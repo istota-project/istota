@@ -471,7 +471,7 @@
 - name: Deploy istota-scheduler systemd service
   template:
     src: istota-scheduler.service.j2
-    dest: "/etc/systemd/system/istota-scheduler.service"
+    dest: "/etc/systemd/system/{{ istota_namespace }}-scheduler.service"
     mode: '0644'
   notify:
     - reload systemd
