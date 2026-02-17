@@ -2,6 +2,18 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: Fix Ansible namespace handling
+
+Fixed several hardcoded `istota-` references in the Ansible role that broke deployments using a custom namespace (e.g., `zorg`). The scheduler service file was being written to `istota-scheduler.service` instead of `{{ istota_namespace }}-scheduler.service`, so the actual service never got updated. Same issue with the enable/start task and the deployment info message.
+
+**Key changes:**
+- Service file dest: `istota-scheduler.service` → `{{ istota_namespace }}-scheduler.service`
+- Service enable task: hardcoded name → `{{ istota_namespace }}-scheduler`
+- Deployment info message: hardcoded names → namespace-aware
+
+**Files modified:**
+- `deploy/ansible/tasks/main.yml` - Fixed service dest, enable task, and display message to use `istota_namespace`
+
 ## 2026-02-17: Architecture doc and Ansible repo dir cleanup
 
 Added comprehensive ARCHITECTURE.md covering the full system architecture. Renamed the Ansible git clone destination from `{{ istota_home }}/src` to `{{ istota_repo_dir }}` (defaults to `{{ istota_home }}/istota`) to avoid the confusing `src/src/istota` path nesting on the server.
