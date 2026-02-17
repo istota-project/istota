@@ -1,0 +1,20 @@
+services:
+  browser:
+    build:
+      context: {{ istota_home }}/src/docker/browser/
+      dockerfile: Dockerfile
+    container_name: {{ istota_namespace }}-browser
+    ports:
+      - "127.0.0.1:{{ istota_browser_api_port }}:9223"
+      - "0.0.0.0:{{ istota_browser_vnc_port }}:6080"
+    shm_size: {{ istota_browser_shm_size }}
+    volumes:
+      - {{ istota_home }}/data/browser-profile:/data/browser-profile
+    env_file:
+      - {{ istota_home }}/browser.env
+    deploy:
+      resources:
+        limits:
+          cpus: "{{ istota_browser_cpu_limit }}"
+          memory: {{ istota_browser_memory_limit }}
+    restart: unless-stopped

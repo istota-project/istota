@@ -1,0 +1,37 @@
+[Unit]
+Description={{ istota_namespace | capitalize }} Fava Ledger Viewer ({{ fava_user_id }})
+After=network.target
+{% if istota_use_nextcloud_mount %}
+After=mount-nextcloud.service
+Wants=mount-nextcloud.service
+{% endif %}
+
+[Service]
+Type=simple
+User={{ istota_user }}
+Group={{ istota_group }}
+ExecStart={{ istota_home }}/.venv/bin/fava --host {{ istota_fava_host }} --port {{ fava_port }} {{ fava_ledger_paths }}
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=HOME={{ istota_home }}
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{ istota_namespace }}-fava-{{ fava_user_id }}
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths={{ istota_home }}/tmp
+ReadWritePaths=/var/log/{{ istota_namespace }}
+{% if istota_use_nextcloud_mount %}
+ReadOnlyPaths={{ istota_nextcloud_mount_path }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

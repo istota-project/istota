@@ -1,0 +1,321 @@
+"""Tests for conversation context selection module."""
+
+import json
+import subprocess
+from unittest.mock import patch
+
+from istota.config import Config, ConversationConfig
+from istota.context import format_context_for_prompt, select_relevant_context
+from istota.db import ConversationMessage
+
+
+def _make_config(**conv_overrides) -> Config:
+    """Create a Config with optional conversation config overrides."""
+    conv = ConversationConfig(**conv_overrides)
+    return Config(conversation=conv)
+
+
+def _msg(id: int, prompt: str, result: str, created_at: str = "2025-01-26 12:00", actions_taken: str | None = None) -> ConversationMessage:
+    return ConversationMessage(id=id, prompt=prompt, result=result, created_at=created_at, actions_taken=actions_taken)
+
+
+def _history(n: int) -> list[ConversationMessage]:
+    """Create a history of n messages."""
+    return [_msg(i, f"q{i}", f"a{i}") for i in range(1, n + 1)]
+
+
+class TestSelectRelevantContext:
+    def test_empty_history(self):
+        config = _make_config()
+        assert select_relevant_context("hello", [], config) == []
+
+    def test_short_history_all_included(self):
+        config = _make_config(skip_selection_threshold=3)
+        history = _history(2)
+        result = select_relevant_context("what's up", history, config)
+        assert result == history
+
+    def test_short_history_at_threshold(self):
+        config = _make_config(skip_selection_threshold=3)
+        history = _history(3)
+        result = select_relevant_context("g", history, config)
+        assert result == history
+
+    def test_single_message(self):
+        config = _make_config(skip_selection_threshold=3)
+        history = [_msg(1, "hi", "hello")]
+        result = select_relevant_context("bye", history, config)
+        assert result == history
+
+    def test_selection_disabled_includes_all(self):
+        config = _make_config(use_selection=False)
+        history = _history(10)
+        result = select_relevant_context("test", history, config)
+        assert result == history
+
+    def test_within_always_include_recent_no_triage(self):
+        """History fits entirely in always_include_recent — no triage needed."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=5)
+        history = _history(4)
+        result = select_relevant_context("test", history, config)
+        assert result == history
+
+    @patch("istota.context.subprocess.run")
+    def test_hybrid_triage_selects_from_older(self, mock_run):
+        """Older messages triaged, recent guaranteed."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = [
+            _msg(1, "about cats", "cats are great"),    # older[0] - triageable
+            _msg(2, "about dogs", "dogs are great"),    # older[1] - triageable
+            _msg(3, "about fish", "fish are great"),    # older[2] - triageable
+            _msg(4, "weather", "sunny"),                # guaranteed recent
+            _msg(5, "latest", "latest response"),       # guaranteed recent
+        ]
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"relevant_ids": [0]}',
+            stderr="",
+        )
+        result = select_relevant_context("tell me about cats", history, config)
+        # triaged: cats (selected) + guaranteed: weather, latest
+        assert len(result) == 3
+        assert result[0] == history[0]  # cats (triaged in)
+        assert result[1] == history[3]  # weather (guaranteed)
+        assert result[2] == history[4]  # latest (guaranteed)
+
+    @patch("istota.context.subprocess.run")
+    def test_hybrid_empty_triage_keeps_recent(self, mock_run):
+        """No older messages selected, but recent still included."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"relevant_ids": []}',
+            stderr="",
+        )
+        result = select_relevant_context("g", history, config)
+        # Only guaranteed recent
+        assert result == history[-2:]
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_error_falls_back_to_recent(self, mock_run):
+        """On triage failure, guaranteed recent messages still returned."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="not valid json",
+            stderr="",
+        )
+        result = select_relevant_context("test", history, config)
+        # Fallback: guaranteed recent only
+        assert result == history[-2:]
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_timeout_falls_back_to_recent(self, mock_run):
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=30)
+        result = select_relevant_context("test", history, config)
+        assert result == history[-2:]
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_cli_not_found_falls_back_to_recent(self, mock_run):
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        mock_run.side_effect = FileNotFoundError("claude not found")
+        result = select_relevant_context("test", history, config)
+        assert result == history[-2:]
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_nonzero_return_falls_back_to_recent(self, mock_run):
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1,
+            stdout="",
+            stderr="error occurred",
+        )
+        result = select_relevant_context("test", history, config)
+        assert result == history[-2:]
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_markdown_code_fence(self, mock_run):
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = [
+            _msg(1, "about cats", "cats are great"),
+            _msg(2, "about dogs", "dogs are great"),
+            _msg(3, "about fish", "fish are great"),
+            _msg(4, "recent1", "r1"),
+            _msg(5, "recent2", "r2"),
+        ]
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='```json\n{"relevant_ids": [1]}\n```',
+            stderr="",
+        )
+        result = select_relevant_context("dogs again", history, config)
+        assert len(result) == 3
+        assert result[0] == history[1]  # dogs (triaged in)
+        assert result[1] == history[3]  # recent1 (guaranteed)
+        assert result[2] == history[4]  # recent2 (guaranteed)
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_json_in_explanation_text(self, mock_run):
+        """Model returns explanation text with embedded JSON."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='Looking at these messages...\n\n```json\n{"relevant_ids": [0, 2]}\n```\n\nThese are relevant.',
+            stderr="",
+        )
+        result = select_relevant_context("test", history, config)
+        # triaged: 0, 2 + guaranteed: last 2
+        assert len(result) == 4
+        assert result[0] == history[0]
+        assert result[1] == history[2]
+        assert result[2] == history[3]
+        assert result[3] == history[4]
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_out_of_range_ids_filtered(self, mock_run):
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        # older_history has 3 items (indices 0, 1, 2). Index 5 and -1 are out of range.
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"relevant_ids": [0, 5, -1]}',
+            stderr="",
+        )
+        result = select_relevant_context("test", history, config)
+        # Only index 0 valid from older, plus 2 guaranteed recent
+        assert len(result) == 3
+        assert result[0] == history[0]
+        assert result[1] == history[3]
+        assert result[2] == history[4]
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_non_integer_ids_filtered(self, mock_run):
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"relevant_ids": ["zero", 0, null]}',
+            stderr="",
+        )
+        result = select_relevant_context("test", history, config)
+        # Only integer index 0 valid
+        assert len(result) == 3
+        assert result[0] == history[0]
+        assert result[1] == history[3]
+        assert result[2] == history[4]
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_results_in_chronological_order(self, mock_run):
+        """Triaged messages should be in chronological order before recent."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(8)
+        # Select out of order — should be returned sorted
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"relevant_ids": [4, 1, 3]}',
+            stderr="",
+        )
+        result = select_relevant_context("test", history, config)
+        # older is history[0..5], recent is history[6..7]
+        assert len(result) == 5
+        assert result[0] == history[1]  # triaged, chronological
+        assert result[1] == history[3]
+        assert result[2] == history[4]
+        assert result[3] == history[6]  # guaranteed recent
+        assert result[4] == history[7]
+
+    @patch("istota.context.subprocess.run")
+    def test_custom_threshold(self, mock_run):
+        config = _make_config(skip_selection_threshold=5)
+        history = _history(5)
+        # At threshold=5 with exactly 5 messages, should return all without CLI call
+        result = select_relevant_context("test", history, config)
+        assert result == history
+        mock_run.assert_not_called()
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_not_called_when_disabled(self, mock_run):
+        config = _make_config(use_selection=False)
+        history = _history(10)
+        result = select_relevant_context("test", history, config)
+        assert result == history
+        mock_run.assert_not_called()
+
+
+class TestFormatContextForPrompt:
+    def test_empty(self):
+        assert format_context_for_prompt([]) == ""
+
+    def test_single_message(self):
+        msgs = [_msg(1, "hello", "hi there", "2025-01-26 12:00:00")]
+        result = format_context_for_prompt(msgs)
+        assert "[2025-01-26 12:00] User: hello" in result
+        assert "[2025-01-26 12:00] Bot: hi there" in result
+
+    def test_multiple_messages(self):
+        msgs = [
+            _msg(1, "first", "response1", "2025-01-26 10:00:00"),
+            _msg(2, "second", "response2", "2025-01-26 11:00:00"),
+        ]
+        result = format_context_for_prompt(msgs)
+        lines = result.split("\n")
+        assert len(lines) == 4
+        assert "User: first" in lines[0]
+        assert "Bot: response1" in lines[1]
+        assert "User: second" in lines[2]
+        assert "Bot: response2" in lines[3]
+
+    def test_truncates_long_result(self):
+        long_result = "x" * 4000
+        msgs = [_msg(1, "q", long_result)]
+        result = format_context_for_prompt(msgs, truncation=3000)
+        assert "...[truncated]" in result
+        bot_line = result.split("\n")[1]
+        assert "x" * 3000 in bot_line
+        assert bot_line.endswith("...[truncated]")
+
+    def test_preserves_short_result(self):
+        short_result = "x" * 2999
+        msgs = [_msg(1, "q", short_result)]
+        result = format_context_for_prompt(msgs, truncation=3000)
+        assert "...[truncated]" not in result
+        assert short_result in result
+
+    def test_no_truncation_when_zero(self):
+        long_result = "x" * 10000
+        msgs = [_msg(1, "q", long_result)]
+        result = format_context_for_prompt(msgs, truncation=0)
+        assert "...[truncated]" not in result
+        assert long_result in result
+
+    def test_actions_taken_appended(self):
+        actions = '["📄 Reading CRON.md", "✏️ Editing CRON.md"]'
+        msgs = [_msg(1, "edit cron", "Done", actions_taken=actions)]
+        result = format_context_for_prompt(msgs)
+        assert "[Actions:" in result
+        assert "Reading CRON.md" in result
+        assert "Editing CRON.md" in result
+
+    def test_actions_taken_none_omitted(self):
+        msgs = [_msg(1, "hello", "hi")]
+        result = format_context_for_prompt(msgs)
+        assert "[Actions:" not in result
+
+    def test_actions_taken_capped_at_15(self):
+        actions_list = [f"action {i}" for i in range(20)]
+        import json
+        actions = json.dumps(actions_list)
+        msgs = [_msg(1, "q", "a", actions_taken=actions)]
+        result = format_context_for_prompt(msgs)
+        # Should contain max 15 actions and an indicator of more
+        assert "[Actions:" in result
+        assert "action 0" in result
+        assert "action 14" in result
+        assert "action 15" not in result

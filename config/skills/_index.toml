@@ -1,0 +1,105 @@
+# Skill metadata for selective loading
+# Skills are loaded based on: always_include, keywords in prompt, user resource types, source type, or file_types in attachments
+
+[files]
+description = "File operations with rclone"
+always_include = true
+
+[sensitive-actions]
+description = "Actions requiring user confirmation"
+always_include = true
+
+[email]
+description = "Email sending and response formatting"
+keywords = ["email", "mail", "send", "inbox", "reply", "message"]
+resource_types = ["email_folder"]
+source_types = ["email"]
+
+[calendar]
+description = "Calendar operations with CalDAV"
+keywords = ["calendar", "event", "meeting", "schedule", "appointment", "caldav"]
+resource_types = ["calendar"]
+source_types = ["briefing"]
+
+[todos]
+description = "TODO file format and operations"
+keywords = ["todo", "task", "checklist", "reminder", "done", "complete"]
+resource_types = ["todo_file"]
+
+[memory]
+description = "User memory file operations"
+always_include = true
+
+[tasks]
+description = "SQLite subtask creation"
+keywords = ["subtask", "queue", "background", "later"]
+admin_only = true
+
+[markets]
+description = "Market data for briefings"
+source_types = ["briefing"]
+
+[notes]
+description = "Notes file parsing for briefings"
+source_types = ["briefing"]
+resource_types = ["notes_file"]
+
+[scripts]
+description = "Reusable script creation and management"
+always_include = true
+
+[schedules]
+description = "Scheduled recurring job management"
+keywords = ["schedule", "scheduled", "recurring", "cron", "every day", "every week", "every morning", "every evening", "periodic", "nightly", "daily", "weekly"]
+
+[nextcloud]
+description = "Nextcloud OCS API (sharing, user lookup)"
+keywords = ["share", "sharing", "shared", "public link", "unshare", "nextcloud", "permission", "access"]
+
+[browse]
+description = "Web browsing and scraping via headless browser"
+keywords = ["browse", "website", "web page", "scrape", "screenshot", "url", "http", "visit", "open page", "fetch page", "web search", "look up", "check the site"]
+
+[briefing]
+description = "Briefing formatting guidelines for Nextcloud Talk"
+source_types = ["briefing"]
+
+[briefings-config]
+description = "Briefing schedule configuration in istota/config/"
+keywords = ["briefing config", "briefing schedule", "briefing setup", "configure briefing", "set up briefing", "change briefing", "edit briefing", "briefing time"]
+
+[heartbeat]
+description = "Heartbeat monitoring configuration in istota/config/"
+keywords = ["heartbeat", "monitoring", "health check", "alert", "file watch", "url health", "disk space", "backup check"]
+
+[accounting]
+description = "Beancount ledger operations, queries, invoicing, and reporting"
+keywords = ["accounting", "ledger", "beancount", "invoice", "invoicing", "expense", "transaction", "balance", "tax", "wash sale", "bookkeeping", "finances", "billing", "receivable"]
+resource_types = ["ledger"]
+
+[transcribe]
+description = "OCR transcription for images with text"
+keywords = ["transcribe", "ocr", "screenshot", "text in image", "handwriting", "scan", "extract text"]
+file_types = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "heic"]
+
+[memory-search]
+description = "Search past conversations and memory files"
+always_include = true
+
+[website]
+description = "Static website hosting at /~user/"
+keywords = ["website", "web page", "static site", "html page", "publish"]
+
+[bookmarks]
+description = "Karakeep bookmark search, browsing, and management"
+keywords = ["bookmark", "bookmarks", "karakeep", "saved", "reading list", "favourited", "favorite"]
+resource_types = ["karakeep"]
+
+[whisper]
+description = "Local audio transcription using faster-whisper (CPU, int8)"
+keywords = ["transcribe", "whisper", "audio", "voice", "speech", "dictation", "recording", "voice memo"]
+file_types = ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]
+
+[developer]
+description = "Git repository management and GitLab merge request workflows"
+keywords = ["git", "gitlab", "repo", "repository", "commit", "branch", "merge request", "MR", "pull request", "PR", "code review", "develop", "worktree", "clone"]

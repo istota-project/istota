@@ -1,0 +1,24 @@
+services:
+  browser:
+    build:
+      context: browser/
+      dockerfile: Dockerfile
+    container_name: istota-browser
+    ports:
+      - "127.0.0.1:9223:9223"  # API (localhost only)
+      - "0.0.0.0:6080:6080"    # noVNC (external for captcha solving)
+    shm_size: 2gb
+    volumes:
+      - browser-profile:/data/browser-profile
+    environment:
+      - VNC_PASSWORD=${VNC_PASSWORD:-}
+      - BROWSER_VNC_URL=${BROWSER_VNC_URL:-}
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 3G
+    restart: unless-stopped
+
+volumes:
+  browser-profile:

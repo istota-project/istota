@@ -1,0 +1,30 @@
+---
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: "restart istota-scheduler"
+  systemd:
+    name: "{{ istota_namespace }}-scheduler"
+    state: restarted
+
+- name: "restart istota-browser"
+  shell: docker compose -f docker-compose.browser.yml build && docker compose -f docker-compose.browser.yml up -d --force-recreate
+  args:
+    chdir: "{{ istota_home }}"
+  when: istota_browser_enabled
+
+- name: restart fava services
+  shell: "systemctl restart {{ istota_namespace }}-fava-*.service"
+  failed_when: false
+  when: istota_fava_enabled
+
+- name: reload nginx
+  systemd:
+    name: nginx
+    state: reloaded
+
+- name: restart nginx
+  systemd:
+    name: nginx
+    state: restarted

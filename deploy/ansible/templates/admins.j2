@@ -1,0 +1,7 @@
+# {{ istota_namespace | capitalize }} admin users - one user ID per line
+# Users listed here get full system access (DB, all files, admin-only skills)
+# If this file is empty or missing, all users are admins (backward compatible)
+# Managed by Ansible - do not edit manually
+{% for user_id in istota_admin_users %}
+{{ user_id }}
+{% endfor %}

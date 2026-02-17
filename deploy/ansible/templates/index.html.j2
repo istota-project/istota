@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>{{ istota_site_hostname }}</title>
+    <meta name="robots" content="noindex" />
+    <style>
+      body { font-family: system-ui, sans-serif; text-align: center; padding: 2em; color: #333; }
+    </style>
+  </head>
+  <body>
+    <h1>{{ istota_site_hostname }}</h1>
+    <p>Deployed: {{ ansible_facts['date_time']['date'] }} at {{ ansible_facts['date_time']['time'] }} ({{ ansible_facts['date_time']['tz'] }})</p>
+  </body>
+</html>

@@ -1,0 +1,825 @@
+---
+# Istota - Claude Code Bot deployment tasks
+#
+# Set istota_update_only=true to skip full installation and just:
+# - Pull latest code from repo
+# - Update Python dependencies
+# - Deploy config files
+# - Restart services
+
+# ============================================================
+# FULL INSTALL TASKS (skipped when istota_update_only=true)
+# ============================================================
+
+- name: Check for Claude CLI
+  stat:
+    path: /usr/local/bin/claude
+  register: claude_check
+  when: not istota_update_only
+
+- name: Install Claude CLI
+  shell: curl -fsSL https://claude.ai/install.sh | bash
+  environment:
+    HOME: "{{ istota_home }}"
+  args:
+    creates: "{{ istota_home }}/.local/bin/claude"
+  register: claude_install_result
+  when: not istota_update_only and not (claude_check.stat.exists | default(true))
+
+- name: Show Claude CLI installation output
+  debug:
+    var: claude_install_result
+  when: not istota_update_only and claude_install_result is defined and claude_install_result.changed
+
+- name: Verify Claude CLI was installed
+  stat:
+    path: "{{ istota_home }}/.local/bin/claude"
+  register: claude_binary_check
+  failed_when: not claude_binary_check.stat.exists
+  when: not istota_update_only and not (claude_check.stat.exists | default(true))
+
+- name: Symlink Claude CLI to /usr/local/bin
+  file:
+    src: "{{ istota_home }}/.local/bin/claude"
+    dest: /usr/local/bin/claude
+    state: link
+  when: not istota_update_only and not (claude_check.stat.exists | default(true))
+
+- name: Remind to authenticate Claude CLI
+  debug:
+    msg: |
+      Claude CLI installed. Remember to authenticate:
+        sudo -u {{ istota_user }} HOME={{ istota_home }} claude login
+  when: not istota_update_only and not (claude_check.stat.exists | default(true))
+
+- name: Install system dependencies
+  apt:
+    name:
+      - git
+      - curl
+      - sqlite3
+      - python3
+      - python3-venv
+      - tesseract-ocr
+      - libpango-1.0-0      # WeasyPrint PDF generation
+      - libpangocairo-1.0-0
+      - libgdk-pixbuf-2.0-0
+      - bubblewrap          # Per-user filesystem sandbox
+    state: present
+    update_cache: yes
+    cache_valid_time: 3600
+  when: not istota_update_only
+
+- name: Enable unprivileged user namespaces for bubblewrap sandbox
+  ansible.posix.sysctl:
+    name: kernel.unprivileged_userns_clone
+    value: "1"
+    sysctl_file: "/etc/sysctl.d/99-{{ istota_namespace }}-sandbox.conf"
+    reload: yes
+  when: istota_security_sandbox_enabled
+
+# Docker — inlined (replace with a dedicated role if you prefer)
+- name: Install Docker for browser container
+  apt:
+    name:
+      - docker.io
+      - docker-compose-plugin
+    state: present
+  when: not istota_update_only and istota_browser_enabled
+
+- name: Add istota user to docker group
+  user:
+    name: "{{ istota_user }}"
+    groups: docker
+    append: yes
+  when: not istota_update_only and istota_browser_enabled
+
+- name: Add istota user to www-data group
+  user:
+    name: "{{ istota_user }}"
+    groups: www-data
+    append: yes
+  when: not istota_update_only and istota_site_enabled
+
+- name: Add www-data to nextcloud-mount group for site hosting
+  user:
+    name: www-data
+    groups: nextcloud-mount
+    append: yes
+  notify: Restart nginx
+  when: not istota_update_only and istota_site_enabled and istota_use_nextcloud_mount
+
+- name: Allow Docker containers to access host ports
+  community.general.ufw:
+    rule: allow
+    from_ip: "172.18.0.0/16"
+    comment: "Docker containers ({{ istota_namespace }})"
+  when: not istota_update_only and istota_browser_enabled
+
+# Node.js — inlined (replace with a dedicated role if you prefer)
+- name: Install Node.js for developer skill
+  block:
+    - name: Add NodeSource repository
+      shell: curl -fsSL https://deb.nodesource.com/setup_20.x | bash
+      args:
+        creates: /etc/apt/sources.list.d/nodesource.list
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+  when: not istota_update_only and istota_nodejs_enabled
+
+- name: Check if uv is installed
+  command: which uv
+  register: uv_check
+  changed_when: false
+  failed_when: false
+  when: not istota_update_only
+
+- name: Install uv
+  shell: curl -LsSf https://astral.sh/uv/install.sh | sh
+  args:
+    creates: /root/.local/bin/uv
+  when: not istota_update_only and (uv_check.rc | default(0)) != 0
+
+- name: Create istota system group
+  group:
+    name: "{{ istota_group }}"
+    system: yes
+    state: present
+  when: not istota_update_only
+
+- name: Create istota system user
+  user:
+    name: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    system: yes
+    home: "{{ istota_home }}"
+    shell: /bin/bash
+    create_home: no
+    state: present
+  when: not istota_update_only
+
+- name: Create istota directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0755"
+  loop:
+    - "{{ istota_home }}"
+    - "{{ istota_home }}/data"
+    - "{{ istota_home }}/data/browser-profile"
+    - "{{ istota_home }}/tmp"
+    - "{{ istota_home }}/.config"
+  when: not istota_update_only
+
+- name: "Create /var/log/{{ istota_namespace }} directory"
+  file:
+    path: "/var/log/{{ istota_namespace }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0755"
+  when: not istota_update_only
+
+- name: Deploy logrotate configuration
+  template:
+    src: istota-logrotate.j2
+    dest: "/etc/logrotate.d/{{ istota_namespace }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: not istota_update_only
+
+# rclone — inlined (replace with a dedicated role if you prefer)
+- name: Install rclone
+  shell: curl https://rclone.org/install.sh | bash
+  args:
+    creates: /usr/bin/rclone
+  when: not istota_update_only and istota_configure_rclone
+
+- name: Create rclone config directory
+  file:
+    path: "{{ istota_home }}/.config/rclone"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0700"
+  when: not istota_update_only and istota_configure_rclone
+
+- name: Deploy rclone configuration
+  copy:
+    dest: "{{ istota_home }}/.config/rclone/rclone.conf"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0600"
+    content: |
+      [{{ istota_rclone_remote }}]
+      type = webdav
+      url = {{ istota_nextcloud_url }}/remote.php/dav/files/{{ istota_nextcloud_username }}/
+      vendor = nextcloud
+      user = {{ istota_nextcloud_username }}
+      pass = {{ istota_rclone_password_obscured }}
+  when: not istota_update_only and istota_configure_rclone
+
+# rclone mount — inlined (replace with a dedicated role if you prefer)
+- name: Create Nextcloud mount point
+  file:
+    path: "{{ istota_nextcloud_mount_path }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0755"
+  when: not istota_update_only and istota_use_nextcloud_mount
+
+- name: Create nextcloud-mount group
+  group:
+    name: nextcloud-mount
+    system: yes
+    state: present
+  when: not istota_update_only and istota_use_nextcloud_mount
+
+- name: Add istota user to nextcloud-mount group
+  user:
+    name: "{{ istota_user }}"
+    groups: nextcloud-mount
+    append: yes
+  when: not istota_update_only and istota_use_nextcloud_mount
+
+- name: Deploy rclone mount systemd service
+  copy:
+    dest: /etc/systemd/system/mount-nextcloud.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Nextcloud rclone FUSE mount
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=notify
+      User={{ istota_user }}
+      Group={{ istota_group }}
+      ExecStartPre=/bin/mkdir -p {{ istota_nextcloud_mount_path }}
+      ExecStart=/usr/bin/rclone mount \
+        --config {{ istota_home }}/.config/rclone/rclone.conf \
+        --allow-other \
+        --vfs-cache-mode full \
+        --vfs-cache-max-age 1h \
+        --dir-cache-time 5s \
+        --poll-interval 10s \
+        {{ istota_rclone_remote }}: {{ istota_nextcloud_mount_path }}
+      ExecStop=/bin/fusermount -u {{ istota_nextcloud_mount_path }}
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  when: not istota_update_only and istota_use_nextcloud_mount
+  notify:
+    - reload systemd
+
+- name: Enable allow_other in FUSE config
+  lineinfile:
+    path: /etc/fuse.conf
+    regexp: '^#?user_allow_other'
+    line: 'user_allow_other'
+  when: not istota_update_only and istota_use_nextcloud_mount
+
+- name: Enable and start rclone mount
+  systemd:
+    name: mount-nextcloud
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: not istota_update_only and istota_use_nextcloud_mount
+
+- name: Set ownership of .config directory
+  file:
+    path: "{{ istota_home }}/.config"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    recurse: yes
+  when: not istota_update_only
+
+# ============================================================
+# UPDATE TASKS (always run)
+# ============================================================
+
+- name: Build authenticated repo URL
+  set_fact:
+    istota_repo_url_auth: "{{ istota_repo_url | regex_replace('^https://', 'https://oauth2:' + istota_gitlab_token + '@') }}"
+  when: istota_gitlab_token | length > 0
+  no_log: true
+
+- name: Configure git safe.directory
+  community.general.git_config:
+    name: safe.directory
+    value: "{{ istota_home }}/src"
+    scope: global
+
+- name: Clone or update istota repository
+  git:
+    repo: "{{ istota_repo_url_auth | default(istota_repo_url) }}"
+    dest: "{{ istota_home }}/src"
+    version: "{{ istota_repo_branch }}"
+    force: yes
+  no_log: "{{ istota_gitlab_token | length > 0 }}"
+  notify:
+    - "restart istota-scheduler"
+    - "restart istota-browser"
+
+- name: Set ownership of src directory
+  file:
+    path: "{{ istota_home }}/src"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    recurse: yes
+
+- name: Install Python dependencies with uv
+  command: >
+    uv sync
+    {% if istota_memory_search_enabled %}--extra memory-search{% endif %}
+    {% if istota_whisper_enabled %}--extra whisper{% endif %}
+  args:
+    chdir: "{{ istota_home }}/src"
+  environment:
+    PATH: "/root/.local/bin:{{ ansible_facts['env']['PATH'] }}"
+  changed_when: false
+
+- name: Set ownership of venv directory
+  file:
+    path: "{{ istota_home }}/src/.venv"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    recurse: yes
+
+- name: Pre-download Whisper model
+  shell: >
+    sudo -u {{ istota_user }} HOME={{ istota_home }}
+    {{ istota_home }}/src/.venv/bin/python -m {{ istota_package }}.skills.whisper download {{ istota_whisper_model }}
+  args:
+    chdir: "{{ istota_home }}/src"
+  when: istota_whisper_enabled
+  changed_when: false
+
+- name: Create symlink for venv in home directory
+  file:
+    src: "{{ istota_home }}/src/.venv"
+    dest: "{{ istota_home }}/.venv"
+    state: link
+    force: yes
+    follow: no
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+
+- name: Remove old config symlink if present
+  file:
+    path: "{{ istota_home }}/src/config/config.toml"
+    state: absent
+
+- name: Remove old separate config directory
+  file:
+    path: "{{ istota_home }}/config"
+    state: absent
+
+- name: "Ensure /etc/{{ istota_namespace }} directory exists"
+  file:
+    path: "/etc/{{ istota_namespace }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy admin users file
+  template:
+    src: admins.j2
+    dest: "/etc/{{ istota_namespace }}/admins"
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - "restart istota-scheduler"
+
+- name: Deploy secrets environment file
+  template:
+    src: secrets.env.j2
+    dest: "/etc/{{ istota_namespace }}/secrets.env"
+    owner: root
+    group: "{{ istota_group }}"
+    mode: '0640'
+  when: istota_use_environment_file | default(false)
+  notify:
+    - "restart istota-scheduler"
+
+- name: Remove secrets environment file when not using environment file
+  file:
+    path: "/etc/{{ istota_namespace }}/secrets.env"
+    state: absent
+  when: not istota_use_environment_file | default(false)
+
+- name: Deploy istota configuration
+  template:
+    src: config.toml.j2
+    dest: "{{ istota_home }}/src/config/config.toml"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: '0600'
+  notify:
+    - "restart istota-scheduler"
+
+- name: Deploy per-user config files
+  template:
+    src: user.toml.j2
+    dest: "{{ istota_home }}/src/config/users/{{ user_id }}.toml"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: '0600'
+  loop: "{{ istota_users | dict2items }}"
+  loop_control:
+    loop_var: user_item
+  vars:
+    user_id: "{{ user_item.key }}"
+    user_config: "{{ user_item.value }}"
+  notify:
+    - "restart istota-scheduler"
+
+- name: Initialize/migrate database schema
+  command: "{{ istota_home }}/.venv/bin/python -c \"from pathlib import Path; import sys; sys.path.insert(0, 'src'); from {{ istota_package }}.db import init_db; init_db(Path('{{ istota_home }}/data/{{ istota_namespace }}.db'))\""
+  args:
+    chdir: "{{ istota_home }}/src"
+  changed_when: false  # Schema uses CREATE TABLE IF NOT EXISTS, always safe to run
+
+- name: Apply database migrations
+  shell: |
+    sqlite3 "{{ istota_home }}/data/{{ istota_namespace }}.db" "ALTER TABLE processed_emails ADD COLUMN \"references\" TEXT;" 2>/dev/null || true
+    sqlite3 "{{ istota_home }}/data/{{ istota_namespace }}.db" "ALTER TABLE tasks ADD COLUMN output_target TEXT;" 2>/dev/null || true
+    sqlite3 "{{ istota_home }}/data/{{ istota_namespace }}.db" "ALTER TABLE scheduled_jobs ADD COLUMN output_target TEXT;" 2>/dev/null || true
+  changed_when: false  # Idempotent - silently fails if column already exists
+
+- name: Set ownership of database
+  file:
+    path: "{{ istota_home }}/data/{{ istota_namespace }}.db"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+  when: not ansible_check_mode
+
+- name: Deploy istota-scheduler systemd service
+  template:
+    src: istota-scheduler.service.j2
+    dest: "/etc/systemd/system/istota-scheduler.service"
+    mode: '0644'
+  notify:
+    - reload systemd
+    - "restart istota-scheduler"
+
+- name: Stop and disable istota-webhook service (no longer needed)
+  systemd:
+    name: "{{ istota_namespace }}-webhook"
+    enabled: no
+    state: stopped
+  failed_when: false
+
+- name: Remove old istota-webhook systemd service file
+  file:
+    path: "/etc/systemd/system/{{ istota_namespace }}-webhook.service"
+    state: absent
+  notify:
+    - reload systemd
+
+- name: Deploy browser container docker-compose
+  template:
+    src: docker-compose.browser.yml.j2
+    dest: "{{ istota_home }}/docker-compose.browser.yml"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0644"
+  when: istota_browser_enabled
+  notify:
+    - "restart istota-browser"
+
+- name: Deploy browser environment file
+  copy:
+    dest: "{{ istota_home }}/browser.env"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0600"
+    content: |
+      VNC_PASSWORD={{ istota_browser_vnc_password }}
+      BROWSER_VNC_URL={{ istota_browser_vnc_external_url }}
+      MAX_BROWSER_SESSIONS={{ istota_browser_max_sessions }}
+  when: istota_browser_enabled
+  notify:
+    - "restart istota-browser"
+
+- name: Check if browser container is running
+  shell: "docker ps -q -f name=istota-browser"
+  register: browser_running
+  changed_when: false
+  when: istota_browser_enabled
+
+- name: Start browser container if not running
+  shell: docker compose -f docker-compose.browser.yml up -d --build
+  args:
+    chdir: "{{ istota_home }}"
+  when: istota_browser_enabled and browser_running.stdout == ""
+
+- name: Check if browser compose file exists
+  stat:
+    path: "{{ istota_home }}/docker-compose.browser.yml"
+  register: browser_compose_file
+  when: not istota_browser_enabled
+
+- name: Stop and remove browser container when disabled
+  shell: docker compose -f docker-compose.browser.yml down --rmi local
+  args:
+    chdir: "{{ istota_home }}"
+  when: not istota_browser_enabled and (browser_compose_file.stat.exists | default(false))
+  failed_when: false
+
+- name: Remove browser files when disabled
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ istota_home }}/docker-compose.browser.yml"
+    - "{{ istota_home }}/browser.env"
+  when: not istota_browser_enabled
+
+# ============================================================
+# BACKUP TASKS
+# ============================================================
+
+- name: Create local backup directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0755"
+  loop:
+    - "{{ istota_backup_local_dir }}"
+    - "{{ istota_backup_local_dir }}/daily"
+    - "{{ istota_backup_local_dir }}/weekly"
+  when: istota_backup_enabled
+
+- name: Create remote backup directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0755"
+  loop:
+    - "{{ istota_backup_remote_dir }}"
+    - "{{ istota_backup_remote_dir }}/db"
+    - "{{ istota_backup_remote_dir }}/db/daily"
+    - "{{ istota_backup_remote_dir }}/db/weekly"
+  when: istota_backup_enabled and istota_use_nextcloud_mount
+
+- name: Deploy istota backup script
+  template:
+    src: istota-backup.sh.j2
+    dest: "/usr/local/bin/{{ istota_namespace }}-backup.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: istota_backup_enabled
+
+- name: Deploy istota backup cron
+  template:
+    src: istota-backup.cron.j2
+    dest: "/etc/cron.d/{{ istota_namespace }}-backup"
+    owner: root
+    group: root
+    mode: "0644"
+  when: istota_backup_enabled
+
+- name: Remove backup script when backups disabled
+  file:
+    path: "/usr/local/bin/{{ istota_namespace }}-backup.sh"
+    state: absent
+  when: not istota_backup_enabled
+
+- name: Remove backup cron when backups disabled
+  file:
+    path: "/etc/cron.d/{{ istota_namespace }}-backup"
+    state: absent
+  when: not istota_backup_enabled
+
+# ============================================================
+# LEDGER BACKUP DIRECTORIES (for auto-append rotating backups)
+# ============================================================
+
+- name: Create ledger backup directories
+  file:
+    path: "{{ (istota_nextcloud_mount_path + '/' + item.1.path | regex_replace('^/', '')) | dirname }}/backups"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0755"
+  loop: >-
+    {{ istota_users | dict2items
+       | selectattr('value.resources', 'defined')
+       | subelements('value.resources')
+       | selectattr('1.type', 'equalto', 'ledger')
+       | list }}
+  loop_control:
+    label: "{{ item.0.key }} - {{ item.1.path | dirname }}/backups"
+  when: istota_use_nextcloud_mount
+
+# ============================================================
+# FAVA WEB UI (per-user beancount ledger viewer)
+# ============================================================
+
+- name: Build list of Fava users
+  set_fact:
+    fava_users: >-
+      {{ istota_users | dict2items
+         | selectattr('value.fava_port', 'defined')
+         | selectattr('value.resources', 'defined')
+         | list }}
+
+- name: Deploy Fava systemd service per user
+  template:
+    src: istota-fava.service.j2
+    dest: "/etc/systemd/system/{{ istota_namespace }}-fava-{{ item.key }}.service"
+    mode: '0644'
+  loop: "{{ fava_users }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    fava_user_id: "{{ item.key }}"
+    fava_port: "{{ item.value.fava_port }}"
+    fava_ledger_paths: >-
+      {{ item.value.resources
+         | selectattr('type', 'equalto', 'ledger')
+         | map(attribute='path')
+         | map('regex_replace', '^/', istota_nextcloud_mount_path + '/')
+         | join(' ') }}
+  when: >-
+    istota_fava_enabled and
+    (item.value.resources | selectattr('type', 'equalto', 'ledger') | list | length > 0)
+  notify:
+    - reload systemd
+    - restart fava services
+
+- name: Deploy Fava sudoers for istota restart
+  template:
+    src: istota-fava-sudoers.j2
+    dest: "/etc/sudoers.d/{{ istota_namespace }}-fava"
+    mode: '0440'
+    validate: 'visudo -cf %s'
+  when: istota_fava_enabled
+
+- name: Remove Fava sudoers when disabled
+  file:
+    path: "/etc/sudoers.d/{{ istota_namespace }}-fava"
+    state: absent
+  when: not istota_fava_enabled
+
+- name: Enable and start Fava services
+  systemd:
+    name: "{{ istota_namespace }}-fava-{{ item.key }}"
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  loop: "{{ fava_users }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: >-
+    istota_fava_enabled and
+    (item.value.resources | selectattr('type', 'equalto', 'ledger') | list | length > 0)
+
+- name: Find existing Fava service files
+  find:
+    paths: /etc/systemd/system
+    patterns: "{{ istota_namespace }}-fava-*.service"
+  register: existing_fava_services
+  when: not istota_fava_enabled
+
+- name: Stop and disable Fava services when disabled
+  systemd:
+    name: "{{ item.path | basename | regex_replace('\\.service$', '') }}"
+    enabled: no
+    state: stopped
+  loop: "{{ existing_fava_services.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: not istota_fava_enabled
+  failed_when: false
+
+- name: Remove Fava service files when disabled
+  file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ existing_fava_services.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: not istota_fava_enabled
+  notify:
+    - reload systemd
+
+# ============================================================
+# NGINX SITE HOSTING
+# ============================================================
+
+# nginx — inlined (replace with a dedicated role if you prefer)
+- name: Install nginx for site hosting
+  apt:
+    name: nginx
+    state: present
+  when: istota_site_enabled and not istota_update_only
+
+- name: Build list of site users
+  set_fact:
+    _istota_site_users: >-
+      {{ istota_users | dict2items
+         | selectattr('value.site_enabled', 'defined')
+         | selectattr('value.site_enabled', 'equalto', true)
+         | list }}
+
+- name: Create site root html directory
+  file:
+    path: "{{ istota_home }}/html"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: www-data
+    mode: "0755"
+  when: istota_site_enabled
+
+- name: Deploy default index.html for site root
+  template:
+    src: index.html.j2
+    dest: "{{ istota_home }}/html/index.html"
+    owner: "{{ istota_user }}"
+    group: www-data
+    mode: "0644"
+    force: no
+  when: istota_site_enabled
+
+- name: Create per-user html directories
+  file:
+    path: "{{ istota_nextcloud_mount_path }}/Users/{{ item.key }}/{{ istota_namespace }}/html"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: www-data
+    mode: "0755"
+  loop: "{{ _istota_site_users }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: istota_site_enabled
+
+- name: Deploy default index.html for site users
+  template:
+    src: user-index.html.j2
+    dest: "{{ istota_nextcloud_mount_path }}/Users/{{ item.key }}/{{ istota_namespace }}/html/index.html"
+    owner: "{{ istota_user }}"
+    group: www-data
+    mode: "0644"
+    force: no
+  loop: "{{ _istota_site_users }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: istota_site_enabled
+
+- name: Deploy nginx site config
+  template:
+    src: istota-site.conf.j2
+    dest: "/etc/nginx/conf.d/{{ istota_site_hostname }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: istota_site_enabled
+  notify:
+    - reload nginx
+
+- name: Remove nginx site config when disabled
+  file:
+    path: "/etc/nginx/conf.d/{{ istota_site_hostname }}.conf"
+    state: absent
+  when: not istota_site_enabled
+  notify:
+    - reload nginx
+
+- name: Force handlers to run now
+  meta: flush_handlers
+
+- name: "Enable and start istota-scheduler"
+  systemd:
+    name: "istota-scheduler"
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Display deployment info
+  debug:
+    msg:
+      - "Istota has been deployed to {{ istota_home }}"
+      - "Scheduler daemon handles all polling (Talk, email, TASKS.md)"
+      - "Service: istota-scheduler"
+      - "Logs: journalctl -u istota-scheduler -f"

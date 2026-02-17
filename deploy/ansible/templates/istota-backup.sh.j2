@@ -1,0 +1,122 @@
+#!/bin/bash
+# {{ istota_namespace | capitalize }} backup script - managed by Ansible
+set -euo pipefail
+
+DB="{{ istota_home }}/data/tasks.db"
+LOCAL_DIR="{{ istota_backup_local_dir }}"
+REMOTE_DIR="{{ istota_backup_remote_dir }}"
+MOUNT_PATH="{{ istota_nextcloud_mount_path }}"
+DAILY_RETENTION={{ istota_backup_db_daily_retention }}
+WEEKLY_RETENTION={{ istota_backup_db_weekly_retention }}
+
+RCLONE_CONFIG="{{ istota_backup_rclone_config }}"
+RCLONE_REMOTE="{{ istota_backup_rclone_remote }}"
+RCLONE_BACKUP_PATH="{{ istota_backup_rclone_remote_path }}"
+
+TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
+DAY_OF_WEEK=$(date +%u)
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+mount_available() {
+    mountpoint -q "$MOUNT_PATH" 2>/dev/null
+}
+
+backup_db() {
+    log "Starting database backup"
+
+    local tmp_file
+    tmp_file=$(mktemp "${LOCAL_DIR}/tasks-backup-XXXXXX.db")
+    trap 'rm -f "$tmp_file"' RETURN
+
+    # Safe WAL-aware backup
+    sqlite3 "$DB" ".backup '$tmp_file'"
+
+    # Integrity check on backup copy
+    local check
+    check=$(sqlite3 "$tmp_file" "PRAGMA integrity_check;")
+    if [ "$check" != "ok" ]; then
+        log "ERROR: Backup integrity check failed: $check"
+        return 1
+    fi
+
+    local backup_name="tasks-${TIMESTAMP}.db.gz"
+
+    # Daily backup (local)
+    gzip -c "$tmp_file" > "${LOCAL_DIR}/daily/${backup_name}"
+    log "Local daily backup saved: ${LOCAL_DIR}/daily/${backup_name}"
+
+    # Weekly backup on Sundays (local)
+    if [ "$DAY_OF_WEEK" -eq 7 ]; then
+        cp "${LOCAL_DIR}/daily/${backup_name}" "${LOCAL_DIR}/weekly/${backup_name}"
+        log "Local weekly backup saved: ${LOCAL_DIR}/weekly/${backup_name}"
+    fi
+
+    # Remote copies via mount
+    if mount_available; then
+        cp "${LOCAL_DIR}/daily/${backup_name}" "${REMOTE_DIR}/db/daily/${backup_name}"
+        log "Remote daily backup copied"
+
+        if [ "$DAY_OF_WEEK" -eq 7 ]; then
+            cp "${LOCAL_DIR}/weekly/${backup_name}" "${REMOTE_DIR}/db/weekly/${backup_name}"
+            log "Remote weekly backup copied"
+        fi
+    else
+        log "WARNING: Nextcloud mount not available, skipping remote copy"
+    fi
+
+    # Rotate local daily
+    find "${LOCAL_DIR}/daily" -name "tasks-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
+    # Rotate local weekly
+    find "${LOCAL_DIR}/weekly" -name "tasks-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
+
+    # Rotate remote
+    if mount_available; then
+        find "${REMOTE_DIR}/db/daily" -name "tasks-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
+        find "${REMOTE_DIR}/db/weekly" -name "tasks-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
+    fi
+
+    log "Database backup complete"
+}
+
+backup_files() {
+    log "Starting files backup (rclone sync)"
+
+{% for source in istota_backup_files_sources %}
+    log "Syncing ${RCLONE_REMOTE}:{{ source.src }} -> ${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}/{{ source.dest }}"
+    rclone sync \
+        --config "$RCLONE_CONFIG" \
+        "${RCLONE_REMOTE}:{{ source.src }}" \
+        "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}/{{ source.dest }}" \
+{% for exclude in source.excludes | default([]) %}
+        --exclude '{{ exclude }}' \
+{% endfor %}
+        --verbose \
+        2>&1 | while IFS= read -r line; do log "  $line"; done || {
+        log "ERROR: rclone sync failed for {{ source.src }}"
+        return 1
+    }
+    log "Finished syncing {{ source.src }}"
+
+{% endfor %}
+    log "Files backup complete"
+}
+
+case "${1:-}" in
+    db)
+        backup_db
+        ;;
+    files)
+        backup_files
+        ;;
+    all)
+        backup_db
+        backup_files
+        ;;
+    *)
+        echo "Usage: $0 {db|files|all}" >&2
+        exit 1
+        ;;
+esac

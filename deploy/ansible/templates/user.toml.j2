@@ -1,0 +1,107 @@
+# {{ user_id }} - managed by Ansible
+
+display_name = "{{ user_config.display_name | default(user_id) }}"
+{% if user_config.email_addresses is defined and user_config.email_addresses %}
+email_addresses = {{ user_config.email_addresses | to_json }}
+{% endif %}
+timezone = "{{ user_config.timezone | default('UTC') }}"
+{% if user_config.invoicing_notifications is defined and user_config.invoicing_notifications %}
+invoicing_notifications = "{{ user_config.invoicing_notifications }}"
+{% endif %}
+{% if user_config.invoicing_conversation_token is defined and user_config.invoicing_conversation_token %}
+invoicing_conversation_token = "{{ user_config.invoicing_conversation_token }}"
+{% endif %}
+{% if user_config.ntfy_topic is defined and user_config.ntfy_topic %}
+ntfy_topic = "{{ user_config.ntfy_topic }}"
+{% endif %}
+{% if user_config.site_enabled is defined and user_config.site_enabled %}
+site_enabled = true
+{% endif %}
+{% if user_config.resources is defined and user_config.resources %}
+{% for resource in user_config.resources %}
+{% if resource.type == 'karakeep' %}
+{% if resource.base_url is defined and resource.api_key is defined %}
+[[resources]]
+type = "karakeep"
+name = "{{ resource.name | default('Bookmarks') }}"
+base_url = "{{ resource.base_url }}"
+api_key = "{{ resource.api_key }}"
+
+{% endif %}
+{% else %}
+[[resources]]
+type = "{{ resource.type }}"
+path = "{{ resource.path }}"
+{% if resource.name is defined and resource.name %}
+name = "{{ resource.name }}"
+{% endif %}
+permissions = "{{ resource.permissions | default('read') }}"
+
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if user_config.reminders_file is defined and user_config.reminders_file %}
+[[resources]]
+type = "reminders_file"
+path = "{{ user_config.reminders_file }}"
+name = "Reminders"
+permissions = "read"
+
+{% endif %}
+{% for briefing in user_config.briefings | default([]) %}
+[[briefings]]
+name = "{{ briefing.name }}"
+cron = "{{ briefing.cron }}"
+{% if briefing.conversation_token is defined and briefing.conversation_token %}
+conversation_token = "{{ briefing.conversation_token }}"
+{% endif %}
+output = "{{ briefing.output | default('talk') }}"
+
+[briefings.components]
+{% if briefing.components.calendar is defined %}
+calendar = {{ briefing.components.calendar | lower }}
+{% endif %}
+{% if briefing.components.todos is defined %}
+todos = {{ briefing.components.todos | lower }}
+{% endif %}
+{% if briefing.components.email is defined %}
+email = {{ briefing.components.email | lower }}
+{% endif %}
+{% if briefing.components.markets is defined %}
+{% if briefing.components.markets is sameas true or (briefing.components.markets is mapping and briefing.components.markets.enabled | default(false) and briefing.components.markets.futures is not defined and briefing.components.markets.indices is not defined) %}
+markets = true
+{% elif briefing.components.markets is sameas false or (briefing.components.markets is mapping and not briefing.components.markets.enabled | default(false)) %}
+markets = false
+{% else %}
+markets = { enabled = {{ briefing.components.markets.enabled | lower }}{% if briefing.components.markets.futures is defined %}, futures = {{ briefing.components.markets.futures | to_json }}{% endif %}{% if briefing.components.markets.indices is defined %}, indices = {{ briefing.components.markets.indices | to_json }}{% endif %} }
+{% endif %}
+{% endif %}
+{% if briefing.components.news is defined %}
+{% if briefing.components.news is sameas true or (briefing.components.news is mapping and briefing.components.news.enabled | default(false) and briefing.components.news.sources is not defined and briefing.components.news.lookback_hours is not defined) %}
+news = true
+{% elif briefing.components.news is sameas false or (briefing.components.news is mapping and not briefing.components.news.enabled | default(false)) %}
+news = false
+{% else %}
+news = { enabled = {{ briefing.components.news.enabled | lower }}, lookback_hours = {{ briefing.components.news.lookback_hours | default(12) }}, sources = [
+{% for source in briefing.components.news.sources | default([]) %}
+    { type = "{{ source.type }}", value = "{{ source.value }}" }{{ "," if not loop.last else "" }}
+{% endfor %}
+]}
+{% endif %}
+{% endif %}
+{% if briefing.components.notes is defined %}
+{% if briefing.components.notes is sameas true or (briefing.components.notes is mapping and briefing.components.notes.enabled | default(false)) %}
+notes = true
+{% else %}
+notes = false
+{% endif %}
+{% endif %}
+{% if briefing.components.reminders is defined %}
+{% if briefing.components.reminders is sameas true or (briefing.components.reminders is mapping and briefing.components.reminders.enabled | default(false)) %}
+reminders = true
+{% else %}
+reminders = false
+{% endif %}
+{% endif %}
+
+{% endfor %}

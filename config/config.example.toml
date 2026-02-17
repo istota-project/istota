@@ -1,0 +1,370 @@
+# Istota configuration
+
+# The name your bot uses in chat, emails, and folder names.
+# Change this to whatever you want to call your assistant.
+bot_name = "Istota"
+
+# Database path (relative to working directory or absolute)
+db_path = "data/istota.db"
+
+# =============================================================================
+# File Access Configuration
+# =============================================================================
+# Choose ONE of the following options:
+
+# Option 1: rclone CLI (default, works without systemd mount)
+# Uses subprocess calls to rclone for each file operation
+rclone_remote = "nextcloud"
+
+# Option 2: Local mount (faster, requires mount-nextcloud.service)
+# Uncomment to enable - all Nextcloud files accessible as local paths
+# nextcloud_mount_path = "/srv/mount/nextcloud/content"
+
+# Path to skills directory (individual skill files loaded selectively)
+skills_dir = "config/skills"
+
+# Temporary directory for task execution
+temp_dir = "/tmp/istota"
+
+# ============================================================================
+# Security Hardening
+# ============================================================================
+# mode: "permissive" (default) — inherits full parent env, uses --dangerously-skip-permissions
+#        "restricted" — clean subprocess env, uses --allowedTools whitelist
+# Heartbeat/cron env stripping is always on regardless of mode.
+# Secrets can be provided via env vars (e.g. from systemd EnvironmentFile=):
+#   ISTOTA_NC_APP_PASSWORD, ISTOTA_IMAP_PASSWORD, ISTOTA_SMTP_PASSWORD,
+#   ISTOTA_GITLAB_TOKEN, ISTOTA_NTFY_TOKEN, ISTOTA_NTFY_PASSWORD
+
+# [security]
+# mode = "permissive"
+# sandbox_enabled = false          # bwrap filesystem isolation per user (Linux only)
+# sandbox_admin_db_write = false   # allow admin DB writes inside sandbox
+# passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
+
+[nextcloud]
+# Nextcloud server URL
+url = "https://nextcloud.example.com"
+# Bot's Nextcloud username
+username = "istota"
+# App password (generate in Nextcloud: Settings > Security > Devices & sessions)
+# Note: CalDAV settings are derived from these values automatically
+# CalDAV URL = {url}/remote.php/dav, using same username/app_password
+app_password = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
+
+[talk]
+# Enable Talk polling (requires istota user to be added to conversations)
+enabled = true
+# Bot's Nextcloud username (to filter its own messages)
+bot_username = "istota"
+
+[email]
+# Enable email functionality (requires himalaya to be installed)
+enabled = true
+# IMAP settings (for receiving)
+imap_host = "imap.example.com"
+imap_port = 993
+imap_user = "istota@example.com"
+imap_password = "app-password-here"
+# SMTP settings (for sending) - defaults to IMAP credentials if not set
+smtp_host = "smtp.example.com"
+smtp_port = 587
+# smtp_user = ""  # uses imap_user if empty
+# smtp_password = ""  # uses imap_password if empty
+# Polling settings
+poll_folder = "INBOX"
+bot_email = "istota@example.com"  # bot's email address (to skip own messages)
+
+[conversation]
+# Enable conversation context (uses Sonnet to select relevant previous messages)
+enabled = true
+# Number of recent messages to consider
+lookback_count = 25
+# Include all messages without selection if history <= this threshold (faster for short threads)
+skip_selection_threshold = 3
+# Model for selecting relevant context (Haiku sufficient for relevance matching)
+selection_model = "haiku"
+# Timeout for context selection
+selection_timeout = 30.0
+# Set to false to include all lookback messages without LLM selection (useful for testing)
+use_selection = true
+# Always include this many recent messages without selection (rest triaged by model)
+always_include_recent = 5
+# Max chars per bot response in conversation context (0 to disable truncation)
+context_truncation = 0
+
+[logging]
+# Log level: INFO (default) or DEBUG (verbose)
+level = "INFO"
+# Output destination: console, file, or both
+output = "console"
+# Log file path (when output includes "file")
+# file = "/var/log/istota/istota.log"
+# rotate = true
+# max_size_mb = 10
+# backup_count = 5
+
+[scheduler]
+# Seconds between checking for new tasks in the queue
+poll_interval = 5
+# Seconds between polling Talk conversations
+talk_poll_interval = 10
+# Long-poll timeout for Talk API (server-side wait)
+talk_poll_timeout = 30
+# Max seconds to wait for all rooms before processing available results
+# Rooms that respond faster (with new messages) are processed immediately;
+# quiet rooms still long-polling are cancelled and re-polled next cycle
+talk_poll_wait = 2.0
+# Seconds between polling for new emails
+email_poll_interval = 60
+# Seconds between checking for briefings to run
+briefing_check_interval = 60
+# Seconds between polling TASKS.md files for new tasks
+tasks_file_poll_interval = 30
+
+# Progress updates during task execution (Talk only)
+# When enabled, sends real-time updates to Talk as Claude works (e.g., "Reading TODO.txt")
+progress_updates = true
+# Minimum seconds between progress messages (prevents flooding)
+progress_min_interval = 8
+# Maximum progress messages per task
+progress_max_messages = 5
+# Show tool use descriptions ("Reading file.txt", "Running script...")
+progress_show_tool_use = true
+# Show intermediate assistant text (can be noisy, off by default)
+progress_show_text = false
+
+# Kill task execution after N minutes (default: 30)
+task_timeout_minutes = 30
+# Robustness settings
+# Auto-cancel tasks awaiting confirmation after N minutes (default: 120 = 2 hours)
+confirmation_timeout_minutes = 120
+# Log warnings for tasks pending longer than N minutes (default: 30)
+stale_pending_warn_minutes = 30
+# Auto-fail tasks pending longer than N hours (default: 24 = 1 day)
+stale_pending_fail_hours = 24
+# Delete completed/failed/cancelled tasks older than N days (default: 7)
+task_retention_days = 7
+# Delete emails older than N days from IMAP inbox (default: 7, 0 to disable)
+email_retention_days = 7
+
+# Per-user worker pool settings
+# Maximum concurrent worker threads (one per user with pending tasks)
+max_total_workers = 5
+# Seconds before an idle worker thread exits
+worker_idle_timeout = 30
+
+# ============================================================================
+# Briefing Defaults
+# ============================================================================
+# Admin-level defaults for briefing components. When a user sets
+# `markets = true` or `news = true` in their workspace BRIEFINGS.md,
+# these defaults are expanded into the full component config.
+
+# [briefing_defaults.markets]
+# Not needed — futures/indices symbols default from markets.py
+# Only add if you want to override the built-in symbols:
+# futures = ["ES=F", "NQ=F", "YM=F"]
+# indices = ["^GSPC", "^IXIC", "^DJI"]
+
+[briefing_defaults.news]
+lookback_hours = 12
+sources = [
+    { type = "domain", value = "semafor.com" },
+    { type = "email", value = "briefing@nytimes.com" },
+]
+
+# ============================================================================
+# Sleep Cycle (nightly memory extraction)
+# ============================================================================
+# Extracts long-term memories from completed tasks for each user nightly.
+# Cron evaluated in each user's timezone (e.g., "0 2 * * *" = 2am local).
+# Memories written to /Users/{user_id}/memories/YYYY-MM-DD.md.
+
+# [sleep_cycle]
+# enabled = false
+# cron = "0 2 * * *"                  # 2am in user's timezone
+# memory_retention_days = 0            # 0 = unlimited, or set days to auto-delete old files
+# lookback_hours = 24                  # how far back to look for interactions
+
+# ============================================================================
+# Channel Sleep Cycle (shared channel memory extraction)
+# ============================================================================
+# Extracts shared memories from channel conversations nightly.
+# Auto-discovers active channels — no explicit channel list needed.
+# Cron evaluated in UTC since channels span users in different timezones.
+
+# [channel_sleep_cycle]
+# enabled = false
+# cron = "0 3 * * *"               # 3am UTC (after user sleep cycles at 2am)
+# lookback_hours = 24               # how far back to look for interactions
+# memory_retention_days = 0           # 0 = unlimited, or set days to auto-delete old files
+
+# ============================================================================
+# Developer Skill (Git + GitLab Workflows)
+# ============================================================================
+# Enables Claude Code to work in git repositories and create GitLab merge requests.
+# Uses bare clones + git worktrees for branch isolation.
+# Recommended: use a dedicated bot account with Developer role (not Maintainer)
+# and a token scoped to read_api + write_repository.
+
+# [developer]
+# enabled = false
+# repos_dir = "/srv/repos"                          # base dir for clones + worktrees
+# gitlab_url = "https://gitlab.com"                 # GitLab instance URL
+# gitlab_token = "glpat-xxxxxxxxxxxxxxxxxxxx"        # API token (read_api + write_repository)
+# gitlab_username = "botuser"                        # GitLab username for HTTPS auth
+# gitlab_default_namespace = "example"                # default namespace for short repo names
+# gitlab_reviewer_id = "12345"                       # GitLab user ID to assign as MR reviewer
+# gitlab_api_allowlist = [                           # API endpoint allowlist (default below)
+#     "GET /api/v4/projects/*",
+#     "GET /api/v4/groups/*",
+#     "GET /api/v4/users*",
+#     "POST /api/v4/projects/*/merge_requests",
+#     "POST /api/v4/projects/*/merge_requests/*/notes",
+#     "POST /api/v4/projects/*/issues",
+#     "POST /api/v4/projects/*/issues/*/notes",
+#     "PUT /api/v4/projects/*/merge_requests/*/merge",
+# ]
+
+# ============================================================================
+# ntfy Push Notifications
+# ============================================================================
+# Send one-way broadcast notifications via ntfy (https://ntfy.sh).
+# Used by heartbeat alerts, invoice notifications, and scheduled job output.
+# Per-user topic overrides via ntfy_topic in user config.
+
+# [ntfy]
+# enabled = false
+# server_url = "https://ntfy.sh"        # self-hosted or ntfy.sh
+# topic = "istota-notifications"           # default topic (per-user override available)
+# token = ""                             # bearer token auth (preferred)
+# username = ""                          # basic auth (alternative to token)
+# password = ""
+# priority = 3                           # default priority (1=min, 3=default, 5=max)
+
+# ============================================================================
+# Static Website Hosting
+# ============================================================================
+# Serves static files at https://{hostname}/~{user_id}/ for users with
+# site_enabled = true. Files written directly to base_path/{user_id}/.
+
+# [site]
+# enabled = false
+# hostname = "istota.example.com"                # public hostname
+# base_path = "/srv/app/istota/html"       # local directory for site files
+
+# User configuration
+# Map Nextcloud usernames to their settings
+# Only messages from configured users will be processed
+# email_addresses maps email addresses to users for email input channel
+
+[users.alice]
+display_name = "Alice"
+email_addresses = ["alice@example.com", "alice.work@company.com"]
+timezone = "America/New_York"  # IANA timezone for briefing scheduling
+# site_enabled = true  # enable static website at /~alice/
+
+# Alice's resources
+[[users.alice.resources]]
+type = "reminders_file"
+path = "/Users/alice/shared/Notes/_REMINDERS.md"
+name = "Reminders"
+
+# Alice's briefings - morning and evening
+[[users.alice.briefings]]
+name = "morning"
+cron = "0 6 * * *"  # 6am in user's timezone
+conversation_token = "room123"  # Talk room to post to
+output = "both"  # "talk", "email", or "both" (default: "talk")
+
+[users.alice.briefings.components]
+calendar = true
+todos = true
+markets = true    # morning → futures, evening → indices (automatic)
+news = true       # expands using [briefing_defaults.news] sources
+reminders = { enabled = true }  # random item from user's reminders_file resource
+
+[[users.alice.briefings]]
+name = "evening"
+cron = "0 18 * * *"  # 6pm in user's timezone
+conversation_token = "room123"
+output = "talk"  # Talk only for evening briefing
+
+[users.alice.briefings.components]
+calendar = true
+todos = true
+markets = true    # morning → futures, evening → indices (automatic)
+
+
+[users.bob]
+display_name = "Bob"
+email_addresses = ["bob@example.com"]
+timezone = "America/Los_Angeles"
+
+# Bob has no briefings or sleep cycle configured
+
+
+# Add more users as needed:
+# [users.charlie]
+# display_name = "Charlie"
+# email_addresses = ["charlie@example.com"]
+# timezone = "UTC"
+
+# ============================================================================
+# Briefing Configuration Notes
+# ============================================================================
+#
+# Briefings are configured per-user in the [[users.NAME.briefings]] array.
+# Each briefing has:
+#   - name: identifier (e.g., "morning", "evening")
+#   - cron: cron expression evaluated in user's timezone
+#   - conversation_token: Talk room ID to post briefing to
+#   - components: what to include in the briefing
+#
+# Available components:
+#   - calendar: boolean - today's (morning) or tomorrow's (evening) events
+#   - todos: boolean - pending TODO items
+#   - email: boolean - general unread email summary
+#   - markets: { enabled, futures, indices } - pre-fetched market data
+#   - news: { enabled, lookback_hours, sources } - newsletter summaries
+#   - notes: { enabled } - parse shared notes files for agenda items
+#   - reminders: { enabled } - random item from user's reminders_file
+#
+# Market symbols:
+#   - Futures: ES=F (S&P 500), NQ=F (Nasdaq 100), YM=F (Dow)
+#   - Indices: ^GSPC (S&P 500), ^IXIC (Nasdaq), ^DJI (Dow Jones)
+#
+# News sources support:
+#   - { type = "email", value = "newsletter@example.com" } - exact sender
+#   - { type = "domain", value = "example.com" } - sender domain match
+
+# ============================================================================
+# TASKS.md File Monitoring (Auto-Discovery)
+# ============================================================================
+#
+# Each user's /Users/{user_id}/ directory is scanned for a TASKS.md file.
+# The daemon automatically discovers these files and processes pending tasks.
+#
+# No per-user configuration needed - just create a TASKS.md file in the
+# user's bot-managed directory (created by `istota user init`).
+#
+# Alternatively, per-user config files can be placed in config/users/:
+#   config/users/alice.toml    # User-specific settings, resources, briefings
+# See config/users/alice.example.toml for the full format.
+#
+# File format:
+#   # Tasks
+#   - [ ] Send email to john about the meeting tomorrow
+#   - [~] Checking calendar for tomorrow's schedule...
+#   - [x] 2025-01-26 12:34 | Summarized report | Result: Summary saved to exports/
+#   - [!] 2025-01-26 12:35 | Failed task | Error: timeout (attempt 2/3)
+#
+# Status markers:
+#   - [ ] Pending (new, not yet picked up)
+#   - [~] In progress (being processed)
+#   - [x] Completed successfully
+#   - [!] Failed (includes error and retry count)
+#
+# Email notifications are sent automatically if the user has email_addresses
+# configured and email is enabled.

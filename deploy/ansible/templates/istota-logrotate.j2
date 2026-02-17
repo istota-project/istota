@@ -1,0 +1,10 @@
+/var/log/{{ istota_namespace }}/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    copytruncate
+    create 0640 {{ istota_user }} {{ istota_group }}
+}

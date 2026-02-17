@@ -1,0 +1,44 @@
+[Unit]
+Description={{ istota_namespace | capitalize }} Task Scheduler Daemon
+After=network.target
+{% if istota_use_nextcloud_mount %}
+After=mount-nextcloud.service
+Wants=mount-nextcloud.service
+{% endif %}
+
+[Service]
+Type=simple
+User={{ istota_user }}
+Group={{ istota_group }}
+WorkingDirectory={{ istota_home }}/src
+ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.scheduler --daemon --config {{ istota_home }}/src/config/config.toml
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=PATH={{ istota_home }}/.venv/bin:{{ istota_home }}/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME={{ istota_home }}
+Environment=PYTHONUNBUFFERED=1
+Environment=ISTOTA_ADMINS_FILE=/etc/{{ istota_namespace }}/admins
+{% if istota_use_environment_file | default(false) %}
+EnvironmentFile=/etc/{{ istota_namespace }}/secrets.env
+{% endif %}
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{ istota_namespace }}-scheduler
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths={{ istota_home }}
+ReadWritePaths=/var/log/{{ istota_namespace }}
+{% if istota_use_nextcloud_mount %}
+ReadWritePaths={{ istota_nextcloud_mount_path }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

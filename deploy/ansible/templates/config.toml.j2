@@ -1,0 +1,211 @@
+# {{ istota_namespace | capitalize }} configuration - managed by Ansible
+
+# Bot identity
+bot_name = "{{ istota_bot_name | default(istota_namespace | capitalize, true) }}"
+
+# Database path
+db_path = "{{ istota_home }}/data/{{ istota_namespace }}.db"
+
+# File access configuration
+{% if istota_use_nextcloud_mount %}
+# Nextcloud mount path (direct filesystem access)
+nextcloud_mount_path = "{{ istota_nextcloud_mount_path }}"
+{% endif %}
+# rclone remote name for Nextcloud files (used when mount_path not set, or for owner detection)
+rclone_remote = "{{ istota_rclone_remote }}"
+
+# Path to skills directory (individual skill files loaded selectively)
+# Points to src/config/skills where skills and guidelines folders live in the repo
+skills_dir = "{{ istota_home }}/src/config/skills"
+
+# Temporary directory
+temp_dir = "{{ istota_home }}/tmp"
+
+[security]
+mode = "{{ istota_security_mode | default('permissive') }}"
+sandbox_enabled = {{ istota_security_sandbox_enabled | default(false) | lower }}
+sandbox_admin_db_write = {{ istota_security_sandbox_admin_db_write | default(false) | lower }}
+
+[nextcloud]
+url = "{{ istota_nextcloud_url }}"
+username = "{{ istota_nextcloud_username }}"
+{% if not istota_use_environment_file | default(false) %}
+app_password = "{{ istota_nextcloud_app_password }}"
+{% endif %}
+
+[talk]
+enabled = {{ istota_talk_enabled | lower }}
+bot_username = "{{ istota_talk_bot_username }}"
+
+[email]
+enabled = {{ istota_email_enabled | lower }}
+{% if istota_email_enabled %}
+imap_host = "{{ istota_email_imap_host }}"
+imap_port = {{ istota_email_imap_port }}
+imap_user = "{{ istota_email_imap_user }}"
+{% if not istota_use_environment_file | default(false) %}
+imap_password = "{{ istota_email_imap_password }}"
+{% endif %}
+smtp_host = "{{ istota_email_smtp_host }}"
+smtp_port = {{ istota_email_smtp_port }}
+poll_folder = "{{ istota_email_poll_folder }}"
+bot_email = "{{ istota_email_bot_address }}"
+{% endif %}
+
+[conversation]
+enabled = {{ istota_conversation_enabled | lower }}
+lookback_count = {{ istota_conversation_lookback_count }}
+selection_model = "{{ istota_conversation_selection_model }}"
+selection_timeout = {{ istota_conversation_selection_timeout }}
+skip_selection_threshold = {{ istota_conversation_skip_selection_threshold }}
+use_selection = {{ istota_conversation_use_selection | lower }}
+always_include_recent = {{ istota_conversation_always_include_recent }}
+context_truncation = {{ istota_conversation_context_truncation }}
+
+[logging]
+level = "{{ istota_logging_level }}"
+output = "{{ istota_logging_output }}"
+file = "{{ istota_logging_file }}"
+rotate = {{ istota_logging_rotate | lower }}
+max_size_mb = {{ istota_logging_max_size_mb }}
+backup_count = {{ istota_logging_backup_count }}
+
+[scheduler]
+poll_interval = {{ istota_scheduler_poll_interval }}
+talk_poll_interval = {{ istota_scheduler_talk_poll_interval }}
+talk_poll_timeout = {{ istota_scheduler_talk_poll_timeout }}
+talk_poll_wait = {{ istota_scheduler_talk_poll_wait }}
+email_poll_interval = {{ istota_scheduler_email_poll_interval }}
+briefing_check_interval = {{ istota_scheduler_briefing_check_interval }}
+tasks_file_poll_interval = {{ istota_scheduler_tasks_file_poll_interval }}
+shared_file_check_interval = {{ istota_scheduler_shared_file_check_interval }}
+heartbeat_check_interval = {{ istota_scheduler_heartbeat_check_interval }}
+
+# Progress updates (Talk only)
+progress_updates = {{ istota_scheduler_progress_updates | lower }}
+progress_min_interval = {{ istota_scheduler_progress_min_interval }}
+progress_max_messages = {{ istota_scheduler_progress_max_messages }}
+progress_show_tool_use = {{ istota_scheduler_progress_show_tool_use | lower }}
+progress_show_text = {{ istota_scheduler_progress_show_text | lower }}
+task_timeout_minutes = {{ istota_scheduler_task_timeout_minutes }}
+
+# Robustness settings
+confirmation_timeout_minutes = {{ istota_scheduler_confirmation_timeout_minutes }}
+stale_pending_warn_minutes = {{ istota_scheduler_stale_pending_warn_minutes }}
+stale_pending_fail_hours = {{ istota_scheduler_stale_pending_fail_hours }}
+max_retry_age_minutes = {{ istota_scheduler_max_retry_age_minutes }}
+task_retention_days = {{ istota_scheduler_task_retention_days }}
+email_retention_days = {{ istota_scheduler_email_retention_days }}
+max_total_workers = {{ istota_scheduler_max_total_workers }}
+worker_idle_timeout = {{ istota_scheduler_worker_idle_timeout }}
+reserved_interactive_workers = {{ istota_scheduler_reserved_interactive_workers }}
+scheduled_job_max_consecutive_failures = {{ istota_scheduler_scheduled_job_max_consecutive_failures }}
+feed_check_interval = {{ istota_scheduler_feed_check_interval }}
+feed_item_retention_days = {{ istota_scheduler_feed_item_retention_days }}
+
+{% if istota_briefing_defaults is defined and istota_briefing_defaults %}
+
+[briefing_defaults]
+{% if istota_briefing_defaults.markets is defined %}
+[briefing_defaults.markets]
+{% if istota_briefing_defaults.markets.futures is defined %}
+futures = {{ istota_briefing_defaults.markets.futures | to_json }}
+{% endif %}
+{% if istota_briefing_defaults.markets.indices is defined %}
+indices = {{ istota_briefing_defaults.markets.indices | to_json }}
+{% endif %}
+{% endif %}
+{% if istota_briefing_defaults.news is defined %}
+[briefing_defaults.news]
+{% if istota_briefing_defaults.news.lookback_hours is defined %}
+lookback_hours = {{ istota_briefing_defaults.news.lookback_hours }}
+{% endif %}
+{% if istota_briefing_defaults.news.sources is defined and istota_briefing_defaults.news.sources | length > 0 %}
+sources = [
+{% for source in istota_briefing_defaults.news.sources %}
+    { type = "{{ source.type }}", value = "{{ source.value }}" },
+{% endfor %}
+]
+{% endif %}
+{% endif %}
+{% endif %}
+
+{% if istota_ntfy_enabled %}
+
+[ntfy]
+enabled = true
+server_url = "{{ istota_ntfy_server_url }}"
+topic = "{{ istota_ntfy_topic }}"
+{% if istota_ntfy_token and not istota_use_environment_file | default(false) %}
+token = "{{ istota_ntfy_token }}"
+{% endif %}
+{% if istota_ntfy_username %}
+username = "{{ istota_ntfy_username }}"
+{% if not istota_use_environment_file | default(false) %}
+password = "{{ istota_ntfy_password }}"
+{% endif %}
+{% endif %}
+priority = {{ istota_ntfy_priority }}
+{% endif %}
+
+{% if istota_browser_enabled %}
+
+[browser]
+enabled = true
+api_url = "http://localhost:{{ istota_browser_api_port }}"
+vnc_url = "{{ istota_browser_vnc_external_url }}"
+{% endif %}
+
+{% if istota_memory_search_enabled %}
+
+[memory_search]
+enabled = true
+auto_index_conversations = {{ istota_memory_search_auto_index_conversations | lower }}
+auto_index_memory_files = {{ istota_memory_search_auto_index_memory_files | lower }}
+{% endif %}
+
+{% if istota_sleep_cycle_enabled %}
+
+[sleep_cycle]
+enabled = true
+cron = "{{ istota_sleep_cycle_cron }}"
+lookback_hours = {{ istota_sleep_cycle_lookback_hours }}
+memory_retention_days = {{ istota_sleep_cycle_memory_retention_days }}
+{% endif %}
+
+{% if istota_channel_sleep_cycle_enabled %}
+
+[channel_sleep_cycle]
+enabled = true
+cron = "{{ istota_channel_sleep_cycle_cron }}"
+lookback_hours = {{ istota_channel_sleep_cycle_lookback_hours }}
+memory_retention_days = {{ istota_channel_sleep_cycle_memory_retention_days }}
+{% endif %}
+{% if istota_site_enabled %}
+
+[site]
+enabled = true
+base_path = "{{ istota_site_base_path }}"
+hostname = "{{ istota_site_hostname }}"
+{% endif %}
+{% if istota_developer_enabled %}
+
+[developer]
+enabled = true
+repos_dir = "{{ istota_developer_repos_dir }}"
+gitlab_url = "{{ istota_developer_gitlab_url }}"
+{% if not istota_use_environment_file | default(false) %}
+gitlab_token = "{{ istota_developer_gitlab_token }}"
+{% endif %}
+gitlab_username = "{{ istota_developer_gitlab_username }}"
+gitlab_default_namespace = "{{ istota_developer_gitlab_default_namespace }}"
+gitlab_reviewer_id = "{{ istota_developer_gitlab_reviewer_id }}"
+gitlab_api_allowlist = [
+{% for pattern in istota_developer_gitlab_api_allowlist %}
+    "{{ pattern }}",
+{% endfor %}
+]
+{% endif %}
+
+# User configuration is in per-user files: config/users/{user_id}.toml
+# See user.toml.j2 template

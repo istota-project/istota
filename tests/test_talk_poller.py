@@ -1,0 +1,592 @@
+"""Tests for Talk conversation polling and task creation."""
+
+import asyncio
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from istota import db
+from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
+from istota.talk_poller import (
+    clean_message_content,
+    extract_attachments,
+    handle_confirmation_reply,
+    poll_talk_conversations,
+)
+
+
+@pytest.fixture
+def db_path(tmp_path):
+    """Create and initialize a temporary SQLite database."""
+    path = tmp_path / "test.db"
+    db.init_db(path)
+    return path
+
+
+@pytest.fixture
+def make_config(db_path, tmp_path):
+    """Create a Config object with tmp paths and test DB."""
+    def _make(**overrides):
+        config = Config()
+        config.db_path = db_path
+        config.temp_dir = tmp_path / "temp"
+        config.temp_dir.mkdir(exist_ok=True)
+        config.skills_dir = tmp_path / "skills"
+        config.skills_dir.mkdir(exist_ok=True)
+        config.talk = TalkConfig(enabled=True, bot_username="istota")
+        config.nextcloud = NextcloudConfig(
+            url="https://nc.test", username="istota", app_password="pass"
+        )
+        config.users = {"alice": UserConfig()}
+        config.scheduler = SchedulerConfig()
+        for key, val in overrides.items():
+            setattr(config, key, val)
+        return config
+    return _make
+
+
+def _msg(
+    id=100,
+    actor_id="alice",
+    actor_type="users",
+    message="Hello istota",
+    message_type="comment",
+    message_params=None,
+    parent=None,
+):
+    """Build a Talk message dict."""
+    msg = {
+        "id": id,
+        "actorId": actor_id,
+        "actorType": actor_type,
+        "message": message,
+        "messageType": message_type,
+        "messageParameters": message_params if message_params is not None else {},
+    }
+    if parent is not None:
+        msg["parent"] = parent
+    return msg
+
+
+# =============================================================================
+# TestExtractAttachments
+# =============================================================================
+
+
+class TestExtractAttachments:
+    def test_file_attachment(self):
+        msg = _msg(message_params={"file0": {"name": "photo.jpg", "type": "file"}})
+        result = extract_attachments(msg)
+        assert result == ["Talk/photo.jpg"]
+
+    def test_multiple_attachments(self):
+        msg = _msg(message_params={
+            "file0": {"name": "a.jpg", "type": "file"},
+            "file1": {"name": "b.pdf", "type": "file"},
+        })
+        result = extract_attachments(msg)
+        assert len(result) == 2
+        assert "Talk/a.jpg" in result
+        assert "Talk/b.pdf" in result
+
+    def test_no_attachments(self):
+        msg = _msg(message_params={})
+        result = extract_attachments(msg)
+        assert result == []
+
+    def test_empty_parameters(self):
+        msg = _msg()
+        msg["messageParameters"] = {}
+        result = extract_attachments(msg)
+        assert result == []
+
+    def test_non_file_parameters(self):
+        msg = _msg(message_params={"mention-user0": {"type": "user", "id": "alice"}})
+        result = extract_attachments(msg)
+        assert result == []
+
+    def test_parameters_is_list(self):
+        """messageParameters can be an empty list [] when no params exist."""
+        msg = _msg()
+        msg["messageParameters"] = []
+        result = extract_attachments(msg)
+        assert result == []
+
+
+# =============================================================================
+# TestCleanMessageContent
+# =============================================================================
+
+
+class TestCleanMessageContent:
+    def test_replace_file_placeholder(self):
+        msg = _msg(
+            message="{file0}",
+            message_params={"file0": {"name": "report.pdf"}},
+        )
+        result = clean_message_content(msg)
+        assert result == "[report.pdf]"
+
+    def test_multiple_placeholders(self):
+        msg = _msg(
+            message="Check {file0} and {file1}",
+            message_params={
+                "file0": {"name": "a.txt"},
+                "file1": {"name": "b.txt"},
+            },
+        )
+        result = clean_message_content(msg)
+        assert result == "Check [a.txt] and [b.txt]"
+
+    def test_no_placeholders(self):
+        msg = _msg(message="Just a regular message")
+        result = clean_message_content(msg)
+        assert result == "Just a regular message"
+
+    def test_parameters_is_list(self):
+        """When messageParameters is an empty list, return message as-is."""
+        msg = _msg(message="Hello {file0}")
+        msg["messageParameters"] = []
+        result = clean_message_content(msg)
+        assert result == "Hello {file0}"
+
+    def test_missing_parameter(self):
+        """Placeholder without matching param is left as-is."""
+        msg = _msg(
+            message="Check {file0}",
+            message_params={},
+        )
+        result = clean_message_content(msg)
+        assert result == "Check {file0}"
+
+
+# =============================================================================
+# TestHandleConfirmationReply
+# =============================================================================
+
+
+class TestHandleConfirmationReply:
+    @pytest.mark.asyncio
+    async def test_affirmative_confirms_task(self, make_config):
+        config = make_config()
+
+        # Create a task and set it to pending_confirmation
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Please confirm")
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes", "room1"
+            )
+
+        assert result is True
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+            assert task.status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_negative_cancels_task(self, make_config):
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Please confirm")
+
+        with (
+            db.get_db(config.db_path) as conn,
+            patch("istota.talk_poller.TalkClient") as MockClient,
+        ):
+            mock_instance = MockClient.return_value
+            mock_instance.send_message = AsyncMock()
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "no", "room1"
+            )
+
+        assert result is True
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+            assert task.status == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_non_confirmation_returns_false(self, make_config):
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Please confirm")
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "what do you mean?", "room1"
+            )
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_no_pending_task_returns_false(self, make_config):
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes", "room1"
+            )
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_wrong_user_returns_false(self, make_config):
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Please confirm")
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "bob", "yes", "room1"
+            )
+
+        assert result is False
+
+        # Task should still be pending_confirmation
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+            assert task.status == "pending_confirmation"
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive(self, make_config):
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Please confirm")
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "YES", "room1"
+            )
+
+        assert result is True
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+            assert task.status == "pending"
+
+
+# =============================================================================
+# TestPollTalkConversations
+# =============================================================================
+
+
+class TestPollTalkConversations:
+    @pytest.mark.asyncio
+    async def test_disabled_returns_empty(self, make_config):
+        config = make_config()
+        config.talk = TalkConfig(enabled=False)
+
+        result = await poll_talk_conversations(config)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_no_url_returns_empty(self, make_config):
+        config = make_config()
+        config.nextcloud = NextcloudConfig(url="", username="istota", app_password="pass")
+
+        result = await poll_talk_conversations(config)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_filters_system_messages(self, make_config):
+        config = make_config()
+
+        system_msg = _msg(message_type="system", actor_id="alice")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[system_msg])
+
+            # Pre-set poll state so we don't hit first-poll logic
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_filters_bot_messages(self, make_config):
+        config = make_config()
+
+        bot_msg = _msg(actor_id="istota")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[bot_msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_filters_unknown_users(self, make_config):
+        config = make_config()
+
+        unknown_msg = _msg(actor_id="stranger")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[unknown_msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_creates_task_for_valid_message(self, make_config):
+        config = make_config()
+
+        msg = _msg(id=101, actor_id="alice", message="Check my calendar")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result[0])
+            assert task.user_id == "alice"
+            assert task.source_type == "talk"
+            assert task.prompt == "Check my calendar"
+            assert task.conversation_token == "room1"
+            assert task.talk_message_id == 101
+
+    @pytest.mark.asyncio
+    async def test_dm_first_poll_fetches_history(self, make_config):
+        config = make_config()
+
+        msg = _msg(id=200, actor_id="alice", message="Hello")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "dm1", "type": 1},  # type 1 = DM
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            # No poll state set -> first poll
+            result = await poll_talk_conversations(config)
+
+        # DM first poll sets last_message_id=0 and polls
+        assert len(result) == 1
+        mock_instance.poll_messages.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_group_first_poll_picks_up_latest_message(self, make_config):
+        config = make_config()
+
+        msg = _msg(id=500, actor_id="alice", message="Hello from new room")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "group1", "type": 2},  # type 2 = group
+            ])
+            mock_instance.get_latest_message_id = AsyncMock(return_value=500)
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            # No poll state -> first poll for group room
+            result = await poll_talk_conversations(config)
+
+        # Group first poll should poll with latest_id - 1 to pick up latest message
+        assert len(result) == 1
+        mock_instance.get_latest_message_id.assert_called_once_with("group1")
+        # poll_messages SHOULD be called with latest_id - 1
+        mock_instance.poll_messages.assert_called_once()
+        call_args = mock_instance.poll_messages.call_args
+        assert call_args.kwargs["last_known_message_id"] == 499  # latest_id - 1
+
+    @pytest.mark.asyncio
+    async def test_group_first_poll_no_messages_yet(self, make_config):
+        config = make_config()
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "group1", "type": 2},
+            ])
+            mock_instance.get_latest_message_id = AsyncMock(return_value=None)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+
+            result = await poll_talk_conversations(config)
+
+        # No messages yet - should still poll with last_message_id=0
+        assert result == []
+        mock_instance.poll_messages.assert_called_once()
+        call_args = mock_instance.poll_messages.call_args
+        assert call_args.kwargs["last_known_message_id"] == 0
+
+    @pytest.mark.asyncio
+    async def test_group_first_poll_error_skips_room(self, make_config):
+        config = make_config()
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "group1", "type": 2},
+            ])
+            mock_instance.get_latest_message_id = AsyncMock(side_effect=Exception("API error"))
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+
+            result = await poll_talk_conversations(config)
+
+        # On error, room should be skipped (continue)
+        assert result == []
+        mock_instance.poll_messages.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extracts_reply_metadata(self, make_config):
+        config = make_config()
+
+        msg = _msg(
+            id=300,
+            actor_id="alice",
+            message="Follow up on that",
+            parent={"id": 250, "message": "Original message content", "deleted": False},
+        )
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result[0])
+            assert task.reply_to_talk_id == 250
+            assert task.reply_to_content == "Original message content"
+
+    @pytest.mark.asyncio
+    async def test_slow_room_does_not_block_fast_room(self, make_config):
+        """A quiet room long-polling should not delay processing of a room with messages."""
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.scheduler.talk_poll_wait = 0.5  # short wait for test
+
+        fast_msg = _msg(id=101, actor_id="alice", message="Hello")
+
+        async def slow_poll(token, last_known_message_id=None, timeout=30):
+            """Simulate a quiet room that blocks for the full long-poll timeout."""
+            await asyncio.sleep(10)  # would block for 10s without wait()
+            return []
+
+        async def fast_poll(token, last_known_message_id=None, timeout=30):
+            """Simulate a room with an immediate new message."""
+            return [fast_msg]
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "fast_room", "type": 1},
+                {"token": "slow_room", "type": 1},
+            ])
+
+            # Route poll_messages based on conversation token
+            async def route_poll(token, **kwargs):
+                if token == "fast_room":
+                    return await fast_poll(token, **kwargs)
+                return await slow_poll(token, **kwargs)
+
+            mock_instance.poll_messages = AsyncMock(side_effect=route_poll)
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "fast_room", 50)
+                db.set_talk_poll_state(conn, "slow_room", 50)
+
+            import time
+            start = time.monotonic()
+            result = await poll_talk_conversations(config)
+            elapsed = time.monotonic() - start
+
+        # Fast room's message should have been processed
+        assert len(result) == 1
+        # Should complete in roughly talk_poll_wait, not 10+ seconds
+        assert elapsed < 3.0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_slow_rooms_no_errors(self, make_config):
+        """Cancelling pending slow rooms should not raise errors."""
+        config = make_config()
+        config.scheduler.talk_poll_wait = 0.1
+        config.scheduler.talk_poll_timeout = 0.2  # short timeout so test doesn't block
+
+        async def slow_poll(token, last_known_message_id=None, timeout=30):
+            await asyncio.sleep(10)
+            return []
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+                {"token": "room2", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(side_effect=slow_poll)
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+                db.set_talk_poll_state(conn, "room2", 50)
+
+            # Should not raise any exceptions
+            result = await poll_talk_conversations(config)
+
+        # No messages from either room
+        assert result == []

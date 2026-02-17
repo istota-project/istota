@@ -1,0 +1,577 @@
+"""Calendar operations via CalDAV.
+
+Also provides a CLI for calendar operations from Claude Code:
+    python -m istota.skills.calendar list [--calendar URL] [--date today|tomorrow|DATE] [--tz TZ]
+    python -m istota.skills.calendar create --calendar URL --summary TEXT --start DATETIME --end DATETIME
+    python -m istota.skills.calendar delete --calendar URL --uid UID
+"""
+
+import argparse
+import json
+import os
+import sys
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import Iterator
+from zoneinfo import ZoneInfo
+
+import caldav
+from icalendar import Calendar, Event
+
+
+@dataclass
+class CalendarEvent:
+    uid: str
+    summary: str
+    start: datetime
+    end: datetime
+    location: str | None = None
+    description: str | None = None
+    all_day: bool = False
+
+
+def get_caldav_client(url: str, username: str, password: str) -> caldav.DAVClient:
+    """Create a CalDAV client."""
+    return caldav.DAVClient(url=url, username=username, password=password)
+
+
+def list_calendars(client: caldav.DAVClient) -> list[tuple[str, str]]:
+    """List available calendars. Returns list of (name, url) tuples."""
+    principal = client.principal()
+    calendars = principal.calendars()
+    return [(cal.name, str(cal.url)) for cal in calendars]
+
+
+def get_calendar_owner(calendar: caldav.Calendar) -> str | None:
+    """Get the owner username from a calendar's DAV properties."""
+    try:
+        props = calendar.get_properties([caldav.dav.Owner()])
+        owner_path = props.get("{DAV:}owner", "")
+        # Parse username from path like /remote.php/dav/principals/users/alice/
+        if "/principals/users/" in owner_path:
+            parts = owner_path.rstrip("/").split("/")
+            return parts[-1] if parts else None
+    except Exception:
+        pass
+    return None
+
+
+def get_calendars_for_user(
+    client: caldav.DAVClient,
+    username: str,
+) -> list[tuple[str, str, bool]]:
+    """
+    Get calendars owned by a specific user.
+
+    Returns list of (name, url, writable) tuples for calendars where the
+    DAV owner matches the given username.
+    """
+    principal = client.principal()
+    calendars = principal.calendars()
+
+    result = []
+    for cal in calendars:
+        owner = get_calendar_owner(cal)
+        if owner == username:
+            # Check if writable by looking at current-user-privilege-set
+            # For now, assume shared calendars may be read-only
+            # We'll determine this by trying to check ACL or just mark as unknown
+            writable = True  # Default assumption; will fail gracefully on write
+            result.append((cal.name, str(cal.url), writable))
+
+    return result
+
+
+def get_events(
+    client: caldav.DAVClient,
+    calendar_url: str,
+    start: datetime,
+    end: datetime,
+) -> list[CalendarEvent]:
+    """Get events from a calendar within a date range.
+
+    When the query boundaries are timezone-aware, all-day events are
+    post-filtered against the local date range to prevent UTC offset leakage
+    (e.g. a Sunday all-day event appearing in a Saturday query because the
+    UTC end boundary extends into the next day).
+    """
+    calendar = client.calendar(url=calendar_url)
+    events = calendar.search(start=start, end=end, expand=True)
+
+    # Derive local date boundaries for all-day event filtering.
+    # All-day events use DATE (no time component), so we compare dates.
+    # The query range [start, end) in local time defines which dates are valid.
+    # For a single-day query like "tomorrow" (Feb 14 00:00 → Feb 15 00:00),
+    # the valid all-day date range is [Feb 14, Feb 15) — i.e. only Feb 14.
+    local_start_date = start.date() if isinstance(start, datetime) else start
+    local_end_date = end.date() if isinstance(end, datetime) else end
+
+    result = []
+    for event in events:
+        ical = Calendar.from_ical(event.data)
+        for component in ical.walk():
+            if component.name == "VEVENT":
+                dtstart = component.get("dtstart")
+                dtend = component.get("dtend")
+
+                # Handle all-day events (date vs datetime)
+                start_dt = dtstart.dt if dtstart else start
+                end_dt = dtend.dt if dtend else start_dt
+
+                all_day = not isinstance(start_dt, datetime)
+                if all_day:
+                    # Filter out all-day events that leaked in due to
+                    # UTC offset extending the CalDAV query window.
+                    # An all-day event spans [DTSTART, DTEND) as dates.
+                    # It overlaps our range if event_start < local_end_date
+                    # AND event_end > local_start_date.
+                    event_start_date = start_dt if isinstance(start_dt, date) else start_dt.date()
+                    event_end_date = end_dt if isinstance(end_dt, date) else end_dt.date()
+                    if event_start_date >= local_end_date or event_end_date <= local_start_date:
+                        continue
+
+                    start_dt = datetime.combine(start_dt, datetime.min.time())
+                    end_dt = datetime.combine(end_dt, datetime.min.time())
+                else:
+                    # Strip tzinfo for consistent sorting with all-day events
+                    if start_dt.tzinfo is not None:
+                        start_dt = start_dt.replace(tzinfo=None)
+                    if end_dt.tzinfo is not None:
+                        end_dt = end_dt.replace(tzinfo=None)
+
+                result.append(
+                    CalendarEvent(
+                        uid=str(component.get("uid", "")),
+                        summary=str(component.get("summary", "Untitled")),
+                        start=start_dt,
+                        end=end_dt,
+                        location=str(component.get("location", "")) or None,
+                        description=str(component.get("description", "")) or None,
+                        all_day=all_day,
+                    )
+                )
+
+    # Sort by start time
+    result.sort(key=lambda e: e.start)
+    return result
+
+
+def _local_midnight(tz: str | None = None) -> datetime:
+    """Get midnight today in the given timezone, as a timezone-aware datetime."""
+    if tz:
+        zone = ZoneInfo(tz)
+        now = datetime.now(zone)
+        return datetime(now.year, now.month, now.day, tzinfo=zone)
+    else:
+        now = datetime.now()
+        return datetime(now.year, now.month, now.day)
+
+
+def get_today_events(
+    client: caldav.DAVClient, calendar_url: str, tz: str | None = None
+) -> list[CalendarEvent]:
+    """Get today's events. Pass tz (e.g., 'America/Los_Angeles') for correct local date."""
+    today = _local_midnight(tz)
+    tomorrow = today + timedelta(days=1)
+    return get_events(client, calendar_url, today, tomorrow)
+
+
+def get_tomorrow_events(
+    client: caldav.DAVClient, calendar_url: str, tz: str | None = None
+) -> list[CalendarEvent]:
+    """Get tomorrow's events. Pass tz (e.g., 'America/Los_Angeles') for correct local date."""
+    tomorrow = _local_midnight(tz) + timedelta(days=1)
+    day_after = tomorrow + timedelta(days=1)
+    return get_events(client, calendar_url, tomorrow, day_after)
+
+
+def get_week_events(
+    client: caldav.DAVClient, calendar_url: str, tz: str | None = None
+) -> list[CalendarEvent]:
+    """Get this week's events. Pass tz (e.g., 'America/Los_Angeles') for correct local date."""
+    today = _local_midnight(tz)
+    week_end = today + timedelta(days=7)
+    return get_events(client, calendar_url, today, week_end)
+
+
+def create_event(
+    client: caldav.DAVClient,
+    calendar_url: str,
+    summary: str,
+    start: datetime,
+    end: datetime,
+    location: str | None = None,
+    description: str | None = None,
+) -> str:
+    """Create a new calendar event. Returns the event UID."""
+    import uuid
+
+    calendar = client.calendar(url=calendar_url)
+
+    event = Event()
+    event.add("uid", str(uuid.uuid4()))
+    event.add("summary", summary)
+    event.add("dtstart", start)
+    event.add("dtend", end)
+    event.add("dtstamp", datetime.now())
+
+    if location:
+        event.add("location", location)
+    if description:
+        event.add("description", description)
+
+    cal = Calendar()
+    cal.add("prodid", "-//Istota Bot//istota//EN")
+    cal.add("version", "2.0")
+    cal.add_component(event)
+
+    calendar.save_event(cal.to_ical().decode("utf-8"))
+    return str(event["uid"])
+
+
+def delete_event(client: caldav.DAVClient, calendar_url: str, uid: str) -> bool:
+    """Delete an event by UID. Returns True if deleted."""
+    calendar = client.calendar(url=calendar_url)
+
+    try:
+        event = calendar.event_by_uid(uid)
+        event.delete()
+        return True
+    except caldav.error.NotFoundError:
+        return False
+
+
+def get_event_by_uid(
+    client: caldav.DAVClient,
+    calendar_url: str,
+    uid: str,
+) -> CalendarEvent | None:
+    """Get a single event by UID. Returns None if not found."""
+    calendar = client.calendar(url=calendar_url)
+
+    try:
+        event = calendar.event_by_uid(uid)
+        ical = Calendar.from_ical(event.data)
+
+        for component in ical.walk():
+            if component.name == "VEVENT":
+                dtstart = component.get("dtstart")
+                dtend = component.get("dtend")
+
+                start_dt = dtstart.dt if dtstart else datetime.now()
+                end_dt = dtend.dt if dtend else start_dt
+
+                all_day = not isinstance(start_dt, datetime)
+                if all_day:
+                    start_dt = datetime.combine(start_dt, datetime.min.time())
+                    end_dt = datetime.combine(end_dt, datetime.min.time())
+
+                return CalendarEvent(
+                    uid=str(component.get("uid", "")),
+                    summary=str(component.get("summary", "Untitled")),
+                    start=start_dt,
+                    end=end_dt,
+                    location=str(component.get("location", "")) or None,
+                    description=str(component.get("description", "")) or None,
+                    all_day=all_day,
+                )
+        return None
+    except caldav.error.NotFoundError:
+        return None
+
+
+def update_event(
+    client: caldav.DAVClient,
+    calendar_url: str,
+    uid: str,
+    summary: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    location: str | None = None,
+    description: str | None = None,
+) -> bool:
+    """Update an existing event. Only provided fields are changed.
+
+    Returns False if event not found.
+    Raises caldav.error.AuthorizationError if calendar is read-only.
+    """
+    calendar = client.calendar(url=calendar_url)
+
+    try:
+        event = calendar.event_by_uid(uid)
+    except caldav.error.NotFoundError:
+        return False
+
+    ical = Calendar.from_ical(event.data)
+
+    for component in ical.walk():
+        if component.name == "VEVENT":
+            if summary is not None:
+                component["summary"] = summary
+            if start is not None:
+                component["dtstart"] = start
+            if end is not None:
+                component["dtend"] = end
+            if location is not None:
+                if location:
+                    component["location"] = location
+                elif "location" in component:
+                    del component["location"]
+            if description is not None:
+                if description:
+                    component["description"] = description
+                elif "description" in component:
+                    del component["description"]
+            break
+
+    event.data = ical.to_ical().decode("utf-8")
+    event.save()
+    return True
+
+
+def format_event_for_display(event: CalendarEvent) -> str:
+    """Format an event for human-readable display."""
+    if event.all_day:
+        time_str = "All day"
+    else:
+        time_str = f"{event.start.strftime('%H:%M')} - {event.end.strftime('%H:%M')}"
+
+    parts = [f"{time_str}: {event.summary}"]
+    if event.location:
+        parts.append(f"  Location: {event.location}")
+
+    return "\n".join(parts)
+
+
+def format_day_schedule(events: list[CalendarEvent], date_label: str = "Today") -> str:
+    """Format a day's events for display."""
+    if not events:
+        return f"{date_label}: No events scheduled"
+
+    lines = [f"{date_label}'s schedule:"]
+    for event in events:
+        lines.append(f"  • {format_event_for_display(event)}")
+
+    return "\n".join(lines)
+
+
+# =============================================================================
+# CLI Interface
+# =============================================================================
+
+
+def _get_client_from_env() -> caldav.DAVClient:
+    """Create CalDAV client from environment variables."""
+    url = os.environ.get("CALDAV_URL")
+    username = os.environ.get("CALDAV_USERNAME")
+    password = os.environ.get("CALDAV_PASSWORD")
+
+    if not all([url, username, password]):
+        raise ValueError(
+            "Missing CalDAV credentials. Required env vars: "
+            "CALDAV_URL, CALDAV_USERNAME, CALDAV_PASSWORD"
+        )
+
+    return get_caldav_client(url, username, password)
+
+
+def _event_to_dict(event: CalendarEvent) -> dict:
+    """Convert CalendarEvent to JSON-serializable dict."""
+    return {
+        "uid": event.uid,
+        "summary": event.summary,
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "location": event.location,
+        "description": event.description,
+        "all_day": event.all_day,
+    }
+
+
+def _parse_date(date_str: str, tz: str | None = None) -> datetime:
+    """Parse a date string into a datetime at midnight, timezone-aware if tz provided."""
+    zone = ZoneInfo(tz) if tz else None
+
+    if date_str.lower() == "today":
+        if zone:
+            now = datetime.now(zone)
+            return datetime(now.year, now.month, now.day, tzinfo=zone)
+        else:
+            now = datetime.now()
+            return datetime(now.year, now.month, now.day)
+    elif date_str.lower() == "tomorrow":
+        if zone:
+            now = datetime.now(zone)
+            tomorrow = now + timedelta(days=1)
+            return datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=zone)
+        else:
+            now = datetime.now()
+            tomorrow = now + timedelta(days=1)
+            return datetime(tomorrow.year, tomorrow.month, tomorrow.day)
+    else:
+        # Parse YYYY-MM-DD format
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        if zone:
+            return dt.replace(tzinfo=zone)
+        return dt
+
+
+def _parse_datetime(dt_str: str) -> datetime:
+    """Parse datetime string in various formats."""
+    formats = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(dt_str, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Cannot parse datetime: {dt_str}. Use format: YYYY-MM-DD HH:MM")
+
+
+def cmd_list(args) -> dict:
+    """List calendar events."""
+    client = _get_client_from_env()
+
+    # If no calendar specified, list from all user calendars
+    if not args.calendar:
+        # Get all calendars and aggregate events
+        all_events = []
+        calendars = list_calendars(client)
+        for name, url in calendars:
+            try:
+                date = _parse_date(args.date, args.tz)
+                date_end = date + timedelta(days=1)
+                events = get_events(client, url, date, date_end)
+                for e in events:
+                    all_events.append({
+                        "calendar": name,
+                        **_event_to_dict(e),
+                    })
+            except Exception:
+                continue  # Skip calendars we can't read
+
+        all_events.sort(key=lambda e: e["start"])
+        return {
+            "status": "ok",
+            "date": args.date,
+            "event_count": len(all_events),
+            "events": all_events,
+        }
+
+    # Single calendar specified
+    date = _parse_date(args.date, args.tz)
+    date_end = date + timedelta(days=1)
+    events = get_events(client, args.calendar, date, date_end)
+
+    return {
+        "status": "ok",
+        "calendar": args.calendar,
+        "date": args.date,
+        "event_count": len(events),
+        "events": [_event_to_dict(e) for e in events],
+    }
+
+
+def cmd_create(args) -> dict:
+    """Create a calendar event."""
+    client = _get_client_from_env()
+
+    start = _parse_datetime(args.start)
+    end = _parse_datetime(args.end)
+
+    uid = create_event(
+        client,
+        args.calendar,
+        summary=args.summary,
+        start=start,
+        end=end,
+        location=args.location,
+        description=args.description,
+    )
+
+    return {
+        "status": "ok",
+        "uid": uid,
+        "summary": args.summary,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+    }
+
+
+def cmd_delete(args) -> dict:
+    """Delete a calendar event."""
+    client = _get_client_from_env()
+
+    deleted = delete_event(client, args.calendar, args.uid)
+
+    if deleted:
+        return {"status": "ok", "uid": args.uid, "deleted": True}
+    else:
+        return {"status": "error", "error": f"Event not found: {args.uid}"}
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="python -m istota.skills.calendar",
+        description="Calendar operations CLI",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # list
+    p_list = sub.add_parser("list", help="List calendar events")
+    p_list.add_argument("--calendar", "-c", help="Calendar URL (omit to query all)")
+    p_list.add_argument(
+        "--date", "-d", default="today",
+        help="Date to query: 'today', 'tomorrow', or YYYY-MM-DD (default: today)"
+    )
+    p_list.add_argument("--tz", help="Timezone (e.g., America/Los_Angeles)")
+
+    # create
+    p_create = sub.add_parser("create", help="Create a calendar event")
+    p_create.add_argument("--calendar", "-c", required=True, help="Calendar URL")
+    p_create.add_argument("--summary", "-s", required=True, help="Event title")
+    p_create.add_argument(
+        "--start", required=True,
+        help="Start time (YYYY-MM-DD HH:MM)"
+    )
+    p_create.add_argument(
+        "--end", required=True,
+        help="End time (YYYY-MM-DD HH:MM)"
+    )
+    p_create.add_argument("--location", "-l", help="Event location")
+    p_create.add_argument("--description", help="Event description")
+
+    # delete
+    p_delete = sub.add_parser("delete", help="Delete a calendar event")
+    p_delete.add_argument("--calendar", "-c", required=True, help="Calendar URL")
+    p_delete.add_argument("--uid", required=True, help="Event UID to delete")
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    commands = {
+        "list": cmd_list,
+        "create": cmd_create,
+        "delete": cmd_delete,
+    }
+
+    try:
+        result = commands[args.command](args)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        if result.get("status") == "error":
+            sys.exit(1)
+    except Exception as e:
+        print(json.dumps({"status": "error", "error": str(e)}))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

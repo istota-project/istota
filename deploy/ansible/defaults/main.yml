@@ -1,0 +1,285 @@
+---
+# Istota deployment defaults
+
+# Namespace - sets all downstream defaults (user, group, paths, services, etc.)
+# Override individual variables below to diverge from namespace where needed
+istota_namespace: "istota"
+
+# Python package name - always "istota" regardless of namespace
+# Used for Python module imports (python -m istota.scheduler, from istota.db, etc.)
+# and for environment variable prefixes (ISTOTA_NC_APP_PASSWORD, etc.)
+istota_package: "istota"
+
+# Update mode - skip full installation, just pull code and update config
+# Usage: ansible-playbook playbook.yml -e "istota_update_only=true"
+istota_update_only: false
+
+# Application paths
+istota_home: "/srv/app/{{ istota_namespace }}"
+istota_user: "{{ istota_namespace }}"
+istota_group: "{{ istota_namespace }}"
+
+# User-facing bot identity name (display only; defaults to namespace capitalized)
+istota_bot_name: ""
+
+# Git repository
+istota_repo_url: "https://github.com/alicekubicki/istota.git"
+istota_repo_branch: main
+
+# GitLab access token (for private repos)
+# Generate at: GitLab > Settings > Access Tokens (read_repository scope)
+istota_gitlab_token: ""
+
+# Scheduler settings
+istota_scheduler_poll_interval: 5
+istota_scheduler_talk_poll_interval: 10       # Talk conversation polling interval
+istota_scheduler_talk_poll_timeout: 30        # Talk long-poll timeout
+istota_scheduler_talk_poll_wait: 2.0         # Max seconds to wait before processing fast rooms
+istota_scheduler_email_poll_interval: 60
+istota_scheduler_briefing_check_interval: 60
+istota_scheduler_tasks_file_poll_interval: 30
+istota_scheduler_shared_file_check_interval: 120  # Shared file organization check interval
+istota_scheduler_heartbeat_check_interval: 60    # Heartbeat monitoring check interval
+
+# Scheduler progress updates (Talk only)
+istota_scheduler_progress_updates: true                # Show real-time progress in Talk during execution
+istota_scheduler_progress_min_interval: 8              # Min seconds between progress messages
+istota_scheduler_progress_max_messages: 5              # Max progress messages per task
+istota_scheduler_progress_show_tool_use: true          # Show tool use descriptions
+istota_scheduler_progress_show_text: false             # Show intermediate assistant text (noisy)
+istota_scheduler_task_timeout_minutes: 30             # Kill task execution after N minutes
+
+# Scheduler robustness settings
+istota_scheduler_confirmation_timeout_minutes: 120  # Auto-cancel pending confirmations
+istota_scheduler_stale_pending_warn_minutes: 30     # Log warnings for stale tasks
+istota_scheduler_stale_pending_fail_hours: 2        # Auto-fail ancient pending tasks
+istota_scheduler_max_retry_age_minutes: 60           # Don't retry stuck tasks older than this
+istota_scheduler_task_retention_days: 7             # Delete old completed tasks
+istota_scheduler_email_retention_days: 7            # Delete old emails from IMAP (0 to disable)
+istota_scheduler_max_total_workers: 5              # Max concurrent user worker threads
+istota_scheduler_worker_idle_timeout: 30           # Seconds before idle worker exits
+istota_scheduler_reserved_interactive_workers: 2   # Workers reserved for interactive tasks
+istota_scheduler_scheduled_job_max_consecutive_failures: 5  # Auto-disable after N failures (0=never)
+istota_scheduler_feed_check_interval: 300                  # Seconds between feed polls
+istota_scheduler_feed_item_retention_days: 30              # Delete feed items older than N days
+
+# Logging settings
+istota_logging_level: "INFO"                        # INFO or DEBUG
+istota_logging_output: "both"                       # console, file, or both
+istota_logging_file: "/var/log/{{ istota_namespace }}/{{ istota_namespace }}.log"
+istota_logging_rotate: true                         # Let Python handle rotation (logrotate also configured)
+istota_logging_max_size_mb: 10
+istota_logging_backup_count: 5
+
+# Nextcloud settings (required)
+istota_nextcloud_url: ""
+istota_nextcloud_username: "{{ istota_namespace }}"
+istota_nextcloud_app_password: ""
+
+# Talk settings (polling-based, no webhook needed)
+istota_talk_enabled: true
+istota_talk_bot_username: "{{ istota_namespace }}"  # Nextcloud username (to filter own messages)
+
+# Email settings (optional)
+istota_email_enabled: false
+istota_email_imap_host: ""
+istota_email_imap_port: 993
+istota_email_imap_user: ""
+istota_email_imap_password: ""
+istota_email_smtp_host: ""
+istota_email_smtp_port: 587
+istota_email_poll_folder: "INBOX"
+istota_email_bot_address: ""
+
+# Conversation context settings
+istota_conversation_enabled: true
+istota_conversation_lookback_count: 25
+istota_conversation_selection_model: "haiku"
+istota_conversation_selection_timeout: 30.0
+istota_conversation_skip_selection_threshold: 3
+istota_conversation_use_selection: true
+istota_conversation_always_include_recent: 10
+istota_conversation_context_truncation: 0
+
+# Admin users - users with full system access (DB, all mount paths, admin-only skills)
+# When empty, all users are admins (backward compatible default)
+# Deployed as /etc/<namespace>/admins (root-owned, not editable by service user or Claude)
+istota_admin_users: []
+
+# Users configuration (dict of user_id -> user config)
+# Each user gets a per-user config file at config/users/{user_id}.toml
+# Example:
+# istota_users:
+#   alice:
+#     display_name: "Alice"
+#     email_addresses:
+#       - "alice@example.com"
+#     timezone: "America/New_York"
+#     resources:
+#       - type: "folder"
+#         path: "/alice/Projects"
+#         name: "Projects"
+#         permissions: "write"
+#       - type: "todo_file"
+#         path: "/Users/alice/workspace/TASKS.md"
+#         name: "Tasks"
+#         permissions: "write"
+#       - type: "ledger"
+#         path: "/Users/alice/beancount/main.beancount"
+#         name: "Personal"
+#         permissions: "write"
+#     briefings:
+#       - name: "morning"
+#         cron: "0 6 * * *"
+#         conversation_token: "room123"
+#         output: "both"
+#         components:
+#           calendar: true
+#           todos: true
+#           markets:
+#             enabled: true
+#           news:
+#             enabled: true
+#           reminders:
+#             enabled: true
+istota_users: {}
+
+# Briefing defaults (expanded when user sets `markets = true` or `news = true`)
+# markets futures/indices symbols default from markets.py — only override if needed
+istota_briefing_defaults:
+  news:
+    lookback_hours: 12
+    sources:
+      - type: "domain"
+        value: "semafor.com"
+      - type: "domain"
+        value: "bloomberg.com"
+      - type: "domain"
+        value: "reuters.com"
+      - type: "domain"
+        value: "axios.com"
+      - type: "domain"
+        value: "nytimes.com"
+      - type: "domain"
+        value: "economist.com"
+
+# rclone remote name for Nextcloud
+istota_rclone_remote: "nextcloud"
+
+# rclone password (must be pre-obscured with: rclone obscure <password>)
+# Generate with: rclone obscure "your-app-password"
+istota_rclone_password_obscured: ""
+
+# Nextcloud mount (alternative to rclone CLI)
+# When enabled, Nextcloud is mounted at istota_nextcloud_mount_path and istota uses
+# direct filesystem access instead of rclone subprocess calls
+istota_use_nextcloud_mount: true
+istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
+
+# Browser container settings (for web browsing skill)
+istota_browser_enabled: false
+istota_browser_api_port: 9223
+istota_browser_vnc_port: 6080
+istota_browser_vnc_password: ""
+istota_browser_vnc_external_url: ""  # e.g. https://vnc.example.com:6080
+istota_browser_max_sessions: 3
+istota_browser_shm_size: "2gb"
+istota_browser_cpu_limit: "2"
+istota_browser_memory_limit: "2G"
+
+# ntfy push notification settings (one-way broadcast notifications)
+istota_ntfy_enabled: false
+istota_ntfy_server_url: "https://ntfy.sh"
+istota_ntfy_topic: ""                      # default topic (per-user override via ntfy_topic)
+istota_ntfy_token: ""                      # bearer token auth (preferred)
+istota_ntfy_username: ""                   # basic auth (alternative to token)
+istota_ntfy_password: ""
+istota_ntfy_priority: 3                    # default priority (1=min, 3=default, 5=max)
+
+# Whisper audio transcription (faster-whisper CPU, int8)
+istota_whisper_enabled: false
+istota_whisper_model: "small"              # Model to pre-download (tiny/base/small/medium/large-v3)
+
+# Memory search settings (hybrid BM25 + vector search)
+istota_memory_search_enabled: true
+istota_memory_search_auto_index_conversations: true
+istota_memory_search_auto_index_memory_files: true
+
+# Sleep cycle settings (nightly memory extraction, cron evaluated per-user timezone)
+istota_sleep_cycle_enabled: false
+istota_sleep_cycle_cron: "0 2 * * *"
+istota_sleep_cycle_lookback_hours: 24
+istota_sleep_cycle_memory_retention_days: 0  # 0 = unlimited
+
+# Channel sleep cycle settings (shared channel memory extraction)
+istota_channel_sleep_cycle_enabled: false
+istota_channel_sleep_cycle_cron: "0 3 * * *"
+istota_channel_sleep_cycle_lookback_hours: 24
+istota_channel_sleep_cycle_memory_retention_days: 0  # 0 = unlimited
+
+# Node.js (for developer skill Node.js projects)
+istota_nodejs_enabled: false
+
+# Developer skill settings (git + GitLab workflows)
+# Recommended: dedicated bot account with Developer role + read_api + write_repository token
+istota_developer_enabled: false
+istota_developer_repos_dir: ""                    # Base directory for repo clones/worktrees
+istota_developer_gitlab_url: "https://gitlab.com"
+istota_developer_gitlab_token: ""                 # API token (read_api + write_repository scope)
+istota_developer_gitlab_username: ""              # GitLab username for HTTPS auth
+istota_developer_gitlab_default_namespace: ""     # Default namespace for short repo names
+istota_developer_gitlab_reviewer_id: ""          # GitLab user ID to assign as MR reviewer
+istota_developer_gitlab_api_allowlist:            # API endpoint allowlist (enforced in wrapper script)
+  - "GET /api/v4/projects/*"
+  - "GET /api/v4/groups/*"
+  - "GET /api/v4/users*"
+  - "POST /api/v4/projects/*/merge_requests"
+  - "POST /api/v4/projects/*/merge_requests/*/notes"
+  - "POST /api/v4/projects/*/issues"
+  - "POST /api/v4/projects/*/issues/*/notes"
+  - "PUT /api/v4/projects/*/merge_requests/*/merge"
+
+# Nginx site hosting
+istota_site_enabled: false
+istota_site_base_path: "{{ istota_home }}/html"
+istota_site_hostname: "{{ istota_namespace }}.example.com"
+
+# Fava web UI settings (beancount ledger viewer)
+istota_fava_enabled: false
+istota_fava_host: "0.0.0.0"
+
+# Backup settings
+istota_backup_enabled: true
+istota_backup_local_dir: "{{ istota_home }}/data/backups"
+istota_backup_remote_dir: "{{ istota_nextcloud_mount_path }}/Backups"
+istota_backup_db_daily_retention: 7
+istota_backup_db_weekly_retention: 4
+istota_backup_db_cron: "0 */6 * * *"
+istota_backup_files_cron: "0 3 * * *"
+istota_backup_files_sources:
+  - src: "Users"
+    dest: "files/Users"
+    excludes:
+      - "*/shared/**"
+  - src: "Channels"
+    dest: "files/Channels"
+istota_backup_rclone_config: "{{ istota_home }}/.config/rclone/rclone.conf"
+istota_backup_rclone_remote: "{{ istota_rclone_remote }}"
+istota_backup_rclone_remote_path: "Backups"
+istota_backup_log: "/var/log/{{ istota_namespace }}/{{ istota_namespace }}-backup.log"
+
+# Whether to configure rclone automatically
+istota_configure_rclone: true
+
+# Security hardening
+# mode: "permissive" (inherits full env, uses --dangerously-skip-permissions)
+#        "restricted" (clean env, uses --allowedTools whitelist)
+istota_security_mode: "restricted"
+istota_security_sandbox_enabled: true            # bwrap filesystem isolation per user
+istota_security_sandbox_admin_db_write: false     # allow admin DB writes inside sandbox
+# When true, secrets are loaded from /etc/<namespace>/secrets.env via EnvironmentFile=
+# and omitted from config.toml (config.py reads them from env vars)
+istota_use_environment_file: true
+
+# Claude CLI will be installed automatically
+# After deployment, authenticate with: sudo -u <namespace> claude login

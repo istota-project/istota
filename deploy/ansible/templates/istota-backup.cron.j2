@@ -1,0 +1,4 @@
+# {{ istota_namespace | capitalize }} backup cron - managed by Ansible
+MAILTO=""
+{{ istota_backup_db_cron }} {{ istota_user }} /usr/local/bin/{{ istota_namespace }}-backup.sh db >> {{ istota_backup_log }} 2>&1
+{{ istota_backup_files_cron }} {{ istota_user }} /usr/local/bin/{{ istota_namespace }}-backup.sh files >> {{ istota_backup_log }} 2>&1

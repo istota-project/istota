@@ -1,0 +1,95 @@
+# Per-user configuration for Alice
+# Filename (without .toml) = Nextcloud username
+
+display_name = "Alice"
+email_addresses = ["alice@example.com", "alice.work@company.com"]
+timezone = "America/New_York"
+
+# User resources (replaces DB-based user_resources)
+[[resources]]
+type = "folder"
+path = "/alice/Projects"
+name = "Projects"
+permissions = "write"
+
+[[resources]]
+type = "todo_file"
+path = "/Users/alice/workspace/TASKS.md"
+name = "Tasks"
+permissions = "write"
+
+[[resources]]
+type = "notes_file"
+path = "/Users/alice/workspace/NOTES.md"
+name = "Notes"
+
+[[resources]]
+type = "reminders_file"
+path = "/Users/alice/workspace/REMINDERS.md"
+name = "Reminders"
+
+# Multiple ledgers can be configured for different purposes
+[[resources]]
+type = "ledger"
+path = "/Users/alice/beancount/personal/main.beancount"
+name = "Personal"
+permissions = "write"
+
+[[resources]]
+type = "ledger"
+path = "/Users/alice/beancount/business/main.beancount"
+name = "Business"
+permissions = "write"
+
+[[resources]]
+type = "ledger"
+path = "/Users/alice/beancount/trading/main.beancount"
+name = "Trading"
+permissions = "write"
+
+# Invoicing config (INVOICING.md with client/service/company definitions)
+[[resources]]
+type = "invoicing"
+path = "/Users/alice/workspace/INVOICING.md"
+name = "Invoicing"
+permissions = "write"
+
+# Karakeep bookmarks (per-user API credentials)
+# [[resources]]
+# type = "karakeep"
+# name = "Bookmarks"
+# base_url = "https://keep.example.com/api/v1"
+# api_key = "your-karakeep-api-key"
+
+# Invoice notification defaults
+invoicing_notifications = "talk"        # default surface: "talk", "email", "ntfy", "both", or "all"
+invoicing_conversation_token = "room123"  # Talk room for invoice notifications
+
+# ntfy topic override (uses global [ntfy] topic if empty)
+# ntfy_topic = "alice-notifications"
+
+# Briefings (can also be configured in workspace/BRIEFINGS.md, which takes precedence)
+[[briefings]]
+name = "morning"
+cron = "0 6 * * *"
+conversation_token = "room123"
+output = "both"
+
+[briefings.components]
+calendar = true
+todos = true
+markets = true    # morning → futures, evening → indices (automatic)
+news = true       # expands using [briefing_defaults.news] sources
+reminders = { enabled = true }
+
+[[briefings]]
+name = "evening"
+cron = "0 18 * * *"
+conversation_token = "room123"
+output = "talk"
+
+[briefings.components]
+calendar = true
+todos = true
+markets = true    # morning → futures, evening → indices (automatic)
+
