@@ -819,7 +819,7 @@
 - name: Display deployment info
   debug:
     msg:
-      - "Istota has been deployed to {{ istota_home }}"
+      - "{{ istota_namespace | capitalize }} has been deployed to {{ istota_home }}"
       - "Scheduler daemon handles all polling (Talk, email, TASKS.md)"
-      - "Service: istota-scheduler"
-      - "Logs: journalctl -u istota-scheduler -f"
+      - "Service: {{ istota_namespace }}-scheduler"
+      - "Logs: journalctl -u {{ istota_namespace }}-scheduler -f"
