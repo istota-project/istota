@@ -1,6 +1,6 @@
-# Developer Skill — Git & GitLab Workflows
+# Developer Skill — Git, GitLab & GitHub Workflows
 
-Work in git repositories and manage merge requests on GitLab. Uses bare clones + git worktrees for branch isolation.
+Work in git repositories, manage merge requests on GitLab and pull requests on GitHub. Uses bare clones + git worktrees for branch isolation.
 
 ## Environment Variables
 
@@ -11,12 +11,16 @@ Work in git repositories and manage merge requests on GitLab. Uses bare clones +
 | `GITLAB_DEFAULT_NAMESPACE` | Default GitLab namespace (user/group) for resolving short repo names |
 | `GITLAB_REVIEWER_ID` | GitLab user ID to assign as reviewer on new merge requests |
 | `GITLAB_API_CMD` | Pre-authenticated wrapper script for GitLab API calls |
+| `GITHUB_URL` | GitHub instance URL (e.g., `https://github.com`) |
+| `GITHUB_DEFAULT_OWNER` | Default GitHub org/user for resolving short repo names |
+| `GITHUB_REVIEWER` | GitHub username to request as PR reviewer |
+| `GITHUB_API_CMD` | Pre-authenticated wrapper script for GitHub API calls |
 
-Git credentials are configured automatically — clone and push work without manual authentication.
+Git credentials are configured automatically for both platforms — clone and push work without manual authentication.
 
-**Namespace resolution**: When the user gives a short repo name (e.g., "nebula" instead of "namespace/nebula"), use `$GITLAB_DEFAULT_NAMESPACE` as the default namespace. Always confirm the resolved path exists via the API before cloning.
+**Namespace resolution**: When the user gives a short repo name (e.g., "nebula" instead of "namespace/nebula"), use `$GITLAB_DEFAULT_NAMESPACE` or `$GITHUB_DEFAULT_OWNER` as the default namespace/owner depending on the platform. Always confirm the resolved path exists via the API before cloning.
 
-**Security**: The GitLab token is embedded in helper scripts and never exposed as an environment variable. Do NOT attempt to read or extract credentials from helper scripts. Use `$GITLAB_API_CMD` for API calls and plain `git` commands for repository operations.
+**Security**: Tokens are embedded in helper scripts and never exposed as environment variables. Do NOT attempt to read or extract credentials from helper scripts. Use `$GITLAB_API_CMD` / `$GITHUB_API_CMD` for API calls and plain `git` commands for repository operations.
 
 ## Directory Layout
 
@@ -39,6 +43,7 @@ BARE_DIR="$DEVELOPER_REPOS_DIR/namespace/project.git"
 
 if [ ! -d "$BARE_DIR" ]; then
     mkdir -p "$(dirname "$BARE_DIR")"
+    # Use $GITLAB_URL or $GITHUB_URL depending on where the repo lives
     git clone --bare "$GITLAB_URL/namespace/project.git" "$BARE_DIR"
     # Configure fetch to get all branches
     git -C "$BARE_DIR" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
@@ -88,7 +93,7 @@ All work happens inside `$WORK_DIR`.
    ```
 4. **Check for secrets** before pushing — never commit tokens, passwords, or private keys
 
-## Pushing and Creating a Merge Request
+## GitLab: Pushing and Creating a Merge Request
 
 Push the branch (git credentials are configured automatically):
 
@@ -120,9 +125,45 @@ $GITLAB_API_CMD POST "/api/v4/projects/$PROJECT_ID/merge_requests" \
 
 The response includes `web_url` (link to share) and `iid` (MR number like `!42`).
 
-## Follow-Up Work on Existing MRs
+## GitHub: Pushing and Creating a Pull Request
 
-To push additional commits to an open MR, reuse the existing worktree:
+Push the branch:
+
+```bash
+cd "$WORK_DIR"
+git push origin "$BRANCH"
+```
+
+Create PR via GitHub API:
+
+```bash
+OWNER="myorg"  # or $GITHUB_DEFAULT_OWNER
+REPO="project"
+
+$GITHUB_API_CMD POST "/repos/$OWNER/$REPO/pulls" \
+    --header "Content-Type: application/json" \
+    --data "{
+        \"head\": \"$BRANCH\",
+        \"base\": \"$DEFAULT_BRANCH\",
+        \"title\": \"Add user authentication\",
+        \"body\": \"Implements JWT auth.\\n\\nCreated by istota task $TASK_ID.\"
+    }"
+```
+
+The response includes `html_url` (link to share) and `number` (PR number like `#42`).
+
+Request a reviewer:
+
+```bash
+PR_NUMBER=42
+$GITHUB_API_CMD POST "/repos/$OWNER/$REPO/pulls/$PR_NUMBER/reviews" \
+    --header "Content-Type: application/json" \
+    --data "{\"reviewers\": [\"$GITHUB_REVIEWER\"]}"
+```
+
+## Follow-Up Work on Existing MRs/PRs
+
+To push additional commits to an open MR/PR, reuse the existing worktree:
 
 ```bash
 WORK_DIR="$DEVELOPER_REPOS_DIR/namespace/project--istota-42-add-auth"
@@ -133,22 +174,38 @@ git commit -m "Address review feedback: add input validation"
 git push origin HEAD
 ```
 
-## Listing Open MRs
+## GitLab: Listing and Merging MRs
 
 ```bash
+# List open MRs
 $GITLAB_API_CMD GET "/api/v4/projects/$PROJECT_ID/merge_requests?state=opened" \
     | python3 -c "import sys,json; [print(f'!{mr[\"iid\"]} {mr[\"title\"]} ({mr[\"web_url\"]})') for mr in json.load(sys.stdin)]"
-```
 
-## Merging a Merge Request
-
-```bash
+# Merge an MR
 $GITLAB_API_CMD PUT "/api/v4/projects/$PROJECT_ID/merge_requests/$MR_IID/merge"
 ```
 
 Options: add `"squash": true` or `"should_remove_source_branch": true` via `--data '{"squash": true}'`.
 
-After merge, clean up the worktree:
+## GitHub: Listing and Merging PRs
+
+```bash
+OWNER="myorg"
+REPO="project"
+
+# List open PRs
+$GITHUB_API_CMD GET "/repos/$OWNER/$REPO/pulls?state=open" \
+    | python3 -c "import sys,json; [print(f'#{pr[\"number\"]} {pr[\"title\"]} ({pr[\"html_url\"]})') for pr in json.load(sys.stdin)]"
+
+# Merge a PR
+$GITHUB_API_CMD PUT "/repos/$OWNER/$REPO/pulls/$PR_NUMBER/merge" \
+    --header "Content-Type: application/json" \
+    --data '{"merge_method": "squash"}'
+```
+
+Merge methods: `"merge"`, `"squash"`, or `"rebase"`.
+
+## Cleanup After Merge
 
 ```bash
 BARE_DIR="$DEVELOPER_REPOS_DIR/namespace/project.git"
@@ -176,10 +233,34 @@ The API wrapper enforces an endpoint allowlist — only the operations below are
 | Add issue comment | POST | `/api/v4/projects/:id/issues/:iid/notes` |
 | Look up user by username | GET | `/api/v4/users?username=:name` |
 
-**Important**: When piping `$GITLAB_API_CMD` output, always redirect to a temp file first, then read:
+## GitHub API Quick Reference
+
+Use `$GITHUB_API_CMD METHOD ENDPOINT [extra curl args]` for all API calls.
+
+The API wrapper enforces an endpoint allowlist — only the operations below are permitted. Deleting and admin operations are blocked.
+
+| Action | Method | Endpoint |
+|---|---|---|
+| Get repo | GET | `/repos/:owner/:repo` |
+| List branches | GET | `/repos/:owner/:repo/branches` |
+| List open PRs | GET | `/repos/:owner/:repo/pulls?state=open` |
+| Get single PR | GET | `/repos/:owner/:repo/pulls/:number` |
+| Create PR | POST | `/repos/:owner/:repo/pulls` |
+| Merge PR | PUT | `/repos/:owner/:repo/pulls/:number/merge` |
+| Update PR | PATCH | `/repos/:owner/:repo/pulls/:number` |
+| Add PR comment | POST | `/repos/:owner/:repo/pulls/:number/comments` |
+| Request PR review | POST | `/repos/:owner/:repo/pulls/:number/reviews` |
+| Create issue | POST | `/repos/:owner/:repo/issues` |
+| Add issue comment | POST | `/repos/:owner/:repo/issues/:number/comments` |
+| Update issue | PATCH | `/repos/:owner/:repo/issues/:number` |
+| Search code | GET | `/search/code?q=...` |
+| Look up user | GET | `/users/:username` |
+| List org repos | GET | `/orgs/:org/repos` |
+
+**Important**: When piping API wrapper output, always redirect to a temp file first, then read:
 ```bash
-$GITLAB_API_CMD GET "/api/v4/projects/$ENCODED_PATH" > /tmp/result.json
-PROJECT_ID=$(python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" < /tmp/result.json)
+$GITHUB_API_CMD GET "/repos/$OWNER/$REPO" > /tmp/result.json
+DEFAULT_BRANCH=$(python3 -c "import sys,json; print(json.load(sys.stdin)['default_branch'])" < /tmp/result.json)
 ```
 
 ## Error Handling
@@ -193,6 +274,6 @@ PROJECT_ID=$(python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" < /
   # Resolve conflicts if any, then force-push
   git push origin "$BRANCH" --force-with-lease
   ```
-- **MR has merge conflicts**: Rebase the worktree branch onto latest target, force-push.
-- **Endpoint not allowed**: The API wrapper enforces an allowlist. Deleting and admin actions are blocked.
-- **Project not found**: Verify the namespace/project path matches exactly (case-sensitive).
+- **MR/PR has merge conflicts**: Rebase the worktree branch onto latest target, force-push.
+- **Endpoint not allowed**: The API wrappers enforce an allowlist. Deleting and admin actions are blocked.
+- **Project not found**: Verify the namespace/project or owner/repo path matches exactly (case-sensitive).

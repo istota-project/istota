@@ -220,10 +220,11 @@ istota_channel_sleep_cycle_memory_retention_days: 0  # 0 = unlimited
 # Node.js (for developer skill Node.js projects)
 istota_nodejs_enabled: false
 
-# Developer skill settings (git + GitLab workflows)
-# Recommended: dedicated bot account with Developer role + read_api + write_repository token
+# Developer skill settings (git + GitLab/GitHub workflows)
+# Recommended: dedicated bot accounts with minimal required permissions
 istota_developer_enabled: false
 istota_developer_repos_dir: ""                    # Base directory for repo clones/worktrees
+# GitLab settings
 istota_developer_gitlab_url: "https://gitlab.com"
 istota_developer_gitlab_token: ""                 # API token (read_api + write_repository scope)
 istota_developer_gitlab_username: ""              # GitLab username for HTTPS auth
@@ -238,6 +239,25 @@ istota_developer_gitlab_api_allowlist:            # API endpoint allowlist (enfo
   - "POST /api/v4/projects/*/issues"
   - "POST /api/v4/projects/*/issues/*/notes"
   - "PUT /api/v4/projects/*/merge_requests/*/merge"
+# GitHub settings
+istota_developer_github_url: "https://github.com"
+istota_developer_github_token: ""                 # Personal access token (repo scope)
+istota_developer_github_username: ""              # GitHub username for HTTPS auth (defaults to x-access-token)
+istota_developer_github_default_owner: ""         # Default org/user for short repo names
+istota_developer_github_reviewer: ""              # GitHub username to request as PR reviewer
+istota_developer_github_api_allowlist:            # API endpoint allowlist (enforced in wrapper script)
+  - "GET /repos/*"
+  - "GET /orgs/*"
+  - "GET /users/*"
+  - "GET /search/*"
+  - "POST /repos/*/pulls"
+  - "POST /repos/*/pulls/*/reviews"
+  - "POST /repos/*/issues"
+  - "POST /repos/*/issues/*/comments"
+  - "POST /repos/*/pulls/*/comments"
+  - "PUT /repos/*/pulls/*/merge"
+  - "PATCH /repos/*/pulls/*"
+  - "PATCH /repos/*/issues/*"
 
 # Nginx site hosting
 istota_site_enabled: false

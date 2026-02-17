@@ -368,9 +368,11 @@ Config searched: `config/config.toml` → `~/.config/istota/config.toml` → `/e
 
 ## Ansible Deployment Role
 
-Update `ansible-server/roles/istota/` when adding config fields:
-- `defaults/main.yml` — Ansible variables with defaults matching `config.py`
-- `templates/config.toml.j2` — Jinja2 template lines
+The Ansible role lives at `deploy/ansible/` inside this repo. The path `ansible-server/roles/istota/` is a symlink pointing here, so all edits should be made in `deploy/ansible/` directly.
+
+When adding config fields, update:
+- `deploy/ansible/defaults/main.yml` — Ansible variables with defaults matching `config.py`
+- `deploy/ansible/templates/config.toml.j2` — Jinja2 template lines
 
 ### Fava Web UI (Beancount Ledger Viewer)
 

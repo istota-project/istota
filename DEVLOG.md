@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: GitHub PR support for developer skill
+
+Added GitHub pull request workflows alongside existing GitLab merge request support. Same security model: token via env var, credential helper per host, API wrapper with endpoint allowlist. Both platforms can be configured simultaneously with dynamic `GIT_CONFIG_COUNT`. GitHub Enterprise detection uses `{url}/api/v3` instead of `api.github.com`. Also documented that `deploy/ansible/` is the canonical location for the Ansible role (ansible-server symlinks here).
+
+**Key changes:**
+- `DeveloperConfig`: added `github_url`, `github_token`, `github_username`, `github_default_owner`, `github_reviewer`, `github_api_allowlist` fields
+- `executor.py`: GitHub credential helper (`x-access-token` default), API wrapper with `Authorization: Bearer` header, dynamic git config indexing for multi-platform support
+- `ISTOTA_GITHUB_TOKEN` env var override for systemd `EnvironmentFile=` usage
+- Developer skill doc expanded with GitHub PR creation, listing, merging, and API quick reference
+- Ansible role updated (defaults, config template, secrets.env)
+- 7 new executor tests, 3 new config tests (TDD)
+
+**Files added/modified:**
+- `src/istota/config.py` - Added github_* fields to DeveloperConfig, env var override
+- `src/istota/executor.py` - GitHub env vars, credential helper, API wrapper, dynamic GIT_CONFIG_COUNT
+- `config/skills/developer.md` - Renamed to "Git, GitLab & GitHub Workflows", added GitHub sections
+- `config/skills/_index.toml` - Added "github" keyword, updated description
+- `config/config.example.toml` - Documented github_* config fields
+- `deploy/ansible/defaults/main.yml` - Added istota_developer_github_* variables
+- `deploy/ansible/templates/config.toml.j2` - Added GitHub config rendering
+- `deploy/ansible/templates/secrets.env.j2` - Added ISTOTA_GITHUB_TOKEN
+- `tests/test_config.py` - GitHub config defaults, TOML parsing, env var override tests
+- `tests/test_executor.py` - TestGitHubEnvVars class (7 tests)
+- `.claude/rules/config.md` - Updated DeveloperConfig reference
+- `.claude/rules/executor.md` - Added GitHub env var table entries
+- `AGENTS.md` - Noted deploy/ansible/ is canonical (ansible-server symlinks here)
+
 ## 2026-02-17: OSS deployment infrastructure
 
 Ported the private Ansible role into the repo at `deploy/ansible/` and created a standalone `install.sh` script with interactive setup wizard. External Ansible role dependencies (Docker, rclone, rclone-mount, nginx, Node.js) inlined as direct tasks. Added `render_config.py` (stdlib-only) that generates all config files from a single settings TOML file. Deleted the old `scripts/deploy/` placeholder scripts.

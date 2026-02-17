@@ -205,6 +205,18 @@ gitlab_api_allowlist = [
     "{{ pattern }}",
 {% endfor %}
 ]
+github_url = "{{ istota_developer_github_url }}"
+{% if not istota_use_environment_file | default(false) %}
+github_token = "{{ istota_developer_github_token }}"
+{% endif %}
+github_username = "{{ istota_developer_github_username }}"
+github_default_owner = "{{ istota_developer_github_default_owner }}"
+github_reviewer = "{{ istota_developer_github_reviewer }}"
+github_api_allowlist = [
+{% for pattern in istota_developer_github_api_allowlist %}
+    "{{ pattern }}",
+{% endfor %}
+]
 {% endif %}
 
 # User configuration is in per-user files: config/users/{user_id}.toml

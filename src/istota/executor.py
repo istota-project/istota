@@ -1082,21 +1082,28 @@ def execute_task(
                 env["KARAKEEP_BASE_URL"] = karakeep_resources[0].base_url
                 env["KARAKEEP_API_KEY"] = karakeep_resources[0].api_key
 
-        # Developer skill (git + GitLab workflows)
-        # Token is never exposed as an env var — instead we write helper scripts
-        # that embed the credential, so it stays out of Claude's context.
+        # Developer skill (git + GitLab/GitHub workflows)
+        # Tokens are never exposed as env vars directly — instead we write helper
+        # scripts that embed the credential, so it stays out of Claude's context.
         if config.developer.enabled and config.developer.repos_dir:
             env["DEVELOPER_REPOS_DIR"] = config.developer.repos_dir
             env["GITLAB_URL"] = config.developer.gitlab_url
+            env["GITHUB_URL"] = config.developer.github_url
             if config.developer.gitlab_default_namespace:
                 env["GITLAB_DEFAULT_NAMESPACE"] = config.developer.gitlab_default_namespace
             if config.developer.gitlab_reviewer_id:
                 env["GITLAB_REVIEWER_ID"] = config.developer.gitlab_reviewer_id
+            if config.developer.github_default_owner:
+                env["GITHUB_DEFAULT_OWNER"] = config.developer.github_default_owner
+            if config.developer.github_reviewer:
+                env["GITHUB_REVIEWER"] = config.developer.github_reviewer
+
+            dev_bin = Path(user_temp_dir) / ".developer"
+            dev_bin.mkdir(parents=True, exist_ok=True)
+            git_config_index = 0
 
             if config.developer.gitlab_token:
                 env["GITLAB_TOKEN"] = config.developer.gitlab_token
-                dev_bin = Path(user_temp_dir) / ".developer"
-                dev_bin.mkdir(parents=True, exist_ok=True)
 
                 # Git credential helper — git calls this automatically for HTTPS auth
                 # Reads token from GITLAB_TOKEN env var (no secrets on disk)
@@ -1109,9 +1116,9 @@ def execute_task(
                 )
                 git_cred.chmod(0o700)
                 gitlab_host = config.developer.gitlab_url.rstrip("/")
-                env["GIT_CONFIG_COUNT"] = "1"
-                env["GIT_CONFIG_KEY_0"] = f"credential.{gitlab_host}.helper"
-                env["GIT_CONFIG_VALUE_0"] = str(git_cred)
+                env[f"GIT_CONFIG_KEY_{git_config_index}"] = f"credential.{gitlab_host}.helper"
+                env[f"GIT_CONFIG_VALUE_{git_config_index}"] = str(git_cred)
+                git_config_index += 1
 
                 # GitLab API wrapper — usage: gitlab-api METHOD /api/v4/... [curl args]
                 # Enforces an endpoint allowlist and strips query strings for matching.
@@ -1136,6 +1143,59 @@ def execute_task(
                 )
                 api_script.chmod(0o700)
                 env["GITLAB_API_CMD"] = str(api_script)
+
+            if config.developer.github_token:
+                env["GITHUB_TOKEN"] = config.developer.github_token
+
+                # Git credential helper for GitHub
+                # Reads token from GITHUB_TOKEN env var (no secrets on disk)
+                gh_username = config.developer.github_username or "x-access-token"
+                gh_cred = dev_bin / "git-credential-helper-github"
+                gh_cred.write_text(
+                    "#!/bin/sh\n"
+                    '[ "$1" = "get" ] || exit 0\n'
+                    f"echo username={gh_username}\n"
+                    'echo password=$GITHUB_TOKEN\n'
+                )
+                gh_cred.chmod(0o700)
+                github_host = config.developer.github_url.rstrip("/")
+                env[f"GIT_CONFIG_KEY_{git_config_index}"] = f"credential.{github_host}.helper"
+                env[f"GIT_CONFIG_VALUE_{git_config_index}"] = str(gh_cred)
+                git_config_index += 1
+
+                # GitHub API wrapper — usage: github-api METHOD /endpoint [curl args]
+                # Enforces an endpoint allowlist and strips query strings for matching.
+                # Reads token from GITHUB_TOKEN env var (no secrets on disk)
+                gh_api_script = dev_bin / "github-api"
+                gh_allowlist_cases = "\n".join(
+                    f"  {_allowlist_pattern_to_case(p)}) ;;"
+                    for p in config.developer.github_api_allowlist
+                )
+                # GitHub Enterprise uses {url}/api/v3, github.com uses api.github.com
+                gh_host_stripped = github_host.rstrip("/")
+                if "github.com" == gh_host_stripped.split("//")[-1]:
+                    gh_api_base = "https://api.github.com"
+                else:
+                    gh_api_base = f"{gh_host_stripped}/api/v3"
+                gh_api_script.write_text(
+                    "#!/bin/sh\n"
+                    'METHOD="$1"; shift\n'
+                    'ENDPOINT="$1"; shift\n'
+                    'CLEAN="${ENDPOINT%%\\?*}"\n'
+                    'case "$METHOD $CLEAN" in\n'
+                    f"{gh_allowlist_cases}\n"
+                    '  *) printf \'{"error":"endpoint not allowed: %s %s"}\\n\' '
+                    '"$METHOD" "$CLEAN" >&2; exit 1 ;;\n'
+                    "esac\n"
+                    f'curl -s --header "Authorization: Bearer $GITHUB_TOKEN" '
+                    f'--header "Accept: application/vnd.github+json" '
+                    f'--request "$METHOD" "{gh_api_base}$ENDPOINT" "$@"\n'
+                )
+                gh_api_script.chmod(0o700)
+                env["GITHUB_API_CMD"] = str(gh_api_script)
+
+            if git_config_index > 0:
+                env["GIT_CONFIG_COUNT"] = str(git_config_index)
 
         # Static website hosting
         if config.site.enabled and task:

@@ -168,7 +168,7 @@
 - [x] Content-hash dedup, user isolation, source type filtering
 - [x] Channel sleep cycle with memory search integration (channel:{token} namespace)
 
-### Git/GitLab Developer Skill ✅
+### Git/GitLab/GitHub Developer Skill ✅
 - [x] Clone repos to persistent bare clones with worktree-based branch isolation
 - [x] Branch management (create feature branches, `{bot_name}/<task-id>-<slug>` naming)
 - [x] Commit and push changes (git credential helper for transparent HTTPS auth)
@@ -178,6 +178,10 @@
 - [x] API endpoint allowlist (configurable, blocks merge/delete/admin by default)
 - [x] Default namespace resolution (`gitlab_default_namespace` for short repo names)
 - [x] Dedicated bot account support (separate `gitlab_username` for auth vs namespace)
+- [x] GitHub PR workflows (create, list, merge, review requests via `$GITHUB_API_CMD`)
+- [x] GitHub credential helper (`x-access-token` default, configurable username)
+- [x] GitHub Enterprise support (auto-detects `{url}/api/v3` vs `api.github.com`)
+- [x] Multi-platform support (GitLab + GitHub simultaneously, dynamic `GIT_CONFIG_COUNT`)
 
 ### Direct Email Sending ✅
 - [x] CLI command `python -m istota.skills.email send` for direct sending from Claude Code

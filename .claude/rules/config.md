@@ -100,7 +100,13 @@ enabled: bool = False        repos_dir: str = ""
 gitlab_url: str = "https://gitlab.com"
 gitlab_token: str = ""       gitlab_username: str = ""
 gitlab_default_namespace: str = ""  # Default namespace for short repo names
+gitlab_reviewer_id: str = ""
 gitlab_api_allowlist: list[str] = [default safe set]  # Endpoint allowlist for API wrapper
+github_url: str = "https://github.com"
+github_token: str = ""       github_username: str = ""
+github_default_owner: str = ""  # Default org/user for short repo names
+github_reviewer: str = ""
+github_api_allowlist: list[str] = [default safe set]  # Endpoint allowlist for API wrapper
 ```
 
 ### `BriefingDefaultsConfig` (L173-177)
@@ -160,6 +166,7 @@ Search order: `config/config.toml` → `~/.config/istota/config.toml` → `/etc/
 | `ISTOTA_IMAP_PASSWORD` | `email.imap_password` |
 | `ISTOTA_SMTP_PASSWORD` | `email.smtp_password` |
 | `ISTOTA_GITLAB_TOKEN` | `developer.gitlab_token` |
+| `ISTOTA_GITHUB_TOKEN` | `developer.github_token` |
 | `ISTOTA_NTFY_TOKEN` | `ntfy.token` |
 | `ISTOTA_NTFY_PASSWORD` | `ntfy.password` |
 

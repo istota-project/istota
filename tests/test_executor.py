@@ -744,6 +744,192 @@ class TestDeveloperEnvVars:
         assert "DEVELOPER_REPOS_DIR" not in env
 
 
+# ---------------------------------------------------------------------------
+# TestGitHubEnvVars
+# ---------------------------------------------------------------------------
+
+
+class TestGitHubEnvVars:
+    def _make_config(self, tmp_path, github_token="ghp_test123", gitlab_token="", developer_enabled=True):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
+        (skills_dir / "files.md").write_text("File operations guide.")
+        dev = DeveloperConfig(
+            enabled=developer_enabled,
+            repos_dir="/srv/repos",
+            gitlab_url="https://gitlab.example.com",
+            gitlab_token=gitlab_token,
+            gitlab_username="gitlabbot",
+            gitlab_default_namespace="example",
+            github_url="https://github.com",
+            github_token=github_token,
+            github_username="githubbot",
+            github_default_owner="myorg",
+            github_reviewer="reviewer-user",
+        )
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            temp_dir=tmp_path / "temp",
+            developer=dev,
+        )
+
+    def _make_task(self, conn):
+        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
+        return db.get_task(conn, task_id)
+
+    @patch("istota.executor.subprocess.run")
+    def test_github_env_vars_set_when_configured(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        assert env["GITHUB_URL"] == "https://github.com"
+        assert env["GITHUB_DEFAULT_OWNER"] == "myorg"
+        assert env["GITHUB_REVIEWER"] == "reviewer-user"
+        assert env["GITHUB_TOKEN"] == "ghp_test123"
+        assert "GITHUB_API_CMD" in env
+        # Git credential helper configured
+        assert "GIT_CONFIG_COUNT" in env
+        assert "github.com" in env["GIT_CONFIG_KEY_0"]
+
+    @patch("istota.executor.subprocess.run")
+    def test_github_helper_scripts_created(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        from pathlib import Path
+        api_cmd = Path(env["GITHUB_API_CMD"])
+        assert api_cmd.exists()
+        assert api_cmd.stat().st_mode & 0o700
+        api_content = api_cmd.read_text()
+        assert "Authorization: Bearer $GITHUB_TOKEN" in api_content
+        assert "ghp_test123" not in api_content
+        # Uses api.github.com for github.com
+        assert "api.github.com" in api_content
+
+        # Git credential helper reads from env var
+        cred_helper = Path(env["GIT_CONFIG_VALUE_0"])
+        assert cred_helper.exists()
+        cred_content = cred_helper.read_text()
+        assert "$GITHUB_TOKEN" in cred_content
+        assert "ghp_test123" not in cred_content
+        # Username set in config
+        assert "githubbot" in cred_content
+
+    @patch("istota.executor.subprocess.run")
+    def test_github_api_wrapper_has_allowlist(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        from pathlib import Path
+        api_content = Path(env["GITHUB_API_CMD"]).read_text()
+        assert "case" in api_content
+        assert "endpoint not allowed" in api_content
+        assert "GET /repos/" in api_content
+        assert "POST /repos/" in api_content
+        assert "pulls" in api_content
+
+    @patch("istota.executor.subprocess.run")
+    def test_github_not_set_when_no_token(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path, github_token="")
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        assert "GITHUB_API_CMD" not in env
+        assert "GITHUB_TOKEN" not in env
+        # URL and owner are still set (for clone URLs, etc.)
+        assert env["GITHUB_URL"] == "https://github.com"
+
+    @patch("istota.executor.subprocess.run")
+    def test_both_platforms_configured(self, mock_run, tmp_path):
+        """When both GitLab and GitHub tokens are set, GIT_CONFIG_COUNT=2."""
+        config = self._make_config(tmp_path, github_token="ghp_test123", gitlab_token="glpat-test")
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        assert env["GIT_CONFIG_COUNT"] == "2"
+        # Both API wrappers exist
+        assert "GITLAB_API_CMD" in env
+        assert "GITHUB_API_CMD" in env
+        # Both credential helpers configured at different indices
+        keys = {env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_KEY_1"]}
+        assert any("gitlab.example.com" in k for k in keys)
+        assert any("github.com" in k for k in keys)
+
+    @patch("istota.executor.subprocess.run")
+    def test_github_enterprise_api_url(self, mock_run, tmp_path):
+        """GitHub Enterprise uses {url}/api/v3 instead of api.github.com."""
+        config = self._make_config(tmp_path)
+        config.developer.github_url = "https://github.example.com"
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        from pathlib import Path
+        api_content = Path(env["GITHUB_API_CMD"]).read_text()
+        assert "github.example.com/api/v3" in api_content
+        assert "api.github.com" not in api_content
+
+    @patch("istota.executor.subprocess.run")
+    def test_github_default_username_x_access_token(self, mock_run, tmp_path):
+        """When github_username is empty, credential helper uses x-access-token."""
+        config = self._make_config(tmp_path)
+        config.developer.github_username = ""
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        from pathlib import Path
+        cred_content = Path(env["GIT_CONFIG_VALUE_0"]).read_text()
+        assert "x-access-token" in cred_content
+
+
 class TestAllowlistPatternConversion:
     def test_trailing_wildcard(self):
         from istota.executor import _allowlist_pattern_to_case

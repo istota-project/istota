@@ -711,6 +711,13 @@ class TestDeveloperConfig:
         assert dev.gitlab_url == "https://gitlab.com"
         assert dev.gitlab_token == ""
         assert dev.gitlab_username == ""
+        assert dev.github_url == "https://github.com"
+        assert dev.github_token == ""
+        assert dev.github_username == ""
+        assert dev.github_default_owner == ""
+        assert dev.github_reviewer == ""
+        assert isinstance(dev.github_api_allowlist, list)
+        assert len(dev.github_api_allowlist) > 0
 
     def test_config_default(self):
         cfg = Config()
@@ -733,12 +740,58 @@ gitlab_username = "istota"
         assert cfg.developer.gitlab_token == "glpat-test"
         assert cfg.developer.gitlab_username == "istota"
 
+    def test_load_github_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+github_url = "https://github.example.com"
+github_token = "ghp_test123"
+github_username = "botuser"
+github_default_owner = "myorg"
+github_reviewer = "reviewer-user"
+""")
+        cfg = load_config(config_file)
+        assert cfg.developer.github_url == "https://github.example.com"
+        assert cfg.developer.github_token == "ghp_test123"
+        assert cfg.developer.github_username == "botuser"
+        assert cfg.developer.github_default_owner == "myorg"
+        assert cfg.developer.github_reviewer == "reviewer-user"
+
+    def test_load_github_custom_allowlist(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+github_api_allowlist = ["GET /repos/*"]
+""")
+        cfg = load_config(config_file)
+        assert cfg.developer.github_api_allowlist == ["GET /repos/*"]
+
+    def test_github_env_var_override(self, tmp_path):
+        import os
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("")
+        old = os.environ.get("ISTOTA_GITHUB_TOKEN")
+        try:
+            os.environ["ISTOTA_GITHUB_TOKEN"] = "ghp_env_override"
+            cfg = load_config(config_file)
+            assert cfg.developer.github_token == "ghp_env_override"
+        finally:
+            if old is None:
+                os.environ.pop("ISTOTA_GITHUB_TOKEN", None)
+            else:
+                os.environ["ISTOTA_GITHUB_TOKEN"] = old
+
     def test_load_defaults_when_not_set(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("")
         cfg = load_config(config_file)
         assert cfg.developer.enabled is False
         assert cfg.developer.gitlab_url == "https://gitlab.com"
+        assert cfg.developer.github_url == "https://github.com"
 
     def test_partial_config(self, tmp_path):
         config_file = tmp_path / "config.toml"
@@ -752,6 +805,8 @@ repos_dir = "/srv/repos"
         assert cfg.developer.repos_dir == "/srv/repos"
         assert cfg.developer.gitlab_url == "https://gitlab.com"
         assert cfg.developer.gitlab_token == ""
+        assert cfg.developer.github_url == "https://github.com"
+        assert cfg.developer.github_token == ""
 
 
 class TestSiteConfig:

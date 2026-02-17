@@ -34,7 +34,7 @@ temp_dir = "/tmp/istota"
 # Heartbeat/cron env stripping is always on regardless of mode.
 # Secrets can be provided via env vars (e.g. from systemd EnvironmentFile=):
 #   ISTOTA_NC_APP_PASSWORD, ISTOTA_IMAP_PASSWORD, ISTOTA_SMTP_PASSWORD,
-#   ISTOTA_GITLAB_TOKEN, ISTOTA_NTFY_TOKEN, ISTOTA_NTFY_PASSWORD
+#   ISTOTA_GITLAB_TOKEN, ISTOTA_GITHUB_TOKEN, ISTOTA_NTFY_TOKEN, ISTOTA_NTFY_PASSWORD
 
 # [security]
 # mode = "permissive"
@@ -201,16 +201,17 @@ sources = [
 # memory_retention_days = 0           # 0 = unlimited, or set days to auto-delete old files
 
 # ============================================================================
-# Developer Skill (Git + GitLab Workflows)
+# Developer Skill (Git + GitLab/GitHub Workflows)
 # ============================================================================
-# Enables Claude Code to work in git repositories and create GitLab merge requests.
-# Uses bare clones + git worktrees for branch isolation.
-# Recommended: use a dedicated bot account with Developer role (not Maintainer)
-# and a token scoped to read_api + write_repository.
+# Enables Claude Code to work in git repositories, create GitLab merge requests,
+# and GitHub pull requests. Uses bare clones + git worktrees for branch isolation.
+# Recommended: use dedicated bot accounts with minimal required permissions.
 
 # [developer]
 # enabled = false
 # repos_dir = "/srv/repos"                          # base dir for clones + worktrees
+#
+# # GitLab settings
 # gitlab_url = "https://gitlab.com"                 # GitLab instance URL
 # gitlab_token = "glpat-xxxxxxxxxxxxxxxxxxxx"        # API token (read_api + write_repository)
 # gitlab_username = "botuser"                        # GitLab username for HTTPS auth
@@ -225,6 +226,27 @@ sources = [
 #     "POST /api/v4/projects/*/issues",
 #     "POST /api/v4/projects/*/issues/*/notes",
 #     "PUT /api/v4/projects/*/merge_requests/*/merge",
+# ]
+#
+# # GitHub settings
+# github_url = "https://github.com"                 # GitHub instance URL (or GitHub Enterprise)
+# github_token = "ghp_xxxxxxxxxxxxxxxxxxxx"          # Personal access token (repo scope)
+# github_username = ""                               # GitHub username (defaults to x-access-token)
+# github_default_owner = "myorg"                     # default org/user for short repo names
+# github_reviewer = "reviewer-user"                  # GitHub username to request as PR reviewer
+# github_api_allowlist = [                           # API endpoint allowlist (default below)
+#     "GET /repos/*",
+#     "GET /orgs/*",
+#     "GET /users/*",
+#     "GET /search/*",
+#     "POST /repos/*/pulls",
+#     "POST /repos/*/pulls/*/reviews",
+#     "POST /repos/*/issues",
+#     "POST /repos/*/issues/*/comments",
+#     "POST /repos/*/pulls/*/comments",
+#     "PUT /repos/*/pulls/*/merge",
+#     "PATCH /repos/*/pulls/*",
+#     "PATCH /repos/*/issues/*",
 # ]
 
 # ============================================================================

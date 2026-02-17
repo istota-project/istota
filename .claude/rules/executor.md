@@ -77,7 +77,11 @@ def build_prompt(
 | Developer | `GITLAB_URL` | `config.developer.gitlab_url` (if enabled) |
 | Developer | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` (if enabled + set) |
 | Developer | `GITLAB_API_CMD` | Path to API wrapper script (if enabled + token set) |
-| Developer | `GIT_CONFIG_*` | Git credential helper for HTTPS auth (if enabled + token set) |
+| Developer | `GITHUB_URL` | `config.developer.github_url` (if enabled) |
+| Developer | `GITHUB_DEFAULT_OWNER` | `config.developer.github_default_owner` (if enabled + set) |
+| Developer | `GITHUB_REVIEWER` | `config.developer.github_reviewer` (if enabled + set) |
+| Developer | `GITHUB_API_CMD` | Path to API wrapper script (if enabled + token set) |
+| Developer | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth (if enabled + token set) |
 
 ## Popen Command
 ```python

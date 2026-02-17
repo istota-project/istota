@@ -16,7 +16,7 @@ A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code
   - 📂 Nextcloud file management, sharing, and organization
   - 🧾 Invoicing with PDF generation and beancount ledger integration
   - 💰 Accounting with Monarch Money sync and transaction tracking
-  - 🛠️ Git/GitLab development workflows (worktrees, merge requests, credential handling)
+  - 🛠️ Git/GitLab/GitHub development workflows (worktrees, merge requests, pull requests)
   - 🌐 Web browsing via Dockerized Playwright with stealth mode
   - 🎙️ Audio transcription via faster-whisper (local, CPU-based)
   - 📸 OCR transcription via Tesseract

@@ -101,5 +101,5 @@ keywords = ["transcribe", "whisper", "audio", "voice", "speech", "dictation", "r
 file_types = ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]
 
 [developer]
-description = "Git repository management and GitLab merge request workflows"
-keywords = ["git", "gitlab", "repo", "repository", "commit", "branch", "merge request", "MR", "pull request", "PR", "code review", "develop", "worktree", "clone"]
+description = "Git repository management, GitLab merge requests, and GitHub pull requests"
+keywords = ["git", "gitlab", "github", "repo", "repository", "commit", "branch", "merge request", "MR", "pull request", "PR", "code review", "develop", "worktree", "clone"]

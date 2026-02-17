@@ -190,7 +190,7 @@ class MemorySearchConfig:
 
 @dataclass
 class DeveloperConfig:
-    """Developer skill configuration for git + GitLab workflows."""
+    """Developer skill configuration for git + GitLab/GitHub workflows."""
     enabled: bool = False
     repos_dir: str = ""           # Base directory for repo clones/worktrees
     gitlab_url: str = "https://gitlab.com"
@@ -207,6 +207,25 @@ class DeveloperConfig:
         "POST /api/v4/projects/*/issues",
         "POST /api/v4/projects/*/issues/*/notes",
         "PUT /api/v4/projects/*/merge_requests/*/merge",
+    ])
+    github_url: str = "https://github.com"
+    github_token: str = ""        # Personal access token (repo scope recommended)
+    github_username: str = ""     # GitHub username for HTTPS auth (defaults to x-access-token if empty)
+    github_default_owner: str = ""  # Default org/user for resolving short repo names
+    github_reviewer: str = ""     # GitHub username to request as PR reviewer
+    github_api_allowlist: list[str] = field(default_factory=lambda: [
+        "GET /repos/*",
+        "GET /orgs/*",
+        "GET /users/*",
+        "GET /search/*",
+        "POST /repos/*/pulls",
+        "POST /repos/*/pulls/*/reviews",
+        "POST /repos/*/issues",
+        "POST /repos/*/issues/*/comments",
+        "POST /repos/*/pulls/*/comments",
+        "PUT /repos/*/pulls/*/merge",
+        "PATCH /repos/*/pulls/*",
+        "PATCH /repos/*/issues/*",
     ])
 
 
@@ -623,6 +642,11 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "developer" in data:
         dev = data["developer"]
+        extra = {}
+        if "gitlab_api_allowlist" in dev:
+            extra["gitlab_api_allowlist"] = dev["gitlab_api_allowlist"]
+        if "github_api_allowlist" in dev:
+            extra["github_api_allowlist"] = dev["github_api_allowlist"]
         config.developer = DeveloperConfig(
             enabled=dev.get("enabled", False),
             repos_dir=dev.get("repos_dir", ""),
@@ -631,9 +655,12 @@ def load_config(config_path: Path | None = None) -> Config:
             gitlab_username=dev.get("gitlab_username", ""),
             gitlab_default_namespace=dev.get("gitlab_default_namespace", ""),
             gitlab_reviewer_id=dev.get("gitlab_reviewer_id", ""),
-            **({
-                "gitlab_api_allowlist": dev["gitlab_api_allowlist"]
-            } if "gitlab_api_allowlist" in dev else {}),
+            github_url=dev.get("github_url", "https://github.com"),
+            github_token=dev.get("github_token", ""),
+            github_username=dev.get("github_username", ""),
+            github_default_owner=dev.get("github_default_owner", ""),
+            github_reviewer=dev.get("github_reviewer", ""),
+            **extra,
         )
 
     if "security" in data:
@@ -655,6 +682,7 @@ def load_config(config_path: Path | None = None) -> Config:
         ("ISTOTA_IMAP_PASSWORD", "email", "imap_password"),
         ("ISTOTA_SMTP_PASSWORD", "email", "smtp_password"),
         ("ISTOTA_GITLAB_TOKEN", "developer", "gitlab_token"),
+        ("ISTOTA_GITHUB_TOKEN", "developer", "github_token"),
         ("ISTOTA_NTFY_TOKEN", "ntfy", "token"),
         ("ISTOTA_NTFY_PASSWORD", "ntfy", "password"),
     ]
