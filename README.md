@@ -1,6 +1,6 @@
 # 🐙 Istota
 
-A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code), Istota can read your files, manage your calendar, send emails, run scheduled jobs, and remember things across conversations — all through Nextcloud Talk or email.
+A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code), Istota is a fully featured AI agent with a curated and growing set of skills — file management, calendar, email, invoicing, accounting, web browsing, audio transcription, dev workflows, and more. It remembers things across conversations, runs scheduled jobs, and works through Nextcloud Talk or email.
 
 ## Features
 
