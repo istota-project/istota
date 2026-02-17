@@ -811,7 +811,7 @@
 
 - name: "Enable and start istota-scheduler"
   systemd:
-    name: "istota-scheduler"
+    name: "{{ istota_namespace }}-scheduler"
     enabled: yes
     state: started
     daemon_reload: yes
