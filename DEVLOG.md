@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: Architecture doc and Ansible repo dir cleanup
+
+Added comprehensive ARCHITECTURE.md covering the full system architecture. Renamed the Ansible git clone destination from `{{ istota_home }}/src` to `{{ istota_repo_dir }}` (defaults to `{{ istota_home }}/istota`) to avoid the confusing `src/src/istota` path nesting on the server.
+
+**Key changes:**
+- ARCHITECTURE.md: core data flow, module map, scheduler internals, executor/prompt assembly, context selection, skills system, four-layer memory model, multi-user isolation, sandbox, Nextcloud integration, database schema, briefings, cron jobs, heartbeat, deployment, testing, design decisions
+- Ansible role: added `istota_repo_dir` variable, replaced all hardcoded `{{ istota_home }}/src` references across defaults, tasks, and templates
+
+**Files added/modified:**
+- `ARCHITECTURE.md` - New comprehensive architecture document
+- `deploy/ansible/defaults/main.yml` - Added `istota_repo_dir` variable
+- `deploy/ansible/tasks/main.yml` - Updated all `{{ istota_home }}/src` → `{{ istota_repo_dir }}`
+- `deploy/ansible/templates/config.toml.j2` - Updated skills_dir path
+- `deploy/ansible/templates/istota-scheduler.service.j2` - Updated WorkingDirectory and ExecStart paths
+- `deploy/ansible/templates/docker-compose.browser.yml.j2` - Updated build context path
+
 ## 2026-02-17: GitHub PR support for developer skill
 
 Added GitHub pull request workflows alongside existing GitLab merge request support. Same security model: token via env var, credential helper per host, API wrapper with endpoint allowlist. Both platforms can be configured simultaneously with dynamic `GIT_CONFIG_COUNT`. GitHub Enterprise detection uses `{url}/api/v3` instead of `api.github.com`. Also documented that `deploy/ansible/` is the canonical location for the Ansible role (ansible-server symlinks here).

@@ -319,13 +319,13 @@
 - name: Configure git safe.directory
   community.general.git_config:
     name: safe.directory
-    value: "{{ istota_home }}/src"
+    value: "{{ istota_repo_dir }}"
     scope: global
 
 - name: Clone or update istota repository
   git:
     repo: "{{ istota_repo_url_auth | default(istota_repo_url) }}"
-    dest: "{{ istota_home }}/src"
+    dest: "{{ istota_repo_dir }}"
     version: "{{ istota_repo_branch }}"
     force: yes
   no_log: "{{ istota_gitlab_token | length > 0 }}"
@@ -335,7 +335,7 @@
 
 - name: Set ownership of src directory
   file:
-    path: "{{ istota_home }}/src"
+    path: "{{ istota_repo_dir }}"
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
     recurse: yes
@@ -346,14 +346,14 @@
     {% if istota_memory_search_enabled %}--extra memory-search{% endif %}
     {% if istota_whisper_enabled %}--extra whisper{% endif %}
   args:
-    chdir: "{{ istota_home }}/src"
+    chdir: "{{ istota_repo_dir }}"
   environment:
     PATH: "/root/.local/bin:{{ ansible_facts['env']['PATH'] }}"
   changed_when: false
 
 - name: Set ownership of venv directory
   file:
-    path: "{{ istota_home }}/src/.venv"
+    path: "{{ istota_repo_dir }}/.venv"
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
     recurse: yes
@@ -361,15 +361,15 @@
 - name: Pre-download Whisper model
   shell: >
     sudo -u {{ istota_user }} HOME={{ istota_home }}
-    {{ istota_home }}/src/.venv/bin/python -m {{ istota_package }}.skills.whisper download {{ istota_whisper_model }}
+    {{ istota_repo_dir }}/.venv/bin/python -m {{ istota_package }}.skills.whisper download {{ istota_whisper_model }}
   args:
-    chdir: "{{ istota_home }}/src"
+    chdir: "{{ istota_repo_dir }}"
   when: istota_whisper_enabled
   changed_when: false
 
 - name: Create symlink for venv in home directory
   file:
-    src: "{{ istota_home }}/src/.venv"
+    src: "{{ istota_repo_dir }}/.venv"
     dest: "{{ istota_home }}/.venv"
     state: link
     force: yes
@@ -379,7 +379,7 @@
 
 - name: Remove old config symlink if present
   file:
-    path: "{{ istota_home }}/src/config/config.toml"
+    path: "{{ istota_repo_dir }}/config/config.toml"
     state: absent
 
 - name: Remove old separate config directory
@@ -425,7 +425,7 @@
 - name: Deploy istota configuration
   template:
     src: config.toml.j2
-    dest: "{{ istota_home }}/src/config/config.toml"
+    dest: "{{ istota_repo_dir }}/config/config.toml"
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
     mode: '0600'
@@ -435,7 +435,7 @@
 - name: Deploy per-user config files
   template:
     src: user.toml.j2
-    dest: "{{ istota_home }}/src/config/users/{{ user_id }}.toml"
+    dest: "{{ istota_repo_dir }}/config/users/{{ user_id }}.toml"
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
     mode: '0600'
@@ -451,7 +451,7 @@
 - name: Initialize/migrate database schema
   command: "{{ istota_home }}/.venv/bin/python -c \"from pathlib import Path; import sys; sys.path.insert(0, 'src'); from {{ istota_package }}.db import init_db; init_db(Path('{{ istota_home }}/data/{{ istota_namespace }}.db'))\""
   args:
-    chdir: "{{ istota_home }}/src"
+    chdir: "{{ istota_repo_dir }}"
   changed_when: false  # Schema uses CREATE TABLE IF NOT EXISTS, always safe to run
 
 - name: Apply database migrations

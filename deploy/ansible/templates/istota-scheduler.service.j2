@@ -10,8 +10,8 @@ Wants=mount-nextcloud.service
 Type=simple
 User={{ istota_user }}
 Group={{ istota_group }}
-WorkingDirectory={{ istota_home }}/src
-ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.scheduler --daemon --config {{ istota_home }}/src/config/config.toml
+WorkingDirectory={{ istota_repo_dir }}
+ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.scheduler --daemon --config {{ istota_repo_dir }}/config/config.toml
 Restart=always
 RestartSec=5
 

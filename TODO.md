@@ -222,6 +222,7 @@
 - [x] Document webhook server endpoints
 - [x] Document task status values
 - [x] Update README.md to match implementation
+- [x] Comprehensive ARCHITECTURE.md
 
 ## Priority 3: Deployment
 
@@ -231,7 +232,9 @@
 - [x] Config generator (`deploy/render_config.py`)
 - [x] Systemd service templating
 - [x] Log rotation configuration
+- [x] Ansible repo dir cleanup (`istota_repo_dir` variable, no more `src/src/` nesting)
 - [ ] Monitoring/alerting
+- [ ] Migrate server from old `src/` to `istota/` repo dir (remove `/srv/app/istota/src` after deploy)
 
 ### Security
 - [x] Review Claude Code sandbox restrictions

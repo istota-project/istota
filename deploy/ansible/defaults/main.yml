@@ -25,6 +25,7 @@ istota_bot_name: ""
 # Git repository
 istota_repo_url: "https://github.com/alicekubicki/istota.git"
 istota_repo_branch: main
+istota_repo_dir: "{{ istota_home }}/istota"
 
 # GitLab access token (for private repos)
 # Generate at: GitLab > Settings > Access Tokens (read_repository scope)

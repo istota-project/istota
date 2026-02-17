@@ -1,7 +1,7 @@
 services:
   browser:
     build:
-      context: {{ istota_home }}/src/docker/browser/
+      context: {{ istota_repo_dir }}/docker/browser/
       dockerfile: Dockerfile
     container_name: {{ istota_namespace }}-browser
     ports:
