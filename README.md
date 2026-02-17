@@ -131,6 +131,8 @@ uv run pytest -m integration -v            # Integration tests (needs config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
 
+For a detailed history of changes and design decisions, see [DEVLOG.md](DEVLOG.md).
+
 ## License
 
 [AGPL-3.0-or-later](LICENSE)
