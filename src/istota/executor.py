@@ -288,6 +288,11 @@ def build_bwrap_cmd(
         settings = claude_dir / "settings.json"
         if settings.exists():
             _ro_bind(settings)
+        # Persist session JSONL logs and debug output across sandbox exits
+        for subdir in ["projects", "debug", "todos"]:
+            d = claude_dir / subdir
+            if d.exists():
+                _bind(d)
 
     # --- User workspace (RW) ---
     _bind(user_temp_dir.resolve())
