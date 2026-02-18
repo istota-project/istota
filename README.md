@@ -13,6 +13,7 @@ A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code
 - 📰 **Briefings** — Scheduled morning/evening summaries with calendar, markets, news, and TODOs
 - 📡 **Feed reader** — Aggregate RSS, Tumblr, and Are.na feeds into a static HTML page with image galleries and lightbox
 - ⏰ **Cron jobs** — Recurring scheduled tasks via `CRON.md` (AI prompts or shell commands)
+- 🔔 **Reminders** — Natural language reminders ("remind me in 2 hours") via one-shot cron entries with @mention notifications
 - 🔧 **Curated skills** — A growing set of secure, practical skill modules loaded on demand:
   - 📂 Nextcloud file management, sharing, and organization
   - 🧾 Invoicing with PDF generation and beancount ledger integration

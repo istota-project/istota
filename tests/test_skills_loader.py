@@ -657,6 +657,69 @@ class TestDirectoryBasedDiscovery:
         assert "Legacy flat doc." in result
 
 
+class TestRemindersSkillSelection:
+    """Tests for the reminders skill keyword matching."""
+
+    def _make_index(self) -> dict[str, SkillMeta]:
+        return {
+            "files": SkillMeta(
+                name="files",
+                description="File ops",
+                always_include=True,
+            ),
+            "reminders": SkillMeta(
+                name="reminders",
+                description="Set and manage time-based reminders via CRON.md",
+                keywords=[
+                    "remind", "reminder", "reminders", "remind me",
+                    "alert me", "notify me", "don't forget",
+                    "don't let me forget", "in an hour", "in 30 minutes",
+                    "at 3pm", "tomorrow morning",
+                ],
+            ),
+            "schedules": SkillMeta(
+                name="schedules",
+                description="Scheduled jobs",
+                keywords=["schedule", "recurring", "cron"],
+            ),
+        }
+
+    def test_remind_me_triggers_reminders(self):
+        index = self._make_index()
+        result = select_skills("remind me to call the dentist in 2 hours", "talk", set(), index)
+        assert "reminders" in result
+
+    def test_reminder_keyword_triggers(self):
+        index = self._make_index()
+        result = select_skills("set a reminder for 3pm", "talk", set(), index)
+        assert "reminders" in result
+
+    def test_dont_forget_triggers(self):
+        index = self._make_index()
+        result = select_skills("don't forget to buy milk", "talk", set(), index)
+        assert "reminders" in result
+
+    def test_alert_me_triggers(self):
+        index = self._make_index()
+        result = select_skills("alert me when it's 5pm", "talk", set(), index)
+        assert "reminders" in result
+
+    def test_in_an_hour_triggers(self):
+        index = self._make_index()
+        result = select_skills("ping me in an hour about the meeting", "talk", set(), index)
+        assert "reminders" in result
+
+    def test_unrelated_prompt_no_match(self):
+        index = self._make_index()
+        result = select_skills("what's the weather today", "talk", set(), index)
+        assert "reminders" not in result
+
+    def test_remind_case_insensitive(self):
+        index = self._make_index()
+        result = select_skills("REMIND ME to take out the trash", "talk", set(), index)
+        assert "reminders" in result
+
+
 class TestSkillEnvSpecs:
     """Tests for EnvSpec parsing from skill.toml."""
 

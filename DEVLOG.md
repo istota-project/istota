@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: Reminders skill (doc-only)
+
+Added a doc-only `reminders` skill that teaches the bot how to set time-based reminders by writing one-shot entries to CRON.md. Previously the bot would sometimes hallucinate reminders — telling the user it set one without actually writing anything. The skill doc gives explicit step-by-step instructions: parse the time, compute the cron expression, write the CRON.md entry, and confirm. Reminders use `@{user_id}` mentions so Nextcloud Talk triggers a notification.
+
+**Key changes:**
+- New `reminders` skill with `skill.toml` (keyword triggers) and `skill.md` (instructions)
+- Keywords cover natural phrases: "remind me", "don't forget", "alert me", "in an hour", "at 3pm", etc.
+- Prompt template uses `@{user_id}` mention for Talk notification alerts
+- Covers one-shot reminders, recurring reminders, cleanup of spent entries, listing, and cancellation
+- Critical rule: never claim a reminder was set without writing to CRON.md
+- 7 new tests for keyword matching in skills loader
+
+**Files added/modified:**
+- `src/istota/skills/reminders/skill.toml` - New skill metadata with keyword triggers
+- `src/istota/skills/reminders/skill.md` - Reminder instructions for the bot
+- `tests/test_skills_loader.py` - Added TestRemindersSkillSelection (7 tests)
+
 ## 2026-02-17: README security model + origin story
 
 Added a new "Security model" section to the README explaining the three-layer isolation: dedicated VM separation from Nextcloud, bubblewrap sandboxing per Claude Code invocation, and per-user sandbox isolation in multi-user setups. Also rewrote the "Why Istota?" origin story to explain how it started as a mobile Claude Code wrapper for development on the go and evolved into a full assistant.

@@ -54,6 +54,7 @@ istota/
 │       ├── memory_search/   # Memory search CLI (search, index, reindex, stats)
 │       ├── nextcloud/       # Nextcloud sharing reference (doc-only)
 │       ├── notes/           # Notes file reference (doc-only)
+│       ├── reminders/       # Time-based reminders via CRON.md (doc-only)
 │       ├── schedules/       # CRON.md job management reference (doc-only)
 │       ├── scripts/         # User scripts reference (doc-only)
 │       ├── sensitive_actions/ # Confirmation rules (doc-only)
