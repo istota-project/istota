@@ -312,14 +312,10 @@
 
 - name: Update Claude CLI
   shell: |
-    before=$(claude --version 2>/dev/null)
-    claude update 2>&1 || true
-    after=$(claude --version 2>/dev/null)
+    before=$(sudo -u {{ istota_user }} HOME={{ istota_home }} claude --version 2>/dev/null)
+    sudo -u {{ istota_user }} HOME={{ istota_home }} claude update 2>&1 || true
+    after=$(sudo -u {{ istota_user }} HOME={{ istota_home }} claude --version 2>/dev/null)
     if [ "$before" != "$after" ]; then echo "UPDATED $before -> $after"; else echo "CURRENT $after"; fi
-  become: true
-  become_user: "{{ istota_user }}"
-  environment:
-    HOME: "{{ istota_home }}"
   register: claude_update_result
   changed_when: "'UPDATED' in claude_update_result.stdout"
 
