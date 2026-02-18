@@ -341,11 +341,25 @@ class TestFormatContextForPrompt:
         assert "Scheduled: Morning briefing" in result
         assert "User:" not in result
 
+    def test_heartbeat_source_type_labeled_as_scheduled(self):
+        """Heartbeat messages should be labeled [Scheduled:]."""
+        msgs = [_msg(1, "heartbeat check", "ok", "2025-01-26 10:00:00", source_type="heartbeat")]
+        result = format_context_for_prompt(msgs)
+        assert "Scheduled: heartbeat check" in result
+        assert "User:" not in result
+
     def test_talk_source_type_labeled_as_user(self):
         """Regular talk messages should still be labeled [User:]."""
         msgs = [_msg(1, "Hello", "Hi there.", "2025-01-26 12:00:00", source_type="talk")]
         result = format_context_for_prompt(msgs)
         assert "User: Hello" in result
+        assert "Scheduled:" not in result
+
+    def test_default_source_type_uses_user_label(self):
+        """Default source_type (talk) should produce [User:] label."""
+        msgs = [_msg(1, "hello", "hi", "2025-01-26 12:00:00")]
+        result = format_context_for_prompt(msgs)
+        assert "User: hello" in result
         assert "Scheduled:" not in result
 
     def test_mixed_source_types_labeled_correctly(self):

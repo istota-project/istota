@@ -957,7 +957,8 @@ class TestGenerateInvoicesForPeriod:
 
         return config_file
 
-    def test_dry_run_no_files_created(self, tmp_path):
+    def test_dry_run_no_files_created(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup_config_and_log(tmp_path)
         config = parse_invoicing_config(config_file)
 
@@ -978,7 +979,8 @@ class TestGenerateInvoicesForPeriod:
         assert updated_config.next_invoice_number == 42
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
-    def test_generates_invoices(self, mock_pdf, tmp_path):
+    def test_generates_invoices(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup_config_and_log(tmp_path)
         config = parse_invoicing_config(config_file)
 
@@ -997,7 +999,8 @@ class TestGenerateInvoicesForPeriod:
         assert updated_config.next_invoice_number == 42 + len(results)
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
-    def test_client_filter(self, mock_pdf, tmp_path):
+    def test_client_filter(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup_config_and_log(tmp_path)
         config = parse_invoicing_config(config_file)
 
@@ -1026,6 +1029,7 @@ class TestGenerateInvoicesForPeriod:
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_no_ledger_entries_at_invoice_time(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         """Cash-basis: invoice generation should not create any ledger entries."""
         config_file = self._setup_config_and_log(tmp_path, monkeypatch)
         config = parse_invoicing_config(config_file)
@@ -1041,7 +1045,8 @@ class TestGenerateInvoicesForPeriod:
         # Ledger should remain empty (cash-basis: no A/R at invoice time)
         assert ledger_file.read_text() == ""
 
-    def test_missing_work_log_auto_created(self, tmp_path):
+    def test_missing_work_log_auto_created(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         work_log_path = tmp_path / "notes" / "_INVOICES.md"
         config_file = tmp_path / "INVOICING.md"
         config_text = SAMPLE_CONFIG_TOML.replace(
@@ -1194,6 +1199,7 @@ class TestAccountingCLIInvoiceCommands:
         assert result["status"] == "error"
 
     def test_cmd_invoice_list_outstanding(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         from istota.skills.accounting import cmd_invoice_list
 
         config_file = tmp_path / "INVOICING.md"
@@ -1243,6 +1249,7 @@ paid_date = 2026-02-20
         assert result["invoices"][0]["status"] == "outstanding"
 
     def test_cmd_invoice_list_all(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         from istota.skills.accounting import cmd_invoice_list
 
         config_file = tmp_path / "INVOICING.md"
@@ -1291,6 +1298,7 @@ paid_date = 2026-02-20
     @patch("istota.skills.accounting._run_bean_check")
     @patch("istota.skills.accounting._get_ledger_path")
     def test_cmd_invoice_paid(self, mock_ledger_path, mock_check, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         from istota.skills.accounting import cmd_invoice_paid
 
         config_file = tmp_path / "INVOICING.md"
@@ -1393,6 +1401,7 @@ invoice = "INV-000042"
         assert "Invalid date" in result["error"]
 
     def test_cmd_invoice_paid_no_post(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         from istota.skills.accounting import cmd_invoice_paid
 
         config_file = tmp_path / "INVOICING.md"
@@ -1436,6 +1445,7 @@ invoice = "INV-000042"
         assert entries[0].paid_date == date(2026, 2, 15)
 
     def test_cmd_invoice_paid_already_paid(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         from istota.skills.accounting import cmd_invoice_paid
 
         config_file = tmp_path / "INVOICING.md"
@@ -1793,6 +1803,7 @@ class TestMultiEntityInvoiceGeneration:
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_entries_grouped_by_entity(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup(tmp_path)
         monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "accounting" / "ledger.beancount"))
         config = parse_invoicing_config(config_file)
@@ -1811,7 +1822,8 @@ class TestMultiEntityInvoiceGeneration:
         assert ("Beta Inc", "personal") in clients_entities
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
-    def test_entity_filter(self, mock_pdf, tmp_path):
+    def test_entity_filter(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup(tmp_path)
         config = parse_invoicing_config(config_file)
 
@@ -1842,7 +1854,8 @@ class TestMultiEntityInvoiceGeneration:
         assert results == []
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
-    def test_per_entity_logo_resolution(self, mock_pdf, tmp_path):
+    def test_per_entity_logo_resolution(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup(tmp_path)
         config = parse_invoicing_config(config_file)
 
@@ -1876,6 +1889,7 @@ class TestMultiEntityInvoiceGeneration:
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_no_ledger_entries_multi_entity(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         """Cash-basis: multi-entity invoice generation should not create any ledger entries."""
         config_file = self._setup(tmp_path)
         ledger_file = tmp_path / "accounting" / "ledger.beancount"
@@ -1892,7 +1906,8 @@ class TestMultiEntityInvoiceGeneration:
         # Ledger should remain empty (cash-basis)
         assert ledger_file.read_text() == ""
 
-    def test_dry_run_multi_entity(self, tmp_path):
+    def test_dry_run_multi_entity(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup(tmp_path)
         config = parse_invoicing_config(config_file)
 
@@ -2443,6 +2458,7 @@ class TestGenerateInvoicesStamping:
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_stamps_after_generation(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup(tmp_path)
         monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "accounting" / "ledger.beancount"))
         config = parse_invoicing_config(config_file)
@@ -2467,7 +2483,8 @@ class TestGenerateInvoicesStamping:
         jan_entries = [e for e in entries if e.date.month == 1]
         assert all(e.invoice != "" for e in jan_entries)
 
-    def test_dry_run_does_not_stamp(self, tmp_path):
+    def test_dry_run_does_not_stamp(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup(tmp_path)
         config = parse_invoicing_config(config_file)
 
@@ -2487,6 +2504,7 @@ class TestGenerateInvoicesStamping:
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_rerun_skips_stamped_entries(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup(tmp_path)
         monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "accounting" / "ledger.beancount"))
         config = parse_invoicing_config(config_file)
@@ -2512,6 +2530,7 @@ class TestGenerateInvoicesStamping:
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_period_optional_all_uninvoiced(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         config_file = self._setup(tmp_path)
         monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "accounting" / "ledger.beancount"))
         config = parse_invoicing_config(config_file)
@@ -2532,6 +2551,7 @@ class TestGenerateInvoicesStamping:
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_backward_compat_no_invoice_fields(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         """Entries without invoice field should be treated as uninvoiced."""
         config_file = self._setup(tmp_path)
         monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "accounting" / "ledger.beancount"))
@@ -2601,6 +2621,7 @@ class TestCLIPeriodOptional:
 
     @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_cmd_generate_no_period_with_entries(self, mock_pdf, tmp_path, monkeypatch):
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         from istota.skills.accounting import cmd_invoice_generate
 
         config_file = tmp_path / "INVOICING.md"
