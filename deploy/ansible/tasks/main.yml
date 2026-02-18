@@ -310,6 +310,19 @@
 # UPDATE TASKS (always run)
 # ============================================================
 
+- name: Update Claude CLI
+  shell: |
+    before=$(claude --version 2>/dev/null)
+    claude update 2>&1 || true
+    after=$(claude --version 2>/dev/null)
+    if [ "$before" != "$after" ]; then echo "UPDATED $before -> $after"; else echo "CURRENT $after"; fi
+  become: true
+  become_user: "{{ istota_user }}"
+  environment:
+    HOME: "{{ istota_home }}"
+  register: claude_update_result
+  changed_when: "'UPDATED' in claude_update_result.stdout"
+
 - name: Build authenticated repo URL
   set_fact:
     istota_repo_url_auth: "{{ istota_repo_url | regex_replace('^https://', 'https://oauth2:' + istota_gitlab_token + '@') }}"
