@@ -2,6 +2,19 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-18: Fix TOML quoting in CRON.md generation
+
+The `generate_cron_md()` function wrapped all values in basic TOML double quotes without escaping inner `"` characters. When `remove_job_from_cron_md()` rewrote the file after a once-job fired, a command containing `--subject "Operation's Tent"` produced invalid TOML that broke parsing for all 23 jobs. Fixed by using triple-quoted TOML strings (`"""..."""`) whenever a value contains double quotes or newlines.
+
+**Key changes:**
+- New `_toml_string()` helper in cron_loader.py — uses triple quotes when value contains `"` or `\n`
+- Both `command` and `prompt` fields now route through `_toml_string()` for safe quoting
+- 2 new round-trip tests for commands and prompts with inner double quotes
+
+**Files modified:**
+- `src/istota/cron_loader.py` - Added `_toml_string()`, updated `generate_cron_md()` to use it
+- `tests/test_cron_loader.py` - Added quote round-trip tests
+
 ## 2026-02-17: Once-fire cron jobs + Claude session log cleanup
 
 One-time scheduled jobs (`once = true`) are now automatically removed from both DB and CRON.md after successful execution. This replaces the previous approach where the reminders skill doc told Claude to manually clean up spent entries (unreliable). Also added periodic cleanup of Claude's JSONL session logs which grow unbounded in the bwrap sandbox.
