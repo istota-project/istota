@@ -20,6 +20,7 @@ A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code
   - 🌐 Web browsing via Dockerized Playwright with stealth mode
   - 🎙️ Audio transcription via faster-whisper (local, CPU-based)
   - 📸 OCR transcription via Tesseract
+  - 🔖 Bookmark management via Karakeep (search, save, tag)
   - 📝 TODO management, notes, and script automation
 - 👥 **Multi-user** — Per-user resources, worker threads, config files, and filesystem sandboxing
 - 🔒 **Security** — Per-user bubblewrap sandbox, credential stripping, deferred DB writes
