@@ -62,6 +62,7 @@ def _load_skill_toml(skill_dir: Path) -> SkillMeta | None:
         resource_types=data.get("resource_types", []),
         source_types=data.get("source_types", []),
         file_types=data.get("file_types", []),
+        companion_skills=data.get("companion_skills", []),
         env_specs=_parse_env_specs(data.get("env", [])),
         dependencies=data.get("dependencies", []),
         skill_dir=str(skill_dir),
@@ -112,6 +113,7 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
             resource_types=meta.get("resource_types", []),
             source_types=meta.get("source_types", []),
             file_types=meta.get("file_types", []),
+            companion_skills=meta.get("companion_skills", []),
         )
         for name, meta in data.items()
         if isinstance(meta, dict)
@@ -233,6 +235,19 @@ def select_skills(
             if any(kw in prompt_lower for kw in meta.keywords):
                 if _check_dependencies(meta):
                     selected.add(name)
+
+    # Resolve companion skills (e.g., whisper pulls in reminders, schedules)
+    companions = set()
+    for name in selected:
+        meta = skill_index[name]
+        for companion in meta.companion_skills:
+            if companion in skill_index and companion not in selected:
+                cmeta = skill_index[companion]
+                if cmeta.admin_only and not is_admin:
+                    continue
+                if _check_dependencies(cmeta):
+                    companions.add(companion)
+    selected |= companions
 
     result = sorted(selected)
     if result:

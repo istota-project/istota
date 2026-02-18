@@ -507,6 +507,123 @@ class TestFileTypeSelection:
         assert index["email"].file_types == []
 
 
+class TestCompanionSkills:
+    """Tests for companion_skills — eagerly included when a skill is selected."""
+
+    def _make_index(self) -> dict[str, SkillMeta]:
+        return {
+            "files": SkillMeta(
+                name="files",
+                description="File ops",
+                always_include=True,
+            ),
+            "whisper": SkillMeta(
+                name="whisper",
+                description="Audio transcription",
+                keywords=["transcribe", "audio", "voice"],
+                file_types=["mp3", "wav", "ogg", "flac", "m4a"],
+                companion_skills=["reminders", "schedules", "calendar"],
+            ),
+            "reminders": SkillMeta(
+                name="reminders",
+                description="Set reminders",
+                keywords=["remind", "reminder"],
+            ),
+            "schedules": SkillMeta(
+                name="schedules",
+                description="CRON jobs",
+                keywords=["schedule", "cron"],
+                admin_only=True,
+            ),
+            "calendar": SkillMeta(
+                name="calendar",
+                description="CalDAV events",
+                keywords=["calendar", "event"],
+            ),
+        }
+
+    def test_audio_attachment_pulls_in_companions(self):
+        index = self._make_index()
+        result = select_skills(
+            "check this out", "talk", set(), index,
+            attachments=["/path/to/memo.mp3"],
+        )
+        assert "whisper" in result
+        assert "reminders" in result
+        assert "calendar" in result
+
+    def test_companion_admin_only_skipped_for_non_admin(self):
+        index = self._make_index()
+        result = select_skills(
+            "check this out", "talk", set(), index,
+            attachments=["/path/to/memo.wav"],
+            is_admin=False,
+        )
+        assert "whisper" in result
+        assert "reminders" in result
+        assert "schedules" not in result
+
+    def test_companion_admin_only_included_for_admin(self):
+        index = self._make_index()
+        result = select_skills(
+            "check this out", "talk", set(), index,
+            attachments=["/path/to/memo.wav"],
+            is_admin=True,
+        )
+        assert "schedules" in result
+
+    def test_no_companions_when_skill_not_selected(self):
+        index = self._make_index()
+        result = select_skills(
+            "hello", "talk", set(), index,
+        )
+        assert "whisper" not in result
+        assert "reminders" not in result
+        assert "calendar" not in result
+
+    def test_companion_not_in_index_ignored(self):
+        index = self._make_index()
+        index["whisper"].companion_skills.append("nonexistent")
+        result = select_skills(
+            "", "talk", set(), index,
+            attachments=["/path/to/audio.ogg"],
+        )
+        assert "whisper" in result
+        assert "reminders" in result
+        # No error from nonexistent companion
+
+    def test_companion_already_selected_not_duplicated(self):
+        index = self._make_index()
+        result = select_skills(
+            "remind me about this audio", "talk", set(), index,
+            attachments=["/path/to/memo.mp3"],
+        )
+        assert "whisper" in result
+        assert "reminders" in result
+        # No duplicates in result
+        assert len(result) == len(set(result))
+
+    def test_companion_skills_parsed_from_toml(self, tmp_path):
+        bundled = tmp_path / "bundled"
+        skill_dir = bundled / "whisper"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "skill.toml").write_text(
+            'description = "Audio"\n'
+            'file_types = ["mp3"]\n'
+            'companion_skills = ["reminders", "calendar"]\n'
+        )
+        index = load_skill_index(tmp_path / "empty_skills", bundled_dir=bundled)
+        assert index["whisper"].companion_skills == ["reminders", "calendar"]
+
+    def test_companion_skills_default_empty(self, tmp_path):
+        bundled = tmp_path / "bundled"
+        skill_dir = bundled / "email"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "skill.toml").write_text('description = "Email"\n')
+        index = load_skill_index(tmp_path / "empty_skills", bundled_dir=bundled)
+        assert index["email"].companion_skills == []
+
+
 class TestDirectoryBasedDiscovery:
     """Tests for the new directory-based skill discovery."""
 

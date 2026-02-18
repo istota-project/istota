@@ -20,6 +20,9 @@ Environment=PATH={{ istota_home }}/.venv/bin:{{ istota_home }}/.local/bin:/usr/l
 Environment=HOME={{ istota_home }}
 Environment=PYTHONUNBUFFERED=1
 Environment=ISTOTA_ADMINS_FILE=/etc/{{ istota_namespace }}/admins
+{% if istota_whisper_enabled | default(false) %}
+Environment=WHISPER_MAX_MODEL={{ istota_whisper_max_model }}
+{% endif %}
 {% if istota_use_environment_file | default(false) %}
 EnvironmentFile=/etc/{{ istota_namespace }}/secrets.env
 {% endif %}

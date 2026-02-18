@@ -31,6 +31,10 @@ A skill is selected if ANY of these match:
 2. `source_type in meta.source_types`
 3. Any `user_resource_types ∩ meta.resource_types`
 4. Any `meta.keywords` found in `prompt.lower()`
+5. Any `meta.file_types` match attachment extensions
+6. `meta.companion_skills` of already-selected skills are pulled in (respects admin_only + dependency checks)
+
+**Pre-transcription**: Before skill selection, `_pre_transcribe_attachments()` in executor.py transcribes audio attachments and enriches `task.prompt` with the spoken text. This allows keyword-based skills to match on voice memo content.
 
 Returns sorted list of skill names.
 

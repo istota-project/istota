@@ -180,7 +180,10 @@ Selection criteria (from `skill.toml`):
 - `source_types`: briefing → calendar, markets, notes, briefing
 - `keywords`: pattern match on prompt (e.g., "email" → email skill)
 - `file_types`: attachment extensions (e.g., `.wav` → whisper)
+- `companion_skills`: when a skill is selected, also pull in listed companions (respects admin_only and dependency checks)
 - `admin_only`: schedules, tasks (filtered out for non-admin users)
+
+**Pre-transcription**: Audio attachments are transcribed before skill selection (`_pre_transcribe_attachments()` in executor.py). This enriches the prompt with actual spoken words so keyword-based skills (reminders, schedules, calendar) match naturally on voice memos.
 
 Env var wiring is declarative via `[[env]]` sections in `skill.toml`. Skills with complex env setup export `setup_env(ctx)` in `__init__.py`.
 

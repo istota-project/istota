@@ -200,6 +200,7 @@ istota_ntfy_priority: 3                    # default priority (1=min, 3=default,
 # Whisper audio transcription (faster-whisper CPU, int8)
 istota_whisper_enabled: false
 istota_whisper_model: "small"              # Model to pre-download (tiny/base/small/medium/large-v3)
+istota_whisper_max_model: "small"          # Max model for auto-selection at runtime (WHISPER_MAX_MODEL)
 
 # Memory search settings (hybrid BM25 + vector search)
 istota_memory_search_enabled: true

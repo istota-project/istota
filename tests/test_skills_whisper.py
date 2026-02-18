@@ -1,6 +1,7 @@
 """Tests for the whisper transcription skill."""
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -16,6 +17,10 @@ from istota.skills.whisper.cli import (
 )
 from istota.skills.whisper.models import (
     MODEL_REQUIREMENTS,
+    _DEFAULT_HEADROOM_GB,
+    _DEFAULT_MAX_MODEL,
+    _get_headroom_gb,
+    _get_max_model,
     _is_model_downloaded,
     download_model,
     list_models,
@@ -33,16 +38,30 @@ from istota.skills.whisper.transcribe import (
 
 class TestSelectModel:
     @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=20.0)
-    def test_auto_selects_largest_fitting(self, mock_mem):
-        result = select_model()
-        assert result == "large-v3"
-
-    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=4.0)
-    def test_auto_selects_small_with_limited_ram(self, mock_mem):
+    def test_auto_capped_at_max_model(self, mock_mem):
+        # Even with 20 GB available, auto caps at small (default max)
         result = select_model()
         assert result == "small"
 
-    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=2.0)
+    @patch.dict("os.environ", {"WHISPER_MAX_MODEL": "medium"})
+    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=20.0)
+    def test_auto_respects_env_max_model(self, mock_mem):
+        result = select_model()
+        assert result == "medium"
+
+    @patch.dict("os.environ", {"WHISPER_MAX_MODEL": "large-v3"})
+    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=20.0)
+    def test_auto_with_large_max(self, mock_mem):
+        result = select_model()
+        assert result == "large-v3"
+
+    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=3.0)
+    def test_auto_selects_small_with_enough_ram(self, mock_mem):
+        # 3.0 GB available, small needs 2.5 + 0.3 headroom = 2.8, fits
+        result = select_model()
+        assert result == "small"
+
+    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=1.5)
     def test_auto_selects_tiny_with_very_limited_ram(self, mock_mem):
         result = select_model()
         assert result == "tiny"
@@ -53,9 +72,10 @@ class TestSelectModel:
             select_model()
 
     @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=10.0)
-    def test_preferred_model_used_if_fits(self, mock_mem):
-        result = select_model("small")
-        assert result == "small"
+    def test_preferred_model_bypasses_cap(self, mock_mem):
+        # Explicit model request is not capped
+        result = select_model("medium")
+        assert result == "medium"
 
     @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=2.0)
     def test_preferred_model_raises_if_doesnt_fit(self, mock_mem):
@@ -67,16 +87,63 @@ class TestSelectModel:
         with pytest.raises(ValueError, match="Unknown model"):
             select_model("nonexistent")
 
-    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=10.0)
+    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=20.0)
     def test_auto_string_treated_as_auto(self, mock_mem):
+        # "auto" triggers auto-selection, capped at small
         result = select_model("auto")
-        assert result == "medium"
+        assert result == "small"
 
     @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=3.0)
-    def test_headroom_respected(self, mock_mem):
+    def test_explicit_headroom_respected(self, mock_mem):
         # 3.0 GB available, small needs 2.5 + 1.0 headroom = 3.5, doesn't fit
         result = select_model(headroom_gb=1.0)
         assert result == "base"  # 1.5 + 1.0 = 2.5, fits
+
+    @patch.dict("os.environ", {"RAM_HEADROOM_MB": "500"})
+    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=3.0)
+    def test_env_var_headroom(self, mock_mem):
+        # 3.0 GB available, 500 MB = 0.488 GB headroom
+        # small needs 2.5 + 0.488 = 2.988, fits
+        result = select_model()
+        assert result == "small"
+
+    @patch.dict("os.environ", {"RAM_HEADROOM_MB": "1024"})
+    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=3.0)
+    def test_env_var_large_headroom(self, mock_mem):
+        # 3.0 GB available, 1024 MB = 1.0 GB headroom
+        # small needs 2.5 + 1.0 = 3.5, doesn't fit
+        result = select_model()
+        assert result == "base"
+
+    @patch.dict("os.environ", {"RAM_HEADROOM_MB": "notanumber"})
+    @patch("istota.skills.whisper.models.get_available_memory_gb", return_value=3.0)
+    def test_env_var_invalid_falls_back_to_default(self, mock_mem):
+        result = select_model()
+        assert result == "small"  # 2.5 + 0.3 = 2.8, fits
+
+    def test_explicit_headroom_overrides_env(self):
+        headroom = _get_headroom_gb(override=2.0)
+        assert headroom == 2.0
+
+    def test_default_headroom_value(self):
+        assert _DEFAULT_HEADROOM_GB == 0.3
+
+    def test_default_max_model(self):
+        assert _DEFAULT_MAX_MODEL == "small"
+
+    @patch.dict("os.environ", {"WHISPER_MAX_MODEL": "medium"})
+    def test_get_max_model_from_env(self):
+        assert _get_max_model() == "medium"
+
+    @patch.dict("os.environ", {"WHISPER_MAX_MODEL": "invalid"})
+    def test_get_max_model_invalid_falls_back(self):
+        assert _get_max_model() == "small"
+
+    @patch.dict("os.environ", {}, clear=False)
+    def test_get_max_model_default(self):
+        # Remove WHISPER_MAX_MODEL if present
+        os.environ.pop("WHISPER_MAX_MODEL", None)
+        assert _get_max_model() == "small"
 
 
 class TestListModels:

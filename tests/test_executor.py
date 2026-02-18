@@ -10,6 +10,8 @@ from istota.executor import (
     is_transient_api_error,
     build_prompt,
     load_persona,
+    _pre_transcribe_attachments,
+    _AUDIO_EXTENSIONS,
     API_RETRY_MAX_ATTEMPTS,
     API_RETRY_DELAY_SECONDS,
     TRANSIENT_STATUS_CODES,
@@ -1566,3 +1568,84 @@ class TestLoadPersona:
         config = self._make_config(tmp_path)
         result = load_persona(config, user_id="alice")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestPreTranscribeAttachments
+# ---------------------------------------------------------------------------
+
+
+_TRANSCRIBE_PATCH = "istota.skills.whisper.transcribe.transcribe_audio"
+
+
+class TestPreTranscribeAttachments:
+    def test_no_attachments_returns_prompt_unchanged(self):
+        assert _pre_transcribe_attachments(None, "hello") == "hello"
+        assert _pre_transcribe_attachments([], "hello") == "hello"
+
+    def test_non_audio_attachments_returns_prompt_unchanged(self):
+        result = _pre_transcribe_attachments(["/tmp/photo.jpg", "/tmp/doc.pdf"], "[photo.jpg]")
+        assert result == "[photo.jpg]"
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_audio_attachment_transcribed_successfully(self, mock_transcribe):
+        mock_transcribe.return_value = {"status": "ok", "text": "remind me to buy groceries"}
+        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
+        assert "remind me to buy groceries" in result
+        assert "voice.mp3" in result
+        assert result.startswith("Transcribed voice message:")
+        mock_transcribe.assert_called_once_with("/tmp/voice.mp3")
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_transcription_failure_returns_prompt_unchanged(self, mock_transcribe):
+        mock_transcribe.return_value = {"status": "error", "error": "corrupted file"}
+        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
+        assert result == "[voice.mp3]"
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_transcription_exception_returns_prompt_unchanged(self, mock_transcribe):
+        mock_transcribe.side_effect = RuntimeError("boom")
+        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
+        assert result == "[voice.mp3]"
+
+    def test_faster_whisper_not_installed_returns_prompt_unchanged(self):
+        """When the whisper module can't be imported, graceful fallback."""
+        with patch.dict("sys.modules", {"istota.skills.whisper.transcribe": None}):
+            result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
+            assert result == "[voice.mp3]"
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_mixed_audio_and_non_audio_attachments(self, mock_transcribe):
+        mock_transcribe.return_value = {"status": "ok", "text": "schedule a meeting"}
+        result = _pre_transcribe_attachments(
+            ["/tmp/photo.jpg", "/tmp/memo.m4a", "/tmp/doc.pdf"],
+            "[photo.jpg] [memo.m4a]",
+        )
+        assert "schedule a meeting" in result
+        assert "memo.m4a" in result
+        mock_transcribe.assert_called_once_with("/tmp/memo.m4a")
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_multiple_audio_attachments(self, mock_transcribe):
+        mock_transcribe.side_effect = [
+            {"status": "ok", "text": "first part"},
+            {"status": "ok", "text": "second part"},
+        ]
+        result = _pre_transcribe_attachments(
+            ["/tmp/a.mp3", "/tmp/b.wav"],
+            "[a.mp3] [b.wav]",
+        )
+        assert "first part" in result
+        assert "second part" in result
+        assert "a.mp3" in result
+        assert "b.wav" in result
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_empty_transcription_returns_prompt_unchanged(self, mock_transcribe):
+        mock_transcribe.return_value = {"status": "ok", "text": "  "}
+        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
+        assert result == "[voice.mp3]"
+
+    def test_all_audio_extensions_recognized(self):
+        for ext in ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]:
+            assert ext in _AUDIO_EXTENSIONS

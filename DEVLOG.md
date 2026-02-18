@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: Pre-transcribe audio for skill selection + companion skills + whisper max model
+
+Voice memos arriving as `[audio.mp3]` had no meaningful text for skill selection — keyword-based skills like reminders, schedules, and calendar never loaded. Fixed by pre-transcribing audio attachments before skill selection so the enriched prompt contains the actual spoken words. Also added `companion_skills` as a generic skill.toml feature and capped whisper auto-selection with a configurable max model.
+
+**Key changes:**
+- New `_pre_transcribe_attachments()` in executor.py runs before `select_skills()`, transcribes audio and enriches `task.prompt`
+- Enriched prompt flows through to `build_prompt()` and context selection so Claude sees the transcription
+- Graceful fallback if faster-whisper not installed or transcription fails
+- New `companion_skills` field on SkillMeta — when a skill is selected, listed companions are pulled in (respects admin_only + dependency checks)
+- Whisper model auto-selection capped by `WHISPER_MAX_MODEL` env var (default: "small") to prevent OOM on servers with lots of RAM
+- Configurable RAM headroom via `RAM_HEADROOM_MB` env var (default: 0.3 GB)
+- Ansible: new `istota_whisper_max_model` variable, passed as env var in scheduler service
+- 10 new pre-transcription tests, companion skill tests, updated whisper model tests
+
+**Files added/modified:**
+- `src/istota/executor.py` - Added `_pre_transcribe_attachments()`, `_AUDIO_EXTENSIONS`, integrated before skill selection
+- `src/istota/skills/_types.py` - Added `companion_skills` field to SkillMeta
+- `src/istota/skills/_loader.py` - Companion skill resolution in `select_skills()`, load from skill.toml
+- `src/istota/skills/whisper/models.py` - Max model cap, configurable headroom, env var overrides
+- `src/istota/skills/whisper/skill.toml` - Removed `companion_skills` (pre-transcription handles it)
+- `deploy/ansible/defaults/main.yml` - Added `istota_whisper_max_model`
+- `deploy/ansible/templates/istota-scheduler.service.j2` - Pass `WHISPER_MAX_MODEL` env var
+- `tests/test_executor.py` - 10 new TestPreTranscribeAttachments tests
+- `tests/test_skills_loader.py` - Companion skill tests
+- `tests/test_skills_whisper.py` - Updated model selection tests for max model + headroom
+- `AGENTS.md` - Documented companion_skills and pre-transcription in skill selection
+
 ## 2026-02-17: Reminders skill (doc-only)
 
 Added a doc-only `reminders` skill that teaches the bot how to set time-based reminders by writing one-shot entries to CRON.md. Previously the bot would sometimes hallucinate reminders — telling the user it set one without actually writing anything. The skill doc gives explicit step-by-step instructions: parse the time, compute the cron expression, write the CRON.md entry, and confirm. Reminders use `@{user_id}` mentions so Nextcloud Talk triggers a notification.

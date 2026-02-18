@@ -40,6 +40,62 @@ TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}  # 529 = overloaded
 API_RETRY_MAX_ATTEMPTS = 3
 API_RETRY_DELAY_SECONDS = 5
 
+# Audio extensions eligible for pre-transcription (matches whisper skill file_types)
+_AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"})
+
+
+def _pre_transcribe_attachments(
+    attachments: list[str] | None,
+    prompt: str,
+) -> str:
+    """Pre-transcribe audio attachments so skill selection sees real text.
+
+    Returns an enriched prompt with transcribed text, or the original prompt
+    if no audio attachments or transcription fails.
+    """
+    if not attachments:
+        return prompt
+
+    audio_paths = []
+    for att in attachments:
+        ext = Path(att).suffix.lstrip(".").lower()
+        if ext in _AUDIO_EXTENSIONS:
+            audio_paths.append(att)
+
+    if not audio_paths:
+        return prompt
+
+    try:
+        from .skills.whisper.transcribe import transcribe_audio
+    except ImportError:
+        logger.debug("faster-whisper not available, skipping pre-transcription")
+        return prompt
+
+    transcribed_parts = []
+    for audio_path in audio_paths:
+        try:
+            result = transcribe_audio(audio_path)
+            if result.get("status") == "ok" and result.get("text", "").strip():
+                text = result["text"].strip()
+                transcribed_parts.append(text)
+                logger.debug(
+                    "Pre-transcribed %s: %s",
+                    Path(audio_path).name,
+                    text[:100] + ("..." if len(text) > 100 else ""),
+                )
+            else:
+                error = result.get("error", "unknown error")
+                logger.debug("Pre-transcription failed for %s: %s", audio_path, error)
+        except Exception:
+            logger.debug("Pre-transcription error for %s", audio_path, exc_info=True)
+
+    if not transcribed_parts:
+        return prompt
+
+    transcribed_text = " ".join(transcribed_parts)
+    filenames = ", ".join(Path(p).name for p in audio_paths)
+    return f"Transcribed voice message: {transcribed_text}\n\n(Original audio: {filenames})"
+
 
 def parse_api_error(text: str) -> dict | None:
     """
@@ -728,6 +784,12 @@ def execute_task(
                 display_name=rc.name or None, permissions=rc.permissions,
             ))
     user_resources = all_resources
+
+    # Pre-transcribe audio attachments so skill selection sees real text
+    enriched_prompt = _pre_transcribe_attachments(task.attachments, task.prompt)
+    if enriched_prompt != task.prompt:
+        logger.info("Pre-transcribed audio for task %s, enriched prompt for skill selection", task.id)
+        task.prompt = enriched_prompt
 
     # Select and load relevant skills
     from .skills_loader import (

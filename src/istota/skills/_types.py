@@ -37,6 +37,7 @@ class SkillMeta:
     resource_types: list[str] = field(default_factory=list)
     source_types: list[str] = field(default_factory=list)
     file_types: list[str] = field(default_factory=list)
+    companion_skills: list[str] = field(default_factory=list)
     env_specs: list[EnvSpec] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
     # Where the skill was loaded from (for doc/code resolution)
