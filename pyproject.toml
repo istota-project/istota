@@ -53,6 +53,7 @@ allow-direct-references = true
 packages = ["src/istota"]
 
 [tool.pytest.ini_options]
+pythonpath = ["src"]
 markers = [
     "integration: tests requiring real Nextcloud connectivity (deselected by default)",
 ]
