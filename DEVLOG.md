@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: Markets skill interactive CLI
+
+The markets skill was previously briefing-only — it had no keywords and no CLI, so users couldn't ask "what happened in the markets today" in interactive chat. Added keyword triggers and a full CLI with three subcommands.
+
+**Key changes:**
+- Added keywords to `skill.toml` so the skill loads for interactive market questions (market, stock, futures, nasdaq, etc.)
+- Added CLI with `quote`, `summary`, and `finviz` subcommands (all JSON output)
+- `quote AAPL MSFT` fetches quotes for specific symbols via yfinance
+- `summary` fetches broad market snapshot (S&P 500, Nasdaq, Dow, VIX, Gold, Oil, 10Y Treasury)
+- `finviz` fetches FinViz homepage data via browser API
+- Added `__main__.py` for `python -m istota.skills.markets` support
+- Updated `skill.md` with interactive usage documentation
+- 10 new tests covering parser, all three commands, and error handling
+
+**Files added/modified:**
+- `src/istota/skills/markets/skill.toml` - Added keywords and updated description
+- `src/istota/skills/markets/__init__.py` - Added CLI (build_parser, main, cmd_quote, cmd_summary, cmd_finviz)
+- `src/istota/skills/markets/__main__.py` - New, for `python -m` support
+- `src/istota/skills/markets/skill.md` - Added interactive use section
+- `tests/test_markets.py` - Added 10 CLI tests (27 total)
+
 ## 2026-02-17: Feed management skill + README updates
 
 Added `feeds_config` doc-only skill so the bot knows how to create and edit a user's `FEEDS.md` file when asked to add/remove RSS, Tumblr, or Are.na feeds via Talk. Also updated the README with previously undocumented features (Karakeep bookmarks, feed reader).

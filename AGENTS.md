@@ -49,7 +49,7 @@ istota/
 │       ├── email/           # Native IMAP/SMTP operations
 │       ├── files/           # Nextcloud file ops (mount-aware, rclone fallback)
 │       ├── heartbeat/       # Heartbeat monitoring reference (doc-only)
-│       ├── markets/         # yfinance wrapper + FinViz scraping
+│       ├── markets/         # yfinance wrapper + FinViz scraping + interactive CLI (quote, summary, finviz)
 │       ├── memory/          # Memory file reference (doc-only)
 │       ├── memory_search/   # Memory search CLI (search, index, reindex, stats)
 │       ├── nextcloud/       # Nextcloud sharing reference (doc-only)
@@ -350,7 +350,7 @@ With sandbox enabled and DB mounted read-only, Claude and skill CLIs cannot writ
 
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Shared fixtures in `conftest.py`. Current: ~1766 tests across 41 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Shared fixtures in `conftest.py`. Current: ~1883 tests across 43 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests

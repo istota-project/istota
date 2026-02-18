@@ -264,4 +264,5 @@
 - [x] Web browsing skill via Dockerized Playwright with stealth and VNC captcha fallback
 - [x] Audio transcription via faster-whisper (CPU, int8) with auto model selection and RAM guard
 - [x] Plugin architecture: self-contained skill directories with `skill.toml` manifests, declarative env var wiring, directory-based discovery
+- [x] Markets skill: interactive CLI with quote, summary, finviz commands + keyword triggers
 - [ ] More specialized skills with specific commands/tools

@@ -1,2 +1,3 @@
-description = "Market data for briefings"
+description = "Market data for briefings and interactive queries"
 source_types = ["briefing"]
+keywords = ["market", "stock", "stocks", "ticker", "index", "indices", "futures", "s&p", "nasdaq", "dow", "aapl", "quote", "trading", "finviz", "movers", "earnings"]

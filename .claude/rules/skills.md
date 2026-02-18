@@ -47,7 +47,7 @@ Returns sorted list of skill names.
 | `calendar` | — | calendar, event, meeting, schedule, appointment, caldav | calendar | briefing |
 | `todos` | — | todo, task, checklist, reminder, done, complete | todo_file | — |
 | `tasks` | — | subtask, queue, background, later | — | — | admin_only |
-| `markets` | — | — | — | briefing |
+| `markets` | — | market, stock, stocks, ticker, index, indices, futures, ... | — | briefing |
 | `notes` | — | — | notes_file | briefing |
 | `schedules` | — | schedule, recurring, cron, daily, weekly, ... | — | — | admin_only |
 | `nextcloud` | — | share, sharing, nextcloud, permission, access | — | — |
@@ -77,6 +77,11 @@ Returns sorted list of skill names.
 **Env vars**: `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`
 **Key fns**: `get_caldav_client()`, `get_calendars_for_user()`, `get_events()`, `create_event()`, `delete_event()`, `update_event()`
 
+### `markets/` - Market Data CLI
+**Subcommands**: `quote`, `summary`, `finviz`
+**Env vars**: `BROWSER_API_URL` (finviz only)
+**Key fns**: `get_quotes()`, `get_futures_quotes()`, `get_index_quotes()`, `format_market_summary()`, `fetch_finviz_data()`, `format_finviz_briefing()`
+
 ### `browse.py` - Headless Browser
 **Subcommands**: `get`, `screenshot`, `extract`, `interact`, `close`
 **Env vars**: `BROWSER_API_URL`
@@ -98,7 +103,6 @@ Returns sorted list of skill names.
 
 ### Library-Only Modules (no CLI)
 - `files.py` - Nextcloud file ops (mount-aware, rclone fallback)
-- `markets.py` - yfinance wrapper (`get_quotes()`, `get_futures_quotes()`, `format_market_summary()`)
 - `invoicing.py` - Invoice generation, PDF export, cash-basis income
 
 ## How to Add a New Skill

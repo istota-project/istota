@@ -21,3 +21,11 @@ Additionally, FinViz data is scraped and pre-formatted, providing:
 - Upcoming earnings calendar (2-3 days ahead)
 
 Include the pre-fetched market data in your briefing. Copy FinViz data as-is — it is pre-formatted.
+
+### Interactive Use
+For market questions in chat, use the CLI:
+- `python -m istota.skills.markets quote AAPL MSFT GOOGL` — get quotes for specific symbols
+- `python -m istota.skills.markets summary` — broad market overview (S&P 500, Nasdaq, Dow, VIX, Gold, Oil, 10Y Treasury)
+- `python -m istota.skills.markets finviz` — market headlines, movers, futures, forex, earnings, economic data (requires browser API)
+
+All commands output JSON.

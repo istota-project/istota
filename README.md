@@ -128,7 +128,7 @@ See `deploy/README.md` for full documentation, settings file format, and Ansible
 
 ```bash
 uv sync                                    # Install dependencies
-uv run pytest tests/ -v                    # Run tests (~1850 tests)
+uv run pytest tests/ -v                    # Run tests (~1883 tests)
 uv run pytest -m integration -v            # Integration tests (needs config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```

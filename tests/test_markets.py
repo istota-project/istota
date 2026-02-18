@@ -1,7 +1,9 @@
-"""Tests for skills/markets.py module."""
+"""Tests for skills/markets module."""
 
+import json
 import sys
 from datetime import datetime
+from io import StringIO
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,8 +11,13 @@ import pytest
 from istota.skills.markets import (
     DEFAULT_FUTURES,
     DEFAULT_INDICES,
+    SUMMARY_SYMBOLS,
     SYMBOL_NAMES,
     MarketQuote,
+    build_parser,
+    cmd_finviz,
+    cmd_quote,
+    cmd_summary,
     format_market_summary,
     format_quote,
 )
@@ -239,3 +246,110 @@ class TestDefaults:
     def test_symbol_names_covers_defaults(self):
         for sym in DEFAULT_FUTURES + DEFAULT_INDICES:
             assert sym in SYMBOL_NAMES
+
+    def test_summary_symbols_defined(self):
+        assert "^GSPC" in SUMMARY_SYMBOLS
+        assert "^VIX" in SUMMARY_SYMBOLS
+        assert "GC=F" in SUMMARY_SYMBOLS
+
+
+# --- CLI tests ---
+
+
+class TestBuildParser:
+    def test_quote_subcommand(self):
+        parser = build_parser()
+        args = parser.parse_args(["quote", "AAPL", "MSFT"])
+        assert args.command == "quote"
+        assert args.symbols == ["AAPL", "MSFT"]
+
+    def test_summary_subcommand(self):
+        parser = build_parser()
+        args = parser.parse_args(["summary"])
+        assert args.command == "summary"
+
+    def test_finviz_subcommand(self):
+        parser = build_parser()
+        args = parser.parse_args(["finviz"])
+        assert args.command == "finviz"
+
+    def test_no_subcommand(self):
+        parser = build_parser()
+        args = parser.parse_args([])
+        assert args.command is None
+
+
+class TestCmdQuote:
+    def test_outputs_json(self, capsys):
+        mock_yf = _make_mock_yf({"AAPL": (195.0, 190.0)})
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            from istota.skills.markets import get_quotes  # noqa: F811
+            parser = build_parser()
+            args = parser.parse_args(["quote", "AAPL"])
+            cmd_quote(args)
+
+        output = json.loads(capsys.readouterr().out)
+        assert len(output) == 1
+        assert output[0]["symbol"] == "AAPL"
+        assert output[0]["price"] == 195.0
+        assert isinstance(output[0]["change"], float)
+        assert isinstance(output[0]["change_percent"], float)
+        assert output[0]["timestamp"] is not None
+
+    def test_empty_result(self, capsys):
+        mock_yf = _make_mock_yf({})
+        mock_yf.Ticker.side_effect = None
+        ticker = MagicMock()
+        ticker.fast_info.last_price = None
+        ticker.fast_info.previous_close = None
+        mock_yf.Ticker.return_value = ticker
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            parser = build_parser()
+            args = parser.parse_args(["quote", "INVALID"])
+            cmd_quote(args)
+
+        output = json.loads(capsys.readouterr().out)
+        assert output == []
+
+
+class TestCmdSummary:
+    def test_fetches_summary_symbols(self, capsys):
+        prices = {sym: (100.0, 99.0) for sym in SUMMARY_SYMBOLS}
+        mock_yf = _make_mock_yf(prices)
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            parser = build_parser()
+            args = parser.parse_args(["summary"])
+            cmd_summary(args)
+
+        output = json.loads(capsys.readouterr().out)
+        assert len(output) == len(SUMMARY_SYMBOLS)
+        symbols = [q["symbol"] for q in output]
+        for sym in SUMMARY_SYMBOLS:
+            assert sym in symbols
+
+
+class TestCmdFinviz:
+    def test_success(self, capsys):
+        mock_data = MagicMock()
+        with patch(
+            "istota.skills.markets.finviz.fetch_finviz_data", return_value=mock_data
+        ) as mock_fetch, patch(
+            "istota.skills.markets.finviz.format_finviz_briefing",
+            return_value="formatted output",
+        ):
+            parser = build_parser()
+            args = parser.parse_args(["finviz"])
+            cmd_finviz(args)
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["formatted"] == "formatted output"
+        mock_fetch.assert_called_once()
+
+    def test_failure_exits(self):
+        with patch(
+            "istota.skills.markets.finviz.fetch_finviz_data", return_value=None
+        ):
+            parser = build_parser()
+            args = parser.parse_args(["finviz"])
+            with pytest.raises(SystemExit, match="1"):
+                cmd_finviz(args)

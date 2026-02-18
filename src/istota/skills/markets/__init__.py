@@ -1,6 +1,16 @@
-"""Market data via yfinance."""
+"""Market data via yfinance.
 
-from dataclasses import dataclass
+Also provides a CLI for interactive market queries:
+    python -m istota.skills.markets quote AAPL MSFT
+    python -m istota.skills.markets summary
+    python -m istota.skills.markets finviz
+"""
+
+import argparse
+import json
+import os
+import sys
+from dataclasses import asdict, dataclass
 from datetime import datetime
 
 
@@ -146,3 +156,63 @@ def format_market_summary(quotes: list[MarketQuote], mode: str = "morning") -> s
         lines.append(f"  As of: {time_str}")
 
     return "\n".join(lines)
+
+
+# --- CLI ---
+
+SUMMARY_SYMBOLS = ["^GSPC", "^IXIC", "^DJI", "^VIX", "GC=F", "CL=F", "^TNX"]
+
+
+def _quote_to_dict(q: MarketQuote) -> dict:
+    d = asdict(q)
+    d["timestamp"] = q.timestamp.isoformat() if q.timestamp else None
+    return d
+
+
+def cmd_quote(args: argparse.Namespace) -> None:
+    quotes = get_quotes(args.symbols)
+    print(json.dumps([_quote_to_dict(q) for q in quotes], indent=2))
+
+
+def cmd_summary(args: argparse.Namespace) -> None:
+    quotes = get_quotes(SUMMARY_SYMBOLS)
+    print(json.dumps([_quote_to_dict(q) for q in quotes], indent=2))
+
+
+def cmd_finviz(args: argparse.Namespace) -> None:
+    from .finviz import fetch_finviz_data, format_finviz_briefing
+
+    api_url = os.environ.get("BROWSER_API_URL")
+    data = fetch_finviz_data(api_url=api_url)
+    if data is None:
+        print(json.dumps({"error": "Failed to fetch FinViz data"}))
+        sys.exit(1)
+    print(json.dumps({"formatted": format_finviz_briefing(data)}))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Market data CLI")
+    sub = parser.add_subparsers(dest="command")
+
+    quote_cmd = sub.add_parser("quote", help="Fetch quotes for specific symbols")
+    quote_cmd.add_argument("symbols", nargs="+", help="Ticker symbols (e.g. AAPL MSFT)")
+
+    sub.add_parser("summary", help="Broad market overview")
+    sub.add_parser("finviz", help="FinViz market data (requires BROWSER_API_URL)")
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.command == "quote":
+        cmd_quote(args)
+    elif args.command == "summary":
+        cmd_summary(args)
+    elif args.command == "finviz":
+        cmd_finviz(args)
+    else:
+        parser.print_help()
+        sys.exit(1)
