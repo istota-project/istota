@@ -790,10 +790,10 @@ class TestCalendarPreFetchInPrompt:
 class TestFetchFinvizMarketData:
     """Tests for _fetch_finviz_market_data."""
 
-    @patch("istota.skills.finviz.fetch_finviz_data")
-    @patch("istota.skills.finviz.format_finviz_briefing")
+    @patch("istota.skills.markets.finviz.fetch_finviz_data")
+    @patch("istota.skills.markets.finviz.format_finviz_briefing")
     def test_returns_formatted_data(self, mock_format, mock_fetch):
-        from istota.skills.finviz import FinVizData
+        from istota.skills.markets.finviz import FinVizData
         mock_fetch.return_value = FinVizData(headlines=[], major_movers=[])
         mock_format.return_value = "**MARKET HEADLINES**\n- Some headline"
 
@@ -802,22 +802,22 @@ class TestFetchFinvizMarketData:
         assert "FinViz Market Data" in result
         assert "MARKET HEADLINES" in result
 
-    @patch("istota.skills.finviz.fetch_finviz_data")
+    @patch("istota.skills.markets.finviz.fetch_finviz_data")
     def test_returns_none_on_fetch_failure(self, mock_fetch):
         mock_fetch.return_value = None
         result = _fetch_finviz_market_data()
         assert result is None
 
-    @patch("istota.skills.finviz.fetch_finviz_data")
-    @patch("istota.skills.finviz.format_finviz_briefing")
+    @patch("istota.skills.markets.finviz.fetch_finviz_data")
+    @patch("istota.skills.markets.finviz.format_finviz_briefing")
     def test_returns_none_on_unavailable(self, mock_format, mock_fetch):
-        from istota.skills.finviz import FinVizData
+        from istota.skills.markets.finviz import FinVizData
         mock_fetch.return_value = FinVizData()
         mock_format.return_value = "FinViz market data unavailable"
         result = _fetch_finviz_market_data()
         assert result is None
 
-    @patch("istota.skills.finviz.fetch_finviz_data", side_effect=Exception("import error"))
+    @patch("istota.skills.markets.finviz.fetch_finviz_data", side_effect=Exception("import error"))
     def test_returns_none_on_exception(self, mock_fetch):
         result = _fetch_finviz_market_data()
         assert result is None

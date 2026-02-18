@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota.skills.finviz import (
+from istota.skills.markets.finviz import (
     FinVizData,
     Headline,
     MajorMover,

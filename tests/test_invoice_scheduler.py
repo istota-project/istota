@@ -271,7 +271,7 @@ class TestCheckScheduledInvoices:
         assert mock_notify.called
 
     @patch("istota.invoice_scheduler._send_notification")
-    @patch("istota.skills.invoicing.generate_invoices_for_period")
+    @patch("istota.skills.accounting.invoicing.generate_invoices_for_period")
     def test_generates_invoices_when_due(self, mock_gen, mock_notify, tmp_path):
         config = self._make_config(tmp_path)
         mock_notify.return_value = True
@@ -312,7 +312,7 @@ class TestCheckScheduledInvoices:
             assert "Gamma" not in msg
 
     @patch("istota.invoice_scheduler._send_notification")
-    @patch("istota.skills.invoicing.generate_invoices_for_period")
+    @patch("istota.skills.accounting.invoicing.generate_invoices_for_period")
     def test_skips_already_generated_this_month(self, mock_gen, mock_notify, tmp_path):
         config = self._make_config(tmp_path)
         mock_notify.return_value = True
@@ -361,7 +361,7 @@ class TestCheckScheduledInvoices:
                 assert "Reminder" not in msg
 
     @patch("istota.invoice_scheduler._send_notification")
-    @patch("istota.skills.invoicing.generate_invoices_for_period")
+    @patch("istota.skills.accounting.invoicing.generate_invoices_for_period")
     def test_generation_with_no_entries_still_records_state(self, mock_gen, mock_notify, tmp_path):
         config = self._make_config(tmp_path)
         mock_gen.return_value = []  # No uninvoiced entries
@@ -404,7 +404,7 @@ class TestCheckScheduledInvoices:
                 assert surface == "talk"  # client override
 
     @patch("istota.invoice_scheduler._send_notification")
-    @patch("istota.skills.invoicing.generate_invoices_for_period")
+    @patch("istota.skills.accounting.invoicing.generate_invoices_for_period")
     def test_no_reminder_after_generation(self, mock_gen, mock_notify, tmp_path):
         """Once generation has run, don't send reminder for same month."""
         config = self._make_config(tmp_path)
@@ -597,7 +597,7 @@ class TestOverdueInvoiceDetection:
         config = self._make_config(tmp_path)
         mock_notify.return_value = True
 
-        from istota.skills.invoicing import parse_invoicing_config, parse_work_log
+        from istota.skills.accounting.invoicing import parse_invoicing_config, parse_work_log
 
         invoicing_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "INVOICING.md"
         invoicing_config = parse_invoicing_config(invoicing_path)
@@ -628,7 +628,7 @@ class TestOverdueInvoiceDetection:
         """Invoice 20 days old with 30-day threshold should not be detected."""
         config = self._make_config(tmp_path)
 
-        from istota.skills.invoicing import parse_invoicing_config, parse_work_log
+        from istota.skills.accounting.invoicing import parse_invoicing_config, parse_work_log
 
         invoicing_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "INVOICING.md"
         invoicing_config = parse_invoicing_config(invoicing_path)
@@ -654,7 +654,7 @@ class TestOverdueInvoiceDetection:
         config = self._make_config(tmp_path)
         mock_notify.return_value = True
 
-        from istota.skills.invoicing import parse_invoicing_config, parse_work_log
+        from istota.skills.accounting.invoicing import parse_invoicing_config, parse_work_log
 
         invoicing_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "INVOICING.md"
         invoicing_config = parse_invoicing_config(invoicing_path)
@@ -721,7 +721,7 @@ invoice = "INV-000001"
         config = self._make_config(tmp_path, invoicing_content=content, work_log_content=work_log)
         mock_notify.return_value = True
 
-        from istota.skills.invoicing import parse_invoicing_config, parse_work_log
+        from istota.skills.accounting.invoicing import parse_invoicing_config, parse_work_log
 
         invoicing_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "INVOICING.md"
         invoicing_config = parse_invoicing_config(invoicing_path)
@@ -761,7 +761,7 @@ paid_date = 2026-01-15
 """
         config = self._make_config(tmp_path, work_log_content=work_log)
 
-        from istota.skills.invoicing import parse_invoicing_config, parse_work_log
+        from istota.skills.accounting.invoicing import parse_invoicing_config, parse_work_log
 
         invoicing_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "INVOICING.md"
         invoicing_config = parse_invoicing_config(invoicing_path)
@@ -819,7 +819,7 @@ invoice = "INV-000001"
 """
         config = self._make_config(tmp_path, invoicing_content=content, work_log_content=work_log)
 
-        from istota.skills.invoicing import parse_invoicing_config, parse_work_log
+        from istota.skills.accounting.invoicing import parse_invoicing_config, parse_work_log
 
         invoicing_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "INVOICING.md"
         invoicing_config = parse_invoicing_config(invoicing_path)
@@ -844,7 +844,7 @@ invoice = "INV-000001"
         config = self._make_config(tmp_path)
         mock_notify.return_value = True
 
-        from istota.skills.invoicing import parse_invoicing_config, parse_work_log
+        from istota.skills.accounting.invoicing import parse_invoicing_config, parse_work_log
 
         invoicing_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "INVOICING.md"
         invoicing_config = parse_invoicing_config(invoicing_path)

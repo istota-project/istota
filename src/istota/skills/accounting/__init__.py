@@ -1624,7 +1624,7 @@ def _get_invoicing_config_path() -> Path:
 
 def cmd_invoice_generate(args) -> dict:
     """Generate invoices for a billing period."""
-    from istota.skills.invoicing import (
+    from .invoicing import (
         generate_invoices_for_period,
         parse_invoicing_config,
     )
@@ -1677,7 +1677,7 @@ def cmd_invoice_generate(args) -> dict:
 
 def cmd_invoice_list(args) -> dict:
     """List invoices from work log (outstanding by default, --all for all)."""
-    from istota.skills.invoicing import (
+    from .invoicing import (
         build_line_items,
         parse_invoicing_config,
         parse_work_log,
@@ -1765,7 +1765,7 @@ def cmd_invoice_list(args) -> dict:
 
 def cmd_invoice_paid(args) -> dict:
     """Record payment for an invoice (cash-basis: creates income posting)."""
-    from istota.skills.invoicing import (
+    from .invoicing import (
         compute_income_lines,
         create_income_posting,
         parse_invoicing_config,
@@ -1880,7 +1880,7 @@ def cmd_invoice_paid(args) -> dict:
 
 def cmd_invoice_create(args) -> dict:
     """Create a manual single invoice."""
-    from istota.skills.invoicing import (
+    from .invoicing import (
         InvoiceLineItem,
         generate_invoice,
         generate_invoice_html,
@@ -1909,7 +1909,7 @@ def cmd_invoice_create(args) -> dict:
         return {"status": "error", "error": f"Client '{args.client}' not found. Available: {', '.join(available)}"}
 
     # Resolve entity
-    from istota.skills.invoicing import resolve_entity, resolve_currency
+    from .invoicing import resolve_entity, resolve_currency
     entity_key = getattr(args, "entity", None)
     if entity_key:
         if entity_key not in config.companies:
@@ -1920,7 +1920,7 @@ def cmd_invoice_create(args) -> dict:
         entity = resolve_entity(config, client_config=client_config)
 
     # Build line items from --service/--qty and --item arguments
-    from istota.skills.invoicing import WorkEntry, build_line_items
+    from .invoicing import WorkEntry, build_line_items
 
     entries = []
     if args.service:
@@ -1967,7 +1967,7 @@ def cmd_invoice_create(args) -> dict:
     from datetime import timedelta as td
     due_date = invoice_date + td(days=client_config.terms)
 
-    from istota.skills.invoicing import Invoice
+    from .invoicing import Invoice
     invoice = Invoice(
         number=format_invoice_number(invoice_number),
         date=invoice_date,
@@ -1980,7 +1980,7 @@ def cmd_invoice_create(args) -> dict:
     )
 
     # Generate PDF — resolve logo per entity
-    from istota.skills.invoicing import _resolve_nc_path
+    from .invoicing import _resolve_nc_path
     accounting_path = _resolve_nc_path(config.accounting_path)
     logo_path = None
     if entity.logo:

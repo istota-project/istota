@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota.skills.invoicing import (
+from istota.skills.accounting.invoicing import (
     ClientConfig,
     CompanyConfig,
     Invoice,
@@ -977,7 +977,7 @@ class TestGenerateInvoicesForPeriod:
         updated_config = parse_invoicing_config(config_file)
         assert updated_config.next_invoice_number == 42
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_generates_invoices(self, mock_pdf, tmp_path):
         config_file = self._setup_config_and_log(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -996,7 +996,7 @@ class TestGenerateInvoicesForPeriod:
         updated_config = parse_invoicing_config(config_file)
         assert updated_config.next_invoice_number == 42 + len(results)
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_client_filter(self, mock_pdf, tmp_path):
         config_file = self._setup_config_and_log(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -1024,7 +1024,7 @@ class TestGenerateInvoicesForPeriod:
 
         assert results == []
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_no_ledger_entries_at_invoice_time(self, mock_pdf, tmp_path, monkeypatch):
         """Cash-basis: invoice generation should not create any ledger entries."""
         config_file = self._setup_config_and_log(tmp_path, monkeypatch)
@@ -1791,7 +1791,7 @@ class TestMultiEntityInvoiceGeneration:
 
         return config_file
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_entries_grouped_by_entity(self, mock_pdf, tmp_path, monkeypatch):
         config_file = self._setup(tmp_path)
         monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "accounting" / "ledger.beancount"))
@@ -1810,7 +1810,7 @@ class TestMultiEntityInvoiceGeneration:
         assert ("Acme Corp", "personal") in clients_entities
         assert ("Beta Inc", "personal") in clients_entities
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_entity_filter(self, mock_pdf, tmp_path):
         config_file = self._setup(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -1827,7 +1827,7 @@ class TestMultiEntityInvoiceGeneration:
         assert results[0]["client"] == "Acme Corp"
         assert results[0]["entity"] == "llc"
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_entity_filter_no_match(self, mock_pdf, tmp_path):
         config_file = self._setup(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -1841,7 +1841,7 @@ class TestMultiEntityInvoiceGeneration:
 
         assert results == []
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_per_entity_logo_resolution(self, mock_pdf, tmp_path):
         config_file = self._setup(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -1874,7 +1874,7 @@ class TestMultiEntityInvoiceGeneration:
             html = call[0][0]
             assert "data:image/png;base64," in html
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_no_ledger_entries_multi_entity(self, mock_pdf, tmp_path, monkeypatch):
         """Cash-basis: multi-entity invoice generation should not create any ledger entries."""
         config_file = self._setup(tmp_path)
@@ -1907,7 +1907,7 @@ class TestMultiEntityInvoiceGeneration:
         for r in results:
             assert "file" not in r
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_invoice_company_matches_entity(self, mock_pdf, tmp_path):
         """Each invoice should use the correct entity as company."""
         config_file = self._setup(tmp_path)
@@ -2441,7 +2441,7 @@ class TestGenerateInvoicesStamping:
 
         return config_file
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_stamps_after_generation(self, mock_pdf, tmp_path, monkeypatch):
         config_file = self._setup(tmp_path)
         monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "accounting" / "ledger.beancount"))
@@ -2485,7 +2485,7 @@ class TestGenerateInvoicesStamping:
         entries = parse_work_log(log_file)
         assert all(e.invoice == "" for e in entries)
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_rerun_skips_stamped_entries(self, mock_pdf, tmp_path, monkeypatch):
         config_file = self._setup(tmp_path)
         monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "accounting" / "ledger.beancount"))
@@ -2510,7 +2510,7 @@ class TestGenerateInvoicesStamping:
         )
         assert results2 == []
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_period_optional_all_uninvoiced(self, mock_pdf, tmp_path, monkeypatch):
         config_file = self._setup(tmp_path)
         monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "accounting" / "ledger.beancount"))
@@ -2530,7 +2530,7 @@ class TestGenerateInvoicesStamping:
         entries = parse_work_log(log_file)
         assert all(e.invoice != "" for e in entries)
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_backward_compat_no_invoice_fields(self, mock_pdf, tmp_path, monkeypatch):
         """Entries without invoice field should be treated as uninvoiced."""
         config_file = self._setup(tmp_path)
@@ -2599,7 +2599,7 @@ class TestCLIPeriodOptional:
         assert "uninvoiced" in result["message"].lower()
         assert "period" not in result
 
-    @patch("istota.skills.invoicing.generate_invoice_pdf")
+    @patch("istota.skills.accounting.invoicing.generate_invoice_pdf")
     def test_cmd_generate_no_period_with_entries(self, mock_pdf, tmp_path, monkeypatch):
         from istota.skills.accounting import cmd_invoice_generate
 

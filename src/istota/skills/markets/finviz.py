@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-logger = logging.getLogger("istota.skills.finviz")
+logger = logging.getLogger("istota.skills.markets.finviz")
 
 FINVIZ_URL = "https://finviz.com"
 DEFAULT_API_URL = "http://localhost:9223"

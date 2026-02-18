@@ -278,7 +278,7 @@ def _fetch_finviz_market_data() -> str | None:
         Formatted FinViz data string, or None if unavailable.
     """
     try:
-        from .skills.finviz import fetch_finviz_data, format_finviz_briefing
+        from .skills.markets.finviz import fetch_finviz_data, format_finviz_briefing
 
         data = fetch_finviz_data()
         if data is None:

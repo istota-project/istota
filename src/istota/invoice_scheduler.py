@@ -135,7 +135,7 @@ def _check_overdue_invoices(
 
     Returns count of newly-detected overdue invoices.
     """
-    from .skills.invoicing import build_line_items
+    from .skills.accounting.invoicing import build_line_items
 
     already_notified = db.get_notified_overdue_invoices(conn, user_id)
 
@@ -220,7 +220,7 @@ def check_scheduled_invoices(conn, app_config: "Config") -> dict:
 
     Returns dict with 'reminders_sent' and 'invoices_generated' counts.
     """
-    from .skills.invoicing import parse_invoicing_config
+    from .skills.accounting.invoicing import parse_invoicing_config
 
     results = {"reminders_sent": 0, "invoices_generated": 0, "overdue_detected": 0}
 
@@ -307,7 +307,7 @@ def check_scheduled_invoices(conn, app_config: "Config") -> dict:
 
                 try:
                     invoices = parse_invoicing_config(invoicing_path)
-                    from .skills.invoicing import generate_invoices_for_period
+                    from .skills.accounting.invoicing import generate_invoices_for_period
                     generated = generate_invoices_for_period(
                         config=invoices,
                         config_path=invoicing_path,
@@ -359,7 +359,7 @@ def check_scheduled_invoices(conn, app_config: "Config") -> dict:
             c.days_until_overdue > 0 for c in invoicing_config.clients.values()
         ):
             try:
-                from .skills.invoicing import parse_work_log
+                from .skills.accounting.invoicing import parse_work_log
 
                 work_log_path = (
                     app_config.nextcloud_mount_path
