@@ -91,6 +91,13 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
     return jobs
 
 
+def _toml_string(key: str, value: str) -> str:
+    """Format a TOML key-value pair, using triple quotes when needed."""
+    if "\n" in value or '"' in value:
+        return f'{key} = """{value}"""'
+    return f'{key} = "{value}"'
+
+
 def generate_cron_md(jobs: list[CronJob]) -> str:
     """Generate CRON.md content from a list of CronJob definitions."""
     lines = ["# Scheduled Jobs", "", "```toml"]
@@ -102,11 +109,9 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
         lines.append(f'name = "{job.name}"')
         lines.append(f'cron = "{job.cron}"')
         if job.command:
-            lines.append(f'command = "{job.command}"')
-        elif "\n" in job.prompt:
-            lines.append(f'prompt = """{job.prompt}"""')
+            lines.append(_toml_string("command", job.command))
         else:
-            lines.append(f'prompt = "{job.prompt}"')
+            lines.append(_toml_string("prompt", job.prompt))
         if job.target:
             lines.append(f'target = "{job.target}"')
         if job.room:

@@ -13,13 +13,13 @@ Reminders are one-shot scheduled jobs in CRON.md. There is no separate reminder 
    [[jobs]]
    name = "reminder-{unix_timestamp}"
    cron = "{minute} {hour} {day} {month} *"
-   prompt = "Send this exact message: @{user_id} Reminder: {message}"
+   prompt = "Reply with ONLY this text, nothing else:\n\n@{user_id} Reminder: {message}"
    target = "talk"
    room = "{current_conversation_token}"
    once = true
    ```
    - `name`: Use `reminder-` prefix + unix timestamp for uniqueness
-   - `prompt`: MUST instruct the bot to start the response with `@{user_id}` (the Nextcloud username, e.g. `@alice`). This triggers a Nextcloud Talk mention notification so the user actually gets alerted. Without the `@` mention, the reminder fires silently
+   - `prompt`: MUST use "Reply with ONLY this text, nothing else:" followed by the message starting with `@{user_id}`. The `@` mention triggers a Nextcloud Talk notification so the user actually gets alerted. Without the `@` mention, the reminder fires silently. Do NOT use phrasing like "Send this exact message" — it causes the bot to output reasoning before the message
    - `room`: Use the conversation token from the current task context
    - `once = true`: The job is automatically removed from DB and CRON.md after it fires successfully. No manual cleanup needed
    - For email delivery, use `target = "email"` instead

@@ -227,6 +227,34 @@ class TestGenerateCronMd:
         assert loaded[1].name == "j2"
         assert loaded[1].silent_unless_action is True
 
+    def test_command_with_inner_quotes(self, mount_path, make_config_with_mount):
+        """Commands containing double quotes should round-trip correctly."""
+        config = make_config_with_mount()
+        original = [CronJob(
+            name="email-test",
+            cron="0 10 * * *",
+            command='python -m istota.skills.email send --subject "Hello World" --body "Test"',
+        )]
+        content = generate_cron_md(original)
+        _write_cron_md(mount_path, "alice", content)
+        loaded = load_cron_jobs(config, "alice")
+        assert len(loaded) == 1
+        assert loaded[0].command == original[0].command
+
+    def test_prompt_with_inner_quotes(self, mount_path, make_config_with_mount):
+        """Prompts containing double quotes should round-trip correctly."""
+        config = make_config_with_mount()
+        original = [CronJob(
+            name="quoted-prompt",
+            cron="0 10 * * *",
+            prompt='Say "hello" to the user',
+        )]
+        content = generate_cron_md(original)
+        _write_cron_md(mount_path, "alice", content)
+        loaded = load_cron_jobs(config, "alice")
+        assert len(loaded) == 1
+        assert loaded[0].prompt == original[0].prompt
+
     def test_multiple_jobs_separated(self):
         jobs = [
             CronJob(name="a", cron="0 * * * *", prompt="first"),
