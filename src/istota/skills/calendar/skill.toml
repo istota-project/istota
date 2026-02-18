@@ -1,0 +1,4 @@
+description = "Calendar operations with CalDAV"
+keywords = ["calendar", "event", "meeting", "schedule", "appointment", "caldav"]
+resource_types = ["calendar"]
+source_types = ["briefing"]

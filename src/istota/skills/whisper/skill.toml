@@ -1,0 +1,4 @@
+description = "Local audio transcription using faster-whisper (CPU, int8)"
+keywords = ["transcribe", "whisper", "audio", "voice", "speech", "dictation", "recording", "voice memo"]
+file_types = ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]
+dependencies = ["faster_whisper>=1.1.0"]

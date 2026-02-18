@@ -1,0 +1,3 @@
+description = "Beancount ledger operations, queries, invoicing, and reporting"
+keywords = ["accounting", "ledger", "beancount", "invoice", "invoicing", "expense", "transaction", "balance", "tax", "wash sale", "bookkeeping", "finances", "billing", "receivable"]
+resource_types = ["ledger"]

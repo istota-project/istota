@@ -1,0 +1,2 @@
+description = "File operations with rclone"
+always_include = true

@@ -1,0 +1,3 @@
+description = "TODO file format and operations"
+keywords = ["todo", "task", "checklist", "reminder", "done", "complete"]
+resource_types = ["todo_file"]

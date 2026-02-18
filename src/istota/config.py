@@ -164,6 +164,8 @@ class ResourceConfig:
     # Service-specific credentials (e.g. karakeep)
     base_url: str = ""
     api_key: str = ""
+    # Arbitrary extra fields for plugin skills (unrecognized keys go here)
+    extra: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -279,6 +281,7 @@ class Config:
     rclone_remote: str = "nextcloud"  # rclone remote name
     nextcloud_mount_path: Path | None = None  # If set, use mount instead of rclone CLI
     skills_dir: Path = field(default_factory=lambda: Path("config/skills"))
+    bundled_skills_dir: Path | None = None  # Override bundled skills dir (for testing)
     temp_dir: Path = field(default_factory=lambda: Path("/tmp/istota"))
     users_dir: Path | None = None  # config/users/ directory for per-user TOML files
 
@@ -378,8 +381,10 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         ))
 
     # Parse resources
+    _resource_known_keys = {"type", "path", "name", "permissions", "base_url", "api_key"}
     resources = []
     for r in user_data.get("resources", []):
+        extra = {k: v for k, v in r.items() if k not in _resource_known_keys}
         resources.append(ResourceConfig(
             type=r.get("type", ""),
             path=r.get("path", ""),
@@ -387,6 +392,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             permissions=r.get("permissions", "read"),
             base_url=r.get("base_url", ""),
             api_key=r.get("api_key", ""),
+            extra=extra,
         ))
 
     # Backward-compat: migrate reminders_file string to a resource

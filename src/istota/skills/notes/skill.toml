@@ -1,0 +1,3 @@
+description = "Notes file parsing for briefings"
+source_types = ["briefing"]
+resource_types = ["notes_file"]

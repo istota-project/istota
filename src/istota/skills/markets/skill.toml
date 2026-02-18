@@ -1,0 +1,2 @@
+description = "Market data for briefings"
+source_types = ["briefing"]

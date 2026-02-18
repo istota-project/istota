@@ -408,6 +408,7 @@ class TestBuildPromptSkillsChangelog:
         return Config(
             db_path=tmp_path / "test.db",
             skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
         )
 
@@ -456,6 +457,7 @@ class TestSkillsFingerprintIntegration:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
         )
 
@@ -489,7 +491,7 @@ class TestSkillsFingerprintIntegration:
 
         # Pre-store the current fingerprint
         from istota.skills_loader import compute_skills_fingerprint
-        fp = compute_skills_fingerprint(config.skills_dir)
+        fp = compute_skills_fingerprint(config.skills_dir, bundled_dir=config.bundled_skills_dir)
 
         with db.get_db(config.db_path) as conn:
             db.set_user_skills_fingerprint(conn, "alice", fp)
@@ -540,7 +542,7 @@ class TestSkillsFingerprintIntegration:
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
         from istota.skills_loader import compute_skills_fingerprint
-        expected_fp = compute_skills_fingerprint(config.skills_dir)
+        expected_fp = compute_skills_fingerprint(config.skills_dir, bundled_dir=config.bundled_skills_dir)
 
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn, source_type="talk")
@@ -603,6 +605,7 @@ class TestDeveloperEnvVars:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
             developer=dev,
         )
@@ -773,6 +776,7 @@ class TestGitHubEnvVars:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
             developer=dev,
         )
@@ -1001,6 +1005,7 @@ class TestWebsiteEnvVars:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=mount_path,
             site=site,
@@ -1072,6 +1077,7 @@ class TestKarakeepEnvVars:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=mount_path,
             users=users,
@@ -1312,6 +1318,7 @@ class TestAdminEnvVarIsolation:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=mount_path,
             admin_users=admin_users or set(),
@@ -1438,6 +1445,7 @@ class TestDeferredDirEnvVar:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=mount_path,
             admin_users=admin_users or set(),
@@ -1486,7 +1494,7 @@ class TestLoadPersona:
         config_dir = tmp_path / "config"
         skills_dir = config_dir / "skills"
         skills_dir.mkdir(parents=True)
-        kwargs = dict(skills_dir=skills_dir)
+        kwargs = dict(skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled")
         if use_mount:
             mount = tmp_path / "mount"
             mount.mkdir()

@@ -1,0 +1,2 @@
+description = "Heartbeat monitoring configuration in istota/config/"
+keywords = ["heartbeat", "monitoring", "health check", "alert", "file watch", "url health", "disk space", "backup check"]

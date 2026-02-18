@@ -737,7 +737,8 @@ def execute_task(
 
     is_admin = config.is_admin(task.user_id)
 
-    skill_index = load_skill_index(config.skills_dir)
+    _bundled_dir = config.bundled_skills_dir
+    skill_index = load_skill_index(config.skills_dir, bundled_dir=_bundled_dir)
     user_resource_types = {r.resource_type for r in user_resources}
     selected_skills = select_skills(
         prompt=task.prompt,
@@ -747,7 +748,10 @@ def execute_task(
         is_admin=is_admin,
         attachments=task.attachments,
     )
-    skills_doc = load_skills(config.skills_dir, selected_skills, config.bot_name, config.bot_dir_name)
+    skills_doc = load_skills(
+        config.skills_dir, selected_skills, config.bot_name, config.bot_dir_name,
+        skill_index=skill_index, bundled_dir=_bundled_dir,
+    )
     if skills_doc:
         # Resolve per-user scripts directory
         scripts_nc_path = get_user_scripts_path(task.user_id)
@@ -762,7 +766,7 @@ def execute_task(
     # Skills changelog: detect changes for interactive tasks
     skills_changelog = None
     _is_interactive = task.source_type in ("talk", "email")
-    current_fingerprint = compute_skills_fingerprint(config.skills_dir)
+    current_fingerprint = compute_skills_fingerprint(config.skills_dir, bundled_dir=_bundled_dir)
     if _is_interactive:
         try:
             def _check_fingerprint(c):
@@ -773,7 +777,7 @@ def execute_task(
                 with db.get_db(config.db_path) as fp_conn:
                     stored_fingerprint = _check_fingerprint(fp_conn)
             if stored_fingerprint != current_fingerprint:
-                skills_changelog = load_skills_changelog(config.skills_dir)
+                skills_changelog = load_skills_changelog(config.skills_dir, bundled_dir=_bundled_dir)
                 if skills_changelog:
                     logger.info(
                         "Skills changed for user %s (%s -> %s), including changelog",
@@ -1204,6 +1208,27 @@ def execute_task(
                 site_dir = config.nextcloud_mount_path / "Users" / task.user_id / config.bot_dir_name / "html"
                 env["WEBSITE_PATH"] = str(site_dir)
                 env["WEBSITE_URL"] = f"https://{config.site.hostname}/~{task.user_id}"
+
+        # Declarative env vars from skill.toml manifests
+        from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
+        env_ctx = EnvContext(
+            config=config,
+            task=task,
+            user_resources=user_resources,
+            user_config=user_config,
+            user_temp_dir=Path(user_temp_dir),
+            is_admin=is_admin,
+        )
+        skill_env = build_skill_env(selected_skills, skill_index, env_ctx)
+        # Declarative env vars don't override hardcoded ones
+        for k, v in skill_env.items():
+            if k not in env:
+                env[k] = v
+        # setup_env hooks (for complex skills like developer)
+        hook_env = dispatch_setup_env_hooks(selected_skills, skill_index, env_ctx)
+        for k, v in hook_env.items():
+            if k not in env:
+                env[k] = v
 
         # Wrap in bwrap sandbox if enabled
         if config.security.sandbox_enabled:
