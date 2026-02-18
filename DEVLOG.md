@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: Feed management skill + README updates
+
+Added `feeds_config` doc-only skill so the bot knows how to create and edit a user's `FEEDS.md` file when asked to add/remove RSS, Tumblr, or Are.na feeds via Talk. Also updated the README with previously undocumented features (Karakeep bookmarks, feed reader).
+
+**Key changes:**
+- New `feeds_config` skill: documents FEEDS.md file format, location, all three feed types, entry fields, and common operations
+- Keywords: feed, feeds, rss, tumblr, are.na, arena, subscribe, add feed, remove feed
+- README: added feed reader and Karakeep bookmarks to features list
+
+**Files added/modified:**
+- `src/istota/skills/feeds_config/skill.toml` - Skill manifest with keywords
+- `src/istota/skills/feeds_config/skill.md` - FEEDS.md format reference doc
+- `README.md` - Added feed reader and Karakeep bookmarks to features
+
 ## 2026-02-17: Skills plugin architecture
 
 Restructured the entire skills system from flat files in `config/skills/` with a central `_index.toml` into self-contained directory packages under `src/istota/skills/`. Each skill is now a directory with a `skill.toml` manifest and `skill.md` doc, optionally containing Python modules. This eliminates the need to edit 3-6 scattered files when adding a skill.
