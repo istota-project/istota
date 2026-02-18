@@ -15,8 +15,8 @@ def _make_config(**conv_overrides) -> Config:
     return Config(conversation=conv)
 
 
-def _msg(id: int, prompt: str, result: str, created_at: str = "2025-01-26 12:00", actions_taken: str | None = None) -> ConversationMessage:
-    return ConversationMessage(id=id, prompt=prompt, result=result, created_at=created_at, actions_taken=actions_taken)
+def _msg(id: int, prompt: str, result: str, created_at: str = "2025-01-26 12:00", actions_taken: str | None = None, source_type: str = "talk") -> ConversationMessage:
+    return ConversationMessage(id=id, prompt=prompt, result=result, created_at=created_at, actions_taken=actions_taken, source_type=source_type)
 
 
 def _history(n: int) -> list[ConversationMessage]:
@@ -319,3 +319,42 @@ class TestFormatContextForPrompt:
         assert "action 0" in result
         assert "action 14" in result
         assert "action 15" not in result
+
+    def test_scheduled_source_type_labeled_as_scheduled(self):
+        """Scheduled/cron messages should be labeled [Scheduled:] not [User:]."""
+        msgs = [_msg(1, "Send water reminder", "Reminder sent.", "2025-01-26 09:00:00", source_type="scheduled")]
+        result = format_context_for_prompt(msgs)
+        assert "[2025-01-26 09:00] Scheduled: Send water reminder" in result
+        assert "User:" not in result
+
+    def test_cron_source_type_labeled_as_scheduled(self):
+        """Cron source_type messages should be labeled [Scheduled:]."""
+        msgs = [_msg(1, "Daily digest", "Done.", "2025-01-26 08:00:00", source_type="cron")]
+        result = format_context_for_prompt(msgs)
+        assert "Scheduled: Daily digest" in result
+        assert "User:" not in result
+
+    def test_briefing_source_type_labeled_as_scheduled(self):
+        """Briefing messages should be labeled [Scheduled:]."""
+        msgs = [_msg(1, "Morning briefing", "Here is your briefing.", "2025-01-26 07:00:00", source_type="briefing")]
+        result = format_context_for_prompt(msgs)
+        assert "Scheduled: Morning briefing" in result
+        assert "User:" not in result
+
+    def test_talk_source_type_labeled_as_user(self):
+        """Regular talk messages should still be labeled [User:]."""
+        msgs = [_msg(1, "Hello", "Hi there.", "2025-01-26 12:00:00", source_type="talk")]
+        result = format_context_for_prompt(msgs)
+        assert "User: Hello" in result
+        assert "Scheduled:" not in result
+
+    def test_mixed_source_types_labeled_correctly(self):
+        """Mixed history with scheduled and user messages labels each correctly."""
+        msgs = [
+            _msg(1, "Send water reminder", "Reminder sent.", "2025-01-26 09:00:00", source_type="scheduled"),
+            _msg(2, "They have been reminded", "Great!", "2025-01-26 09:05:00", source_type="talk"),
+        ]
+        result = format_context_for_prompt(msgs)
+        assert "Scheduled: Send water reminder" in result
+        assert "User: They have been reminded" in result
+

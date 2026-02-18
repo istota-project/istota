@@ -201,11 +201,18 @@ def format_context_for_prompt(messages: list[ConversationMessage], truncation: i
     if not messages:
         return ""
 
+    # Source types that represent scheduled/background tasks — not real user messages
+    _SCHEDULED_SOURCE_TYPES = {"scheduled", "cron", "briefing", "heartbeat"}
+
     formatted = []
     for msg in messages:
         # Use shorter timestamp format
         timestamp = msg.created_at[:16] if msg.created_at else "unknown"
-        formatted.append(f"[{timestamp}] User: {msg.prompt}")
+        source_type = getattr(msg, "source_type", "talk")
+        if source_type in _SCHEDULED_SOURCE_TYPES:
+            formatted.append(f"[{timestamp}] Scheduled: {msg.prompt}")
+        else:
+            formatted.append(f"[{timestamp}] User: {msg.prompt}")
         result = msg.result
         if truncation > 0 and len(result) > truncation:
             result = result[:truncation] + "...[truncated]"

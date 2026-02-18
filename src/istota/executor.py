@@ -430,6 +430,7 @@ def _ensure_reply_parent_in_history(
             result=parent_task.result or "",
             created_at=parent_task.created_at or "",
             actions_taken=parent_task.actions_taken,
+            source_type=parent_task.source_type,
         )
         if parent_task.id not in history_ids:
             logger.info(
