@@ -111,7 +111,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     try:
         conversations = await client.list_conversations()
     except Exception as e:
-        logger.error("Error listing Talk conversations: %s", e)
+        logger.error("Error listing Talk conversations: %s: %s", type(e).__name__, e)
         return []
 
     # Build list of conversations to poll and initialize new ones
