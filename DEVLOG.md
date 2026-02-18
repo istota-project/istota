@@ -2,6 +2,18 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: README security model + origin story
+
+Added a new "Security model" section to the README explaining the three-layer isolation: dedicated VM separation from Nextcloud, bubblewrap sandboxing per Claude Code invocation, and per-user sandbox isolation in multi-user setups. Also rewrote the "Why Istota?" origin story to explain how it started as a mobile Claude Code wrapper for development on the go and evolved into a full assistant.
+
+**Key changes:**
+- New "Security model" section: dedicated VM isolation, bubblewrap sandbox (same as Claude Code on Linux), per-user filesystem isolation, credential stripping, deferred DB writes
+- Rewrote origin story: started as thin Claude Code wrapper for mobile dev without SSH, grew into full assistant
+- Updated deployment section to emphasize dedicated VM requirement
+
+**Files modified:**
+- `README.md` - Added security model section, rewrote origin story, updated deployment wording
+
 ## 2026-02-17: Markets skill interactive CLI
 
 The markets skill was previously briefing-only — it had no keywords and no CLI, so users couldn't ask "what happened in the markets today" in interactive chat. Added keyword triggers and a full CLI with three subcommands.

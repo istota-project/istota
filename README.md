@@ -29,15 +29,23 @@ A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code
 
 ## Why Istota?
 
-There are several Claude Code agent frameworks out there (OpenClaw and friends). Istota started in December 2025 as a Signal wrapper for Claude Code, but Signal CLI's limitations made it frustrating to use. After trying other bot frameworks with similar issues around messaging integrations, I realized Nextcloud — which I was already running for everything — was the right foundation. Nextcloud gives you granular control over what the bot can access, a solid messaging interface (Talk) where you can create separate channels for different topics and tasks, and mature iOS/Android apps with push notifications for managing things remotely.
+Istota started in December 2025 as a thin wrapper around Claude Code so I could do development on the go — kick off coding tasks from my phone without having to SSH into a VM. The first version used Signal as the messaging layer, but Signal CLI's limitations made it frustrating to use. After trying other bot frameworks with similar issues around messaging integrations, I realized Nextcloud — which I was already running for everything — was the right foundation. What was meant to be a mobile-friendly Claude Code interface turned into a fully featured assistant with its own skill system, memory, scheduling, and multi-user support.
 
-Istota lives as a regular Nextcloud user (non-admin) on your instance, sharing a workspace folder with each user. You can also share any files or folders you want to collaborate on directly with your Istota user — it just works like sharing with any other Nextcloud user.
+Nextcloud gives you granular control over what the bot can access, a solid messaging interface (Talk) where you can create separate channels for different topics and tasks, and mature iOS/Android apps with push notifications for managing things remotely. Istota lives as a regular Nextcloud user (non-admin) on your instance, sharing a workspace folder with each user. You can also share any files or folders you want to collaborate on directly with your Istota user — it just works like sharing with any other Nextcloud user.
 
 ## Should I use Istota?
 
 **Probably yes if** you run a homelab, already use Nextcloud (or are open to it), and want an AI assistant that integrates with your existing self-hosted setup — files, calendar, email, all in one place.
 
 **Probably not if** your files live entirely in Google Drive or Dropbox, you want a bot with full root access to your machine, or you'd rather not run Nextcloud. Istota is opinionated about Nextcloud as the foundation — that's its strength, but it does mean you're buying into that ecosystem.
+
+## Security model
+
+Istota runs on its own dedicated VM, separate from your Nextcloud server. It connects to Nextcloud as a regular non-admin user and can only access its own userspace and whatever files you explicitly share with the Istota Nextcloud account. It never has direct access to your Nextcloud database, other users' files, or the Nextcloud server filesystem.
+
+Each Claude Code invocation runs inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox — the same sandboxing tool that Claude Code itself uses on Linux. The sandbox provides filesystem isolation through Linux mount namespaces: the agent runs with no root access, can't see system files it doesn't need, and gets a private PID namespace so it can't inspect other processes. Only the minimum required paths are mounted — system libraries (read-only), the Python runtime (read-only), and the user's own Nextcloud subtree (read-write). Everything else, including the database, other users' directories, config files, and credentials, is hidden behind tmpfs mounts.
+
+In a multi-user setup, each user gets their own isolated sandbox. Non-admin users can only see their own Nextcloud files, can't access the database, and can't create subtasks. Admin users get broader access (full Nextcloud mount, read-only DB) but are still sandboxed. Credentials are stripped from the subprocess environment, and any writes the agent needs to make to the database go through a deferred JSON file mechanism — the agent writes requests to its temp directory, and the scheduler (which runs outside the sandbox) processes them after task completion.
 
 ## How it works
 
@@ -113,7 +121,7 @@ Each user gets a shared Nextcloud folder with config files and bot output:
 
 ## Deployment
 
-Designed to run on a Debian 13+ VM. Two deployment paths:
+Designed to run on a dedicated Debian 13+ VM, separate from your Nextcloud server. Two deployment paths:
 
 ```bash
 # Standalone install (interactive wizard)
