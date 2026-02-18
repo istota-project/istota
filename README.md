@@ -1,6 +1,6 @@
 # 🐙 Istota
 
-A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code), Istota is a fully featured AI agent with a curated and growing set of skills — file management, calendar, email, invoicing, accounting, web browsing, audio transcription, dev workflows, and more. It remembers things across conversations, runs scheduled jobs, and works through Nextcloud Talk or email.
+A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code), it handles files, calendar, email, invoicing, accounting, web browsing, audio transcription, dev workflows, and a growing list of other things. It remembers context across conversations, runs scheduled jobs, sets reminders, generates briefings, and talks to you through Nextcloud Talk or email.
 
 ## Features
 
@@ -30,23 +30,25 @@ A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code
 
 ## Why Istota?
 
-Istota started in December 2025 as a thin wrapper around Claude Code so I could do development on the go — kick off coding tasks from my phone without having to SSH into a VM. The first version used Signal as the messaging layer, but Signal CLI's limitations made it frustrating to use. After trying other bot frameworks with similar issues around messaging integrations, I realized Nextcloud — which I was already running for everything — was the right foundation. What was meant to be a mobile-friendly Claude Code interface turned into a fully featured assistant with its own skill system, memory, scheduling, and multi-user support.
+Istota started in December 2025 as a thin wrapper around Claude Code so I could do development on the go without having to SSH into a VM from my phone like an insane person.
 
-Nextcloud gives you granular control over what the bot can access, a solid messaging interface (Talk) where you can create separate channels for different topics and tasks, and mature iOS/Android apps with push notifications for managing things remotely. Istota lives as a regular Nextcloud user (non-admin) on your instance, sharing a workspace folder with each user. You can also share any files or folders you want to collaborate on directly with your Istota user — it just works like sharing with any other Nextcloud user.
+The first version used Signal as the messaging layer, but Signal CLI's quirks and the dependency on an external messaging platform made me look elsewhere. After trying other bot frameworks with similar issues around messaging integrations, I realized Nextcloud — which I was already running for everything — was the right foundation. As a mild form of claude psychosis set in, what was meant to be a mobile-friendly wrapper for Claude Code turned into a fully featured personal operating system with its own skill system, memory, scheduling, and multi-user support.
 
-## Should I use Istota?
+Nextcloud gives you granular control over what the bot can access, a solid messaging interface (Talk) where you can create separate channels for different topics and tasks, and mature iOS/Android apps with push notifications for managing things remotely. Istota lives as a regular Nextcloud user (non-admin) on your instance, sharing a workspace folder with each user. You can also share any files or folders you want to collaborate on directly with your Istota user — works the same as sharing with any other Nextcloud user.
 
-**Probably yes if** you run a homelab, already use Nextcloud (or are open to it), and want an AI assistant that integrates with your existing self-hosted setup — files, calendar, email, all in one place.
+## Should I try Istota?
 
-**Probably not if** your files live entirely in Google Drive or Dropbox, you want a bot with full root access to your machine, or you'd rather not run Nextcloud. Istota is opinionated about Nextcloud as the foundation — that's its strength, but it does mean you're buying into that ecosystem.
+**Yes** if you run a homelab, already use Nextcloud (or want to try it) and want an AI assistant that integrates with your existing self-hosted setup — files, calendar, email, but without the YOLO approach of some other options.
+
+**Probably not** if your files live entirely in Google Drive or Dropbox, you want a bot with full unhindered root access to your machine, or you'd rather not use Nextcloud. Istota is (for now, at least) opinionated about Nextcloud as the foundation — that's its strength, but it does mean you're expected to drink the kool-aid if you haven't already.
 
 ## Security model
 
-Istota runs on its own dedicated VM, separate from your Nextcloud server. It connects to Nextcloud as a regular non-admin user and can only access its own userspace and whatever files you explicitly share with the Istota Nextcloud account. It never has direct access to your Nextcloud database, other users' files, or the Nextcloud server filesystem.
+Istota runs on its own VM, separate from your Nextcloud server — it never touches your Nextcloud database or other users' files. It connects as a regular non-admin Nextcloud user that can only see its own stuff and whatever you explicitly share with it.
 
-Each Claude Code invocation runs inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox — the same sandboxing tool that Claude Code itself uses on Linux. The sandbox provides filesystem isolation through Linux mount namespaces: the agent runs with no root access, can't see system files it doesn't need, and gets a private PID namespace so it can't inspect other processes. Only the minimum required paths are mounted — system libraries (read-only), the Python runtime (read-only), and the user's own Nextcloud subtree (read-write). Everything else, including the database, other users' directories, config files, and credentials, is hidden behind tmpfs mounts.
+Each Claude Code invocation runs inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox (the same tool Claude Code itself uses on Linux). No root access, no visibility into system files it doesn't need, private PID namespace. Only the bare minimum gets mounted: system libraries (read-only), Python runtime (read-only), and the user's own Nextcloud subtree (read-write). Everything else — database, other users' directories, config files, credentials — is hidden behind tmpfs.
 
-In a multi-user setup, each user gets their own isolated sandbox. Non-admin users can only see their own Nextcloud files, can't access the database, and can't create subtasks. Admin users get broader access (full Nextcloud mount, read-only DB) but are still sandboxed. Credentials are stripped from the subprocess environment, and any writes the agent needs to make to the database go through a deferred JSON file mechanism — the agent writes requests to its temp directory, and the scheduler (which runs outside the sandbox) processes them after task completion.
+In a multi-user setup, each user gets their own sandbox. Non-admin users can only see their own files, can't touch the database, and can't spawn subtasks. Admin users get broader access but are still sandboxed. Credentials are stripped from the subprocess environment, and any DB writes the agent needs go through a deferred JSON file mechanism — the agent drops requests in its temp dir, and the scheduler processes them after the task completes.
 
 ## How it works
 
@@ -122,7 +124,7 @@ Each user gets a shared Nextcloud folder with config files and bot output:
 
 ## Deployment
 
-Designed to run on a dedicated Debian 13+ VM, separate from your Nextcloud server. Two deployment paths:
+Expects its own Debian 13 VM, separate from your Nextcloud server. Two deployment paths:
 
 ```bash
 # Standalone install (interactive wizard)
@@ -137,7 +139,7 @@ See `deploy/README.md` for full documentation, settings file format, and Ansible
 
 ```bash
 uv sync                                    # Install dependencies
-uv run pytest tests/ -v                    # Run tests (~1883 tests)
+uv run pytest tests/ -v                    # Run tests
 uv run pytest -m integration -v            # Integration tests (needs config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
