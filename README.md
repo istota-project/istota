@@ -11,6 +11,7 @@ A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code
 - 🧠 **Memory** — Remembers things about you across conversations (USER.md), with nightly memory extraction
 - 🔍 **Semantic search** — Hybrid BM25 + vector search over past conversations and memories
 - 📰 **Briefings** — Scheduled morning/evening summaries with calendar, markets, news, and TODOs
+- 📡 **Feed reader** — Aggregate RSS, Tumblr, and Are.na feeds into a static HTML page with image galleries and lightbox
 - ⏰ **Cron jobs** — Recurring scheduled tasks via `CRON.md` (AI prompts or shell commands)
 - 🔧 **Curated skills** — A growing set of secure, practical skill modules loaded on demand:
   - 📂 Nextcloud file management, sharing, and organization
