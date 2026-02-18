@@ -2,6 +2,46 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: Skills plugin architecture
+
+Restructured the entire skills system from flat files in `config/skills/` with a central `_index.toml` into self-contained directory packages under `src/istota/skills/`. Each skill is now a directory with a `skill.toml` manifest and `skill.md` doc, optionally containing Python modules. This eliminates the need to edit 3-6 scattered files when adding a skill.
+
+**Key changes:**
+- New infrastructure: `_types.py` (SkillMeta, EnvSpec dataclasses), `_loader.py` (directory-based discovery with layered priority), `_env.py` (declarative env var resolver + setup_env() hook dispatch)
+- `skills_loader.py` is now a thin re-export wrapper delegating to `skills/_loader.py`
+- Skill manifests (`skill.toml`) declare metadata, keywords, resource/source types, dependencies, and env var wiring via `[[env]]` sections
+- Discovery layers: legacy `_index.toml` < bundled `skill.toml` dirs < operator override dirs in `config/skills/`
+- `ResourceConfig.extra: dict` captures arbitrary TOML keys from `[[resources]]` entries
+- `Config.bundled_skills_dir` override for test isolation
+- All 22 skills migrated to directory format
+- Shared libraries moved into their skill packages: `finviz.py` → `markets/finviz.py`, `invoicing.py` → `accounting/invoicing.py`
+- Dashed skill names normalized to underscores: `sensitive-actions` → `sensitive_actions`, `memory-search` → `memory_search`, `briefings-config` → `briefings_config`
+- `config/skills/` is now an empty operator override directory
+- Executor wired to resolve declarative env vars and dispatch `setup_env()` hooks
+
+**Files added:**
+- `src/istota/skills/_types.py` - SkillMeta and EnvSpec dataclasses
+- `src/istota/skills/_loader.py` - Skill discovery, manifest loading, doc resolution
+- `src/istota/skills/_env.py` - Declarative env var resolver + hook dispatch
+- `src/istota/skills/*/skill.toml` - Manifest for each of 22 skills
+- `src/istota/skills/*/skill.md` - Docs moved from `config/skills/*.md`
+- `tests/test_skill_env.py` - 20 tests for env resolution
+
+**Files modified:**
+- `src/istota/skills_loader.py` - Now thin wrapper re-exporting from `skills/_loader.py`
+- `src/istota/executor.py` - Wired declarative env resolution and setup_env hooks
+- `src/istota/config.py` - Added `ResourceConfig.extra`, `Config.bundled_skills_dir`
+- `src/istota/briefing.py` - Updated finviz import path
+- `src/istota/invoice_scheduler.py` - Updated invoicing import path
+- `tests/test_skills_loader.py` - Rewritten for directory-based discovery
+- `tests/test_executor.py` - Updated for bundled_skills_dir isolation
+
+**Files removed:**
+- `config/skills/_index.toml` - Replaced by per-skill `skill.toml` manifests
+- `config/skills/*.md` - Moved to `src/istota/skills/*/skill.md`
+- `src/istota/skills/invoicing.py` - Moved to `accounting/invoicing.py`
+- `src/istota/skills/finviz.py` - Moved to `markets/finviz.py`
+
 ## 2026-02-17: Fix Ansible namespace handling
 
 Fixed several hardcoded `istota-` references in the Ansible role that broke deployments using a custom namespace (e.g., `zorg`). The scheduler service file was being written to `istota-scheduler.service` instead of `{{ istota_namespace }}-scheduler.service`, so the actual service never got updated. Same issue with the enable/start task and the deployment info message.

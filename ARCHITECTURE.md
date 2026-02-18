@@ -6,8 +6,8 @@ Istota is a self-hosted AI assistant that runs as a regular Nextcloud user. It u
 Talk (polling) ──────►┐
 Email (IMAP) ────────►├─► SQLite queue ──► Scheduler ──► Claude Code ──► Talk / Email
 TASKS.md (file) ─────►│                    (WorkerPool)   (subprocess)
-CLI (direct) ─────────►│
-CRON.md (scheduled) ──►┘
+CLI (direct) ────────►│
+CRON.md (scheduled) ─►┘
 ```
 
 Istota is not an agent framework. It is an application built on top of Claude Code. The "intelligence" comes from Claude Code itself; Istota handles the plumbing: input channels, task queuing, context assembly, prompt construction, skill loading, memory, scheduling, multi-user isolation, and response delivery.
@@ -50,7 +50,7 @@ Task lifecycle: `pending → locked → running → completed | failed | pending
 | `scheduler.py` | Main loop. Two modes: daemon (long-running with `WorkerPool`) and single-pass (process-and-exit). Orchestrates all polling, cleanup, briefing checks, heartbeat evaluation, and worker dispatch. |
 | `executor.py` | Builds the full prompt, constructs the subprocess environment, invokes Claude Code, parses the result stream. Also contains the bubblewrap sandbox logic. |
 | `context.py` | Selects relevant conversation history. Recent messages always included; older messages triaged by a fast model (Haiku) that picks which are relevant to the current request. |
-| `skills_loader.py` | Loads skill documentation from `config/skills/`. Skills are selectively included based on keywords in the prompt, user resource types, task source type, and attachment file types. |
+| `skills_loader.py` | Thin wrapper re-exporting from `skills/_loader.py`. Loads skill documentation from self-contained skill directories under `src/istota/skills/`. Skills are selectively included based on keywords, resource types, source types, and file types defined in each skill's `skill.toml` manifest. |
 | `stream_parser.py` | Parses Claude Code's `--output-format stream-json` line by line into typed events: `ToolUseEvent`, `TextEvent`, `ResultEvent`. |
 
 ### Storage and state
@@ -223,22 +223,30 @@ Reply-to messages are force-included regardless of selection. Actions taken (too
 
 ## Skills system
 
-Skills are modular documentation files in `config/skills/`. They are not code — they are reference docs loaded into the prompt so Claude knows how to use available tools and CLIs.
+Each skill is a self-contained directory under `src/istota/skills/` with a `skill.toml` manifest and `skill.md` doc. Skills are reference docs loaded into the prompt so Claude knows how to use available tools and CLIs. Some skills also contain Python modules (CLIs, libraries).
 
-### Selection
+Infrastructure lives in `skills/_types.py` (SkillMeta, EnvSpec dataclasses), `skills/_loader.py` (discovery, manifest loading, doc resolution), and `skills/_env.py` (declarative env var resolver + setup_env() hook dispatch). `skills_loader.py` at the package root is a thin re-export wrapper.
 
-`_index.toml` defines metadata for each skill. A skill is selected if any of these match:
-- `always_include = true` (files, sensitive-actions, memory, scripts, memory-search)
-- `source_type` matches the task's source type (e.g., briefing → calendar, markets, notes)
-- User has a resource type the skill is linked to (e.g., `ledger` → accounting)
-- Attachment file extensions match (e.g., `.wav` → whisper)
-- Any keyword is found in the prompt text (e.g., "email" → email skill)
+### Discovery and selection
 
-Admin-only skills (`tasks`, `schedules`) are filtered out for non-admin users.
+Skill discovery uses layered priority: bundled `skill.toml` directories < operator overrides in `config/skills/`. A skill is selected if any of these match (from its `skill.toml`):
+- `always_include = true` (files, sensitive_actions, memory, scripts, memory_search)
+- `source_types` matches the task's source type (e.g., briefing → calendar, markets, notes)
+- User has a resource type the skill is linked to (`resource_types`, e.g., `ledger` → accounting)
+- Attachment file extensions match (`file_types`, e.g., `.wav` → whisper)
+- Any `keywords` found in the prompt text (e.g., "email" → email skill)
+
+Admin-only skills (`tasks`, `schedules`) are filtered out for non-admin users. Skills with `dependencies` are skipped with a warning if the dependency is not installed.
+
+### Env var wiring
+
+Skills declare env var requirements in `[[env]]` sections in `skill.toml`. Source types: `config` (dotted config path with optional guard), `resource` (DB resource mount path), `resource_json` (all resources as JSON), `user_resource_config` (from per-user TOML `[[resources]]`), `template_file` (auto-create from template). Declarative env vars don't override hardcoded ones in executor.py.
+
+Skills with complex env setup (e.g., developer) export `setup_env(ctx) -> dict[str, str]` in their `__init__.py`, called after declarative resolution.
 
 ### Fingerprinting
 
-Skills have a SHA-256 fingerprint (of `_index.toml` + all `.md` files). When the fingerprint changes between interactions, a "what's new" changelog is appended to the prompt for interactive tasks, so the user learns about new capabilities.
+Skills have a SHA-256 fingerprint (of all `skill.toml` + `skill.md` files). When the fingerprint changes between interactions, a "what's new" changelog is appended to the prompt for interactive tasks, so the user learns about new capabilities.
 
 ### Placeholder substitution
 

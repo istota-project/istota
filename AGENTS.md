@@ -25,7 +25,7 @@ istota/
 │   ├── notifications.py     # Central notification dispatcher (Talk, Email, ntfy)
 │   ├── scheduler.py         # Task processor, briefing scheduler, all polling
 │   ├── shared_file_organizer.py # Auto-organize files shared with bot
-│   ├── skills_loader.py     # Skill loading and selection
+│   ├── skills_loader.py     # Thin wrapper re-exporting from skills/_loader.py
 │   ├── sleep_cycle.py       # Nightly memory extraction
 │   ├── storage.py           # Bot-managed Nextcloud storage
 │   ├── stream_parser.py     # Parse stream-json events
@@ -34,16 +34,32 @@ istota/
 │   ├── talk_poller.py       # Talk conversation polling
 │   ├── tasks_file_poller.py # TASKS.md file monitoring
 │   ├── memory_search.py     # Hybrid BM25 + vector search over conversations/memories
-│   └── skills/
-│       ├── accounting.py    # Beancount ledger ops + Monarch Money sync + invoicing CLI
-│       ├── invoicing.py     # Invoice generation, PDF export, cash-basis income
-│       ├── browse.py        # Web browsing CLI (Docker container API)
-│       ├── calendar.py      # CalDAV helper functions
-│       ├── email.py         # Native IMAP/SMTP operations
-│       ├── files.py         # Nextcloud file ops (mount-aware, rclone fallback)
-│       ├── markets.py       # yfinance wrapper
-│       ├── memory_search.py # Memory search CLI (search, index, reindex, stats)
-│       ├── transcribe.py    # OCR transcription via Tesseract
+│   └── skills/              # Self-contained skill directories (skill.toml + skill.md + optional Python)
+│       ├── _types.py        # SkillMeta, EnvSpec dataclasses
+│       ├── _loader.py       # Skill discovery, manifest loading, doc resolution
+│       ├── _env.py          # Declarative env var resolver + setup_env() hook dispatch
+│       ├── accounting/      # Beancount ledger ops + Monarch Money sync + invoicing
+│       ├── bookmarks/       # Karakeep bookmark management
+│       ├── briefing/        # Briefing format reference (doc-only)
+│       ├── briefings_config/ # User briefing schedule config (doc-only)
+│       ├── browse/          # Web browsing CLI (Docker container API)
+│       ├── calendar/        # CalDAV helper functions
+│       ├── developer/       # Git/GitLab/GitHub workflows (doc-only)
+│       ├── email/           # Native IMAP/SMTP operations
+│       ├── files/           # Nextcloud file ops (mount-aware, rclone fallback)
+│       ├── heartbeat/       # Heartbeat monitoring reference (doc-only)
+│       ├── markets/         # yfinance wrapper + FinViz scraping
+│       ├── memory/          # Memory file reference (doc-only)
+│       ├── memory_search/   # Memory search CLI (search, index, reindex, stats)
+│       ├── nextcloud/       # Nextcloud sharing reference (doc-only)
+│       ├── notes/           # Notes file reference (doc-only)
+│       ├── schedules/       # CRON.md job management reference (doc-only)
+│       ├── scripts/         # User scripts reference (doc-only)
+│       ├── sensitive_actions/ # Confirmation rules (doc-only)
+│       ├── tasks/           # Subtask/queue reference (doc-only)
+│       ├── todos/           # Todo list reference (doc-only)
+│       ├── transcribe/      # OCR transcription via Tesseract
+│       ├── website/         # Website management reference (doc-only)
 │       └── whisper/         # Audio transcription via faster-whisper (CPU, int8)
 ├── config/
 │   ├── config.toml          # Active configuration (gitignored)
@@ -51,7 +67,7 @@ istota/
 │   ├── users/               # Per-user config files (override [users] section)
 │   ├── persona.md           # Default personality (user workspace PERSONA.md overrides)
 │   ├── guidelines/          # Channel-specific formatting (talk.md, email.md, briefing.md)
-│   └── skills/              # Skill files (selectively loaded via _index.toml)
+│   └── skills/              # Operator override directory (empty by default)
 ├── deploy/
 │   ├── ansible/             # Ansible role (defaults, tasks, handlers, templates)
 │   ├── render_config.py     # Python config generator for install.sh
@@ -154,14 +170,17 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 **!Commands**: `!`-prefixed messages intercepted in the poller before task creation. Handled synchronously without Claude Code. Commands: `!help` (list commands), `!stop` (cancel active task via DB flag + SIGTERM), `!status` (show tasks grouped by interactive/background + system stats), `!memory user`/`!memory channel` (show memory files), `!cron` (list/enable/disable scheduled jobs), `!usage` (show Claude API usage/billing stats), `!check` (run system health check). Long responses split via `split_message()`. Registry in `commands.py` with decorator-based registration.
 
 ### Skills
-Modular reference docs in `config/skills/`, selectively loaded via `_index.toml`:
-- `always_include`: `files.md`, `sensitive-actions.md`, `scripts.md`
-- `resource_types`: calendar → `calendar.md`
-- `source_types`: briefing → `markets.md`, `notes.md`
-- `keywords`: pattern match on prompt (e.g., "email" → `email.md`)
-- `admin_only`: `schedules.md`, `tasks.md` (filtered out for non-admin users)
+Self-contained directories under `src/istota/skills/`, each with a `skill.toml` manifest and `skill.md` doc. `config/skills/` serves as an operator override directory (skill.md placed there takes precedence over bundled). Discovery uses `_loader.py` with layered priority: bundled `skill.toml` dirs < operator override dirs.
 
-Other skills: `todos.md`, `memory.md`, `nextcloud.md`, `browse.md`, `briefings-config.md`, `briefing.md`, `heartbeat.md`, `transcribe.md`, `whisper.md`, `accounting.md`, `memory-search.md`
+Selection criteria (from `skill.toml`):
+- `always_include`: files, sensitive_actions, memory, scripts, memory_search
+- `resource_types`: calendar → calendar, ledger → accounting, karakeep → bookmarks
+- `source_types`: briefing → calendar, markets, notes, briefing
+- `keywords`: pattern match on prompt (e.g., "email" → email skill)
+- `file_types`: attachment extensions (e.g., `.wav` → whisper)
+- `admin_only`: schedules, tasks (filtered out for non-admin users)
+
+Env var wiring is declarative via `[[env]]` sections in `skill.toml`. Skills with complex env setup export `setup_env(ctx)` in `__init__.py`.
 
 **Skill CLI pattern**: Action skills expose `python -m istota.skills.<name>` CLI with `build_parser()`/`main()`, JSON output, env-var config. Executor passes credentials as env vars.
 

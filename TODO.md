@@ -260,7 +260,8 @@
 - [ ] Migrate existing scripts to use KV store or `data/` directory for state
 - [ ] Bulk data read/write commands for larger JSON blobs
 
-### Skills
+### Skills ✅
 - [x] Web browsing skill via Dockerized Playwright with stealth and VNC captcha fallback
 - [x] Audio transcription via faster-whisper (CPU, int8) with auto model selection and RAM guard
+- [x] Plugin architecture: self-contained skill directories with `skill.toml` manifests, declarative env var wiring, directory-based discovery
 - [ ] More specialized skills with specific commands/tools
