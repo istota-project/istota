@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-17: Once-fire cron jobs + Claude session log cleanup
+
+One-time scheduled jobs (`once = true`) are now automatically removed from both DB and CRON.md after successful execution. This replaces the previous approach where the reminders skill doc told Claude to manually clean up spent entries (unreliable). Also added periodic cleanup of Claude's JSONL session logs which grow unbounded in the bwrap sandbox.
+
+**Key changes:**
+- New `once` field on CronJob dataclass, parsed from TOML, synced to DB, round-trips through generate/migrate
+- New `remove_job_from_cron_md()` function — loads, filters, rewrites cleanly via `generate_cron_md()`
+- New `get_scheduled_job()` and `delete_scheduled_job()` DB functions
+- Scheduler auto-removes once jobs after success (DB delete + CRON.md removal), keeps on failure for retry
+- New `cleanup_old_claude_logs()` — deletes old `.jsonl`/`.txt`/`.json` from `~/.claude/{projects,debug,todos}`
+- Hooked into `run_cleanup_checks()` using same `temp_file_retention_days` retention
+- Reminders skill.md updated: `once = true` in template, simplified cleanup section
+- `schema.sql` and DB migration for `once INTEGER DEFAULT 0` on `scheduled_jobs`
+- 23 new tests: once field parsing/sync/removal (13 in test_cron_loader), once-job auto-removal + JSONL cleanup (10 in test_scheduler)
+
+**Files added/modified:**
+- `src/istota/cron_loader.py` - `once` field on CronJob, `remove_job_from_cron_md()`
+- `src/istota/db.py` - `once` on ScheduledJob, migration, `get_scheduled_job()`, `delete_scheduled_job()`
+- `src/istota/scheduler.py` - Once-job auto-removal on success, `cleanup_old_claude_logs()`
+- `src/istota/skills/reminders/skill.md` - `once = true` in template, auto-cleanup docs
+- `schema.sql` - `once INTEGER DEFAULT 0` column on `scheduled_jobs`
+- `AGENTS.md` - Documented one-time jobs in Scheduled Jobs section
+- `tests/test_cron_loader.py` - TestOnceField (7 tests), TestRemoveJobFromCronMd (5 tests)
+- `tests/test_scheduler.py` - TestOnceJobAutoRemoval (4 tests), TestCleanupOldClaudeLogs (6 tests)
+
 ## 2026-02-17: Pre-transcribe audio for skill selection + companion skills + whisper max model
 
 Voice memos arriving as `[audio.mp3]` had no meaningful text for skill selection — keyword-based skills like reminders, schedules, and calendar never loaded. Fixed by pre-transcribing audio attachments before skill selection so the enriched prompt contains the actual spoken words. Also added `companion_skills` as a generic skill.toml feature and capped whisper auto-selection with a configurable max model.

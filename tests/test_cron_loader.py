@@ -11,6 +11,7 @@ from istota.cron_loader import (
     generate_cron_md,
     load_cron_jobs,
     migrate_db_jobs_to_file,
+    remove_job_from_cron_md,
     sync_cron_jobs_to_db,
 )
 from istota.storage import get_user_cron_path
@@ -609,3 +610,184 @@ target = "talk"
         assert len(jobs) == 1
         assert jobs[0].command == "echo hello"
         assert jobs[0].prompt == ""
+
+
+# ---------------------------------------------------------------------------
+# TestOnceField
+# ---------------------------------------------------------------------------
+
+
+class TestOnceField:
+    """Tests for once=true one-time job support."""
+
+    def test_parse_once_from_toml(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "reminder-123"
+cron = "30 14 17 2 *"
+prompt = "Send reminder"
+once = true
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].once is True
+
+    def test_once_defaults_to_false(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "recurring"
+cron = "0 9 * * *"
+prompt = "daily check"
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].once is False
+
+    def test_once_roundtrips_through_generate(self):
+        jobs = [
+            CronJob(name="one-shot", cron="0 12 1 3 *", prompt="fire once", once=True),
+            CronJob(name="recurring", cron="0 9 * * *", prompt="daily"),
+        ]
+        content = generate_cron_md(jobs)
+        assert "once = true" in content
+        # Recurring job should NOT have once line
+        lines = content.split("\n")
+        # Find the recurring job section — once should only appear once in entire output
+        assert content.count("once = true") == 1
+
+    def test_once_synced_to_db(self, db_path):
+        file_jobs = [CronJob(name="one-shot", cron="0 12 1 3 *", prompt="fire once", once=True)]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            job = db.get_scheduled_job_by_name(conn, "alice", "one-shot")
+        assert job.once is True
+
+    def test_once_false_synced_to_db(self, db_path):
+        file_jobs = [CronJob(name="recurring", cron="0 9 * * *", prompt="daily")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            job = db.get_scheduled_job_by_name(conn, "alice", "recurring")
+        assert job.once is False
+
+    def test_once_updated_on_sync(self, db_path):
+        """Changing once from false to true in file should update DB."""
+        file_jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="test")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            job = db.get_scheduled_job_by_name(conn, "alice", "j1")
+            assert job.once is False
+
+        file_jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="test", once=True)]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            job = db.get_scheduled_job_by_name(conn, "alice", "j1")
+            assert job.once is True
+
+    def test_migrate_once_job_to_file(self, db_path, mount_path, make_config_with_mount):
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-123", "30 14 17 2 *", "Send reminder"),
+            )
+            migrate_db_jobs_to_file(conn, config, "alice")
+
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].once is True
+
+
+# ---------------------------------------------------------------------------
+# TestRemoveJobFromCronMd
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveJobFromCronMd:
+    """Tests for remove_job_from_cron_md()."""
+
+    def test_removes_target_job(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "keep-this"
+cron = "0 9 * * *"
+prompt = "daily check"
+
+[[jobs]]
+name = "remove-me"
+cron = "30 14 17 2 *"
+prompt = "one-shot"
+once = true
+```
+""")
+        result = remove_job_from_cron_md(config, "alice", "remove-me")
+        assert result is True
+
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].name == "keep-this"
+
+    def test_leaves_other_jobs_intact(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "j1"
+cron = "0 9 * * *"
+prompt = "first"
+
+[[jobs]]
+name = "j2"
+cron = "0 12 * * *"
+prompt = "second"
+
+[[jobs]]
+name = "j3"
+cron = "0 18 * * *"
+prompt = "third"
+```
+""")
+        remove_job_from_cron_md(config, "alice", "j2")
+
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 2
+        assert jobs[0].name == "j1"
+        assert jobs[1].name == "j3"
+
+    def test_job_not_found_returns_false(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "existing"
+cron = "0 9 * * *"
+prompt = "test"
+```
+""")
+        result = remove_job_from_cron_md(config, "alice", "nonexistent")
+        assert result is False
+
+        # Original job should still be there
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+
+    def test_no_cron_file_returns_false(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        result = remove_job_from_cron_md(config, "alice", "any-job")
+        assert result is False
+
+    def test_no_mount_returns_false(self, tmp_path):
+        config = Config(db_path=tmp_path / "test.db")
+        result = remove_job_from_cron_md(config, "alice", "any-job")
+        assert result is False

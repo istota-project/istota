@@ -112,6 +112,7 @@
 - [x] `!cron` command for listing/enabling/disabling jobs
 - [x] `!status` interactive vs background task grouping
 - [x] Shell command jobs (`command` field, mutually exclusive with `prompt`, subprocess execution)
+- [x] One-time jobs (`once = true`) auto-removed from DB and CRON.md after successful execution
 
 ### User Timezone from Nextcloud ✅
 - [x] Fetch user's timezone from Nextcloud API instead of requiring manual config

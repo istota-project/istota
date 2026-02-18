@@ -184,6 +184,7 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     consecutive_failures INTEGER DEFAULT 0,
     last_error TEXT,
     last_success_at TEXT,
+    once INTEGER DEFAULT 0,                 -- One-time job: auto-removed after successful execution
     UNIQUE(user_id, name)
 );
 

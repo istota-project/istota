@@ -25,6 +25,7 @@ class CronJob:
     room: str = ""  # conversation_token
     enabled: bool = True
     silent_unless_action: bool = False
+    once: bool = False
 
 
 def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
@@ -84,6 +85,7 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
             room=j.get("room", ""),
             enabled=j.get("enabled", True),
             silent_unless_action=j.get("silent_unless_action", False),
+            once=j.get("once", False),
         ))
 
     return jobs
@@ -113,6 +115,8 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
             lines.append("enabled = false")
         if job.silent_unless_action:
             lines.append("silent_unless_action = true")
+        if job.once:
+            lines.append("once = true")
 
     lines.append("```")
     lines.append("")
@@ -143,6 +147,7 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
                 "conversation_token": fj.room or None,
                 "output_target": fj.target or None,
                 "silent_unless_action": 1 if fj.silent_unless_action else 0,
+                "once": 1 if fj.once else 0,
             }
             # Only force-disable from file; don't re-enable (preserves !cron disable)
             if not fj.enabled:
@@ -159,14 +164,16 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
             conn.execute(
                 """INSERT INTO scheduled_jobs
                    (user_id, name, cron_expression, prompt, command,
-                    conversation_token, output_target, enabled, silent_unless_action)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    conversation_token, output_target, enabled, silent_unless_action,
+                    once)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id, fj.name, fj.cron, fj.prompt,
                     fj.command or None,
                     fj.room or None, fj.target or None,
                     1 if fj.enabled else 0,
                     1 if fj.silent_unless_action else 0,
+                    1 if fj.once else 0,
                 ),
             )
 
@@ -213,6 +220,7 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             room=j.conversation_token or "",
             enabled=j.enabled,
             silent_unless_action=j.silent_unless_action,
+            once=j.once,
         )
         for j in db_jobs
     ]
@@ -223,4 +231,29 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
         "Migrated %d DB scheduled job(s) to CRON.md for user %s",
         len(file_jobs), user_id,
     )
+    return True
+
+
+def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
+    """
+    Remove a job by name from the user's CRON.md file.
+
+    Loads the file, filters out the named job, and rewrites cleanly.
+    Returns True if the job was found and removed.
+    """
+    if not config.use_mount:
+        return False
+
+    jobs = load_cron_jobs(config, user_id)
+    if jobs is None:
+        return False
+
+    original_count = len(jobs)
+    jobs = [j for j in jobs if j.name != job_name]
+    if len(jobs) == original_count:
+        return False  # Job not found
+
+    cron_path = config.nextcloud_mount_path / get_user_cron_path(user_id, config.bot_dir_name).lstrip("/")
+    cron_path.write_text(generate_cron_md(jobs))
+    logger.info("Removed job '%s' from CRON.md for user %s", job_name, user_id)
     return True

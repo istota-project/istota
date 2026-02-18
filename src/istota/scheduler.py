@@ -716,6 +716,16 @@ def process_one_task(
                 # Track scheduled job success
                 if task.scheduled_job_id:
                     db.reset_scheduled_job_failures(conn, task.scheduled_job_id)
+                    # Auto-remove one-time jobs after successful execution
+                    job = db.get_scheduled_job(conn, task.scheduled_job_id)
+                    if job and job.once:
+                        db.delete_scheduled_job(conn, task.scheduled_job_id)
+                        logger.info(
+                            "One-time job '%s' completed and removed (job_id=%d)",
+                            job.name, job.id,
+                        )
+                        from .cron_loader import remove_job_from_cron_md
+                        remove_job_from_cron_md(config, task.user_id, job.name)
 
         else:
             # Check if we should retry (skip for OOM and cancellation — no point retrying)
@@ -1197,6 +1207,57 @@ async def run_cleanup_checks(config: Config) -> None:
                 logger.info(f"Deleted {deleted_files} old temp file(s)")
         except Exception as e:
             logger.error(f"Error cleaning up temp files: {e}")
+
+    # 8. Clean up old Claude session logs
+    if sched.temp_file_retention_days > 0:
+        try:
+            deleted_logs = cleanup_old_claude_logs(sched.temp_file_retention_days)
+            if deleted_logs > 0:
+                logger.info(f"Deleted {deleted_logs} old Claude session log(s)")
+        except Exception as e:
+            logger.error(f"Error cleaning up Claude logs: {e}")
+
+
+def cleanup_old_claude_logs(retention_days: int) -> int:
+    """
+    Delete old Claude session logs from ~/.claude/{projects,debug,todos}.
+
+    Returns count of deleted files.
+    """
+    home = Path(os.environ.get("HOME", "/tmp"))
+    claude_dir = home / ".claude"
+    if not claude_dir.exists():
+        return 0
+
+    cutoff = time.time() - (retention_days * 24 * 60 * 60)
+    deleted = 0
+
+    cleanup_specs = [
+        (claude_dir / "projects", "*.jsonl"),
+        (claude_dir / "debug", "*.txt"),
+        (claude_dir / "todos", "*.json"),
+    ]
+
+    for base_dir, pattern in cleanup_specs:
+        if not base_dir.exists():
+            continue
+        for path in base_dir.rglob(pattern):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    deleted += 1
+            except Exception as e:
+                logger.debug("Could not delete claude log %s: %s", path, e)
+
+        # Clean up empty subdirectories (walk bottom-up)
+        for dirpath in sorted(base_dir.rglob("*"), reverse=True):
+            if dirpath.is_dir():
+                try:
+                    dirpath.rmdir()  # only succeeds if empty
+                except OSError:
+                    pass
+
+    return deleted
 
 
 def _sync_cron_files(conn, app_config: Config) -> None:

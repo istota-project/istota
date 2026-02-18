@@ -116,6 +116,7 @@ class ScheduledJob:
     consecutive_failures: int = 0
     last_error: str | None = None
     last_success_at: str | None = None
+    once: bool = False
 
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
@@ -146,6 +147,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("consecutive_failures", "INTEGER DEFAULT 0"),
         ("last_error", "TEXT"),
         ("last_success_at", "TEXT"),
+        ("once", "INTEGER DEFAULT 0"),
     ]:
         try:
             conn.execute(f"ALTER TABLE scheduled_jobs ADD COLUMN {col} {col_type}")
@@ -1369,7 +1371,8 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
         """
         SELECT id, user_id, name, cron_expression, prompt, command,
                conversation_token, output_target, enabled, last_run_at, created_at,
-               silent_unless_action, consecutive_failures, last_error, last_success_at
+               silent_unless_action, consecutive_failures, last_error, last_success_at,
+               once
         FROM scheduled_jobs
         WHERE enabled = 1
         """
@@ -1383,7 +1386,8 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
         """
         SELECT id, user_id, name, cron_expression, prompt, command,
                conversation_token, output_target, enabled, last_run_at, created_at,
-               silent_unless_action, consecutive_failures, last_error, last_success_at
+               silent_unless_action, consecutive_failures, last_error, last_success_at,
+               once
         FROM scheduled_jobs
         WHERE user_id = ?
         ORDER BY name
@@ -1411,6 +1415,7 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
         consecutive_failures=row["consecutive_failures"] if "consecutive_failures" in row.keys() else 0,
         last_error=row["last_error"] if "last_error" in row.keys() else None,
         last_success_at=row["last_success_at"] if "last_success_at" in row.keys() else None,
+        once=bool(row["once"]) if "once" in row.keys() else False,
     )
 
 
@@ -1463,6 +1468,30 @@ def disable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
     )
 
 
+def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | None:
+    """Look up a scheduled job by ID."""
+    cursor = conn.execute(
+        """
+        SELECT id, user_id, name, cron_expression, prompt, command,
+               conversation_token, output_target, enabled, last_run_at, created_at,
+               silent_unless_action, consecutive_failures, last_error, last_success_at,
+               once
+        FROM scheduled_jobs
+        WHERE id = ?
+        """,
+        (job_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return _row_to_scheduled_job(row)
+
+
+def delete_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
+    """Delete a scheduled job from the database."""
+    conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (job_id,))
+
+
 def enable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
     """Enable a scheduled job and reset failure count."""
     conn.execute(
@@ -1483,7 +1512,8 @@ def get_scheduled_job_by_name(
         """
         SELECT id, user_id, name, cron_expression, prompt, command,
                conversation_token, output_target, enabled, last_run_at, created_at,
-               silent_unless_action, consecutive_failures, last_error, last_success_at
+               silent_unless_action, consecutive_failures, last_error, last_success_at,
+               once
         FROM scheduled_jobs
         WHERE user_id = ? AND name = ?
         """,

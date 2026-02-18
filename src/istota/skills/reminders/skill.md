@@ -16,10 +16,12 @@ Reminders are one-shot scheduled jobs in CRON.md. There is no separate reminder 
    prompt = "Send this exact message: @{user_id} Reminder: {message}"
    target = "talk"
    room = "{current_conversation_token}"
+   once = true
    ```
    - `name`: Use `reminder-` prefix + unix timestamp for uniqueness
    - `prompt`: MUST instruct the bot to start the response with `@{user_id}` (the Nextcloud username, e.g. `@alice`). This triggers a Nextcloud Talk mention notification so the user actually gets alerted. Without the `@` mention, the reminder fires silently
    - `room`: Use the conversation token from the current task context
+   - `once = true`: The job is automatically removed from DB and CRON.md after it fires successfully. No manual cleanup needed
    - For email delivery, use `target = "email"` instead
 5. **Write the updated CRON.md.**
 6. **Confirm to the user** what was set and when it will fire in human-readable form (e.g., "I'll remind you to call the dentist at 4:30 PM today").
@@ -30,9 +32,9 @@ NEVER tell the user you set a reminder without actually writing to CRON.md. If y
 
 ## Cleanup
 
-When you are delivering a reminder (i.e., you were invoked by a scheduled job with a `reminder-` name), delete the spent `[[jobs]]` entry from CRON.md afterward. Read the file, remove the entry that fired, and write it back. This keeps the file clean.
+One-time jobs (`once = true`) are automatically removed after successful execution — no manual cleanup needed.
 
-Same for cancelled reminders — if a user asks to cancel a reminder, remove its entry from CRON.md.
+If a user asks to cancel a reminder, remove its entry from CRON.md manually.
 
 ## Listing reminders
 
@@ -40,4 +42,4 @@ To show pending reminders, read CRON.md and filter for entries whose name starts
 
 ## Recurring reminders
 
-For recurring requests like "remind me every day at 9am", use a standard recurring cron expression (e.g., `0 9 * * *`) instead of pinning to a specific date. Use a descriptive name like `reminder-daily-standup` instead of a timestamp.
+For recurring requests like "remind me every day at 9am", use a standard recurring cron expression (e.g., `0 9 * * *`) instead of pinning to a specific date. Use a descriptive name like `reminder-daily-standup` instead of a timestamp. Do NOT set `once = true` for recurring reminders.

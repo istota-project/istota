@@ -13,6 +13,7 @@ from istota.scheduler import (
     CONFIRMATION_PATTERN,
     PROGRESS_MESSAGES,
     WorkerPool,
+    cleanup_old_claude_logs,
     download_talk_attachments,
     get_worker_id,
     strip_briefing_preamble,
@@ -2059,3 +2060,272 @@ class TestDeferredOperations:
         with db.get_db(db_path) as conn:
             tasks = db.list_tasks(conn, user_id="testuser")
         assert all(t.source_type != "subtask" for t in tasks)
+
+
+# ---------------------------------------------------------------------------
+# TestOnceJobAutoRemoval
+# ---------------------------------------------------------------------------
+
+
+class TestOnceJobAutoRemoval:
+    """Tests for automatic removal of once=true scheduled jobs after success."""
+
+    def _make_config(self, db_path, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example.com", username="istota", app_password="secret"),
+            talk=TalkConfig(enabled=True, bot_username="istota"),
+            email=EmailConfig(enabled=False),
+            nextcloud_mount_path=mount,
+            temp_dir=tmp_path / "temp",
+        )
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_once_job_removed_on_success(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Successful once job should be removed from DB."""
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-123", "30 14 17 2 *", "Send reminder"),
+            )
+            job_id = conn.execute("SELECT id FROM scheduled_jobs WHERE name='reminder-123'").fetchone()[0]
+
+            db.create_task(
+                conn,
+                prompt="Send reminder",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            job = db.get_scheduled_job_by_name(conn, "alice", "reminder-123")
+            assert job is None, "Once job should be deleted from DB after success"
+
+    @patch("istota.scheduler.execute_task", return_value=(False, "Task failed", None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_once_job_not_removed_on_failure(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Failed once job should NOT be removed (stays for retry)."""
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-456", "0 9 18 2 *", "Reminder"),
+            )
+            job_id = conn.execute("SELECT id FROM scheduled_jobs WHERE name='reminder-456'").fetchone()[0]
+
+            task_id = db.create_task(
+                conn,
+                prompt="Reminder",
+                user_id="alice",
+                source_type="scheduled",
+                scheduled_job_id=job_id,
+            )
+            # Set attempts to max so failure is permanent
+            conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?", (task_id,))
+
+        process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            job = db.get_scheduled_job_by_name(conn, "alice", "reminder-456")
+            assert job is not None, "Once job should NOT be deleted on failure"
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_once_job_also_removed_from_cron_md(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Successful once job should also be removed from CRON.md file."""
+        from istota.cron_loader import load_cron_jobs
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path)
+        mount = config.nextcloud_mount_path
+
+        # Write CRON.md with the once job and a regular job
+        cron_path = mount / get_user_cron_path("alice", "istota").lstrip("/")
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "keep-this"
+cron = "0 9 * * *"
+prompt = "daily check"
+
+[[jobs]]
+name = "reminder-789"
+cron = "0 15 20 2 *"
+prompt = "One-time reminder"
+once = true
+```
+""")
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-789", "0 15 20 2 *", "One-time reminder"),
+            )
+            job_id = conn.execute("SELECT id FROM scheduled_jobs WHERE name='reminder-789'").fetchone()[0]
+
+            db.create_task(
+                conn,
+                prompt="One-time reminder",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        process_one_task(config)
+
+        # CRON.md should only have the keep-this job
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].name == "keep-this"
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Regular success", None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_non_once_job_not_removed(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Regular (non-once) job should NOT be removed on success."""
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 0)""",
+                ("alice", "daily-job", "0 9 * * *", "Do stuff"),
+            )
+            job_id = conn.execute("SELECT id FROM scheduled_jobs WHERE name='daily-job'").fetchone()[0]
+
+            db.create_task(
+                conn,
+                prompt="Do stuff",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            job = db.get_scheduled_job_by_name(conn, "alice", "daily-job")
+            assert job is not None, "Regular job should NOT be deleted on success"
+
+
+# ---------------------------------------------------------------------------
+# TestCleanupOldClaudeLogs
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupOldClaudeLogs:
+    """Tests for cleanup_old_claude_logs()."""
+
+    def test_deletes_old_jsonl_files(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        projects = claude_dir / "projects" / "some-project"
+        projects.mkdir(parents=True)
+
+        import time
+        old_file = projects / "old-session.jsonl"
+        old_file.write_text("{}")
+        recent_file = projects / "recent-session.jsonl"
+        recent_file.write_text("{}")
+
+        # Make old file actually old
+        import os
+        old_mtime = time.time() - (10 * 24 * 60 * 60)
+        os.utime(old_file, (old_mtime, old_mtime))
+
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            deleted = cleanup_old_claude_logs(retention_days=7)
+
+        assert deleted == 1
+        assert not old_file.exists()
+        assert recent_file.exists()
+
+    def test_deletes_old_debug_files(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        debug = claude_dir / "debug"
+        debug.mkdir(parents=True)
+
+        import time, os
+        old_file = debug / "debug-2026-01-01.txt"
+        old_file.write_text("log")
+        old_mtime = time.time() - (10 * 24 * 60 * 60)
+        os.utime(old_file, (old_mtime, old_mtime))
+
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            deleted = cleanup_old_claude_logs(retention_days=7)
+
+        assert deleted == 1
+        assert not old_file.exists()
+
+    def test_deletes_old_todo_files(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        todos = claude_dir / "todos"
+        todos.mkdir(parents=True)
+
+        import time, os
+        old_file = todos / "tasks.json"
+        old_file.write_text("[]")
+        old_mtime = time.time() - (10 * 24 * 60 * 60)
+        os.utime(old_file, (old_mtime, old_mtime))
+
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            deleted = cleanup_old_claude_logs(retention_days=7)
+
+        assert deleted == 1
+
+    def test_removes_empty_subdirectories(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        subdir = claude_dir / "projects" / "empty-project"
+        subdir.mkdir(parents=True)
+
+        import time, os
+        old_file = subdir / "session.jsonl"
+        old_file.write_text("{}")
+        old_mtime = time.time() - (10 * 24 * 60 * 60)
+        os.utime(old_file, (old_mtime, old_mtime))
+
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            cleanup_old_claude_logs(retention_days=7)
+
+        assert not subdir.exists(), "Empty subdirectory should be removed"
+
+    def test_missing_claude_dir_returns_zero(self, tmp_path):
+        import os
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            deleted = cleanup_old_claude_logs(retention_days=7)
+        assert deleted == 0
+
+    def test_keeps_recent_files(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        projects = claude_dir / "projects" / "active"
+        projects.mkdir(parents=True)
+
+        recent = projects / "today.jsonl"
+        recent.write_text("{}")
+
+        import os
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            deleted = cleanup_old_claude_logs(retention_days=7)
+
+        assert deleted == 0
+        assert recent.exists()

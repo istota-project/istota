@@ -77,7 +77,7 @@ istota/
 │   └── README.md            # Deployment documentation
 ├── docker/browser/          # Playwright browser container (Flask API)
 ├── scripts/                 # setup.sh, scheduler.sh
-├── tests/                   # pytest + pytest-asyncio (~1946 tests, 43 files)
+├── tests/                   # pytest + pytest-asyncio (~1964 tests, 43 files)
 ├── schema.sql
 └── pyproject.toml
 ```
@@ -224,6 +224,8 @@ Defined in `/Users/{user_id}/{bot_name}/config/CRON.md` (markdown with TOML `[[j
 
 **Job types**: Each job has either `prompt` (runs through Claude Code) or `command` (runs shell command directly via `subprocess.run()`). Mutually exclusive — exactly one must be set. Command jobs flow through the same task queue and get retry logic, `!stop`, failure tracking, and auto-disable. Env vars passed to commands: `ISTOTA_TASK_ID`, `ISTOTA_USER_ID`, `ISTOTA_DB_PATH`, `NEXTCLOUD_MOUNT_PATH`, `ISTOTA_CONVERSATION_TOKEN`.
 
+**One-time jobs**: `once = true` on a `[[jobs]]` entry marks it as one-shot. After successful execution, the scheduler automatically deletes the job from both DB and CRON.md. Failed jobs are kept for retry. Used by reminders skill for fire-and-forget entries.
+
 **Migration**: If a user has DB jobs but no CRON.md, the file is auto-generated from DB entries on first sync. After that, CRON.md is the source of truth.
 
 **Isolation**: Scheduled job results excluded from interactive conversation context. Worker pool reserves slots for interactive tasks (`reserved_interactive_workers`, default 2). `silent_unless_action=1` suppresses output unless response has `ACTION:` prefix. Jobs auto-disable after `scheduled_job_max_consecutive_failures` (default 5) consecutive failures. Re-enable via `!cron enable <name>`. Tasks link back to originating job via `scheduled_job_id` column.
@@ -354,7 +356,7 @@ With sandbox enabled and DB mounted read-only, Claude and skill CLIs cannot writ
 
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Shared fixtures in `conftest.py`. Current: ~1883 tests across 43 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Shared fixtures in `conftest.py`. Current: ~1964 tests across 43 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests
