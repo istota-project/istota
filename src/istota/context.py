@@ -208,11 +208,9 @@ def format_context_for_prompt(messages: list[ConversationMessage], truncation: i
     for msg in messages:
         # Use shorter timestamp format
         timestamp = msg.created_at[:16] if msg.created_at else "unknown"
-        source_type = getattr(msg, "source_type", "talk")
-        if source_type in _SCHEDULED_SOURCE_TYPES:
-            formatted.append(f"[{timestamp}] Scheduled: {msg.prompt}")
-        else:
-            formatted.append(f"[{timestamp}] User: {msg.prompt}")
+        source_type = getattr(msg, "source_type", "talk") or "talk"
+        speaker = "Scheduled" if source_type in _SCHEDULED_SOURCE_TYPES else "User"
+        formatted.append(f"[{timestamp}] {speaker}: {msg.prompt}")
         result = msg.result
         if truncation > 0 and len(result) > truncation:
             result = result[:truncation] + "...[truncated]"
