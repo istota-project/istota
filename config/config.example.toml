@@ -4,6 +4,9 @@
 # Change this to whatever you want to call your assistant.
 bot_name = "Istota"
 
+# Claude model to use (e.g. "sonnet", "opus"). Empty or omitted = CLI default.
+# model = "sonnet"
+
 # Database path (relative to working directory or absolute)
 db_path = "data/istota.db"
 

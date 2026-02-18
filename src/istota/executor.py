@@ -1051,6 +1051,8 @@ def execute_task(
             cmd = ["claude", "-p", prompt, "--allowedTools"] + allowed
         else:
             cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
+        if config.model:
+            cmd += ["--model", config.model]
         if use_streaming:
             cmd += ["--output-format", "stream-json", "--verbose"]
 

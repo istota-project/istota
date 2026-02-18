@@ -21,6 +21,8 @@ istota_group: "{{ istota_namespace }}"
 
 # User-facing bot identity name (display only; defaults to namespace capitalized)
 istota_bot_name: ""
+# Claude model (e.g. "sonnet", "opus"); empty = CLI default
+istota_model: ""
 
 # Git repository
 istota_repo_url: "https://github.com/alicekubicki/istota.git"

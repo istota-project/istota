@@ -2,6 +2,9 @@
 
 # Bot identity
 bot_name = "{{ istota_bot_name | default(istota_namespace | capitalize, true) }}"
+{% if istota_model %}
+model = "{{ istota_model }}"
+{% endif %}
 
 # Database path
 db_path = "{{ istota_home }}/data/{{ istota_namespace }}.db"
