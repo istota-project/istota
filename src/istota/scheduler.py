@@ -251,10 +251,16 @@ def get_worker_id(user_id: str | None = None) -> str:
 
 
 def _make_talk_progress_callback(config: Config, task: db.Task):
-    """Build a rate-limited progress callback that posts updates to Talk."""
+    """Build a rate-limited progress callback that posts updates to Talk.
+
+    The returned callback has a ``sent_texts`` attribute (list of raw strings)
+    that records every message successfully posted as progress.  Callers can
+    inspect this list to deduplicate the final result.
+    """
     last_send = time.time()  # starts from initial ack message
     send_count = 0
     sched = config.scheduler
+    sent_texts: list[str] = []
 
     def callback(message: str):
         nonlocal last_send, send_count
@@ -279,11 +285,13 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
             asyncio.run(post_result_to_talk(config, task, formatted))
             last_send = now
             send_count += 1
+            sent_texts.append(message)
             with db.get_db(config.db_path) as conn:
                 db.log_task(conn, task.id, "debug", f"Progress: {msg}")
         except Exception as e:
             logger.debug("Progress update failed: %s", e)
 
+    callback.sent_texts = sent_texts
     return callback
 
 
@@ -798,6 +806,15 @@ def process_one_task(
         user_temp_dir = get_user_temp_dir(config, task.user_id)
         _process_deferred_subtasks(config, task, user_temp_dir)
         _process_deferred_tracking(config, task, user_temp_dir)
+
+    # Deduplicate: if the final result was already sent verbatim as a
+    # progress message, skip posting it again.
+    if post_talk_message and progress_callback and hasattr(progress_callback, "sent_texts"):
+        for sent in progress_callback.sent_texts:
+            if sent.strip() == post_talk_message.strip():
+                logger.debug("Final result already sent as progress for task %d, skipping", task_id)
+                post_talk_message = None
+                break
 
     # Deliver results outside DB context to avoid lock conflicts
     if post_talk_message:

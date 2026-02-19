@@ -2,6 +2,17 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: Deduplicate progress and final result in Talk
+
+When `progress_show_text` is enabled with unlimited chars, the final result could repeat text already sent as a progress message. Added deduplication: the progress callback now tracks sent texts, and the result posting stage skips the final message if it exactly matches a previously sent progress message.
+
+**Key changes:**
+- Progress callback tracks raw sent texts via `callback.sent_texts` attribute
+- Final result posting checks for exact match against sent progress texts and skips if duplicate
+
+**Files modified:**
+- `src/istota/scheduler.py` — Added `sent_texts` tracking to callback, dedup check before `post_result_to_talk`
+
 ## 2026-02-19: Make progress text max chars configurable
 
 The progress callback had a hardcoded 200-char truncation for intermediate assistant text messages. Made this configurable via `progress_text_max_chars` (default 200, 0 = unlimited) so that `progress_show_text = true` can surface full intermediate responses when needed.
