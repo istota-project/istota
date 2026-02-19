@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: Group chat reply threading — final response only
+
+Reply threading and @mentions in group chats were being applied to every message including intermediate progress updates (ack, tool use notifications), making the chat noisy. Fixed so only the final response gets reply_to and @mention; progress updates are sent as plain messages.
+
+**Key changes:**
+- Added `use_reply_threading` parameter to `post_result_to_talk()` (default `False`)
+- Only the final result delivery passes `use_reply_threading=True`
+- Ack messages and streaming progress updates use the default (no threading)
+- Added test verifying progress updates skip reply threading in group chats
+
+**Files modified:**
+- `src/istota/scheduler.py` - Gated reply threading on `use_reply_threading` param
+- `tests/test_scheduler.py` - Updated existing tests, added progress update test (5 tests total)
+
 ## 2026-02-19: Group chat reply threading and @mentions
 
 In multi-user Talk rooms, the bot now replies to the original message and @mentions the triggering user. This makes it clear what message the bot is responding to and ensures the user gets a notification.

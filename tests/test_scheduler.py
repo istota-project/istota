@@ -2372,7 +2372,9 @@ class TestPostResultToTalk:
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 100}}}
             )
-            result = await post_result_to_talk(config, task, "Hello there")
+            result = await post_result_to_talk(
+                config, task, "Hello there", use_reply_threading=True,
+            )
 
         mock_instance.send_message.assert_called_once_with(
             "room123", "Hello there", reply_to=None,
@@ -2390,7 +2392,9 @@ class TestPostResultToTalk:
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 200}}}
             )
-            result = await post_result_to_talk(config, task, "Sure thing")
+            result = await post_result_to_talk(
+                config, task, "Sure thing", use_reply_threading=True,
+            )
 
         mock_instance.send_message.assert_called_once_with(
             "room123", "@bob Sure thing", reply_to=42,
@@ -2409,7 +2413,9 @@ class TestPostResultToTalk:
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 300}}}
             )
-            result = await post_result_to_talk(config, task, "Long message")
+            result = await post_result_to_talk(
+                config, task, "Long message", use_reply_threading=True,
+            )
 
         calls = mock_instance.send_message.call_args_list
         assert len(calls) == 2
@@ -2431,8 +2437,28 @@ class TestPostResultToTalk:
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 400}}}
             )
-            result = await post_result_to_talk(config, task, "Response")
+            result = await post_result_to_talk(
+                config, task, "Response", use_reply_threading=True,
+            )
 
         mock_instance.send_message.assert_called_once_with(
             "room123", "@dave Response", reply_to=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_group_chat_no_threading_for_progress_updates(self):
+        """Progress updates (use_reply_threading=False) should not get reply_to or @mention."""
+        config = self._make_config()
+        task = self._make_task(is_group_chat=True, talk_message_id=42, user_id="eve")
+
+        with patch("istota.scheduler.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.send_message = AsyncMock(
+                return_value={"ocs": {"data": {"id": 500}}}
+            )
+            # Default use_reply_threading=False (progress/ack messages)
+            result = await post_result_to_talk(config, task, "Working on it...")
+
+        mock_instance.send_message.assert_called_once_with(
+            "room123", "Working on it...", reply_to=None,
         )

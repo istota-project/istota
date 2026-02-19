@@ -786,7 +786,9 @@ def process_one_task(
 
     # Deliver results outside DB context to avoid lock conflicts
     if post_talk_message:
-        response_msg_id = asyncio.run(post_result_to_talk(config, task, post_talk_message))
+        response_msg_id = asyncio.run(post_result_to_talk(
+            config, task, post_talk_message, use_reply_threading=True,
+        ))
         # Store bot's response message ID for reply tracking
         if response_msg_id and not is_failure_notify:
             try:
@@ -821,7 +823,10 @@ def _strip_markdown(text: str) -> str:
     return text
 
 
-async def post_result_to_talk(config: Config, task: db.Task, message: str) -> int | None:
+async def post_result_to_talk(
+    config: Config, task: db.Task, message: str,
+    *, use_reply_threading: bool = False,
+) -> int | None:
     """Post a result message to Talk. Returns the Talk message ID of the last sent message.
 
     Long messages are split into multiple parts sent sequentially.
@@ -836,8 +841,10 @@ async def post_result_to_talk(config: Config, task: db.Task, message: str) -> in
         for i, part in enumerate(parts):
             # In group chats, reply to the original message and @mention the user
             # for the first part only so they get a notification.
+            # Only applied for final results (use_reply_threading=True), not
+            # intermediate progress updates which would be too noisy.
             reply_to = None
-            if i == 0 and task.is_group_chat:
+            if use_reply_threading and i == 0 and task.is_group_chat:
                 reply_to = task.talk_message_id
                 part = f"@{task.user_id} {part}"
             response = await client.send_message(
