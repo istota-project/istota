@@ -1588,6 +1588,21 @@ def get_users_with_pending_bg_queue_tasks(conn: sqlite3.Connection) -> list[str]
     return [row[0] for row in cursor.fetchall()]
 
 
+def count_pending_tasks_for_user_queue(
+    conn: sqlite3.Connection, user_id: str, queue: str,
+) -> int:
+    """Count pending tasks for a specific user and queue type."""
+    cursor = conn.execute(
+        """
+        SELECT COUNT(*) FROM tasks
+        WHERE user_id = ? AND queue = ? AND status = 'pending'
+        AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
+        """,
+        (user_id, queue),
+    )
+    return cursor.fetchone()[0]
+
+
 def has_active_foreground_task_for_channel(
     conn: sqlite3.Connection, conversation_token: str,
 ) -> bool:

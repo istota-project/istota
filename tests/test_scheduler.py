@@ -1666,8 +1666,8 @@ class TestDualWorkerQueue:
         pool = WorkerPool(config)
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
-            fg_count = sum(1 for (_, qt) in pool._workers if qt == "foreground")
-            bg_count = sum(1 for (_, qt) in pool._workers if qt == "background")
+            fg_count = sum(1 for (_, qt, _) in pool._workers if qt == "foreground")
+            bg_count = sum(1 for (_, qt, _) in pool._workers if qt == "background")
             assert fg_count <= 2
             assert bg_count <= 1
             assert pool.active_count <= 3  # 2 fg + 1 bg
@@ -2496,7 +2496,7 @@ class TestWorkerPoolConcurrencyCaps:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             # Only 2 fg workers despite 3 users, because max_foreground_workers=2
-            fg_count = sum(1 for (_, qt) in pool._workers if qt == "foreground")
+            fg_count = sum(1 for (_, qt, _) in pool._workers if qt == "foreground")
             assert fg_count <= 2
 
         pool.shutdown()
@@ -2521,7 +2521,7 @@ class TestWorkerPoolConcurrencyCaps:
         pool = WorkerPool(config)
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
-            bg_count = sum(1 for (_, qt) in pool._workers if qt == "background")
+            bg_count = sum(1 for (_, qt, _) in pool._workers if qt == "background")
             assert bg_count <= 1
 
         pool.shutdown()
@@ -2547,5 +2547,219 @@ class TestWorkerPoolConcurrencyCaps:
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
             assert pool.active_count == 2
+
+        pool.shutdown()
+
+
+class TestMultiWorkerPerUser:
+    """Tests for per-user multi-worker support (multiple fg/bg workers per user)."""
+
+    def test_dispatch_multiple_fg_workers_same_user(self, db_path, tmp_path):
+        """User with 2 pending fg tasks and per-user cap of 2 gets 2 fg workers."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=5,
+                user_max_foreground_workers=2,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="alice", queue="foreground")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            assert pool.active_count == 2
+
+        pool.shutdown()
+
+    def test_dispatch_respects_per_user_fg_cap(self, db_path, tmp_path):
+        """User with 3 pending fg tasks but per-user cap of 2 gets only 2 workers."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=5,
+                user_max_foreground_workers=2,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t3", user_id="alice", queue="foreground")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            assert pool.active_count == 2
+
+        pool.shutdown()
+
+    def test_dispatch_per_user_bg_cap(self, db_path, tmp_path):
+        """Background workers also respect per-user caps."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_background_workers=5,
+                user_max_background_workers=2,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", source_type="scheduled", queue="background")
+            db.create_task(conn, prompt="t2", user_id="alice", source_type="scheduled", queue="background")
+            db.create_task(conn, prompt="t3", user_id="alice", source_type="scheduled", queue="background")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            assert pool.active_count == 2
+
+        pool.shutdown()
+
+    def test_dispatch_instance_cap_limits_per_user(self, db_path, tmp_path):
+        """Instance cap of 2 overrides per-user cap of 3."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=2,
+                user_max_foreground_workers=3,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t3", user_id="alice", queue="foreground")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            assert pool.active_count == 2
+
+        pool.shutdown()
+
+    def test_dispatch_doesnt_spawn_excess_workers_for_few_tasks(self, db_path, tmp_path):
+        """Don't spawn 3 workers if user only has 1 pending task."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=5,
+                user_max_foreground_workers=3,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            assert pool.active_count == 1
+
+        pool.shutdown()
+
+    def test_dispatch_multiple_users_with_multi_workers(self, db_path, tmp_path):
+        """Multiple users each get their per-user cap of workers."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=10,
+                user_max_foreground_workers=2,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t3", user_id="bob", queue="foreground")
+            db.create_task(conn, prompt="t4", user_id="bob", queue="foreground")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            # alice: 2 workers, bob: 2 workers
+            assert pool.active_count == 4
+
+        pool.shutdown()
+
+    def test_worker_key_is_three_tuple(self, db_path, tmp_path):
+        """Worker keys should be (user_id, queue_type, slot) 3-tuples."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=5,
+                user_max_foreground_workers=2,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="alice", queue="foreground")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            for key in pool._workers:
+                assert len(key) == 3, f"Expected 3-tuple key, got {key}"
+                user_id, queue_type, slot = key
+                assert isinstance(slot, int)
+
+        pool.shutdown()
+
+    def test_redispatch_doesnt_duplicate_existing_slots(self, db_path, tmp_path):
+        """Calling dispatch twice doesn't create duplicate workers for same slots."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=5,
+                user_max_foreground_workers=2,
+                worker_idle_timeout=2, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="alice", queue="foreground")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            count_after_first = pool.active_count
+            pool.dispatch()
+            assert pool.active_count == count_after_first
 
         pool.shutdown()

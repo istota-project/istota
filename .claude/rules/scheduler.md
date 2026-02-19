@@ -77,19 +77,21 @@ After successful task completion (not confirmation, not failure), the scheduler 
 class WorkerPool:
     def __init__(self, config: Config)
     def dispatch(self) -> None        # Two-phase: fg first (fg cap), then bg (bg cap)
-    def _on_worker_exit(self, user_id: str, queue_type: str) -> None
+    def _on_worker_exit(self, user_id: str, queue_type: str, slot: int) -> None
     def shutdown(self) -> None         # request_stop + join(10s)
     @property active_count -> int
 ```
 - Thread-safe via `threading.Lock` on `_workers` dict
+- Workers keyed by `(user_id, queue_type, slot)` 3-tuple — allows multiple workers per user per queue
 - Foreground cap: `max_foreground_workers` (default 5)
 - Background cap: `max_background_workers` (default 3)
-- Per-user caps enforced by `(user_id, queue_type)` key uniqueness (default 1/1)
+- Per-user caps: `effective_user_max_fg_workers(user_id)` / `effective_user_max_bg_workers(user_id)` (global default via `user_max_foreground_workers`/`user_max_background_workers`, overridable per user)
+- Workers only spawned up to `min(per_user_cap, pending_task_count)` to avoid idle workers
 
 ## UserWorker (L266-326)
 ```python
 class UserWorker(threading.Thread):
-    def __init__(self, user_id: str, config: Config, pool: WorkerPool)
+    def __init__(self, user_id: str, config: Config, pool: WorkerPool, queue_type: str, slot: int)
     def run(self) -> None
     def request_stop(self) -> None
 ```

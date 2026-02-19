@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: Multi-worker per user
+
+The previous worker pool keyed workers by `(user_id, queue_type)`, which silently capped each user to exactly 1 foreground worker regardless of `user_max_foreground_workers`. A user with an active task in Room A couldn't get a concurrent worker for Room B. Fixed by switching to 3-tuple keys with slot indices.
+
+**Key changes:**
+- Worker keys changed from `(user_id, queue_type)` to `(user_id, queue_type, slot)` 3-tuple
+- `WorkerPool.dispatch()` now spawns up to `min(per_user_cap, pending_task_count)` workers per user per queue type
+- `UserWorker` takes a `slot` parameter, thread names include slot index
+- Added `count_pending_tasks_for_user_queue()` DB function to avoid spawning idle workers
+- Pre-fetches pending task counts during dispatch to minimize DB queries
+
+**Files modified:**
+- `src/istota/scheduler.py` — 3-tuple worker keys, multi-slot dispatch logic, updated `UserWorker` and `_on_worker_exit`
+- `src/istota/db.py` — Added `count_pending_tasks_for_user_queue()`
+- `tests/test_scheduler.py` — 8 new tests in `TestMultiWorkerPerUser`, 3 existing tests updated for 3-tuple keys
+- `tests/test_db.py` — 5 new tests for `count_pending_tasks_for_user_queue`
+- `AGENTS.md`, `.claude/rules/scheduler.md` — Updated worker pool docs
+
 ## 2026-02-19: Configurable worker concurrency
 
 Replaced the single `max_total_workers`/`reserved_interactive_workers` approach with three-tier concurrency control: per-channel gate (reject duplicate foreground tasks), separate instance-level fg/bg caps, and per-user worker limits with global defaults.

@@ -67,3 +67,33 @@ class TestHasActiveForegroundTaskForChannel:
                 conversation_token="room1", queue="foreground",
             )
             assert db.has_active_foreground_task_for_channel(conn, "room2") is False
+
+
+class TestCountPendingTasksForUserQueue:
+    def test_counts_pending_fg_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="alice", queue="foreground")
+            assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 2
+
+    def test_ignores_other_user(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="bob", queue="foreground")
+            assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 1
+
+    def test_ignores_other_queue(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="alice", queue="background")
+            assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 1
+
+    def test_ignores_completed_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+            db.update_task_status(conn, task_id, "completed", result="done")
+            assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 0
+
+    def test_zero_when_no_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 0

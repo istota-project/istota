@@ -290,10 +290,11 @@ class UserWorker(threading.Thread):
     """Worker thread that processes tasks for a single user and queue serially."""
 
     def __init__(self, user_id: str, config: Config, pool: "WorkerPool",
-                 queue_type: str = "foreground"):
-        super().__init__(daemon=True, name=f"worker-{user_id}-{queue_type}")
+                 queue_type: str = "foreground", slot: int = 0):
+        super().__init__(daemon=True, name=f"worker-{user_id}-{queue_type}-{slot}")
         self.user_id = user_id
         self.queue_type = queue_type
+        self.slot = slot
         self.config = config
         self.pool = pool
         self._stop_event = threading.Event()
@@ -349,8 +350,8 @@ class UserWorker(threading.Thread):
                 # Still no tasks — exit idle worker
                 break
         finally:
-            logger.info("Worker exiting for user %s (%s)", self.user_id, self.queue_type)
-            self.pool._on_worker_exit(self.user_id, self.queue_type)
+            logger.info("Worker exiting for user %s (%s/%d)", self.user_id, self.queue_type, self.slot)
+            self.pool._on_worker_exit(self.user_id, self.queue_type, self.slot)
 
     def request_stop(self) -> None:
         self._stop_event.set()
@@ -359,13 +360,13 @@ class UserWorker(threading.Thread):
 class WorkerPool:
     """Manages per-user, per-queue worker threads with a concurrency cap.
 
-    Each user can have up to two concurrent workers: one foreground (interactive)
-    and one background (scheduled/briefing). Workers are keyed by (user_id, queue_type).
+    Each user can have multiple concurrent workers per queue type, up to their
+    per-user cap. Workers are keyed by (user_id, queue_type, slot).
     """
 
     def __init__(self, config: Config):
         self.config = config
-        self._workers: dict[tuple[str, str], UserWorker] = {}
+        self._workers: dict[tuple[str, str, int], UserWorker] = {}
         self._lock = threading.Lock()
 
     def dispatch(self) -> None:
@@ -374,51 +375,62 @@ class WorkerPool:
         Three-tier concurrency control:
         1. Instance-level fg cap: max_foreground_workers
         2. Instance-level bg cap: max_background_workers
-        3. Per-user caps: user config max_foreground_workers / max_background_workers
-           (default 1/1, already enforced by (user_id, queue_type) key uniqueness)
+        3. Per-user caps: effective_user_max_fg_workers / effective_user_max_bg_workers
         """
         with db.get_db(self.config.db_path) as conn:
             fg_users = db.get_users_with_pending_fg_queue_tasks(conn)
             bg_users = db.get_users_with_pending_bg_queue_tasks(conn)
+            # Pre-fetch pending task counts for users that may need multiple workers
+            fg_pending = {uid: db.count_pending_tasks_for_user_queue(conn, uid, "foreground") for uid in fg_users}
+            bg_pending = {uid: db.count_pending_tasks_for_user_queue(conn, uid, "background") for uid in bg_users}
 
         fg_cap = self.config.scheduler.max_foreground_workers
         bg_cap = self.config.scheduler.max_background_workers
 
         with self._lock:
             # Phase 1: foreground workers
-            active_fg = sum(1 for (_, qt) in self._workers if qt == "foreground")
+            active_fg = sum(1 for (_, qt, _) in self._workers if qt == "foreground")
             for user_id in fg_users:
-                key = (user_id, "foreground")
-                if key in self._workers:
-                    continue
                 if active_fg >= fg_cap:
-                    logger.debug("Foreground cap reached (%d), skipping user %s", fg_cap, user_id)
                     break
-                worker = UserWorker(user_id, self.config, self, queue_type="foreground")
-                self._workers[key] = worker
-                worker.start()
-                logger.info("Spawned foreground worker for user %s", user_id)
-                active_fg += 1
+                user_fg_cap = self.config.effective_user_max_fg_workers(user_id)
+                user_fg_active = sum(1 for (uid, qt, _) in self._workers if uid == user_id and qt == "foreground")
+                # Don't spawn more workers than pending tasks
+                pending = fg_pending.get(user_id, 0)
+                slots_needed = min(user_fg_cap, pending) - user_fg_active
+                for slot in range(user_fg_active, user_fg_active + slots_needed):
+                    if active_fg >= fg_cap:
+                        break
+                    key = (user_id, "foreground", slot)
+                    worker = UserWorker(user_id, self.config, self, queue_type="foreground", slot=slot)
+                    self._workers[key] = worker
+                    worker.start()
+                    logger.info("Spawned foreground worker for user %s (slot %d)", user_id, slot)
+                    active_fg += 1
 
             # Phase 2: background workers
-            active_bg = sum(1 for (_, qt) in self._workers if qt == "background")
+            active_bg = sum(1 for (_, qt, _) in self._workers if qt == "background")
             for user_id in bg_users:
-                key = (user_id, "background")
-                if key in self._workers:
-                    continue
                 if active_bg >= bg_cap:
-                    logger.debug("Background cap reached (%d), skipping user %s", bg_cap, user_id)
                     break
-                worker = UserWorker(user_id, self.config, self, queue_type="background")
-                self._workers[key] = worker
-                worker.start()
-                logger.info("Spawned background worker for user %s", user_id)
-                active_bg += 1
+                user_bg_cap = self.config.effective_user_max_bg_workers(user_id)
+                user_bg_active = sum(1 for (uid, qt, _) in self._workers if uid == user_id and qt == "background")
+                pending = bg_pending.get(user_id, 0)
+                slots_needed = min(user_bg_cap, pending) - user_bg_active
+                for slot in range(user_bg_active, user_bg_active + slots_needed):
+                    if active_bg >= bg_cap:
+                        break
+                    key = (user_id, "background", slot)
+                    worker = UserWorker(user_id, self.config, self, queue_type="background", slot=slot)
+                    self._workers[key] = worker
+                    worker.start()
+                    logger.info("Spawned background worker for user %s (slot %d)", user_id, slot)
+                    active_bg += 1
 
-    def _on_worker_exit(self, user_id: str, queue_type: str = "foreground") -> None:
+    def _on_worker_exit(self, user_id: str, queue_type: str, slot: int) -> None:
         """Called by a worker thread when it exits."""
         with self._lock:
-            self._workers.pop((user_id, queue_type), None)
+            self._workers.pop((user_id, queue_type, slot), None)
 
     def shutdown(self) -> None:
         """Request all workers to stop and wait for them to finish."""
