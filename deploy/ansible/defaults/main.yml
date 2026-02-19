@@ -59,12 +59,10 @@ istota_scheduler_stale_pending_fail_hours: 2        # Auto-fail ancient pending 
 istota_scheduler_max_retry_age_minutes: 60           # Don't retry stuck tasks older than this
 istota_scheduler_task_retention_days: 7             # Delete old completed tasks
 istota_scheduler_email_retention_days: 7            # Delete old emails from IMAP (0 to disable)
-istota_scheduler_max_total_workers: 5              # Max concurrent user worker threads (legacy)
 istota_scheduler_worker_idle_timeout: 30           # Seconds before idle worker exits
-istota_scheduler_reserved_interactive_workers: 2   # Workers reserved for interactive tasks (legacy)
 istota_scheduler_max_foreground_workers: 5         # Instance-level foreground (interactive) worker cap
 istota_scheduler_max_background_workers: 3         # Instance-level background (scheduled/briefing) worker cap
-istota_scheduler_user_max_foreground_workers: 1    # Global per-user fg worker default
+istota_scheduler_user_max_foreground_workers: 2    # Global per-user fg worker default
 istota_scheduler_user_max_background_workers: 1    # Global per-user bg worker default
 istota_scheduler_scheduled_job_max_consecutive_failures: 5  # Auto-disable after N failures (0=never)
 istota_scheduler_feed_check_interval: 300                  # Seconds between feed polls

@@ -4,30 +4,32 @@
 
 ## 2026-02-19: Configurable worker concurrency
 
-Replaced the single `max_total_workers`/`reserved_interactive_workers` approach with three-tier concurrency control: per-channel gate (reject duplicate foreground tasks), separate instance-level fg/bg caps, and per-user worker limits.
+Replaced the single `max_total_workers`/`reserved_interactive_workers` approach with three-tier concurrency control: per-channel gate (reject duplicate foreground tasks), separate instance-level fg/bg caps, and per-user worker limits with global defaults.
 
 **Key changes:**
-- Added `max_foreground_workers` (default 5) and `max_background_workers` (default 3) to SchedulerConfig
-- Added per-user `max_foreground_workers` and `max_background_workers` fields (default 1/1) to UserConfig
-- Backward-compat: old `max_total_workers`/`reserved_interactive_workers` fields derive new fields when loaded from TOML
+- Added `max_foreground_workers` (default 5) and `max_background_workers` (default 3) instance-level caps to SchedulerConfig
+- Added `user_max_foreground_workers` (default 2) and `user_max_background_workers` (default 1) global per-user defaults
+- Added per-user `max_foreground_workers` and `max_background_workers` overrides in UserConfig (0 = use global default)
+- Resolution chain: per-user override > global per-user default > hardcoded default
 - Added per-channel gate in Talk poller — rejects messages when an active fg task exists for the same conversation, sends "still working" response
 - Added `has_active_foreground_task_for_channel()` DB query
 - Rewrote `WorkerPool.dispatch()` to use separate fg/bg caps instead of shared total cap
+- Removed legacy `max_total_workers` and `reserved_interactive_workers` fields entirely
 
 **Files added/modified:**
-- `src/istota/config.py` — New fields on SchedulerConfig and UserConfig, backward-compat derivation in load_config()
+- `src/istota/config.py` — New SchedulerConfig/UserConfig fields, `effective_user_max_fg/bg_workers()` on Config
 - `src/istota/db.py` — Added `has_active_foreground_task_for_channel()`
 - `src/istota/talk_poller.py` — Per-channel gate before task creation
 - `src/istota/scheduler.py` — Rewrote WorkerPool.dispatch() for separate fg/bg caps
 - `tests/test_db.py` — 7 new tests for channel gate query
-- `tests/test_config.py` — 6 new tests for config fields and backward compat
+- `tests/test_config.py` — 9 tests for config fields, global defaults, resolution chain
 - `tests/test_talk_poller.py` — 3 new tests for channel gate behavior
 - `tests/test_scheduler.py` — 3 new + 4 updated tests for concurrency caps
 - `config/config.example.toml` — Updated worker pool settings
 - `config/users/alice.example.toml` — Added per-user worker limit examples
-- `deploy/ansible/defaults/main.yml` — New Ansible variables
-- `deploy/ansible/templates/config.toml.j2` — New template fields
-- `AGENTS.md`, `.claude/rules/scheduler.md`, `.claude/rules/config.md` — Updated docs
+- `deploy/ansible/` — Updated defaults, config template, user template
+- `deploy/render_config.py` — Updated scheduler field list
+- `ARCHITECTURE.md`, `AGENTS.md`, `.claude/rules/scheduler.md`, `.claude/rules/config.md` — Updated docs
 
 ## 2026-02-19: Group chat reply threading — final response only
 

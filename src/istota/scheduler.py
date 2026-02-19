@@ -1545,7 +1545,7 @@ def run_daemon(config: Config) -> None:
 
     logger.info("STARTUP Scheduler daemon starting (pid: %d)", os.getpid())
     logger.info("STARTUP Task poll interval: %ds", config.scheduler.poll_interval)
-    logger.info("STARTUP Max worker threads: %d", config.scheduler.max_total_workers)
+    logger.info("STARTUP Max fg/bg workers: %d/%d", config.scheduler.max_foreground_workers, config.scheduler.max_background_workers)
     logger.info("STARTUP Worker idle timeout: %ds", config.scheduler.worker_idle_timeout)
     logger.info("STARTUP Talk poll interval: %ds", config.scheduler.talk_poll_interval)
     logger.info("STARTUP Talk poll timeout: %ds", config.scheduler.talk_poll_timeout)

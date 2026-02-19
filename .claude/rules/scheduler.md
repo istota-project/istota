@@ -138,8 +138,6 @@ After task completion, if enabled + `auto_index_conversations`:
 | `shared_file_check_interval` | 120s | Shared file organizer |
 | `heartbeat_check_interval` | 60s | Heartbeat checks |
 | `worker_idle_timeout` | 30s | Worker thread exit |
-| `max_total_workers` | 5 | Legacy overall cap (kept for compat) |
-| `reserved_interactive_workers` | 2 | Legacy reserved (kept for compat) |
 | `max_foreground_workers` | 5 | Instance-level fg worker cap |
 | `max_background_workers` | 3 | Instance-level bg worker cap |
 | `user_max_foreground_workers` | 1 | Global per-user fg default |

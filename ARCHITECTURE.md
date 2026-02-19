@@ -131,10 +131,10 @@ while not shutdown_requested:
 
 ### Worker pool
 
-`WorkerPool` manages up to `max_total_workers` (default 5) concurrent `UserWorker` threads. Dispatch is two-phase:
+`WorkerPool` manages concurrent `UserWorker` threads with separate caps for foreground and background work. Dispatch is two-phase:
 
-1. **Interactive first**: spawn workers for users with Talk/email tasks, using the full worker cap
-2. **Background second**: spawn for users with only scheduled/background tasks, capped at `max_total_workers - reserved_interactive_workers` (default: 5 - 2 = 3)
+1. **Foreground first**: spawn workers for users with Talk/email tasks, capped at `max_foreground_workers` (default 5)
+2. **Background second**: spawn for users with scheduled/background tasks, capped at `max_background_workers` (default 3)
 
 Each `UserWorker` is a thread that processes tasks serially for one user. It exits after `worker_idle_timeout` (30s) of no tasks. Thread safety: fresh DB connections per call, new `asyncio.run()` event loop per worker, `threading.Lock` on the workers dict.
 

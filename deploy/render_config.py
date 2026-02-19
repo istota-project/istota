@@ -146,8 +146,9 @@ def render_config_toml(s: dict) -> str:
         ("task_timeout_minutes", 30), ("confirmation_timeout_minutes", 120),
         ("stale_pending_warn_minutes", 30), ("stale_pending_fail_hours", 2),
         ("max_retry_age_minutes", 60), ("task_retention_days", 7),
-        ("email_retention_days", 7), ("max_total_workers", 5),
-        ("worker_idle_timeout", 30), ("reserved_interactive_workers", 2),
+        ("email_retention_days", 7), ("max_foreground_workers", 5),
+        ("max_background_workers", 3), ("worker_idle_timeout", 30),
+        ("user_max_foreground_workers", 2), ("user_max_background_workers", 1),
         ("scheduled_job_max_consecutive_failures", 5),
         ("feed_check_interval", 300), ("feed_item_retention_days", 30),
     ]

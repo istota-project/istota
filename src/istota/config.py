@@ -118,9 +118,7 @@ class SchedulerConfig:
     task_retention_days: int = 7  # delete completed/failed/cancelled tasks older than this
     email_retention_days: int = 7  # delete emails older than N days from IMAP, 0 to disable
     temp_file_retention_days: int = 7  # delete temp files older than N days, 0 to disable
-    max_total_workers: int = 5       # total concurrent user worker threads (legacy, kept for compat)
     worker_idle_timeout: int = 30    # seconds before idle worker exits
-    reserved_interactive_workers: int = 2  # workers reserved for interactive tasks (legacy, kept for compat)
     max_foreground_workers: int = 5  # instance-level foreground (interactive) worker cap
     max_background_workers: int = 3  # instance-level background (scheduled/briefing) worker cap
     user_max_foreground_workers: int = 1  # global per-user fg worker default
@@ -594,13 +592,11 @@ def load_config(config_path: Path | None = None) -> Config:
             task_retention_days=sched.get("task_retention_days", 7),
             email_retention_days=sched.get("email_retention_days", 7),
             temp_file_retention_days=sched.get("temp_file_retention_days", 7),
-            max_total_workers=sched.get("max_total_workers", 5),
             worker_idle_timeout=sched.get("worker_idle_timeout", 30),
-            reserved_interactive_workers=sched.get("reserved_interactive_workers", 2),
             scheduled_job_max_consecutive_failures=sched.get("scheduled_job_max_consecutive_failures", 5),
             feed_check_interval=sched.get("feed_check_interval", 300),
-            max_foreground_workers=sched.get("max_foreground_workers", sched.get("max_total_workers", 5)),
-            max_background_workers=sched.get("max_background_workers", max(1, sched.get("max_total_workers", 5) - sched.get("reserved_interactive_workers", 2))),
+            max_foreground_workers=sched.get("max_foreground_workers", 5),
+            max_background_workers=sched.get("max_background_workers", 3),
             user_max_foreground_workers=sched.get("user_max_foreground_workers", 1),
             user_max_background_workers=sched.get("user_max_background_workers", 1),
         )

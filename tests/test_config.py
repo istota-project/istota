@@ -963,32 +963,6 @@ class TestWorkerConcurrencyConfig:
         assert cfg.scheduler.max_foreground_workers == 8
         assert cfg.scheduler.max_background_workers == 4
 
-    def test_scheduler_backwards_compat_from_old_fields(self, tmp_path, monkeypatch):
-        """Old max_total_workers/reserved_interactive_workers derive new fields."""
-        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
-        p = tmp_path / "config.toml"
-        p.write_text(
-            '[scheduler]\n'
-            'max_total_workers = 6\n'
-            'reserved_interactive_workers = 2\n'
-        )
-        cfg = load_config(p)
-        assert cfg.scheduler.max_foreground_workers == 6
-        assert cfg.scheduler.max_background_workers == 4  # max(1, 6-2)
-
-    def test_scheduler_backwards_compat_all_reserved(self, tmp_path, monkeypatch):
-        """When reserved >= total, bg cap should be at least 1."""
-        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
-        p = tmp_path / "config.toml"
-        p.write_text(
-            '[scheduler]\n'
-            'max_total_workers = 2\n'
-            'reserved_interactive_workers = 2\n'
-        )
-        cfg = load_config(p)
-        assert cfg.scheduler.max_foreground_workers == 2
-        assert cfg.scheduler.max_background_workers == 1  # max(1, 2-2)
-
     def test_scheduler_defaults(self):
         """Default values for new fields."""
         cfg = Config()

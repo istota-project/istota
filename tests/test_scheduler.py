@@ -921,7 +921,7 @@ class TestWorkerPool:
     def test_dispatch_creates_worker(self, db_path, tmp_path):
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_total_workers=5, worker_idle_timeout=1, poll_interval=1),
+            scheduler=SchedulerConfig(worker_idle_timeout=1, poll_interval=1),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -963,7 +963,7 @@ class TestWorkerPool:
     def test_no_dispatch_when_empty(self, db_path, tmp_path):
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_total_workers=5),
+            scheduler=SchedulerConfig(),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -976,7 +976,7 @@ class TestWorkerPool:
     def test_no_duplicate_workers_for_same_user(self, db_path, tmp_path):
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_total_workers=5, worker_idle_timeout=2, poll_interval=1),
+            scheduler=SchedulerConfig(worker_idle_timeout=2, poll_interval=1),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -1311,11 +1311,11 @@ class TestScheduledJobFailureTracking:
 
 class TestWorkerPoolIsolation:
     def test_foreground_gets_full_cap(self, db_path, tmp_path):
-        """Foreground tasks should use full worker cap."""
+        """Foreground tasks should use full fg worker cap."""
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(
-                max_total_workers=3, reserved_interactive_workers=2,
+                max_foreground_workers=3,
                 worker_idle_timeout=1, poll_interval=1,
             ),
             nextcloud_mount_path=tmp_path / "mount",
@@ -1331,7 +1331,7 @@ class TestWorkerPoolIsolation:
         pool = WorkerPool(config)
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
-            # All 3 foreground users should get workers (full cap=3)
+            # All 3 foreground users should get workers (fg cap=3)
             assert pool.active_count == 3
 
         pool.shutdown()
@@ -1367,7 +1367,7 @@ class TestWorkerPoolIsolation:
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(
-                max_total_workers=3, reserved_interactive_workers=2,
+                max_foreground_workers=3, max_background_workers=1,
                 worker_idle_timeout=1, poll_interval=1,
             ),
             nextcloud_mount_path=tmp_path / "mount",
@@ -1375,7 +1375,7 @@ class TestWorkerPoolIsolation:
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
 
-        # bg_cap = max(1, 3-2) = 1, but foreground should still get workers
+        # bg_cap=1, fg_cap=3: foreground should still get workers
         with db.get_db(db_path) as conn:
             db.create_task(conn, prompt="bg1", user_id="bg-user", source_type="scheduled", queue="background")
             db.create_task(conn, prompt="fg1", user_id="alice", source_type="talk", queue="foreground")
@@ -1384,7 +1384,7 @@ class TestWorkerPoolIsolation:
         pool = WorkerPool(config)
         with patch("istota.scheduler.process_one_task", return_value=None):
             pool.dispatch()
-            # 2 foreground + 1 background (bg_cap=1 allows it)
+            # 2 foreground + 1 background
             assert pool.active_count == 3
 
         pool.shutdown()
@@ -1563,7 +1563,7 @@ class TestDualWorkerQueue:
         """A user with both fg and bg tasks should get two workers."""
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_total_workers=6, worker_idle_timeout=1, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, poll_interval=1),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -1585,7 +1585,7 @@ class TestDualWorkerQueue:
         """A user with only foreground tasks gets one fg worker."""
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_total_workers=6, worker_idle_timeout=1, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, poll_interval=1),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -1605,7 +1605,7 @@ class TestDualWorkerQueue:
         """A user with only background tasks gets one bg worker."""
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_total_workers=6, worker_idle_timeout=1, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, poll_interval=1),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -1625,7 +1625,7 @@ class TestDualWorkerQueue:
         """Calling dispatch twice doesn't duplicate workers for the same (user, queue)."""
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_total_workers=6, worker_idle_timeout=2, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=2, poll_interval=1),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -2480,7 +2480,7 @@ class TestWorkerPoolConcurrencyCaps:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_foreground_workers=2, max_background_workers=3,
-                max_total_workers=10, worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, poll_interval=1,
             ),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -2507,7 +2507,7 @@ class TestWorkerPoolConcurrencyCaps:
             db_path=db_path,
             scheduler=SchedulerConfig(
                 max_foreground_workers=5, max_background_workers=1,
-                max_total_workers=10, worker_idle_timeout=1, poll_interval=1,
+                worker_idle_timeout=1, poll_interval=1,
             ),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
@@ -2526,12 +2526,11 @@ class TestWorkerPoolConcurrencyCaps:
 
         pool.shutdown()
 
-    def test_dispatch_backwards_compat_migration(self, db_path, tmp_path):
-        """Config with only old fields still works — new fields derived."""
+    def test_dispatch_separate_fg_bg_caps(self, db_path, tmp_path):
+        """Separate fg and bg caps work independently."""
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(
-                max_total_workers=4, reserved_interactive_workers=1,
                 max_foreground_workers=4, max_background_workers=3,
                 worker_idle_timeout=1, poll_interval=1,
             ),
