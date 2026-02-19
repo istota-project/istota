@@ -1171,6 +1171,8 @@ def execute_task(
                 env["GITHUB_DEFAULT_OWNER"] = config.developer.github_default_owner
             if config.developer.github_reviewer:
                 env["GITHUB_REVIEWER"] = config.developer.github_reviewer
+            if config.developer.author_credit:
+                env["DEVELOPER_AUTHOR_CREDIT"] = config.developer.author_credit
 
             dev_bin = Path(user_temp_dir) / ".developer"
             dev_bin.mkdir(parents=True, exist_ok=True)

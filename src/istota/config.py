@@ -215,6 +215,7 @@ class DeveloperConfig:
     github_username: str = ""     # GitHub username for HTTPS auth (defaults to x-access-token if empty)
     github_default_owner: str = ""  # Default org/user for resolving short repo names
     github_reviewer: str = ""     # GitHub username to request as PR reviewer
+    author_credit: str = ""       # Appended to every commit message (e.g., "Co-Authored-By: Name <email>")
     github_api_allowlist: list[str] = field(default_factory=lambda: [
         "GET /repos/*",
         "GET /orgs/*",

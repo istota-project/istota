@@ -228,6 +228,7 @@ istota_nodejs_enabled: false
 # Recommended: dedicated bot accounts with minimal required permissions
 istota_developer_enabled: false
 istota_developer_repos_dir: ""                    # Base directory for repo clones/worktrees
+istota_developer_author_credit: ""                # Appended to every commit (e.g., "Co-Authored-By: Name <email>")
 # GitLab settings
 istota_developer_gitlab_url: "https://gitlab.com"
 istota_developer_gitlab_token: ""                 # API token (read_api + write_repository scope)

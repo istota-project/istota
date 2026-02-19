@@ -196,6 +196,9 @@ hostname = "{{ istota_site_hostname }}"
 [developer]
 enabled = true
 repos_dir = "{{ istota_developer_repos_dir }}"
+{% if istota_developer_author_credit %}
+author_credit = "{{ istota_developer_author_credit }}"
+{% endif %}
 gitlab_url = "{{ istota_developer_gitlab_url }}"
 {% if not istota_use_environment_file | default(false) %}
 gitlab_token = "{{ istota_developer_gitlab_token }}"
