@@ -122,7 +122,7 @@ def clean_message_content(message: dict, bot_username: str | None = None) -> str
 async def _is_multi_user_room(
     client: TalkClient,
     conversation_token: str,
-    conv_type: int,
+    conv_type: int | None,
 ) -> bool:
     """Determine if a conversation has 3+ participants (requires @mention).
 
@@ -143,9 +143,17 @@ async def _is_multi_user_room(
         participants = await client.get_participants(conversation_token)
         count = len(participants)
         _participant_counts[conversation_token] = (count, now)
+        logger.debug(
+            "Room %s (type=%s) has %d participants → %s",
+            conversation_token, conv_type, count,
+            "multi-user" if count >= 3 else "DM-like",
+        )
         return count >= 3
     except Exception as e:
-        logger.warning("Error getting participants for %s: %s — treating as DM", conversation_token, e)
+        logger.warning(
+            "Error getting participants for %s (type=%s): %s: %s — treating as DM",
+            conversation_token, conv_type, type(e).__name__, e,
+        )
         return False
 
 
@@ -312,6 +320,10 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 conv_type = conv_types.get(conversation_token, 1)
                 is_multi_user = await _is_multi_user_room(client, conversation_token, conv_type)
                 if is_multi_user and not is_bot_mentioned(msg, config.talk.bot_username):
+                    logger.debug(
+                        "Skipping message from %s in multi-user room %s (no @mention)",
+                        actor_id, conversation_token,
+                    )
                     continue
 
                 # Extract message content and attachments
