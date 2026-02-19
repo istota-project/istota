@@ -285,7 +285,7 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
             asyncio.run(post_result_to_talk(config, task, formatted))
             last_send = now
             send_count += 1
-            sent_texts.append(message)
+            sent_texts.append(msg)
             with db.get_db(config.db_path) as conn:
                 db.log_task(conn, task.id, "debug", f"Progress: {msg}")
         except Exception as e:
