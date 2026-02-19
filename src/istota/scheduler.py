@@ -394,12 +394,13 @@ class WorkerPool:
                 if active_fg >= fg_cap:
                     break
                 user_fg_cap = self.config.effective_user_max_fg_workers(user_id)
-                user_fg_active = sum(1 for (uid, qt, _) in self._workers if uid == user_id and qt == "foreground")
-                # Don't spawn more workers than pending tasks
+                existing_slots = {s for (uid, qt, s) in self._workers if uid == user_id and qt == "foreground"}
+                user_fg_active = len(existing_slots)
                 pending = fg_pending.get(user_id, 0)
-                slots_needed = min(user_fg_cap, pending) - user_fg_active
-                for slot in range(user_fg_active, user_fg_active + slots_needed):
-                    if active_fg >= fg_cap:
+                to_spawn = min(user_fg_cap - user_fg_active, pending)
+                available = (s for s in range(user_fg_cap) if s not in existing_slots)
+                for slot in available:
+                    if to_spawn <= 0 or active_fg >= fg_cap:
                         break
                     key = (user_id, "foreground", slot)
                     worker = UserWorker(user_id, self.config, self, queue_type="foreground", slot=slot)
@@ -407,6 +408,7 @@ class WorkerPool:
                     worker.start()
                     logger.info("Spawned foreground worker for user %s (slot %d)", user_id, slot)
                     active_fg += 1
+                    to_spawn -= 1
 
             # Phase 2: background workers
             active_bg = sum(1 for (_, qt, _) in self._workers if qt == "background")
@@ -414,11 +416,13 @@ class WorkerPool:
                 if active_bg >= bg_cap:
                     break
                 user_bg_cap = self.config.effective_user_max_bg_workers(user_id)
-                user_bg_active = sum(1 for (uid, qt, _) in self._workers if uid == user_id and qt == "background")
+                existing_slots = {s for (uid, qt, s) in self._workers if uid == user_id and qt == "background"}
+                user_bg_active = len(existing_slots)
                 pending = bg_pending.get(user_id, 0)
-                slots_needed = min(user_bg_cap, pending) - user_bg_active
-                for slot in range(user_bg_active, user_bg_active + slots_needed):
-                    if active_bg >= bg_cap:
+                to_spawn = min(user_bg_cap - user_bg_active, pending)
+                available = (s for s in range(user_bg_cap) if s not in existing_slots)
+                for slot in available:
+                    if to_spawn <= 0 or active_bg >= bg_cap:
                         break
                     key = (user_id, "background", slot)
                     worker = UserWorker(user_id, self.config, self, queue_type="background", slot=slot)
@@ -426,6 +430,7 @@ class WorkerPool:
                     worker.start()
                     logger.info("Spawned background worker for user %s (slot %d)", user_id, slot)
                     active_bg += 1
+                    to_spawn -= 1
 
     def _on_worker_exit(self, user_id: str, queue_type: str, slot: int) -> None:
         """Called by a worker thread when it exits."""

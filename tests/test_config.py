@@ -1006,9 +1006,9 @@ class TestWorkerConcurrencyConfig:
         assert cfg.scheduler.user_max_background_workers == 2
 
     def test_global_user_worker_defaults(self):
-        """Default global per-user limits are 1/1."""
+        """Default global per-user limits are 2/1."""
         cfg = Config()
-        assert cfg.scheduler.user_max_foreground_workers == 1
+        assert cfg.scheduler.user_max_foreground_workers == 2
         assert cfg.scheduler.user_max_background_workers == 1
 
     def test_effective_user_workers_uses_global_default(self):

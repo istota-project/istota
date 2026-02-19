@@ -121,7 +121,7 @@ class SchedulerConfig:
     worker_idle_timeout: int = 30    # seconds before idle worker exits
     max_foreground_workers: int = 5  # instance-level foreground (interactive) worker cap
     max_background_workers: int = 3  # instance-level background (scheduled/briefing) worker cap
-    user_max_foreground_workers: int = 1  # global per-user fg worker default
+    user_max_foreground_workers: int = 2  # global per-user fg worker default
     user_max_background_workers: int = 1  # global per-user bg worker default
     scheduled_job_max_consecutive_failures: int = 5  # auto-disable after N failures (0 = never)
     feed_check_interval: int = 300  # seconds between feed polls

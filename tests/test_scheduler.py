@@ -12,6 +12,7 @@ import pytest
 from istota.scheduler import (
     CONFIRMATION_PATTERN,
     PROGRESS_MESSAGES,
+    UserWorker,
     WorkerPool,
     cleanup_old_claude_logs,
     download_talk_attachments,
@@ -976,7 +977,7 @@ class TestWorkerPool:
     def test_no_duplicate_workers_for_same_user(self, db_path, tmp_path):
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(worker_idle_timeout=2, poll_interval=1),
+            scheduler=SchedulerConfig(user_max_foreground_workers=1, worker_idle_timeout=2, poll_interval=1),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -1622,10 +1623,10 @@ class TestDualWorkerQueue:
         pool.shutdown()
 
     def test_worker_pool_no_duplicate_workers_per_queue(self, db_path, tmp_path):
-        """Calling dispatch twice doesn't duplicate workers for the same (user, queue)."""
+        """Calling dispatch twice doesn't duplicate workers for the same (user, queue) when per-user cap is 1."""
         config = Config(
             db_path=db_path,
-            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=2, poll_interval=1),
+            scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, user_max_foreground_workers=1, worker_idle_timeout=2, poll_interval=1),
             nextcloud_mount_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
@@ -2761,5 +2762,77 @@ class TestMultiWorkerPerUser:
             count_after_first = pool.active_count
             pool.dispatch()
             assert pool.active_count == count_after_first
+
+        pool.shutdown()
+
+    def test_new_worker_spawned_while_existing_worker_busy(self, db_path, tmp_path):
+        """A pending task should get a new worker even if another worker is busy.
+
+        Scenario: user posts in Room A, worker 0 claims it (now running).
+        User posts in Room B. Task B is pending, worker 0 is busy.
+        Dispatch should spawn worker 1 for the pending task.
+        """
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=5,
+                user_max_foreground_workers=2,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        # Task A is claimed and running (simulates worker 0 busy)
+        with db.get_db(db_path) as conn:
+            task_a = db.create_task(conn, prompt="room A", user_id="alice", queue="foreground")
+            db.update_task_status(conn, task_a, "running")
+            # Task B is pending (user just posted in another room)
+            db.create_task(conn, prompt="room B", user_id="alice", queue="foreground")
+
+        pool = WorkerPool(config)
+        # Simulate worker 0 already in the pool (busy with task A)
+        busy_worker = MagicMock(spec=UserWorker)
+        pool._workers[("alice", "foreground", 0)] = busy_worker
+
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            # Should have 2 workers: slot 0 (busy) + slot 1 (new for task B)
+            assert pool.active_count == 2
+
+        pool.shutdown()
+
+    def test_slot_assignment_handles_gaps(self, db_path, tmp_path):
+        """Slot assignment should work even if lower slots have exited."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=5,
+                user_max_foreground_workers=3,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice", queue="foreground")
+
+        pool = WorkerPool(config)
+        # Simulate: slot 0 exited, slot 1 still running
+        busy_worker = MagicMock(spec=UserWorker)
+        pool._workers[("alice", "foreground", 1)] = busy_worker
+
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            # Should pick slot 0 (gap) rather than colliding with slot 1
+            keys = list(pool._workers.keys())
+            slots = sorted(s for (uid, qt, s) in keys if uid == "alice" and qt == "foreground")
+            assert 0 in slots, f"Expected slot 0 to be used, got slots {slots}"
+            assert 1 in slots, f"Expected slot 1 to still exist, got slots {slots}"
+            # No duplicate keys
+            assert len(keys) == len(set(keys))
 
         pool.shutdown()

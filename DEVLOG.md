@@ -4,20 +4,24 @@
 
 ## 2026-02-19: Multi-worker per user
 
-The previous worker pool keyed workers by `(user_id, queue_type)`, which silently capped each user to exactly 1 foreground worker regardless of `user_max_foreground_workers`. A user with an active task in Room A couldn't get a concurrent worker for Room B. Fixed by switching to 3-tuple keys with slot indices.
+The previous worker pool keyed workers by `(user_id, queue_type)`, which silently capped each user to exactly 1 foreground worker regardless of `user_max_foreground_workers`. A user with an active task in Room A couldn't get a concurrent worker for Room B. Fixed by switching to 3-tuple keys with slot indices and correcting two bugs in the dispatch formula.
 
 **Key changes:**
 - Worker keys changed from `(user_id, queue_type)` to `(user_id, queue_type, slot)` 3-tuple
-- `WorkerPool.dispatch()` now spawns up to `min(per_user_cap, pending_task_count)` workers per user per queue type
+- Fixed dispatch formula: `min(cap, pending) - active` → `min(cap - active, pending)` — old formula wouldn't spawn a second worker when one was busy with a running task
+- Fixed slot assignment to fill gaps (e.g., if slot 0 exits while slot 1 is running, reuse slot 0)
+- Changed `user_max_foreground_workers` default from 1 to 2 (matching Ansible defaults)
 - `UserWorker` takes a `slot` parameter, thread names include slot index
 - Added `count_pending_tasks_for_user_queue()` DB function to avoid spawning idle workers
-- Pre-fetches pending task counts during dispatch to minimize DB queries
 
 **Files modified:**
 - `src/istota/scheduler.py` — 3-tuple worker keys, multi-slot dispatch logic, updated `UserWorker` and `_on_worker_exit`
+- `src/istota/config.py` — Changed `user_max_foreground_workers` default to 2
 - `src/istota/db.py` — Added `count_pending_tasks_for_user_queue()`
-- `tests/test_scheduler.py` — 8 new tests in `TestMultiWorkerPerUser`, 3 existing tests updated for 3-tuple keys
+- `config/config.example.toml` — Updated default value
+- `tests/test_scheduler.py` — 10 new tests in `TestMultiWorkerPerUser`, 5 existing tests updated
 - `tests/test_db.py` — 5 new tests for `count_pending_tasks_for_user_queue`
+- `tests/test_config.py` — Updated default assertion
 - `AGENTS.md`, `.claude/rules/scheduler.md` — Updated worker pool docs
 
 ## 2026-02-19: Configurable worker concurrency
