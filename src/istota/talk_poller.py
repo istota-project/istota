@@ -143,7 +143,7 @@ async def _get_participants(
     try:
         participants = await client.get_participants(conversation_token)
         _participant_cache[conversation_token] = (participants, now)
-        logger.info(
+        logger.debug(
             "Room %s (type=%s) has %d participants → %s",
             conversation_token, conv_type, len(participants),
             "multi-user" if len(participants) >= 3 else "DM-like",
@@ -339,7 +339,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 participants = await _get_participants(client, conversation_token, conv_type)
                 is_multi_user = _is_multi_user(participants)
                 if is_multi_user and not is_bot_mentioned(msg, config.talk.bot_username):
-                    logger.info(
+                    logger.debug(
                         "Skipping message from %s in multi-user room %s (no @mention)",
                         actor_id, conversation_token,
                     )
