@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from istota import db
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
 from istota.talk_poller import (
-    _is_multi_user_room,
-    _participant_counts,
+    _get_participants,
+    _is_multi_user,
+    _participant_cache,
+    _participant_names,
     clean_message_content,
     extract_attachments,
     handle_confirmation_reply,
@@ -701,64 +703,85 @@ class TestCleanMessageContentMentions:
 # =============================================================================
 
 
-class TestIsMultiUserRoom:
+class TestGetParticipantsAndMultiUser:
     @pytest.mark.asyncio
-    async def test_type_1_always_false(self):
+    async def test_type_1_returns_empty(self):
         client = MagicMock()
-        result = await _is_multi_user_room(client, "dm1", 1)
-        assert result is False
-        # Should not call get_participants for type 1
+        result = await _get_participants(client, "dm1", 1)
+        assert result == []
         client.get_participants.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_type_2_with_2_participants_is_false(self):
-        _participant_counts.clear()
+    async def test_type_2_with_2_participants(self):
+        _participant_cache.clear()
         client = MagicMock()
         client.get_participants = AsyncMock(return_value=[
-            {"actorId": "alice"},
-            {"actorId": "istota"},
+            {"actorId": "alice", "displayName": "Alice"},
+            {"actorId": "istota", "displayName": "Istota"},
         ])
-        result = await _is_multi_user_room(client, "room1", 2)
-        assert result is False
+        participants = await _get_participants(client, "room1", 2)
+        assert len(participants) == 2
+        assert _is_multi_user(participants) is False
 
     @pytest.mark.asyncio
-    async def test_type_2_with_3_participants_is_true(self):
-        _participant_counts.clear()
+    async def test_type_2_with_3_participants(self):
+        _participant_cache.clear()
         client = MagicMock()
         client.get_participants = AsyncMock(return_value=[
-            {"actorId": "alice"},
-            {"actorId": "bob"},
-            {"actorId": "istota"},
+            {"actorId": "alice", "displayName": "Alice"},
+            {"actorId": "bob", "displayName": "Bob"},
+            {"actorId": "istota", "displayName": "Istota"},
         ])
-        result = await _is_multi_user_room(client, "room2", 2)
-        assert result is True
+        participants = await _get_participants(client, "room2", 2)
+        assert _is_multi_user(participants) is True
 
     @pytest.mark.asyncio
     async def test_caching(self):
-        _participant_counts.clear()
+        _participant_cache.clear()
         client = MagicMock()
         client.get_participants = AsyncMock(return_value=[
-            {"actorId": "alice"},
-            {"actorId": "bob"},
-            {"actorId": "istota"},
+            {"actorId": "alice", "displayName": "Alice"},
+            {"actorId": "bob", "displayName": "Bob"},
+            {"actorId": "istota", "displayName": "Istota"},
         ])
         # First call
-        result1 = await _is_multi_user_room(client, "room3", 2)
-        assert result1 is True
+        p1 = await _get_participants(client, "room3", 2)
+        assert _is_multi_user(p1) is True
         assert client.get_participants.call_count == 1
 
         # Second call should use cache
-        result2 = await _is_multi_user_room(client, "room3", 2)
-        assert result2 is True
+        p2 = await _get_participants(client, "room3", 2)
+        assert _is_multi_user(p2) is True
         assert client.get_participants.call_count == 1  # still 1
 
     @pytest.mark.asyncio
-    async def test_api_error_falls_back_to_false(self):
-        _participant_counts.clear()
+    async def test_api_error_falls_back_to_empty(self):
+        _participant_cache.clear()
         client = MagicMock()
         client.get_participants = AsyncMock(side_effect=Exception("API error"))
-        result = await _is_multi_user_room(client, "room4", 2)
-        assert result is False
+        participants = await _get_participants(client, "room4", 2)
+        assert participants == []
+        assert _is_multi_user(participants) is False
+
+
+class TestParticipantNames:
+    def test_extracts_display_names(self):
+        participants = [
+            {"actorId": "alice", "displayName": "Alice"},
+            {"actorId": "bob", "displayName": "Bob"},
+        ]
+        assert _participant_names(participants) == ["Alice", "Bob"]
+
+    def test_excludes_actor(self):
+        participants = [
+            {"actorId": "alice", "displayName": "Alice"},
+            {"actorId": "istota", "displayName": "Istota"},
+        ]
+        assert _participant_names(participants, exclude="istota") == ["Alice"]
+
+    def test_falls_back_to_actor_id(self):
+        participants = [{"actorId": "alice", "displayName": ""}]
+        assert _participant_names(participants) == ["alice"]
 
 
 # =============================================================================
@@ -770,7 +793,7 @@ class TestPollTalkConversationsGroupRoom:
     @pytest.mark.asyncio
     async def test_group_room_skips_without_mention(self, make_config):
         """In a 3+ person room, messages without @mention are skipped."""
-        _participant_counts.clear()
+        _participant_cache.clear()
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}
 
@@ -783,9 +806,9 @@ class TestPollTalkConversationsGroupRoom:
             ])
             mock_instance.poll_messages = AsyncMock(return_value=[msg])
             mock_instance.get_participants = AsyncMock(return_value=[
-                {"actorId": "alice"},
-                {"actorId": "bob"},
-                {"actorId": "istota"},
+                {"actorId": "alice", "displayName": "Alice"},
+                {"actorId": "bob", "displayName": "Bob"},
+                {"actorId": "istota", "displayName": "Istota"},
             ])
 
             with db.get_db(config.db_path) as conn:
@@ -798,7 +821,7 @@ class TestPollTalkConversationsGroupRoom:
     @pytest.mark.asyncio
     async def test_group_room_processes_with_mention(self, make_config):
         """In a 3+ person room, messages with @mention are processed."""
-        _participant_counts.clear()
+        _participant_cache.clear()
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}
 
@@ -818,9 +841,9 @@ class TestPollTalkConversationsGroupRoom:
             ])
             mock_instance.poll_messages = AsyncMock(return_value=[msg])
             mock_instance.get_participants = AsyncMock(return_value=[
-                {"actorId": "alice"},
-                {"actorId": "bob"},
-                {"actorId": "istota"},
+                {"actorId": "alice", "displayName": "Alice"},
+                {"actorId": "bob", "displayName": "Bob"},
+                {"actorId": "istota", "displayName": "Istota"},
             ])
 
             with db.get_db(config.db_path) as conn:
@@ -835,11 +858,14 @@ class TestPollTalkConversationsGroupRoom:
             # Bot mention should be stripped from prompt
             assert "istota" not in task.prompt.lower()
             assert "check my calendar" in task.prompt
+            # Participant names should be in the prompt
+            assert "Alice" in task.prompt
+            assert "Bob" in task.prompt
 
     @pytest.mark.asyncio
     async def test_two_person_group_acts_like_dm(self, make_config):
         """A type-2 room with only 2 participants doesn't require mention."""
-        _participant_counts.clear()
+        _participant_cache.clear()
         config = make_config()
 
         msg = _msg(id=103, actor_id="alice", message="Hello there")
@@ -851,8 +877,8 @@ class TestPollTalkConversationsGroupRoom:
             ])
             mock_instance.poll_messages = AsyncMock(return_value=[msg])
             mock_instance.get_participants = AsyncMock(return_value=[
-                {"actorId": "alice"},
-                {"actorId": "istota"},
+                {"actorId": "alice", "displayName": "Alice"},
+                {"actorId": "istota", "displayName": "Istota"},
             ])
 
             with db.get_db(config.db_path) as conn:
@@ -864,11 +890,13 @@ class TestPollTalkConversationsGroupRoom:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, result[0])
             assert task.is_group_chat is False
+            # No participant context for DM-like rooms
+            assert "[Room participants:" not in task.prompt
 
     @pytest.mark.asyncio
     async def test_dm_unchanged(self, make_config):
         """Type-1 DM always processes without mention."""
-        _participant_counts.clear()
+        _participant_cache.clear()
         config = make_config()
 
         msg = _msg(id=104, actor_id="alice", message="Hello")

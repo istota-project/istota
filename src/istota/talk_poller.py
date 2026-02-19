@@ -19,8 +19,8 @@ FILE_PLACEHOLDER_PATTERN = re.compile(r'\{file(\d+)\}')
 # Pattern to match mention placeholders in Talk messages
 MENTION_PLACEHOLDER_PATTERN = re.compile(r'\{(mention-(?:user|call|federated-user)\d+)\}')
 
-# Participant count cache: token -> (count, timestamp)
-_participant_counts: dict[str, tuple[int, float]] = {}
+# Participant cache: token -> (participants list, timestamp)
+_participant_cache: dict[str, tuple[list[dict], float]] = {}
 _PARTICIPANT_CACHE_TTL = 300  # 5 minutes
 
 
@@ -119,42 +119,60 @@ def clean_message_content(message: dict, bot_username: str | None = None) -> str
     return content
 
 
-async def _is_multi_user_room(
+async def _get_participants(
     client: TalkClient,
     conversation_token: str,
     conv_type: int | None,
-) -> bool:
-    """Determine if a conversation has 3+ participants (requires @mention).
+) -> list[dict]:
+    """Get participants for a conversation, with TTL cache.
 
-    Type 1 (DM) always returns False. Type 2/3 checks participant count
-    with a TTL cache. Falls back to False (treat as DM) on API errors.
+    Type 1 (DM) returns empty list (no lookup needed).
+    Returns cached or fresh participant list from API.
+    Falls back to empty list on API errors.
     """
     if conv_type == 1:
-        return False
+        return []
 
     now = time.monotonic()
-    cached = _participant_counts.get(conversation_token)
+    cached = _participant_cache.get(conversation_token)
     if cached is not None:
-        count, ts = cached
+        participants, ts = cached
         if now - ts < _PARTICIPANT_CACHE_TTL:
-            return count >= 3
+            return participants
 
     try:
         participants = await client.get_participants(conversation_token)
-        count = len(participants)
-        _participant_counts[conversation_token] = (count, now)
+        _participant_cache[conversation_token] = (participants, now)
         logger.info(
             "Room %s (type=%s) has %d participants → %s",
-            conversation_token, conv_type, count,
-            "multi-user" if count >= 3 else "DM-like",
+            conversation_token, conv_type, len(participants),
+            "multi-user" if len(participants) >= 3 else "DM-like",
         )
-        return count >= 3
+        return participants
     except Exception as e:
         logger.warning(
             "Error getting participants for %s (type=%s): %s: %s — treating as DM",
             conversation_token, conv_type, type(e).__name__, e,
         )
-        return False
+        return []
+
+
+def _is_multi_user(participants: list[dict]) -> bool:
+    """Return True if 3+ participants (requires @mention)."""
+    return len(participants) >= 3
+
+
+def _participant_names(participants: list[dict], exclude: str | None = None) -> list[str]:
+    """Extract display names from participant list, excluding a specific actor."""
+    names = []
+    for p in participants:
+        actor_id = p.get("actorId", "")
+        if exclude and actor_id == exclude:
+            continue
+        name = p.get("displayName") or actor_id
+        if name:
+            names.append(name)
+    return names
 
 
 async def _poll_single_conversation(
@@ -318,8 +336,8 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
                 # In multi-user rooms, only respond when @mentioned
                 conv_type = conv_types.get(conversation_token, 1)
-                logger.info("Room %s conv_type=%s for message from %s", conversation_token, conv_type, actor_id)
-                is_multi_user = await _is_multi_user_room(client, conversation_token, conv_type)
+                participants = await _get_participants(client, conversation_token, conv_type)
+                is_multi_user = _is_multi_user(participants)
                 if is_multi_user and not is_bot_mentioned(msg, config.talk.bot_username):
                     logger.info(
                         "Skipping message from %s in multi-user room %s (no @mention)",
@@ -358,6 +376,13 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
                 # Build prompt
                 prompt = content.strip() if content.strip() else "Process the attached file(s)"
+
+                # For group chats, prepend participant context so the bot
+                # knows who else is in the room
+                if is_multi_user and participants:
+                    other_names = _participant_names(participants, exclude=config.talk.bot_username)
+                    if other_names:
+                        prompt = f"[Room participants: {', '.join(other_names)}]\n{prompt}"
 
                 # Extract reply metadata
                 reply_to_talk_id = None
