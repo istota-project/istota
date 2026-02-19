@@ -68,6 +68,10 @@ invoicing_conversation_token = "room123"  # Talk room for invoice notifications
 # ntfy topic override (uses global [ntfy] topic if empty)
 # ntfy_topic = "alice-notifications"
 
+# Per-user worker concurrency limits (default: 1 each)
+# max_foreground_workers = 1
+# max_background_workers = 1
+
 # Briefings (can also be configured in workspace/BRIEFINGS.md, which takes precedence)
 [[briefings]]
 name = "morning"

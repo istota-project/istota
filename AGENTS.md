@@ -94,7 +94,7 @@ CLI ─────────►┘
 - **Talk poller**: Background daemon thread, long-polling per conversation, WAL mode for concurrent DB access
 - **Email poller**: Polls INBOX via imap-tools, creates tasks from known senders
 - **Task queue** (`db.py`): Atomic locking with optional `user_id` filter, retry logic (exponential backoff: 1, 4, 16 min), resource permissions
-- **Scheduler**: Per-user worker pool (threaded). Main loop dispatches `UserWorker` threads; each processes tasks serially for one user. `WorkerPool` manages concurrency cap (`max_total_workers`, default 5) and idle timeout (`worker_idle_timeout`, default 30s). Worker ID = hostname-pid-user_id
+- **Scheduler**: Per-user worker pool (threaded). Main loop dispatches `UserWorker` threads; each processes tasks serially for one user. `WorkerPool` manages three-tier concurrency: instance-level fg cap (`max_foreground_workers`, default 5), instance-level bg cap (`max_background_workers`, default 3), and per-user limits (default 1/1). Idle timeout via `worker_idle_timeout` (default 30s). Worker ID = hostname-pid-user_id
 - **Executor**: Builds prompts (resources + skills + context + memory), invokes Claude Code via `Popen` with `--output-format stream-json`. Auto-discovers CalDAV calendars. 10 min timeout. Auto-retries transient API errors (5xx, 429) up to 3 times before counting against task attempts
 - **Context** (`context.py`): Sonnet selects relevant previous messages; ≤3 messages included without selection
 - **Storage** (`storage.py`): Bot-owned Nextcloud directories and user memory files
@@ -230,7 +230,7 @@ Defined in `/Users/{user_id}/{bot_name}/config/CRON.md` (markdown with TOML `[[j
 
 **Migration**: If a user has DB jobs but no CRON.md, the file is auto-generated from DB entries on first sync. After that, CRON.md is the source of truth.
 
-**Isolation**: Scheduled job results excluded from interactive conversation context. Worker pool reserves slots for interactive tasks (`reserved_interactive_workers`, default 2). `silent_unless_action=1` suppresses output unless response has `ACTION:` prefix. Jobs auto-disable after `scheduled_job_max_consecutive_failures` (default 5) consecutive failures. Re-enable via `!cron enable <name>`. Tasks link back to originating job via `scheduled_job_id` column.
+**Isolation**: Scheduled job results excluded from interactive conversation context. Background workers capped separately via `max_background_workers` (default 3). `silent_unless_action=1` suppresses output unless response has `ACTION:` prefix. Jobs auto-disable after `scheduled_job_max_consecutive_failures` (default 5) consecutive failures. Re-enable via `!cron enable <name>`. Tasks link back to originating job via `scheduled_job_id` column.
 
 ### Sleep Cycle (Nightly Memory Extraction)
 Direct subprocess (not queued task). Gathers completed tasks from DB → Claude CLI extracts memories → writes `/Users/{user}/memories/YYYY-MM-DD.md` → cleanup old files.
@@ -247,7 +247,9 @@ Config: `[channel_sleep_cycle]` — enabled (default false), cron (`0 3 * * *` U
 Memory search integration: Channel conversations are indexed under `channel:{token}` namespace at task completion time. When searching from a channel context (`ISTOTA_CONVERSATION_TOKEN` env var), channel memories are automatically included via `include_user_ids`.
 
 ### Per-User Worker Pool
-Daemon mode uses `WorkerPool` + `UserWorker` threading. Main loop calls `pool.dispatch()` each iteration with two-phase dispatch: first spawns workers for users with interactive (talk/email) tasks using full `max_total_workers` cap, then spawns for background-only users capped at `max_total_workers - reserved_interactive_workers`. Each worker loops calling `process_one_task(config, user_id=...)` with user-filtered `claim_task()`. Workers exit after `worker_idle_timeout` seconds of no tasks. Thread safety: fresh DB connections per call, `threading.Lock` on workers dict, atomic `UPDATE...RETURNING` for claiming, `asyncio.run()` creates new event loop per worker. One-shot mode (`run_scheduler`) unchanged — stays single-threaded.
+Daemon mode uses `WorkerPool` + `UserWorker` threading. Main loop calls `pool.dispatch()` each iteration with two-phase dispatch: first spawns foreground workers capped at `max_foreground_workers` (default 5), then background workers capped at `max_background_workers` (default 3). Per-user limits (`UserConfig.max_foreground_workers`, `max_background_workers`, both default 1) enforced by `(user_id, queue_type)` key uniqueness. Each worker loops calling `process_one_task(config, user_id=...)` with user-filtered `claim_task()`. Workers exit after `worker_idle_timeout` seconds of no tasks. Thread safety: fresh DB connections per call, `threading.Lock` on workers dict, atomic `UPDATE...RETURNING` for claiming, `asyncio.run()` creates new event loop per worker. One-shot mode (`run_scheduler`) unchanged — stays single-threaded.
+
+**Per-channel gate**: Talk poller rejects messages when there's already an active foreground task for the same conversation (`has_active_foreground_task_for_channel()`). User gets "Still working on a previous request" response. This is a reject (not queue) — user can resend after the active task completes.
 
 ### Scheduler Robustness
 - **Stale confirmations**: Auto-cancelled after timeout (default: 120 min), user notified

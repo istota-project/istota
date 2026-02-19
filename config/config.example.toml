@@ -152,8 +152,10 @@ task_retention_days = 7
 email_retention_days = 7
 
 # Per-user worker pool settings
-# Maximum concurrent worker threads (one per user with pending tasks)
-max_total_workers = 5
+# Maximum concurrent foreground (interactive) worker threads
+max_foreground_workers = 5
+# Maximum concurrent background (scheduled/briefing) worker threads
+max_background_workers = 3
 # Seconds before an idle worker thread exits
 worker_idle_timeout = 30
 

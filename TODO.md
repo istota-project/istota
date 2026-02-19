@@ -116,7 +116,7 @@
 - [x] Skill doc for the bot to manage jobs via CRON.md file editing (was sqlite3)
 - [x] Available to all users (removed admin_only restriction)
 - [x] Context isolation (scheduled/briefing excluded from Talk context)
-- [x] Worker pool isolation (reserved slots for interactive tasks)
+- [x] Worker pool isolation (separate fg/bg caps, per-user limits, per-channel gate)
 - [x] Silent scheduled jobs (`silent_unless_action` with ACTION/NO_ACTION prefix)
 - [x] Failure tracking + auto-disable after N consecutive failures
 - [x] `!cron` command for listing/enabling/disabling jobs

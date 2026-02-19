@@ -1588,6 +1588,26 @@ def get_users_with_pending_bg_queue_tasks(conn: sqlite3.Connection) -> list[str]
     return [row[0] for row in cursor.fetchall()]
 
 
+def has_active_foreground_task_for_channel(
+    conn: sqlite3.Connection, conversation_token: str,
+) -> bool:
+    """Check if there's an active foreground task for the given channel.
+
+    Active means pending, locked, or running.
+    """
+    cursor = conn.execute(
+        """
+        SELECT 1 FROM tasks
+        WHERE conversation_token = ?
+        AND queue = 'foreground'
+        AND status IN ('pending', 'locked', 'running')
+        LIMIT 1
+        """,
+        (conversation_token,),
+    )
+    return cursor.fetchone() is not None
+
+
 # ============================================================================
 # Sleep cycle state functions
 # ============================================================================

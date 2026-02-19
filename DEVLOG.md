@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: Configurable worker concurrency
+
+Replaced the single `max_total_workers`/`reserved_interactive_workers` approach with three-tier concurrency control: per-channel gate (reject duplicate foreground tasks), separate instance-level fg/bg caps, and per-user worker limits.
+
+**Key changes:**
+- Added `max_foreground_workers` (default 5) and `max_background_workers` (default 3) to SchedulerConfig
+- Added per-user `max_foreground_workers` and `max_background_workers` fields (default 1/1) to UserConfig
+- Backward-compat: old `max_total_workers`/`reserved_interactive_workers` fields derive new fields when loaded from TOML
+- Added per-channel gate in Talk poller — rejects messages when an active fg task exists for the same conversation, sends "still working" response
+- Added `has_active_foreground_task_for_channel()` DB query
+- Rewrote `WorkerPool.dispatch()` to use separate fg/bg caps instead of shared total cap
+
+**Files added/modified:**
+- `src/istota/config.py` — New fields on SchedulerConfig and UserConfig, backward-compat derivation in load_config()
+- `src/istota/db.py` — Added `has_active_foreground_task_for_channel()`
+- `src/istota/talk_poller.py` — Per-channel gate before task creation
+- `src/istota/scheduler.py` — Rewrote WorkerPool.dispatch() for separate fg/bg caps
+- `tests/test_db.py` — 7 new tests for channel gate query
+- `tests/test_config.py` — 6 new tests for config fields and backward compat
+- `tests/test_talk_poller.py` — 3 new tests for channel gate behavior
+- `tests/test_scheduler.py` — 3 new + 4 updated tests for concurrency caps
+- `config/config.example.toml` — Updated worker pool settings
+- `config/users/alice.example.toml` — Added per-user worker limit examples
+- `deploy/ansible/defaults/main.yml` — New Ansible variables
+- `deploy/ansible/templates/config.toml.j2` — New template fields
+- `AGENTS.md`, `.claude/rules/scheduler.md`, `.claude/rules/config.md` — Updated docs
+
 ## 2026-02-19: Group chat reply threading — final response only
 
 Reply threading and @mentions in group chats were being applied to every message including intermediate progress updates (ack, tool use notifications), making the chat noisy. Fixed so only the final response gets reply_to and @mention; progress updates are sent as plain messages.

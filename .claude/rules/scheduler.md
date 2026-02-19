@@ -76,14 +76,15 @@ After successful task completion (not confirmation, not failure), the scheduler 
 ```python
 class WorkerPool:
     def __init__(self, config: Config)
-    def dispatch(self) -> None        # Two-phase: interactive first (full cap), then background (reduced cap)
-    def _on_worker_exit(self, user_id: str) -> None
+    def dispatch(self) -> None        # Two-phase: fg first (fg cap), then bg (bg cap)
+    def _on_worker_exit(self, user_id: str, queue_type: str) -> None
     def shutdown(self) -> None         # request_stop + join(10s)
     @property active_count -> int
 ```
 - Thread-safe via `threading.Lock` on `_workers` dict
-- Interactive cap: `max_total_workers`
-- Background cap: `max_total_workers - reserved_interactive_workers`
+- Foreground cap: `max_foreground_workers` (default 5)
+- Background cap: `max_background_workers` (default 3)
+- Per-user caps enforced by `(user_id, queue_type)` key uniqueness (default 1/1)
 
 ## UserWorker (L266-326)
 ```python
@@ -137,8 +138,10 @@ After task completion, if enabled + `auto_index_conversations`:
 | `shared_file_check_interval` | 120s | Shared file organizer |
 | `heartbeat_check_interval` | 60s | Heartbeat checks |
 | `worker_idle_timeout` | 30s | Worker thread exit |
-| `max_total_workers` | 5 | Worker pool cap |
-| `reserved_interactive_workers` | 2 | Reserved for interactive |
+| `max_total_workers` | 5 | Legacy overall cap (kept for compat) |
+| `reserved_interactive_workers` | 2 | Legacy reserved (kept for compat) |
+| `max_foreground_workers` | 5 | Instance-level fg worker cap |
+| `max_background_workers` | 3 | Instance-level bg worker cap |
 | `task_timeout_minutes` | 30 | Claude Code timeout |
 | `confirmation_timeout_minutes` | 120 | Confirmation expiry |
 | `max_retry_age_minutes` | 60 | Max age for retry |

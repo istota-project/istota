@@ -916,3 +916,92 @@ class TestPollTalkConversationsGroupRoom:
         assert len(result) == 1
         # get_participants should not be called for type 1
         mock_instance.get_participants.assert_not_called()
+
+
+class TestChannelGate:
+    """Per-channel gate: reject duplicate foreground tasks."""
+
+    @pytest.mark.asyncio
+    async def test_channel_gate_rejects_when_active_task(self, make_config):
+        """When an active fg task exists for the channel, reject and send 'still working'."""
+        config = make_config()
+
+        # Pre-create an active foreground task for room1
+        with db.get_db(config.db_path) as conn:
+            db.create_task(
+                conn, prompt="previous request", user_id="alice",
+                source_type="talk", conversation_token="room1", queue="foreground",
+            )
+
+        msg = _msg(id=200, actor_id="alice", message="Another request")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+            mock_instance.send_message = AsyncMock()
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        # No new task should be created
+        assert result == []
+        # Bot should have sent "still working" message
+        mock_instance.send_message.assert_called_once()
+        call_args = mock_instance.send_message.call_args
+        assert "room1" == call_args[0][0]
+        assert "still working" in call_args[0][1].lower() or "previous request" in call_args[0][1].lower()
+
+    @pytest.mark.asyncio
+    async def test_channel_gate_allows_when_no_active_task(self, make_config):
+        """When no active fg task exists, message is processed normally."""
+        config = make_config()
+
+        msg = _msg(id=200, actor_id="alice", message="New request")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_channel_gate_allows_after_task_completes(self, make_config):
+        """Completed tasks don't block new ones."""
+        config = make_config()
+
+        # Create and complete a task
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="old request", user_id="alice",
+                source_type="talk", conversation_token="room1", queue="foreground",
+            )
+            db.update_task_status(conn, task_id, "completed", result="done")
+
+        msg = _msg(id=200, actor_id="alice", message="New request")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
