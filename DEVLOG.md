@@ -2,6 +2,19 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: Fix channel gate blocking after !stop
+
+After `!stop`, the cancelled task stays in `running` status until the worker thread cleans up. If the user sends a new message in that window, the per-channel gate sees the still-running task and rejects the message with "Still working on a previous request." Fixed by excluding tasks with `cancel_requested = 1` from the gate check. Also added a prompt note telling the bot where its JSONL execution logs live, so it can retrieve full output from previous tasks when users report truncated responses.
+
+**Key changes:**
+- `has_active_foreground_task_for_channel()` now excludes cancelled tasks (`AND cancel_requested = 0`)
+- Added prompt rule pointing the bot to `~/.claude/projects/` for execution JSONL logs
+
+**Files modified:**
+- `src/istota/db.py` — Added `cancel_requested = 0` filter to channel gate query
+- `src/istota/executor.py` — Added rule 8 about JSONL log location to admin prompt
+- `tests/test_db.py` — Added `test_false_when_cancel_requested`
+
 ## 2026-02-19: Fix load_config default for user_max_foreground_workers
 
 Code review of the multi-worker feature found a mismatch: the dataclass default for `user_max_foreground_workers` was updated to 2 but the `load_config()` fallback was left at 1. In production (config loaded from TOML), deployments without an explicit setting would silently get 1 worker per user instead of the intended 2.

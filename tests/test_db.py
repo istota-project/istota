@@ -68,6 +68,21 @@ class TestHasActiveForegroundTaskForChannel:
             )
             assert db.has_active_foreground_task_for_channel(conn, "room2") is False
 
+    def test_false_when_cancel_requested(self, db_path):
+        """A running task with cancel_requested should not block new messages."""
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hello", user_id="alice",
+                conversation_token="room1", queue="foreground",
+            )
+            db.update_task_status(conn, task_id, "running")
+            conn.execute(
+                "UPDATE tasks SET cancel_requested = 1 WHERE id = ?",
+                (task_id,),
+            )
+            conn.commit()
+            assert db.has_active_foreground_task_for_channel(conn, "room1") is False
+
 
 class TestCountPendingTasksForUserQueue:
     def test_counts_pending_fg_tasks(self, db_path):

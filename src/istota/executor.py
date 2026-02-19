@@ -710,7 +710,8 @@ The following are relevant previous messages from this conversation:
 4. Do NOT write to the SQLite database directly (e.g. via sqlite3 CLI or Python sqlite3 module). The database is read-only in your environment. All database modifications are handled by the skill CLI commands (e.g. `python -m istota.skills.accounting`, `python -m istota.skills.memory_search`) or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
 5. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
 6. Never edit or create files in your own source directory.
-7. Respond directly with your answer - your output will be sent to the user."""
+7. Respond directly with your answer - your output will be sent to the user.
+8. Your execution JSONL logs (full conversation traces including subagent output) are stored under ~/.claude/projects/. If a user reports missing or truncated output from a previous task, search these logs for the full assistant message content."""
     else:
         scoped_path = str(config.nextcloud_mount_path / "Users" / task.user_id) if config.use_mount else f"{config.rclone_remote}:/Users/{task.user_id}"
         rules_section = f"""## Important rules

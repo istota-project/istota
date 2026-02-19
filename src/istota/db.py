@@ -1608,7 +1608,8 @@ def has_active_foreground_task_for_channel(
 ) -> bool:
     """Check if there's an active foreground task for the given channel.
 
-    Active means pending, locked, or running.
+    Active means pending, locked, or running — but not if cancellation
+    has been requested (the task is winding down).
     """
     cursor = conn.execute(
         """
@@ -1616,6 +1617,7 @@ def has_active_foreground_task_for_channel(
         WHERE conversation_token = ?
         AND queue = 'foreground'
         AND status IN ('pending', 'locked', 'running')
+        AND cancel_requested = 0
         LIMIT 1
         """,
         (conversation_token,),
