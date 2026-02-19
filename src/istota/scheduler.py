@@ -807,13 +807,23 @@ def process_one_task(
         _process_deferred_subtasks(config, task, user_temp_dir)
         _process_deferred_tracking(config, task, user_temp_dir)
 
-    # Deduplicate: if the final result was already sent verbatim as a
-    # progress message, skip posting it again.
-    if post_talk_message and progress_callback and hasattr(progress_callback, "sent_texts"):
+    # Deduplicate: strip text already sent as progress from the final result.
+    # Only applies when progress_text_max_chars == 0 (unlimited), since truncated
+    # progress texts would leave dangling partial sentences if stripped as a prefix.
+    max_chars = config.scheduler.progress_text_max_chars
+    if post_talk_message and max_chars == 0 and progress_callback and hasattr(progress_callback, "sent_texts"):
+        result_stripped = post_talk_message.strip()
         for sent in progress_callback.sent_texts:
-            if sent.strip() == post_talk_message.strip():
+            sent_stripped = sent.strip()
+            if sent_stripped == result_stripped:
                 logger.debug("Final result already sent as progress for task %d, skipping", task_id)
                 post_talk_message = None
+                break
+            if result_stripped.startswith(sent_stripped):
+                remainder = result_stripped[len(sent_stripped):].strip()
+                if remainder:
+                    logger.debug("Stripping progress prefix from result for task %d (%d chars)", task_id, len(sent_stripped))
+                    post_talk_message = remainder
                 break
 
     # Deliver results outside DB context to avoid lock conflicts
