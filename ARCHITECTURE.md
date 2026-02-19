@@ -131,12 +131,13 @@ while not shutdown_requested:
 
 ### Worker pool
 
-`WorkerPool` manages concurrent `UserWorker` threads with separate caps for foreground and background work. Dispatch is two-phase:
+`WorkerPool` manages concurrent `UserWorker` threads with three-tier concurrency control:
 
-1. **Foreground first**: spawn workers for users with Talk/email tasks, capped at `max_foreground_workers` (default 5)
-2. **Background second**: spawn for users with scheduled/background tasks, capped at `max_background_workers` (default 3)
+1. **Per-channel gate**: before creating a task, the Talk poller checks if an active foreground task already exists for the conversation. If so, the message is rejected with "still working on a previous request" — the user can resend after the active task completes.
+2. **Instance-level caps**: `max_foreground_workers` (default 5) and `max_background_workers` (default 3) limit total concurrent workers by queue type. Dispatch is two-phase: foreground first, then background.
+3. **Per-user limits**: `user_max_foreground_workers` (default 2) and `user_max_background_workers` (default 1) set global per-user defaults. Individual users can override via `max_foreground_workers`/`max_background_workers` in their per-user config (0 = use global default).
 
-Each `UserWorker` is a thread that processes tasks serially for one user. It exits after `worker_idle_timeout` (30s) of no tasks. Thread safety: fresh DB connections per call, new `asyncio.run()` event loop per worker, `threading.Lock` on the workers dict.
+Each `UserWorker` is a thread that processes tasks serially for one user. Workers are keyed by `(user_id, queue_type)`, so a user can have at most one foreground and one background worker simultaneously. Workers exit after `worker_idle_timeout` (30s) of no tasks. Thread safety: fresh DB connections per call, new `asyncio.run()` event loop per worker, `threading.Lock` on the workers dict.
 
 ### Task claiming
 
@@ -358,7 +359,11 @@ Two methods:
 
 The talk poller runs in a background daemon thread. It long-polls each conversation the bot is part of. First poll initializes state; subsequent polls use `lookIntoFuture=1` for real-time message delivery. Fast rooms (with new messages) are processed immediately without waiting for slow (quiet) rooms.
 
-Progress updates during task execution: random acknowledgment before execution starts ("On it...", "Braining...", etc.), then streaming tool-use descriptions rate-limited to min 8s apart and max 5 per task.
+**Multi-user rooms**: In rooms with 3+ participants, the bot only responds when @mentioned. 2-person rooms behave like DMs. Participant counts are cached (5 min TTL). The bot's own @mention is stripped from the prompt; other mentions are resolved to `@DisplayName`. Falls back to DM behavior on API errors.
+
+**Reply threading**: Final responses in group chats use `reply_to` on the original message and prepend `@{user_id}` for notification. Intermediate messages (ack, progress updates) are sent without reply threading to avoid noise.
+
+Progress updates during task execution: random acknowledgment before execution starts, then streaming tool-use descriptions rate-limited to min 8s apart and max 5 per task.
 
 ### CalDAV
 
@@ -464,7 +469,7 @@ Nextcloud mount via rclone: full VFS cache, 1h max age, 5s dir cache, 10s poll i
 
 ## Testing
 
-TDD with pytest + pytest-asyncio. ~1946 tests across 43 files. Real SQLite via `tmp_path` (no DB mocking). `unittest.mock` for external dependencies.
+TDD with pytest + pytest-asyncio. ~2005 tests across 43 files. Real SQLite via `tmp_path` (no DB mocking). `unittest.mock` for external dependencies.
 
 Shared fixtures in `conftest.py`: `db_path` (initialized from schema.sql), `db_conn`, `make_task`, `make_config`, `make_user_config`.
 
@@ -502,6 +507,6 @@ External tooling: `claude` CLI (Anthropic), `rclone` (Nextcloud file access), `b
 
 **Security by environment, not tool restriction.** Rather than limiting which Claude Code tools are available, credentials are stripped from the subprocess environment. For heartbeat/cron commands, no credentials are passed. The bubblewrap sandbox restricts filesystem visibility per user.
 
-**Worker-per-user for fairness.** Each user gets their own serial worker thread. One user's slow task doesn't block another user. Interactive tasks get priority via two-phase dispatch.
+**Worker-per-user for fairness.** Each user gets their own serial worker thread per queue type (foreground/background). One user's slow task doesn't block another user. Interactive tasks get priority via two-phase dispatch with separate instance-level and per-user caps.
 
 **Deferred writes for sandbox compatibility.** With bubblewrap making the DB read-only inside the sandbox, skills write JSON files to a writable temp dir. The unsandboxed scheduler processes these after task completion.
