@@ -156,6 +156,9 @@ email_retention_days = 7
 max_foreground_workers = 5
 # Maximum concurrent background (scheduled/briefing) worker threads
 max_background_workers = 3
+# Global per-user worker defaults (individual users can override in their config)
+# user_max_foreground_workers = 1
+# user_max_background_workers = 1
 # Seconds before an idle worker thread exits
 worker_idle_timeout = 30
 

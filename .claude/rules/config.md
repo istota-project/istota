@@ -86,7 +86,7 @@ timezone: str = "UTC"                     briefings: list[BriefingConfig] = []
 resources: list[ResourceConfig] = []
 invoicing_notifications: str = ""         invoicing_conversation_token: str = ""
 ntfy_topic: str = ""
-max_foreground_workers: int = 1           max_background_workers: int = 1
+max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 = use global default
 ```
 
 ### `MemorySearchConfig` (L165-170)

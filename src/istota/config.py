@@ -123,6 +123,8 @@ class SchedulerConfig:
     reserved_interactive_workers: int = 2  # workers reserved for interactive tasks (legacy, kept for compat)
     max_foreground_workers: int = 5  # instance-level foreground (interactive) worker cap
     max_background_workers: int = 3  # instance-level background (scheduled/briefing) worker cap
+    user_max_foreground_workers: int = 1  # global per-user fg worker default
+    user_max_background_workers: int = 1  # global per-user bg worker default
     scheduled_job_max_consecutive_failures: int = 5  # auto-disable after N failures (0 = never)
     feed_check_interval: int = 300  # seconds between feed polls
     feed_item_retention_days: int = 30  # delete feed items older than this
@@ -182,8 +184,8 @@ class UserConfig:
     invoicing_conversation_token: str = ""  # Talk room for invoice notifications
     ntfy_topic: str = ""  # per-user ntfy topic override
     site_enabled: bool = False  # static website hosting at /~user/
-    max_foreground_workers: int = 1  # max concurrent fg workers for this user
-    max_background_workers: int = 1  # max concurrent bg workers for this user
+    max_foreground_workers: int = 0  # per-user fg worker override (0 = use global default)
+    max_background_workers: int = 0  # per-user bg worker override (0 = use global default)
 
 
 @dataclass
@@ -338,6 +340,20 @@ class Config:
     def caldav_password(self) -> str:
         """CalDAV password (same as Nextcloud app password)."""
         return self.nextcloud.app_password
+
+    def effective_user_max_fg_workers(self, user_id: str) -> int:
+        """Effective max fg workers for a user (per-user override > global default)."""
+        uc = self.get_user(user_id)
+        if uc and uc.max_foreground_workers > 0:
+            return uc.max_foreground_workers
+        return self.scheduler.user_max_foreground_workers
+
+    def effective_user_max_bg_workers(self, user_id: str) -> int:
+        """Effective max bg workers for a user (per-user override > global default)."""
+        uc = self.get_user(user_id)
+        if uc and uc.max_background_workers > 0:
+            return uc.max_background_workers
+        return self.scheduler.user_max_background_workers
 
     def is_admin(self, user_id: str) -> bool:
         """Check if user has admin privileges.
@@ -585,6 +601,8 @@ def load_config(config_path: Path | None = None) -> Config:
             feed_check_interval=sched.get("feed_check_interval", 300),
             max_foreground_workers=sched.get("max_foreground_workers", sched.get("max_total_workers", 5)),
             max_background_workers=sched.get("max_background_workers", max(1, sched.get("max_total_workers", 5) - sched.get("reserved_interactive_workers", 2))),
+            user_max_foreground_workers=sched.get("user_max_foreground_workers", 1),
+            user_max_background_workers=sched.get("user_max_background_workers", 1),
         )
 
     if "browser" in data:

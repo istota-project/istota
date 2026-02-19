@@ -64,6 +64,8 @@ istota_scheduler_worker_idle_timeout: 30           # Seconds before idle worker 
 istota_scheduler_reserved_interactive_workers: 2   # Workers reserved for interactive tasks (legacy)
 istota_scheduler_max_foreground_workers: 5         # Instance-level foreground (interactive) worker cap
 istota_scheduler_max_background_workers: 3         # Instance-level background (scheduled/briefing) worker cap
+istota_scheduler_user_max_foreground_workers: 1    # Global per-user fg worker default
+istota_scheduler_user_max_background_workers: 1    # Global per-user bg worker default
 istota_scheduler_scheduled_job_max_consecutive_failures: 5  # Auto-disable after N failures (0=never)
 istota_scheduler_feed_check_interval: 300                  # Seconds between feed polls
 istota_scheduler_feed_item_retention_days: 30              # Delete feed items older than N days
@@ -120,8 +122,8 @@ istota_admin_users: []
 #     email_addresses:
 #       - "alice@example.com"
 #     timezone: "America/New_York"
-#     max_foreground_workers: 1    # per-user fg worker limit (default: 1)
-#     max_background_workers: 1    # per-user bg worker limit (default: 1)
+#     max_foreground_workers: 2    # per-user override (0 or omit = use global default)
+#     max_background_workers: 1    # per-user override (0 or omit = use global default)
 #     resources:
 #       - type: "folder"
 #         path: "/alice/Projects"

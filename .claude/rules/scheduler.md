@@ -142,6 +142,8 @@ After task completion, if enabled + `auto_index_conversations`:
 | `reserved_interactive_workers` | 2 | Legacy reserved (kept for compat) |
 | `max_foreground_workers` | 5 | Instance-level fg worker cap |
 | `max_background_workers` | 3 | Instance-level bg worker cap |
+| `user_max_foreground_workers` | 1 | Global per-user fg default |
+| `user_max_background_workers` | 1 | Global per-user bg default |
 | `task_timeout_minutes` | 30 | Claude Code timeout |
 | `confirmation_timeout_minutes` | 120 | Confirmation expiry |
 | `max_retry_age_minutes` | 60 | Max age for retry |

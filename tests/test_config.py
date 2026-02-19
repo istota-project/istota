@@ -1012,8 +1012,55 @@ class TestWorkerConcurrencyConfig:
         assert cfg.users["alice"].max_background_workers == 3
 
     def test_user_config_worker_limits_defaults(self):
-        """UserConfig defaults to 1/1 for worker limits."""
+        """UserConfig defaults to 0/0 (use global default)."""
         from istota.config import UserConfig
         uc = UserConfig()
-        assert uc.max_foreground_workers == 1
-        assert uc.max_background_workers == 1
+        assert uc.max_foreground_workers == 0
+        assert uc.max_background_workers == 0
+
+    def test_global_user_worker_defaults_from_toml(self, tmp_path, monkeypatch):
+        """Global per-user worker defaults parsed from scheduler section."""
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[scheduler]\n'
+            'user_max_foreground_workers = 3\n'
+            'user_max_background_workers = 2\n'
+        )
+        cfg = load_config(p)
+        assert cfg.scheduler.user_max_foreground_workers == 3
+        assert cfg.scheduler.user_max_background_workers == 2
+
+    def test_global_user_worker_defaults(self):
+        """Default global per-user limits are 1/1."""
+        cfg = Config()
+        assert cfg.scheduler.user_max_foreground_workers == 1
+        assert cfg.scheduler.user_max_background_workers == 1
+
+    def test_effective_user_workers_uses_global_default(self):
+        """When user has 0 (not set), effective value comes from global default."""
+        from istota.config import UserConfig
+        cfg = Config()
+        cfg.scheduler.user_max_foreground_workers = 3
+        cfg.scheduler.user_max_background_workers = 2
+        cfg.users["alice"] = UserConfig()  # 0/0 = use global
+        assert cfg.effective_user_max_fg_workers("alice") == 3
+        assert cfg.effective_user_max_bg_workers("alice") == 2
+
+    def test_effective_user_workers_per_user_override(self):
+        """Per-user setting overrides global default."""
+        from istota.config import UserConfig
+        cfg = Config()
+        cfg.scheduler.user_max_foreground_workers = 1
+        cfg.scheduler.user_max_background_workers = 1
+        cfg.users["alice"] = UserConfig(max_foreground_workers=4, max_background_workers=2)
+        assert cfg.effective_user_max_fg_workers("alice") == 4
+        assert cfg.effective_user_max_bg_workers("alice") == 2
+
+    def test_effective_user_workers_unknown_user(self):
+        """Unknown user gets global default."""
+        cfg = Config()
+        cfg.scheduler.user_max_foreground_workers = 2
+        cfg.scheduler.user_max_background_workers = 3
+        assert cfg.effective_user_max_fg_workers("unknown") == 2
+        assert cfg.effective_user_max_bg_workers("unknown") == 3
