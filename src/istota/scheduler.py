@@ -868,7 +868,7 @@ async def post_result_to_talk(
         return msg_id
     except Exception as e:
         # Log but don't fail the task — use Python logger to avoid DB lock issues
-        logger.error("Failed to post to Talk (task %s): %s", task.id, e)
+        logger.error("Failed to post to Talk (task %s): %s: %r", task.id, type(e).__name__, e)
         return None
 
 
