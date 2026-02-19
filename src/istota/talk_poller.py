@@ -143,7 +143,7 @@ async def _is_multi_user_room(
         participants = await client.get_participants(conversation_token)
         count = len(participants)
         _participant_counts[conversation_token] = (count, now)
-        logger.debug(
+        logger.info(
             "Room %s (type=%s) has %d participants → %s",
             conversation_token, conv_type, count,
             "multi-user" if count >= 3 else "DM-like",
@@ -318,9 +318,10 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
                 # In multi-user rooms, only respond when @mentioned
                 conv_type = conv_types.get(conversation_token, 1)
+                logger.info("Room %s conv_type=%s for message from %s", conversation_token, conv_type, actor_id)
                 is_multi_user = await _is_multi_user_room(client, conversation_token, conv_type)
                 if is_multi_user and not is_bot_mentioned(msg, config.talk.bot_username):
-                    logger.debug(
+                    logger.info(
                         "Skipping message from %s in multi-user room %s (no @mention)",
                         actor_id, conversation_token,
                     )
