@@ -435,8 +435,8 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         invoicing_conversation_token=user_data.get("invoicing_conversation_token", ""),
         ntfy_topic=user_data.get("ntfy_topic", ""),
         site_enabled=user_data.get("site_enabled", False),
-        max_foreground_workers=user_data.get("max_foreground_workers", 1),
-        max_background_workers=user_data.get("max_background_workers", 1),
+        max_foreground_workers=user_data.get("max_foreground_workers", 0),
+        max_background_workers=user_data.get("max_background_workers", 0),
     )
 
 

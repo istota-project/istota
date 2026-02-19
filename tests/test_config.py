@@ -1048,3 +1048,19 @@ class TestWorkerConcurrencyConfig:
         cfg.scheduler.user_max_background_workers = 3
         assert cfg.effective_user_max_fg_workers("unknown") == 2
         assert cfg.effective_user_max_bg_workers("unknown") == 3
+
+    def test_parsed_user_defaults_to_global_workers(self, tmp_path, monkeypatch):
+        """User loaded from per-user TOML without explicit worker limits uses global default."""
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[scheduler]\n'
+            'user_max_foreground_workers = 3\n'
+        )
+        cfg = load_config(p)
+        # alice's per-user file doesn't set worker limits, so effective should use global
+        assert cfg.effective_user_max_fg_workers("alice") == 3
+        assert cfg.users["alice"].max_foreground_workers == 0  # sentinel, not 1
