@@ -1616,6 +1616,12 @@ def run_daemon(config: Config) -> None:
     last_feed_check = 0.0
 
     while not _shutdown_requested:
+        # Dispatch worker threads first — minimizes latency for pending tasks
+        try:
+            pool.dispatch()
+        except Exception as e:
+            logger.error("Error dispatching workers: %s", e)
+
         now = time.time()
 
         # Check briefings periodically
@@ -1740,12 +1746,6 @@ def run_daemon(config: Config) -> None:
             except Exception as e:
                 logger.error("Error checking feeds: %s", e)
             last_feed_check = now
-
-        # Dispatch worker threads for users with pending tasks
-        try:
-            pool.dispatch()
-        except Exception as e:
-            logger.error("Error dispatching workers: %s", e)
 
         # Sleep before next poll cycle
         time.sleep(config.scheduler.poll_interval)
