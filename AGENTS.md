@@ -169,6 +169,8 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 
 **Confirmation flow**: Regex-detected confirmation requests → `pending_confirmation` status → user replies yes/no → resume or cancel.
 
+**Multi-user rooms**: In rooms with 3+ participants, the bot only responds when @mentioned (`mention-user` or `mention-federated-user` in `messageParameters`). Rooms with 2 participants (bot + 1 user) behave like DMs — respond to everything. Participant counts are cached (5 min TTL) via `get_participants()` API. `mention-call` (@all) is excluded to avoid responding to every broadcast. Bot's own mention is stripped from the prompt; other mentions are replaced with `@DisplayName`. Tasks created from group rooms have `is_group_chat=True`, and conversation context shows usernames as speaker labels instead of "User". Falls back to DM behavior on participants API failure.
+
 **!Commands**: `!`-prefixed messages intercepted in the poller before task creation. Handled synchronously without Claude Code. Commands: `!help` (list commands), `!stop` (cancel active task via DB flag + SIGTERM), `!status` (show tasks grouped by interactive/background + system stats), `!memory user`/`!memory channel` (show memory files), `!cron` (list/enable/disable scheduled jobs), `!usage` (show Claude API usage/billing stats), `!check` (run system health check). Long responses split via `split_message()`. Registry in `commands.py` with decorator-based registration.
 
 ### Skills

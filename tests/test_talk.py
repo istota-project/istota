@@ -157,6 +157,27 @@ class TestTalkClient:
         assert result is None
 
 
+class TestGetParticipants:
+    @pytest.mark.asyncio
+    async def test_basic_call(self, client):
+        mock_http = _mock_httpx_client()
+        participants = [
+            {"actorId": "alice", "actorType": "users"},
+            {"actorId": "istota", "actorType": "users"},
+        ]
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ocs": {"data": participants}}
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.get_participants("room1")
+
+        assert result == participants
+        call_kwargs = mock_http.get.call_args
+        assert "/participants" in call_kwargs.args[0]
+        assert "room1" in call_kwargs.args[0]
+
+
 class TestTruncateMessage:
     def test_short_unchanged(self):
         msg = "Hello world"

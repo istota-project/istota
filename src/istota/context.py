@@ -88,7 +88,8 @@ def _triage_older_messages(
 
     def _format_triage_msg(i: int, msg: ConversationMessage) -> str:
         ts = msg.created_at[:16] if msg.created_at else "unknown"
-        lines = f"[{i}] ({ts}) User: {msg.prompt}\nBot: {msg.result}"
+        speaker = msg.user_id if msg.user_id else "User"
+        lines = f"[{i}] ({ts}) {speaker}: {msg.prompt}\nBot: {msg.result}"
         if msg.actions_taken:
             actions_line = _format_actions_line(msg.actions_taken)
             if actions_line:
@@ -209,7 +210,12 @@ def format_context_for_prompt(messages: list[ConversationMessage], truncation: i
         # Use shorter timestamp format
         timestamp = msg.created_at[:16] if msg.created_at else "unknown"
         source_type = getattr(msg, "source_type", "talk") or "talk"
-        speaker = "Scheduled" if source_type in _SCHEDULED_SOURCE_TYPES else "User"
+        if source_type in _SCHEDULED_SOURCE_TYPES:
+            speaker = "Scheduled"
+        elif msg.user_id:
+            speaker = msg.user_id
+        else:
+            speaker = "User"
         formatted.append(f"[{timestamp}] {speaker}: {msg.prompt}")
         result = msg.result
         if truncation > 0 and len(result) > truncation:

@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-18: Multi-user Talk room participation
+
+In group rooms with multiple participants, istota now only responds when @mentioned instead of replying to every message. Rooms with exactly 2 participants (bot + 1 user) still behave like DMs. Conversation context in group chats shows usernames as speaker labels for multi-user attribution.
+
+**Key changes:**
+- `is_bot_mentioned()` checks `messageParameters` for `mention-user`/`mention-federated-user` matching bot username (excludes `mention-call`/@all)
+- `clean_message_content()` updated to strip bot's own @mention from prompt and replace other mentions with `@DisplayName`
+- `_is_multi_user_room()` async function with 5-min TTL participant count cache; type 1 (DM) always False, type 2/3 checks count via `get_participants()` API
+- `poll_talk_conversations()` gates on @mention in multi-user rooms, passes `is_group_chat=True` to task creation
+- `ConversationMessage` now includes `user_id` field; context formatter and triage use it as speaker label
+- `build_prompt()` adds group chat note when `task.is_group_chat` is set
+- Falls back to DM behavior (respond to everything) on participants API failure
+
+**Files modified:**
+- `src/istota/talk.py` - Added `get_participants()` method to `TalkClient`
+- `src/istota/talk_poller.py` - Added `is_bot_mentioned()`, `_is_multi_user_room()`, mention handling in `clean_message_content()`, group room logic in `poll_talk_conversations()`
+- `src/istota/db.py` - Added `user_id` to `ConversationMessage`, updated `get_conversation_history()` and `get_previous_task()` queries
+- `src/istota/context.py` - Multi-user attribution in `format_context_for_prompt()` and `_format_triage_msg()`
+- `src/istota/executor.py` - `user_id` passthrough in `_ensure_reply_parent_in_history()`, group chat note in `build_prompt()`
+- `AGENTS.md` - Documented multi-user room behavior in Talk Integration section
+- `tests/test_talk.py` - Added `TestGetParticipants`
+- `tests/test_talk_poller.py` - Added `TestIsBotMentioned` (7), `TestCleanMessageContentMentions` (4), `TestIsMultiUserRoom` (5), `TestPollTalkConversationsGroupRoom` (4)
+- `tests/test_context.py` - Added multi-user attribution tests (4)
+
 ## 2026-02-18: Fix TOML quoting in CRON.md generation
 
 The `generate_cron_md()` function wrapped all values in basic TOML double quotes without escaping inner `"` characters. When `remove_job_from_cron_md()` rewrote the file after a once-job fired, a command containing `--subject "Operation's Tent"` produced invalid TOML that broke parsing for all 23 jobs. Fixed by using triple-quoted TOML strings (`"""..."""`) whenever a value contains double quotes or newlines.

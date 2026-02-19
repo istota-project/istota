@@ -136,6 +136,19 @@ class TalkClient:
                 return messages[0].get("id")
             return None
 
+    async def get_participants(self, conversation_token: str) -> list[dict]:
+        """Get participants of a conversation."""
+        url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room/{conversation_token}/participants"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                auth=self.auth,
+                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            )
+            response.raise_for_status()
+            return response.json().get("ocs", {}).get("data", [])
+
     async def download_attachment(
         self,
         file_path: str,

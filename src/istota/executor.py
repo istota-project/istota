@@ -431,6 +431,7 @@ def _ensure_reply_parent_in_history(
             created_at=parent_task.created_at or "",
             actions_taken=parent_task.actions_taken,
             source_type=parent_task.source_type,
+            user_id=parent_task.user_id,
         )
         if parent_task.id not in history_ids:
             logger.info(
@@ -724,11 +725,15 @@ The following are relevant previous messages from this conversation:
 5. Never edit or create files in your own source directory.
 6. Respond directly with your answer - your output will be sent to the user."""
 
+    group_chat_line = ""
+    if task.is_group_chat:
+        group_chat_line = f"\nThis is a group conversation. You were @mentioned by '{task.user_id}'. Other participants' messages are visible in conversation context below."
+
     prompt = f"""You are {config.bot_name}, a helpful assistant bot. You are responding to a request from user '{task.user_id}'.
 
 Current time: {user_time_str}
 Current task ID: {task.id}
-Conversation token: {task.conversation_token or 'none'}
+Conversation token: {task.conversation_token or 'none'}{group_chat_line}
 {db_path_line}
 {persona_section}
 ## User's accessible resources

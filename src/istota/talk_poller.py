@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import time
 
 from . import db
 from .config import Config
@@ -14,6 +15,13 @@ logger = logging.getLogger("istota.talk_poller")
 # Pattern to extract file attachment info from Talk messages
 # Format: {file0} placeholder in message, actual file shared in bot's Talk folder
 FILE_PLACEHOLDER_PATTERN = re.compile(r'\{file(\d+)\}')
+
+# Pattern to match mention placeholders in Talk messages
+MENTION_PLACEHOLDER_PATTERN = re.compile(r'\{(mention-(?:user|call|federated-user)\d+)\}')
+
+# Participant count cache: token -> (count, timestamp)
+_participant_counts: dict[str, tuple[int, float]] = {}
+_PARTICIPANT_CACHE_TTL = 300  # 5 minutes
 
 
 def extract_attachments(message: dict) -> list[str]:
@@ -44,9 +52,32 @@ def extract_attachments(message: dict) -> list[str]:
     return attachments
 
 
-def clean_message_content(message: dict) -> str:
+def is_bot_mentioned(message: dict, bot_username: str) -> bool:
+    """Check if the bot is directly @mentioned in a Talk message.
+
+    Checks messageParameters for mention-user or mention-federated-user entries
+    matching the bot username. Excludes mention-call (@all) to avoid responding
+    to every broadcast.
     """
-    Clean up message content, replacing file placeholders with readable text.
+    message_params = message.get("messageParameters", {})
+    if not isinstance(message_params, dict):
+        return False
+
+    for key, value in message_params.items():
+        if not isinstance(value, dict):
+            continue
+        if key.startswith("mention-user") or key.startswith("mention-federated-user"):
+            if value.get("id") == bot_username:
+                return True
+    return False
+
+
+def clean_message_content(message: dict, bot_username: str | None = None) -> str:
+    """
+    Clean up message content, replacing file and mention placeholders with readable text.
+
+    When bot_username is provided, the bot's own mention placeholder is stripped
+    (cleaned from the prompt). Other mentions are replaced with @DisplayName.
     """
     content = message.get("message", "")
     message_params = message.get("messageParameters", {})
@@ -63,7 +94,59 @@ def clean_message_content(message: dict) -> str:
             return f"[{filename}]"
         return match.group(0)
 
-    return FILE_PLACEHOLDER_PATTERN.sub(replace_file, content)
+    content = FILE_PLACEHOLDER_PATTERN.sub(replace_file, content)
+
+    # Replace mention placeholders
+    if bot_username is not None:
+        def replace_mention(match):
+            key = match.group(1)
+            param = message_params.get(key)
+            if not isinstance(param, dict):
+                return match.group(0)
+            # Strip bot's own mention from the prompt
+            if param.get("id") == bot_username:
+                return ""
+            # Replace other mentions with @DisplayName
+            display_name = param.get("name", param.get("id", ""))
+            if display_name:
+                return f"@{display_name}"
+            return match.group(0)
+
+        content = MENTION_PLACEHOLDER_PATTERN.sub(replace_mention, content)
+        # Clean up extra whitespace from stripped bot mentions
+        content = re.sub(r'  +', ' ', content).strip()
+
+    return content
+
+
+async def _is_multi_user_room(
+    client: TalkClient,
+    conversation_token: str,
+    conv_type: int,
+) -> bool:
+    """Determine if a conversation has 3+ participants (requires @mention).
+
+    Type 1 (DM) always returns False. Type 2/3 checks participant count
+    with a TTL cache. Falls back to False (treat as DM) on API errors.
+    """
+    if conv_type == 1:
+        return False
+
+    now = time.monotonic()
+    cached = _participant_counts.get(conversation_token)
+    if cached is not None:
+        count, ts = cached
+        if now - ts < _PARTICIPANT_CACHE_TTL:
+            return count >= 3
+
+    try:
+        participants = await client.get_participants(conversation_token)
+        count = len(participants)
+        _participant_counts[conversation_token] = (count, now)
+        return count >= 3
+    except Exception as e:
+        logger.warning("Error getting participants for %s: %s — treating as DM", conversation_token, e)
+        return False
 
 
 async def _poll_single_conversation(
@@ -116,6 +199,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
     # Build list of conversations to poll and initialize new ones
     poll_tasks = []
+    conv_types: dict[str, int] = {}  # token -> conversation type
     with db.get_db(config.db_path) as conn:
         for conv in conversations:
             conversation_token = conv.get("token")
@@ -124,6 +208,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
             # Conversation types: 1=one-to-one (DM), 2=group, 3=public, 4=changelog
             conv_type = conv.get("type")
+            conv_types[conversation_token] = conv_type
 
             # Get last known message ID for this conversation
             last_message_id = db.get_talk_poll_state(conn, conversation_token)
@@ -223,8 +308,18 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     # Unknown user - skip silently
                     continue
 
+                # In multi-user rooms, only respond when @mentioned
+                conv_type = conv_types.get(conversation_token, 1)
+                is_multi_user = await _is_multi_user_room(client, conversation_token, conv_type)
+                if is_multi_user and not is_bot_mentioned(msg, config.talk.bot_username):
+                    continue
+
                 # Extract message content and attachments
-                content = clean_message_content(msg)
+                # In multi-user rooms, strip bot mention from prompt and resolve other mentions
+                content = clean_message_content(
+                    msg,
+                    bot_username=config.talk.bot_username if is_multi_user else None,
+                )
                 attachments = extract_attachments(msg)
 
                 # !command dispatch — intercept before task creation
@@ -269,6 +364,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     user_id=actor_id,
                     source_type="talk",
                     conversation_token=conversation_token,
+                    is_group_chat=is_multi_user,
                     attachments=attachments if attachments else None,
                     talk_message_id=message_id,
                     reply_to_talk_id=reply_to_talk_id,

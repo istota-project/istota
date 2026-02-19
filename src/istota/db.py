@@ -718,6 +718,7 @@ class ConversationMessage:
     created_at: str
     actions_taken: str | None = None
     source_type: str = "talk"
+    user_id: str | None = None
 
 
 def get_conversation_history(
@@ -738,7 +739,7 @@ def get_conversation_history(
             from the history (e.g. ["scheduled", "briefing", "heartbeat"]).
     """
     query = """
-        SELECT id, prompt, result, created_at, actions_taken, source_type
+        SELECT id, prompt, result, created_at, actions_taken, source_type, user_id
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'completed'
@@ -772,6 +773,7 @@ def get_conversation_history(
             created_at=row["created_at"],
             actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
             source_type=row["source_type"] if "source_type" in row.keys() else "talk",
+            user_id=row["user_id"] if "user_id" in row.keys() else None,
         )
         for row in reversed(rows)
     ]
@@ -790,7 +792,7 @@ def get_previous_task(
     in context even when its source_type would normally be excluded.
     """
     query = """
-        SELECT id, prompt, result, created_at, actions_taken, source_type
+        SELECT id, prompt, result, created_at, actions_taken, source_type, user_id
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'completed'
@@ -816,6 +818,7 @@ def get_previous_task(
         created_at=row["created_at"],
         actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
         source_type=row["source_type"] if "source_type" in row.keys() else "talk",
+        user_id=row["user_id"] if "user_id" in row.keys() else None,
     )
 
 

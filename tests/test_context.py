@@ -15,8 +15,8 @@ def _make_config(**conv_overrides) -> Config:
     return Config(conversation=conv)
 
 
-def _msg(id: int, prompt: str, result: str, created_at: str = "2025-01-26 12:00", actions_taken: str | None = None, source_type: str = "talk") -> ConversationMessage:
-    return ConversationMessage(id=id, prompt=prompt, result=result, created_at=created_at, actions_taken=actions_taken, source_type=source_type)
+def _msg(id: int, prompt: str, result: str, created_at: str = "2025-01-26 12:00", actions_taken: str | None = None, source_type: str = "talk", user_id: str | None = None) -> ConversationMessage:
+    return ConversationMessage(id=id, prompt=prompt, result=result, created_at=created_at, actions_taken=actions_taken, source_type=source_type, user_id=user_id)
 
 
 def _history(n: int) -> list[ConversationMessage]:
@@ -371,4 +371,34 @@ class TestFormatContextForPrompt:
         result = format_context_for_prompt(msgs)
         assert "Scheduled: Send water reminder" in result
         assert "User: They have been reminded" in result
+
+    def test_user_id_shown_as_speaker(self):
+        """When user_id is set, it should be used as the speaker label."""
+        msgs = [ConversationMessage(id=1, prompt="hello", result="hi", created_at="2025-01-26 12:00", user_id="alice")]
+        result = format_context_for_prompt(msgs)
+        assert "alice: hello" in result
+        assert "User:" not in result
+
+    def test_user_id_none_falls_back_to_user(self):
+        """When user_id is None, label should be 'User'."""
+        msgs = [ConversationMessage(id=1, prompt="hello", result="hi", created_at="2025-01-26 12:00", user_id=None)]
+        result = format_context_for_prompt(msgs)
+        assert "User: hello" in result
+
+    def test_scheduled_overrides_user_id(self):
+        """Scheduled source_type should show 'Scheduled' even if user_id is set."""
+        msgs = [ConversationMessage(id=1, prompt="daily job", result="done", created_at="2025-01-26 12:00", source_type="scheduled", user_id="alice")]
+        result = format_context_for_prompt(msgs)
+        assert "Scheduled: daily job" in result
+        assert "alice:" not in result
+
+    def test_multi_user_attribution(self):
+        """Multiple users in a group chat should each show their username."""
+        msgs = [
+            ConversationMessage(id=1, prompt="q from alice", result="a1", created_at="2025-01-26 10:00", user_id="alice"),
+            ConversationMessage(id=2, prompt="q from bob", result="a2", created_at="2025-01-26 11:00", user_id="bob"),
+        ]
+        result = format_context_for_prompt(msgs)
+        assert "alice: q from alice" in result
+        assert "bob: q from bob" in result
 

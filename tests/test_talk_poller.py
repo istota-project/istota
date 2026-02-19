@@ -8,9 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from istota import db
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
 from istota.talk_poller import (
+    _is_multi_user_room,
+    _participant_counts,
     clean_message_content,
     extract_attachments,
     handle_confirmation_reply,
+    is_bot_mentioned,
     poll_talk_conversations,
 )
 
@@ -590,3 +593,298 @@ class TestPollTalkConversations:
 
         # No messages from either room
         assert result == []
+
+
+# =============================================================================
+# TestIsBotMentioned
+# =============================================================================
+
+
+class TestIsBotMentioned:
+    def test_direct_mention(self):
+        msg = _msg(message_params={
+            "mention-user0": {"type": "user", "id": "istota", "name": "Istota"},
+        })
+        assert is_bot_mentioned(msg, "istota") is True
+
+    def test_no_mention(self):
+        msg = _msg(message_params={})
+        assert is_bot_mentioned(msg, "istota") is False
+
+    def test_other_user_mentioned(self):
+        msg = _msg(message_params={
+            "mention-user0": {"type": "user", "id": "alice", "name": "Alice"},
+        })
+        assert is_bot_mentioned(msg, "istota") is False
+
+    def test_mention_call_excluded(self):
+        """@all mentions should not count as bot mention."""
+        msg = _msg(message_params={
+            "mention-call0": {"type": "call", "id": "room1", "name": "All"},
+        })
+        assert is_bot_mentioned(msg, "istota") is False
+
+    def test_multiple_mentions_bot_present(self):
+        msg = _msg(message_params={
+            "mention-user0": {"type": "user", "id": "alice", "name": "Alice"},
+            "mention-user1": {"type": "user", "id": "istota", "name": "Istota"},
+        })
+        assert is_bot_mentioned(msg, "istota") is True
+
+    def test_empty_params_list(self):
+        """messageParameters can be an empty list."""
+        msg = _msg()
+        msg["messageParameters"] = []
+        assert is_bot_mentioned(msg, "istota") is False
+
+    def test_federated_user_mention(self):
+        msg = _msg(message_params={
+            "mention-federated-user0": {"type": "user", "id": "istota", "name": "Istota"},
+        })
+        assert is_bot_mentioned(msg, "istota") is True
+
+
+# =============================================================================
+# TestCleanMessageContentMentions
+# =============================================================================
+
+
+class TestCleanMessageContentMentions:
+    def test_bot_mention_stripped(self):
+        msg = _msg(
+            message="{mention-user0} what's the weather?",
+            message_params={
+                "mention-user0": {"type": "user", "id": "istota", "name": "Istota"},
+            },
+        )
+        result = clean_message_content(msg, bot_username="istota")
+        assert result == "what's the weather?"
+
+    def test_other_mention_replaced_with_display_name(self):
+        msg = _msg(
+            message="{mention-user0} can you ask {mention-user1} about the meeting?",
+            message_params={
+                "mention-user0": {"type": "user", "id": "istota", "name": "Istota"},
+                "mention-user1": {"type": "user", "id": "alice", "name": "Alice"},
+            },
+        )
+        result = clean_message_content(msg, bot_username="istota")
+        assert "Istota" not in result
+        assert "@Alice" in result
+        assert "about the meeting?" in result
+
+    def test_no_bot_username_preserves_all(self):
+        """When bot_username is None, mention placeholders are not processed."""
+        msg = _msg(
+            message="{mention-user0} hello",
+            message_params={
+                "mention-user0": {"type": "user", "id": "istota", "name": "Istota"},
+            },
+        )
+        result = clean_message_content(msg)
+        assert result == "{mention-user0} hello"
+
+    def test_mention_call_preserved(self):
+        """@all mentions are replaced with display name, not stripped."""
+        msg = _msg(
+            message="{mention-call0} meeting in 5 mins",
+            message_params={
+                "mention-call0": {"type": "call", "id": "room1", "name": "Engineering"},
+            },
+        )
+        result = clean_message_content(msg, bot_username="istota")
+        assert "@Engineering" in result
+
+
+# =============================================================================
+# TestIsMultiUserRoom
+# =============================================================================
+
+
+class TestIsMultiUserRoom:
+    @pytest.mark.asyncio
+    async def test_type_1_always_false(self):
+        client = MagicMock()
+        result = await _is_multi_user_room(client, "dm1", 1)
+        assert result is False
+        # Should not call get_participants for type 1
+        client.get_participants.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_type_2_with_2_participants_is_false(self):
+        _participant_counts.clear()
+        client = MagicMock()
+        client.get_participants = AsyncMock(return_value=[
+            {"actorId": "alice"},
+            {"actorId": "istota"},
+        ])
+        result = await _is_multi_user_room(client, "room1", 2)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_type_2_with_3_participants_is_true(self):
+        _participant_counts.clear()
+        client = MagicMock()
+        client.get_participants = AsyncMock(return_value=[
+            {"actorId": "alice"},
+            {"actorId": "bob"},
+            {"actorId": "istota"},
+        ])
+        result = await _is_multi_user_room(client, "room2", 2)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_caching(self):
+        _participant_counts.clear()
+        client = MagicMock()
+        client.get_participants = AsyncMock(return_value=[
+            {"actorId": "alice"},
+            {"actorId": "bob"},
+            {"actorId": "istota"},
+        ])
+        # First call
+        result1 = await _is_multi_user_room(client, "room3", 2)
+        assert result1 is True
+        assert client.get_participants.call_count == 1
+
+        # Second call should use cache
+        result2 = await _is_multi_user_room(client, "room3", 2)
+        assert result2 is True
+        assert client.get_participants.call_count == 1  # still 1
+
+    @pytest.mark.asyncio
+    async def test_api_error_falls_back_to_false(self):
+        _participant_counts.clear()
+        client = MagicMock()
+        client.get_participants = AsyncMock(side_effect=Exception("API error"))
+        result = await _is_multi_user_room(client, "room4", 2)
+        assert result is False
+
+
+# =============================================================================
+# TestPollTalkConversationsGroupRoom
+# =============================================================================
+
+
+class TestPollTalkConversationsGroupRoom:
+    @pytest.mark.asyncio
+    async def test_group_room_skips_without_mention(self, make_config):
+        """In a 3+ person room, messages without @mention are skipped."""
+        _participant_counts.clear()
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+
+        msg = _msg(id=101, actor_id="alice", message="Just chatting")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "group1", "type": 2},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+            mock_instance.get_participants = AsyncMock(return_value=[
+                {"actorId": "alice"},
+                {"actorId": "bob"},
+                {"actorId": "istota"},
+            ])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "group1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_group_room_processes_with_mention(self, make_config):
+        """In a 3+ person room, messages with @mention are processed."""
+        _participant_counts.clear()
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+
+        msg = _msg(
+            id=102,
+            actor_id="alice",
+            message="{mention-user0} check my calendar",
+            message_params={
+                "mention-user0": {"type": "user", "id": "istota", "name": "Istota"},
+            },
+        )
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "group1", "type": 2},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+            mock_instance.get_participants = AsyncMock(return_value=[
+                {"actorId": "alice"},
+                {"actorId": "bob"},
+                {"actorId": "istota"},
+            ])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "group1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result[0])
+            assert task.is_group_chat is True
+            # Bot mention should be stripped from prompt
+            assert "istota" not in task.prompt.lower()
+            assert "check my calendar" in task.prompt
+
+    @pytest.mark.asyncio
+    async def test_two_person_group_acts_like_dm(self, make_config):
+        """A type-2 room with only 2 participants doesn't require mention."""
+        _participant_counts.clear()
+        config = make_config()
+
+        msg = _msg(id=103, actor_id="alice", message="Hello there")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 2},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+            mock_instance.get_participants = AsyncMock(return_value=[
+                {"actorId": "alice"},
+                {"actorId": "istota"},
+            ])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result[0])
+            assert task.is_group_chat is False
+
+    @pytest.mark.asyncio
+    async def test_dm_unchanged(self, make_config):
+        """Type-1 DM always processes without mention."""
+        _participant_counts.clear()
+        config = make_config()
+
+        msg = _msg(id=104, actor_id="alice", message="Hello")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "dm1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "dm1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
+        # get_participants should not be called for type 1
+        mock_instance.get_participants.assert_not_called()

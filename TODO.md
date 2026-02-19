@@ -72,6 +72,15 @@
 - [x] Freeform markdown format with template
 - [x] Direct Nextcloud writes via rclone (multi-user safe)
 
+### Multi-User Talk Room Participation ✅
+- [x] Only respond when @mentioned in rooms with 3+ participants
+- [x] 2-person group rooms (bot + 1 user) treated like DMs
+- [x] Participant count caching with 5-min TTL
+- [x] Strip bot's own @mention from prompt, resolve others to @DisplayName
+- [x] Conversation context shows usernames as speaker labels in group chats
+- [x] Group chat note in executor prompt
+- [x] Graceful fallback to DM behavior on API errors
+
 ### Confirmation Flow ✅
 - [x] Handle confirmation replies in Talk (user says "yes"/"no")
 - [x] Track pending confirmations (`pending_confirmation` status)
