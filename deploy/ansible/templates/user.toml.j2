@@ -17,6 +17,12 @@ ntfy_topic = "{{ user_config.ntfy_topic }}"
 {% if user_config.site_enabled is defined and user_config.site_enabled %}
 site_enabled = true
 {% endif %}
+{% if user_config.max_foreground_workers is defined %}
+max_foreground_workers = {{ user_config.max_foreground_workers }}
+{% endif %}
+{% if user_config.max_background_workers is defined %}
+max_background_workers = {{ user_config.max_background_workers }}
+{% endif %}
 {% if user_config.resources is defined and user_config.resources %}
 {% for resource in user_config.resources %}
 {% if resource.type == 'karakeep' %}

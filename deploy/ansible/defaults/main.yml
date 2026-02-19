@@ -120,6 +120,8 @@ istota_admin_users: []
 #     email_addresses:
 #       - "alice@example.com"
 #     timezone: "America/New_York"
+#     max_foreground_workers: 1    # per-user fg worker limit (default: 1)
+#     max_background_workers: 1    # per-user bg worker limit (default: 1)
 #     resources:
 #       - type: "folder"
 #         path: "/alice/Projects"
