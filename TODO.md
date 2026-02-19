@@ -80,6 +80,7 @@
 - [x] Conversation context shows usernames as speaker labels in group chats
 - [x] Group chat note in executor prompt
 - [x] Graceful fallback to DM behavior on API errors
+- [x] Reply threading (`reply_to`) and @mention notifications in group chat responses
 
 ### Confirmation Flow ✅
 - [x] Handle confirmation replies in Talk (user says "yes"/"no")

@@ -833,8 +833,16 @@ async def post_result_to_talk(config: Config, task: db.Task, message: str) -> in
         client = TalkClient(config)
         parts = split_message(message)
         msg_id = None
-        for part in parts:
-            response = await client.send_message(task.conversation_token, part)
+        for i, part in enumerate(parts):
+            # In group chats, reply to the original message and @mention the user
+            # for the first part only so they get a notification.
+            reply_to = None
+            if i == 0 and task.is_group_chat:
+                reply_to = task.talk_message_id
+                part = f"@{task.user_id} {part}"
+            response = await client.send_message(
+                task.conversation_token, part, reply_to=reply_to,
+            )
             msg_id = response.get("ocs", {}).get("data", {}).get("id")
         return msg_id
     except Exception as e:

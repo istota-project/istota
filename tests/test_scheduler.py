@@ -27,6 +27,7 @@ from istota.scheduler import (
     post_result_to_email,
     process_one_task,
     _make_talk_progress_callback,
+    post_result_to_talk,
 )
 from istota.config import (
     Config,
@@ -2329,3 +2330,109 @@ class TestCleanupOldClaudeLogs:
 
         assert deleted == 0
         assert recent.exists()
+
+
+# ---------------------------------------------------------------------------
+# TestPostResultToTalk
+# ---------------------------------------------------------------------------
+
+
+class TestPostResultToTalk:
+    """Tests for post_result_to_talk() — reply threading and @mentions in group chats."""
+
+    def _make_config(self):
+        return Config(
+            nextcloud=NextcloudConfig(
+                url="https://nc.example.com",
+                username="istota",
+                app_password="secret",
+            ),
+        )
+
+    def _make_task(self, *, is_group_chat=False, talk_message_id=None, user_id="alice"):
+        return db.Task(
+            id=1,
+            prompt="hello",
+            user_id=user_id,
+            source_type="talk",
+            status="completed",
+            conversation_token="room123",
+            is_group_chat=is_group_chat,
+            talk_message_id=talk_message_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_dm_no_reply_to_no_mention(self):
+        """DM messages should not use reply_to or @mention."""
+        config = self._make_config()
+        task = self._make_task(is_group_chat=False, talk_message_id=42)
+
+        with patch("istota.scheduler.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.send_message = AsyncMock(
+                return_value={"ocs": {"data": {"id": 100}}}
+            )
+            result = await post_result_to_talk(config, task, "Hello there")
+
+        mock_instance.send_message.assert_called_once_with(
+            "room123", "Hello there", reply_to=None,
+        )
+        assert result == 100
+
+    @pytest.mark.asyncio
+    async def test_group_chat_reply_to_and_mention(self):
+        """Group chat messages should reply to original and @mention the user."""
+        config = self._make_config()
+        task = self._make_task(is_group_chat=True, talk_message_id=42, user_id="bob")
+
+        with patch("istota.scheduler.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.send_message = AsyncMock(
+                return_value={"ocs": {"data": {"id": 200}}}
+            )
+            result = await post_result_to_talk(config, task, "Sure thing")
+
+        mock_instance.send_message.assert_called_once_with(
+            "room123", "@bob Sure thing", reply_to=42,
+        )
+        assert result == 200
+
+    @pytest.mark.asyncio
+    async def test_group_chat_split_message_only_first_part_gets_reply(self):
+        """When a message is split, only the first part should get reply_to and @mention."""
+        config = self._make_config()
+        task = self._make_task(is_group_chat=True, talk_message_id=42, user_id="carol")
+
+        with patch("istota.scheduler.TalkClient") as MockClient, \
+             patch("istota.scheduler.split_message", return_value=["Part 1", "Part 2"]):
+            mock_instance = MockClient.return_value
+            mock_instance.send_message = AsyncMock(
+                return_value={"ocs": {"data": {"id": 300}}}
+            )
+            result = await post_result_to_talk(config, task, "Long message")
+
+        calls = mock_instance.send_message.call_args_list
+        assert len(calls) == 2
+        # First part: reply_to + @mention
+        assert calls[0].args == ("room123", "@carol Part 1")
+        assert calls[0].kwargs == {"reply_to": 42}
+        # Second part: no reply_to, no @mention
+        assert calls[1].args == ("room123", "Part 2")
+        assert calls[1].kwargs == {"reply_to": None}
+
+    @pytest.mark.asyncio
+    async def test_group_chat_no_talk_message_id(self):
+        """Group chat without talk_message_id should still @mention but reply_to is None."""
+        config = self._make_config()
+        task = self._make_task(is_group_chat=True, talk_message_id=None, user_id="dave")
+
+        with patch("istota.scheduler.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.send_message = AsyncMock(
+                return_value={"ocs": {"data": {"id": 400}}}
+            )
+            result = await post_result_to_talk(config, task, "Response")
+
+        mock_instance.send_message.assert_called_once_with(
+            "room123", "@dave Response", reply_to=None,
+        )

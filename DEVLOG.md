@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: Group chat reply threading and @mentions
+
+In multi-user Talk rooms, the bot now replies to the original message and @mentions the triggering user. This makes it clear what message the bot is responding to and ensures the user gets a notification.
+
+**Key changes:**
+- `post_result_to_talk()` passes `reply_to=task.talk_message_id` for the first message part in group chats
+- First message part prepends `@{user_id}` so the user gets a Nextcloud Talk notification
+- Subsequent split parts remain standalone (no reply threading or @mention)
+- DM behavior unchanged
+
+**Files modified:**
+- `src/istota/scheduler.py` - Updated `post_result_to_talk()` with group chat reply_to and @mention logic
+- `tests/test_scheduler.py` - Added `TestPostResultToTalk` (4 tests: DM, group chat, split messages, missing message ID)
+
 ## 2026-02-18: Multi-user Talk room participation
 
 In group rooms with multiple participants, istota now only responds when @mentioned instead of replying to every message. Rooms with exactly 2 participants (bot + 1 user) still behave like DMs. Conversation context in group chats shows usernames as speaker labels for multi-user attribution.
