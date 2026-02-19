@@ -264,7 +264,8 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
         if now - last_send < sched.progress_min_interval:
             return
         # Split emoji prefix from description so only text is italicised
-        msg = message[:200]
+        max_chars = sched.progress_text_max_chars
+        msg = message if max_chars == 0 else message[:max_chars]
         if msg and not msg[0].isascii():
             # First char is emoji — find where the text starts
             parts = msg.split(" ", 1)
@@ -279,7 +280,7 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
             last_send = now
             send_count += 1
             with db.get_db(config.db_path) as conn:
-                db.log_task(conn, task.id, "debug", f"Progress: {message[:200]}")
+                db.log_task(conn, task.id, "debug", f"Progress: {msg}")
         except Exception as e:
             logger.debug("Progress update failed: %s", e)
 

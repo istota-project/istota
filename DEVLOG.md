@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: Make progress text max chars configurable
+
+The progress callback had a hardcoded 200-char truncation for intermediate assistant text messages. Made this configurable via `progress_text_max_chars` (default 200, 0 = unlimited) so that `progress_show_text = true` can surface full intermediate responses when needed.
+
+**Key changes:**
+- Added `progress_text_max_chars` to `SchedulerConfig` dataclass and `load_config()`
+- Progress callback uses configurable limit instead of hardcoded `message[:200]`
+- Log line also uses the truncated `msg` instead of re-slicing
+
+**Files modified:**
+- `src/istota/config.py` — Added `progress_text_max_chars: int = 200`
+- `src/istota/scheduler.py` — Updated `_make_talk_progress_callback` to use config value
+- `deploy/ansible/defaults/main.yml` — Added `istota_scheduler_progress_text_max_chars`
+- `deploy/ansible/templates/config.toml.j2` — Added template line
+- `config/config.example.toml` — Documented new setting
+
 ## 2026-02-19: Fix channel gate blocking after !stop
 
 After `!stop`, the cancelled task stays in `running` status until the worker thread cleans up. If the user sends a new message in that window, the per-channel gate sees the still-running task and rejects the message with "Still working on a previous request." Fixed by excluding tasks with `cancel_requested = 1` from the gate check. Also added a prompt note telling the bot where its JSONL execution logs live, so it can retrieve full output from previous tasks when users report truncated responses.

@@ -136,6 +136,8 @@ progress_max_messages = 5
 progress_show_tool_use = true
 # Show intermediate assistant text (can be noisy, off by default)
 progress_show_text = false
+# Max characters for text progress messages (0 = unlimited)
+progress_text_max_chars = 200
 
 # Kill task execution after N minutes (default: 30)
 task_timeout_minutes = 30
