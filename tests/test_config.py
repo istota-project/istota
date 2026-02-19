@@ -1011,6 +1011,16 @@ class TestWorkerConcurrencyConfig:
         assert cfg.scheduler.user_max_foreground_workers == 2
         assert cfg.scheduler.user_max_background_workers == 1
 
+    def test_load_config_user_worker_defaults_match_dataclass(self, tmp_path, monkeypatch):
+        """load_config() without explicit settings should match Config() defaults."""
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text('[scheduler]\n')
+        cfg = load_config(p)
+        defaults = Config()
+        assert cfg.scheduler.user_max_foreground_workers == defaults.scheduler.user_max_foreground_workers
+        assert cfg.scheduler.user_max_background_workers == defaults.scheduler.user_max_background_workers
+
     def test_effective_user_workers_uses_global_default(self):
         """When user has 0 (not set), effective value comes from global default."""
         from istota.config import UserConfig

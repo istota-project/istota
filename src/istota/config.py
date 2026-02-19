@@ -597,7 +597,7 @@ def load_config(config_path: Path | None = None) -> Config:
             feed_check_interval=sched.get("feed_check_interval", 300),
             max_foreground_workers=sched.get("max_foreground_workers", 5),
             max_background_workers=sched.get("max_background_workers", 3),
-            user_max_foreground_workers=sched.get("user_max_foreground_workers", 1),
+            user_max_foreground_workers=sched.get("user_max_foreground_workers", 2),
             user_max_background_workers=sched.get("user_max_background_workers", 1),
         )
 

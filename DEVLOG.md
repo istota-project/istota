@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: Fix load_config default for user_max_foreground_workers
+
+Code review of the multi-worker feature found a mismatch: the dataclass default for `user_max_foreground_workers` was updated to 2 but the `load_config()` fallback was left at 1. In production (config loaded from TOML), deployments without an explicit setting would silently get 1 worker per user instead of the intended 2.
+
+**Key changes:**
+- Fixed `load_config()` fallback from 1 to 2 to match the `SchedulerConfig` dataclass default
+- Added regression test verifying `load_config()` defaults match dataclass defaults
+- Updated `.claude/rules/scheduler.md` docs (still showed old default of 1)
+
+**Files modified:**
+- `src/istota/config.py` — Fixed `sched.get("user_max_foreground_workers", 1)` → `2`
+- `tests/test_config.py` — Added `test_load_config_user_worker_defaults_match_dataclass`
+- `.claude/rules/scheduler.md` — Updated default in config intervals table
+
 ## 2026-02-19: Multi-worker per user
 
 The previous worker pool keyed workers by `(user_id, queue_type)`, which silently capped each user to exactly 1 foreground worker regardless of `user_max_foreground_workers`. A user with an active task in Room A couldn't get a concurrent worker for Room B. Fixed by switching to 3-tuple keys with slot indices and correcting two bugs in the dispatch formula.
