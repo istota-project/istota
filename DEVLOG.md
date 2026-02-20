@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: Queue gated messages instead of discarding them
+
+When a user sent a second message while the bot was still processing the first, the per-channel gate sent "Still working on a previous request" but permanently discarded the message by advancing the poll state past it. The user's message was lost and never processed. Fixed by removing the `continue` after the gate check so the message falls through to normal task creation. The scheduler already handles ordering — tasks are processed serially per user via `claim_task()`.
+
+**Key changes:**
+- Per-channel gate now queues gated messages as tasks instead of discarding them
+- "Still working" notification still sent so the user knows there's a queue
+- Test updated: asserts both notification sent AND task created
+
+**Files modified:**
+- `src/istota/talk_poller.py` — Removed `continue` from channel gate block
+- `tests/test_talk_poller.py` — Updated gate test to expect task creation
+- `AGENTS.md` — Updated per-channel gate documentation
+
 ## 2026-02-19: Progress text dedup and intermediate output guidance
 
 When `progress_show_text` is enabled with `progress_text_max_chars = 0` (unlimited), intermediate assistant text sent as progress could repeat in the final result. Added deduplication that handles both exact matches (skip entirely) and prefix matches (strip already-seen prefix from final output). Dedup only applies when text is unlimited to avoid dangling partial sentences from truncated progress. Also added prompt guidance telling Claude to keep intermediate text minimal and save detailed output for the final response.

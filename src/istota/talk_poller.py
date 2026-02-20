@@ -370,10 +370,11 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 if handled:
                     continue
 
-                # Per-channel gate: reject if there's already an active fg task
+                # Per-channel gate: notify user if there's already an active fg task
+                # but still queue the message (fall through to task creation)
                 if db.has_active_foreground_task_for_channel(conn, conversation_token):
                     logger.debug(
-                        "Channel gate: active fg task in %s, rejecting message from %s",
+                        "Channel gate: active fg task in %s, queuing message from %s",
                         conversation_token, actor_id,
                     )
                     try:
@@ -383,7 +384,6 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                         )
                     except Exception as e:
                         logger.debug("Failed to send channel gate message: %s", e)
-                    continue
 
                 # Skip empty messages (file-only shares have empty content)
                 if not content.strip() and not attachments:

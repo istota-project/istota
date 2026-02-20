@@ -919,11 +919,11 @@ class TestPollTalkConversationsGroupRoom:
 
 
 class TestChannelGate:
-    """Per-channel gate: reject duplicate foreground tasks."""
+    """Per-channel gate: queue gated messages instead of discarding them."""
 
     @pytest.mark.asyncio
-    async def test_channel_gate_rejects_when_active_task(self, make_config):
-        """When an active fg task exists for the channel, reject and send 'still working'."""
+    async def test_channel_gate_queues_when_active_task(self, make_config):
+        """When an active fg task exists, send 'still working' AND create a task."""
         config = make_config()
 
         # Pre-create an active foreground task for room1
@@ -948,8 +948,8 @@ class TestChannelGate:
 
             result = await poll_talk_conversations(config)
 
-        # No new task should be created
-        assert result == []
+        # Task should be created (queued, not discarded)
+        assert len(result) == 1
         # Bot should have sent "still working" message
         mock_instance.send_message.assert_called_once()
         call_args = mock_instance.send_message.call_args
