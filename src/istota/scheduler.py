@@ -274,7 +274,7 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
         max_chars = sched.progress_text_max_chars
         msg = message if max_chars == 0 else message[:max_chars]
         if "\n" in msg:
-            formatted = msg
+            formatted = "\n".join(f"*{line}*" if line.strip() else line for line in msg.split("\n"))
         elif msg and not msg[0].isascii():
             # First char is emoji — find where the text starts
             parts = msg.split(" ", 1)
