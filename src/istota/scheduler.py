@@ -269,10 +269,13 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
         now = time.time()
         if now - last_send < sched.progress_min_interval:
             return
-        # Split emoji prefix from description so only text is italicised
+        # Italicise single-line progress; leave multiline as-is (markdown
+        # italic doesn't render reliably across multiple lines).
         max_chars = sched.progress_text_max_chars
         msg = message if max_chars == 0 else message[:max_chars]
-        if msg and not msg[0].isascii():
+        if "\n" in msg:
+            formatted = msg
+        elif msg and not msg[0].isascii():
             # First char is emoji — find where the text starts
             parts = msg.split(" ", 1)
             if len(parts) == 2:
