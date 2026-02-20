@@ -2,16 +2,19 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
-## 2026-02-19: Deduplicate progress and final result in Talk
+## 2026-02-19: Progress text dedup and intermediate output guidance
 
-When `progress_show_text` is enabled with unlimited chars, the final result could repeat text already sent as a progress message. Added deduplication: the progress callback now tracks sent texts, and the result posting stage skips the final message if it exactly matches a previously sent progress message.
+When `progress_show_text` is enabled with `progress_text_max_chars = 0` (unlimited), intermediate assistant text sent as progress could repeat in the final result. Added deduplication that handles both exact matches (skip entirely) and prefix matches (strip already-seen prefix from final output). Dedup only applies when text is unlimited to avoid dangling partial sentences from truncated progress. Also added prompt guidance telling Claude to keep intermediate text minimal and save detailed output for the final response.
 
 **Key changes:**
-- Progress callback tracks raw sent texts via `callback.sent_texts` attribute
-- Final result posting checks for exact match against sent progress texts and skips if duplicate
+- Progress callback tracks sent texts via `callback.sent_texts` attribute
+- Final result dedup: exact match → skip, prefix match → strip (only when `progress_text_max_chars = 0`)
+- Dedup compares against actually-sent text (truncated `msg`), not raw input
+- Prompt rules updated: intermediate text should be brief, detailed output saved for final response
 
 **Files modified:**
-- `src/istota/scheduler.py` — Added `sent_texts` tracking to callback, dedup check before `post_result_to_talk`
+- `src/istota/scheduler.py` — Progress text tracking, dedup logic before `post_result_to_talk`
+- `src/istota/executor.py` — Updated output rules for both admin and non-admin prompts
 
 ## 2026-02-19: Make progress text max chars configurable
 
