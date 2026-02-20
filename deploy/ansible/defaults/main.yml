@@ -24,6 +24,11 @@ istota_bot_name: ""
 # Claude model (e.g. "sonnet", "opus"); empty = CLI default
 istota_model: ""
 
+# Claude CLI authentication
+# Preferred: generate a token locally with `claude setup-token`, store in vault
+# Fallback: authenticate manually with `sudo -u <namespace> claude login`
+istota_claude_code_oauth_token: ""
+
 # Git repository
 istota_repo_url: "https://github.com/alicekubicki/istota.git"
 istota_repo_branch: main
@@ -311,5 +316,4 @@ istota_security_sandbox_admin_db_write: false     # allow admin DB writes inside
 # and omitted from config.toml (config.py reads them from env vars)
 istota_use_environment_file: true
 
-# Claude CLI will be installed automatically
-# After deployment, authenticate with: sudo -u <namespace> claude login
+

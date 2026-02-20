@@ -164,6 +164,10 @@ def build_clean_env(config: Config) -> dict[str, str]:
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
+    # Pass through Claude CLI auth token if present (set via EnvironmentFile)
+    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if oauth_token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
     return env
 
 

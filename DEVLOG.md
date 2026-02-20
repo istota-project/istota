@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-19: CLAUDE_CODE_OAUTH_TOKEN env var for Claude CLI auth
+
+Claude CLI previously required running `claude login` interactively on the server, which could break when tokens expired. Added support for passing `CLAUDE_CODE_OAUTH_TOKEN` as an environment variable — generated locally via `claude setup-token` and stored in Ansible vault. Claude CLI picks this up automatically with no credentials file or refresh needed.
+
+**Key changes:**
+- Added `istota_claude_code_oauth_token` Ansible variable with vault comment
+- Token templated into `secrets.env.j2` (loaded via systemd `EnvironmentFile=`)
+- `build_clean_env()` in executor passes token through in restricted mode (permissive inherits it via `os.environ`)
+- Heartbeat and `!check` execution tests inherit the token automatically through `build_clean_env()`
+- Ansible login reminder updated to mention both auth options
+
+**Files modified:**
+- `deploy/ansible/defaults/main.yml` — Added `istota_claude_code_oauth_token` variable
+- `deploy/ansible/templates/secrets.env.j2` — Added `CLAUDE_CODE_OAUTH_TOKEN` template line
+- `src/istota/executor.py` — Pass `CLAUDE_CODE_OAUTH_TOKEN` in restricted-mode `build_clean_env()`
+- `deploy/ansible/tasks/main.yml` — Updated reminder message with both auth methods
+
 ## 2026-02-19: Queue gated messages instead of discarding them
 
 When a user sent a second message while the bot was still processing the first, the per-channel gate sent "Still working on a previous request" but permanently discarded the message by advancing the poll state past it. The user's message was lost and never processed. Fixed by removing the `continue` after the gate check so the message falls through to normal task creation. The scheduler already handles ordering — tasks are processed serially per user via `claim_task()`.

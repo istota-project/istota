@@ -48,8 +48,10 @@
 - name: Remind to authenticate Claude CLI
   debug:
     msg: |
-      Claude CLI installed. Remember to authenticate:
-        sudo -u {{ istota_user }} HOME={{ istota_home }} claude login
+      Claude CLI installed. Authenticate with one of:
+        1. (Preferred) Generate a token locally with `claude setup-token` and set
+           istota_claude_code_oauth_token in your vault
+        2. (Manual) sudo -u {{ istota_user }} HOME={{ istota_home }} claude login
   when: not istota_update_only and not (claude_check.stat.exists | default(true))
 
 - name: Install system dependencies
