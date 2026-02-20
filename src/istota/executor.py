@@ -1449,7 +1449,7 @@ def _execute_streaming_once(
                     pass  # never affect task execution
             elif isinstance(event, TextEvent) and show_text and on_progress:
                 try:
-                    on_progress(event.text)
+                    on_progress(event.text, italicize=False)
                 except Exception:
                     pass
 

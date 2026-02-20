@@ -374,7 +374,7 @@ class TestStreamingExecution:
         ]
         with contextmanager_chain(patches):
             success, result, _actions = execute_task(
-                task, config, [], on_progress=lambda msg: progress_calls.append(msg),
+                task, config, [], on_progress=lambda msg, **kw: progress_calls.append(msg),
             )
 
         assert success is True

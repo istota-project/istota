@@ -262,18 +262,18 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
     sched = config.scheduler
     sent_texts: list[str] = []
 
-    def callback(message: str):
+    def callback(message: str, *, italicize: bool = True):
         nonlocal last_send, send_count
         if send_count >= sched.progress_max_messages:
             return
         now = time.time()
         if now - last_send < sched.progress_min_interval:
             return
-        # Italicise single-line progress; leave multiline as-is (markdown
-        # italic doesn't render reliably across multiple lines).
         max_chars = sched.progress_text_max_chars
         msg = message if max_chars == 0 else message[:max_chars]
-        if "\n" in msg:
+        if not italicize:
+            formatted = msg
+        elif "\n" in msg:
             formatted = "\n".join(f"*{line}*" if line.strip() else line for line in msg.split("\n"))
         elif msg and not msg[0].isascii():
             # First char is emoji — find where the text starts
