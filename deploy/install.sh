@@ -680,8 +680,18 @@ setup_rclone() {
         ok "rclone already installed"
     else
         info "Installing rclone"
-        curl -s https://rclone.org/install.sh | bash 2>&1 | tail -1
-        ok "rclone installed"
+        if curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh 2>/dev/null; then
+            bash /tmp/rclone-install.sh 2>&1 | tail -3
+            rm -f /tmp/rclone-install.sh
+        else
+            # Fallback: install from apt
+            apt-get install -y -qq rclone 2>/dev/null || true
+        fi
+        if command_exists rclone; then
+            ok "rclone installed"
+        else
+            warn "rclone installation failed — install manually"
+        fi
     fi
 
     # Auto-obscure password if needed
@@ -698,21 +708,27 @@ setup_rclone() {
             app_pass=$(read_setting "nextcloud_app_password" "")
             if [ -n "$app_pass" ]; then
                 info "Generating obscured rclone password"
-                rclone_pass=$(rclone obscure "$app_pass")
-                # Update settings file with the obscured password
-                python3 -c "
-import re
-with open('$SETTINGS_FILE', 'r') as f:
+                rclone_pass=$(rclone obscure "$app_pass" 2>/dev/null) || true
+                if [ -n "$rclone_pass" ]; then
+                    # Update settings file — pass value via env to avoid shell escaping issues
+                    RCLONE_PASS_VALUE="$rclone_pass" python3 -c "
+import os, re
+rclone_pass = os.environ['RCLONE_PASS_VALUE']
+settings_file = '$SETTINGS_FILE'
+with open(settings_file, 'r') as f:
     content = f.read()
 content = re.sub(
     r'rclone_password_obscured\s*=\s*\"[^\"]*\"',
-    'rclone_password_obscured = \"$rclone_pass\"',
+    'rclone_password_obscured = \"' + rclone_pass + '\"',
     content
 )
-with open('$SETTINGS_FILE', 'w') as f:
+with open(settings_file, 'w') as f:
     f.write(content)
 " 2>/dev/null
-                ok "rclone password auto-obscured"
+                    ok "rclone password auto-obscured"
+                else
+                    warn "rclone obscure failed — set rclone_password_obscured manually in settings"
+                fi
             fi
         fi
 
