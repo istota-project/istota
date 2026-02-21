@@ -82,6 +82,13 @@ require_root() {
     fi
 }
 
+# Safe chown that only runs if the target user exists
+safe_chown() {
+    if id "$ISTOTA_USER" &>/dev/null; then
+        chown "$@"
+    fi
+}
+
 command_exists() {
     command -v "$1" &>/dev/null
 }
@@ -668,9 +675,7 @@ setup_claude_cli() {
             mkdir -p "$claude_dir"
             echo "{\"claudeAiOauth\":{\"accessToken\":\"$token\",\"expiresAt\":\"9999-12-31T23:59:59.999Z\"}}" \
                 > "$claude_dir/.credentials.json"
-            if id "$ISTOTA_USER" &>/dev/null; then
-                chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$claude_dir"
-            fi
+            safe_chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$claude_dir"
             chmod 600 "$claude_dir/.credentials.json"
             ok "Claude OAuth token configured"
         fi
@@ -744,9 +749,7 @@ vendor = nextcloud
 user = $nc_user
 pass = $rclone_pass
 EOF
-            if id "$ISTOTA_USER" &>/dev/null; then
-                chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$rclone_dir"
-            fi
+            safe_chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$rclone_dir"
             chmod 700 "$rclone_dir"
             chmod 600 "$rclone_dir/rclone.conf"
             ok "rclone configured"
@@ -854,10 +857,8 @@ setup_directories() {
         mkdir -p "$d"
     done
     # Fix ownership of everything under ISTOTA_HOME
-    if id "$ISTOTA_USER" &>/dev/null; then
-        chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME"
-        chown "$ISTOTA_USER:$ISTOTA_GROUP" "/var/log/$ISTOTA_NAMESPACE"
-    fi
+    safe_chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME"
+    safe_chown "$ISTOTA_USER:$ISTOTA_GROUP" "/var/log/$ISTOTA_NAMESPACE"
     ok "Directories created"
 }
 
@@ -896,7 +897,7 @@ deploy_code() {
         info "Cloning repository"
         git clone --branch "$REPO_BRANCH" "$REPO_URL" "$ISTOTA_HOME/src"
     fi
-    chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/src"
+    safe_chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/src"
     ok "Code deployed"
 
     # Python dependencies
@@ -916,11 +917,11 @@ deploy_code() {
 
     # shellcheck disable=SC2086
     (cd "$ISTOTA_HOME/src" && PATH="/root/.local/bin:$PATH" $uv_bin sync $extras 2>&1 | tail -5)
-    chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/src/.venv"
+    safe_chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/src/.venv"
 
     # Symlink venv
     ln -sfn "$ISTOTA_HOME/src/.venv" "$ISTOTA_HOME/.venv"
-    chown -h "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/.venv"
+    safe_chown -h "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/.venv"
     ok "Dependencies installed"
 }
 
@@ -955,16 +956,16 @@ deploy_config() {
 
     # Fix permissions
     if [ -f "$ISTOTA_HOME/src/config/config.toml" ]; then
-        chown "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/src/config/config.toml"
+        safe_chown "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/src/config/config.toml"
         chmod 600 "$ISTOTA_HOME/src/config/config.toml"
     fi
     for f in "$ISTOTA_HOME"/src/config/users/*.toml; do
         [ -f "$f" ] || continue
-        chown "$ISTOTA_USER:$ISTOTA_GROUP" "$f"
+        safe_chown "$ISTOTA_USER:$ISTOTA_GROUP" "$f"
         chmod 600 "$f"
     done
     if [ -f "/etc/$ISTOTA_NAMESPACE/secrets.env" ]; then
-        chown "root:$ISTOTA_GROUP" "/etc/$ISTOTA_NAMESPACE/secrets.env"
+        safe_chown "root:$ISTOTA_GROUP" "/etc/$ISTOTA_NAMESPACE/secrets.env"
         chmod 640 "/etc/$ISTOTA_NAMESPACE/secrets.env"
     fi
     if [ -f "/etc/$ISTOTA_NAMESPACE/admins" ]; then
@@ -983,7 +984,7 @@ init_db(Path('$db_path'))
 ") 2>/dev/null || warn "DB init failed (may need config first)"
 
     if [ -f "$db_path" ]; then
-        chown "$ISTOTA_USER:$ISTOTA_GROUP" "$db_path"
+        safe_chown "$ISTOTA_USER:$ISTOTA_GROUP" "$db_path"
         # Apply migrations (idempotent — fails silently if column exists)
         sqlite3 "$db_path" "ALTER TABLE processed_emails ADD COLUMN \"references\" TEXT;" 2>/dev/null || true
         sqlite3 "$db_path" "ALTER TABLE tasks ADD COLUMN output_target TEXT;" 2>/dev/null || true
