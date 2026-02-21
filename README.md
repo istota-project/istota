@@ -26,7 +26,7 @@ A self-hosted AI assistant that lives in your Nextcloud. Powered by [Claude Code
   - 📝 TODO management, notes, and script automation
 - 👥 **Multi-user** — Per-user resources, worker threads, config files, and filesystem sandboxing
 - 🔒 **Security** — Per-user bubblewrap sandbox, credential stripping, deferred DB writes
-- 🐙 **Personality** — Customizable per-user persona (ships with a Culture drone-inspired default)
+- 🐙 **Personality** — Constitutional principles layer (emissaries) plus customizable per-user persona (ships with a Culture drone-inspired default)
 
 ## Why Istota?
 

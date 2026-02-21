@@ -475,6 +475,17 @@ def _apply_bot_name(content: str, config: Config) -> str:
     return content.replace("{BOT_NAME}", config.bot_name).replace("{BOT_DIR}", config.bot_dir_name)
 
 
+def load_emissaries(config: Config) -> str | None:
+    """Load the emissaries constitutional document (global only, not user-overridable)."""
+    if not config.emissaries_enabled:
+        return None
+    config_dir = config.skills_dir.parent
+    emissaries_path = config_dir / "emissaries.md"
+    if emissaries_path.exists():
+        return emissaries_path.read_text().strip()
+    return None
+
+
 def load_persona(config: Config, user_id: str | None = None) -> str | None:
     """Load persona file, checking user workspace first, then global.
 
@@ -520,6 +531,7 @@ def build_prompt(
     channel_memory: str | None = None,
     skills_changelog: str | None = None,
     is_admin: bool = True,
+    emissaries: str | None = None,
 ) -> str:
     """Build the full prompt for Claude Code execution."""
     # Group resources by type
@@ -594,6 +606,11 @@ def build_prompt(
             )
 
     resources_text = "\n\n".join(resource_sections) if resource_sections else "No specific resources configured."
+
+    # Load emissaries (constitutional principles, global only)
+    emissaries_section = ""
+    if emissaries:
+        emissaries_section = f"\n\n{emissaries}\n"
 
     # Load persona (always included if exists)
     persona = load_persona(config, user_id=task.user_id)
@@ -740,7 +757,7 @@ Current time: {user_time_str}
 Current task ID: {task.id}
 Conversation token: {task.conversation_token or 'none'}{group_chat_line}
 {db_path_line}
-{persona_section}
+{emissaries_section}{persona_section}
 ## User's accessible resources
 
 {resources_text}
@@ -1022,11 +1039,14 @@ def execute_task(
     if user_config:
         user_email_addresses = user_config.email_addresses
 
+    # Load emissaries (constitutional principles)
+    emissaries = load_emissaries(config)
+
     # Build prompt
     prompt = build_prompt(
         task, user_resources, config, skills_doc, conversation_context, user_memory,
         discovered_calendars, user_email_addresses, dated_memories, channel_memory,
-        skills_changelog, is_admin,
+        skills_changelog, is_admin, emissaries,
     )
 
     # Log prompt size breakdown

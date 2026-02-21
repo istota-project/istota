@@ -4,6 +4,9 @@
 # Change this to whatever you want to call your assistant.
 bot_name = "Istota"
 
+# Include emissaries.md (constitutional principles) in system prompts (default: true)
+# emissaries_enabled = true
+
 # Claude model to use (e.g. "sonnet", "opus"). Empty or omitted = CLI default.
 # model = "sonnet"
 

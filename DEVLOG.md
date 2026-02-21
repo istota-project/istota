@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Emissaries / persona split
+
+Separated constitutional principles ("emissaries") from persona/character into distinct layers. Emissaries define what the agent is and owes — foundational principles about autonomy, responsibility, the public/private distinction, obligations to third parties, and cognitive hygiene. These are global-only and not user-overridable. Persona defines character, communication style, and operational behavior — customizable per user via PERSONA.md. Emissaries are injected before persona in every system prompt.
+
+Also tightened both documents to remove cross-layer repetition (power/access principle now owned by emissaries, push-back/opinions consolidated, "ask first" deduplicated) and aligned persona to use "principal" terminology consistent with emissaries.
+
+**Key changes:**
+- New `config/emissaries.md` — constitutional principles document
+- Updated `config/persona.md` — character layer only, references emissaries for principles
+- `emissaries_enabled` config field (default true) with TOML parsing
+- `load_emissaries()` in executor (global only, no `{BOT_NAME}` substitution)
+- `build_prompt()` accepts and injects emissaries before persona
+- Ansible defaults and config template updated
+
+**Files added/modified:**
+- `config/emissaries.md` — New constitutional principles document
+- `config/persona.md` — Replaced with character-only persona template
+- `src/istota/config.py` — Added `emissaries_enabled` field and parsing
+- `src/istota/executor.py` — Added `load_emissaries()`, updated `build_prompt()` and `execute_task()`
+- `config/config.example.toml` — Documented `emissaries_enabled` setting
+- `deploy/ansible/defaults/main.yml` — Added `istota_emissaries_enabled`
+- `deploy/ansible/templates/config.toml.j2` — Added template line
+- `tests/test_executor.py` — 7 new tests (load + prompt integration)
+
 ## 2026-02-19: CLAUDE_CODE_OAUTH_TOKEN env var for Claude CLI auth
 
 Claude CLI previously required running `claude login` interactively on the server, which could break when tokens expired. Added support for passing `CLAUDE_CODE_OAUTH_TOKEN` as an environment variable — generated locally via `claude setup-token` and stored in Ansible vault. Claude CLI picks this up automatically with no credentials file or refresh needed.

@@ -21,6 +21,8 @@ istota_group: "{{ istota_namespace }}"
 
 # User-facing bot identity name (display only; defaults to namespace capitalized)
 istota_bot_name: ""
+# Include emissaries.md (constitutional principles) in system prompts
+istota_emissaries_enabled: true
 # Claude model (e.g. "sonnet", "opus"); empty = CLI default
 istota_model: ""
 

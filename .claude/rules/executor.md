@@ -41,7 +41,8 @@ def build_prompt(
 
 ### Prompt Section Order
 1. Header: role, user_id, datetime, task_id, conversation_token, db_path (L341-346)
-2. Persona: user workspace `PERSONA.md` overrides `config/persona.md` (L244-248)
+2. Emissaries: `config/emissaries.md` constitutional principles (global only, not user-overridable)
+3. Persona: user workspace `PERSONA.md` overrides `config/persona.md` (L244-248)
 3. Resources: calendars, folders, todos, email_folders, notes, reminders (L180-242)
 4. User memory: USER.md (L267-276)
 5. Channel memory: CHANNEL.md (L278-288)
@@ -129,7 +130,8 @@ cmd += ["--output-format", "stream-json", "--verbose"]
 | `is_transient_api_error()` | 63-68 | Check if error is retryable |
 | `get_user_temp_dir()` | 71-73 | `config.temp_dir / user_id` |
 | `_ensure_reply_parent_in_history()` | 76-145 | Force-include reply parent in context |
-| `load_persona()` | 148-154 | Load persona (user workspace > global) |
+| `load_emissaries()` | ~478 | Load constitutional principles (global only, not user-overridable) |
+| `load_persona()` | ~490 | Load persona (user workspace > global) |
 | `load_channel_guidelines()` | 157-163 | Load guidelines/{source_type}.md |
 | `_execute_simple()` | 752-783 | subprocess.run mode |
 | `_execute_streaming()` | 915-952 | Retry wrapper for streaming |

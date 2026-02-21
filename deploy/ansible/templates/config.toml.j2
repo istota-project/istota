@@ -2,6 +2,7 @@
 
 # Bot identity
 bot_name = "{{ istota_bot_name | default(istota_namespace | capitalize, true) }}"
+emissaries_enabled = {{ istota_emissaries_enabled | lower }}
 {% if istota_model %}
 model = "{{ istota_model }}"
 {% endif %}

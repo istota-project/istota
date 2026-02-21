@@ -266,6 +266,7 @@ class BriefingDefaultsConfig:
 @dataclass
 class Config:
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
+    emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt
     model: str = ""  # Claude model to use (e.g. "sonnet", "opus"); empty = CLI default
     db_path: Path = field(default_factory=lambda: Path("data/istota.db"))
     nextcloud: NextcloudConfig = field(default_factory=NextcloudConfig)
@@ -493,6 +494,9 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "bot_name" in data:
         config.bot_name = data["bot_name"]
+
+    if "emissaries_enabled" in data:
+        config.emissaries_enabled = data["emissaries_enabled"]
 
     if "model" in data:
         config.model = data["model"]

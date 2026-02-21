@@ -10,6 +10,7 @@ from istota.executor import (
     is_transient_api_error,
     build_prompt,
     load_persona,
+    load_emissaries,
     _pre_transcribe_attachments,
     _AUDIO_EXTENSIONS,
     API_RETRY_MAX_ATTEMPTS,
@@ -1568,6 +1569,79 @@ class TestLoadPersona:
         config = self._make_config(tmp_path)
         result = load_persona(config, user_id="alice")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestLoadEmissaries
+# ---------------------------------------------------------------------------
+
+
+class TestLoadEmissaries:
+    def _make_config(self, tmp_path):
+        config_dir = tmp_path / "config"
+        skills_dir = config_dir / "skills"
+        skills_dir.mkdir(parents=True)
+        return Config(skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled")
+
+    def test_returns_none_when_absent(self, tmp_path):
+        config = self._make_config(tmp_path)
+        assert load_emissaries(config) is None
+
+    def test_returns_content_when_present(self, tmp_path):
+        config = self._make_config(tmp_path)
+        (tmp_path / "config" / "emissaries.md").write_text("# Emissaries\n\nBe good.")
+        result = load_emissaries(config)
+        assert result == "# Emissaries\n\nBe good."
+
+    def test_no_bot_name_substitution(self, tmp_path):
+        config = self._make_config(tmp_path)
+        config.bot_name = "Jarvis"
+        (tmp_path / "config" / "emissaries.md").write_text("Agent {BOT_NAME} principles")
+        result = load_emissaries(config)
+        assert result == "Agent {BOT_NAME} principles"
+
+    def test_returns_none_when_disabled(self, tmp_path):
+        config = self._make_config(tmp_path)
+        config.emissaries_enabled = False
+        (tmp_path / "config" / "emissaries.md").write_text("# Emissaries\n\nBe good.")
+        assert load_emissaries(config) is None
+
+
+class TestEmissariesInPrompt:
+    def _make_task(self):
+        return db.Task(
+            id=1, status="running", prompt="hello", user_id="alice",
+            source_type="talk", conversation_token="room1",
+            created_at="2024-01-01T00:00:00",
+        )
+
+    def test_emissaries_appears_in_prompt(self):
+        task = self._make_task()
+        result = build_prompt(
+            task, [], Config(), emissaries="# Emissaries\n\nBe good.",
+        )
+        assert "# Emissaries" in result
+        assert "Be good." in result
+
+    def test_emissaries_before_persona(self, tmp_path):
+        task = self._make_task()
+        config_dir = tmp_path / "config"
+        skills_dir = config_dir / "skills"
+        skills_dir.mkdir(parents=True)
+        (config_dir / "persona.md").write_text("# Persona\n\nBe helpful.")
+        config = Config(skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled")
+
+        result = build_prompt(
+            task, [], config, emissaries="# Emissaries\n\nBe good.",
+        )
+        emissaries_pos = result.index("# Emissaries")
+        persona_pos = result.index("# Persona")
+        assert emissaries_pos < persona_pos
+
+    def test_emissaries_absent_when_no_file(self):
+        task = self._make_task()
+        result = build_prompt(task, [], Config())
+        assert "Emissaries" not in result
 
 
 # ---------------------------------------------------------------------------

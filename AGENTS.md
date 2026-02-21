@@ -67,6 +67,7 @@ istota/
 │   ├── config.toml          # Active configuration (gitignored)
 │   ├── config.example.toml  # Example configuration
 │   ├── users/               # Per-user config files (override [users] section)
+│   ├── emissaries.md        # Constitutional principles (global only, not user-overridable)
 │   ├── persona.md           # Default personality (user workspace PERSONA.md overrides)
 │   ├── guidelines/          # Channel-specific formatting (talk.md, email.md, briefing.md)
 │   └── skills/              # Operator override directory (empty by default)
@@ -192,6 +193,7 @@ Env var wiring is declarative via `[[env]]` sections in `skill.toml`. Skills wit
 **Skill CLI pattern**: Action skills expose `python -m istota.skills.<name>` CLI with `build_parser()`/`main()`, JSON output, env-var config. Executor passes credentials as env vars.
 
 ### Response Guidelines
+- **Emissaries**: `config/emissaries.md` — constitutional principles (autonomy, responsibility, third-party obligations). Global only, not user-overridable. Injected before persona. Controlled by `emissaries_enabled` config (default true).
 - **Persona**: User workspace `PERSONA.md` overrides global `config/persona.md`. Seeded from global on first run. Always loaded.
 - **Channel guidelines** (`config/guidelines/{source_type}.md`): Loaded per source type. Both optional.
 
