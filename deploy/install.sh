@@ -591,7 +591,7 @@ setup_system() {
     apt-get update -qq
     apt-get install -y -qq \
         git curl unzip sqlite3 python3 python3-venv \
-        tesseract-ocr \
+        tesseract-ocr fuse3 \
         libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
         bubblewrap \
         2>&1 | while IFS= read -r line; do
@@ -798,7 +798,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=notify
+Type=simple
 User=$ISTOTA_USER
 Group=$ISTOTA_GROUP
 ExecStartPre=/bin/mkdir -p $mount_path
@@ -810,7 +810,7 @@ ExecStart=/usr/bin/rclone mount \\
   --dir-cache-time 5s \\
   --poll-interval 10s \\
   ${rclone_remote}: $mount_path
-ExecStop=/bin/fusermount -u $mount_path
+ExecStop=/bin/fusermount3 -u $mount_path
 Restart=on-failure
 RestartSec=5
 
@@ -1165,7 +1165,7 @@ show_summary() {
 
     # Resolve a user ID for the test command
     local test_user="USER_ID"
-    if [ ${#_WIZ_USER_IDS[@]:-0} -gt 0 ] 2>/dev/null; then
+    if [ "${#_WIZ_USER_IDS[@]}" -gt 0 ] 2>/dev/null; then
         test_user="${_WIZ_USER_IDS[0]}"
     elif [ -f "$SETTINGS_FILE" ]; then
         # Pull first user from settings file
