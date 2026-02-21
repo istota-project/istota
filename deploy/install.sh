@@ -668,7 +668,9 @@ setup_claude_cli() {
             mkdir -p "$claude_dir"
             echo "{\"claudeAiOauth\":{\"accessToken\":\"$token\",\"expiresAt\":\"9999-12-31T23:59:59.999Z\"}}" \
                 > "$claude_dir/.credentials.json"
-            chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$claude_dir"
+            if id "$ISTOTA_USER" &>/dev/null; then
+                chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$claude_dir"
+            fi
             chmod 600 "$claude_dir/.credentials.json"
             ok "Claude OAuth token configured"
         fi
@@ -742,7 +744,9 @@ vendor = nextcloud
 user = $nc_user
 pass = $rclone_pass
 EOF
-            chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$rclone_dir"
+            if id "$ISTOTA_USER" &>/dev/null; then
+                chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$rclone_dir"
+            fi
             chmod 700 "$rclone_dir"
             chmod 600 "$rclone_dir/rclone.conf"
             ok "rclone configured"
@@ -825,9 +829,15 @@ setup_user() {
         return
     fi
     info "Creating system user $ISTOTA_USER"
-    groupadd --system "$ISTOTA_GROUP" 2>/dev/null || true
+    if ! getent group "$ISTOTA_GROUP" &>/dev/null; then
+        groupadd --system "$ISTOTA_GROUP"
+    fi
     useradd --system --home-dir "$ISTOTA_HOME" --gid "$ISTOTA_GROUP" --shell /bin/bash --no-create-home "$ISTOTA_USER"
-    ok "User created"
+    if id "$ISTOTA_USER" &>/dev/null; then
+        ok "User $ISTOTA_USER created"
+    else
+        die "Failed to create user $ISTOTA_USER"
+    fi
 }
 
 setup_directories() {
@@ -842,8 +852,12 @@ setup_directories() {
     )
     for d in "${dirs[@]}"; do
         mkdir -p "$d"
-        chown "$ISTOTA_USER:$ISTOTA_GROUP" "$d"
     done
+    # Fix ownership of everything under ISTOTA_HOME
+    if id "$ISTOTA_USER" &>/dev/null; then
+        chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME"
+        chown "$ISTOTA_USER:$ISTOTA_GROUP" "/var/log/$ISTOTA_NAMESPACE"
+    fi
     ok "Directories created"
 }
 
