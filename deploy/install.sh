@@ -621,11 +621,9 @@ setup_uv() {
 }
 
 setup_claude_cli() {
-    if command_exists claude; then
+    if [ -x "$ISTOTA_HOME/.local/bin/claude" ]; then
         ok "Claude CLI already installed"
-    fi
-
-    if ! command_exists claude; then
+    else
         info "Installing Claude CLI"
 
         # Install as the istota user so files are owned correctly
