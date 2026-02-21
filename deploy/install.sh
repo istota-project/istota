@@ -1254,10 +1254,14 @@ main() {
         setup_directories
         setup_logrotate
         if [ "$SKIP_SYSTEM" = false ]; then
-            setup_claude_cli
             setup_rclone
         fi
         setup_rclone_mount
+    fi
+
+    # Always ensure Claude CLI is installed (even on --update)
+    if [ "$SKIP_SYSTEM" = false ]; then
+        setup_claude_cli
     fi
 
     deploy_code
