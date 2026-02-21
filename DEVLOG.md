@@ -2,6 +2,13 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: README rewrite
+
+Replaced the emoji-laden listicle README with a cleaner, more functional version. Requirements and quick start moved to the top. Features consolidated into prose paragraphs grouped by theme. Dropped the "Why Istota?" and "Should I try Istota?" sections (those belong on the website). Added optional dependency groups and git clone to quick start.
+
+**Files modified:**
+- `README.md` — Full rewrite
+
 ## 2026-02-21: Emissaries / persona split
 
 Separated constitutional principles ("emissaries") from persona/character into distinct layers. Emissaries define what the agent is and owes — foundational principles about autonomy, responsibility, the public/private distinction, obligations to third parties, and cognitive hygiene. These are global-only and not user-overridable. Persona defines character, communication style, and operational behavior — customizable per user via PERSONA.md. Emissaries are injected before persona in every system prompt.
