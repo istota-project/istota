@@ -618,11 +618,44 @@ setup_claude_cli() {
         ok "Claude CLI already installed"
     else
         info "Installing Claude CLI"
-        HOME="$ISTOTA_HOME" curl -fsSL https://claude.ai/install.sh | bash 2>&1 | tail -1
-        if [ -f "$ISTOTA_HOME/.local/bin/claude" ] && [ ! -f /usr/local/bin/claude ]; then
-            ln -sf "$ISTOTA_HOME/.local/bin/claude" /usr/local/bin/claude
+
+        # Try the prebuilt binary first
+        local install_ok=false
+        if HOME="$ISTOTA_HOME" bash -c 'curl -fsSL https://claude.ai/install.sh | bash' 2>&1 | tail -3; then
+            # Verify the binary actually runs (catches Illegal instruction, etc.)
+            if "$ISTOTA_HOME/.local/bin/claude" --version &>/dev/null 2>&1; then
+                install_ok=true
+            else
+                warn "Prebuilt binary failed (unsupported CPU). Falling back to npm install."
+                rm -f "$ISTOTA_HOME/.local/bin/claude"
+            fi
         fi
-        ok "Claude CLI installed"
+
+        # Fallback: install via npm
+        if [ "$install_ok" = false ]; then
+            if ! command_exists npm; then
+                info "Installing Node.js for npm-based Claude CLI"
+                apt-get install -y -qq nodejs npm 2>/dev/null || true
+            fi
+            if command_exists npm; then
+                npm install -g @anthropic-ai/claude-code 2>&1 | tail -3
+                install_ok=true
+            else
+                warn "npm not available. Install Claude CLI manually."
+            fi
+        fi
+
+        if [ "$install_ok" = true ]; then
+            # Ensure claude is on the system PATH
+            if command_exists claude; then
+                ok "Claude CLI installed"
+            elif [ -f "$ISTOTA_HOME/.local/bin/claude" ]; then
+                ln -sf "$ISTOTA_HOME/.local/bin/claude" /usr/local/bin/claude
+                ok "Claude CLI installed"
+            else
+                ok "Claude CLI installed (via npm)"
+            fi
+        fi
     fi
 
     # Set up OAuth token if provided in settings
