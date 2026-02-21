@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Install script hardening
+
+End-to-end testing of install.sh on a fresh Debian VM uncovered a series of issues with the mount service, Claude CLI installation, file permissions, and system dependencies.
+
+**Key changes:**
+- Fixed rclone mount service: `Type=notify` → `Type=simple` (rclone doesn't send sd_notify)
+- Added `fuse3` to system packages, switched `ExecStop` to `fusermount3` for Debian 13+
+- Install Claude CLI as the istota user (not root), so files are owned correctly
+- Always create `/usr/local/bin/claude` symlink (not just on fresh install)
+- Run `setup_claude_cli` on `--update` too, not just fresh install
+- Chown mount point directory to istota user before starting mount service
+- Fixed `${#_WIZ_USER_IDS[@]:-0}` bad substitution in summary output
+- Verification now shows Claude binary path for easier debugging
+- Sleep cycle (nightly memory extraction) enabled by default
+- Fixed test command in summary to use full venv path
+
+**Files modified:**
+- `deploy/install.sh` — Mount service, Claude CLI install, permissions, defaults
+
 ## 2026-02-21: Interactive install wizard
 
 Rewrote `deploy/install.sh` with a polished 7-step interactive wizard for first-time setup on Debian/Ubuntu VMs. The wizard validates Nextcloud connectivity and credentials in real time, auto-generates the obscured rclone password (eliminating a confusing manual step), and produces all config files through the existing `render_config.py` pipeline. Added `--dry-run` mode that runs the full wizard and generates config into a temp directory without touching the system — useful for testing on macOS or previewing what would be deployed.

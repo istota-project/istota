@@ -45,7 +45,7 @@ _WIZ_BOT_NAME=""
 _WIZ_EMAIL_ENABLED=false
 _WIZ_BROWSER_ENABLED=false
 _WIZ_MEMORY_SEARCH_ENABLED=true
-_WIZ_SLEEP_CYCLE_ENABLED=false
+_WIZ_SLEEP_CYCLE_ENABLED=true
 _WIZ_USERS_BLOCK=""
 _WIZ_ADMIN_BLOCK="admin_users = []"
 _WIZ_EMAIL_IMAP_HOST=""
@@ -458,7 +458,7 @@ wiz_features() {
     # Sleep cycle
     echo
     dim "Sleep cycle extracts daily memories from conversations overnight."
-    prompt_bool _WIZ_SLEEP_CYCLE_ENABLED "Enable nightly memory extraction?" "n"
+    prompt_bool _WIZ_SLEEP_CYCLE_ENABLED "Enable nightly memory extraction?" "y"
 
     # Browser
     echo
@@ -1190,7 +1190,7 @@ if users:
         step=$((step + 1))
     fi
     echo "  ${step}. Test with:"
-    echo "     sudo -u $ISTOTA_USER HOME=$ISTOTA_HOME istota task \"Hello\" -u $test_user -x"
+    echo "     sudo -u $ISTOTA_USER HOME=$ISTOTA_HOME $ISTOTA_HOME/.venv/bin/istota task \"Hello\" -u $test_user -x"
     echo
 }
 
