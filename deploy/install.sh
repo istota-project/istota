@@ -1067,20 +1067,21 @@ verify_installation() {
     fi
 
     # Check Claude CLI
-    if command_exists claude; then
+    local claude_bin="$ISTOTA_HOME/.local/bin/claude"
+    if [ -x "$claude_bin" ]; then
         local claude_ver
-        claude_ver=$(claude --version 2>/dev/null || echo "unknown")
-        ok "Claude CLI: $claude_ver"
+        claude_ver=$("$claude_bin" --version 2>/dev/null || echo "unknown")
+        ok "Claude CLI: $claude_ver ($claude_bin)"
 
-        # Check authentication
-        if sudo -u "$ISTOTA_USER" HOME="$ISTOTA_HOME" claude --version &>/dev/null 2>&1; then
+        # Check accessibility by service user
+        if sudo -u "$ISTOTA_USER" HOME="$ISTOTA_HOME" "$claude_bin" --version &>/dev/null 2>&1; then
             ok "Claude CLI accessible by $ISTOTA_USER"
         else
             warn "Claude CLI not accessible by $ISTOTA_USER"
             all_ok=false
         fi
     else
-        warn "Claude CLI not found"
+        warn "Claude CLI not found at $claude_bin"
         all_ok=false
     fi
 
