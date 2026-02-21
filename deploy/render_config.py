@@ -248,6 +248,26 @@ def render_config_toml(s: dict) -> str:
             lines.append(f'    "{pattern}",')
         lines.append(']')
 
+        # GitHub settings
+        github_url = get(s, "developer.github_url", "")
+        if github_url:
+            lines.append(f'github_url = "{github_url}"')
+        else:
+            lines.append(f'github_url = "https://github.com"')
+        if not use_env_file:
+            github_token = get(s, "developer.github_token", "")
+            if github_token:
+                lines.append(f'github_token = "{github_token}"')
+        github_username = get(s, "developer.github_username", "")
+        if github_username:
+            lines.append(f'github_username = "{github_username}"')
+        github_default_owner = get(s, "developer.github_default_owner", "")
+        if github_default_owner:
+            lines.append(f'github_default_owner = "{github_default_owner}"')
+        github_reviewer = get(s, "developer.github_reviewer", "")
+        if github_reviewer:
+            lines.append(f'github_reviewer = "{github_reviewer}"')
+
     lines.append('')
     lines.append('# User configuration is in per-user files: config/users/{user_id}.toml')
     lines.append('')
@@ -341,6 +361,7 @@ def render_secrets_env(s: dict) -> str:
         ("email.imap_password", f"{prefix}_IMAP_PASSWORD"),
         ("email.smtp_password", f"{prefix}_SMTP_PASSWORD"),
         ("developer.gitlab_token", f"{prefix}_GITLAB_TOKEN"),
+        ("developer.github_token", f"{prefix}_GITHUB_TOKEN"),
         ("ntfy.token", f"{prefix}_NTFY_TOKEN"),
         ("ntfy.password", f"{prefix}_NTFY_PASSWORD"),
     ]
@@ -351,6 +372,12 @@ def render_secrets_env(s: dict) -> str:
             val = get(s, "email.imap_password", "")
         if val:
             lines.append(f"{env_key}={val}")
+
+    # Claude OAuth token
+    claude_token = get(s, "claude_oauth_token", "")
+    if claude_token:
+        lines.append(f"CLAUDE_CODE_OAUTH_TOKEN={claude_token}")
+
     lines.append("")
     return "\n".join(lines)
 

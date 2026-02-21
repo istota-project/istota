@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Interactive install wizard
+
+Rewrote `deploy/install.sh` with a polished 7-step interactive wizard for first-time setup on Debian/Ubuntu VMs. The wizard validates Nextcloud connectivity and credentials in real time, auto-generates the obscured rclone password (eliminating a confusing manual step), and produces all config files through the existing `render_config.py` pipeline. Added `--dry-run` mode that runs the full wizard and generates config into a temp directory without touching the system — useful for testing on macOS or previewing what would be deployed.
+
+**Key changes:**
+- Pre-flight checks: OS detection, internet connectivity, disk space, Python version
+- Nextcloud URL validation (tests `/status.php`) and credential verification (OCS API)
+- Auto-obscure rclone password from the app password after rclone install
+- Claude OAuth token can be provided during setup or authenticated later
+- Post-install verification: checks service status, mount, CLI, database
+- `--dry-run` flag for local testing without root or Linux
+- `render_config.py`: added GitHub developer settings, `CLAUDE_CODE_OAUTH_TOKEN` to secrets.env
+
+**Files modified:**
+- `deploy/install.sh` — Major rewrite (717 → 1200 lines)
+- `deploy/render_config.py` — GitHub secrets, Claude OAuth token support
+
 ## 2026-02-21: README rewrite
 
 Replaced the emoji-laden listicle README with a cleaner, more functional version. Requirements and quick start moved to the top. Features consolidated into prose paragraphs grouped by theme. Dropped the "Why Istota?" and "Should I try Istota?" sections (those belong on the website). Added optional dependency groups and git clone to quick start.

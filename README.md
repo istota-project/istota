@@ -1,4 +1,4 @@
-# Istota
+# 🐙 istota
 
 [istota.xyz](https://istota.xyz)
 
@@ -11,7 +11,7 @@ Istota joins your Nextcloud as a regular user with its own account, collaborates
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) for package management
 - [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI installed and authenticated
-- A Nextcloud instance with a dedicated user account for the bot
+- A Nextcloud instance with a dedicated user account for the bot (mounted via Rclone)
 - Linux (Debian 13 recommended) for production — bubblewrap sandboxing requires Linux
 - Optional: [bubblewrap](https://github.com/containers/bubblewrap) for filesystem sandboxing
 
@@ -115,17 +115,23 @@ Each user gets a shared Nextcloud folder:
 
 ## Deployment
 
-Istota expects its own Debian 13 VM, separate from your Nextcloud server. Nextcloud files are accessed via an rclone mount.
+Istota expects its own Debian/Ubuntu VM, separate from your Nextcloud server. Nextcloud files are accessed via an rclone FUSE mount.
 
 ```bash
-# Interactive install
-sudo ./install.sh --interactive
-
-# Or use the Ansible role
-# See deploy/ansible/ and deploy/README.md
+# Download and run the interactive installer
+curl -fsSL https://raw.githubusercontent.com/alicekubicki/istota/main/deploy/install.sh -o install.sh
+sudo bash install.sh
 ```
 
-The Ansible role handles systemd services, rclone mount, bubblewrap setup, per-user Fava instances (beancount web UI), and config templating. See `deploy/README.md` for details.
+The installer walks through Nextcloud connection, user setup, and optional features. It validates credentials, sets up the rclone mount, generates all config files, and starts the scheduler service. Re-run with `--update` to pull code and regenerate config without re-prompting.
+
+An Ansible role (`deploy/ansible/`) is also available for infrastructure-as-code deployments. See `deploy/README.md` for details.
+
+Preview the installer output without making any system changes:
+
+```bash
+bash deploy/install.sh --dry-run
+```
 
 ## Development
 
