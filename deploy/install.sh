@@ -680,13 +680,12 @@ setup_rclone() {
         ok "rclone already installed"
     else
         info "Installing rclone"
-        if curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh 2>/dev/null; then
-            bash /tmp/rclone-install.sh 2>&1 | tail -3
-            rm -f /tmp/rclone-install.sh
-        else
-            # Fallback: install from apt
-            apt-get install -y -qq rclone 2>/dev/null || true
-        fi
+        # Try official installer, fall back to apt
+        curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh 2>/dev/null \
+            && bash /tmp/rclone-install.sh 2>&1 | tail -3 \
+            || apt-get install -y -qq rclone 2>/dev/null \
+            || true
+        rm -f /tmp/rclone-install.sh
         if command_exists rclone; then
             ok "rclone installed"
         else
@@ -1255,9 +1254,9 @@ main() {
 
 # Trap to show summary even if a step fails
 _on_error() {
-    local exit_code=$?
+    local exit_code=$? line_no="${BASH_LINENO[0]}"
     echo
-    error "Installation failed (exit code $exit_code)"
+    error "Installation failed at line $line_no (exit code $exit_code)"
     echo
     echo "  Check the output above for details."
     echo "  After fixing the issue, re-run:"
