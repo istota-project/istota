@@ -1133,13 +1133,33 @@ show_summary() {
         echo -e "${_YELLOW}Next steps:${_RESET}"
     fi
 
-    echo "  $([ "$needs_auth" = true ] && echo "2" || echo "1"). Invite $ISTOTA_NAMESPACE to Nextcloud Talk conversations"
-    echo "  $([ "$needs_auth" = true ] && echo "3" || echo "2"). Test with:"
+    # Resolve a user ID for the test command
+    local test_user="USER_ID"
     if [ ${#_WIZ_USER_IDS[@]:-0} -gt 0 ] 2>/dev/null; then
-        echo "     sudo -u $ISTOTA_USER HOME=$ISTOTA_HOME istota task \"Hello\" -u ${_WIZ_USER_IDS[0]} -x"
-    else
-        echo "     sudo -u $ISTOTA_USER HOME=$ISTOTA_HOME istota task \"Hello\" -u USER_ID -x"
+        test_user="${_WIZ_USER_IDS[0]}"
+    elif [ -f "$SETTINGS_FILE" ]; then
+        # Pull first user from settings file
+        local first_user
+        first_user=$(python3 -c "
+import tomllib
+with open('$SETTINGS_FILE', 'rb') as f: s = tomllib.load(f)
+users = s.get('users', {})
+if users:
+    print(next(iter(users)))
+" 2>/dev/null || true)
+        [ -n "$first_user" ] && test_user="$first_user"
     fi
+
+    local step=1
+    echo "  ${step}. Invite $ISTOTA_NAMESPACE to Nextcloud Talk conversations"
+    step=$((step + 1))
+    if [ "$needs_auth" = true ]; then
+        echo "  ${step}. Authenticate Claude CLI:"
+        echo "     sudo -u $ISTOTA_USER HOME=$ISTOTA_HOME claude login"
+        step=$((step + 1))
+    fi
+    echo "  ${step}. Test with:"
+    echo "     sudo -u $ISTOTA_USER HOME=$ISTOTA_HOME istota task \"Hello\" -u $test_user -x"
     echo
 }
 
@@ -1212,9 +1232,24 @@ main() {
     deploy_db
     deploy_services
     start_services
+
     verify_installation
     show_summary
 }
+
+# Trap to show summary even if a step fails
+_on_error() {
+    local exit_code=$?
+    echo
+    error "Installation failed (exit code $exit_code)"
+    echo
+    echo "  Check the output above for details."
+    echo "  After fixing the issue, re-run:"
+    echo "    sudo bash install.sh --update"
+    echo
+    exit "$exit_code"
+}
+trap _on_error ERR
 
 main_dry_run() {
     local tmpdir
