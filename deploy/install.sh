@@ -9,6 +9,7 @@
 #   install.sh [OPTIONS]
 #     --interactive     Guided setup wizard (writes settings file, default on first run)
 #     --update          Update only (skip system setup, just pull + config + restart)
+#     --skip-system     Skip system package/tool installation (git, uv, rclone, claude, etc.)
 #     --dry-run         Run wizard and generate config to temp dir without system changes
 #     --settings PATH   Settings file path (default: /etc/istota/settings.toml)
 #     --home PATH       Override install directory
@@ -31,6 +32,7 @@ REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
 UPDATE_ONLY=false
 INTERACTIVE=false
 DRY_RUN=false
+SKIP_SYSTEM=false
 
 # Wizard state (populated during interactive mode)
 _WIZ_NC_URL=""
@@ -148,11 +150,12 @@ else:
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --interactive) INTERACTIVE=true; shift ;;
-        --update)      UPDATE_ONLY=true; shift ;;
-        --dry-run)     DRY_RUN=true; INTERACTIVE=true; shift ;;
-        --settings)    SETTINGS_FILE="$2"; shift 2 ;;
-        --home)        ISTOTA_HOME="$2"; shift 2 ;;
+        --interactive)  INTERACTIVE=true; shift ;;
+        --update)       UPDATE_ONLY=true; shift ;;
+        --skip-system)  SKIP_SYSTEM=true; shift ;;
+        --dry-run)      DRY_RUN=true; INTERACTIVE=true; shift ;;
+        --settings)     SETTINGS_FILE="$2"; shift 2 ;;
+        --home)         ISTOTA_HOME="$2"; shift 2 ;;
         --help|-h)
             sed -n '2,/^$/s/^# \?//p' "$0"
             exit 0 ;;
@@ -1152,17 +1155,22 @@ main() {
 
     echo -e "  ${_BOLD}Home:${_RESET}      $ISTOTA_HOME"
     echo -e "  ${_BOLD}Namespace:${_RESET} $ISTOTA_NAMESPACE"
-    echo -e "  ${_BOLD}Mode:${_RESET}      $([ "$UPDATE_ONLY" = true ] && echo "update" || echo "full install")"
+    local mode="full install"
+    [ "$UPDATE_ONLY" = true ] && mode="update"
+    [ "$SKIP_SYSTEM" = true ] && mode="skip system"
+    echo -e "  ${_BOLD}Mode:${_RESET}      $mode"
     echo
 
     if [ "$UPDATE_ONLY" = false ]; then
-        setup_system
-        setup_uv
+        if [ "$SKIP_SYSTEM" = false ]; then
+            setup_system
+            setup_uv
+            setup_claude_cli
+            setup_rclone
+        fi
         setup_user
         setup_directories
         setup_logrotate
-        setup_claude_cli
-        setup_rclone
         setup_rclone_mount
     fi
 
