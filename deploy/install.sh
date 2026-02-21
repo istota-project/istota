@@ -583,7 +583,7 @@ setup_system() {
     info "Installing system dependencies"
     apt-get update -qq
     apt-get install -y -qq \
-        git curl sqlite3 python3 python3-venv \
+        git curl unzip sqlite3 python3 python3-venv \
         tesseract-ocr \
         libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
         bubblewrap \
@@ -1233,12 +1233,14 @@ main() {
         if [ "$SKIP_SYSTEM" = false ]; then
             setup_system
             setup_uv
-            setup_claude_cli
-            setup_rclone
         fi
         setup_user
         setup_directories
         setup_logrotate
+        if [ "$SKIP_SYSTEM" = false ]; then
+            setup_claude_cli
+            setup_rclone
+        fi
         setup_rclone_mount
     fi
 
