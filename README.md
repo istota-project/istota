@@ -1,6 +1,8 @@
 # Istota
 
-A self-hosted AI agent that lives in your Nextcloud instance. Powered by Claude Code. [istota.xyz](https://istota.xyz)
+[istota.xyz](https://istota.xyz)
+
+A self-hosted AI agent that lives in your Nextcloud instance. Powered by Claude Code.
 
 Istota joins your Nextcloud as a regular user with its own account, collaborates on files, manages calendars, handles email, and does pretty much anything Claude Code can do — through Nextcloud Talk or email. Your data stays on your stack, permissions follow Nextcloud's sharing model, and each invocation runs in a bubblewrap sandbox.
 
