@@ -13,7 +13,7 @@ Istota joins your Nextcloud as a regular user with its own account, collaborates
 - [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI installed and authenticated
 - A Nextcloud instance with a dedicated user account for the bot
 - Linux (Debian 13 recommended) for production — bubblewrap sandboxing requires Linux
-- Optional: [bubblewrap](https://github.com/containers/bubblewrap) for per-user filesystem sandboxing
+- Optional: [bubblewrap](https://github.com/containers/bubblewrap) for filesystem sandboxing
 
 ## Quick start
 
