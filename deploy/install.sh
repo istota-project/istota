@@ -1192,6 +1192,17 @@ if users:
     echo "  ${step}. Test with:"
     echo "     sudo -u $ISTOTA_USER HOME=$ISTOTA_HOME $ISTOTA_HOME/.venv/bin/istota task \"Hello\" -u $test_user -x"
     echo
+
+    echo -e "${_BOLD}Optional features${_RESET} (not set up by this script):"
+    echo "  - Browser container    Dockerized Playwright for web browsing"
+    echo "  - Automated backups    DB + file backups with rotation"
+    echo "  - Fava ledger viewer   Per-user beancount web UI"
+    echo "  - Nginx site hosting   Per-user static sites from Nextcloud"
+    echo "  - Whisper transcription Audio-to-text via faster-whisper"
+    echo "  - ntfy notifications   Push notifications via ntfy.sh"
+    echo
+    echo "  See deploy/README.md for setup instructions."
+    echo
 }
 
 # ============================================================

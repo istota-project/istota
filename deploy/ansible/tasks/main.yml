@@ -67,6 +67,7 @@
       - libpangocairo-1.0-0
       - libgdk-pixbuf-2.0-0
       - bubblewrap          # Per-user filesystem sandbox
+      - fuse3               # FUSE mount support (fusermount3)
     state: present
     update_cache: yes
     cache_valid_time: 3600
@@ -263,7 +264,7 @@
       Wants=network-online.target
 
       [Service]
-      Type=notify
+      Type=simple
       User={{ istota_user }}
       Group={{ istota_group }}
       ExecStartPre=/bin/mkdir -p {{ istota_nextcloud_mount_path }}
@@ -275,7 +276,7 @@
         --dir-cache-time 5s \
         --poll-interval 10s \
         {{ istota_rclone_remote }}: {{ istota_nextcloud_mount_path }}
-      ExecStop=/bin/fusermount -u {{ istota_nextcloud_mount_path }}
+      ExecStop=/bin/fusermount3 -u {{ istota_nextcloud_mount_path }}
       Restart=on-failure
       RestartSec=5
 
