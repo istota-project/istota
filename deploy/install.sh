@@ -623,14 +623,18 @@ setup_uv() {
 setup_claude_cli() {
     if command_exists claude; then
         ok "Claude CLI already installed"
-    else
+    fi
+
+    if ! command_exists claude; then
         info "Installing Claude CLI"
 
-        # Try the prebuilt binary first
+        # Install as the istota user so files are owned correctly
         local install_ok=false
-        if HOME="$ISTOTA_HOME" bash -c 'curl -fsSL https://claude.ai/install.sh | bash' 2>&1 | tail -3; then
+        if sudo -u "$ISTOTA_USER" HOME="$ISTOTA_HOME" \
+            bash -c 'curl -fsSL https://claude.ai/install.sh | bash' 2>&1 | tail -3; then
             # Verify the binary actually runs (catches Illegal instruction, etc.)
-            if "$ISTOTA_HOME/.local/bin/claude" --version &>/dev/null 2>&1; then
+            if sudo -u "$ISTOTA_USER" HOME="$ISTOTA_HOME" \
+                "$ISTOTA_HOME/.local/bin/claude" --version &>/dev/null 2>&1; then
                 install_ok=true
             else
                 warn "Prebuilt binary failed (unsupported CPU). Falling back to npm install."
@@ -653,16 +657,13 @@ setup_claude_cli() {
         fi
 
         if [ "$install_ok" = true ]; then
-            # Ensure claude is on the system PATH
-            if command_exists claude; then
-                ok "Claude CLI installed"
-            elif [ -f "$ISTOTA_HOME/.local/bin/claude" ]; then
-                ln -sf "$ISTOTA_HOME/.local/bin/claude" /usr/local/bin/claude
-                ok "Claude CLI installed"
-            else
-                ok "Claude CLI installed (via npm)"
-            fi
+            ok "Claude CLI installed"
         fi
+    fi
+
+    # Ensure claude is accessible on the system PATH for all users
+    if [ -f "$ISTOTA_HOME/.local/bin/claude" ] && [ ! -f /usr/local/bin/claude ]; then
+        ln -sf "$ISTOTA_HOME/.local/bin/claude" /usr/local/bin/claude
     fi
 
     # Set up OAuth token if provided in settings
@@ -772,6 +773,7 @@ setup_rclone_mount() {
 
     info "Setting up Nextcloud FUSE mount"
     mkdir -p "$mount_path"
+    safe_chown "$ISTOTA_USER:$ISTOTA_GROUP" "$mount_path"
 
     # Create mount group
     if ! getent group nextcloud-mount &>/dev/null; then
