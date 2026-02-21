@@ -8,60 +8,38 @@ Istota joins your Nextcloud as a regular user with its own account, collaborates
 
 ## Requirements
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/) for package management
-- [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI installed and authenticated
-- A Nextcloud instance with a dedicated user account for the bot (mounted via Rclone)
-- Linux (Debian 13 recommended) for production — bubblewrap sandboxing requires Linux
-- Optional: [bubblewrap](https://github.com/containers/bubblewrap) for filesystem sandboxing
+- A Nextcloud instance with a dedicated user account for the bot
+- A Debian/Ubuntu VM (separate from your Nextcloud server)
+- A [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) API key or OAuth token
 
 ## Quick start
 
 ```bash
-git clone https://github.com/alicekubicki/istota.git
-cd istota
-
-# Install dependencies
-uv sync
-
-# Copy and edit config
-cp config/config.example.toml config/config.toml
-# Edit config/config.toml with your Nextcloud credentials
-
-# Initialize the database
-uv run istota init
-
-# Test with a dry run (shows the full prompt without calling Claude)
-uv run istota task "What's on my calendar today?" -u alice -x --dry-run
-
-# Execute a single task
-uv run istota task "What's on my calendar today?" -u alice -x
-
-# Run the scheduler daemon
-uv run istota-scheduler -d
+curl -fsSL https://raw.githubusercontent.com/alicekubicki/istota/main/deploy/install.sh -o install.sh
+sudo bash install.sh
 ```
 
-## Configuration
+The installer walks you through connecting to Nextcloud, setting up users, and choosing optional features (email, memory search, scheduled briefings, etc.). It handles everything: system packages, Python dependencies, rclone mount, database initialization, systemd services.
 
-Minimum config requires Nextcloud credentials and at least one user:
+After installation, authenticate the Claude CLI and invite the bot to a Talk conversation:
 
-```toml
-[nextcloud]
-url = "https://nextcloud.example.com"
-username = "istota"
-app_password = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
-
-[talk]
-enabled = true
-
-[users.alice]
-display_name = "Alice"
-email_addresses = ["alice@example.com"]
+```bash
+sudo -u istota HOME=/srv/app/istota claude login
 ```
 
-CalDAV is auto-derived from Nextcloud credentials — no separate calendar config needed.
+To update an existing installation (pull latest code, regenerate config, restart):
 
-Config is searched in order: `config/config.toml`, `~/.config/istota/config.toml`, `/etc/istota/config.toml`. Per-user config files go in `config/users/` (e.g. `config/users/alice.toml`). See `config/config.example.toml` for all options.
+```bash
+sudo bash install.sh --update
+```
+
+Preview what the installer would generate without making changes:
+
+```bash
+bash deploy/install.sh --dry-run
+```
+
+An Ansible role is also available at `deploy/ansible/` for infrastructure-as-code deployments.
 
 ## How it works
 
@@ -111,26 +89,6 @@ Each user gets a shared Nextcloud folder:
 │   └── HEARTBEAT.md     # Health monitoring config
 ├── exports/             # Bot-generated files
 └── examples/            # Reference documentation
-```
-
-## Deployment
-
-Istota expects its own Debian/Ubuntu VM, separate from your Nextcloud server. Nextcloud files are accessed via an rclone FUSE mount.
-
-```bash
-# Download and run the interactive installer
-curl -fsSL https://raw.githubusercontent.com/alicekubicki/istota/main/deploy/install.sh -o install.sh
-sudo bash install.sh
-```
-
-The installer walks through Nextcloud connection, user setup, and optional features. It validates credentials, sets up the rclone mount, generates all config files, and starts the scheduler service. Re-run with `--update` to pull code and regenerate config without re-prompting.
-
-An Ansible role (`deploy/ansible/`) is also available for infrastructure-as-code deployments. See `deploy/README.md` for details.
-
-Preview the installer output without making any system changes:
-
-```bash
-bash deploy/install.sh --dry-run
 ```
 
 ## Development
