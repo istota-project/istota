@@ -90,7 +90,7 @@ journalctl -u istota-scheduler -f
 
 ## Optional features
 
-The core install covers Talk integration, email, scheduling, and Claude Code execution. The features below require additional setup. All settings go in `/etc/istota/settings.toml`, then re-run `install.sh --update` to regenerate config.
+The core install covers Talk integration, email, scheduling, and Claude Code execution. The install wizard (`--interactive`) prompts for the features below and sets them up automatically. For manual setup or customization, the reference instructions are provided here. All settings go in `/etc/istota/settings.toml`, then re-run `install.sh --update` to regenerate config.
 
 Throughout this section, `$HOME` refers to the istota home directory (default `/srv/app/istota`) and commands are run as root unless noted otherwise.
 

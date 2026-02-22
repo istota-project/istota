@@ -44,8 +44,17 @@ _WIZ_RCLONE_PASS_OBSCURED=""
 _WIZ_BOT_NAME=""
 _WIZ_EMAIL_ENABLED=false
 _WIZ_BROWSER_ENABLED=false
+_WIZ_BROWSER_VNC_PASSWORD=""
 _WIZ_MEMORY_SEARCH_ENABLED=true
 _WIZ_SLEEP_CYCLE_ENABLED=true
+_WIZ_CHANNEL_SLEEP_ENABLED=true
+_WIZ_WHISPER_ENABLED=true
+_WIZ_WHISPER_MODEL="small"
+_WIZ_NTFY_ENABLED=false
+_WIZ_NTFY_SERVER=""
+_WIZ_NTFY_TOPIC=""
+_WIZ_NTFY_TOKEN=""
+_WIZ_BACKUP_ENABLED=true
 _WIZ_USERS_BLOCK=""
 _WIZ_ADMIN_BLOCK="admin_users = []"
 _WIZ_EMAIL_IMAP_HOST=""
@@ -460,6 +469,42 @@ wiz_features() {
     dim "Sleep cycle extracts daily memories from conversations overnight."
     prompt_bool _WIZ_SLEEP_CYCLE_ENABLED "Enable nightly memory extraction?" "y"
 
+    # Channel sleep cycle
+    if [ "$_WIZ_SLEEP_CYCLE_ENABLED" = "true" ]; then
+        echo
+        dim "Channel sleep cycle extracts shared context from group conversations."
+        prompt_bool _WIZ_CHANNEL_SLEEP_ENABLED "Enable channel memory extraction?" "y"
+    else
+        _WIZ_CHANNEL_SLEEP_ENABLED=false
+    fi
+
+    # Whisper
+    echo
+    dim "Whisper provides audio-to-text transcription via faster-whisper."
+    dim "Requires ~1-2GB disk depending on model size."
+    prompt_bool _WIZ_WHISPER_ENABLED "Enable audio transcription?" "y"
+    if [ "$_WIZ_WHISPER_ENABLED" = "true" ]; then
+        echo
+        dim "Model sizes: tiny (~75MB), base (~150MB), small (~500MB), medium (~1.5GB)"
+        prompt_value _WIZ_WHISPER_MODEL "Whisper model" "small"
+    fi
+
+    # ntfy
+    echo
+    dim "ntfy enables push notifications to phones/desktops via ntfy.sh."
+    prompt_bool _WIZ_NTFY_ENABLED "Enable ntfy push notifications?" "n"
+    if [ "$_WIZ_NTFY_ENABLED" = "true" ]; then
+        echo
+        prompt_value _WIZ_NTFY_SERVER "ntfy server URL" "https://ntfy.sh"
+        prompt_value _WIZ_NTFY_TOPIC "ntfy topic" ""
+        prompt_secret _WIZ_NTFY_TOKEN "ntfy access token (optional, press Enter to skip)"
+    fi
+
+    # Backups
+    echo
+    dim "Automated backups of the database and Nextcloud files with rotation."
+    prompt_bool _WIZ_BACKUP_ENABLED "Enable automated backups?" "y"
+
     # Browser
     echo
     dim "Browser container provides web browsing capability via Docker."
@@ -468,6 +513,8 @@ wiz_features() {
         if ! command_exists docker; then
             warn "Docker not found. It will need to be installed separately."
         fi
+        echo
+        prompt_secret _WIZ_BROWSER_VNC_PASSWORD "VNC password for browser viewer"
     fi
 }
 
@@ -514,6 +561,10 @@ wiz_review() {
     echo -e "  ${_BOLD}Email:${_RESET}             $_WIZ_EMAIL_ENABLED"
     echo -e "  ${_BOLD}Memory search:${_RESET}     $_WIZ_MEMORY_SEARCH_ENABLED"
     echo -e "  ${_BOLD}Sleep cycle:${_RESET}       $_WIZ_SLEEP_CYCLE_ENABLED"
+    echo -e "  ${_BOLD}Channel sleep:${_RESET}     $_WIZ_CHANNEL_SLEEP_ENABLED"
+    echo -e "  ${_BOLD}Whisper:${_RESET}           $_WIZ_WHISPER_ENABLED$([ "$_WIZ_WHISPER_ENABLED" = "true" ] && echo " (model: $_WIZ_WHISPER_MODEL)")"
+    echo -e "  ${_BOLD}ntfy:${_RESET}              $_WIZ_NTFY_ENABLED$([ "$_WIZ_NTFY_ENABLED" = "true" ] && echo " (topic: $_WIZ_NTFY_TOPIC)")"
+    echo -e "  ${_BOLD}Backups:${_RESET}           $_WIZ_BACKUP_ENABLED"
     echo -e "  ${_BOLD}Browser:${_RESET}           $_WIZ_BROWSER_ENABLED"
     echo -e "  ${_BOLD}Claude token:${_RESET}      $([ -n "$_WIZ_CLAUDE_TOKEN" ] && echo "provided" || echo "authenticate later")"
     echo
@@ -568,12 +619,29 @@ bot_email = "$_WIZ_EMAIL_BOT_ADDRESS"
 
 [browser]
 enabled = $_WIZ_BROWSER_ENABLED
+vnc_password = "$_WIZ_BROWSER_VNC_PASSWORD"
 
 [memory_search]
 enabled = $_WIZ_MEMORY_SEARCH_ENABLED
 
 [sleep_cycle]
 enabled = $_WIZ_SLEEP_CYCLE_ENABLED
+
+[channel_sleep_cycle]
+enabled = $_WIZ_CHANNEL_SLEEP_ENABLED
+
+[whisper]
+enabled = $_WIZ_WHISPER_ENABLED
+model = "$_WIZ_WHISPER_MODEL"
+
+[ntfy]
+enabled = $_WIZ_NTFY_ENABLED
+server_url = "$_WIZ_NTFY_SERVER"
+topic = "$_WIZ_NTFY_TOPIC"
+token = "$_WIZ_NTFY_TOKEN"
+
+[backup]
+enabled = $_WIZ_BACKUP_ENABLED
 
 $_WIZ_USERS_BLOCK
 TOML
@@ -876,6 +944,231 @@ setup_logrotate() {
 }
 EOF
     ok "Logrotate configured"
+}
+
+# ============================================================
+# Optional feature setup
+# ============================================================
+
+setup_browser_container() {
+    if [ ! -f "$SETTINGS_FILE" ]; then
+        return 0
+    fi
+
+    local browser_enabled
+    browser_enabled=$(read_setting "browser.enabled" "false")
+    [ "$browser_enabled" != "True" ] && [ "$browser_enabled" != "true" ] && return 0
+
+    info "Setting up browser container"
+
+    # Check Docker
+    if ! command_exists docker; then
+        info "Installing Docker"
+        apt-get install -y -qq docker.io docker-compose-plugin 2>/dev/null || true
+        if ! command_exists docker; then
+            warn "Docker installation failed — install manually and re-run"
+            return 0
+        fi
+    fi
+
+    # Add istota to docker group
+    if ! groups "$ISTOTA_USER" 2>/dev/null | grep -q docker; then
+        usermod -aG docker "$ISTOTA_USER"
+    fi
+
+    local vnc_password vnc_url api_port vnc_port
+    vnc_password=$(read_setting "browser.vnc_password" "changeme")
+    vnc_url=$(read_setting "browser.vnc_external_url" "")
+    api_port=$(read_setting "browser.api_port" "9223")
+    vnc_port=$(read_setting "browser.vnc_port" "6080")
+
+    # Create browser.env
+    cat > "$ISTOTA_HOME/browser.env" <<EOF
+VNC_PASSWORD=$vnc_password
+BROWSER_VNC_URL=$vnc_url
+MAX_BROWSER_SESSIONS=3
+EOF
+    safe_chown "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/browser.env"
+    chmod 600 "$ISTOTA_HOME/browser.env"
+
+    # Create docker-compose file
+    cat > "$ISTOTA_HOME/docker-compose.browser.yml" <<EOF
+services:
+  browser:
+    build:
+      context: $ISTOTA_HOME/src/docker/browser/
+      dockerfile: Dockerfile
+    container_name: ${ISTOTA_NAMESPACE}-browser
+    ports:
+      - "127.0.0.1:${api_port}:9223"
+      - "0.0.0.0:${vnc_port}:6080"
+    shm_size: 2gb
+    volumes:
+      - $ISTOTA_HOME/data/browser-profile:/data/browser-profile
+    env_file:
+      - $ISTOTA_HOME/browser.env
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+    restart: unless-stopped
+EOF
+    safe_chown "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/docker-compose.browser.yml"
+
+    # Build and start
+    if [ -d "$ISTOTA_HOME/src/docker/browser" ]; then
+        (cd "$ISTOTA_HOME" && docker compose -f docker-compose.browser.yml up -d --build 2>&1 | tail -5) \
+            && ok "Browser container started" \
+            || warn "Browser container build/start failed — check docker logs"
+    else
+        warn "Browser Dockerfile not found at $ISTOTA_HOME/src/docker/browser"
+    fi
+}
+
+setup_whisper() {
+    if [ ! -f "$SETTINGS_FILE" ]; then
+        return 0
+    fi
+
+    local whisper_enabled
+    whisper_enabled=$(read_setting "whisper.enabled" "false")
+    [ "$whisper_enabled" != "True" ] && [ "$whisper_enabled" != "true" ] && return 0
+
+    local model
+    model=$(read_setting "whisper.model" "small")
+
+    info "Pre-downloading whisper model: $model"
+    local VENV="$ISTOTA_HOME/.venv/bin"
+    if [ -x "$VENV/python" ]; then
+        sudo -u "$ISTOTA_USER" HOME="$ISTOTA_HOME" \
+            "$VENV/python" -m istota.skills.whisper download "$model" 2>&1 | tail -3 \
+            && ok "Whisper model '$model' downloaded" \
+            || warn "Whisper model download failed (can be retried later)"
+    else
+        warn "Python venv not ready — whisper model download skipped"
+    fi
+}
+
+setup_backups() {
+    if [ ! -f "$SETTINGS_FILE" ]; then
+        return 0
+    fi
+
+    local backup_enabled
+    backup_enabled=$(read_setting "backup.enabled" "false")
+    [ "$backup_enabled" != "True" ] && [ "$backup_enabled" != "true" ] && return 0
+
+    info "Setting up automated backups"
+
+    local db_path="$ISTOTA_HOME/data/$ISTOTA_NAMESPACE.db"
+    local local_dir="$ISTOTA_HOME/data/backups"
+    local mount_path
+    mount_path=$(read_setting "nextcloud_mount_path" "/srv/mount/nextcloud/content")
+    local rclone_remote
+    rclone_remote=$(read_setting "rclone_remote" "nextcloud")
+
+    # Create backup directories
+    mkdir -p "$local_dir"/{daily,weekly}
+    safe_chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$local_dir"
+
+    # Create remote backup dirs if mount is available
+    if mountpoint -q "$mount_path" 2>/dev/null; then
+        mkdir -p "$mount_path/Backups/db"/{daily,weekly}
+        safe_chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$mount_path/Backups"
+    fi
+
+    # Deploy backup script
+    cat > /usr/local/bin/istota-backup.sh <<'BACKUPSCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+DB="@@DB_PATH@@"
+LOCAL_DIR="@@LOCAL_DIR@@"
+REMOTE_DIR="@@MOUNT_PATH@@/Backups"
+MOUNT_PATH="@@MOUNT_PATH@@"
+DAILY_RETENTION=7
+WEEKLY_RETENTION=4
+RCLONE_CONFIG="@@HOME@@/.config/rclone/rclone.conf"
+RCLONE_REMOTE="@@RCLONE_REMOTE@@"
+RCLONE_BACKUP_PATH="Backups"
+
+TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
+DAY_OF_WEEK=$(date +%u)
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+mount_available() { mountpoint -q "$MOUNT_PATH" 2>/dev/null; }
+
+backup_db() {
+    log "Starting database backup"
+    local tmp_file
+    tmp_file=$(mktemp "${LOCAL_DIR}/backup-XXXXXX.db")
+    trap 'rm -f "$tmp_file"' RETURN
+
+    sqlite3 "$DB" ".backup '$tmp_file'"
+    local check
+    check=$(sqlite3 "$tmp_file" "PRAGMA integrity_check;")
+    if [ "$check" != "ok" ]; then
+        log "ERROR: Backup integrity check failed: $check"
+        return 1
+    fi
+
+    local backup_name="istota-${TIMESTAMP}.db.gz"
+    gzip -c "$tmp_file" > "${LOCAL_DIR}/daily/${backup_name}"
+    log "Local daily backup: ${LOCAL_DIR}/daily/${backup_name}"
+
+    if [ "$DAY_OF_WEEK" -eq 7 ]; then
+        cp "${LOCAL_DIR}/daily/${backup_name}" "${LOCAL_DIR}/weekly/${backup_name}"
+        log "Local weekly backup saved"
+    fi
+
+    if mount_available; then
+        cp "${LOCAL_DIR}/daily/${backup_name}" "${REMOTE_DIR}/db/daily/${backup_name}"
+        [ "$DAY_OF_WEEK" -eq 7 ] && cp "${LOCAL_DIR}/weekly/${backup_name}" "${REMOTE_DIR}/db/weekly/${backup_name}"
+        log "Remote backup copied"
+    fi
+
+    find "${LOCAL_DIR}/daily" -name "istota-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
+    find "${LOCAL_DIR}/weekly" -name "istota-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
+    if mount_available; then
+        find "${REMOTE_DIR}/db/daily" -name "istota-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
+        find "${REMOTE_DIR}/db/weekly" -name "istota-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
+    fi
+    log "Database backup complete"
+}
+
+backup_files() {
+    log "Starting files backup"
+    rclone sync --config "$RCLONE_CONFIG" "${RCLONE_REMOTE}:Users" "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}/files/Users" --exclude "*/shared/**" --verbose 2>&1 | while IFS= read -r line; do log "  $line"; done
+    rclone sync --config "$RCLONE_CONFIG" "${RCLONE_REMOTE}:Channels" "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}/files/Channels" --verbose 2>&1 | while IFS= read -r line; do log "  $line"; done
+    log "Files backup complete"
+}
+
+case "${1:-}" in
+    db) backup_db ;;
+    files) backup_files ;;
+    all) backup_db; backup_files ;;
+    *) echo "Usage: $0 {db|files|all}" >&2; exit 1 ;;
+esac
+BACKUPSCRIPT
+
+    # Replace placeholders with actual paths
+    sed -i "s|@@DB_PATH@@|$db_path|g" /usr/local/bin/istota-backup.sh
+    sed -i "s|@@LOCAL_DIR@@|$local_dir|g" /usr/local/bin/istota-backup.sh
+    sed -i "s|@@MOUNT_PATH@@|$mount_path|g" /usr/local/bin/istota-backup.sh
+    sed -i "s|@@HOME@@|$ISTOTA_HOME|g" /usr/local/bin/istota-backup.sh
+    sed -i "s|@@RCLONE_REMOTE@@|$rclone_remote|g" /usr/local/bin/istota-backup.sh
+    chmod 755 /usr/local/bin/istota-backup.sh
+
+    # Deploy cron
+    cat > /etc/cron.d/istota-backup <<EOF
+MAILTO=""
+0 */6 * * * $ISTOTA_USER /usr/local/bin/istota-backup.sh db >> /var/log/$ISTOTA_NAMESPACE/istota-backup.log 2>&1
+0 3 * * * $ISTOTA_USER /usr/local/bin/istota-backup.sh files >> /var/log/$ISTOTA_NAMESPACE/istota-backup.log 2>&1
+EOF
+
+    ok "Backup script and cron deployed"
 }
 
 # ============================================================
@@ -1194,12 +1487,8 @@ if users:
     echo
 
     echo -e "${_BOLD}Optional features${_RESET} (not set up by this script):"
-    echo "  - Browser container    Dockerized Playwright for web browsing"
-    echo "  - Automated backups    DB + file backups with rotation"
     echo "  - Fava ledger viewer   Per-user beancount web UI"
     echo "  - Nginx site hosting   Per-user static sites from Nextcloud"
-    echo "  - Whisper transcription Audio-to-text via faster-whisper"
-    echo "  - ntfy notifications   Push notifications via ntfy.sh"
     echo
     echo "  See deploy/README.md for setup instructions."
     echo
@@ -1279,6 +1568,12 @@ main() {
     deploy_config
     deploy_db
     deploy_services
+
+    # Optional feature setup (after deploy_code so venv/source are available)
+    setup_browser_container
+    setup_whisper
+    setup_backups
+
     start_services
 
     verify_installation

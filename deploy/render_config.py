@@ -415,6 +415,10 @@ def render_systemd_service(s: dict) -> str:
     lines.append(f"Environment=ISTOTA_ADMINS_FILE=/etc/{namespace}/admins")
     if use_env_file:
         lines.append(f"EnvironmentFile=/etc/{namespace}/secrets.env")
+    # Whisper max model limit
+    whisper_model = get(s, "whisper.model", "")
+    if get(s, "whisper.enabled", False) and whisper_model:
+        lines.append(f"Environment=WHISPER_MAX_MODEL={whisper_model}")
     lines.append("")
     lines.append("# Logging")
     lines.append("StandardOutput=journal")

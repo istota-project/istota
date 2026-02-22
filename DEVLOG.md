@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Install wizard optional feature prompts and setup
+
+The install wizard previously prompted for some optional features (email, memory search, sleep cycle, browser) but didn't actually set up several of them. Other optional features documented in deploy/README.md (whisper, ntfy, backups, channel sleep cycle) weren't prompted at all. Now all optional features are prompted in the wizard and deployed during installation.
+
+**Key changes:**
+- Wizard prompts for channel sleep cycle, whisper (with model selection), ntfy (server/topic/token), automated backups, and browser VNC password
+- New `setup_browser_container()` — installs Docker, creates browser.env and docker-compose.browser.yml, builds and starts the container
+- New `setup_whisper()` — pre-downloads the selected whisper model after venv is ready
+- New `setup_backups()` — deploys backup script with path substitution and cron for DB (every 6h) and files (nightly)
+- `render_config.py` adds `WHISPER_MAX_MODEL` env var to systemd service when whisper enabled
+- `deploy_code()` reads `whisper.enabled` and adds `--extra whisper` to `uv sync`
+- Review screen and settings file include all new feature states
+- Post-install summary only lists Fava and Nginx as features not set up by the script
+
+**Files modified:**
+- `deploy/install.sh` — Wizard state vars, feature prompts, setup functions, main flow, summary
+- `deploy/render_config.py` — WHISPER_MAX_MODEL env var in systemd service
+- `deploy/README.md` — Updated optional features intro
+
 ## 2026-02-21: Email output tool + developer skill hardening
 
 Addressed four open issues from the Zorg issue tracker. The headline change replaces the fragile JSON-as-text email output pattern with a dedicated CLI tool that writes structured output to a deferred file — eliminating the transcription corruption (smart-quote substitution) that caused raw JSON to be delivered to users. The developer skill gained mandatory pre-submission checks for namespace verification, MR/PR response verification, and a prohibition on editing live production source files.
