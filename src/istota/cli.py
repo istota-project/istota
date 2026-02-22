@@ -83,7 +83,7 @@ def cmd_task(args):
             if task:
                 user_resources = db.get_user_resources(conn, args.user)
                 use_context = not args.no_context
-                success, result = execute_task(
+                success, result, _actions = execute_task(
                     task,
                     config,
                     user_resources,
