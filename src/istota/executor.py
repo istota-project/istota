@@ -1095,9 +1095,9 @@ def execute_task(
         use_streaming = on_progress is not None
         if config.security.mode == "restricted":
             allowed = build_allowed_tools(is_admin, selected_skills)
-            cmd = ["claude", "-p", prompt, "--allowedTools"] + allowed
+            cmd = ["claude", "-p", "--allowedTools"] + allowed
         else:
-            cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
+            cmd = ["claude", "-p", "--dangerously-skip-permissions"]
         if config.model:
             cmd += ["--model", config.model]
         if use_streaming:
@@ -1353,9 +1353,9 @@ def execute_task(
             cmd = build_bwrap_cmd(cmd, config, task, is_admin, user_resources, Path(user_temp_dir))
 
         if use_streaming:
-            success, result, actions = _execute_streaming(cmd, env, config, task, on_progress, result_file)
+            success, result, actions = _execute_streaming(cmd, env, config, task, on_progress, result_file, prompt)
         else:
-            success, result, actions = _execute_simple(cmd, env, config, task, result_file)
+            success, result, actions = _execute_simple(cmd, env, config, task, result_file, prompt)
 
         # Update skills fingerprint after successful interactive execution
         if success and _is_interactive:
@@ -1384,10 +1384,15 @@ def _execute_simple(
     config: Config,
     task: db.Task,
     result_file: Path,
+    prompt: str = "",
 ) -> tuple[bool, str, str | None]:
-    """Execute Claude Code with subprocess.run (no streaming)."""
+    """Execute Claude Code with subprocess.run (no streaming).
+
+    Prompt is passed via stdin to avoid E2BIG errors from large CLI arguments.
+    """
     result = subprocess.run(
         cmd,
+        input=prompt,
         capture_output=True,
         text=True,
         timeout=config.scheduler.task_timeout_minutes * 60,
@@ -1419,9 +1424,11 @@ def _execute_streaming_once(
     task: db.Task,
     on_progress: Callable[[str], None] | None,
     result_file: Path,
+    prompt: str = "",
 ) -> tuple[bool, str, str | None]:
     """Execute Claude Code once with Popen + stream-json parsing for progress updates.
 
+    Prompt is passed via stdin to avoid E2BIG errors from large CLI arguments.
     Returns (success, result_text, actions_taken_json).
     """
     show_tool_use = config.scheduler.progress_show_tool_use
@@ -1435,12 +1442,20 @@ def _execute_streaming_once(
 
     process = subprocess.Popen(
         cmd,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         cwd=str(config.temp_dir),
         env=env,
     )
+
+    # Write prompt to stdin and close to signal EOF
+    try:
+        process.stdin.write(prompt)
+        process.stdin.close()
+    except BrokenPipeError:
+        pass  # process may have exited early
 
     # Store PID in DB for !stop command
     try:
@@ -1559,12 +1574,13 @@ def _execute_streaming(
     task: db.Task,
     on_progress: Callable[[str], None],
     result_file: Path,
+    prompt: str = "",
 ) -> tuple[bool, str, str | None]:
     """Execute Claude Code with Popen + stream-json parsing, with auto-retry for transient API errors."""
     last_error = ""
 
     for attempt in range(API_RETRY_MAX_ATTEMPTS):
-        success, result, actions = _execute_streaming_once(cmd, env, config, task, on_progress, result_file)
+        success, result, actions = _execute_streaming_once(cmd, env, config, task, on_progress, result_file, prompt)
 
         if success:
             return True, result, actions

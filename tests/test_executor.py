@@ -482,7 +482,7 @@ class TestSkillsFingerprintIntegration:
 
         # Verify changelog was in the prompt
         call_args = mock_run.call_args
-        prompt_text = call_args[0][0][2]  # cmd[2] is the prompt after "-p"
+        prompt_text = call_args.kwargs["input"]  # prompt passed via stdin
         assert "What's New in Skills" in prompt_text
 
     @patch("istota.executor.subprocess.run")
@@ -503,7 +503,7 @@ class TestSkillsFingerprintIntegration:
             success, result, _actions = execute_task(task, config, [], conn=conn)
 
         call_args = mock_run.call_args
-        prompt_text = call_args[0][0][2]
+        prompt_text = call_args.kwargs["input"]
         assert "What's New in Skills" not in prompt_text
 
     @patch("istota.executor.subprocess.run")
@@ -519,7 +519,7 @@ class TestSkillsFingerprintIntegration:
             success, result, _actions = execute_task(task, config, [], conn=conn)
 
         call_args = mock_run.call_args
-        prompt_text = call_args[0][0][2]
+        prompt_text = call_args.kwargs["input"]
         assert "What's New in Skills" not in prompt_text
 
     @patch("istota.executor.subprocess.run")
@@ -535,7 +535,7 @@ class TestSkillsFingerprintIntegration:
             success, result, _actions = execute_task(task, config, [], conn=conn)
 
         call_args = mock_run.call_args
-        prompt_text = call_args[0][0][2]
+        prompt_text = call_args.kwargs["input"]
         assert "What's New in Skills" not in prompt_text
 
     @patch("istota.executor.subprocess.run")
@@ -1407,7 +1407,7 @@ class TestAdminEnvVarIsolation:
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
-        prompt_text = mock_run.call_args[0][0][2]
+        prompt_text = mock_run.call_args.kwargs["input"]
         assert "Admin scheduling reference" in prompt_text
 
     @patch("istota.executor.subprocess.run")
@@ -1429,7 +1429,7 @@ class TestAdminEnvVarIsolation:
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
-        prompt_text = mock_run.call_args[0][0][2]
+        prompt_text = mock_run.call_args.kwargs["input"]
         assert "Admin scheduling reference" not in prompt_text
 
 

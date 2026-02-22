@@ -2,6 +2,19 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Fix E2BIG for large prompts
+
+Prompts were passed as CLI arguments to the `claude` command, which hit the Linux 128KB `execve()` argument limit when conversation context or emissaries made the assembled prompt too large. Switched to passing prompts via stdin instead.
+
+**Key changes:**
+- Prompt removed from the `cmd` list — now passed via `input=` to `subprocess.run()` (simple mode) and written to `process.stdin` (streaming mode).
+- `_execute_simple()`, `_execute_streaming_once()`, and `_execute_streaming()` accept a `prompt` parameter, threaded from `execute_task()`.
+- Bypasses the kernel limit entirely since stdin has no size constraint.
+
+**Files modified:**
+- `src/istota/executor.py` — Removed prompt from cmd, added stdin-based prompt passing to all execution paths
+- `tests/test_executor.py` — Updated 6 test assertions to read prompt from `call_args.kwargs["input"]` instead of `cmd[2]`
+
 ## 2026-02-21: Documentation sync
 
 Updated all project documentation to reflect recent changes: nextcloud client refactor, calendar skill enhancements, cron catch-up fix, config search path addition, and test count growth.
