@@ -1095,9 +1095,9 @@ def execute_task(
         use_streaming = on_progress is not None
         if config.security.mode == "restricted":
             allowed = build_allowed_tools(is_admin, selected_skills)
-            cmd = ["claude", "-p", "--allowedTools"] + allowed
+            cmd = ["claude", "-p", "-", "--allowedTools"] + allowed
         else:
-            cmd = ["claude", "-p", "--dangerously-skip-permissions"]
+            cmd = ["claude", "-p", "-", "--dangerously-skip-permissions"]
         if config.model:
             cmd += ["--model", config.model]
         if use_streaming:
