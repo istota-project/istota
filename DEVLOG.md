@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Deployment polish — Nextcloud note, Docker CPU fix
+
+Small deployment improvements for new users and single-core VMs.
+
+**Key changes:**
+- Added Nextcloud All-in-One link to README.md and deploy/README.md prerequisites for users starting fresh
+- Fixed browser container failing on single-core machines (`cpus: "2"` exceeded available CPUs)
+- install.sh now uses `$(nproc)` to cap CPU limit to available cores
+- Ansible default changed from hardcoded `"2"` to `{{ ansible_processor_vcpus }}`
+- Removed CPU limit from development docker-compose and deploy docs (memory limit is sufficient)
+
+**Files modified:**
+- `README.md` — Added Nextcloud All-in-One parenthetical in Requirements
+- `deploy/README.md` — Added Nextcloud All-in-One note, removed CPU limit from browser example
+- `deploy/install.sh` — Dynamic CPU limit via `$(nproc)`
+- `deploy/ansible/defaults/main.yml` — CPU limit uses `ansible_processor_vcpus`
+- `docker/docker-compose.browser.yml` — Removed CPU limit
+
 ## 2026-02-21: Claude CLI npm fallback verification fix
 
 When the prebuilt Claude CLI binary fails (e.g., unsupported CPU on older VMs), install.sh falls back to installing via npm. Previously, the verification step only checked `$ISTOTA_HOME/.local/bin/claude` — which doesn't exist after an npm install — so it would report the CLI as missing even though it was functional on the system PATH.

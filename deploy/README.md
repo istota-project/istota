@@ -70,7 +70,7 @@ Point your Ansible `roles_path` at the `deploy/ansible/` directory, or symlink i
 ## Prerequisites
 
 - Debian 13+ (Trixie) server
-- Nextcloud instance with an app password for the bot user
+- Nextcloud instance with an app password for the bot user (no Nextcloud yet? [Nextcloud All-in-One](https://github.com/nextcloud/all-in-one) is the quickest path — enable Nextcloud Talk during setup)
 - Claude Code CLI subscription (authenticate after install with `sudo -u istota claude login`)
 
 ## Post-install
@@ -145,7 +145,6 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2"
           memory: 2G
     restart: unless-stopped
 EOF

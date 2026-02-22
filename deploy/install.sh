@@ -1030,7 +1030,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2"
+          cpus: "$(nproc)"
           memory: 2G
     restart: unless-stopped
 EOF

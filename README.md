@@ -8,7 +8,7 @@ Istota joins your Nextcloud as a regular user with its own account, collaborates
 
 ## Requirements
 
-- A Nextcloud instance with a dedicated user account for the bot
+- A Nextcloud instance with a dedicated user account for the bot (if you don't have one yet, [Nextcloud All-in-One](https://github.com/nextcloud/all-in-one) is the easiest way to get started — make sure Nextcloud Talk is enabled)
 - A Debian/Ubuntu VM (separate from your Nextcloud server)
 - A [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) API key or OAuth token
 
