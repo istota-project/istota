@@ -85,6 +85,7 @@ Task lifecycle: `pending → locked → running → completed | failed | pending
 | `heartbeat.py` | Evaluates health checks defined in `HEARTBEAT.md`. Check types: file-watch, shell-command, url-health, calendar-conflicts, task-deadline, self-check. Per-check cooldowns, quiet hours, and interval controls. |
 | `invoice_scheduler.py` | Automated invoice generation for clients with `schedule = "monthly"`. Sends reminders before the schedule day, generates on the schedule day, detects overdue invoices. |
 | `shared_file_organizer.py` | Periodically scans the Nextcloud root for files shared with the bot. Determines owner via WebDAV PROPFIND, moves to `/Users/{owner}/shared/`, creates resource entries. |
+| `nextcloud_client.py` | Shared Nextcloud HTTP plumbing. OCS wrappers (`ocs_get`, `ocs_post`, `ocs_delete`), WebDAV owner lookup, sharing API helpers (`ocs_list_shares`, `ocs_create_share`, `ocs_share_folder`). Used by `storage.py`, `nextcloud_api.py`, `shared_file_organizer.py`, and the nextcloud skill CLI. |
 | `nextcloud_api.py` | Enriches user configs from Nextcloud OCS API at startup (display name, email, timezone). Config values take precedence; API only fills gaps. |
 | `logging_setup.py` | Centralized logging configuration. Console, file, or both. Log rotation. |
 
@@ -96,13 +97,14 @@ Skills expose Python CLIs invoked by Claude Code inside the sandbox via `python 
 |---|---|
 | `accounting.py` | Beancount ledger operations, Monarch Money sync, CSV import, transaction management |
 | `invoicing.py` | Invoice generation, PDF export (WeasyPrint), cash-basis income posting |
-| `calendar.py` | CalDAV read/write (auto-discovered from Nextcloud credentials) |
+| `calendar/` | CalDAV read/write/update (auto-discovered from Nextcloud credentials). Subcommands: `list` (`--date`, `--week`), `create`, `update`, `delete`. |
 | `email.py` | IMAP/SMTP: send, reply, search, list, delete, newsletter extraction |
 | `files.py` | Nextcloud file operations (mount-aware, rclone fallback) |
 | `browse.py` | Headless browser via Dockerized Playwright container (Flask API) |
 | `markets.py` | yfinance wrapper for market data |
 | `transcribe.py` | OCR via Tesseract |
 | `whisper/` | Audio transcription via faster-whisper (CPU, int8) |
+| `nextcloud/` | Nextcloud sharing CLI: list, create, delete shares; search sharees. Uses `nextcloud_client.py`. |
 | `memory_search.py` | Memory search CLI: search, index, reindex, stats |
 
 ---
@@ -133,7 +135,7 @@ while not shutdown_requested:
 
 `WorkerPool` manages concurrent `UserWorker` threads with three-tier concurrency control:
 
-1. **Per-channel gate**: before creating a task, the Talk poller checks if an active foreground task already exists for the conversation. If so, the message is rejected with "still working on a previous request" — the user can resend after the active task completes.
+1. **Per-channel gate**: before creating a task, the Talk poller checks if an active foreground task already exists for the conversation. If so, it sends "Still working on a previous request — I'll be with you shortly" but still queues the message as a normal task. The scheduler processes it after the active task completes.
 2. **Instance-level caps**: `max_foreground_workers` (default 5) and `max_background_workers` (default 3) limit total concurrent workers by queue type. Dispatch is two-phase: foreground first, then background.
 3. **Per-user limits**: `user_max_foreground_workers` (default 2) and `user_max_background_workers` (default 1) set global per-user defaults. Individual users can override via `max_foreground_workers`/`max_background_workers` in their per-user config (0 = use global default).
 
@@ -469,7 +471,7 @@ Nextcloud mount via rclone: full VFS cache, 1h max age, 5s dir cache, 10s poll i
 
 ## Testing
 
-TDD with pytest + pytest-asyncio. ~2005 tests across 43 files. Real SQLite via `tmp_path` (no DB mocking). `unittest.mock` for external dependencies.
+TDD with pytest + pytest-asyncio. ~2170 tests across 48 files. Real SQLite via `tmp_path` (no DB mocking). `unittest.mock` for external dependencies.
 
 Shared fixtures in `conftest.py`: `db_path` (initialized from schema.sql), `db_conn`, `make_task`, `make_config`, `make_user_config`.
 

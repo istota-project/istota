@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Documentation sync
+
+Updated all project documentation to reflect recent changes: nextcloud client refactor, calendar skill enhancements, cron catch-up fix, config search path addition, and test count growth.
+
+**Key changes:**
+- AGENTS.md: nextcloud skill upgraded from doc-only to CLI, calendar skill description updated, config search path now includes `~/src/config/config.toml`, added cron expression change catch-up prevention note, test count updated to ~2170/48 files.
+- ARCHITECTURE.md: added `nextcloud_client.py` to subsystems table, added nextcloud and calendar skill CLIs, fixed per-channel gate description (queues instead of rejects), test count updated.
+- `.claude/rules/skills.md`: added calendar `update` subcommand and `--week` flag, added nextcloud skill CLI section.
+- `.claude/rules/config.md`: updated config search order.
+- README.md: test count updated.
+
+**Files modified:**
+- `AGENTS.md` — 6 updates across project structure, config, skills, scheduling, testing sections
+- `ARCHITECTURE.md` — 5 updates across subsystems, skills, scheduler, testing sections
+- `.claude/rules/skills.md` — Calendar CLI update + nextcloud CLI section
+- `.claude/rules/config.md` — Config search order
+- `README.md` — Test count
+- `TODO.md` — Checked off nextcloud client refactor
+
 ## 2026-02-21: Cron catch-up prevention + email double-send fix
 
 Fixed two scheduling/delivery bugs: cron expression changes triggering catch-up runs for past slots, and duplicate email delivery when Claude sends directly during execution.

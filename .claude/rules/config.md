@@ -147,7 +147,7 @@ Methods:
 ## Config Loading
 
 ### `load_config()` (L320-488)
-Search order: `config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`
+Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`
 
 1. Parse TOML file
 2. Build each sub-config from sections: `[logging]`, `[nextcloud]`, `[talk]`, `[email]`, `[browser]`, `[conversation]`, `[scheduler]`, `[memory_search]`, `[channel_sleep_cycle]`, `[briefing_defaults]`

@@ -77,10 +77,10 @@ Returns sorted list of skill names.
 **Env vars**: `IMAP_HOST/PORT/USER/PASSWORD`, `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM`, `ISTOTA_TASK_ID`, `ISTOTA_DEFERRED_DIR`
 **Key fns**: `list_emails()`, `read_email()`, `send_email()`, `reply_to_email()`, `search_emails()`, `get_newsletters()`, `delete_email()`, `cmd_output()`
 
-### `calendar.py` - CalDAV
-**Subcommands**: `list`, `create`, `delete`
+### `calendar/` - CalDAV
+**Subcommands**: `list` (`--date`, `--week`), `create`, `update` (`--clear-location`, `--clear-description`), `delete`
 **Env vars**: `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`
-**Key fns**: `get_caldav_client()`, `get_calendars_for_user()`, `get_events()`, `create_event()`, `delete_event()`, `update_event()`
+**Key fns**: `get_caldav_client()`, `get_calendars_for_user()`, `get_events()`, `get_event_by_uid()`, `create_event()`, `update_event()`, `delete_event()`
 
 ### `markets/` - Market Data CLI
 **Subcommands**: `quote`, `summary`, `finviz`
@@ -105,6 +105,11 @@ Returns sorted list of skill names.
 **Env vars**: None (reads audio files from paths accessible via mount)
 **Key fns**: `transcribe_audio()`, `select_model()`, `format_srt()`, `format_vtt()`
 **Optional deps**: `faster-whisper>=1.1.0`, `psutil>=5.9.0` (in `whisper` extra group)
+
+### `nextcloud/` - Nextcloud Sharing CLI
+**Subcommands**: `share list` (`--path`), `share create` (`--path`, `--type user|link|email`, `--permissions`), `share delete SHARE_ID`, `share search QUERY`
+**Env vars**: `NC_URL`, `NC_USER`, `NC_PASS`
+**Key fns**: Uses `nextcloud_client.py` (OCS + WebDAV)
 
 ### Library-Only Modules (no CLI)
 - `files.py` - Nextcloud file ops (mount-aware, rclone fallback)

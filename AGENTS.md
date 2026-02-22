@@ -44,7 +44,7 @@ istota/
 │       ├── briefing/        # Briefing format reference (doc-only)
 │       ├── briefings_config/ # User briefing schedule config (doc-only)
 │       ├── browse/          # Web browsing CLI (Docker container API)
-│       ├── calendar/        # CalDAV helper functions
+│       ├── calendar/        # CalDAV operations CLI (list, create, update, delete events)
 │       ├── developer/       # Git/GitLab/GitHub workflows (doc-only)
 │       ├── feeds_config/    # Feed subscription config (doc-only)
 │       ├── email/           # Native IMAP/SMTP operations
@@ -53,7 +53,7 @@ istota/
 │       ├── markets/         # yfinance wrapper + FinViz scraping + interactive CLI (quote, summary, finviz)
 │       ├── memory/          # Memory file reference (doc-only)
 │       ├── memory_search/   # Memory search CLI (search, index, reindex, stats)
-│       ├── nextcloud/       # Nextcloud sharing reference (doc-only)
+│       ├── nextcloud/       # Nextcloud sharing + OCS API CLI (list, create, delete shares)
 │       ├── notes/           # Notes file reference (doc-only)
 │       ├── reminders/       # Time-based reminders via CRON.md (doc-only)
 │       ├── schedules/       # CRON.md job management reference (doc-only)
@@ -79,7 +79,7 @@ istota/
 │   └── README.md            # Deployment documentation
 ├── docker/browser/          # Playwright browser container (Flask API)
 ├── scripts/                 # setup.sh, scheduler.sh
-├── tests/                   # pytest + pytest-asyncio (~1964 tests, 43 files)
+├── tests/                   # pytest + pytest-asyncio (~2170 tests, 48 files)
 ├── schema.sql
 └── pyproject.toml
 ```
@@ -233,6 +233,8 @@ Defined in `/Users/{user_id}/{bot_name}/config/CRON.md` (markdown with TOML `[[j
 
 **Migration**: If a user has DB jobs but no CRON.md, the file is auto-generated from DB entries on first sync. After that, CRON.md is the source of truth.
 
+**Cron expression changes**: When a job's `cron` expression changes in CRON.md, `last_run_at` is automatically reset to prevent catch-up runs (i.e., the scheduler won't fire all missed slots from the old expression).
+
 **Isolation**: Scheduled job results excluded from interactive conversation context. Background workers capped separately via `max_background_workers` (default 3). `silent_unless_action=1` suppresses output unless response has `ACTION:` prefix. Jobs auto-disable after `scheduled_job_max_consecutive_failures` (default 5) consecutive failures. Re-enable via `!cron enable <name>`. Tasks link back to originating job via `scheduled_job_id` column.
 
 ### Sleep Cycle (Nightly Memory Extraction)
@@ -367,7 +369,7 @@ Email replies and scheduled email jobs use `python -m istota.skills.email output
 
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Shared fixtures in `conftest.py`. Current: ~2045 tests across 43 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Shared fixtures in `conftest.py`. Current: ~2170 tests across 48 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests
@@ -397,7 +399,7 @@ uv run istota-scheduler [-d] [-v] [--max-tasks N]  # Scheduler (daemon/single)
 
 ## Configuration
 
-Config searched: `config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`. Override: `-c PATH`.
+Config searched: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`. Override: `-c PATH`.
 
 **CalDAV**: Derived from Nextcloud settings (`{url}/remote.php/dav`, same credentials). No separate config needed.
 

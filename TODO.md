@@ -250,6 +250,7 @@
 - [x] Ansible repo dir cleanup (`istota_repo_dir` variable, no more `src/src/` nesting)
 - [x] Tag-based release deployment (`repo_tag` setting, `istota --version`, semver resolution)
 - [ ] Monitoring/alerting
+- [x] Nextcloud client refactor: shared `nextcloud_client.py` module (OCS + WebDAV) + nextcloud skill CLI
 - [ ] Migrate server from old `src/` to `istota/` repo dir (remove `/srv/app/istota/src` after deploy)
 
 ### Security
