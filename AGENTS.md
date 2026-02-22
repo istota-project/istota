@@ -22,6 +22,7 @@ istota/
 │   ├── invoice_scheduler.py # Scheduled invoice generation + reminders
 │   ├── logging_setup.py     # Central logging configuration
 │   ├── nextcloud_api.py     # Nextcloud API user metadata hydration
+│   ├── nextcloud_client.py  # Shared Nextcloud HTTP plumbing (OCS + WebDAV)
 │   ├── notifications.py     # Central notification dispatcher (Talk, Email, ntfy)
 │   ├── scheduler.py         # Task processor, briefing scheduler, all polling
 │   ├── shared_file_organizer.py # Auto-organize files shared with bot
@@ -108,7 +109,7 @@ Admin users listed in `/etc/istota/admins` (root-owned, one user ID per line). `
 **Non-admin restrictions:**
 - Prompt: scoped mount path (`{mount}/Users/{user_id}`), no DB path, no sqlite3 tool, no subtask creation
 - Env vars: `ISTOTA_DB_PATH` omitted, `NEXTCLOUD_MOUNT_PATH` scoped to user directory
-- Skills: `admin_only = true` skills (schedules, tasks) filtered out
+- Skills: `admin_only = true` skills (tasks) filtered out
 
 ### Multi-user Resource Permissions
 Resources defined in per-user config (`config/users/{user_id}.toml`) or DB (from shared file organizer), merged at task time:
@@ -184,7 +185,7 @@ Selection criteria (from `skill.toml`):
 - `keywords`: pattern match on prompt (e.g., "email" → email skill)
 - `file_types`: attachment extensions (e.g., `.wav` → whisper)
 - `companion_skills`: when a skill is selected, also pull in listed companions (respects admin_only and dependency checks)
-- `admin_only`: schedules, tasks (filtered out for non-admin users)
+- `admin_only`: tasks (filtered out for non-admin users)
 
 **Pre-transcription**: Audio attachments are transcribed before skill selection (`_pre_transcribe_attachments()` in executor.py). This enriches the prompt with actual spoken words so keyword-based skills (reminders, schedules, calendar) match naturally on voice memos.
 

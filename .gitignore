@@ -39,6 +39,7 @@ ENV/
 data/
 config/config.toml
 /tmp/istota/
+.env
 
 # Test artifacts
 .pytest_cache/

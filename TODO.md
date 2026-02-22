@@ -29,6 +29,7 @@
 - [x] CLI commands: `istota calendar discover|test`
 - [x] Test read/write access with `--test-write` flag
 - [x] Event CRUD operations (create, read, update, delete)
+- [x] Calendar CLI: `update` subcommand, `--week` flag for list
 
 ### Briefing Management
 - [ ] CLI commands to add/edit/delete briefing configs

@@ -1,8 +1,9 @@
 """Calendar operations via CalDAV.
 
 Also provides a CLI for calendar operations from Claude Code:
-    python -m istota.skills.calendar list [--calendar URL] [--date today|tomorrow|DATE] [--tz TZ]
+    python -m istota.skills.calendar list [--calendar URL] [--date today|tomorrow|DATE | --week] [--tz TZ]
     python -m istota.skills.calendar create --calendar URL --summary TEXT --start DATETIME --end DATETIME
+    python -m istota.skills.calendar update --calendar URL --uid UID [--summary TEXT] [--start DT] [--end DT] ...
     python -m istota.skills.calendar delete --calendar URL --uid UID
 """
 
@@ -432,20 +433,29 @@ def _parse_datetime(dt_str: str) -> datetime:
     raise ValueError(f"Cannot parse datetime: {dt_str}. Use format: YYYY-MM-DD HH:MM")
 
 
+def _get_date_range(args) -> tuple[datetime, datetime, str]:
+    """Compute (start, end, label) from --week or --date flags."""
+    if getattr(args, "week", False):
+        start = _parse_date("today", args.tz)
+        end = start + timedelta(days=7)
+        return start, end, "week"
+    start = _parse_date(args.date, args.tz)
+    end = start + timedelta(days=1)
+    return start, end, args.date
+
+
 def cmd_list(args) -> dict:
     """List calendar events."""
     client = _get_client_from_env()
+    start, end, label = _get_date_range(args)
 
     # If no calendar specified, list from all user calendars
     if not args.calendar:
-        # Get all calendars and aggregate events
         all_events = []
         calendars = list_calendars(client)
         for name, url in calendars:
             try:
-                date = _parse_date(args.date, args.tz)
-                date_end = date + timedelta(days=1)
-                events = get_events(client, url, date, date_end)
+                events = get_events(client, url, start, end)
                 for e in events:
                     all_events.append({
                         "calendar": name,
@@ -457,20 +467,18 @@ def cmd_list(args) -> dict:
         all_events.sort(key=lambda e: e["start"])
         return {
             "status": "ok",
-            "date": args.date,
+            "date": label,
             "event_count": len(all_events),
             "events": all_events,
         }
 
     # Single calendar specified
-    date = _parse_date(args.date, args.tz)
-    date_end = date + timedelta(days=1)
-    events = get_events(client, args.calendar, date, date_end)
+    events = get_events(client, args.calendar, start, end)
 
     return {
         "status": "ok",
         "calendar": args.calendar,
-        "date": args.date,
+        "date": label,
         "event_count": len(events),
         "events": [_event_to_dict(e) for e in events],
     }
@@ -514,6 +522,40 @@ def cmd_delete(args) -> dict:
         return {"status": "error", "error": f"Event not found: {args.uid}"}
 
 
+def cmd_update(args) -> dict:
+    """Update a calendar event."""
+    client = _get_client_from_env()
+
+    kwargs: dict = {}
+    if args.summary is not None:
+        kwargs["summary"] = args.summary
+    if args.start is not None:
+        kwargs["start"] = _parse_datetime(args.start)
+    if args.end is not None:
+        kwargs["end"] = _parse_datetime(args.end)
+
+    # --clear-location passes "" to delete the property; --location sets it
+    if args.clear_location:
+        kwargs["location"] = ""
+    elif args.location is not None:
+        kwargs["location"] = args.location
+
+    if args.clear_description:
+        kwargs["description"] = ""
+    elif args.description is not None:
+        kwargs["description"] = args.description
+
+    if not kwargs:
+        return {"status": "error", "error": "No fields to update. Provide at least one of --summary, --start, --end, --location, --description, --clear-location, --clear-description."}
+
+    updated = update_event(client, args.calendar, args.uid, **kwargs)
+
+    if updated:
+        return {"status": "ok", "uid": args.uid, "updated_fields": list(kwargs.keys())}
+    else:
+        return {"status": "error", "error": f"Event not found: {args.uid}"}
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="python -m istota.skills.calendar",
@@ -524,9 +566,14 @@ def build_parser():
     # list
     p_list = sub.add_parser("list", help="List calendar events")
     p_list.add_argument("--calendar", "-c", help="Calendar URL (omit to query all)")
-    p_list.add_argument(
+    date_group = p_list.add_mutually_exclusive_group()
+    date_group.add_argument(
         "--date", "-d", default="today",
         help="Date to query: 'today', 'tomorrow', or YYYY-MM-DD (default: today)"
+    )
+    date_group.add_argument(
+        "--week", "-w", action="store_true", default=False,
+        help="Show events for the next 7 days"
     )
     p_list.add_argument("--tz", help="Timezone (e.g., America/Los_Angeles)")
 
@@ -550,6 +597,18 @@ def build_parser():
     p_delete.add_argument("--calendar", "-c", required=True, help="Calendar URL")
     p_delete.add_argument("--uid", required=True, help="Event UID to delete")
 
+    # update
+    p_update = sub.add_parser("update", help="Update a calendar event")
+    p_update.add_argument("--calendar", "-c", required=True, help="Calendar URL")
+    p_update.add_argument("--uid", required=True, help="Event UID to update")
+    p_update.add_argument("--summary", "-s", help="New event title")
+    p_update.add_argument("--start", help="New start time (YYYY-MM-DD HH:MM)")
+    p_update.add_argument("--end", help="New end time (YYYY-MM-DD HH:MM)")
+    p_update.add_argument("--location", "-l", help="New event location")
+    p_update.add_argument("--description", help="New event description")
+    p_update.add_argument("--clear-location", action="store_true", default=False, help="Remove location")
+    p_update.add_argument("--clear-description", action="store_true", default=False, help="Remove description")
+
     return parser
 
 
@@ -561,6 +620,7 @@ def main(argv=None):
         "list": cmd_list,
         "create": cmd_create,
         "delete": cmd_delete,
+        "update": cmd_update,
     }
 
     try:

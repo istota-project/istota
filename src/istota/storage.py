@@ -8,8 +8,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import httpx
-
 if TYPE_CHECKING:
     from .config import Config
 
@@ -1482,60 +1480,7 @@ def share_folder_with_user(config: "Config", folder_path: str, user_id: str) -> 
     Creates a user share (shareType=0) with full permissions (read+write).
     Idempotent: checks existing shares first.
 
-    Args:
-        config: Application config (for Nextcloud credentials)
-        folder_path: Path relative to the bot's Nextcloud root (e.g. /Users/alice/notes)
-        user_id: Nextcloud username to share with
-
-    Returns:
-        True on success or already shared, False on error.
+    Delegates to nextcloud_client.ocs_share_folder.
     """
-    if not config.nextcloud.url or not config.nextcloud.username:
-        logger.warning("Cannot share folder: Nextcloud not configured")
-        return False
-
-    base_url = config.nextcloud.url.rstrip("/")
-    auth = (config.nextcloud.username, config.nextcloud.app_password)
-    ocs_base = f"{base_url}/ocs/v2.php/apps/files_sharing/api/v1/shares"
-    headers = {"OCS-APIRequest": "true", "Accept": "application/json"}
-
-    # Check existing shares
-    try:
-        resp = httpx.get(
-            ocs_base,
-            params={"path": folder_path, "reshares": "true"},
-            auth=auth,
-            headers=headers,
-            timeout=10.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        shares = data.get("ocs", {}).get("data", [])
-        for share in shares:
-            if share.get("share_with") == user_id and share.get("share_type") == 0:
-                logger.debug("Folder %s already shared with %s", folder_path, user_id)
-                return True
-    except Exception as e:
-        logger.debug("Error checking existing shares for %s: %s", folder_path, e)
-        # Continue to try creating the share anyway
-
-    # Create share
-    try:
-        resp = httpx.post(
-            ocs_base,
-            data={
-                "path": folder_path,
-                "shareType": 0,  # user share
-                "shareWith": user_id,
-                "permissions": 31,  # all permissions (read+update+create+delete+share)
-            },
-            auth=auth,
-            headers=headers,
-            timeout=10.0,
-        )
-        resp.raise_for_status()
-        logger.info("Shared folder %s with user %s", folder_path, user_id)
-        return True
-    except Exception as e:
-        logger.warning("Failed to share folder %s with %s: %s", folder_path, user_id, e)
-        return False
+    from .nextcloud_client import ocs_share_folder
+    return ocs_share_folder(config, folder_path, user_id)

@@ -2,9 +2,8 @@
 
 import logging
 
-import httpx
-
 from .config import Config
+from .nextcloud_client import ocs_get
 
 logger = logging.getLogger("istota.nextcloud_api")
 
@@ -15,26 +14,13 @@ def fetch_user_info(config: Config, user_id: str) -> dict | None:
 
     Returns dict with 'displayname' and 'email' keys, or None on error.
     """
-    if not config.nextcloud.url or not config.nextcloud.username:
+    data = ocs_get(config, f"/cloud/users/{user_id}")
+    if data is None:
         return None
-
-    base_url = config.nextcloud.url.rstrip("/")
-    url = f"{base_url}/ocs/v2.php/cloud/users/{user_id}"
-    auth = (config.nextcloud.username, config.nextcloud.app_password)
-    headers = {"OCS-APIRequest": "true", "Accept": "application/json"}
-
-    try:
-        resp = httpx.get(url, auth=auth, headers=headers, timeout=10.0)
-        resp.raise_for_status()
-        data = resp.json()
-        user_data = data.get("ocs", {}).get("data", {})
-        return {
-            "displayname": user_data.get("displayname", ""),
-            "email": user_data.get("email", ""),
-        }
-    except Exception as e:
-        logger.debug("Failed to fetch user info for %s: %s", user_id, e)
-        return None
+    return {
+        "displayname": data.get("displayname", ""),
+        "email": data.get("email", ""),
+    }
 
 
 def fetch_user_timezone(config: Config, user_id: str) -> str | None:
@@ -43,26 +29,14 @@ def fetch_user_timezone(config: Config, user_id: str) -> str | None:
 
     Returns timezone string (e.g. "America/New_York"), or None on error.
     """
-    if not config.nextcloud.url or not config.nextcloud.username:
-        return None
-
-    base_url = config.nextcloud.url.rstrip("/")
-    url = (
-        f"{base_url}/ocs/v2.php/apps/provisioning_api/api/v1"
-        f"/config/users/{user_id}/core/timezone"
+    data = ocs_get(
+        config,
+        f"/apps/provisioning_api/api/v1/config/users/{user_id}/core/timezone",
     )
-    auth = (config.nextcloud.username, config.nextcloud.app_password)
-    headers = {"OCS-APIRequest": "true", "Accept": "application/json"}
-
-    try:
-        resp = httpx.get(url, auth=auth, headers=headers, timeout=10.0)
-        resp.raise_for_status()
-        data = resp.json()
-        tz = data.get("ocs", {}).get("data", {}).get("data", "")
-        return tz if tz else None
-    except Exception as e:
-        logger.debug("Failed to fetch timezone for %s: %s", user_id, e)
+    if data is None:
         return None
+    tz = data.get("data", "")
+    return tz if tz else None
 
 
 def hydrate_user_configs(config: Config) -> None:

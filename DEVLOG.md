@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Nextcloud client refactor + calendar/scheduling fixes
+
+Consolidated scattered Nextcloud HTTP code (OCS + WebDAV) into a shared `nextcloud_client.py` module, and fixed several skill gaps found during a calendar/scheduling audit.
+
+**Key changes:**
+- Extracted `nextcloud_client.py` — shared OCS GET/POST, WebDAV owner lookup, share management, sharee search. Replaces duplicated httpx code in `nextcloud_api.py`, `storage.py`, `shared_file_organizer.py`, and `tasks_file_poller.py`.
+- Added Nextcloud skill CLI (`python -m istota.skills.nextcloud`) for share management: `list-shares`, `create-share`, `delete-share`, `search-sharees`, `share-folder`.
+- Fixed email output misuse bug: scheduled Talk-targeted jobs were incorrectly using `python -m istota.skills.email output`, producing empty output. Root cause — prompt never told Claude the task's output target. Now `build_prompt()` includes `Source:` and `Output target:` header lines, and the email tool instruction explicitly says "Do NOT use when output target is talk".
+- Added calendar `update` CLI subcommand (summary, start, end, location, description, clear flags).
+- Added `--week` flag to calendar `list` (next 7 days, mutually exclusive with `--date`).
+- Documented `once = true` field in schedules skill.md (auto-delete job after successful execution).
+- Updated calendar skill.md with `update` examples, `--week` flag, and missing API functions (`get_week_events`, `get_event_by_uid`).
+- AGENTS.md: corrected admin_only skill list (schedules is no longer admin-only).
+
+**Files added:**
+- `src/istota/nextcloud_client.py` — Shared Nextcloud HTTP client
+- `src/istota/skills/nextcloud/__init__.py` — Nextcloud skill CLI
+- `src/istota/skills/nextcloud/__main__.py` — CLI entry point
+- `tests/test_nextcloud_client.py` — Unit tests for nextcloud_client
+- `tests/test_nextcloud_client_integration.py` — Live integration tests
+- `tests/test_nextcloud_skill_cli.py` — Skill CLI tests
+
+**Files modified:**
+- `src/istota/executor.py` — Source/output_target in prompt header, fixed email tool line
+- `src/istota/nextcloud_api.py` — Delegates to nextcloud_client
+- `src/istota/storage.py` — Delegates to nextcloud_client
+- `src/istota/shared_file_organizer.py` — Delegates to nextcloud_client
+- `src/istota/tasks_file_poller.py` — Delegates to nextcloud_client
+- `src/istota/skills/calendar/__init__.py` — `update` subcommand, `--week` flag, `_get_date_range()` helper
+- `src/istota/skills/calendar/skill.md` — Updated docs
+- `src/istota/skills/schedules/skill.md` — Documented `once` field
+- `src/istota/skills/nextcloud/skill.md` — Updated with CLI commands
+- `tests/test_executor.py` — Prompt output target tests
+- `tests/test_skills_calendar.py` — Calendar CLI tests (update, --week, parser)
+
 ## 2026-02-21: Tag-based release deployment
 
 Deployments now pin to semver tags instead of tracking the tip of `main`. Both `install.sh` and Ansible support a `repo_tag` setting (`"latest"` resolves to the highest `v*` tag, a specific tag like `"v0.2.0"` checks out that tag directly, empty string falls back to branch tracking). New installs default to `repo_tag = "latest"`.

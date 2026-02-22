@@ -22,6 +22,9 @@ python -m istota.skills.calendar list --date 2026-02-15 --tz "America/Los_Angele
 # List from a specific calendar
 python -m istota.skills.calendar list --calendar "https://..." --date today
 
+# List events for the next 7 days
+python -m istota.skills.calendar list --week --tz "America/Los_Angeles"
+
 # Create an event
 python -m istota.skills.calendar create \
   --calendar "https://..." \
@@ -29,6 +32,20 @@ python -m istota.skills.calendar create \
   --start "2026-02-15 14:00" \
   --end "2026-02-15 15:00" \
   --location "Conference Room A"
+
+# Update an event
+python -m istota.skills.calendar update \
+  --calendar "https://..." \
+  --uid "event-uid-here" \
+  --summary "Updated Title" \
+  --start "2026-02-15 15:00" \
+  --end "2026-02-15 16:00"
+
+# Update: clear optional fields
+python -m istota.skills.calendar update \
+  --calendar "https://..." \
+  --uid "event-uid-here" \
+  --clear-location --clear-description
 
 # Delete an event
 python -m istota.skills.calendar delete --calendar "https://..." --uid "event-uid-here"
@@ -69,6 +86,8 @@ The `istota.skills.calendar` module also provides functions for programmatic acc
 | `get_events(client, calendar_url, start, end)` | Get events in date range | `list[CalendarEvent]` |
 | `get_today_events(client, calendar_url, tz)` | Get today's events | `list[CalendarEvent]` |
 | `get_tomorrow_events(client, calendar_url, tz)` | Get tomorrow's events | `list[CalendarEvent]` |
+| `get_week_events(client, calendar_url, tz)` | Get next 7 days' events | `list[CalendarEvent]` |
+| `get_event_by_uid(client, calendar_url, uid)` | Get single event by UID | `CalendarEvent \| None` |
 | `create_event(client, calendar_url, ...)` | Create new event | `str` (event UID) |
 | `update_event(client, calendar_url, uid, ...)` | Update existing event | `bool` |
 | `delete_event(client, calendar_url, uid)` | Delete event by UID | `bool` |

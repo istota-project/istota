@@ -17,7 +17,7 @@ class TestFetchUserInfo:
         config = Config()
         assert fetch_user_info(config, "alice") is None
 
-    @patch("istota.nextcloud_api.httpx.get")
+    @patch("istota.nextcloud_client.httpx.get")
     def test_success(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
@@ -41,7 +41,7 @@ class TestFetchUserInfo:
         assert result == {"displayname": "Alice Smith", "email": "alice@example.com"}
         mock_get.assert_called_once()
 
-    @patch("istota.nextcloud_api.httpx.get")
+    @patch("istota.nextcloud_client.httpx.get")
     def test_http_error(self, mock_get):
         mock_get.return_value.raise_for_status.side_effect = Exception("404")
         config = Config(nextcloud=NextcloudConfig(
@@ -58,7 +58,7 @@ class TestFetchUserTimezone:
         config = Config()
         assert fetch_user_timezone(config, "alice") is None
 
-    @patch("istota.nextcloud_api.httpx.get")
+    @patch("istota.nextcloud_client.httpx.get")
     def test_success(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
@@ -76,7 +76,7 @@ class TestFetchUserTimezone:
         result = fetch_user_timezone(config, "alice")
         assert result == "America/New_York"
 
-    @patch("istota.nextcloud_api.httpx.get")
+    @patch("istota.nextcloud_client.httpx.get")
     def test_empty_timezone(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
@@ -91,7 +91,7 @@ class TestFetchUserTimezone:
         ))
         assert fetch_user_timezone(config, "alice") is None
 
-    @patch("istota.nextcloud_api.httpx.get")
+    @patch("istota.nextcloud_client.httpx.get")
     def test_error(self, mock_get):
         mock_get.side_effect = Exception("connection error")
         config = Config(nextcloud=NextcloudConfig(

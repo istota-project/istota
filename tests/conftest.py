@@ -1,9 +1,31 @@
 """Shared test fixtures for istota tests."""
 
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
+
+
+def _load_dotenv():
+    """Load .env file from project root into os.environ (simple key=value parser)."""
+    env_file = Path(__file__).parent.parent / ".env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            os.environ.setdefault(key, value)
+
+
+_load_dotenv()
 
 from istota import db
 from istota.config import Config, UserConfig

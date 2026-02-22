@@ -1,54 +1,47 @@
-Nextcloud OCS API for sharing and user lookup. Credentials are available via environment variables:
-- `NC_URL`: Nextcloud base URL (e.g., `https://nextcloud.example.com`)
-- `NC_USER`: Username for authentication
-- `NC_PASS`: App password for authentication
+Nextcloud OCS API for sharing and user lookup. Use the CLI tool for all sharing operations:
 
-All endpoints return JSON when `format=json` is appended. Auth uses HTTP Basic.
-
-### Share API
-
-Base path: `$NC_URL/ocs/v2.php/apps/files_sharing/api/v1/shares`
-
-**Create user share** (shareType=0):
-```bash
-curl -s -u "$NC_USER:$NC_PASS" -X POST \
-  "$NC_URL/ocs/v2.php/apps/files_sharing/api/v1/shares" \
-  -d path="/path/to/file" -d shareType=0 -d shareWith="bob" -d permissions=31 \
-  -H "OCS-APIRequest: true" -H "Accept: application/json"
+```
+python -m istota.skills.nextcloud share list [--path /path]
+python -m istota.skills.nextcloud share create --path /path --type user --with USERNAME [--permissions 31]
+python -m istota.skills.nextcloud share create --path /path --type link [--password X] [--expire YYYY-MM-DD] [--label X]
+python -m istota.skills.nextcloud share delete SHARE_ID
+python -m istota.skills.nextcloud share search QUERY [--item-type file]
 ```
 
-**Create public link** (shareType=3):
+All commands output JSON. Credentials are read from env vars `NC_URL`, `NC_USER`, `NC_PASS`.
+
+### Examples
+
+**Share a folder with a user (full permissions):**
 ```bash
-curl -s -u "$NC_USER:$NC_PASS" -X POST \
-  "$NC_URL/ocs/v2.php/apps/files_sharing/api/v1/shares" \
-  -d path="/path/to/file" -d shareType=3 -d permissions=1 \
-  -H "OCS-APIRequest: true" -H "Accept: application/json"
+python -m istota.skills.nextcloud share create --path "/Documents/project" --type user --with bob --permissions 31
 ```
 
-**List shares for a path:**
+**Create a read-only public link:**
 ```bash
-curl -s -u "$NC_USER:$NC_PASS" \
-  "$NC_URL/ocs/v2.php/apps/files_sharing/api/v1/shares?path=/path/to/file&format=json" \
-  -H "OCS-APIRequest: true"
+python -m istota.skills.nextcloud share create --path "/Documents/report.pdf" --type link
 ```
 
-**Delete a share:**
+**Create a password-protected public link with expiry:**
 ```bash
-curl -s -u "$NC_USER:$NC_PASS" -X DELETE \
-  "$NC_URL/ocs/v2.php/apps/files_sharing/api/v1/shares/SHARE_ID" \
-  -H "OCS-APIRequest: true"
+python -m istota.skills.nextcloud share create --path "/shared" --type link --password secret123 --expire 2026-03-15 --label "Project files"
 ```
 
-### Sharee Lookup
-
-Search for users to share with:
+**List all shares for a path:**
 ```bash
-curl -s -u "$NC_USER:$NC_PASS" \
-  "$NC_URL/ocs/v2.php/apps/files_sharing/api/v1/sharees?search=bob&itemType=file&format=json" \
-  -H "OCS-APIRequest: true"
+python -m istota.skills.nextcloud share list --path "/Documents/project"
 ```
 
-Results are in `ocs.data.exact.users` (exact matches) and `ocs.data.users` (partial matches).
+**Find users to share with:**
+```bash
+python -m istota.skills.nextcloud share search bob
+```
+Results include `exact.users` (exact matches) and `users` (partial matches).
+
+**Delete a share by ID:**
+```bash
+python -m istota.skills.nextcloud share delete 42
+```
 
 ### Permission Values
 
@@ -65,12 +58,12 @@ Combine with addition: read + update + create = 7.
 
 ### Share Types
 
-| Value | Type          |
-|-------|---------------|
-| 0     | User share    |
-| 3     | Public link   |
-| 4     | Email share   |
+| Type     | Description   |
+|----------|---------------|
+| `user`   | User share    |
+| `link`   | Public link   |
+| `email`  | Email share   |
 
 ### Response Format
 
-Successful responses have `ocs.meta.statuscode` of 200. Share data is in `ocs.data`. Key fields: `id` (share ID), `url` (for public links), `path`, `permissions`, `share_with`.
+Share data includes key fields: `id` (share ID), `url` (for public links), `path`, `permissions`, `share_with`.

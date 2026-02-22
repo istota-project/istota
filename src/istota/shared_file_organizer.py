@@ -1,14 +1,11 @@
 """Auto-organize files shared with the istota Nextcloud user."""
 
 import logging
-import subprocess
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-
-import httpx
 
 from . import db
 from .config import Config
+from .nextcloud_client import webdav_get_owner
 from .skills.files import list_files, path_exists, move_file, rclone_list
 from .storage import get_user_shared_path, ensure_user_directories_v2
 
@@ -26,52 +23,11 @@ class OrganizedFile:
 
 
 def get_file_owner(config: Config, file_path: str) -> str | None:
+    """Get the owner of a file via WebDAV PROPFIND.
+
+    Delegates to nextcloud_client.webdav_get_owner.
     """
-    Get the owner of a file via WebDAV PROPFIND.
-
-    Args:
-        config: Application config (for Nextcloud credentials)
-        file_path: Path to the file (relative to Nextcloud root)
-
-    Returns:
-        Owner's Nextcloud username, or None if not found
-    """
-    if not config.nextcloud.url or not config.nextcloud.username:
-        return None
-
-    webdav_url = f"{config.nextcloud.url.rstrip('/')}/remote.php/dav/files/{config.nextcloud.username}/{file_path.lstrip('/')}"
-
-    propfind_body = '''<?xml version="1.0"?>
-<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
-  <d:prop>
-    <oc:owner-id/>
-  </d:prop>
-</d:propfind>'''
-
-    try:
-        response = httpx.request(
-            "PROPFIND",
-            webdav_url,
-            content=propfind_body,
-            headers={
-                "Content-Type": "application/xml",
-                "Depth": "0",
-            },
-            auth=(config.nextcloud.username, config.nextcloud.app_password),
-            timeout=10.0,
-        )
-        response.raise_for_status()
-
-        # Parse XML response
-        root = ET.fromstring(response.text)
-        # Find oc:owner-id element (namespace handling)
-        for elem in root.iter():
-            if elem.tag.endswith('}owner-id') or elem.tag == 'owner-id':
-                return elem.text
-        return None
-    except Exception as e:
-        logger.debug("Error getting file owner for %s: %s", file_path, e)
-        return None
+    return webdav_get_owner(config, file_path)
 
 
 def discover_and_organize_shared_files(config: Config) -> list[OrganizedFile]:

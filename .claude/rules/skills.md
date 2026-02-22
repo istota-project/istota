@@ -54,7 +54,7 @@ Returns sorted list of skill names.
 | `markets` | — | market, stock, stocks, ticker, index, indices, futures, ... | — | briefing |
 | `notes` | — | — | notes_file | briefing |
 | `reminders` | — | remind, reminder, remind me, alert me, notify me, don't forget, ... | — | — |
-| `schedules` | — | schedule, recurring, cron, daily, weekly, ... | — | — | admin_only |
+| `schedules` | — | schedule, recurring, cron, daily, weekly, ... | — | — |
 | `nextcloud` | — | share, sharing, nextcloud, permission, access | — | — |
 | `browse` | — | browse, website, scrape, screenshot, url, http, ... | — | — |
 | `briefing` | — | — | — | briefing |

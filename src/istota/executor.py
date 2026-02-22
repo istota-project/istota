@@ -532,6 +532,8 @@ def build_prompt(
     skills_changelog: str | None = None,
     is_admin: bool = True,
     emissaries: str | None = None,
+    source_type: str | None = None,
+    output_target: str | None = None,
 ) -> str:
     """Build the full prompt for Claude Code execution."""
     # Group resources by type
@@ -756,6 +758,8 @@ The following are relevant previous messages from this conversation:
 Current time: {user_time_str}
 Current task ID: {task.id}
 Conversation token: {task.conversation_token or 'none'}{group_chat_line}
+Source: {source_type or task.source_type or 'unknown'}
+Output target: {output_target or 'text'}
 {db_path_line}
 {emissaries_section}{persona_section}
 ## User's accessible resources
@@ -766,7 +770,7 @@ Conversation token: {task.conversation_token or 'none'}{group_chat_line}
 You have access to:
 {file_tools}{browser_tool}
 - caldav via curl or the caldav Python library for calendar operations{db_tool_line}
-- Email sending is handled by the bot internally. For email tasks (replies and scheduled jobs with email output), use the email output tool: `python -m istota.skills.email output --subject "..." --body "..." [--html]`. Use `--body-file` for long content. See the email skill for details.
+- Email sending is handled by the bot internally. When the output target is "email", use the email output tool: `python -m istota.skills.email output --subject "..." --body "..." [--html]`. Use `--body-file` for long content. Do NOT use this tool when the output target is "talk" — just respond with text. See the email skill for details.
 
 {rules_section}
 {context_section}
@@ -1042,11 +1046,23 @@ def execute_task(
     # Load emissaries (constitutional principles)
     emissaries = load_emissaries(config)
 
+    # Compute effective output target (same logic as scheduler.process_one_task)
+    effective_output_target = task.output_target
+    if not effective_output_target:
+        if task.source_type in ("talk", "briefing"):
+            effective_output_target = "talk"
+        elif task.source_type == "email":
+            effective_output_target = "email"
+        elif task.source_type == "istota_file":
+            effective_output_target = "istota_file"
+
     # Build prompt
     prompt = build_prompt(
         task, user_resources, config, skills_doc, conversation_context, user_memory,
         discovered_calendars, user_email_addresses, dated_memories, channel_memory,
         skills_changelog, is_admin, emissaries,
+        source_type=task.source_type,
+        output_target=effective_output_target,
     )
 
     # Log prompt size breakdown

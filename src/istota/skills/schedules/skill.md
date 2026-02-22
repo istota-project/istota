@@ -44,6 +44,7 @@ room = "ROOM_TOKEN"
 - `target`: Where to deliver results — `"talk"` (post to room), `"email"` (send to user's email), or omit for no delivery
 - `room`: Talk conversation token (required when `target` is `"talk"`)
 - `enabled`: Set to `false` to pause the job (default: true). Use `!cron disable/enable` for runtime control
+- `once`: When `true`, the job auto-deletes from both the DB and CRON.md after successful execution. Failed jobs are kept for retry. Used by the reminders skill for one-shot fire-and-forget entries
 - `silent_unless_action`: When `true`, only posts output if response starts with `ACTION:`. Useful for monitoring jobs
 
 ## Cron examples

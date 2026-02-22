@@ -3,11 +3,8 @@
 import hashlib
 import logging
 import re
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
-
-import httpx
 
 from . import db
 from .config import Config
@@ -47,55 +44,6 @@ class DiscoveredTasksFile:
     """A discovered TASKS.md file with owner info."""
     file_path: str
     owner_id: str  # Nextcloud username of the file owner
-
-
-def get_file_owner(config: Config, file_path: str) -> str | None:
-    """
-    Get the owner of a file via WebDAV PROPFIND.
-
-    Args:
-        config: Application config (for Nextcloud credentials)
-        file_path: Path to the file (relative to Nextcloud root)
-
-    Returns:
-        Owner's Nextcloud username, or None if not found
-    """
-    if not config.nextcloud.url or not config.nextcloud.username:
-        return None
-
-    webdav_url = f"{config.nextcloud.url.rstrip('/')}/remote.php/dav/files/{config.nextcloud.username}/{file_path.lstrip('/')}"
-
-    propfind_body = '''<?xml version="1.0"?>
-<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
-  <d:prop>
-    <oc:owner-id/>
-  </d:prop>
-</d:propfind>'''
-
-    try:
-        response = httpx.request(
-            "PROPFIND",
-            webdav_url,
-            content=propfind_body,
-            headers={
-                "Content-Type": "application/xml",
-                "Depth": "0",
-            },
-            auth=(config.nextcloud.username, config.nextcloud.app_password),
-            timeout=10.0,
-        )
-        response.raise_for_status()
-
-        # Parse XML response
-        root = ET.fromstring(response.text)
-        # Find oc:owner-id element (namespace handling)
-        for elem in root.iter():
-            if elem.tag.endswith('}owner-id') or elem.tag == 'owner-id':
-                return elem.text
-        return None
-    except Exception as e:
-        logger.debug("Error getting file owner for %s: %s", file_path, e)
-        return None
 
 
 def discover_tasks_files(config: Config) -> list[DiscoveredTasksFile]:

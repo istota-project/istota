@@ -1723,3 +1723,49 @@ class TestPreTranscribeAttachments:
     def test_all_audio_extensions_recognized(self):
         for ext in ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]:
             assert ext in _AUDIO_EXTENSIONS
+
+
+# ---------------------------------------------------------------------------
+# TestPromptOutputTarget
+# ---------------------------------------------------------------------------
+
+
+class TestPromptOutputTarget:
+    """Verify that source_type and output_target appear in the prompt header."""
+
+    def _make_task(self, source_type="talk", output_target=None):
+        return db.Task(
+            id=1, status="running", prompt="hello", user_id="alice",
+            source_type=source_type, conversation_token="room1",
+            output_target=output_target,
+        )
+
+    def test_talk_source_and_target_in_prompt(self):
+        task = self._make_task(source_type="talk")
+        result = build_prompt(
+            task, [], Config(),
+            source_type="talk", output_target="talk",
+        )
+        assert "Source: talk" in result
+        assert "Output target: talk" in result
+
+    def test_scheduled_source_with_email_target(self):
+        task = self._make_task(source_type="scheduled", output_target="email")
+        result = build_prompt(
+            task, [], Config(),
+            source_type="scheduled", output_target="email",
+        )
+        assert "Source: scheduled" in result
+        assert "Output target: email" in result
+
+    def test_defaults_when_no_output_target(self):
+        task = self._make_task(source_type="cli")
+        result = build_prompt(task, [], Config())
+        assert "Source: cli" in result
+        assert "Output target: text" in result
+
+    def test_email_tool_line_references_output_target(self):
+        task = self._make_task(source_type="talk")
+        result = build_prompt(task, [], Config())
+        assert "When the output target is \"email\"" in result
+        assert "Do NOT use this tool when the output target is \"talk\"" in result
