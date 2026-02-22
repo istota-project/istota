@@ -247,6 +247,7 @@
 - [x] Systemd service templating
 - [x] Log rotation configuration
 - [x] Ansible repo dir cleanup (`istota_repo_dir` variable, no more `src/src/` nesting)
+- [x] Tag-based release deployment (`repo_tag` setting, `istota --version`, semver resolution)
 - [ ] Monitoring/alerting
 - [ ] Migrate server from old `src/` to `istota/` repo dir (remove `/srv/app/istota/src` after deploy)
 

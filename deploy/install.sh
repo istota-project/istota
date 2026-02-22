@@ -29,6 +29,7 @@ ISTOTA_USER="${ISTOTA_USER:-$ISTOTA_NAMESPACE}"
 ISTOTA_GROUP="${ISTOTA_GROUP:-$ISTOTA_NAMESPACE}"
 REPO_URL="${ISTOTA_REPO_URL:-https://github.com/alicekubicki/istota.git}"
 REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
+REPO_TAG="${ISTOTA_REPO_TAG:-}"
 UPDATE_ONLY=false
 INTERACTIVE=false
 DRY_RUN=false
@@ -592,6 +593,7 @@ namespace = "$ISTOTA_NAMESPACE"
 bot_name = "$_WIZ_BOT_NAME"
 repo_url = "$REPO_URL"
 repo_branch = "$REPO_BRANCH"
+repo_tag = "latest"
 use_environment_file = true
 
 nextcloud_url = "$_WIZ_NC_URL"
@@ -1204,12 +1206,33 @@ deploy_code() {
 
     if [ -d "$ISTOTA_HOME/src/.git" ]; then
         info "Updating repository"
-        git -C "$ISTOTA_HOME/src" fetch origin
-        git -C "$ISTOTA_HOME/src" reset --hard "origin/$REPO_BRANCH"
+        git -C "$ISTOTA_HOME/src" fetch origin --tags
     else
         info "Cloning repository"
         git clone --branch "$REPO_BRANCH" "$REPO_URL" "$ISTOTA_HOME/src"
     fi
+
+    # Determine target ref
+    if [ -n "$REPO_TAG" ]; then
+        if [ "$REPO_TAG" = "latest" ]; then
+            local resolved_tag
+            resolved_tag=$(git -C "$ISTOTA_HOME/src" tag -l 'v*' --sort=-v:refname | head -1)
+            if [ -n "$resolved_tag" ]; then
+                info "Checking out latest tag: $resolved_tag"
+                git -C "$ISTOTA_HOME/src" checkout "$resolved_tag" --quiet
+            else
+                warn "No semver tags found, falling back to branch: $REPO_BRANCH"
+                git -C "$ISTOTA_HOME/src" reset --hard "origin/$REPO_BRANCH"
+            fi
+        else
+            info "Checking out tag: $REPO_TAG"
+            git -C "$ISTOTA_HOME/src" checkout "$REPO_TAG" --quiet
+        fi
+    else
+        info "Tracking branch: $REPO_BRANCH"
+        git -C "$ISTOTA_HOME/src" reset --hard "origin/$REPO_BRANCH"
+    fi
+
     safe_chown -R "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/src"
     ok "Code deployed"
 
@@ -1556,6 +1579,7 @@ main() {
         ISTOTA_GROUP="$ISTOTA_NAMESPACE"
         REPO_URL=$(read_setting "repo_url" "$REPO_URL")
         REPO_BRANCH=$(read_setting "repo_branch" "$REPO_BRANCH")
+        REPO_TAG=$(read_setting "repo_tag" "$REPO_TAG")
     fi
 
     section "Deploying Istota"

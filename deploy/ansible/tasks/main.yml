@@ -334,7 +334,7 @@
     value: "{{ istota_repo_dir }}"
     scope: global
 
-- name: Clone or update istota repository
+- name: Clone or update istota repository (branch checkout)
   git:
     repo: "{{ istota_repo_url_auth | default(istota_repo_url) }}"
     dest: "{{ istota_repo_dir }}"
@@ -344,6 +344,43 @@
   notify:
     - "restart istota-scheduler"
     - "restart istota-browser"
+
+- name: Resolve and checkout tag
+  block:
+    - name: Fetch tags
+      command: git fetch origin --tags
+      args:
+        chdir: "{{ istota_repo_dir }}"
+      changed_when: false
+
+    - name: Resolve latest semver tag
+      shell: git tag -l 'v*' --sort=-v:refname | head -1
+      args:
+        chdir: "{{ istota_repo_dir }}"
+      register: _istota_latest_tag
+      changed_when: false
+      when: istota_repo_tag == "latest"
+
+    - name: Set resolved tag version
+      set_fact:
+        _istota_resolved_tag: "{{ (istota_repo_tag == 'latest') | ternary(_istota_latest_tag.stdout | default(''), istota_repo_tag) }}"
+
+    - name: Checkout tag
+      command: "git checkout {{ _istota_resolved_tag }} --quiet"
+      args:
+        chdir: "{{ istota_repo_dir }}"
+      register: tag_checkout_result
+      changed_when: tag_checkout_result.rc == 0
+      when: _istota_resolved_tag | length > 0
+      notify:
+        - "restart istota-scheduler"
+        - "restart istota-browser"
+
+    - name: Warn if no tags found
+      debug:
+        msg: "No semver tags found in repository, staying on branch {{ istota_repo_branch }}"
+      when: _istota_resolved_tag | length == 0
+  when: istota_repo_tag | length > 0
 
 - name: Set ownership of src directory
   file:

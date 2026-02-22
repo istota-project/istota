@@ -1,6 +1,7 @@
 """CLI interface for local testing and administration."""
 
 import argparse
+import importlib.metadata
 import json
 import sys
 from pathlib import Path
@@ -655,6 +656,10 @@ def main():
     parser = argparse.ArgumentParser(description="Istota CLI")
     parser.add_argument("-c", "--config", help="Path to config file")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose (DEBUG) logging")
+    parser.add_argument(
+        "--version", action="version",
+        version=f"istota {importlib.metadata.version('istota')}",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init

@@ -2,6 +2,19 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Tag-based release deployment
+
+Deployments now pin to semver tags instead of tracking the tip of `main`. Both `install.sh` and Ansible support a `repo_tag` setting (`"latest"` resolves to the highest `v*` tag, a specific tag like `"v0.2.0"` checks out that tag directly, empty string falls back to branch tracking). New installs default to `repo_tag = "latest"`.
+
+Also added `istota --version` which prints the version from `pyproject.toml` (currently `0.1.0`).
+
+**Files modified:**
+- `deploy/install.sh` — `deploy_code()` resolves and checks out tags; new `REPO_TAG` variable; wizard writes `repo_tag = "latest"`
+- `deploy/ansible/defaults/main.yml` — `istota_repo_tag: "latest"`
+- `deploy/ansible/tasks/main.yml` — Tag fetch/resolve/checkout block after git clone
+- `src/istota/cli.py` — `--version` flag via `importlib.metadata`
+- `DEVLOG.md` — This entry
+
 ## 2026-02-21: Deployment polish — Nextcloud note, Docker CPU fix
 
 Small deployment improvements for new users and single-core VMs.
