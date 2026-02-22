@@ -205,7 +205,7 @@ Hybrid approach: recent N messages (`always_include_recent`, default 5) always i
 ### Email Input Channel
 Polls INBOX via IMAP, creates tasks from known senders. Attachments uploaded to `/Users/{user_id}/inbox/`. Thread ID from normalized subject + participants. Responses sent as email replies with threading headers.
 
-**Output format**: JSON `{"subject": "...", "body": "...", "format": "plain"|"html"}`. Falls back to raw text. Config: `[email]` section.
+**Output format**: Model calls `python -m istota.skills.email output` which writes structured JSON to a deferred file. Scheduler picks it up for delivery. Falls back to inline JSON parsing (`_parse_email_output()`) for backward compat. Config: `[email]` section.
 
 ### TASKS.md File Input Channel
 Polls `/Users/{user_id}/{bot_name}/config/TASKS.md` (default: 30s). Status markers: `[ ]` pending, `[~]` in-progress, `[x]` completed, `[!]` failed. Task identity via SHA-256 hash. Tracked in `istota_file_tasks` table.
@@ -357,12 +357,16 @@ With sandbox enabled and DB mounted read-only, Claude and skill CLIs cannot writ
 **File patterns** (in `{config.temp_dir}/{user_id}/`):
 - `task_{id}_subtasks.json` — subtask creation requests (admin-only)
 - `task_{id}_tracked_transactions.json` — transaction dedup tracking (monarch sync, CSV import)
+- `task_{id}_email_output.json` — structured email output (replaces inline JSON pattern)
 
 **Backward compat**: Accounting skill falls back to direct DB write if `ISTOTA_DEFERRED_DIR` not set. Deferred files are only processed on successful completion (not failure, not confirmation).
 
+### Email Output Tool
+Email replies and scheduled email jobs use `python -m istota.skills.email output --subject "..." --body "..." [--html]` instead of producing inline JSON. The command writes `task_{id}_email_output.json` to `ISTOTA_DEFERRED_DIR`. The scheduler reads this file in `post_result_to_email()` before falling back to `_parse_email_output()` (legacy inline JSON parsing). This eliminates transcription corruption (e.g., Unicode smart-quote substitution breaking JSON structure) by keeping structured data in a file written by `json.dumps()` rather than having the model echo JSON as text.
+
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Shared fixtures in `conftest.py`. Current: ~1964 tests across 43 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Shared fixtures in `conftest.py`. Current: ~2045 tests across 43 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests

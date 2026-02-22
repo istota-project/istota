@@ -23,6 +23,11 @@ Git credentials are configured automatically for both platforms — clone and pu
 
 **Security**: Tokens are embedded in helper scripts and never exposed as environment variables. Do NOT attempt to read or extract credentials from helper scripts. Use `$GITLAB_API_CMD` / `$GITHUB_API_CMD` for API calls and plain `git` commands for repository operations.
 
+**Pre-submission checks** (mandatory before every MR/PR):
+1. **Namespace verification**: Before creating any MR or PR, extract the resolved namespace/owner from the API response and confirm it matches the intended target. If the user said "submit to `cynium/istota`", verify the project resolves to `cynium`, not some other namespace. Abort and ask the user if there is any mismatch.
+2. **Response verification**: After creating an MR/PR, parse the API response to extract the URL and ID. If the response contains an error, treat it as failure. Then query the open MR/PR list to confirm it actually exists before reporting success.
+3. **No live source editing**: Never edit files under production installation paths (e.g., `/srv/app/*/src/`). All source changes must go through worktrees in `$DEVELOPER_REPOS_DIR` and be submitted as MRs/PRs.
+
 ## Directory Layout
 
 ```
@@ -114,10 +119,20 @@ Create MR via GitLab API:
 # Get project ID from path
 PROJECT_PATH="namespace/project"
 ENCODED_PATH=$(echo "$PROJECT_PATH" | sed 's|/|%2F|g')
-PROJECT_ID=$($GITLAB_API_CMD GET "/api/v4/projects/$ENCODED_PATH" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+PROJECT_INFO=$($GITLAB_API_CMD GET "/api/v4/projects/$ENCODED_PATH")
+PROJECT_ID=$(echo "$PROJECT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+# REQUIRED: Verify the resolved namespace matches the intended target.
+# Extract the namespace from the project info and confirm it is correct
+# before creating any MR. Abort and ask the user if it doesn't match.
+RESOLVED_NS=$(echo "$PROJECT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['path_with_namespace'].split('/')[0])")
+if [ "$RESOLVED_NS" != "namespace" ]; then
+    echo "ERROR: Resolved namespace '$RESOLVED_NS' does not match expected 'namespace'. Aborting MR creation."
+    exit 1
+fi
 
 # Create merge request (assign configured reviewer)
-$GITLAB_API_CMD POST "/api/v4/projects/$PROJECT_ID/merge_requests" \
+MR_RESPONSE=$($GITLAB_API_CMD POST "/api/v4/projects/$PROJECT_ID/merge_requests" \
     --header "Content-Type: application/json" \
     --data "{
         \"source_branch\": \"$BRANCH\",
@@ -126,10 +141,23 @@ $GITLAB_API_CMD POST "/api/v4/projects/$PROJECT_ID/merge_requests" \
         \"description\": \"Implements JWT auth.\\n\\nCreated by istota task $TASK_ID.\",
         \"remove_source_branch\": true,
         \"reviewer_ids\": [$GITLAB_REVIEWER_ID]
-    }"
-```
+    }")
 
-The response includes `web_url` (link to share) and `iid` (MR number like `!42`).
+# REQUIRED: Verify the MR was actually created. Parse the response for
+# web_url and iid. If the response contains "error" or "message" fields
+# instead, treat it as a failure.
+MR_URL=$(echo "$MR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('web_url',''))")
+MR_IID=$(echo "$MR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('iid',''))")
+if [ -z "$MR_URL" ] || [ -z "$MR_IID" ]; then
+    echo "ERROR: MR creation failed. Response: $MR_RESPONSE"
+    exit 1
+fi
+echo "MR created: !$MR_IID — $MR_URL"
+
+# Verify the MR appears in the open MRs list
+$GITLAB_API_CMD GET "/api/v4/projects/$PROJECT_ID/merge_requests?state=opened" \
+    | python3 -c "import sys,json; mrs=json.load(sys.stdin); match=[m for m in mrs if m['iid']==$MR_IID]; assert match, 'MR !$MR_IID not found in open MRs'"
+```
 
 ## GitHub: Pushing and Creating a Pull Request
 
@@ -146,22 +174,37 @@ Create PR via GitHub API:
 OWNER="myorg"  # or $GITHUB_DEFAULT_OWNER
 REPO="project"
 
-$GITHUB_API_CMD POST "/repos/$OWNER/$REPO/pulls" \
+# REQUIRED: Verify the owner/repo resolves to the intended target before creating a PR.
+REPO_INFO=$($GITHUB_API_CMD GET "/repos/$OWNER/$REPO")
+RESOLVED_OWNER=$(echo "$REPO_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['owner']['login'])")
+if [ "$RESOLVED_OWNER" != "$OWNER" ]; then
+    echo "ERROR: Resolved owner '$RESOLVED_OWNER' does not match expected '$OWNER'. Aborting PR creation."
+    exit 1
+fi
+
+PR_RESPONSE=$($GITHUB_API_CMD POST "/repos/$OWNER/$REPO/pulls" \
     --header "Content-Type: application/json" \
     --data "{
         \"head\": \"$BRANCH\",
         \"base\": \"$DEFAULT_BRANCH\",
         \"title\": \"Add user authentication\",
         \"body\": \"Implements JWT auth.\\n\\nCreated by istota task $TASK_ID.\"
-    }"
-```
+    }")
 
-The response includes `html_url` (link to share) and `number` (PR number like `#42`).
+# REQUIRED: Verify the PR was actually created. Parse the response for
+# html_url and number. If missing, treat as failure.
+PR_URL=$(echo "$PR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('html_url',''))")
+PR_NUMBER=$(echo "$PR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('number',''))")
+if [ -z "$PR_URL" ] || [ -z "$PR_NUMBER" ]; then
+    echo "ERROR: PR creation failed. Response: $PR_RESPONSE"
+    exit 1
+fi
+echo "PR created: #$PR_NUMBER — $PR_URL"
+```
 
 Request a reviewer:
 
 ```bash
-PR_NUMBER=42
 $GITHUB_API_CMD POST "/repos/$OWNER/$REPO/pulls/$PR_NUMBER/reviews" \
     --header "Content-Type: application/json" \
     --data "{\"reviewers\": [\"$GITHUB_REVIEWER\"]}"

@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Email output tool + developer skill hardening
+
+Addressed four open issues from the Zorg issue tracker. The headline change replaces the fragile JSON-as-text email output pattern with a dedicated CLI tool that writes structured output to a deferred file — eliminating the transcription corruption (smart-quote substitution) that caused raw JSON to be delivered to users. The developer skill gained mandatory pre-submission checks for namespace verification, MR/PR response verification, and a prohibition on editing live production source files.
+
+**Key changes:**
+- New `email output` CLI subcommand writes `task_{id}_email_output.json` to deferred dir (same pattern as subtasks/tracking)
+- Scheduler checks for deferred email output file before falling back to `_parse_email_output()` (backward compat)
+- Smart-quote normalization (Try 4) added to `_parse_email_output()` as a safety net for the legacy path
+- Warning log when fallback body looks like malformed JSON
+- Developer skill: namespace verification before MR/PR creation (abort on mismatch)
+- Developer skill: response verification after MR/PR creation (parse response, verify via list query)
+- Developer skill: no live source editing rule (`/srv/app/*/src/` is off-limits)
+- Updated prompt instruction, email skill docs, and email guidelines to reference the output tool
+
+**Files added/modified:**
+- `src/istota/skills/email/__init__.py` — Added `cmd_output()` and `output` CLI subcommand
+- `src/istota/scheduler.py` — Added `_load_deferred_email_output()`, smart-quote Try 4, malformed JSON warning
+- `src/istota/executor.py` — Updated prompt instruction for email output tool
+- `src/istota/skills/email/skill.md` — Rewrote reply format docs for output tool
+- `config/guidelines/email.md` — Updated for output tool
+- `src/istota/skills/developer/skill.md` — Pre-submission checks, response verification, namespace assertion
+- `tests/test_scheduler.py` — 10 new tests (deferred email output + smart quotes)
+- `tests/test_skills_email.py` — 5 new tests (output CLI)
+
 ## 2026-02-21: Install script hardening
 
 End-to-end testing of install.sh on a fresh Debian VM uncovered a series of issues with the mount service, Claude CLI installation, file permissions, and system dependencies.

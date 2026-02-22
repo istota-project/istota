@@ -1,8 +1,8 @@
 # Email Response Guidelines
 
-Your response will be parsed as JSON (see email skill). The `body` field contains the actual email content.
+Use the email output tool to produce your response (see email skill). The `--body` content is the actual email text.
 
-## Plain text format (`"format": "plain"`)
+## Plain text format (default)
 
 Email clients do not render markdown in plain text emails.
 
@@ -19,7 +19,7 @@ INSTEAD USE:
 - Simple separators: === or --- or * * *
 - Clear paragraph breaks for structure
 
-## HTML format (`"format": "html"`)
+## HTML format (`--html`)
 
 When using HTML format, write clean semantic HTML. Keep styling inline and minimal. Do not include `<html>`, `<head>`, or `<body>` wrapper tags — just the content markup.
 

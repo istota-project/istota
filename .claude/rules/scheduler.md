@@ -158,8 +158,9 @@ After task completion, if enabled + `auto_index_conversations`:
 | `get_worker_id()` | 222-227 | `{hostname}-{pid}[-{user_id}]` |
 | `_make_talk_progress_callback()` | 230-263 | Rate-limited progress to Talk |
 | `post_result_to_talk()` | 667-687 | Send result to Talk conversation |
-| `_parse_email_output()` | 689-752 | Parse JSON email response |
-| `post_result_to_email()` | 755-844 | Send email reply with threading |
+| `_parse_email_output()` | 906-996 | Parse JSON email response (legacy fallback) |
+| `_load_deferred_email_output()` | 999-1032 | Load structured email output from deferred file |
+| `post_result_to_email()` | 1035-1122 | Send email reply with threading |
 | `check_briefings()` | 847-924 | Cron-based briefing scheduling |
 | `check_scheduled_jobs()` | 1048-1135 | Cron-based job scheduling |
 | `cleanup_old_temp_files()` | 927-964 | Remove old temp files |

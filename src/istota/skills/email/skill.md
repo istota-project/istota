@@ -16,23 +16,31 @@ Use this command whenever you need to send an email — whether the user asks fr
 
 For HTML emails with complex formatting, write the body to a temp file first and use `--body-file`.
 
-## Email reply format (email-source tasks only)
+## Email reply format (email-source tasks and scheduled email jobs)
 
-When replying to an incoming email (task source is email), output a JSON response instead of using the CLI. The scheduler handles threading headers automatically:
+When replying to an incoming email or producing output for a scheduled job with email delivery, use the email output tool instead of writing inline JSON:
 
-```json
-{
-  "subject": "Optional subject line",
-  "body": "The email content",
-  "format": "plain"
-}
+```bash
+python -m istota.skills.email output --subject "Subject line" --body "The email content"
 ```
 
-**Fields:**
-- `subject` (string, optional for replies): For replies, omit this to keep the original subject with "Re:" prefix. For new/scheduled emails, always provide a clear subject line.
-- `body` (string, required): The email content.
-- `format` (string, required): `"plain"` for plain text or `"html"` for HTML emails.
+Options:
+- `--subject` — email subject (optional for replies; the original subject with "Re:" prefix is used if omitted)
+- `--body` — the email body text (required, or use `--body-file`)
+- `--body-file /path/to/file` — read body from a file (useful for long content)
+- `--html` — format body as HTML instead of plain text
 
-**Important:** Output ONLY the JSON object — no extra text before or after it. The bot parses this JSON to extract subject, body, and format separately.
+This writes a structured file that the scheduler picks up for delivery. It avoids transcription corruption (e.g., smart-quote substitution) that can break inline JSON.
 
-**When to use HTML:** Use `"format": "html"` when the content benefits from rich formatting (tables, styled sections, links). For simple text responses, prefer `"format": "plain"`.
+For long email bodies, write the body to a temp file first and use `--body-file`:
+
+```bash
+# Write body to temp file, then use --body-file
+cat > /tmp/email_body.txt << 'BODY'
+The full email content goes here.
+Multiple paragraphs, quotes, etc.
+BODY
+python -m istota.skills.email output --subject "Subject" --body-file /tmp/email_body.txt
+```
+
+**When to use HTML:** Use `--html` when the content benefits from rich formatting (tables, styled sections, links). For simple text responses, use plain text (the default).

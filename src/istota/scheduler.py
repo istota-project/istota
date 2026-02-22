@@ -966,7 +966,68 @@ def _parse_email_output(message: str) -> dict:
         if result:
             return result
 
-    return {"subject": None, "body": message, "format": "plain"}
+    # Try 4: normalize Unicode smart quotes to ASCII and retry.
+    # Models sometimes silently replace ASCII quotes with smart quotes
+    # (U+201C/U+201D/U+2018/U+2019) when echoing JSON, which breaks parsing.
+    _SMART_QUOTE_MAP = {
+        "\u201c": '"',  # left double
+        "\u201d": '"',  # right double
+        "\u2018": "'",  # left single
+        "\u2019": "'",  # right single
+    }
+    if first_brace != -1 and last_brace > first_brace:
+        candidate = text[first_brace:last_brace + 1]
+        for smart, ascii_char in _SMART_QUOTE_MAP.items():
+            candidate = candidate.replace(smart, ascii_char)
+        result = _try_parse(candidate)
+        if result:
+            logger.warning("Email JSON required smart-quote normalization to parse")
+            return result
+
+    # Fallback: raw message as plain text body.
+    # Log a warning if the body looks like broken JSON — helps diagnose
+    # future transcription corruption issues.
+    fallback = {"subject": None, "body": message, "format": "plain"}
+    if first_brace != -1 and '"format"' in text:
+        logger.warning(
+            "Email output looks like malformed JSON but could not be parsed; "
+            "sending as raw text"
+        )
+    return fallback
+
+
+def _load_deferred_email_output(config: Config, task: db.Task) -> dict | None:
+    """Load email output from a deferred JSON file written by the email output tool.
+
+    Returns parsed dict with subject/body/format keys, or None if no file exists.
+    """
+    from .executor import get_user_temp_dir
+    user_temp_dir = get_user_temp_dir(config, task.user_id)
+    path = user_temp_dir / f"task_{task.id}_email_output.json"
+    if not path.exists():
+        return None
+
+    try:
+        data = json.loads(path.read_text())
+        path.unlink(missing_ok=True)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Bad deferred email output file for task %d: %s", task.id, e)
+        path.unlink(missing_ok=True)
+        return None
+
+    if not isinstance(data, dict) or "body" not in data or "format" not in data:
+        logger.warning("Deferred email output file for task %d missing required fields", task.id)
+        return None
+
+    fmt = data["format"]
+    if fmt not in ("plain", "html"):
+        fmt = "plain"
+
+    return {
+        "subject": data.get("subject"),
+        "body": data["body"],
+        "format": fmt,
+    }
 
 
 async def post_result_to_email(config: Config, task: db.Task, message: str) -> bool:
@@ -1000,7 +1061,9 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
             logger.error("Failed to send briefing email (task %s): %s", task.id, e)
             return False
 
-    parsed = _parse_email_output(message)
+    # Prefer deferred email output file (tool-based, no transcription risk)
+    # over inline JSON parsing (legacy, subject to smart-quote corruption)
+    parsed = _load_deferred_email_output(config, task) or _parse_email_output(message)
 
     with db.get_db(config.db_path) as conn:
         processed_email = db.get_email_for_task(conn, task.id)

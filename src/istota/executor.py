@@ -766,7 +766,7 @@ Conversation token: {task.conversation_token or 'none'}{group_chat_line}
 You have access to:
 {file_tools}{browser_tool}
 - caldav via curl or the caldav Python library for calendar operations{db_tool_line}
-- Email sending is handled by the bot internally. For email tasks, output a JSON object with keys: "subject" (optional for replies), "body", and "format" ("plain" or "html"). See the email skill for details.
+- Email sending is handled by the bot internally. For email tasks (replies and scheduled jobs with email output), use the email output tool: `python -m istota.skills.email output --subject "..." --body "..." [--html]`. Use `--body-file` for long content. See the email skill for details.
 
 {rules_section}
 {context_section}

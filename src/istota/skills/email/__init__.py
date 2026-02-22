@@ -557,6 +557,40 @@ def _config_from_env() -> EmailConfig:
     )
 
 
+def cmd_output(args):
+    """Write structured email output to a deferred file for the scheduler.
+
+    Instead of the model producing inline JSON (which risks transcription
+    corruption like smart-quote substitution), it calls this command. The
+    scheduler reads the file and handles delivery.
+    """
+    task_id = os.environ.get("ISTOTA_TASK_ID", "")
+    deferred_dir = os.environ.get("ISTOTA_DEFERRED_DIR", "")
+    if not task_id or not deferred_dir:
+        raise ValueError("ISTOTA_TASK_ID and ISTOTA_DEFERRED_DIR must be set")
+
+    # Read body from file if specified
+    if args.body_file:
+        body = Path(args.body_file).read_text()
+    else:
+        body = args.body
+    if not body:
+        raise ValueError("Either --body or --body-file is required")
+
+    fmt = "html" if args.html else "plain"
+    data = {
+        "subject": args.subject or None,
+        "body": body,
+        "format": fmt,
+    }
+
+    out_path = Path(deferred_dir) / f"task_{task_id}_email_output.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(data, ensure_ascii=False))
+
+    return {"status": "ok", "file": str(out_path)}
+
+
 def cmd_send(args):
     """Send an email via CLI."""
     config = _config_from_env()
@@ -598,6 +632,13 @@ def build_parser():
     p_send.add_argument("--body-file", help="Read body from file (for large content)")
     p_send.add_argument("--html", action="store_true", help="Send as HTML email")
 
+    # output — write email response for scheduler delivery (replaces inline JSON)
+    p_output = sub.add_parser("output", help="Write email response for scheduler delivery")
+    p_output.add_argument("--subject", help="Email subject (optional for replies)")
+    p_output.add_argument("--body", help="Email body text")
+    p_output.add_argument("--body-file", help="Read body from file (for large content)")
+    p_output.add_argument("--html", action="store_true", help="Send as HTML email")
+
     return parser
 
 
@@ -607,6 +648,7 @@ def main(argv=None):
 
     commands = {
         "send": cmd_send,
+        "output": cmd_output,
     }
 
     try:

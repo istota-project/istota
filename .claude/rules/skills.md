@@ -73,9 +73,9 @@ Returns sorted list of skill names.
 **Key fns**: `_run_bean_check()`, `_run_bean_query()`, `cmd_sync_monarch()`, `cmd_invoice_generate()`, `cmd_invoice_list()`, `cmd_invoice_paid()`, `cmd_invoice_create()`, `cmd_add_transaction()`
 
 ### `email.py` - IMAP/SMTP
-**Subcommands**: `send`
-**Env vars**: `IMAP_HOST/PORT/USER/PASSWORD`, `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM`
-**Key fns**: `list_emails()`, `read_email()`, `send_email()`, `reply_to_email()`, `search_emails()`, `get_newsletters()`, `delete_email()`
+**Subcommands**: `send`, `output`
+**Env vars**: `IMAP_HOST/PORT/USER/PASSWORD`, `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM`, `ISTOTA_TASK_ID`, `ISTOTA_DEFERRED_DIR`
+**Key fns**: `list_emails()`, `read_email()`, `send_email()`, `reply_to_email()`, `search_emails()`, `get_newsletters()`, `delete_email()`, `cmd_output()`
 
 ### `calendar.py` - CalDAV
 **Subcommands**: `list`, `create`, `delete`

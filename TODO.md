@@ -198,6 +198,9 @@
 - [x] CLI command `python -m istota.skills.email send` for direct sending from Claude Code
 - [x] Executor passes SMTP/IMAP credentials as env vars
 - [x] Email skill doc updated: CLI for non-email channels, JSON for email-reply tasks
+- [x] Dedicated `email output` tool replaces inline JSON pattern for email replies/scheduled jobs
+- [x] Deferred email output file (`task_{id}_email_output.json`) with scheduler pickup
+- [x] Smart-quote normalization fallback for legacy inline JSON path
 
 ### Agent-Task Heartbeat Check (Removed)
 - [x] ~~Queue natural language prompts as heartbeat tasks~~ — Removed in favor of CRON.md with `silent_unless_action`

@@ -15,6 +15,7 @@ from istota.skills.email import (
     _config_from_env,
     _parse_email_date,
     _sanitize_header,
+    cmd_output,
     cmd_send,
     list_emails,
     main,
@@ -411,6 +412,68 @@ class TestEmailCLIMain:
     def test_main_missing_command(self):
         with pytest.raises(SystemExit):
             main([])
+
+    def test_main_output(self, tmp_path, capsys):
+        deferred_dir = tmp_path / "deferred"
+        deferred_dir.mkdir()
+        env = {"ISTOTA_TASK_ID": "99", "ISTOTA_DEFERRED_DIR": str(deferred_dir)}
+        with patch.dict("os.environ", env):
+            main(["output", "--subject", "Test Subject", "--body", "Hello world"])
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "ok"
+
+        # Verify the deferred file was written correctly
+        out_file = deferred_dir / "task_99_email_output.json"
+        assert out_file.exists()
+        data = json.loads(out_file.read_text())
+        assert data["subject"] == "Test Subject"
+        assert data["body"] == "Hello world"
+        assert data["format"] == "plain"
+
+    def test_main_output_html(self, tmp_path, capsys):
+        deferred_dir = tmp_path / "deferred"
+        deferred_dir.mkdir()
+        env = {"ISTOTA_TASK_ID": "100", "ISTOTA_DEFERRED_DIR": str(deferred_dir)}
+        with patch.dict("os.environ", env):
+            main(["output", "--subject", "HTML", "--body", "<p>Hi</p>", "--html"])
+
+        out_file = deferred_dir / "task_100_email_output.json"
+        data = json.loads(out_file.read_text())
+        assert data["format"] == "html"
+        assert data["body"] == "<p>Hi</p>"
+
+    def test_main_output_body_file(self, tmp_path, capsys):
+        deferred_dir = tmp_path / "deferred"
+        deferred_dir.mkdir()
+        body_file = tmp_path / "body.txt"
+        body_file.write_text("Body from file")
+        env = {"ISTOTA_TASK_ID": "101", "ISTOTA_DEFERRED_DIR": str(deferred_dir)}
+        with patch.dict("os.environ", env):
+            main(["output", "--subject", "S", "--body-file", str(body_file)])
+
+        out_file = deferred_dir / "task_101_email_output.json"
+        data = json.loads(out_file.read_text())
+        assert data["body"] == "Body from file"
+
+    def test_main_output_no_subject(self, tmp_path, capsys):
+        deferred_dir = tmp_path / "deferred"
+        deferred_dir.mkdir()
+        env = {"ISTOTA_TASK_ID": "102", "ISTOTA_DEFERRED_DIR": str(deferred_dir)}
+        with patch.dict("os.environ", env):
+            main(["output", "--body", "Reply body"])
+
+        out_file = deferred_dir / "task_102_email_output.json"
+        data = json.loads(out_file.read_text())
+        assert data["subject"] is None
+        assert data["body"] == "Reply body"
+
+    def test_output_missing_env_vars(self, capsys):
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(SystemExit):
+                main(["output", "--body", "test"])
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "error"
 
 
 # --- _sanitize_header tests ---

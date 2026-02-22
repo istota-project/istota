@@ -19,6 +19,7 @@ from istota.scheduler import (
     get_worker_id,
     strip_briefing_preamble,
     _parse_email_output,
+    _load_deferred_email_output,
     _talk_poll_loop,
     _format_error_for_user,
     _strip_action_prefix,
@@ -211,6 +212,113 @@ class TestParseEmailOutput:
         assert result["subject"] is None
         assert result["body"] == "Just body"
         assert result["format"] == "html"
+
+    def test_smart_quotes_normalized(self):
+        # Unicode left double quote (U+201C) inside a JSON string value
+        # breaks JSON parsing — Try 4 should normalize and recover
+        msg = '{"subject": "Daily Notes", "body": "He said \u201chello\u201d today", "format": "plain"}'
+        result = _parse_email_output(msg)
+        assert result["subject"] == "Daily Notes"
+        assert "hello" in result["body"]
+        assert result["format"] == "plain"
+
+    def test_smart_single_quotes_normalized(self):
+        msg = '{"subject": "Test", "body": "It\u2019s a nice day", "format": "plain"}'
+        result = _parse_email_output(msg)
+        assert result["subject"] == "Test"
+        assert "nice day" in result["body"]
+        assert result["format"] == "plain"
+
+    def test_smart_quotes_in_preamble_json(self):
+        # Smart quotes in JSON with preamble text — Try 3 fails, Try 4 recovers
+        msg = 'Here is the email:\n{"subject": "Notes", "body": "\u201cWise words\u201d from Dostoevsky", "format": "plain"}'
+        result = _parse_email_output(msg)
+        assert result["subject"] == "Notes"
+        assert "Dostoevsky" in result["body"]
+
+
+# ---------------------------------------------------------------------------
+# TestLoadDeferredEmailOutput
+# ---------------------------------------------------------------------------
+
+
+class TestLoadDeferredEmailOutput:
+    def _make_task(self, task_id=42, user_id="alice"):
+        return db.Task(
+            id=task_id, status="completed", source_type="email",
+            user_id=user_id, prompt="test",
+        )
+
+    def test_loads_valid_file(self, tmp_path):
+        config = Config(temp_dir=tmp_path)
+        user_dir = tmp_path / "alice"
+        user_dir.mkdir()
+        data = {"subject": "Hello", "body": "World", "format": "plain"}
+        (user_dir / "task_42_email_output.json").write_text(json.dumps(data))
+
+        result = _load_deferred_email_output(config, self._make_task())
+        assert result == {"subject": "Hello", "body": "World", "format": "plain"}
+        # File should be deleted after loading
+        assert not (user_dir / "task_42_email_output.json").exists()
+
+    def test_returns_none_when_no_file(self, tmp_path):
+        config = Config(temp_dir=tmp_path)
+        (tmp_path / "alice").mkdir()
+        result = _load_deferred_email_output(config, self._make_task())
+        assert result is None
+
+    def test_handles_invalid_json(self, tmp_path):
+        config = Config(temp_dir=tmp_path)
+        user_dir = tmp_path / "alice"
+        user_dir.mkdir()
+        (user_dir / "task_42_email_output.json").write_text("not json")
+
+        result = _load_deferred_email_output(config, self._make_task())
+        assert result is None
+        # File should be cleaned up
+        assert not (user_dir / "task_42_email_output.json").exists()
+
+    def test_handles_missing_body(self, tmp_path):
+        config = Config(temp_dir=tmp_path)
+        user_dir = tmp_path / "alice"
+        user_dir.mkdir()
+        data = {"subject": "Hello", "format": "plain"}
+        (user_dir / "task_42_email_output.json").write_text(json.dumps(data))
+
+        result = _load_deferred_email_output(config, self._make_task())
+        assert result is None
+
+    def test_normalizes_invalid_format(self, tmp_path):
+        config = Config(temp_dir=tmp_path)
+        user_dir = tmp_path / "alice"
+        user_dir.mkdir()
+        data = {"subject": "S", "body": "B", "format": "markdown"}
+        (user_dir / "task_42_email_output.json").write_text(json.dumps(data))
+
+        result = _load_deferred_email_output(config, self._make_task())
+        assert result["format"] == "plain"
+
+    def test_html_format_preserved(self, tmp_path):
+        config = Config(temp_dir=tmp_path)
+        user_dir = tmp_path / "alice"
+        user_dir.mkdir()
+        data = {"subject": "S", "body": "<p>Hi</p>", "format": "html"}
+        (user_dir / "task_42_email_output.json").write_text(json.dumps(data))
+
+        result = _load_deferred_email_output(config, self._make_task())
+        assert result["format"] == "html"
+        assert result["body"] == "<p>Hi</p>"
+
+    def test_null_subject(self, tmp_path):
+        config = Config(temp_dir=tmp_path)
+        user_dir = tmp_path / "alice"
+        user_dir.mkdir()
+        data = {"body": "Reply text", "format": "plain"}
+        (user_dir / "task_42_email_output.json").write_text(json.dumps(data))
+
+        result = _load_deferred_email_output(config, self._make_task())
+        assert result["subject"] is None
+        assert result["body"] == "Reply text"
 
 
 # ---------------------------------------------------------------------------
