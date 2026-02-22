@@ -479,9 +479,12 @@ def load_config(config_path: Path | None = None) -> Config:
             Path("/etc/istota/config.toml"),
         ]
         for candidate in candidates:
-            if candidate.exists():
-                config_path = candidate
-                break
+            try:
+                if candidate.exists():
+                    config_path = candidate
+                    break
+            except PermissionError:
+                continue
 
     if config_path is None or not config_path.exists():
         # Return default config
