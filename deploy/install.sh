@@ -975,7 +975,7 @@ setup_browser_container() {
         # Try Docker's official convenience script first (works across Debian/Ubuntu),
         # fall back to distro packages
         if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>/dev/null \
-            && sh /tmp/get-docker.sh 2>&1 | tail -5; then
+            && sh /tmp/get-docker.sh > /dev/null 2>&1; then
             rm -f /tmp/get-docker.sh
         else
             rm -f /tmp/get-docker.sh
