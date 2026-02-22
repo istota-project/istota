@@ -475,6 +475,7 @@ def load_config(config_path: Path | None = None) -> Config:
         # Look for config in standard locations
         candidates = [
             Path("config/config.toml"),
+            Path.home() / "src/config/config.toml",
             Path.home() / ".config/istota/config.toml",
             Path("/etc/istota/config.toml"),
         ]
