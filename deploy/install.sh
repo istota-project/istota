@@ -716,7 +716,9 @@ setup_claude_cli() {
             fi
             if command_exists npm; then
                 npm install -g @anthropic-ai/claude-code 2>&1 | tail -3
-                install_ok=true
+                if command_exists claude; then
+                    install_ok=true
+                fi
             else
                 warn "npm not available. Install Claude CLI manually."
             fi
@@ -730,6 +732,12 @@ setup_claude_cli() {
     # Ensure claude is accessible on the system PATH for all users
     if [ -f "$ISTOTA_HOME/.local/bin/claude" ] && [ ! -f /usr/local/bin/claude ]; then
         ln -sf "$ISTOTA_HOME/.local/bin/claude" /usr/local/bin/claude
+    fi
+    # If installed via npm, ensure the istota user's local bin has a symlink too
+    if [ ! -x "$ISTOTA_HOME/.local/bin/claude" ] && command_exists claude; then
+        mkdir -p "$ISTOTA_HOME/.local/bin"
+        ln -sf "$(command -v claude)" "$ISTOTA_HOME/.local/bin/claude"
+        safe_chown -h "$ISTOTA_USER:$ISTOTA_GROUP" "$ISTOTA_HOME/.local/bin/claude"
     fi
 
     # Set up OAuth token if provided in settings
@@ -1359,9 +1367,12 @@ verify_installation() {
         all_ok=false
     fi
 
-    # Check Claude CLI
+    # Check Claude CLI — prefer .local/bin, fall back to system PATH
     local claude_bin="$ISTOTA_HOME/.local/bin/claude"
-    if [ -x "$claude_bin" ]; then
+    if [ ! -x "$claude_bin" ]; then
+        claude_bin=$(command -v claude 2>/dev/null || true)
+    fi
+    if [ -n "$claude_bin" ] && [ -x "$claude_bin" ]; then
         local claude_ver
         claude_ver=$("$claude_bin" --version 2>/dev/null || echo "unknown")
         ok "Claude CLI: $claude_ver ($claude_bin)"
@@ -1374,7 +1385,7 @@ verify_installation() {
             all_ok=false
         fi
     else
-        warn "Claude CLI not found at $claude_bin"
+        warn "Claude CLI not found"
         all_ok=false
     fi
 

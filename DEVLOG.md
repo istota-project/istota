@@ -2,6 +2,18 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Claude CLI npm fallback verification fix
+
+When the prebuilt Claude CLI binary fails (e.g., unsupported CPU on older VMs), install.sh falls back to installing via npm. Previously, the verification step only checked `$ISTOTA_HOME/.local/bin/claude` — which doesn't exist after an npm install — so it would report the CLI as missing even though it was functional on the system PATH.
+
+**Key changes:**
+- After npm fallback install, create a symlink at `$ISTOTA_HOME/.local/bin/claude` pointing to the npm-installed binary so the rest of the script (systemd PATH, services) works uniformly
+- Verification now falls back to `command -v claude` if the `.local/bin` path doesn't exist
+- npm fallback verifies `command_exists claude` after install before declaring success
+
+**Files modified:**
+- `deploy/install.sh` — npm fallback symlink, resilient verification
+
 ## 2026-02-21: Install wizard optional feature prompts and setup
 
 The install wizard previously prompted for some optional features (email, memory search, sleep cycle, browser) but didn't actually set up several of them. Other optional features documented in deploy/README.md (whisper, ntfy, backups, channel sleep cycle) weren't prompted at all. Now all optional features are prompted in the wizard and deployed during installation.
