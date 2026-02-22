@@ -320,16 +320,17 @@ class TestSyncCronJobsToDb:
 
         assert len(jobs) == 0
 
-    def test_preserves_state_fields(self, db_path):
-        """Sync should not overwrite last_run_at, consecutive_failures, etc."""
+    def test_preserves_state_fields_when_cron_unchanged(self, db_path):
+        """Sync should not overwrite state fields when cron expression hasn't changed."""
         with db.get_db(db_path) as conn:
             conn.execute(
                 """INSERT INTO scheduled_jobs
                    (user_id, name, cron_expression, prompt, enabled,
                     last_run_at, consecutive_failures, last_error, last_success_at)
                    VALUES (?, ?, ?, ?, 1, '2026-01-01T00:00:00', 3, 'oops', '2025-12-31T00:00:00')""",
-                ("alice", "j1", "0 8 * * *", "old"),
+                ("alice", "j1", "0 9 * * *", "old"),
             )
+        # Same cron, different prompt — state should be preserved
         file_jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="new")]
         with db.get_db(db_path) as conn:
             sync_cron_jobs_to_db(conn, "alice", file_jobs)
@@ -339,6 +340,28 @@ class TestSyncCronJobsToDb:
         assert job.consecutive_failures == 3
         assert job.last_error == "oops"
         assert job.last_success_at == "2025-12-31T00:00:00"
+
+    def test_resets_last_run_at_on_cron_expression_change(self, db_path):
+        """Changing cron expression should reset last_run_at to prevent catch-up runs."""
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled,
+                    last_run_at, consecutive_failures, last_error)
+                   VALUES (?, ?, ?, ?, 1, '2026-01-01T00:00:00', 3, 'oops')""",
+                ("alice", "j1", "0 8 * * *", "old"),
+            )
+        file_jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="new")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            job = db.get_scheduled_job_by_name(conn, "alice", "j1")
+
+        # last_run_at should be reset to now (not the old value)
+        assert job.last_run_at != "2026-01-01T00:00:00"
+        assert job.last_run_at is not None
+        # Other state fields should be preserved
+        assert job.consecutive_failures == 3
+        assert job.last_error == "oops"
 
     def test_file_enabled_false_disables_db(self, db_path):
         with db.get_db(db_path) as conn:

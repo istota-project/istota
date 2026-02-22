@@ -179,26 +179,21 @@ class TestParseEmailOutput:
         assert result["subject"] == "Update"
         assert result["body"] == "Details here"
 
-    def test_plain_text_fallback(self):
+    def test_plain_text_returns_none(self):
         msg = "Just a plain text response with no JSON at all."
         result = _parse_email_output(msg)
-        assert result["body"] == msg
-        assert result["format"] == "plain"
-        assert result["subject"] is None
+        assert result is None
 
-    def test_invalid_json_fallback(self):
+    def test_invalid_json_returns_none(self):
         msg = '{"broken json'
         result = _parse_email_output(msg)
-        assert result["body"] == msg
-        assert result["format"] == "plain"
+        assert result is None
 
-    def test_missing_body_fallback(self):
+    def test_missing_body_returns_none(self):
         # Valid JSON but missing required "body" key
         msg = '{"subject": "No body here", "format": "plain"}'
         result = _parse_email_output(msg)
-        # Falls back because "body" is required
-        assert result["body"] == msg
-        assert result["format"] == "plain"
+        assert result is None
 
     def test_invalid_format_normalized(self):
         msg = '{"subject": "Test", "body": "Content", "format": "markdown"}'

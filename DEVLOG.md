@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-21: Cron catch-up prevention + email double-send fix
+
+Fixed two scheduling/delivery bugs: cron expression changes triggering catch-up runs for past slots, and duplicate email delivery when Claude sends directly during execution.
+
+**Key changes:**
+- `sync_cron_jobs_to_db()` now resets `last_run_at` to `datetime('now')` when a job's cron expression changes, preventing immediate catch-up runs for past time slots in the new expression.
+- `_parse_email_output()` returns `None` instead of raw-text fallback when no structured email JSON is found, preventing the scheduler from sending a duplicate email when Claude already sent via `email send` during execution.
+- `post_result_to_email()` skips delivery when no structured output is available (deferred file or inline JSON), logging that the email was likely sent directly.
+
+**Files modified:**
+- `src/istota/cron_loader.py` — Detect cron expression change and reset last_run_at
+- `src/istota/scheduler.py` — Remove raw-text fallback from email parser, add None guard in delivery
+- `tests/test_cron_loader.py` — Split state preservation test, add cron change reset test
+- `tests/test_scheduler.py` — Update fallback tests to expect None instead of raw-text dict
+
 ## 2026-02-21: Nextcloud client refactor + calendar/scheduling fixes
 
 Consolidated scattered Nextcloud HTTP code (OCS + WebDAV) into a shared `nextcloud_client.py` module, and fixed several skill gaps found during a calendar/scheduling audit.

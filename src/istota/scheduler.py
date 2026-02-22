@@ -903,7 +903,7 @@ async def post_result_to_talk(
         return None
 
 
-def _parse_email_output(message: str) -> dict:
+def _parse_email_output(message: str) -> dict | None:
     """
     Parse Claude Code's email output as JSON.
 
@@ -915,7 +915,8 @@ def _parse_email_output(message: str) -> dict:
     - Preamble text before the JSON object
     - Trailing text after the JSON object
 
-    Falls back to treating raw string as plain-text body (backward compatible).
+    Returns None if no structured email JSON is found — this prevents
+    double-sending when Claude already sent the email via `email send`.
     """
     def _try_parse(text: str) -> dict | None:
         try:
@@ -984,16 +985,15 @@ def _parse_email_output(message: str) -> dict:
             logger.warning("Email JSON required smart-quote normalization to parse")
             return result
 
-    # Fallback: raw message as plain text body.
-    # Log a warning if the body looks like broken JSON — helps diagnose
-    # future transcription corruption issues.
-    fallback = {"subject": None, "body": message, "format": "plain"}
+    # No structured email JSON found.  Log a warning if it looks like broken
+    # JSON — helps diagnose transcription corruption.  Return None so the
+    # caller knows there is no structured output (prevents double-send when
+    # Claude already sent the email directly via `email send`).
     if first_brace != -1 and '"format"' in text:
         logger.warning(
-            "Email output looks like malformed JSON but could not be parsed; "
-            "sending as raw text"
+            "Email output looks like malformed JSON but could not be parsed"
         )
-    return fallback
+    return None
 
 
 def _load_deferred_email_output(config: Config, task: db.Task) -> dict | None:
@@ -1062,8 +1062,17 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
             return False
 
     # Prefer deferred email output file (tool-based, no transcription risk)
-    # over inline JSON parsing (legacy, subject to smart-quote corruption)
+    # over inline JSON parsing (legacy, subject to smart-quote corruption).
+    # If neither source provides structured output, skip sending — Claude
+    # likely already sent the email directly via `email send` during execution.
     parsed = _load_deferred_email_output(config, task) or _parse_email_output(message)
+    if parsed is None:
+        logger.info(
+            "No structured email output for task %d; skipping scheduler delivery "
+            "(email was likely sent directly during execution)",
+            task.id,
+        )
+        return True
 
     with db.get_db(config.db_path) as conn:
         processed_email = db.get_email_for_task(conn, task.id)

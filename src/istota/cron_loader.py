@@ -158,8 +158,22 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
             if not fj.enabled:
                 updates["enabled"] = 0
 
-            set_clause = ", ".join(f"{k} = ?" for k in updates)
-            values = list(updates.values()) + [existing.id]
+            # Reset last_run_at when cron expression changes to prevent
+            # catch-up runs for past slots in the new expression
+            cron_changed = fj.cron != existing.cron_expression
+            if cron_changed:
+                logger.info(
+                    "Cron expression changed for job '%s' (user %s): "
+                    "'%s' -> '%s', resetting last_run_at",
+                    fj.name, user_id, existing.cron_expression, fj.cron,
+                )
+
+            set_parts = [f"{k} = ?" for k in updates]
+            values = list(updates.values())
+            if cron_changed:
+                set_parts.append("last_run_at = datetime('now')")
+            set_clause = ", ".join(set_parts)
+            values.append(existing.id)
             conn.execute(
                 f"UPDATE scheduled_jobs SET {set_clause} WHERE id = ?",
                 values,
