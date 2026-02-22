@@ -90,7 +90,7 @@ journalctl -u istota-scheduler -f
 
 ## Optional features
 
-The core install covers Talk integration, email, scheduling, and Claude Code execution. The install wizard (`--interactive`) prompts for the features below and sets them up automatically. For manual setup or customization, the reference instructions are provided here. All settings go in `/etc/istota/settings.toml`, then re-run `install.sh --update` to regenerate config.
+The core install covers Talk integration, email, scheduling, and Claude Code execution. The install wizard (`--interactive`) prompts for the features below and sets them up automatically: memory search, sleep cycle, channel sleep cycle, whisper transcription, ntfy notifications, automated backups, and the browser container (including Docker installation). Fava and nginx site hosting are not covered by the wizard and require manual setup. For manual setup or customization, the reference instructions are provided here. All settings go in `/etc/istota/settings.toml`, then re-run `install.sh --update` to regenerate config.
 
 Throughout this section, `$HOME` refers to the istota home directory (default `/srv/app/istota`) and commands are run as root unless noted otherwise.
 
@@ -112,8 +112,8 @@ vnc_external_url = "https://vnc.example.com:6080"  # optional, for CAPTCHA acces
 **Setup:**
 
 ```bash
-# Install Docker
-apt-get install -y docker.io docker-compose-plugin
+# Install Docker (official convenience script, works across Debian/Ubuntu)
+curl -fsSL https://get.docker.com | sh
 
 # Add istota to docker group
 usermod -aG docker istota

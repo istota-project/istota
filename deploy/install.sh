@@ -972,11 +972,23 @@ setup_browser_container() {
     # Check Docker
     if ! command_exists docker; then
         info "Installing Docker"
-        apt-get install -y -qq docker.io docker-compose-plugin 2>/dev/null || true
+        # Try Docker's official convenience script first (works across Debian/Ubuntu),
+        # fall back to distro packages
+        if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>/dev/null \
+            && sh /tmp/get-docker.sh 2>&1 | tail -5; then
+            rm -f /tmp/get-docker.sh
+        else
+            rm -f /tmp/get-docker.sh
+            apt-get install -y -qq docker.io 2>&1 | tail -3 || true
+        fi
         if ! command_exists docker; then
             warn "Docker installation failed — install manually and re-run"
             return 0
         fi
+    fi
+    # Ensure compose plugin is available
+    if ! docker compose version &>/dev/null; then
+        apt-get install -y -qq docker-compose-plugin 2>&1 | tail -3 || true
     fi
 
     # Add istota to docker group
