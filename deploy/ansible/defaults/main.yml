@@ -306,6 +306,10 @@ istota_backup_rclone_remote: "{{ istota_rclone_remote }}"
 istota_backup_rclone_remote_path: "Backups"
 istota_backup_log: "/var/log/{{ istota_namespace }}/{{ istota_namespace }}-backup.log"
 
+# Auto-update settings (poor man's CI)
+istota_auto_update_enabled: false
+istota_auto_update_cron: "*/5 * * * *"
+
 # Whether to configure rclone automatically
 istota_configure_rclone: true
 

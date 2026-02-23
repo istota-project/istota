@@ -1,0 +1,3 @@
+# {{ istota_namespace | capitalize }} auto-update check - managed by Ansible
+MAILTO=""
+{{ istota_auto_update_cron }} root /usr/local/bin/{{ istota_namespace }}-update.sh

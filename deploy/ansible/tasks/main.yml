@@ -661,6 +661,40 @@
   when: not istota_backup_enabled
 
 # ============================================================
+# AUTO-UPDATE (poor man's CI)
+# ============================================================
+
+- name: Deploy auto-update script
+  template:
+    src: istota-update.sh.j2
+    dest: "/usr/local/bin/{{ istota_namespace }}-update.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: istota_auto_update_enabled
+
+- name: Deploy auto-update cron
+  template:
+    src: istota-update.cron.j2
+    dest: "/etc/cron.d/{{ istota_namespace }}-update"
+    owner: root
+    group: root
+    mode: "0644"
+  when: istota_auto_update_enabled
+
+- name: Remove auto-update script when disabled
+  file:
+    path: "/usr/local/bin/{{ istota_namespace }}-update.sh"
+    state: absent
+  when: not istota_auto_update_enabled
+
+- name: Remove auto-update cron when disabled
+  file:
+    path: "/etc/cron.d/{{ istota_namespace }}-update"
+    state: absent
+  when: not istota_auto_update_enabled
+
+# ============================================================
 # LEDGER BACKUP DIRECTORIES (for auto-append rotating backups)
 # ============================================================
 

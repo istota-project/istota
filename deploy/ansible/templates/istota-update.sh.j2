@@ -1,0 +1,97 @@
+#!/bin/bash
+# {{ istota_namespace | capitalize }} auto-update script - managed by Ansible
+set -euo pipefail
+
+REPO_DIR="{{ istota_repo_dir }}"
+REPO_BRANCH="{{ istota_repo_branch }}"
+REPO_TAG="{{ istota_repo_tag }}"
+NAMESPACE="{{ istota_namespace }}"
+PACKAGE="{{ istota_package }}"
+USER="{{ istota_user }}"
+GROUP="{{ istota_group }}"
+HOME_DIR="{{ istota_home }}"
+DB_PATH="{{ istota_home }}/data/{{ istota_namespace }}.db"
+LOG="/var/log/{{ istota_namespace }}/{{ istota_namespace }}-update.log"
+LOCK="/tmp/{{ istota_namespace }}-update.lock"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+exec >> "$LOG" 2>&1
+
+# Acquire exclusive lock (exit silently if another run is in progress)
+exec 200>"$LOCK"
+flock -n 200 || exit 0
+
+cd "$REPO_DIR"
+
+git fetch origin --tags --quiet
+
+if [ -n "$REPO_TAG" ]; then
+    # Tag mode: resolve latest semver tag and check if we need to update
+    if [ "$REPO_TAG" = "latest" ]; then
+        TARGET_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+    else
+        TARGET_TAG="$REPO_TAG"
+    fi
+
+    if [ -z "$TARGET_TAG" ]; then
+        log "ERROR: No semver tags found in repository"
+        exit 1
+    fi
+
+    CURRENT=$(git rev-parse HEAD)
+    TARGET=$(git rev-parse "$TARGET_TAG^{}" 2>/dev/null || git rev-parse "$TARGET_TAG")
+
+    if [ "$CURRENT" = "$TARGET" ]; then
+        exit 0
+    fi
+
+    log "Updating to tag $TARGET_TAG ($CURRENT -> $TARGET)"
+    git checkout "$TARGET_TAG" --quiet
+else
+    # Branch mode: check if remote has new commits
+    CURRENT=$(git rev-parse HEAD)
+    REMOTE=$(git rev-parse "origin/$REPO_BRANCH")
+
+    if [ "$CURRENT" = "$REMOTE" ]; then
+        exit 0
+    fi
+
+    log "Updating branch $REPO_BRANCH ($CURRENT -> $REMOTE)"
+    git pull origin "$REPO_BRANCH" --quiet
+fi
+
+# Fix repo ownership
+chown -R "${USER}:${GROUP}" "$REPO_DIR"
+
+# Install/update dependencies
+log "Installing dependencies"
+UV_ARGS="sync"
+{% if istota_memory_search_enabled %}
+UV_ARGS="$UV_ARGS --extra memory-search"
+{% endif %}
+{% if istota_whisper_enabled %}
+UV_ARGS="$UV_ARGS --extra whisper"
+{% endif %}
+PATH="/root/.local/bin:$PATH" uv $UV_ARGS
+
+# Fix venv ownership
+chown -R "${USER}:${GROUP}" "${REPO_DIR}/.venv"
+
+# Run DB migrations
+log "Running database migrations"
+"${HOME_DIR}/.venv/bin/python" -c "from pathlib import Path; import sys; sys.path.insert(0, 'src'); from ${PACKAGE}.db import init_db; init_db(Path('${DB_PATH}'))"
+sqlite3 "$DB_PATH" "ALTER TABLE processed_emails ADD COLUMN \"references\" TEXT;" 2>/dev/null || true
+sqlite3 "$DB_PATH" "ALTER TABLE tasks ADD COLUMN output_target TEXT;" 2>/dev/null || true
+sqlite3 "$DB_PATH" "ALTER TABLE scheduled_jobs ADD COLUMN output_target TEXT;" 2>/dev/null || true
+
+# Fix DB ownership
+chown "${USER}:${GROUP}" "$DB_PATH"
+
+# Restart scheduler
+log "Restarting ${NAMESPACE}-scheduler"
+systemctl restart "${NAMESPACE}-scheduler"
+
+log "Update complete"
