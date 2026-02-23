@@ -101,6 +101,9 @@ context_truncation = 0
 # Number of recent unfiltered tasks to inject into context (ensures scheduled/briefing
 # messages aren't orphaned when the user replies to them)
 previous_tasks_count = 3
+# Messages to fetch from Talk API for context (max 200, default 100)
+# Talk API-based context shows all participants' messages, not just bot interactions
+talk_context_limit = 100
 
 [logging]
 # Log level: INFO (default) or DEBUG (verbose)

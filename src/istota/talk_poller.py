@@ -2,22 +2,14 @@
 
 import asyncio
 import logging
-import re
 import time
 
 from . import db
 from .config import Config
-from .talk import TalkClient
+from .talk import TalkClient, clean_message_content
 
 logger = logging.getLogger("istota.talk_poller")
 
-
-# Pattern to extract file attachment info from Talk messages
-# Format: {file0} placeholder in message, actual file shared in bot's Talk folder
-FILE_PLACEHOLDER_PATTERN = re.compile(r'\{file(\d+)\}')
-
-# Pattern to match mention placeholders in Talk messages
-MENTION_PLACEHOLDER_PATTERN = re.compile(r'\{(mention-(?:user|call|federated-user)\d+)\}')
 
 # Participant cache: token -> (participants list, timestamp)
 _participant_cache: dict[str, tuple[list[dict], float]] = {}
@@ -70,53 +62,6 @@ def is_bot_mentioned(message: dict, bot_username: str) -> bool:
             if value.get("id") == bot_username:
                 return True
     return False
-
-
-def clean_message_content(message: dict, bot_username: str | None = None) -> str:
-    """
-    Clean up message content, replacing file and mention placeholders with readable text.
-
-    When bot_username is provided, the bot's own mention placeholder is stripped
-    (cleaned from the prompt). Other mentions are replaced with @DisplayName.
-    """
-    content = message.get("message", "")
-    message_params = message.get("messageParameters", {})
-
-    # Handle case where messageParameters is an empty list instead of dict
-    if not isinstance(message_params, dict):
-        return content
-
-    # Replace {fileN} placeholders with [filename]
-    def replace_file(match):
-        file_key = f"file{match.group(1)}"
-        if file_key in message_params:
-            filename = message_params[file_key].get("name", "file")
-            return f"[{filename}]"
-        return match.group(0)
-
-    content = FILE_PLACEHOLDER_PATTERN.sub(replace_file, content)
-
-    # Replace mention placeholders
-    if bot_username is not None:
-        def replace_mention(match):
-            key = match.group(1)
-            param = message_params.get(key)
-            if not isinstance(param, dict):
-                return match.group(0)
-            # Strip bot's own mention from the prompt
-            if param.get("id") == bot_username:
-                return ""
-            # Replace other mentions with @DisplayName
-            display_name = param.get("name", param.get("id", ""))
-            if display_name:
-                return f"@{display_name}"
-            return match.group(0)
-
-        content = MENTION_PLACEHOLDER_PATTERN.sub(replace_mention, content)
-        # Clean up extra whitespace from stripped bot mentions
-        content = re.sub(r'  +', ' ', content).strip()
-
-    return content
 
 
 async def _get_participants(

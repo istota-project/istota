@@ -16,7 +16,13 @@ from zoneinfo import ZoneInfo
 
 from . import db
 from .config import Config
-from .context import format_context_for_prompt, select_relevant_context
+from .context import (
+    build_talk_context,
+    format_context_for_prompt,
+    format_talk_context_for_prompt,
+    select_relevant_context,
+    select_relevant_talk_context,
+)
 from .storage import (
     ensure_channel_directories,
     ensure_user_directories_v2,
@@ -470,6 +476,204 @@ def _ensure_reply_parent_in_history(
     return history, None
 
 
+def _build_talk_api_context(
+    task: db.Task,
+    config: Config,
+    conn: "db.sqlite3.Connection | None",
+) -> str | None:
+    """Build conversation context from the Talk chat API.
+
+    Fetches recent messages from the Talk API, enriches bot messages with
+    task metadata from the DB, and formats for the prompt.
+
+    Returns formatted context string, or None if no relevant messages found.
+    """
+    import asyncio
+    from .talk import TalkClient
+    from .context import _parse_reference_id
+
+    client = TalkClient(config)
+    limit = config.conversation.talk_context_limit
+    raw_messages = asyncio.run(client.fetch_chat_history(task.conversation_token, limit=limit))
+
+    if not raw_messages:
+        logger.info("No messages from Talk API for token %s", task.conversation_token)
+        # Fall through to reply-to fallback
+        if task.reply_to_talk_id and task.reply_to_content:
+            return f"(In reply to: {task.reply_to_content})"
+        return None
+
+    # Collect task IDs from referenceIds for batch metadata lookup
+    task_ids = []
+    for msg in raw_messages:
+        ref_id = msg.get("referenceId") or None
+        tid, tag = _parse_reference_id(ref_id)
+        if tid is not None and tag == "result":
+            task_ids.append(tid)
+
+    # Batch lookup task metadata
+    task_metadata: dict[int, dict] = {}
+    if task_ids:
+        if conn is not None:
+            task_metadata = db.get_task_metadata_for_context(conn, task_ids)
+        else:
+            with db.get_db(config.db_path) as temp_conn:
+                task_metadata = db.get_task_metadata_for_context(temp_conn, task_ids)
+
+    # Build filtered TalkMessage list
+    talk_messages = build_talk_context(
+        raw_messages, config.talk.bot_username, task_metadata,
+    )
+
+    if not talk_messages:
+        logger.info("No relevant Talk messages after filtering for task %d", task.id)
+        if task.reply_to_talk_id and task.reply_to_content:
+            return f"(In reply to: {task.reply_to_content})"
+        return None
+
+    # Reply parent handling: check if replied-to message is in the fetched history
+    reply_parent_talk_msg = None
+    if task.reply_to_talk_id:
+        for tm in talk_messages:
+            if tm.message_id == task.reply_to_talk_id:
+                reply_parent_talk_msg = tm
+                break
+        if reply_parent_talk_msg is None and task.reply_to_content:
+            # Synthesize a TalkMessage from reply_to_content as fallback
+            reply_parent_talk_msg = db.TalkMessage(
+                message_id=task.reply_to_talk_id,
+                actor_id="unknown",
+                actor_display_name="User",
+                is_bot=False,
+                content=task.reply_to_content,
+                timestamp=0,
+                actions_taken=None,
+                message_role="user",
+                task_id=None,
+            )
+            talk_messages = [reply_parent_talk_msg] + talk_messages
+
+    # Select relevant messages
+    relevant = select_relevant_talk_context(task.prompt, talk_messages, config)
+
+    # Ensure reply parent survives triage
+    if reply_parent_talk_msg:
+        relevant_ids = {m.message_id for m in relevant}
+        if reply_parent_talk_msg.message_id not in relevant_ids:
+            relevant = [reply_parent_talk_msg] + relevant
+            logger.info(
+                "Re-added reply parent (talk msg %d) after triage for task %d",
+                reply_parent_talk_msg.message_id, task.id,
+            )
+
+    if not relevant:
+        logger.info("No relevant Talk context selected from %d messages", len(talk_messages))
+        return None
+
+    conversation_context = format_talk_context_for_prompt(
+        relevant, truncation=config.conversation.context_truncation,
+    )
+    logger.info(
+        "Loaded %d Talk API context messages (%d chars) for task %d",
+        len(relevant), len(conversation_context), task.id,
+    )
+    return conversation_context
+
+
+def _build_db_context(
+    task: db.Task,
+    config: Config,
+    conn: "db.sqlite3.Connection | None",
+) -> str | None:
+    """Build conversation context from the DB (original approach).
+
+    Used for email tasks and as fallback when Talk API is unavailable.
+    """
+    # Exclude background task types from conversation context
+    _exclude_types = ["scheduled", "briefing"]
+
+    if conn is not None:
+        history = db.get_conversation_history(
+            conn, task.conversation_token, exclude_task_id=task.id,
+            limit=config.conversation.lookback_count,
+            exclude_source_types=_exclude_types,
+        )
+    else:
+        with db.get_db(config.db_path) as temp_conn:
+            history = db.get_conversation_history(
+                temp_conn, task.conversation_token, exclude_task_id=task.id,
+                limit=config.conversation.lookback_count,
+                exclude_source_types=_exclude_types,
+            )
+
+    # Inject recent unfiltered tasks (scheduled/briefing in same channel)
+    if conn is not None:
+        prev_tasks = db.get_previous_tasks(
+            conn, task.conversation_token, exclude_task_id=task.id,
+            limit=config.conversation.previous_tasks_count,
+        )
+    else:
+        with db.get_db(config.db_path) as temp_conn:
+            prev_tasks = db.get_previous_tasks(
+                temp_conn, task.conversation_token, exclude_task_id=task.id,
+                limit=config.conversation.previous_tasks_count,
+            )
+
+    if prev_tasks:
+        history_ids = {msg.id for msg in history}
+        injected = 0
+        for prev in prev_tasks:
+            if prev.id not in history_ids:
+                history.append(prev)
+                injected += 1
+        if injected:
+            history.sort(key=lambda m: (m.created_at, m.id))
+            logger.info(
+                "Included %d previous tasks (excluded source_type) in context for task %d",
+                injected, task.id,
+            )
+
+    logger.debug("Context lookup: token=%s, history_count=%d", task.conversation_token, len(history))
+
+    if history:
+        reply_parent_msg = None
+        if task.reply_to_talk_id and task.conversation_token:
+            history, reply_parent_msg = _ensure_reply_parent_in_history(
+                task, history, config, conn if conn is not None else None,
+            )
+
+        relevant = select_relevant_context(task.prompt, history, config)
+
+        if reply_parent_msg:
+            relevant_ids = {msg.id for msg in relevant}
+            if reply_parent_msg.id not in relevant_ids:
+                relevant = [reply_parent_msg] + relevant
+                logger.info(
+                    "Re-added reply parent (task %d) after triage dropped it for task %d",
+                    reply_parent_msg.id, task.id,
+                )
+
+        if relevant:
+            conversation_context = format_context_for_prompt(
+                relevant, truncation=config.conversation.context_truncation,
+            )
+            logger.info(
+                "Loaded %d context messages (%d chars) for task %d",
+                len(relevant), len(conversation_context), task.id,
+            )
+            return conversation_context
+        else:
+            logger.info("No relevant context selected from %d messages", len(history))
+    else:
+        if task.reply_to_talk_id and task.reply_to_content:
+            logger.info("Using inline reply context for task %d (no history)", task.id)
+            return f"(In reply to: {task.reply_to_content})"
+        else:
+            logger.info("No conversation history found for token %s", task.conversation_token)
+
+    return None
+
+
 def _apply_bot_name(content: str, config: Config) -> str:
     """Replace {BOT_NAME} placeholder with config.bot_name in loaded content."""
     return content.replace("{BOT_NAME}", config.bot_name).replace("{BOT_DIR}", config.bot_dir_name)
@@ -900,105 +1104,23 @@ def execute_task(
     if context_skip_reason:
         logger.info("Skipping context lookup: %s", context_skip_reason)
     else:
-        # Exclude background task types from conversation context so scheduled
-        # jobs, briefings, and heartbeat results don't pollute interactive history
-        _exclude_types = ["scheduled", "briefing"]
-
-        # Use provided connection or open a new one
-        if conn is not None:
-            history = db.get_conversation_history(
-                conn,
-                task.conversation_token,
-                exclude_task_id=task.id,
-                limit=config.conversation.lookback_count,
-                exclude_source_types=_exclude_types,
-            )
-        else:
-            with db.get_db(config.db_path) as temp_conn:
-                history = db.get_conversation_history(
-                    temp_conn,
-                    task.conversation_token,
-                    exclude_task_id=task.id,
-                    limit=config.conversation.lookback_count,
-                    exclude_source_types=_exclude_types,
+        # Try Talk API-based context for Talk tasks, fall back to DB on failure
+        _used_talk_api = False
+        if task.source_type == "talk":
+            try:
+                conversation_context = _build_talk_api_context(
+                    task, config, conn,
+                )
+                _used_talk_api = conversation_context is not None
+            except Exception as e:
+                logger.warning(
+                    "Talk API context fetch failed for task %d, falling back to DB: %s",
+                    task.id, e,
                 )
 
-        # Always fetch the immediately previous task (unfiltered) so that
-        # scheduled/briefing messages aren't orphaned when the user responds
-        # to them in the same channel.
-        if conn is not None:
-            prev_tasks = db.get_previous_tasks(
-                conn, task.conversation_token, exclude_task_id=task.id,
-                limit=config.conversation.previous_tasks_count,
-            )
-        else:
-            with db.get_db(config.db_path) as temp_conn:
-                prev_tasks = db.get_previous_tasks(
-                    temp_conn, task.conversation_token, exclude_task_id=task.id,
-                    limit=config.conversation.previous_tasks_count,
-                )
-
-        if prev_tasks:
-            history_ids = {msg.id for msg in history}
-            injected = 0
-            for prev in prev_tasks:
-                if prev.id not in history_ids:
-                    history.append(prev)
-                    injected += 1
-            if injected:
-                history.sort(key=lambda m: (m.created_at, m.id))
-                logger.info(
-                    "Included %d previous tasks (excluded source_type) in context for task %d",
-                    injected,
-                    task.id,
-                )
-
-        logger.debug(
-            "Context lookup: token=%s, history_count=%d",
-            task.conversation_token,
-            len(history),
-        )
-
-        if history:
-            # Force-include reply parent if this task is a reply to a specific message
-            reply_parent_msg = None
-            if task.reply_to_talk_id and task.conversation_token:
-                history, reply_parent_msg = _ensure_reply_parent_in_history(
-                    task, history, config, conn if conn is not None else None
-                )
-
-            relevant = select_relevant_context(task.prompt, history, config)
-
-            # Ensure reply parent survives triage — force it in if triage dropped it
-            if reply_parent_msg:
-                relevant_ids = {msg.id for msg in relevant}
-                if reply_parent_msg.id not in relevant_ids:
-                    relevant = [reply_parent_msg] + relevant
-                    logger.info(
-                        "Re-added reply parent (task %d) after triage dropped it for task %d",
-                        reply_parent_msg.id,
-                        task.id,
-                    )
-
-            if relevant:
-                conversation_context = format_context_for_prompt(
-                    relevant, truncation=config.conversation.context_truncation
-                )
-                logger.info(
-                    "Loaded %d context messages (%d chars) for task %d",
-                    len(relevant),
-                    len(conversation_context),
-                    task.id,
-                )
-            else:
-                logger.info("No relevant context selected from %d messages", len(history))
-        else:
-            # No conversation history — but if this is a reply, still inject the parent content
-            if task.reply_to_talk_id and task.reply_to_content:
-                conversation_context = f"(In reply to: {task.reply_to_content})"
-                logger.info("Using inline reply context for task %d (no history)", task.id)
-            else:
-                logger.info("No conversation history found for token %s", task.conversation_token)
+        # DB-based context fallback (always used for email, fallback for Talk)
+        if not _used_talk_api:
+            conversation_context = _build_db_context(task, config, conn)
 
     # Load user memory (auto-create directories if missing)
     # Skip personal memory for briefings — they should use only their

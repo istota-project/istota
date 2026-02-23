@@ -4,8 +4,12 @@ import json
 import logging
 import re
 import subprocess
+from datetime import datetime, timezone
+from typing import Any
+
 from .config import Config
-from .db import ConversationMessage
+from .db import ConversationMessage, TalkMessage
+from .talk import clean_message_content
 
 logger = logging.getLogger("istota.context")
 
@@ -245,3 +249,248 @@ def _format_actions_line(actions_json: str) -> str | None:
     display = actions[:_MAX_ACTIONS]
     suffix = f" +{len(actions) - _MAX_ACTIONS} more" if len(actions) > _MAX_ACTIONS else ""
     return f"[Actions: {' | '.join(str(a) for a in display)}{suffix}]"
+
+
+# ---------------------------------------------------------------------------
+# Talk API-based context pipeline
+# ---------------------------------------------------------------------------
+
+_REFERENCE_ID_PATTERN = re.compile(r"^istota:task:(\d+):(\w+)$")
+
+_SCHEDULED_SOURCE_TYPES = {"scheduled", "cron", "briefing", "heartbeat"}
+
+
+def _parse_reference_id(ref_id: str | None) -> tuple[int | None, str | None]:
+    """Parse an istota referenceId string.
+
+    Returns (task_id, tag) where tag is "result", "ack", or "progress".
+    Returns (None, None) for non-matching or missing referenceIds.
+    """
+    if not ref_id:
+        return None, None
+    m = _REFERENCE_ID_PATTERN.match(ref_id)
+    if not m:
+        return None, None
+    return int(m.group(1)), m.group(2)
+
+
+def build_talk_context(
+    raw_messages: list[dict],
+    bot_username: str,
+    task_metadata: dict[int, dict],
+) -> list[TalkMessage]:
+    """Convert raw Talk API messages into filtered TalkMessage list.
+
+    Args:
+        raw_messages: Messages from TalkClient.fetch_chat_history() (oldest-first).
+        bot_username: Bot's Nextcloud username for identifying bot messages.
+        task_metadata: Dict from get_task_metadata_for_context() mapping
+            task_id -> {"actions_taken": ..., "source_type": ...}.
+
+    Returns filtered list of TalkMessages (oldest-first), excluding system
+    messages, deleted messages, ack messages, and progress messages.
+    """
+    result = []
+    for msg in raw_messages:
+        # Skip system messages
+        if msg.get("messageType") == "system":
+            continue
+
+        # Skip deleted messages
+        if msg.get("deleted"):
+            continue
+
+        ref_id = msg.get("referenceId") or None
+        task_id, tag = _parse_reference_id(ref_id)
+
+        # Skip ack and progress messages
+        if tag in ("ack", "progress"):
+            continue
+
+        actor_id = msg.get("actorId", "")
+        is_bot = actor_id == bot_username
+
+        # Clean content (resolve placeholders)
+        content = clean_message_content(msg, bot_username=bot_username if not is_bot else None)
+
+        # Determine message role and enrich with task metadata
+        actions_taken = None
+        message_role = "user"
+        if is_bot:
+            message_role = "bot_result"
+            if task_id and task_id in task_metadata:
+                meta = task_metadata[task_id]
+                actions_taken = meta.get("actions_taken")
+                source_type = meta.get("source_type", "")
+                if source_type in _SCHEDULED_SOURCE_TYPES:
+                    message_role = "scheduled"
+
+        result.append(TalkMessage(
+            message_id=msg.get("id", 0),
+            actor_id=actor_id,
+            actor_display_name=msg.get("actorDisplayName", actor_id),
+            is_bot=is_bot,
+            content=content,
+            timestamp=msg.get("timestamp", 0),
+            actions_taken=actions_taken,
+            message_role=message_role,
+            task_id=task_id,
+        ))
+
+    return result
+
+
+def select_relevant_talk_context(
+    current_prompt: str,
+    messages: list[TalkMessage],
+    config: "Config",
+) -> list[TalkMessage]:
+    """Select relevant Talk messages for context, mirroring select_relevant_context().
+
+    Uses the same hybrid approach: guaranteed recent messages + LLM triage of older.
+    """
+    if not messages:
+        return []
+
+    if not config.conversation.use_selection:
+        return messages
+
+    threshold = config.conversation.skip_selection_threshold
+    if len(messages) <= threshold:
+        return messages
+
+    recent_count = config.conversation.always_include_recent
+    if recent_count >= len(messages):
+        return messages
+
+    guaranteed_recent = messages[-recent_count:] if recent_count > 0 else []
+    older = messages[:-recent_count] if recent_count > 0 else messages
+
+    if not older:
+        return guaranteed_recent
+
+    selected_older = _triage_older_talk_messages(current_prompt, older, config)
+    selected = selected_older + guaranteed_recent
+
+    logger.info(
+        "Talk context: %d triaged + %d recent = %d/%d messages",
+        len(selected_older), len(guaranteed_recent), len(selected), len(messages),
+    )
+    return selected
+
+
+def _triage_older_talk_messages(
+    current_prompt: str,
+    older: list[TalkMessage],
+    config: "Config",
+) -> list[TalkMessage]:
+    """Run the selection model to triage older Talk messages."""
+
+    def _format_msg(i: int, msg: TalkMessage) -> str:
+        ts = datetime.fromtimestamp(msg.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        speaker = "Bot" if msg.is_bot else msg.actor_id
+        lines = f"[{i}] ({ts}) {speaker}: {msg.content}"
+        if msg.actions_taken:
+            actions_line = _format_actions_line(msg.actions_taken)
+            if actions_line:
+                lines += f"\n{actions_line}"
+        return lines
+
+    history_text = "\n\n".join(_format_msg(i, msg) for i, msg in enumerate(older))
+
+    selection_prompt = f"""You are helping select relevant conversation context for a chatbot.
+
+Current user request:
+{current_prompt}
+
+OLDER messages from this conversation (the {config.conversation.always_include_recent} most recent messages are already included separately):
+
+{history_text}
+
+Which of these OLDER messages contain information relevant to understanding or answering the current request?
+
+NOTE: The {config.conversation.always_include_recent} most recent messages are already included. Select which of these older messages also provide useful context.
+
+Respond with ONLY a JSON object in this exact format:
+{{"relevant_ids": [0, 2, 5]}}
+
+Use an empty array if none of these older messages are relevant: {{"relevant_ids": []}}
+
+Rules:
+- When in doubt, INCLUDE the message — more context is better than missing context
+- Include messages that could help answer or provide background for the current request
+- Include messages that establish context, preferences, or facts the user might be referring to
+- Include messages about ongoing topics, even if not directly referenced
+- Only exclude messages that are clearly unrelated (different topic, fully resolved, trivial small talk)
+- Respond with ONLY the JSON, no other text"""
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "-", "--model", config.conversation.selection_model],
+            input=selection_prompt,
+            capture_output=True,
+            text=True,
+            timeout=config.conversation.selection_timeout,
+        )
+
+        if result.returncode != 0:
+            logger.warning("Talk context triage failed (rc=%d)", result.returncode)
+            return []
+
+        output = result.stdout.strip()
+        code_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", output, re.DOTALL)
+        if code_block:
+            output = code_block.group(1).strip()
+        else:
+            json_match = re.search(r"\{.*\}", output, re.DOTALL)
+            if json_match:
+                output = json_match.group(0)
+
+        data = json.loads(output)
+        relevant_ids = data.get("relevant_ids", [])
+        if not isinstance(relevant_ids, list):
+            return []
+
+        valid_ids = [idx for idx in relevant_ids if isinstance(idx, int) and 0 <= idx < len(older)]
+        selected = [older[idx] for idx in sorted(valid_ids)]
+        logger.debug("Talk triage selected %d/%d older messages", len(selected), len(older))
+        return selected
+
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError, Exception) as e:
+        logger.warning("Talk context triage error: %s", e)
+        return []
+
+
+def format_talk_context_for_prompt(
+    messages: list[TalkMessage],
+    truncation: int = 3000,
+) -> str:
+    """Format Talk messages for inclusion in the prompt.
+
+    Individual message format (not paired), showing all participants.
+    """
+    if not messages:
+        return ""
+
+    formatted = []
+    for msg in messages:
+        ts = datetime.fromtimestamp(msg.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+        if msg.is_bot:
+            speaker = "Bot"
+            content = msg.content
+            if truncation > 0 and len(content) > truncation:
+                content = content[:truncation] + "...[truncated]"
+            formatted.append(f"[{ts}] {speaker}: {content}")
+            if msg.actions_taken:
+                actions_line = _format_actions_line(msg.actions_taken)
+                if actions_line:
+                    formatted.append(actions_line)
+        else:
+            if msg.message_role == "scheduled":
+                speaker = "Scheduled"
+            else:
+                speaker = msg.actor_id or "User"
+            formatted.append(f"[{ts}] {speaker}: {msg.content}")
+
+    return "\n".join(formatted)

@@ -1,9 +1,9 @@
-"""Configuration loading for istota.talk module."""
+"""Tests for istota.talk module."""
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from istota.talk import TalkClient, split_message, truncate_message
+from istota.talk import TalkClient, split_message, truncate_message, clean_message_content
 from istota.config import Config, NextcloudConfig
 
 
@@ -250,3 +250,132 @@ class TestSplitMessage:
         parts = split_message(msg, max_length=4000)
         for part in parts:
             assert len(part) <= 4000
+
+
+class TestSendMessageReferenceId:
+    @pytest.mark.asyncio
+    async def test_reference_id_included_in_body(self, client):
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ocs": {"data": {"id": 50}}}
+        mock_http.post = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            await client.send_message("room1", "Hello!", reference_id="istota:task:42:result")
+
+        call_kwargs = mock_http.post.call_args
+        assert call_kwargs.kwargs["json"] == {
+            "message": "Hello!",
+            "referenceId": "istota:task:42:result",
+        }
+
+    @pytest.mark.asyncio
+    async def test_reference_id_omitted_when_none(self, client):
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ocs": {"data": {"id": 51}}}
+        mock_http.post = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            await client.send_message("room1", "Hello!")
+
+        call_kwargs = mock_http.post.call_args
+        assert "referenceId" not in call_kwargs.kwargs["json"]
+
+    @pytest.mark.asyncio
+    async def test_reference_id_with_reply(self, client):
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ocs": {"data": {"id": 52}}}
+        mock_http.post = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            await client.send_message(
+                "room1", "Reply!", reply_to=10, reference_id="istota:task:5:ack",
+            )
+
+        call_kwargs = mock_http.post.call_args
+        assert call_kwargs.kwargs["json"] == {
+            "message": "Reply!",
+            "replyTo": 10,
+            "referenceId": "istota:task:5:ack",
+        }
+
+
+class TestFetchChatHistory:
+    @pytest.mark.asyncio
+    async def test_returns_oldest_first(self, client):
+        mock_http = _mock_httpx_client()
+        # API returns newest-first
+        messages = [
+            {"id": 3, "message": "C"},
+            {"id": 2, "message": "B"},
+            {"id": 1, "message": "A"},
+        ]
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ocs": {"data": messages}}
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.fetch_chat_history("room1", limit=50)
+
+        assert [m["id"] for m in result] == [1, 2, 3]
+        call_kwargs = mock_http.get.call_args
+        assert call_kwargs.kwargs["params"]["lookIntoFuture"] == 0
+        assert call_kwargs.kwargs["params"]["limit"] == 50
+
+    @pytest.mark.asyncio
+    async def test_empty_room(self, client):
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ocs": {"data": []}}
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.fetch_chat_history("room1")
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_default_limit(self, client):
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ocs": {"data": []}}
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            await client.fetch_chat_history("room1")
+
+        call_kwargs = mock_http.get.call_args
+        assert call_kwargs.kwargs["params"]["limit"] == 100
+
+
+class TestCleanMessageContent:
+    def test_basic_text(self):
+        msg = {"message": "Hello world", "messageParameters": {}}
+        assert clean_message_content(msg) == "Hello world"
+
+    def test_file_placeholder(self):
+        msg = {
+            "message": "Check this {file0}",
+            "messageParameters": {"file0": {"name": "photo.jpg"}},
+        }
+        assert clean_message_content(msg) == "Check this [photo.jpg]"
+
+    def test_bot_mention_stripped(self):
+        msg = {
+            "message": "{mention-user0} do something",
+            "messageParameters": {"mention-user0": {"type": "user", "id": "istota", "name": "Istota"}},
+        }
+        assert clean_message_content(msg, bot_username="istota") == "do something"
+
+    def test_other_mention_replaced(self):
+        msg = {
+            "message": "Hey {mention-user0}",
+            "messageParameters": {"mention-user0": {"type": "user", "id": "alice", "name": "Alice"}},
+        }
+        assert clean_message_content(msg, bot_username="istota") == "Hey @Alice"
+
+    def test_empty_params_list(self):
+        msg = {"message": "Hello {file0}", "messageParameters": []}
+        assert clean_message_content(msg) == "Hello {file0}"

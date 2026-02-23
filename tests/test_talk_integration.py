@@ -355,3 +355,69 @@ class TestPollingRoundTrip:
         assert messages == []
         # Should have waited roughly the timeout period
         assert elapsed >= 2.0, f"Poll returned too quickly ({elapsed:.1f}s)"
+
+
+class TestReferenceIdRoundTrip:
+    """Verify referenceId is stored and returned by the API."""
+
+    def test_send_with_reference_id_and_fetch(self, client, run):
+        """Send with referenceId, then fetch_chat_history and verify it comes back."""
+        tag = uuid.uuid4().hex[:8]
+        ref_id = f"istota:task:999:result:{tag}"
+        message = f"[integration test] refid_roundtrip {tag}"
+
+        # Send with referenceId
+        response = run(client.send_message(
+            TEST_ROOM, message, reference_id=ref_id,
+        ))
+        sent_id = response["ocs"]["data"]["id"]
+
+        # Fetch history and find our message
+        messages = run(client.fetch_chat_history(TEST_ROOM, limit=20))
+        found = [m for m in messages if m.get("id") == sent_id]
+        assert len(found) == 1, f"Expected to find sent message {sent_id} in history"
+        assert found[0].get("referenceId") == ref_id
+
+    def test_send_without_reference_id(self, client, run):
+        """Messages without referenceId have empty/missing referenceId field."""
+        tag = uuid.uuid4().hex[:8]
+        message = f"[integration test] no_refid {tag}"
+        response = run(client.send_message(TEST_ROOM, message))
+        sent_id = response["ocs"]["data"]["id"]
+
+        messages = run(client.fetch_chat_history(TEST_ROOM, limit=20))
+        found = [m for m in messages if m.get("id") == sent_id]
+        assert len(found) == 1
+        ref = found[0].get("referenceId", "")
+        # Should be empty string or missing
+        assert not ref or ref == ""
+
+
+class TestContextFetch:
+    """Verify fetch_chat_history for context building."""
+
+    def test_fetch_returns_messages(self, client, run):
+        """fetch_chat_history returns messages in oldest-first order."""
+        messages = run(client.fetch_chat_history(TEST_ROOM, limit=10))
+        assert isinstance(messages, list)
+        if len(messages) >= 2:
+            ids = [m["id"] for m in messages]
+            assert ids == sorted(ids), "Messages should be oldest-first"
+
+    def test_fetch_message_fields(self, client, run):
+        """Messages have the fields needed for context building."""
+        messages = run(client.fetch_chat_history(TEST_ROOM, limit=10))
+        if not messages:
+            pytest.skip("No messages in test room")
+        msg = messages[-1]  # Most recent
+        assert "id" in msg
+        assert "actorId" in msg
+        assert "actorDisplayName" in msg
+        assert "message" in msg
+        assert "timestamp" in msg
+        assert "messageType" in msg
+
+    def test_fetch_respects_limit(self, client, run):
+        """Limit parameter controls max messages returned."""
+        messages = run(client.fetch_chat_history(TEST_ROOM, limit=3))
+        assert len(messages) <= 3

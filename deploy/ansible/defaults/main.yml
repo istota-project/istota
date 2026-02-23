@@ -115,6 +115,7 @@ istota_conversation_use_selection: true
 istota_conversation_always_include_recent: 10
 istota_conversation_context_truncation: 0
 istota_conversation_previous_tasks_count: 3
+istota_conversation_talk_context_limit: 100
 
 # Admin users - users with full system access (DB, all mount paths, admin-only skills)
 # When empty, all users are admins (backward compatible default)

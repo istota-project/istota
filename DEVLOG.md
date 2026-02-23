@@ -2,6 +2,35 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-23: Talk API-based conversation context
+
+Replaced the DB-only conversation context pipeline with one that fetches recent messages directly from the Talk chat API. This gives the bot the actual conversation visible to users — including messages from all participants in group chats, not just bot-processed interactions. Bot messages are tagged with `referenceId` fields for correlation back to tasks (actions_taken enrichment). Falls back to DB-based context on API failure.
+
+**Key changes:**
+- Added `reference_id` parameter to `TalkClient.send_message()` and tagged all bot messages (ack, progress, result) with `istota:task:{id}:{tag}`.
+- Extracted `clean_message_content()` from `talk_poller.py` to `talk.py` for reuse.
+- Added `fetch_chat_history()` to `TalkClient` for context fetching.
+- Added `TalkMessage` dataclass and `get_task_metadata_for_context()` batch lookup in `db.py`.
+- New Talk context pipeline in `context.py`: `build_talk_context()`, `select_relevant_talk_context()`, `format_talk_context_for_prompt()`.
+- Wired into `executor.py` with graceful fallback to DB path on Talk API failure.
+- Added `talk_context_limit` config field (default 100).
+
+**Files added/modified:**
+- `src/istota/talk.py` — `reference_id` param, `fetch_chat_history()`, `clean_message_content()` moved here
+- `src/istota/talk_poller.py` — Imports `clean_message_content` from `talk.py`
+- `src/istota/db.py` — `TalkMessage` dataclass, `get_task_metadata_for_context()`
+- `src/istota/context.py` — Talk API context pipeline functions
+- `src/istota/executor.py` — `_build_talk_api_context()`, `_build_db_context()` refactor
+- `src/istota/scheduler.py` — `reference_id` on all `send_message()` calls
+- `src/istota/config.py` — `talk_context_limit` field
+- `config/config.example.toml` — Documented `talk_context_limit`
+- `deploy/ansible/defaults/main.yml` — `istota_conversation_talk_context_limit`
+- `deploy/ansible/templates/config.toml.j2` — Renders `talk_context_limit`
+- `tests/test_talk_context.py` — New: 36 tests for Talk-based context
+- `tests/test_talk.py` — Extended: referenceId, fetch_chat_history, clean_message_content tests
+- `tests/test_talk_integration.py` — Extended: referenceId round-trip, context fetch tests
+- `tests/test_scheduler.py` — Updated assertions for reference_id parameter
+
 ## 2026-02-23: Fix auto-update script blocking on dirty uv.lock
 
 The auto-update cron job was failing because `uv sync` regenerates `uv.lock` on the server, and the next `git pull` refuses to merge over the dirty file. Added `git checkout -- uv.lock` before both the branch pull and tag checkout paths.

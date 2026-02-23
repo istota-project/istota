@@ -91,6 +91,7 @@ class ConversationConfig:
     always_include_recent: int = 5  # Always include this many recent messages without selection
     context_truncation: int = 0  # Max chars per bot response in context (0 to disable)
     previous_tasks_count: int = 3  # Number of recent unfiltered tasks to inject into context
+    talk_context_limit: int = 100  # Messages to fetch from Talk API for context (max 200)
 
 
 @dataclass
@@ -576,6 +577,7 @@ def load_config(config_path: Path | None = None) -> Config:
             always_include_recent=conv.get("always_include_recent", 5),
             context_truncation=conv.get("context_truncation", 0),
             previous_tasks_count=conv.get("previous_tasks_count", 3),
+            talk_context_limit=conv.get("talk_context_limit", 100),
         )
 
     if "scheduler" in data:

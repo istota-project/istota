@@ -2488,7 +2488,7 @@ class TestPostResultToTalk:
             )
 
         mock_instance.send_message.assert_called_once_with(
-            "room123", "Hello there", reply_to=None,
+            "room123", "Hello there", reply_to=None, reference_id=None,
         )
         assert result == 100
 
@@ -2508,7 +2508,7 @@ class TestPostResultToTalk:
             )
 
         mock_instance.send_message.assert_called_once_with(
-            "room123", "@bob Sure thing", reply_to=42,
+            "room123", "@bob Sure thing", reply_to=42, reference_id=None,
         )
         assert result == 200
 
@@ -2532,10 +2532,10 @@ class TestPostResultToTalk:
         assert len(calls) == 2
         # First part: reply_to + @mention
         assert calls[0].args == ("room123", "@carol Part 1")
-        assert calls[0].kwargs == {"reply_to": 42}
+        assert calls[0].kwargs == {"reply_to": 42, "reference_id": None}
         # Second part: no reply_to, no @mention
         assert calls[1].args == ("room123", "Part 2")
-        assert calls[1].kwargs == {"reply_to": None}
+        assert calls[1].kwargs == {"reply_to": None, "reference_id": None}
 
     @pytest.mark.asyncio
     async def test_group_chat_no_talk_message_id(self):
@@ -2553,7 +2553,7 @@ class TestPostResultToTalk:
             )
 
         mock_instance.send_message.assert_called_once_with(
-            "room123", "@dave Response", reply_to=None,
+            "room123", "@dave Response", reply_to=None, reference_id=None,
         )
 
     @pytest.mark.asyncio
@@ -2571,7 +2571,27 @@ class TestPostResultToTalk:
             result = await post_result_to_talk(config, task, "Working on it...")
 
         mock_instance.send_message.assert_called_once_with(
-            "room123", "Working on it...", reply_to=None,
+            "room123", "Working on it...", reply_to=None, reference_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_reference_id_passed_through(self):
+        """reference_id should be passed to send_message for each part."""
+        config = self._make_config()
+        task = self._make_task(is_group_chat=False, talk_message_id=42)
+
+        with patch("istota.scheduler.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.send_message = AsyncMock(
+                return_value={"ocs": {"data": {"id": 100}}}
+            )
+            await post_result_to_talk(
+                config, task, "Result", reference_id="istota:task:1:result",
+            )
+
+        mock_instance.send_message.assert_called_once_with(
+            "room123", "Result", reply_to=None,
+            reference_id="istota:task:1:result",
         )
 
 

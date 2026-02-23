@@ -721,6 +721,20 @@ class ConversationMessage:
     user_id: str | None = None
 
 
+@dataclass
+class TalkMessage:
+    """A message from the Talk API, used for Talk-based conversation context."""
+    message_id: int          # Talk message ID
+    actor_id: str            # Nextcloud username
+    actor_display_name: str  # Display name from API
+    is_bot: bool             # actor_id == bot_username
+    content: str             # cleaned text (placeholders resolved)
+    timestamp: int           # unix timestamp
+    actions_taken: str | None  # from DB, only for bot result messages
+    message_role: str        # "user" | "bot_result" | "scheduled"
+    task_id: int | None      # parsed from referenceId
+
+
 def get_conversation_history(
     conn: sqlite3.Connection,
     conversation_token: str,
@@ -827,6 +841,35 @@ def get_previous_tasks(
     # Return in oldest-first order (query fetches newest-first)
     results.reverse()
     return results
+
+
+def get_task_metadata_for_context(
+    conn: sqlite3.Connection,
+    task_ids: list[int],
+) -> dict[int, dict]:
+    """Batch lookup of task metadata for Talk-based context enrichment.
+
+    Given a list of task IDs (parsed from referenceIds in Talk messages),
+    returns a dict mapping task_id to {"actions_taken": ..., "source_type": ...}.
+    """
+    if not task_ids:
+        return {}
+
+    placeholders = ", ".join("?" for _ in task_ids)
+    query = f"""
+        SELECT id, actions_taken, source_type
+        FROM tasks
+        WHERE id IN ({placeholders})
+        AND status = 'completed'
+    """
+    cursor = conn.execute(query, task_ids)
+    return {
+        row["id"]: {
+            "actions_taken": row["actions_taken"],
+            "source_type": row["source_type"],
+        }
+        for row in cursor.fetchall()
+    }
 
 
 def log_task(

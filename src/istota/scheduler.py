@@ -285,7 +285,10 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
         else:
             formatted = f"*{msg}*"
         try:
-            asyncio.run(post_result_to_talk(config, task, formatted))
+            asyncio.run(post_result_to_talk(
+                config, task, formatted,
+                reference_id=f"istota:task:{task.id}:progress",
+            ))
             last_send = now
             send_count += 1
             sent_texts.append(msg)
@@ -648,7 +651,10 @@ def process_one_task(
         is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
         if task.source_type == "talk" and task.conversation_token and not dry_run:
             if not is_rerun:
-                asyncio.run(post_result_to_talk(config, task, random.choice(PROGRESS_MESSAGES)))
+                asyncio.run(post_result_to_talk(
+                    config, task, random.choice(PROGRESS_MESSAGES),
+                    reference_id=f"istota:task:{task.id}:ack",
+                ))
 
             # Build streaming progress callback if enabled
             if config.scheduler.progress_updates:
@@ -833,6 +839,7 @@ def process_one_task(
     if post_talk_message:
         response_msg_id = asyncio.run(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
+            reference_id=f"istota:task:{task.id}:result",
         ))
         # Store bot's response message ID for reply tracking
         if response_msg_id and not is_failure_notify:
@@ -871,6 +878,7 @@ def _strip_markdown(text: str) -> str:
 async def post_result_to_talk(
     config: Config, task: db.Task, message: str,
     *, use_reply_threading: bool = False,
+    reference_id: str | None = None,
 ) -> int | None:
     """Post a result message to Talk. Returns the Talk message ID of the last sent message.
 
@@ -894,6 +902,7 @@ async def post_result_to_talk(
                 part = f"@{task.user_id} {part}"
             response = await client.send_message(
                 task.conversation_token, part, reply_to=reply_to,
+                reference_id=reference_id,
             )
             msg_id = response.get("ocs", {}).get("data", {}).get("id")
         return msg_id

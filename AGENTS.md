@@ -199,7 +199,24 @@ Env var wiring is declarative via `[[env]]` sections in `skill.toml`. Skills wit
 - **Channel guidelines** (`config/guidelines/{source_type}.md`): Loaded per source type. Both optional.
 
 ### Conversation Context
-Hybrid approach: recent N messages (`always_include_recent`, default 5) always included without model call; older messages triaged by selection model. Short histories (≤ `skip_selection_threshold`) skip selection entirely. Reply-to tasks force-included. `use_selection=false` disables triage and includes all lookback messages. `context_truncation` controls max chars per bot response (0 = no truncation). Config: `[conversation]` section (enabled, lookback_count=25, skip_selection_threshold=3, always_include_recent=5, selection_model=haiku, use_selection, context_truncation=0). Graceful degradation on errors — falls back to guaranteed recent messages.
+Talk tasks use a **Talk API-based context pipeline** that fetches recent messages directly from the Talk chat API (`GET /chat/{token}`), giving the bot the actual conversation visible to users — including messages from all participants, not just bot interactions. Email tasks fall back to the DB-based context path.
+
+**Talk API context flow** (`_build_talk_api_context` in executor.py):
+1. `TalkClient.fetch_chat_history(token, limit=talk_context_limit)` — fetches recent messages from Talk API (oldest-first)
+2. Parse `referenceId` fields to extract task IDs from bot result messages (format: `istota:task:{id}:result`)
+3. `db.get_task_metadata_for_context(task_ids)` — batch lookup of `actions_taken` and `source_type` for enrichment
+4. `build_talk_context()` — filter (skip system, deleted, ack, progress messages) and convert to `TalkMessage` list
+5. `select_relevant_talk_context()` — same hybrid triage as DB path (guaranteed recent + LLM selection of older)
+6. `format_talk_context_for_prompt()` — individual message format showing all participants
+7. Reply parent handling: checks if `reply_to_talk_id` is in fetched messages, synthesizes from `reply_to_content` as fallback
+
+**referenceId tagging**: All bot-sent messages include a `referenceId` field: `istota:task:{id}:ack` for acknowledgments, `istota:task:{id}:progress` for progress updates, `istota:task:{id}:result` for final results. Ack and progress messages are filtered out of context. Result messages are enriched with `actions_taken` from the DB.
+
+**Fallback**: Talk API failure falls through to the DB-based context path with a warning log. Email tasks always use the DB path.
+
+**DB context path** (`_build_db_context`): Paired prompt/result format from completed tasks in the DB. Used for email tasks and as fallback. Includes `get_previous_tasks()` injection for scheduled/briefing continuity.
+
+**Selection**: Both paths use the same hybrid approach: recent N messages (`always_include_recent`, default 5) always included without model call; older messages triaged by selection model. Short histories (≤ `skip_selection_threshold`) skip selection entirely. Reply-to messages force-included. `use_selection=false` disables triage. Config: `[conversation]` section (enabled, lookback_count=25, skip_selection_threshold=3, always_include_recent=5, selection_model=haiku, use_selection, context_truncation=0, talk_context_limit=100).
 
 **Actions tracking**: Tool use descriptions from streaming execution are stored as `actions_taken` (JSON array) on completed tasks. Context formatter appends compact `[Actions: ...]` lines after bot responses so the bot can see what tools it used previously. Capped at 15 actions, pipe-separated. Also included in triage text for the selection model.
 

@@ -1,12 +1,67 @@
 """Nextcloud Talk API client."""
 
 import logging
+import re
 
 import httpx
 
 from .config import Config
 
 logger = logging.getLogger("istota.talk")
+
+# Pattern to extract file attachment info from Talk messages
+# Format: {file0} placeholder in message, actual file shared in bot's Talk folder
+FILE_PLACEHOLDER_PATTERN = re.compile(r'\{file(\d+)\}')
+
+# Pattern to match mention placeholders in Talk messages
+MENTION_PLACEHOLDER_PATTERN = re.compile(r'\{(mention-(?:user|call|federated-user)\d+)\}')
+
+
+def clean_message_content(message: dict, bot_username: str | None = None) -> str:
+    """
+    Clean up message content, replacing file and mention placeholders with readable text.
+
+    When bot_username is provided, the bot's own mention placeholder is stripped
+    (cleaned from the prompt). Other mentions are replaced with @DisplayName.
+    """
+    content = message.get("message", "")
+    message_params = message.get("messageParameters", {})
+
+    # Handle case where messageParameters is an empty list instead of dict
+    if not isinstance(message_params, dict):
+        return content
+
+    # Replace {fileN} placeholders with [filename]
+    def replace_file(match):
+        file_key = f"file{match.group(1)}"
+        if file_key in message_params:
+            filename = message_params[file_key].get("name", "file")
+            return f"[{filename}]"
+        return match.group(0)
+
+    content = FILE_PLACEHOLDER_PATTERN.sub(replace_file, content)
+
+    # Replace mention placeholders
+    if bot_username is not None:
+        def replace_mention(match):
+            key = match.group(1)
+            param = message_params.get(key)
+            if not isinstance(param, dict):
+                return match.group(0)
+            # Strip bot's own mention from the prompt
+            if param.get("id") == bot_username:
+                return ""
+            # Replace other mentions with @DisplayName
+            display_name = param.get("name", param.get("id", ""))
+            if display_name:
+                return f"@{display_name}"
+            return match.group(0)
+
+        content = MENTION_PLACEHOLDER_PATTERN.sub(replace_mention, content)
+        # Clean up extra whitespace from stripped bot mentions
+        content = re.sub(r'  +', ' ', content).strip()
+
+    return content
 
 
 class TalkClient:
@@ -22,6 +77,7 @@ class TalkClient:
         conversation_token: str,
         message: str,
         reply_to: int | None = None,
+        reference_id: str | None = None,
     ) -> dict:
         """Send a message to a Talk conversation using user API."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
@@ -29,6 +85,8 @@ class TalkClient:
         data = {"message": message}
         if reply_to:
             data["replyTo"] = reply_to
+        if reference_id:
+            data["referenceId"] = reference_id
 
         logger.debug("Sending message to %s (%d chars)", conversation_token, len(message))
         async with httpx.AsyncClient() as client:
@@ -135,6 +193,31 @@ class TalkClient:
             if messages:
                 return messages[0].get("id")
             return None
+
+    async def fetch_chat_history(
+        self, conversation_token: str, limit: int = 100,
+    ) -> list[dict]:
+        """Fetch recent chat messages for context building.
+
+        Returns up to ``limit`` messages in oldest-first order.
+        Uses lookIntoFuture=0 (history fetch) without lastKnownMessageId
+        to get the most recent messages.
+        """
+        url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(
+                url,
+                auth=self.auth,
+                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+                params={"lookIntoFuture": 0, "limit": limit},
+            )
+            response.raise_for_status()
+            messages = response.json().get("ocs", {}).get("data", [])
+            # History fetch returns newest-first, reverse for oldest-first
+            if messages:
+                messages = list(reversed(messages))
+            return messages
 
     async def get_participants(self, conversation_token: str) -> list[dict]:
         """Get participants of a conversation."""
