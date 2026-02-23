@@ -348,6 +348,8 @@ def select_relevant_talk_context(
     """Select relevant Talk messages for context, mirroring select_relevant_context().
 
     Uses the same hybrid approach: guaranteed recent messages + LLM triage of older.
+    The Talk API may fetch many messages (talk_context_limit), but we only triage
+    the most recent `lookback_count` to keep the selection prompt manageable.
     """
     if not messages:
         return []
@@ -358,6 +360,11 @@ def select_relevant_talk_context(
     threshold = config.conversation.skip_selection_threshold
     if len(messages) <= threshold:
         return messages
+
+    # Limit to lookback_count for triage (same as DB path)
+    lookback = config.conversation.lookback_count
+    if len(messages) > lookback:
+        messages = messages[-lookback:]
 
     recent_count = config.conversation.always_include_recent
     if recent_count >= len(messages):

@@ -300,6 +300,36 @@ class TestSelectRelevantTalkContext:
         assert result[0].message_id == 8
         assert result[1].message_id == 9
 
+    def test_lookback_count_limits_triage_input(self):
+        """Messages exceeding lookback_count are trimmed before triage."""
+        config = _make_config(
+            skip_selection_threshold=3, always_include_recent=2, lookback_count=10,
+        )
+        # 50 messages, but lookback_count=10 means only last 10 go to triage
+        messages = [
+            TalkMessage(i, "alice", "Alice", False, f"msg {i}", 100 + i, None, "user", None)
+            for i in range(50)
+        ]
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        # Select index 0 from the trimmed set (which is message_id=40)
+        mock_result.stdout = json.dumps({"relevant_ids": [0]})
+
+        with patch("istota.context.subprocess.run", return_value=mock_result) as mock_run:
+            result = select_relevant_talk_context("hello", messages, config)
+
+        # Should have been called with 8 older messages (10 lookback - 2 recent)
+        call_input = mock_run.call_args.kwargs.get("input") or mock_run.call_args[1].get("input")
+        # The trimmed older messages start from message_id=40
+        assert "msg 40" in call_input
+        assert "msg 39" not in call_input
+        # Result: 1 triaged + 2 recent = 3
+        assert len(result) == 3
+        assert result[0].message_id == 40  # triaged from trimmed set
+        assert result[1].message_id == 48  # recent
+        assert result[2].message_id == 49  # recent
+
 
 class TestFormatTalkContextForPrompt:
     def test_empty(self):
