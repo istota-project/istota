@@ -1,10 +1,6 @@
-# 🐙 istota
+# > istota
 
-[istota.xyz](https://istota.xyz)
-
-A self-hosted AI agent that lives in your Nextcloud instance. Powered by Claude Code.
-
-Istota joins your Nextcloud as a regular user with its own account, collaborates on files, manages calendars, handles email, and does pretty much anything Claude Code can do — through Nextcloud Talk or email. Your data stays on your stack, permissions follow Nextcloud's sharing model, and each invocation runs in a bubblewrap sandbox.
+A self-hosted AI agent that lives in your Nextcloud instance. Powered by Claude Code. ([istota.xyz](https://istota.xyz))
 
 ## Requirements
 
@@ -72,7 +68,7 @@ Per-user worker threads handle concurrency — foreground tasks (chat) and backg
 
 **Security** — Bubblewrap sandbox per invocation (PID namespace, restricted mounts, credential isolation). Non-admin users can't see the database, other users' files, or system config. Deferred DB writes via JSON files for sandboxed operations. Credential stripping from subprocess environments.
 
-**Constitution** — An emissaries layer defines how the agent reasons about data, handles the boundary between private and public action, and what it owes to people beyond its operator. Customizable per-user persona on top.
+**Constitution** — An [Emissaries](https://commontask.org/emissaries/) layer defines how the agent reasons about data, handles the boundary between private and public action, and what it owes to people beyond its operator. Customizable per-user persona on top.
 
 ## User workspace
 
@@ -104,14 +100,19 @@ Optional dependency groups:
 
 ```bash
 uv sync --extra memory-search    # sqlite-vec + sentence-transformers for semantic search
-uv sync --extra whisper           # faster-whisper for audio transcription
+uv sync --extra whisper          # faster-whisper for audio transcription
 ```
 
 ## Further reading
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — detailed system architecture and design decisions
-- [DEVLOG.md](DEVLOG.md) — history of changes and design rationale
+- [DEVLOG.md](DEVLOG.md) — detailed changelog
 
 ## License
 
 [MIT](LICENSE)
+
+***
+© 2026 [Stefan Kubicki](https://kubicki.org) • a [CYNIUM](https://cynium.com) release • shipped from the [Atoll](https://kubicki.org/atoll)
+***
+Canonical URL: https://forge.example.com/alice/istota
