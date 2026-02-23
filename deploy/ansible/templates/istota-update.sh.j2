@@ -49,6 +49,7 @@ if [ -n "$REPO_TAG" ]; then
     fi
 
     log "Updating to tag $TARGET_TAG ($CURRENT -> $TARGET)"
+    git checkout -- uv.lock 2>/dev/null || true
     git checkout "$TARGET_TAG" --quiet
 else
     # Branch mode: check if remote has new commits
@@ -60,6 +61,7 @@ else
     fi
 
     log "Updating branch $REPO_BRANCH ($CURRENT -> $REMOTE)"
+    git checkout -- uv.lock 2>/dev/null || true
     git pull origin "$REPO_BRANCH" --quiet
 fi
 

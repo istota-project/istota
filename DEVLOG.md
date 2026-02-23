@@ -2,6 +2,13 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-23: Fix auto-update script blocking on dirty uv.lock
+
+The auto-update cron job was failing because `uv sync` regenerates `uv.lock` on the server, and the next `git pull` refuses to merge over the dirty file. Added `git checkout -- uv.lock` before both the branch pull and tag checkout paths.
+
+**Files modified:**
+- `deploy/ansible/templates/istota-update.sh.j2` — Reset uv.lock before git pull/checkout
+
 ## 2026-02-23: Fix scheduled notification replies losing context
 
 When a user replies "Done" to a scheduled notification (e.g., vitamins reminder), the bot had no context because `get_conversation_history` excludes scheduled tasks by design, and the previous single-task injection could be displaced by a silent NO_ACTION job in the same room. Extended the injection to fetch the last N tasks instead of just 1.
