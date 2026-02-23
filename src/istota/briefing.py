@@ -226,7 +226,8 @@ def build_briefing_prompt(
         "Output sections in the exact order shown in the briefing skill. "
         "Only include sections that have data. NO tables. "
         "CRITICAL: Your response must start with the first emoji section header (e.g. 📰 or 📈). "
-        "Do NOT output any preamble, reasoning, thoughts, or commentary before or after the briefing sections."
+        "Do NOT output any preamble, reasoning, thoughts, or commentary before or after the briefing sections. "
+        "Do NOT use email commands (email send, email output). Delivery is handled automatically by the scheduler."
     )
 
     return "\n".join(prompt_parts)

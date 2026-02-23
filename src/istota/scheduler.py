@@ -1074,6 +1074,11 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
         )
         return True
 
+    # Safety net: strip markdown from briefing plain text emails (briefing content
+    # is generated with Talk formatting; strip it for email delivery)
+    if task.source_type == "briefing" and parsed["format"] == "plain":
+        parsed["body"] = _strip_markdown(parsed["body"])
+
     with db.get_db(config.db_path) as conn:
         processed_email = db.get_email_for_task(conn, task.id)
 
