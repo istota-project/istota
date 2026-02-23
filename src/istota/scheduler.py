@@ -1037,15 +1037,21 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
     """
     from .skills.email import send_email
 
-    # Briefing tasks output Talk-formatted text, not JSON — send directly
-    if task.source_type == "briefing":
+    # Prefer deferred email output file (tool-based, no transcription risk)
+    # over inline JSON parsing (legacy, subject to smart-quote corruption).
+    # If neither source provides structured output, fall back to legacy briefing
+    # path (raw model output stripped of markdown) for briefing tasks, or skip
+    # sending for other tasks (Claude likely sent directly via `email send`).
+    parsed = _load_deferred_email_output(config, task) or _parse_email_output(message)
+
+    if parsed is None and task.source_type == "briefing":
+        # Legacy path: model output is Talk-formatted text, send directly
         user_config = config.users.get(task.user_id)
         if not user_config or not user_config.email_addresses:
             logger.warning("No email address for user %s (task %d)", task.user_id, task.id)
             return False
         try:
             email_config = get_email_config(config)
-            # Extract briefing type from prompt (e.g. "Generate a morning briefing")
             match = re.search(r"Generate a (\w+) briefing", task.prompt)
             briefing_type = match.group(1).title() if match else ""
             send_email(
@@ -1060,12 +1066,6 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
         except Exception as e:
             logger.error("Failed to send briefing email (task %s): %s", task.id, e)
             return False
-
-    # Prefer deferred email output file (tool-based, no transcription risk)
-    # over inline JSON parsing (legacy, subject to smart-quote corruption).
-    # If neither source provides structured output, skip sending — Claude
-    # likely already sent the email directly via `email send` during execution.
-    parsed = _load_deferred_email_output(config, task) or _parse_email_output(message)
     if parsed is None:
         logger.info(
             "No structured email output for task %d; skipping scheduler delivery "
