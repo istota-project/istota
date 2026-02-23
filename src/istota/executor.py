@@ -927,23 +927,29 @@ def execute_task(
         # scheduled/briefing messages aren't orphaned when the user responds
         # to them in the same channel.
         if conn is not None:
-            prev_task = db.get_previous_task(
-                conn, task.conversation_token, exclude_task_id=task.id
+            prev_tasks = db.get_previous_tasks(
+                conn, task.conversation_token, exclude_task_id=task.id,
+                limit=config.conversation.previous_tasks_count,
             )
         else:
             with db.get_db(config.db_path) as temp_conn:
-                prev_task = db.get_previous_task(
-                    temp_conn, task.conversation_token, exclude_task_id=task.id
+                prev_tasks = db.get_previous_tasks(
+                    temp_conn, task.conversation_token, exclude_task_id=task.id,
+                    limit=config.conversation.previous_tasks_count,
                 )
 
-        if prev_task:
+        if prev_tasks:
             history_ids = {msg.id for msg in history}
-            if prev_task.id not in history_ids:
-                history.append(prev_task)
+            injected = 0
+            for prev in prev_tasks:
+                if prev.id not in history_ids:
+                    history.append(prev)
+                    injected += 1
+            if injected:
                 history.sort(key=lambda m: (m.created_at, m.id))
                 logger.info(
-                    "Included previous task %d (excluded source_type) in context for task %d",
-                    prev_task.id,
+                    "Included %d previous tasks (excluded source_type) in context for task %d",
+                    injected,
                     task.id,
                 )
 

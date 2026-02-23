@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-23: Fix scheduled notification replies losing context
+
+When a user replies "Done" to a scheduled notification (e.g., vitamins reminder), the bot had no context because `get_conversation_history` excludes scheduled tasks by design, and the previous single-task injection could be displaced by a silent NO_ACTION job in the same room. Extended the injection to fetch the last N tasks instead of just 1.
+
+**Key changes:**
+- Renamed `get_previous_task()` → `get_previous_tasks()` in `db.py` — returns a list of up to N recent completed tasks (oldest-first), unfiltered by source_type.
+- Updated executor injection block to iterate over the list, dedup against existing history, and sort after injection.
+- Added `previous_tasks_count` config field to `[conversation]` section (default 3) so the injection depth is configurable.
+
+**Files modified:**
+- `src/istota/db.py` — Renamed function, added `limit` parameter, returns `list[ConversationMessage]`
+- `src/istota/executor.py` — Updated injection block to handle list, uses config value
+- `src/istota/config.py` — Added `previous_tasks_count` to `ConversationConfig`
+- `config/config.example.toml` — Documented new field
+- `deploy/ansible/defaults/main.yml` — Added `istota_conversation_previous_tasks_count`
+- `deploy/ansible/templates/config.toml.j2` — Renders new field
+- `tests/test_db.py` — Added `TestGetPreviousTasks` (8 tests)
+
 ## 2026-02-23: Fix briefing email formatting + auto-update cron
 
 Fixed two bugs in briefing email delivery introduced when the deferred email output file was wired up for briefings. Also added an Ansible-managed auto-update mechanism.

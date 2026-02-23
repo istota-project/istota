@@ -112,3 +112,76 @@ class TestCountPendingTasksForUserQueue:
     def test_zero_when_no_tasks(self, db_path):
         with db.get_db(db_path) as conn:
             assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 0
+
+
+class TestGetPreviousTasks:
+    """Tests for get_previous_tasks (returns last N tasks unfiltered by source_type)."""
+
+    def _create_completed(self, conn, prompt, token="room1", source_type="talk"):
+        task_id = db.create_task(
+            conn, prompt=prompt, user_id="alice",
+            conversation_token=token, source_type=source_type,
+        )
+        db.update_task_status(conn, task_id, "completed", result=f"result-{task_id}")
+        return task_id
+
+    def test_returns_empty_list_when_no_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            result = db.get_previous_tasks(conn, "room1")
+            assert result == []
+
+    def test_returns_tasks_in_oldest_first_order(self, db_path):
+        with db.get_db(db_path) as conn:
+            id1 = self._create_completed(conn, "first")
+            id2 = self._create_completed(conn, "second")
+            id3 = self._create_completed(conn, "third")
+            result = db.get_previous_tasks(conn, "room1", limit=3)
+            assert [m.id for m in result] == [id1, id2, id3]
+
+    def test_respects_limit(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._create_completed(conn, "first")
+            id2 = self._create_completed(conn, "second")
+            id3 = self._create_completed(conn, "third")
+            result = db.get_previous_tasks(conn, "room1", limit=2)
+            assert [m.id for m in result] == [id2, id3]
+
+    def test_respects_exclude_task_id(self, db_path):
+        with db.get_db(db_path) as conn:
+            id1 = self._create_completed(conn, "first")
+            id2 = self._create_completed(conn, "second")
+            id3 = self._create_completed(conn, "third")
+            result = db.get_previous_tasks(conn, "room1", exclude_task_id=id3, limit=3)
+            assert [m.id for m in result] == [id1, id2]
+
+    def test_scoped_by_conversation_token(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._create_completed(conn, "other room", token="room2")
+            id2 = self._create_completed(conn, "this room")
+            result = db.get_previous_tasks(conn, "room1", limit=3)
+            assert [m.id for m in result] == [id2]
+
+    def test_includes_scheduled_and_briefing_source_types(self, db_path):
+        with db.get_db(db_path) as conn:
+            id1 = self._create_completed(conn, "scheduled", source_type="scheduled")
+            id2 = self._create_completed(conn, "briefing", source_type="briefing")
+            id3 = self._create_completed(conn, "talk", source_type="talk")
+            result = db.get_previous_tasks(conn, "room1", limit=3)
+            assert [m.id for m in result] == [id1, id2, id3]
+
+    def test_returns_fewer_than_limit_when_not_enough(self, db_path):
+        with db.get_db(db_path) as conn:
+            id1 = self._create_completed(conn, "only one")
+            result = db.get_previous_tasks(conn, "room1", limit=3)
+            assert [m.id for m in result] == [id1]
+
+    def test_default_limit_is_three(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._create_completed(conn, "t1")
+            self._create_completed(conn, "t2")
+            id3 = self._create_completed(conn, "t3")
+            id4 = self._create_completed(conn, "t4")
+            id5 = self._create_completed(conn, "t5")
+            # Default limit=3 should return the last 3
+            result = db.get_previous_tasks(conn, "room1")
+            assert [m.id for m in result] == [id3, id4, id5]

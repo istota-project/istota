@@ -779,17 +779,19 @@ def get_conversation_history(
     ]
 
 
-def get_previous_task(
+def get_previous_tasks(
     conn: sqlite3.Connection,
     conversation_token: str,
     exclude_task_id: int | None = None,
-) -> ConversationMessage | None:
+    limit: int = 3,
+) -> list[ConversationMessage]:
     """
-    Get the single most recent completed task in a conversation,
+    Get the most recent completed tasks in a conversation,
     regardless of source_type.
 
-    Used to ensure the immediately previous message is always available
-    in context even when its source_type would normally be excluded.
+    Used to ensure recent messages are always available in context even
+    when their source_type would normally be excluded (e.g. scheduled,
+    briefing).  Returns up to ``limit`` tasks in oldest-first order.
     """
     query = """
         SELECT id, prompt, result, created_at, actions_taken, source_type, user_id
@@ -804,22 +806,27 @@ def get_previous_task(
         query += " AND id != ?"
         params.append(exclude_task_id)
 
-    query += " ORDER BY created_at DESC, id DESC LIMIT 1"
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(limit)
 
     cursor = conn.execute(query, params)
-    row = cursor.fetchone()
-    if row is None:
-        return None
+    rows = cursor.fetchall()
 
-    return ConversationMessage(
-        id=row["id"],
-        prompt=row["prompt"],
-        result=row["result"],
-        created_at=row["created_at"],
-        actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
-        source_type=row["source_type"] if "source_type" in row.keys() else "talk",
-        user_id=row["user_id"] if "user_id" in row.keys() else None,
-    )
+    results = [
+        ConversationMessage(
+            id=row["id"],
+            prompt=row["prompt"],
+            result=row["result"],
+            created_at=row["created_at"],
+            actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
+            source_type=row["source_type"] if "source_type" in row.keys() else "talk",
+            user_id=row["user_id"] if "user_id" in row.keys() else None,
+        )
+        for row in rows
+    ]
+    # Return in oldest-first order (query fetches newest-first)
+    results.reverse()
+    return results
 
 
 def log_task(

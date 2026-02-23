@@ -90,6 +90,7 @@ class ConversationConfig:
     use_selection: bool = True  # If False, include all messages without LLM selection
     always_include_recent: int = 5  # Always include this many recent messages without selection
     context_truncation: int = 0  # Max chars per bot response in context (0 to disable)
+    previous_tasks_count: int = 3  # Number of recent unfiltered tasks to inject into context
 
 
 @dataclass
@@ -574,6 +575,7 @@ def load_config(config_path: Path | None = None) -> Config:
             use_selection=conv.get("use_selection", True),
             always_include_recent=conv.get("always_include_recent", 5),
             context_truncation=conv.get("context_truncation", 0),
+            previous_tasks_count=conv.get("previous_tasks_count", 3),
         )
 
     if "scheduler" in data:

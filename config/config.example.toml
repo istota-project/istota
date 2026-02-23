@@ -98,6 +98,9 @@ use_selection = true
 always_include_recent = 5
 # Max chars per bot response in conversation context (0 to disable truncation)
 context_truncation = 0
+# Number of recent unfiltered tasks to inject into context (ensures scheduled/briefing
+# messages aren't orphaned when the user replies to them)
+previous_tasks_count = 3
 
 [logging]
 # Log level: INFO (default) or DEBUG (verbose)
