@@ -2683,3 +2683,140 @@ def cleanup_old_feed_items(conn: sqlite3.Connection, retention_days: int = 30) -
         (f"-{retention_days}",),
     )
     return cursor.rowcount
+
+
+# ============================================================================
+# Talk message cache functions
+# ============================================================================
+
+
+def upsert_talk_messages(
+    conn: sqlite3.Connection,
+    conversation_token: str,
+    messages: list[dict],
+) -> int:
+    """Bulk insert/replace Talk API messages into the cache.
+
+    Maps raw API field names to DB columns. Returns count of rows affected.
+    """
+    if not messages:
+        return 0
+
+    count = 0
+    for msg in messages:
+        parent = msg.get("parent")
+        parent_id = None
+        if isinstance(parent, dict) and parent.get("id"):
+            parent_id = parent["id"]
+
+        message_params = msg.get("messageParameters")
+        if message_params is not None:
+            params_json = json.dumps(message_params)
+        else:
+            params_json = None
+
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO talk_messages (
+                message_id, conversation_token, actor_id, actor_display_name,
+                actor_type, message_text, message_type, message_parameters,
+                timestamp, reference_id, deleted, parent_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                msg.get("id"),
+                conversation_token,
+                msg.get("actorId", ""),
+                msg.get("actorDisplayName", ""),
+                msg.get("actorType", "users"),
+                msg.get("message", ""),
+                msg.get("messageType", "comment"),
+                params_json,
+                msg.get("timestamp", 0),
+                msg.get("referenceId"),
+                1 if msg.get("deleted") else 0,
+                parent_id,
+            ),
+        )
+        count += 1
+    return count
+
+
+def get_cached_talk_messages(
+    conn: sqlite3.Connection,
+    conversation_token: str,
+    limit: int = 100,
+) -> list[dict]:
+    """Retrieve cached messages in oldest-first order (same format as Talk API).
+
+    Returns dicts matching the structure that build_talk_context() expects.
+    """
+    cursor = conn.execute(
+        """
+        SELECT message_id, actor_id, actor_display_name, actor_type,
+               message_text, message_type, message_parameters,
+               timestamp, reference_id, deleted, parent_id
+        FROM talk_messages
+        WHERE conversation_token = ?
+        ORDER BY message_id DESC
+        LIMIT ?
+        """,
+        (conversation_token, limit),
+    )
+    rows = cursor.fetchall()
+
+    # Reverse to oldest-first (query fetches newest-first for LIMIT)
+    messages = []
+    for row in reversed(rows):
+        params = row["message_parameters"]
+        if params is not None:
+            try:
+                params = json.loads(params)
+            except (json.JSONDecodeError, TypeError):
+                params = {}
+        else:
+            params = {}
+
+        msg = {
+            "id": row["message_id"],
+            "actorId": row["actor_id"],
+            "actorDisplayName": row["actor_display_name"],
+            "actorType": row["actor_type"],
+            "message": row["message_text"],
+            "messageType": row["message_type"],
+            "messageParameters": params,
+            "timestamp": row["timestamp"],
+            "referenceId": row["reference_id"],
+            "deleted": bool(row["deleted"]),
+        }
+        if row["parent_id"] is not None:
+            msg["parent"] = {"id": row["parent_id"]}
+        messages.append(msg)
+
+    return messages
+
+
+def has_cached_talk_messages(
+    conn: sqlite3.Connection,
+    conversation_token: str,
+) -> bool:
+    """Check if any cached messages exist for a conversation."""
+    cursor = conn.execute(
+        "SELECT 1 FROM talk_messages WHERE conversation_token = ? LIMIT 1",
+        (conversation_token,),
+    )
+    return cursor.fetchone() is not None
+
+
+def cleanup_old_talk_messages(
+    conn: sqlite3.Connection,
+    retention_days: int,
+) -> int:
+    """Delete cached talk messages older than retention_days. Returns count deleted."""
+    import time as _time
+    cutoff = int(_time.time()) - (retention_days * 86400)
+    cursor = conn.execute(
+        "DELETE FROM talk_messages WHERE timestamp < ?",
+        (cutoff,),
+    )
+    return cursor.rowcount

@@ -207,6 +207,24 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                         logger.error("Error initializing poll state for %s: %s", conversation_token, e)
                         continue
 
+            # Backfill cache on first encounter
+            if not db.has_cached_talk_messages(conn, conversation_token):
+                try:
+                    backfill_msgs = await client.fetch_chat_history(
+                        conversation_token, limit=config.conversation.talk_context_limit,
+                    )
+                    if backfill_msgs:
+                        db.upsert_talk_messages(conn, conversation_token, backfill_msgs)
+                        logger.info(
+                            "Backfilled %d messages for conversation %s",
+                            len(backfill_msgs), conversation_token,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Backfill failed for %s: %s — context will build from polling",
+                        conversation_token, e,
+                    )
+
             # Add to concurrent poll list
             poll_tasks.append(
                 _poll_single_conversation(
@@ -250,6 +268,9 @@ async def poll_talk_conversations(config: Config) -> list[int]:
         for conversation_token, messages in results:
             if not messages:
                 continue
+
+            # Store all messages in cache (system, bot, user — context builder filters)
+            db.upsert_talk_messages(conn, conversation_token, messages)
 
             # Process messages in order (oldest first)
             for msg in messages:

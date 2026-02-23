@@ -1005,3 +1005,90 @@ class TestChannelGate:
             result = await poll_talk_conversations(config)
 
         assert len(result) == 1
+
+
+# =============================================================================
+# TestTalkMessageCacheIntegration
+# =============================================================================
+
+
+class TestTalkMessageCacheIntegration:
+    """Tests for talk message cache storage and backfill in the poller."""
+
+    @pytest.mark.asyncio
+    async def test_poll_stores_messages_in_cache(self, make_config):
+        """Polled messages are stored in the talk_messages cache."""
+        config = make_config()
+
+        msg = _msg(id=100, actor_id="alice", message="Hello")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+                # Seed cache so backfill doesn't trigger
+                db.upsert_talk_messages(conn, "room1", [_msg(id=50)])
+
+            await poll_talk_conversations(config)
+
+        # Verify the polled message was stored
+        with db.get_db(config.db_path) as conn:
+            cached = db.get_cached_talk_messages(conn, "room1")
+            ids = [m["id"] for m in cached]
+            assert 100 in ids
+
+    @pytest.mark.asyncio
+    async def test_backfill_on_first_encounter(self, make_config):
+        """When no cache exists, fetch_chat_history is called for backfill."""
+        config = make_config()
+
+        backfill_msgs = [
+            _msg(id=i, actor_id="alice", message=f"msg {i}")
+            for i in range(1, 6)
+        ]
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            mock_instance.fetch_chat_history = AsyncMock(return_value=backfill_msgs)
+
+            # No poll state yet — will be initialized as DM (last_message_id=0)
+            await poll_talk_conversations(config)
+
+            # fetch_chat_history should have been called for backfill
+            mock_instance.fetch_chat_history.assert_called_once_with(
+                "room1", limit=config.conversation.talk_context_limit,
+            )
+
+        with db.get_db(config.db_path) as conn:
+            cached = db.get_cached_talk_messages(conn, "room1")
+            assert len(cached) == 5
+
+    @pytest.mark.asyncio
+    async def test_skip_backfill_when_cache_exists(self, make_config):
+        """When cache already has messages, no backfill fetch_chat_history call."""
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "room1", 50)
+            db.upsert_talk_messages(conn, "room1", [_msg(id=50)])
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+
+            await poll_talk_conversations(config)
+
+            # fetch_chat_history should NOT have been called
+            mock_instance.fetch_chat_history.assert_not_called()

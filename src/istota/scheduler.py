@@ -1339,11 +1339,15 @@ async def run_cleanup_checks(config: Config) -> None:
         except Exception as e:
             logger.error(f"Error cleaning up old emails: {e}")
 
-    # 6. Clean up old feed items
+    # 6. Clean up old feed items and talk message cache
     with db.get_db(config.db_path) as conn:
         deleted_feeds = db.cleanup_old_feed_items(conn, config.scheduler.feed_item_retention_days)
         if deleted_feeds > 0:
             logger.info(f"Cleaned up {deleted_feeds} old feed item(s)")
+
+        deleted_msgs = db.cleanup_old_talk_messages(conn, sched.task_retention_days)
+        if deleted_msgs > 0:
+            logger.info(f"Cleaned up {deleted_msgs} old talk message(s)")
 
     # 7. Clean up old temp files
     if sched.temp_file_retention_days > 0:

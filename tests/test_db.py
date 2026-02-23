@@ -185,3 +185,160 @@ class TestGetPreviousTasks:
             # Default limit=3 should return the last 3
             result = db.get_previous_tasks(conn, "room1")
             assert [m.id for m in result] == [id3, id4, id5]
+
+
+class TestTalkMessageCache:
+    """Tests for the talk_messages cache DB functions."""
+
+    def _make_msg(self, id, actor_id="alice", message="hello", timestamp=1000,
+                  message_params=None, deleted=False, parent_id=None,
+                  reference_id=None, actor_display_name="Alice",
+                  actor_type="users", message_type="comment"):
+        msg = {
+            "id": id,
+            "actorId": actor_id,
+            "actorDisplayName": actor_display_name,
+            "actorType": actor_type,
+            "message": message,
+            "messageType": message_type,
+            "messageParameters": message_params if message_params is not None else {},
+            "timestamp": timestamp,
+            "referenceId": reference_id,
+            "deleted": deleted,
+        }
+        if parent_id is not None:
+            msg["parent"] = {"id": parent_id}
+        return msg
+
+    def test_upsert_and_retrieve(self, db_path):
+        with db.get_db(db_path) as conn:
+            msgs = [
+                self._make_msg(1, timestamp=100, message="first"),
+                self._make_msg(2, timestamp=200, message="second"),
+            ]
+            count = db.upsert_talk_messages(conn, "room1", msgs)
+            assert count == 2
+
+            result = db.get_cached_talk_messages(conn, "room1")
+            assert len(result) == 2
+            # Oldest first
+            assert result[0]["id"] == 1
+            assert result[0]["message"] == "first"
+            assert result[1]["id"] == 2
+            assert result[1]["message"] == "second"
+
+    def test_upsert_replaces_on_conflict(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(1, message="original"),
+            ])
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(1, message="updated"),
+            ])
+            result = db.get_cached_talk_messages(conn, "room1")
+            assert len(result) == 1
+            assert result[0]["message"] == "updated"
+
+    def test_get_cached_limit_and_order(self, db_path):
+        with db.get_db(db_path) as conn:
+            msgs = [self._make_msg(i, timestamp=i * 100) for i in range(1, 21)]
+            db.upsert_talk_messages(conn, "room1", msgs)
+
+            result = db.get_cached_talk_messages(conn, "room1", limit=10)
+            assert len(result) == 10
+            # Should be the 10 most recent, in oldest-first order
+            assert result[0]["id"] == 11
+            assert result[-1]["id"] == 20
+
+    def test_reconstructed_dict_format(self, db_path):
+        """Verify returned dicts match raw API format for build_talk_context()."""
+        with db.get_db(db_path) as conn:
+            msg = self._make_msg(
+                42,
+                actor_id="bob",
+                actor_display_name="Bob",
+                message="test msg",
+                timestamp=1700000000,
+                reference_id="istota:task:5:result",
+                message_params={"file0": {"name": "photo.jpg", "type": "file"}},
+                parent_id=40,
+                deleted=False,
+            )
+            db.upsert_talk_messages(conn, "room1", [msg])
+
+            result = db.get_cached_talk_messages(conn, "room1")
+            assert len(result) == 1
+            r = result[0]
+            assert r["id"] == 42
+            assert r["actorId"] == "bob"
+            assert r["actorDisplayName"] == "Bob"
+            assert r["message"] == "test msg"
+            assert r["timestamp"] == 1700000000
+            assert r["referenceId"] == "istota:task:5:result"
+            assert r["messageParameters"] == {"file0": {"name": "photo.jpg", "type": "file"}}
+            assert r["parent"] == {"id": 40}
+            assert r["deleted"] is False
+
+    def test_has_cached_talk_messages(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.has_cached_talk_messages(conn, "room1") is False
+            db.upsert_talk_messages(conn, "room1", [self._make_msg(1)])
+            assert db.has_cached_talk_messages(conn, "room1") is True
+            # Different room still empty
+            assert db.has_cached_talk_messages(conn, "room2") is False
+
+    def test_cleanup_old_messages(self, db_path):
+        import time
+        now = int(time.time())
+        with db.get_db(db_path) as conn:
+            msgs = [
+                self._make_msg(1, timestamp=now - 86400 * 10),  # 10 days old
+                self._make_msg(2, timestamp=now - 86400 * 3),   # 3 days old
+                self._make_msg(3, timestamp=now),                # now
+            ]
+            db.upsert_talk_messages(conn, "room1", msgs)
+
+            deleted = db.cleanup_old_talk_messages(conn, retention_days=7)
+            assert deleted == 1  # only msg 1
+
+            result = db.get_cached_talk_messages(conn, "room1")
+            assert len(result) == 2
+            assert result[0]["id"] == 2
+            assert result[1]["id"] == 3
+
+    def test_message_parameters_json_roundtrip(self, db_path):
+        """Both dict and list messageParameters survive serialization."""
+        with db.get_db(db_path) as conn:
+            # Dict params
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(1, message_params={"key": "value"}),
+            ])
+            # List params (Talk API can return empty list)
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(2, message_params=[]),
+            ])
+
+            result = db.get_cached_talk_messages(conn, "room1")
+            assert result[0]["messageParameters"] == {"key": "value"}
+            assert result[1]["messageParameters"] == []
+
+    def test_upsert_empty_list_returns_zero(self, db_path):
+        with db.get_db(db_path) as conn:
+            count = db.upsert_talk_messages(conn, "room1", [])
+            assert count == 0
+
+    def test_deleted_message_flag(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(1, deleted=True),
+            ])
+            result = db.get_cached_talk_messages(conn, "room1")
+            assert result[0]["deleted"] is True
+
+    def test_no_parent_omits_key(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(1),  # No parent_id
+            ])
+            result = db.get_cached_talk_messages(conn, "room1")
+            assert "parent" not in result[0]

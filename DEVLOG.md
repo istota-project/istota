@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-23: Poller-fed Talk message cache
+
+Eliminated per-task HTTP calls to the Talk API for conversation context. The talk poller already sees every message via long-polling — now it stores them in a local `talk_messages` SQLite table. Context building reads from this cache (fast local query, zero API calls). Backfills existing conversations on first encounter via `fetch_chat_history()`. Old messages cleaned up on the same retention schedule as tasks.
+
+**Key changes:**
+- New `talk_messages` table with composite PK `(conversation_token, message_id)`.
+- Four DB functions: `upsert_talk_messages`, `get_cached_talk_messages`, `has_cached_talk_messages`, `cleanup_old_talk_messages`.
+- Poller stores all received messages in cache before per-message processing.
+- Backfill on first encounter: if no cache exists for a conversation, fetches history via API (non-fatal on failure).
+- `_build_talk_api_context()` reads from DB cache instead of calling `asyncio.run(client.fetch_chat_history())`.
+- Cleanup of old cached messages added to `run_cleanup_checks()`, reusing `task_retention_days`.
+
+**Files modified:**
+- `schema.sql` — Added `talk_messages` table
+- `src/istota/db.py` — Cache CRUD functions
+- `src/istota/talk_poller.py` — Store after polling, backfill on first encounter
+- `src/istota/executor.py` — `_build_talk_api_context` reads from DB cache
+- `src/istota/scheduler.py` — Cleanup in `run_cleanup_checks()`
+- `tests/test_db.py` — 10 new tests (`TestTalkMessageCache`)
+- `tests/test_talk_poller.py` — 3 new tests (`TestTalkMessageCacheIntegration`)
+
 ## 2026-02-23: Talk API-based conversation context
 
 Replaced the DB-only conversation context pipeline with one that fetches recent messages directly from the Talk chat API. This gives the bot the actual conversation visible to users — including messages from all participants in group chats, not just bot-processed interactions. Bot messages are tagged with `referenceId` fields for correlation back to tasks (actions_taken enrichment). Falls back to DB-based context on API failure.

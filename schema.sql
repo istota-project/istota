@@ -349,6 +349,23 @@ CREATE TRIGGER IF NOT EXISTS memory_chunks_au AFTER UPDATE ON memory_chunks BEGI
     INSERT INTO memory_chunks_fts(rowid, content) VALUES (new.id, new.content);
 END;
 
+-- Talk message cache (poller-fed, replaces per-task API fetches for context)
+CREATE TABLE IF NOT EXISTS talk_messages (
+    message_id INTEGER NOT NULL,
+    conversation_token TEXT NOT NULL,
+    actor_id TEXT NOT NULL DEFAULT '',
+    actor_display_name TEXT NOT NULL DEFAULT '',
+    actor_type TEXT NOT NULL DEFAULT 'users',
+    message_text TEXT NOT NULL DEFAULT '',
+    message_type TEXT NOT NULL DEFAULT 'comment',
+    message_parameters TEXT,  -- JSON string (dict or list)
+    timestamp INTEGER NOT NULL DEFAULT 0,
+    reference_id TEXT,
+    deleted INTEGER DEFAULT 0,
+    parent_id INTEGER,
+    PRIMARY KEY (conversation_token, message_id)
+);
+
 -- Key-value store for script runtime state (scoped by user and namespace)
 CREATE TABLE IF NOT EXISTS istota_kv (
     user_id TEXT NOT NULL,

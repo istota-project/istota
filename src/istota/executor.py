@@ -481,20 +481,21 @@ def _build_talk_api_context(
     config: Config,
     conn: "db.sqlite3.Connection | None",
 ) -> str | None:
-    """Build conversation context from the Talk chat API.
+    """Build conversation context from the local Talk message cache.
 
-    Fetches recent messages from the Talk API, enriches bot messages with
+    Reads cached messages (populated by the poller), enriches bot messages with
     task metadata from the DB, and formats for the prompt.
 
     Returns formatted context string, or None if no relevant messages found.
     """
-    import asyncio
-    from .talk import TalkClient
     from .context import _parse_reference_id
 
-    client = TalkClient(config)
     limit = config.conversation.talk_context_limit
-    raw_messages = asyncio.run(client.fetch_chat_history(task.conversation_token, limit=limit))
+    if conn is not None:
+        raw_messages = db.get_cached_talk_messages(conn, task.conversation_token, limit=limit)
+    else:
+        with db.get_db(config.db_path) as temp_conn:
+            raw_messages = db.get_cached_talk_messages(temp_conn, task.conversation_token, limit=limit)
 
     if not raw_messages:
         logger.info("No messages from Talk API for token %s", task.conversation_token)
