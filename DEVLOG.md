@@ -2,6 +2,18 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-22: Emissaries sync script
+
+Added a script to sync `config/emissaries.md` from the canonical public emissaries repo at `https://forge.example.com/alice/emissaries`. This keeps istota's constitutional principles up to date with the upstream source without needing git submodules or CI pipelines.
+
+**Key changes:**
+- Added `scripts/sync-emissaries.sh` to fetch the latest `emissaries.md` via curl from the raw file URL.
+- Updated `config/emissaries.md` to match the current canonical version.
+
+**Files added/modified:**
+- `scripts/sync-emissaries.sh` — New script to fetch latest emissaries.md from upstream
+- `config/emissaries.md` — Updated to latest canonical version
+
 ## 2026-02-21: Fix E2BIG for large prompts
 
 Prompts were passed as CLI arguments to the `claude` command, which hit the Linux 128KB `execve()` argument limit when conversation context or emissaries made the assembled prompt too large. Switched to passing prompts via stdin instead.
