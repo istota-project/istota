@@ -11,7 +11,7 @@
 ### Testing ✅
 - [x] Test with actual Claude Code execution (non-dry-run)
 - [x] Test Talk polling integration (migrated from webhook to polling)
-- [ ] Test briefing generation
+- [x] Test briefing generation
 
 ## Priority 2: Enhancements
 

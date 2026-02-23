@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-23: Fix briefing email formatting + auto-update cron
+
+Fixed two bugs in briefing email delivery introduced when the deferred email output file was wired up for briefings. Also added an Ansible-managed auto-update mechanism.
+
+**Key changes:**
+- Briefing emails contained raw markdown syntax (bold, italic, links) because the deferred file path bypassed `_strip_markdown()`. Added markdown stripping for briefing plain text emails in the deferred file path as a safety net.
+- Duplicate HTML-formatted briefing emails were sent because the email skill was keyword-matched for briefing tasks, causing the model to call `email send` directly during execution on top of the scheduler's own delivery. Added instruction to briefing prompt telling the model not to use email commands.
+- Added Ansible-managed auto-update cron job (`istota_auto_update_enabled`, disabled by default). Polls git for new commits/tags every 5 minutes, runs `uv sync`, DB migrations, and restarts the scheduler. Supports both branch mode and tag-based semver mode.
+
+**Files added/modified:**
+- `src/istota/briefing.py` — Added "do not use email commands" instruction to briefing prompt
+- `src/istota/scheduler.py` — Added `_strip_markdown()` in deferred file path for briefing emails
+- `deploy/ansible/defaults/main.yml` — Added `istota_auto_update_enabled` and `istota_auto_update_cron` vars
+- `deploy/ansible/tasks/main.yml` — Auto-update script and cron deployment tasks
+- `deploy/ansible/templates/istota-update.sh.j2` — Update script (git fetch, uv sync, DB migrate, restart)
+- `deploy/ansible/templates/istota-update.cron.j2` — Cron entry template
+
 ## 2026-02-22: Emissaries sync script
 
 Added a script to sync `config/emissaries.md` from the canonical public emissaries repo at `https://forge.example.com/alice/emissaries`. This keeps istota's constitutional principles up to date with the upstream source without needing git submodules or CI pipelines.
