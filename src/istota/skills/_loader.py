@@ -219,12 +219,6 @@ def select_skills(
                 selected.add(name)
             continue
 
-        if meta.resource_types:
-            if any(rt in user_resource_types for rt in meta.resource_types):
-                if _check_dependencies(meta):
-                    selected.add(name)
-                continue
-
         if meta.file_types and attachment_extensions:
             if any(ft in attachment_extensions for ft in meta.file_types):
                 if _check_dependencies(meta):
@@ -233,6 +227,10 @@ def select_skills(
 
         if meta.keywords:
             if any(kw in prompt_lower for kw in meta.keywords):
+                # If skill requires a resource type, only include if user has it
+                if meta.resource_types:
+                    if not any(rt in user_resource_types for rt in meta.resource_types):
+                        continue
                 if _check_dependencies(meta):
                     selected.add(name)
 

@@ -92,6 +92,7 @@ class TestSelectSkills:
             "calendar": SkillMeta(
                 name="calendar",
                 description="CalDAV",
+                keywords=["calendar", "event", "meeting"],
                 resource_types=["calendar"],
             ),
             "markets": SkillMeta(
@@ -126,10 +127,23 @@ class TestSelectSkills:
         result = select_skills("generate briefing", "briefing", set(), index)
         assert "markets" in result
 
-    def test_resource_type_match(self):
+    def test_resource_type_alone_not_enough(self):
+        """Resource type without keyword match should NOT select skill."""
         index = self._make_index()
         result = select_skills("what is next", "talk", {"calendar"}, index)
+        assert "calendar" not in result
+
+    def test_resource_type_with_keyword_match(self):
+        """Resource type + keyword match should select skill."""
+        index = self._make_index()
+        result = select_skills("check my calendar", "talk", {"calendar"}, index)
         assert "calendar" in result
+
+    def test_keyword_without_resource_type_no_match(self):
+        """Keyword match but missing required resource should NOT select skill."""
+        index = self._make_index()
+        result = select_skills("check my calendar", "talk", set(), index)
+        assert "calendar" not in result
 
     def test_keyword_match(self):
         index = self._make_index()
@@ -166,7 +180,21 @@ class TestSelectSkills:
             index,
         )
         assert "files" in result      # always_include
-        assert "calendar" in result   # resource_type
+        assert "calendar" not in result  # resource_type alone (no keyword hit)
+        assert "markets" in result    # source_type
+        assert "email" in result      # keyword
+        assert "schedules" in result  # keyword
+
+    def test_multiple_criteria_with_keyword(self):
+        index = self._make_index()
+        result = select_skills(
+            "send email about calendar schedule",
+            "briefing",
+            {"calendar"},
+            index,
+        )
+        assert "files" in result      # always_include
+        assert "calendar" in result   # resource_type + keyword
         assert "markets" in result    # source_type
         assert "email" in result      # keyword
         assert "schedules" in result  # keyword
