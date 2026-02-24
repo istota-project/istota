@@ -19,11 +19,6 @@ name = "Tasks"
 permissions = "write"
 
 [[resources]]
-type = "notes_file"
-path = "/Users/alice/workspace/NOTES.md"
-name = "Notes"
-
-[[resources]]
 type = "reminders_file"
 path = "/Users/alice/workspace/REMINDERS.md"
 name = "Reminders"

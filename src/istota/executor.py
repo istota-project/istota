@@ -787,14 +787,6 @@ def build_prompt(
         )
         resource_sections.append(f"Email Folders:\n{email_list}")
 
-    if "notes_file" in resources_by_type:
-        notes = resources_by_type["notes_file"]
-        notes_list = "\n".join(
-            f"  - {r.display_name or r.resource_path}: {r.resource_path} ({r.permissions})"
-            for r in notes
-        )
-        resource_sections.append(f"Notes Files (read for reminders/agenda items):\n{notes_list}")
-
     if "reminders_file" in resources_by_type and task.source_type != "briefing":
         reminders = resources_by_type["reminders_file"]
         reminders_list = "\n".join(

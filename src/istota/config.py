@@ -163,7 +163,7 @@ class BriefingConfig:
 @dataclass
 class ResourceConfig:
     """User resource configuration (defined in per-user TOML files)."""
-    type: str           # calendar, folder, todo_file, email_folder, notes_file, shared_file, reminders_file, karakeep
+    type: str           # calendar, folder, todo_file, email_folder, shared_file, reminders_file, karakeep
     path: str = ""
     name: str = ""
     permissions: str = "read"
