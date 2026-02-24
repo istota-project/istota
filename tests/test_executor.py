@@ -2192,3 +2192,304 @@ class TestRecencyWindowDb:
         result = _apply_recency_window_db(msgs, config)
         # Can't parse newest, returns all
         assert len(result) == 5
+
+
+# ---------------------------------------------------------------------------
+# TestBuildPromptRecalledMemories
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPromptRecalledMemories:
+    def _make_task(self, **overrides):
+        defaults = {
+            "id": 1, "prompt": "test prompt", "user_id": "alice",
+            "source_type": "talk", "status": "running",
+        }
+        defaults.update(overrides)
+        return db.Task(**defaults)
+
+    def test_recalled_section_included_when_provided(self):
+        task = self._make_task()
+        config = Config()
+        prompt = build_prompt(
+            task, [], config,
+            recalled_memories="- [memory_file] User prefers dark mode\n- [conversation] Discussed project X",
+        )
+        assert "Recalled memories (from search)" in prompt
+        assert "User prefers dark mode" in prompt
+        assert "Discussed project X" in prompt
+
+    def test_recalled_section_absent_when_none(self):
+        task = self._make_task()
+        config = Config()
+        prompt = build_prompt(task, [], config, recalled_memories=None)
+        assert "Recalled memories" not in prompt
+
+    def test_recalled_section_absent_when_empty_string(self):
+        task = self._make_task()
+        config = Config()
+        prompt = build_prompt(task, [], config, recalled_memories="")
+        assert "Recalled memories" not in prompt
+
+    def test_recalled_section_after_dated_memories(self):
+        task = self._make_task()
+        config = Config()
+        prompt = build_prompt(
+            task, [], config,
+            dated_memories="- Dated memory entry",
+            recalled_memories="- Recalled entry",
+        )
+        dated_pos = prompt.index("Recent context (from previous days)")
+        recalled_pos = prompt.index("Recalled memories (from search)")
+        assert dated_pos < recalled_pos
+
+
+# ---------------------------------------------------------------------------
+# TestRecallMemories
+# ---------------------------------------------------------------------------
+
+
+class TestRecallMemories:
+    def test_returns_none_when_disabled(self):
+        from istota.executor import _recall_memories
+        from istota.config import MemorySearchConfig
+        config = Config(memory_search=MemorySearchConfig(enabled=True, auto_recall=False))
+        task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
+        assert _recall_memories(config, None, task) is None
+
+    def test_returns_none_when_search_not_enabled(self):
+        from istota.executor import _recall_memories
+        from istota.config import MemorySearchConfig
+        config = Config(memory_search=MemorySearchConfig(enabled=False, auto_recall=True))
+        task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
+        assert _recall_memories(config, None, task) is None
+
+    def test_returns_none_for_briefing(self):
+        from istota.executor import _recall_memories
+        from istota.config import MemorySearchConfig
+        config = Config(memory_search=MemorySearchConfig(enabled=True, auto_recall=True))
+        task = db.Task(id=1, prompt="test", user_id="alice", source_type="briefing", status="running")
+        assert _recall_memories(config, None, task) is None
+
+    @patch("istota.memory_search.search")
+    def test_formats_results(self, mock_search):
+        from istota.executor import _recall_memories
+        from istota.config import MemorySearchConfig
+
+        mock_result = MagicMock()
+        mock_result.content = "User likes Python"
+        mock_result.source_type = "memory_file"
+        mock_search.return_value = [mock_result]
+
+        config = Config(
+            memory_search=MemorySearchConfig(enabled=True, auto_recall=True, auto_recall_limit=5),
+            db_path=Path("/tmp/test.db"),
+        )
+        task = db.Task(id=1, prompt="what language?", user_id="alice", source_type="talk", status="running")
+
+        conn = MagicMock()
+        result = _recall_memories(config, conn, task)
+        assert result is not None
+        assert "[memory_file]" in result
+        assert "User likes Python" in result
+
+    @patch("istota.memory_search.search")
+    def test_returns_none_when_no_results(self, mock_search):
+        from istota.executor import _recall_memories
+        from istota.config import MemorySearchConfig
+
+        mock_search.return_value = []
+        config = Config(
+            memory_search=MemorySearchConfig(enabled=True, auto_recall=True),
+            db_path=Path("/tmp/test.db"),
+        )
+        task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
+        assert _recall_memories(config, MagicMock(), task) is None
+
+    @patch("istota.memory_search.search")
+    def test_includes_channel_in_search(self, mock_search):
+        from istota.executor import _recall_memories
+        from istota.config import MemorySearchConfig
+
+        mock_search.return_value = []
+        config = Config(
+            memory_search=MemorySearchConfig(enabled=True, auto_recall=True),
+            db_path=Path("/tmp/test.db"),
+        )
+        task = db.Task(
+            id=1, prompt="test", user_id="alice", source_type="talk", status="running",
+            conversation_token="room123",
+        )
+        _recall_memories(config, MagicMock(), task)
+        call_kwargs = mock_search.call_args[1]
+        assert call_kwargs["include_user_ids"] == ["channel:room123"]
+
+
+# ---------------------------------------------------------------------------
+# TestApplyMemoryCap
+# ---------------------------------------------------------------------------
+
+
+class TestApplyMemoryCap:
+    def test_unlimited_when_zero(self):
+        from istota.executor import _apply_memory_cap
+        config = Config(max_memory_chars=0)
+        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, "C" * 100, "D" * 100)
+        assert len(u) == 100
+        assert len(d) == 100
+        assert len(c) == 100
+        assert len(r) == 100
+
+    def test_no_truncation_under_cap(self):
+        from istota.executor import _apply_memory_cap
+        config = Config(max_memory_chars=500)
+        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, "C" * 100, "D" * 100)
+        assert len(u) == 100
+        assert len(d) == 100
+        assert len(c) == 100
+        assert len(r) == 100
+
+    def test_truncates_recalled_first(self):
+        from istota.executor import _apply_memory_cap
+        config = Config(max_memory_chars=200)
+        # total = 300, cap = 200, over = 100, recalled = 100 → removed entirely
+        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, None, "D" * 100)
+        assert u == "A" * 100
+        assert d == "B" * 100
+        assert r is None
+
+    def test_truncates_dated_after_recalled(self):
+        from istota.executor import _apply_memory_cap
+        config = Config(max_memory_chars=100)
+        # total = 300, cap = 100, over = 200
+        # recalled (100) removed → over = 100
+        # dated (100) removed → over = 0
+        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, None, "D" * 100)
+        assert u == "A" * 100
+        assert d is None
+        assert r is None
+
+    def test_partial_truncation(self):
+        from istota.executor import _apply_memory_cap
+        config = Config(max_memory_chars=250)
+        # total = 300, cap = 250, over = 50
+        # recalled (100) → trim to 50 chars + truncation marker
+        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, None, "D" * 100)
+        assert u == "A" * 100
+        assert d == "B" * 100
+        assert r is not None
+        assert "truncated" in r
+
+    def test_handles_all_none(self):
+        from istota.executor import _apply_memory_cap
+        config = Config(max_memory_chars=100)
+        u, d, c, r = _apply_memory_cap(config, None, None, None, None)
+        assert u is None and d is None and c is None and r is None
+
+
+# ---------------------------------------------------------------------------
+# TestDatedMemoriesAutoLoad
+# ---------------------------------------------------------------------------
+
+
+class TestDatedMemoriesAutoLoad:
+    def _make_config(self, tmp_path, auto_load_days=3, sleep_enabled=True):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "_index.toml").write_text("")
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        from istota.config import SleepCycleConfig
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=mount,
+            sleep_cycle=SleepCycleConfig(
+                enabled=sleep_enabled,
+                auto_load_dated_days=auto_load_days,
+            ),
+        )
+
+    def _make_task(self, conn, source_type="talk"):
+        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type=source_type)
+        return db.get_task(conn, task_id)
+
+    @patch("istota.executor.subprocess.run")
+    def test_dated_memories_loaded_when_enabled(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path, auto_load_days=3)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        # Create a dated memory file
+        from datetime import datetime
+        memories_dir = config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- User prefers dark mode")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn, source_type="talk")
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        prompt_text = mock_run.call_args.kwargs["input"]
+        assert "User prefers dark mode" in prompt_text
+        assert "Recent context (from previous days)" in prompt_text
+
+    @patch("istota.executor.subprocess.run")
+    def test_dated_memories_skipped_for_briefing(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path, auto_load_days=3)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        from datetime import datetime
+        memories_dir = config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- Should not appear")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn, source_type="briefing")
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        prompt_text = mock_run.call_args.kwargs["input"]
+        assert "Should not appear" not in prompt_text
+
+    @patch("istota.executor.subprocess.run")
+    def test_dated_memories_none_when_zero_days(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path, auto_load_days=0)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        from datetime import datetime
+        memories_dir = config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- Should not appear")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn, source_type="talk")
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        prompt_text = mock_run.call_args.kwargs["input"]
+        assert "Recent context (from previous days)" not in prompt_text
+
+    @patch("istota.executor.subprocess.run")
+    def test_dated_memories_none_when_sleep_disabled(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path, auto_load_days=3, sleep_enabled=False)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn, source_type="talk")
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        prompt_text = mock_run.call_args.kwargs["input"]
+        assert "Recent context (from previous days)" not in prompt_text

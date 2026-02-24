@@ -29,6 +29,7 @@ from .storage import (
     get_user_persona_path,
     get_user_scripts_path,
     read_channel_memory,
+    read_dated_memories,
     read_user_memory_v2,
 )
 from .stream_parser import ResultEvent, TextEvent, ToolUseEvent, parse_stream_line
@@ -841,6 +842,111 @@ def load_channel_guidelines(config: Config, source_type: str) -> str | None:
     return None
 
 
+def _recall_memories(
+    config: Config,
+    conn: "db.sqlite3.Connection | None",
+    task: db.Task,
+) -> str | None:
+    """BM25 search using task prompt as query. Independent of context triage."""
+    if not config.memory_search.enabled or not config.memory_search.auto_recall:
+        return None
+    if task.source_type == "briefing":
+        return None
+
+    try:
+        from .memory_search import search
+    except ImportError:
+        return None
+
+    include_ids: list[str] = []
+    if task.conversation_token:
+        include_ids.append(f"channel:{task.conversation_token}")
+
+    try:
+        if conn is not None:
+            results = search(
+                conn, task.user_id, task.prompt,
+                limit=config.memory_search.auto_recall_limit,
+                source_types=["memory_file", "conversation"],
+                include_user_ids=include_ids or None,
+            )
+        else:
+            with db.get_db(config.db_path) as temp_conn:
+                results = search(
+                    temp_conn, task.user_id, task.prompt,
+                    limit=config.memory_search.auto_recall_limit,
+                    source_types=["memory_file", "conversation"],
+                    include_user_ids=include_ids or None,
+                )
+    except Exception:
+        logger.debug("Memory recall search failed", exc_info=True)
+        return None
+
+    if not results:
+        return None
+
+    parts = []
+    for r in results:
+        snippet = r.content[:300].strip()
+        parts.append(f"- [{r.source_type}] {snippet}")
+    return "\n".join(parts)
+
+
+def _apply_memory_cap(
+    config: Config,
+    user_memory: str | None,
+    dated_memories: str | None,
+    channel_memory: str | None,
+    recalled_memories: str | None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Truncate memory components if total exceeds max_memory_chars.
+
+    Truncation order: recalled → dated → (warn about user/channel).
+    Returns updated (user_memory, dated_memories, channel_memory, recalled_memories).
+    """
+    cap = config.max_memory_chars
+    if cap <= 0:
+        return user_memory, dated_memories, channel_memory, recalled_memories
+
+    total = (
+        len(user_memory or "")
+        + len(dated_memories or "")
+        + len(channel_memory or "")
+        + len(recalled_memories or "")
+    )
+    if total <= cap:
+        return user_memory, dated_memories, channel_memory, recalled_memories
+
+    over = total - cap
+
+    # Truncate recalled first
+    if recalled_memories and over > 0:
+        if over >= len(recalled_memories):
+            over -= len(recalled_memories)
+            recalled_memories = None
+        else:
+            recalled_memories = recalled_memories[:len(recalled_memories) - over] + "\n...[truncated]"
+            over = 0
+
+    # Then dated
+    if dated_memories and over > 0:
+        if over >= len(dated_memories):
+            over -= len(dated_memories)
+            dated_memories = None
+        else:
+            dated_memories = dated_memories[:len(dated_memories) - over] + "\n...[truncated]"
+            over = 0
+
+    if over > 0:
+        logger.warning(
+            "Memory cap (%d) exceeded by %d chars after truncating recalled/dated; "
+            "user_memory=%d, channel_memory=%d chars remain",
+            cap, over, len(user_memory or ""), len(channel_memory or ""),
+        )
+
+    return user_memory, dated_memories, channel_memory, recalled_memories
+
+
 def build_prompt(
     task: db.Task,
     user_resources: list[db.UserResource],
@@ -857,6 +963,7 @@ def build_prompt(
     emissaries: str | None = None,
     source_type: str | None = None,
     output_target: str | None = None,
+    recalled_memories: str | None = None,
 ) -> str:
     """Build the full prompt for Claude Code execution."""
     # Group resources by type
@@ -985,6 +1092,18 @@ The following information has been remembered about this channel/room:
 
 """
 
+    # Build recalled memories section
+    recalled_section = ""
+    if recalled_memories:
+        recalled_section = f"""
+## Recalled memories (from search)
+
+The following past context was automatically retrieved based on relevance to the current request:
+
+{recalled_memories}
+
+"""
+
     # Build conversation context section
     context_section = ""
     if conversation_context:
@@ -1080,7 +1199,7 @@ Output target: {output_target or 'text'}
 ## User's accessible resources
 
 {resources_text}
-{memory_section}{channel_memory_section}{dated_memories_section}## Available tools
+{memory_section}{channel_memory_section}{dated_memories_section}{recalled_section}## Available tools
 
 You have access to:
 {file_tools}{browser_tool}
@@ -1288,10 +1407,27 @@ def execute_task(
             # Graceful degradation if CalDAV unavailable
             pass
 
-    # Dated memories are stored for search/reference, not auto-loaded into prompts.
-    # They are available at /Users/{user_id}/memories/ for Claude to read if needed.
+    # Auto-load recent dated memories if enabled
     dated_memories = None
+    if (config.sleep_cycle.enabled
+            and config.sleep_cycle.auto_load_dated_days > 0
+            and task.source_type != "briefing"):
+        try:
+            dated_memories = read_dated_memories(
+                config, task.user_id,
+                max_days=config.sleep_cycle.auto_load_dated_days,
+            )
+        except Exception:
+            pass  # Graceful degradation
     user_config = config.get_user(task.user_id)
+
+    # Auto-recall memories via BM25 search
+    recalled_memories = _recall_memories(config, conn, task)
+
+    # Apply memory size cap
+    user_memory, dated_memories, channel_memory, recalled_memories = _apply_memory_cap(
+        config, user_memory, dated_memories, channel_memory, recalled_memories,
+    )
 
     # Get user's email addresses for confirmation policy
     user_email_addresses = []
@@ -1318,11 +1454,12 @@ def execute_task(
         skills_changelog, is_admin, emissaries,
         source_type=task.source_type,
         output_target=effective_output_target,
+        recalled_memories=recalled_memories,
     )
 
     # Log prompt size breakdown
     context_chars = len(conversation_context) if conversation_context else 0
-    memory_chars = len(user_memory or "") + len(dated_memories or "") + len(channel_memory or "")
+    memory_chars = len(user_memory or "") + len(dated_memories or "") + len(channel_memory or "") + len(recalled_memories or "")
     skills_chars = len(skills_doc or "")
     prompt_chars = len(prompt)
     logger.info(

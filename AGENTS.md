@@ -129,9 +129,11 @@ Resources defined in per-user config or DB, merged at task time. Types: `calenda
 ```
 
 ### Memory System
-- **User memory** (`USER.md`): Auto-loaded into prompts (except briefings)
+- **User memory** (`USER.md`): Auto-loaded into prompts (except briefings). Optional nightly curation via `curate_user_memory` (sleep cycle promotes durable facts from dated memories).
 - **Channel memory** (`CHANNEL.md`): Loaded when `conversation_token` set
-- **Dated memories** (`memories/YYYY-MM-DD.md`): Stored for on-demand search, NOT auto-loaded
+- **Dated memories** (`memories/YYYY-MM-DD.md`): Auto-loaded into prompts (last N days via `auto_load_dated_days`, default 3). Includes task provenance references (`ref:TASK_ID`).
+- **Memory recall** (BM25): Auto-recall via `auto_recall` config — searches indexed memories/conversations using task prompt as query, independent of context triage.
+- **Memory cap** (`max_memory_chars`): Limits total memory in prompts. Truncation order: recalled → dated → warn about user/channel. Default 0 (unlimited).
 - Briefings exclude all personal memory to prevent leaking into newsletter-style output
 
 ### Talk Integration
@@ -165,7 +167,7 @@ Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user's tim
 Defined in user's `CRON.md` (markdown with TOML `[[jobs]]`). Job types: `prompt` (Claude Code) or `command` (shell). One-time jobs (`once = true`) auto-deleted after success. Auto-disable after 5 consecutive failures. Results excluded from interactive context.
 
 ### Sleep Cycle
-Nightly memory extraction (direct subprocess). Gathers completed tasks → Claude extracts memories → writes dated memory files. Channel sleep cycle runs in parallel for shared context. Config: `[sleep_cycle]`, `[channel_sleep_cycle]`.
+Nightly memory extraction (direct subprocess). Gathers completed tasks → Claude extracts memories → writes dated memory files with task provenance (`ref:TASK_ID`). Channel sleep cycle runs in parallel for shared context. Optional USER.md curation pass (`curate_user_memory`). Config: `[sleep_cycle]`, `[channel_sleep_cycle]`.
 
 ### Heartbeat Monitoring
 User-defined health checks in `HEARTBEAT.md`. Types: `file-watch`, `shell-command`, `url-health`, `calendar-conflicts`, `task-deadline`, `self-check`. Cooldown, check intervals, and quiet hours supported.

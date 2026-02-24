@@ -53,13 +53,14 @@ See `memory/scheduler.md` for full table of fields and defaults.
 
 ### `SleepCycleConfig` (L114-121)
 ```
-enabled: bool = False        cron: str = "0 2 * * *"
+enabled: bool = True         cron: str = "0 2 * * *"
 memory_retention_days: int = 0     lookback_hours: int = 24
+auto_load_dated_days: int = 3      curate_user_memory: bool = False
 ```
 
 ### `ChannelSleepCycleConfig` (L124-130)
 ```
-enabled: bool = False        cron: str = "0 3 * * *"
+enabled: bool = True         cron: str = "0 3 * * *"
 lookback_hours: int = 24     memory_retention_days: int = 0
 ```
 
@@ -93,8 +94,9 @@ max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 =
 
 ### `MemorySearchConfig` (L165-170)
 ```
-enabled: bool = False        auto_index_conversations: bool = True
+enabled: bool = True         auto_index_conversations: bool = True
 auto_index_memory_files: bool = True
+auto_recall: bool = False    auto_recall_limit: int = 5
 ```
 
 ### `DeveloperConfig`
@@ -135,6 +137,7 @@ nextcloud_mount_path: Path | None = None
 skills_dir: Path = Path("config/skills")
 temp_dir: Path = Path("/tmp/istota")
 users_dir: Path | None = None
+max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
 ```
 Properties:
 - `use_mount` (L200): `bool` — True if `nextcloud_mount_path` set

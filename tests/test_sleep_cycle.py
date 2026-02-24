@@ -15,7 +15,10 @@ from istota.sleep_cycle import (
     process_user_sleep_cycle,
     cleanup_old_memory_files,
     check_sleep_cycles,
+    build_curation_prompt,
+    curate_user_memory,
     NO_NEW_MEMORIES,
+    NO_CHANGES_NEEDED,
     MAX_DAY_DATA_CHARS,
 )
 
@@ -344,3 +347,166 @@ class TestCheckSleepCycles:
             result = check_sleep_cycles(conn, mount_config)
 
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# TestMemoryProvenance
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryProvenance:
+    def test_extraction_prompt_includes_ref_format(self):
+        prompt = build_memory_extraction_prompt("alice", "some data", None, "2026-01-28")
+        assert "ref:" in prompt
+
+    def test_extraction_prompt_example_has_task_ref(self):
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        # The prompt should show examples like (2026-01-28, ref:1234)
+        assert "ref:1234" in prompt
+
+
+# ---------------------------------------------------------------------------
+# TestBuildCurationPrompt
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCurationPrompt:
+    def test_includes_current_memory(self):
+        prompt = build_curation_prompt("alice", "- Likes Python", "- New fact from today")
+        assert "Likes Python" in prompt
+        assert "Current USER.md" in prompt
+
+    def test_includes_dated_memories(self):
+        prompt = build_curation_prompt("alice", None, "- Prefers dark mode")
+        assert "Prefers dark mode" in prompt
+        assert "Recent dated memories" in prompt
+
+    def test_empty_memory_shows_placeholder(self):
+        prompt = build_curation_prompt("alice", None, "- Some memory")
+        assert "Empty" in prompt or "no existing" in prompt.lower()
+
+    def test_includes_no_changes_sentinel(self):
+        prompt = build_curation_prompt("alice", "existing", "new")
+        assert NO_CHANGES_NEEDED in prompt
+
+    def test_includes_user_id(self):
+        prompt = build_curation_prompt("bob", None, "data")
+        assert "bob" in prompt
+
+
+# ---------------------------------------------------------------------------
+# TestCurateUserMemory
+# ---------------------------------------------------------------------------
+
+
+class TestCurateUserMemory:
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_writes_updated_memory(self, mock_run, mount_config):
+        mount_config.sleep_cycle.curate_user_memory = True
+        # Create existing dated memories
+        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- Prefers Python over JS")
+
+        # Create config dir for USER.md
+        config_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        config_dir.mkdir(parents=True)
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="# Alice\n\n## Preferences\n- Prefers Python over JS\n",
+            stderr="",
+        )
+
+        result = curate_user_memory(mount_config, "alice")
+        assert result is True
+
+        # Verify USER.md was written
+        memory_path = config_dir / "USER.md"
+        assert memory_path.exists()
+        assert "Prefers Python" in memory_path.read_text()
+
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_no_changes_needed_returns_false(self, mock_run, mount_config):
+        mount_config.sleep_cycle.curate_user_memory = True
+        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- Some memory")
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=NO_CHANGES_NEEDED,
+            stderr="",
+        )
+
+        result = curate_user_memory(mount_config, "alice")
+        assert result is False
+
+    def test_returns_false_when_no_dated_memories(self, mount_config):
+        result = curate_user_memory(mount_config, "alice")
+        assert result is False
+
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_returns_false_on_cli_failure(self, mock_run, mount_config):
+        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- Memory")
+
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Error")
+        result = curate_user_memory(mount_config, "alice")
+        assert result is False
+
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_returns_false_on_timeout(self, mock_run, mount_config):
+        import subprocess
+        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- Memory")
+
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=120)
+        result = curate_user_memory(mount_config, "alice")
+        assert result is False
+
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_curation_called_from_sleep_cycle(self, mock_run, mount_config, db_path):
+        """Verify curate_user_memory is called when enabled in process_user_sleep_cycle."""
+        mount_config.sleep_cycle.curate_user_memory = True
+
+        # First call: extraction, second call: curation
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="- Memory from today\n", stderr=""),
+            MagicMock(returncode=0, stdout=NO_CHANGES_NEEDED, stderr=""),
+        ]
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Test", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Done")
+
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        # Should have been called twice: once for extraction, once for curation
+        assert mock_run.call_count == 2
+
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_curation_not_called_when_disabled(self, mock_run, mount_config, db_path):
+        """Verify curate_user_memory is NOT called when disabled."""
+        mount_config.sleep_cycle.curate_user_memory = False
+
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="- Memory\n", stderr="",
+        )
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Test", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Done")
+
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        # Only one call: extraction. No curation.
+        assert mock_run.call_count == 1

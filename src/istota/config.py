@@ -141,12 +141,14 @@ class SleepCycleConfig:
     cron: str = "0 2 * * *"  # 2am in user's timezone
     memory_retention_days: int = 0  # 0 = unlimited retention
     lookback_hours: int = 24
+    auto_load_dated_days: int = 3  # auto-load N days of dated memories into prompts (0 = disabled)
+    curate_user_memory: bool = False  # nightly USER.md curation from dated memories
 
 
 @dataclass
 class ChannelSleepCycleConfig:
     """Channel-level sleep cycle (memory extraction from shared conversations)."""
-    enabled: bool = False
+    enabled: bool = True
     cron: str = "0 3 * * *"  # UTC (after user sleep cycles)
     lookback_hours: int = 24
     memory_retention_days: int = 0  # 0 = unlimited retention
@@ -195,9 +197,11 @@ class UserConfig:
 @dataclass
 class MemorySearchConfig:
     """Memory search configuration."""
-    enabled: bool = False
+    enabled: bool = True
     auto_index_conversations: bool = True
     auto_index_memory_files: bool = True
+    auto_recall: bool = False  # BM25 search using task prompt as query
+    auto_recall_limit: int = 5  # max results for auto-recall
 
 
 @dataclass
@@ -273,6 +277,7 @@ class Config:
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt
     model: str = ""  # Claude model to use (e.g. "sonnet", "opus"); empty = CLI default
+    max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
     db_path: Path = field(default_factory=lambda: Path("data/istota.db"))
     nextcloud: NextcloudConfig = field(default_factory=NextcloudConfig)
     talk: TalkConfig = field(default_factory=TalkConfig)
@@ -510,6 +515,9 @@ def load_config(config_path: Path | None = None) -> Config:
     if "model" in data:
         config.model = data["model"]
 
+    if "max_memory_chars" in data:
+        config.max_memory_chars = data["max_memory_chars"]
+
     if "db_path" in data:
         config.db_path = Path(data["db_path"])
 
@@ -661,9 +669,11 @@ def load_config(config_path: Path | None = None) -> Config:
     if "memory_search" in data:
         ms = data["memory_search"]
         config.memory_search = MemorySearchConfig(
-            enabled=ms.get("enabled", False),
+            enabled=ms.get("enabled", True),
             auto_index_conversations=ms.get("auto_index_conversations", True),
             auto_index_memory_files=ms.get("auto_index_memory_files", True),
+            auto_recall=ms.get("auto_recall", False),
+            auto_recall_limit=ms.get("auto_recall_limit", 5),
         )
 
     if "sleep_cycle" in data:
@@ -673,12 +683,14 @@ def load_config(config_path: Path | None = None) -> Config:
             cron=sc.get("cron", "0 2 * * *"),
             memory_retention_days=sc.get("memory_retention_days", 0),
             lookback_hours=sc.get("lookback_hours", 24),
+            auto_load_dated_days=sc.get("auto_load_dated_days", 3),
+            curate_user_memory=sc.get("curate_user_memory", False),
         )
 
     if "channel_sleep_cycle" in data:
         csc = data["channel_sleep_cycle"]
         config.channel_sleep_cycle = ChannelSleepCycleConfig(
-            enabled=csc.get("enabled", False),
+            enabled=csc.get("enabled", True),
             cron=csc.get("cron", "0 3 * * *"),
             lookback_hours=csc.get("lookback_hours", 24),
             memory_retention_days=csc.get("memory_retention_days", 0),

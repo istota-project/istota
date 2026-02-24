@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-24: Memory system improvements
+
+Six-part enhancement to the multi-tiered memory system. Dated memories are now auto-loaded into prompts, BM25 recall surfaces relevant past context without LLM calls, and a memory size cap prevents prompt bloating. Sleep cycle extraction now includes task provenance references, and an optional nightly USER.md curation pass promotes durable facts from dated memories.
+
+**Key changes:**
+- Auto-load recent dated memories into prompts (`auto_load_dated_days`, default 3 days, skip briefings)
+- BM25 memory recall using task prompt as query (`auto_recall` config, independent of context triage)
+- Memory size cap (`max_memory_chars`) with truncation order: recalled → dated → warn
+- Memory provenance in sleep cycle extraction (`ref:TASK_ID` references in dated memories)
+- Optional USER.md curation via sleep cycle (`curate_user_memory` config, Claude Sonnet second pass)
+- Changed defaults: `MemorySearchConfig.enabled` → `True`, `ChannelSleepCycleConfig.enabled` → `True`
+- 44 new tests covering all features (2275 total)
+
+**Files modified:**
+- `src/istota/config.py` — New fields: `auto_load_dated_days`, `curate_user_memory`, `auto_recall`, `auto_recall_limit`, `max_memory_chars`
+- `src/istota/executor.py` — `_recall_memories()`, `_apply_memory_cap()`, dated memories auto-load, `recalled_memories` in `build_prompt()`
+- `src/istota/sleep_cycle.py` — `build_curation_prompt()`, `curate_user_memory()`, `ref:TASK_ID` in extraction prompt
+- `config/config.example.toml` — Documented new config fields
+- `deploy/ansible/defaults/main.yml` — Added ansible variables for all new fields
+- `deploy/ansible/templates/config.toml.j2` — Template entries for new fields
+- `tests/test_executor.py` — 20 new tests (recall, cap, dated memories, build_prompt)
+- `tests/test_sleep_cycle.py` — 14 new tests (provenance, curation prompt, curate_user_memory)
+- `tests/test_config.py` — 10 new tests (defaults and TOML loading for new fields)
+
 ## 2026-02-24: Sleep cycle default + no-mount state bug fix
 
 Sleep cycle was disabled by default (`enabled = false`), which meant deployments that didn't explicitly set it in config.toml silently had no nightly memory extraction. Changed the default to `true` (both in code and Ansible role).

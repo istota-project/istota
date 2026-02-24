@@ -13,8 +13,10 @@ from .config import Config
 from .storage import (
     _get_mount_path,
     get_user_memories_path,
+    get_user_memory_path,
     get_channel_memories_path,
     read_user_memory_v2,
+    read_dated_memories,
     read_channel_memory,
     _DATED_MEMORY_PATTERN,
 )
@@ -119,9 +121,9 @@ Do NOT include:
 - Temporary states that are no longer relevant
 - Raw data or lengthy outputs
 
-Format your output as concise bullet points with dates, like:
-- Decided to switch project Alpha to Python 3.12 (2026-01-28)
-- Prefers email summaries over detailed reports (2026-01-28)
+Format your output as concise bullet points with dates and task references, like:
+- Decided to switch project Alpha to Python 3.12 (2026-01-28, ref:1234)
+- Prefers email summaries over detailed reports (2026-01-28, ref:1235)
 
 If there is genuinely nothing new worth remembering, respond with exactly: {NO_NEW_MEMORIES}
 
@@ -227,6 +229,120 @@ def process_user_sleep_cycle(
     # Clean up old memory files
     cleanup_old_memory_files(config, user_id, sleep_config.memory_retention_days)
 
+    # Curate USER.md if enabled
+    if sleep_config.curate_user_memory:
+        try:
+            curate_user_memory(config, user_id)
+        except Exception as e:
+            logger.error("USER.md curation failed for %s: %s", user_id, e)
+
+    return True
+
+
+# Sentinel output from Claude indicating no curation changes needed
+NO_CHANGES_NEEDED = "NO_CHANGES_NEEDED"
+
+
+def build_curation_prompt(
+    user_id: str,
+    current_memory: str | None,
+    dated_memories: str,
+) -> str:
+    """Build the prompt that instructs Claude to curate USER.md from dated memories."""
+    current_section = ""
+    if current_memory:
+        current_section = f"""
+## Current USER.md
+
+{current_memory}
+"""
+    else:
+        current_section = """
+## Current USER.md
+
+(Empty — no existing memory file)
+"""
+
+    return f"""You are curating the persistent memory file (USER.md) for user '{user_id}'.
+
+{current_section}
+## Recent dated memories
+
+The following memories were extracted from recent conversations:
+
+{dated_memories}
+
+## Instructions
+
+Update USER.md by:
+1. Promoting durable facts from the dated memories (preferences, projects, people, decisions)
+2. Removing entries that are outdated or contradicted by newer information
+3. Keeping the file concise and well-organized under clear headings
+4. Preserving the existing structure and headings where possible
+
+Do NOT include:
+- Temporary or time-bound information (e.g., "meeting tomorrow")
+- Task references (ref:NNNN) — those belong in dated memories only
+- Redundant entries — if info is already in USER.md, don't duplicate it
+
+If USER.md is already up to date and no changes are needed, respond with exactly: {NO_CHANGES_NEEDED}
+
+Otherwise, output the COMPLETE updated USER.md content. No preamble, no explanation — just the file content."""
+
+
+def curate_user_memory(config: Config, user_id: str) -> bool:
+    """Second pass: update USER.md based on accumulated dated memories.
+
+    Returns True if USER.md was updated.
+    """
+    current_memory = read_user_memory_v2(config, user_id)
+    dated = read_dated_memories(config, user_id, max_days=30, max_chars=12000)
+    if not dated:
+        return False  # Nothing to curate from
+
+    prompt = build_curation_prompt(user_id, current_memory, dated)
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "-", "--model", "sonnet"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if result.returncode != 0:
+            logger.error(
+                "USER.md curation failed for %s (rc=%d): %s",
+                user_id, result.returncode,
+                result.stderr[:200] if result.stderr else "",
+            )
+            return False
+
+        output = result.stdout.strip()
+
+    except subprocess.TimeoutExpired:
+        logger.error("USER.md curation timed out for %s", user_id)
+        return False
+    except FileNotFoundError:
+        logger.error("Claude CLI not found for USER.md curation")
+        return False
+    except Exception as e:
+        logger.error("USER.md curation error for %s: %s", user_id, e)
+        return False
+
+    if output == NO_CHANGES_NEEDED:
+        logger.info("USER.md curation for %s: no changes needed", user_id)
+        return False
+
+    if not config.use_mount:
+        logger.warning("USER.md curation requires mount mode, skipping for %s", user_id)
+        return False
+
+    memory_path = _get_mount_path(config, get_user_memory_path(user_id, config.bot_dir_name))
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text(output + "\n")
+    logger.info("Updated USER.md for %s (%d chars)", user_id, len(output))
     return True
 
 
@@ -431,9 +547,9 @@ Do NOT include:
 - Temporary states that are no longer relevant
 - Raw data or lengthy outputs
 
-Format your output as concise bullet points with dates and attribution, like:
-- Decided to migrate API to GraphQL (alice, 2026-01-28)
-- Blocked on infrastructure approval for prod deploy (bob, 2026-01-28)
+Format your output as concise bullet points with dates, attribution, and task references, like:
+- Decided to migrate API to GraphQL (alice, 2026-01-28, ref:1234)
+- Blocked on infrastructure approval for prod deploy (bob, 2026-01-28, ref:1235)
 
 If there is genuinely nothing new worth remembering, respond with exactly: {NO_NEW_MEMORIES}
 

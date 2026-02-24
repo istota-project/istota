@@ -226,15 +226,19 @@ istota_whisper_max_model: "small"          # Max model for auto-selection at run
 istota_memory_search_enabled: true
 istota_memory_search_auto_index_conversations: true
 istota_memory_search_auto_index_memory_files: true
+istota_memory_search_auto_recall: false           # BM25 search using task prompt as query
+istota_memory_search_auto_recall_limit: 5          # max results for auto-recall
 
 # Sleep cycle settings (nightly memory extraction, cron evaluated per-user timezone)
 istota_sleep_cycle_enabled: true
 istota_sleep_cycle_cron: "0 2 * * *"
 istota_sleep_cycle_lookback_hours: 24
 istota_sleep_cycle_memory_retention_days: 0  # 0 = unlimited
+istota_sleep_cycle_auto_load_dated_days: 3   # auto-load N days of dated memories (0 = disabled)
+istota_sleep_cycle_curate_user_memory: false  # nightly USER.md curation from dated memories
 
 # Channel sleep cycle settings (shared channel memory extraction)
-istota_channel_sleep_cycle_enabled: false
+istota_channel_sleep_cycle_enabled: true
 istota_channel_sleep_cycle_cron: "0 3 * * *"
 istota_channel_sleep_cycle_lookback_hours: 24
 istota_channel_sleep_cycle_memory_retention_days: 0  # 0 = unlimited

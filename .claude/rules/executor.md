@@ -20,6 +20,9 @@ Returns `(success, result_text, actions_taken_json)`. `actions_taken` is a JSON 
 6. **User memory** (L551-564): `read_user_memory_v2()`, skip for briefings
 7. **Channel memory** (L566-574): `read_channel_memory()`, only if `conversation_token`
 8. **CalDAV discovery** (L576-588): `get_calendars_for_user()`
+8b. **Dated memories** (L1410-1421): `read_dated_memories()`, skip for briefings, controlled by `auto_load_dated_days`
+8c. **Memory recall** (L1424-1425): `_recall_memories()`, BM25 search using task prompt, skip for briefings
+8d. **Memory cap** (L1427-1430): `_apply_memory_cap()`, truncates recalled → dated if `max_memory_chars` exceeded
 9. **Build prompt** (L600-605)
 10. **Dry run check** (L618-619): return prompt text
 11. **Write prompt file** (L621-623): `task_{id}_prompt.txt`
@@ -36,6 +39,9 @@ def build_prompt(
     user_memory: str | None = None, discovered_calendars: list[tuple[str, str, bool]] | None = None,
     user_email_addresses: list[str] | None = None, dated_memories: str | None = None,
     channel_memory: str | None = None, skills_changelog: str | None = None,
+    is_admin: bool = True, emissaries: str | None = None,
+    source_type: str | None = None, output_target: str | None = None,
+    recalled_memories: str | None = None,
 ) -> str:
 ```
 
@@ -46,7 +52,8 @@ def build_prompt(
 3. Resources: calendars, folders, todos, email_folders, notes, reminders (L180-242)
 4. User memory: USER.md (L267-276)
 5. Channel memory: CHANNEL.md (L278-288)
-6. Dated memories: (reserved, currently None) (L290-298)
+6. Dated memories: auto-loaded from `memories/YYYY-MM-DD.md` (configurable via `auto_load_dated_days`)
+6b. Recalled memories: BM25 search results (when `auto_recall` enabled)
 7. Tools: file access, browser, CalDAV, sqlite3, email (L312-357)
 8. Rules: resource restrictions, confirmation, subtasks, output (L359-367)
 9. Context: previous messages (L300-310)

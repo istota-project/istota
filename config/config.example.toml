@@ -203,10 +203,12 @@ sources = [
 # Memories written to /Users/{user_id}/memories/YYYY-MM-DD.md.
 
 # [sleep_cycle]
-# enabled = false
+# enabled = true                       # enabled by default
 # cron = "0 2 * * *"                  # 2am in user's timezone
 # memory_retention_days = 0            # 0 = unlimited, or set days to auto-delete old files
 # lookback_hours = 24                  # how far back to look for interactions
+# auto_load_dated_days = 3             # auto-load N days of dated memories into prompts (0 = disabled)
+# curate_user_memory = false           # nightly USER.md curation from dated memories
 
 # ============================================================================
 # Channel Sleep Cycle (shared channel memory extraction)
@@ -216,7 +218,7 @@ sources = [
 # Cron evaluated in UTC since channels span users in different timezones.
 
 # [channel_sleep_cycle]
-# enabled = false
+# enabled = true                    # enabled by default
 # cron = "0 3 * * *"               # 3am UTC (after user sleep cycles at 2am)
 # lookback_hours = 24               # how far back to look for interactions
 # memory_retention_days = 0           # 0 = unlimited, or set days to auto-delete old files

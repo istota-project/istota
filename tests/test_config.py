@@ -10,6 +10,7 @@ from istota.config import (
     DeveloperConfig,
     EmailConfig,
     LoggingConfig,
+    MemorySearchConfig,
     NextcloudConfig,
     ResourceConfig,
     SchedulerConfig,
@@ -420,14 +421,14 @@ enabled = true
 class TestChannelSleepCycleConfig:
     def test_defaults(self):
         csc = ChannelSleepCycleConfig()
-        assert csc.enabled is False
+        assert csc.enabled is True
         assert csc.cron == "0 3 * * *"
         assert csc.lookback_hours == 24
         assert csc.memory_retention_days == 0
 
     def test_config_default(self):
         cfg = Config()
-        assert cfg.channel_sleep_cycle.enabled is False
+        assert cfg.channel_sleep_cycle.enabled is True
 
     def test_load_from_toml(self, tmp_path):
         config_file = tmp_path / "config.toml"
@@ -448,7 +449,7 @@ memory_retention_days = 60
         config_file = tmp_path / "config.toml"
         config_file.write_text("")
         cfg = load_config(config_file)
-        assert cfg.channel_sleep_cycle.enabled is False
+        assert cfg.channel_sleep_cycle.enabled is True
         assert cfg.channel_sleep_cycle.cron == "0 3 * * *"
 
 
@@ -1064,3 +1065,80 @@ class TestWorkerConcurrencyConfig:
         # alice's per-user file doesn't set worker limits, so effective should use global
         assert cfg.effective_user_max_fg_workers("alice") == 3
         assert cfg.users["alice"].max_foreground_workers == 0  # sentinel, not 1
+
+
+# ---------------------------------------------------------------------------
+# TestMemorySystemConfigDefaults
+# ---------------------------------------------------------------------------
+
+
+class TestMemorySystemConfigDefaults:
+    def test_sleep_cycle_auto_load_dated_days_default(self):
+        cfg = SleepCycleConfig()
+        assert cfg.auto_load_dated_days == 3
+
+    def test_sleep_cycle_curate_user_memory_default(self):
+        cfg = SleepCycleConfig()
+        assert cfg.curate_user_memory is False
+
+    def test_memory_search_auto_recall_default(self):
+        cfg = MemorySearchConfig()
+        assert cfg.auto_recall is False
+
+    def test_memory_search_auto_recall_limit_default(self):
+        cfg = MemorySearchConfig()
+        assert cfg.auto_recall_limit == 5
+
+    def test_memory_search_enabled_by_default(self):
+        cfg = MemorySearchConfig()
+        assert cfg.enabled is True
+
+    def test_config_max_memory_chars_default(self):
+        cfg = Config()
+        assert cfg.max_memory_chars == 0
+
+
+class TestMemorySystemConfigLoading:
+    def test_load_sleep_cycle_auto_load_dated_days(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[sleep_cycle]\n'
+            'enabled = true\n'
+            'auto_load_dated_days = 7\n'
+            'curate_user_memory = true\n'
+        )
+        cfg = load_config(p)
+        assert cfg.sleep_cycle.auto_load_dated_days == 7
+        assert cfg.sleep_cycle.curate_user_memory is True
+
+    def test_load_memory_search_auto_recall(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[memory_search]\n'
+            'enabled = true\n'
+            'auto_recall = true\n'
+            'auto_recall_limit = 10\n'
+        )
+        cfg = load_config(p)
+        assert cfg.memory_search.auto_recall is True
+        assert cfg.memory_search.auto_recall_limit == 10
+
+    def test_load_max_memory_chars(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text('max_memory_chars = 5000\n')
+        cfg = load_config(p)
+        assert cfg.max_memory_chars == 5000
+
+    def test_load_defaults_when_not_set(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text('db_path = "test.db"\n')
+        cfg = load_config(p)
+        assert cfg.sleep_cycle.auto_load_dated_days == 3
+        assert cfg.sleep_cycle.curate_user_memory is False
+        assert cfg.memory_search.auto_recall is False
+        assert cfg.memory_search.auto_recall_limit == 5
+        assert cfg.max_memory_chars == 0
