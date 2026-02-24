@@ -354,17 +354,17 @@ def select_relevant_talk_context(
     if not messages:
         return []
 
+    # Always cap at lookback_count (hard limit on context size)
+    lookback = config.conversation.lookback_count
+    if len(messages) > lookback:
+        messages = messages[-lookback:]
+
     if not config.conversation.use_selection:
         return messages
 
     threshold = config.conversation.skip_selection_threshold
     if len(messages) <= threshold:
         return messages
-
-    # Limit to lookback_count for triage (same as DB path)
-    lookback = config.conversation.lookback_count
-    if len(messages) > lookback:
-        messages = messages[-lookback:]
 
     recent_count = config.conversation.always_include_recent
     if recent_count >= len(messages):
