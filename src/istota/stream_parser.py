@@ -36,7 +36,7 @@ _TOOL_EMOJI = {
     "Write": "📝",
     "Grep": "🔍",
     "Glob": "🔍",
-    "Task": "🤖",
+    "Task": "🐙",
     "WebFetch": "🌐",
     "WebSearch": "🌐",
 }

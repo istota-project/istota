@@ -91,7 +91,7 @@ Each user gets a shared Nextcloud folder:
 
 ```bash
 uv sync                                    # Install dependencies
-uv run pytest tests/ -v                    # Run tests (~2170 unit tests)
+uv run pytest tests/ -v                    # Run tests (~2275 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```

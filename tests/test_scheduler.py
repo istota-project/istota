@@ -120,7 +120,7 @@ class TestFormatErrorForUser:
     def test_formats_other_api_error(self):
         error = 'API Error: 422 {"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}}'
         result = _format_error_for_user(error)
-        assert "void stared back" in result.lower()
+        assert "the deep stared back" in result.lower()
 
     def test_formats_oom_error(self):
         error = "Claude Code was killed (likely out of memory)"

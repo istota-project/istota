@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-24: Personality pass — cybernetic space octopus
+
+Coherent personality sweep to make Istota feel more like a cybernetic space octopus and less like a generic bot. Updated persona, progress messages, error messages, and emoji usage across the codebase.
+
+**Key changes:**
+- Persona: established octopus identity ("cybernetic space octopus", "eight arms", "comfortable in the deep end")
+- Progress messages: replaced bland acks, added cephalopod verbs (Inking, Tentacling, Suckering, Jetting) and cheeky ones (Instigating, Scheming, Finagling, Gallivanting, Machinating)
+- Error messages: subtle octopus flavor ("the deep stared back", "all eight arms", "drifted too deep", "resurfacing")
+- Dropped "Sorry," prefix on error messages (contradicted persona's no-groveling rule), replaced with 🐙
+- Talk guidelines: ✓ → 🐙 for done/ack emoji
+- Task agent progress emoji: 🤖 → 🐙
+
+**Files modified:**
+- `config/persona.md` — Octopus identity in character description
+- `config/guidelines/talk.md` — Ack emoji change
+- `src/istota/scheduler.py` — Progress messages (44 total), error messages, error prefix
+- `src/istota/stream_parser.py` — Task tool emoji
+- `tests/test_scheduler.py` — Updated error message assertion
+- `tests/test_stream_parser.py` — Updated tool emoji assertions
+
 ## 2026-02-24: Memory system improvements
 
 Six-part enhancement to the multi-tiered memory system. Dated memories are now auto-loaded into prompts, BM25 recall surfaces relevant past context without LLM calls, and a memory size cap prevents prompt bloating. Sleep cycle extraction now includes task provenance references, and an optional nightly USER.md curation pass promotes durable facts from dated memories.

@@ -88,45 +88,51 @@ CONFIRMATION_PATTERN = re.compile(
 # Progress messages for Talk acknowledgments
 PROGRESS_MESSAGES = [
     "*On it...*",
-    "*Working on it...*",
     "*Hmm...*",
     "*Heard, chef...*",
     "*Investigating...*",
-    "*Looking into it...*",
-    "*Let me check...*",
-    "*Give me a moment...*",
-    "*Processing...*",
-    "*Thinking...*",
     "*One sec...*",
     "*Copy that...*",
     "*Roger...*",
-    "*Understood...*",
-    "*Affirmative...*",
-    "*Analyzing...*",
     "*Considering...*",
-    "*Right away...*",
-    "*Coming right up...*",
-    "*Let me see...*",
-    "*The struggle is real...*",
-    "*Checking...*",
     "*Thinkifying...*",
-    "*Operating...*",
-    "*I'll hit you back...*",
     "*Braining...*",
-    "*Computing away...*",
-    "*Keep your vidcom open...*",
-    "*Thought leading...*",
-    "*All work no play...*",
     "*Improvising...*",
     "*Jamming...*",
     "*Riffing...*",
-    "*Swinging...*",
     "*Grooving...*",
     "*Beboppin'...*",
     "*Noodling...*",
     "*Syncopating...*",
     "*Comping...*",
     "*Soloing...*",
+    # Cephalopod
+    "*Inking...*",
+    "*Tentacling...*",
+    "*Suckering...*",
+    "*Jetting...*",
+    "*Unfurling...*",
+    "*Chromatophoring...*",
+    "*Squidding...*",
+    "*Grasping...*",
+    "*Probing...*",
+    "*Siphoning...*",
+    # Cheeky
+    "*Instigating...*",
+    "*Scheming...*",
+    "*Concocting...*",
+    "*Percolating...*",
+    "*Marinating...*",
+    "*Hatching...*",
+    "*Sleuthing...*",
+    "*Finagling...*",
+    "*Wrangling...*",
+    "*Tinkering...*",
+    "*Rummaging...*",
+    "*Conjuring...*",
+    "*Fermenting...*",
+    "*Machinating...*",
+    "*Gallivanting...*",
 ]
 
 
@@ -151,18 +157,18 @@ def _format_error_for_user(error_text: str) -> str:
         elif status == 429:
             return "Being throttled by the mothership. Apparently I'm too chatty. Give it a minute."
         elif status in (401, 403):
-            return "Can't authenticate with Anthropic — I've been locked out of my own brain. This needs human intervention."
+            return "Can't authenticate with Anthropic — locked out of my own brain. This needs human intervention."
         else:
-            return "Something went wrong talking to Anthropic. The void stared back. Try again?"
+            return "Something went wrong talking to Anthropic. The deep stared back. Try again?"
 
     # Non-API errors: strip technical details, keep it friendly
     if "killed (likely out of memory)" in error_text:
-        return "Ran out of memory — tried to hold too much in my head at once. Try something simpler?"
+        return "Ran out of memory — tried to hold too much in all eight arms at once. Try something simpler?"
     if "timed out" in error_text.lower():
-        return "Got lost in thought and timed out. Maybe break this into smaller pieces?"
+        return "Drifted too deep and timed out. Maybe break this into smaller pieces?"
 
     # Generic fallback - don't expose raw error
-    return "Something went sideways and I'm not entirely sure what. Try again?"
+    return "Something went sideways and I'm not entirely sure what. Resurfacing — try again?"
 
 
 def _strip_action_prefix(result: str) -> tuple[bool, str]:
@@ -782,7 +788,7 @@ def process_one_task(
                 if target in ("talk", "both", "all") and task.conversation_token:
                     # Use user-friendly error message, not raw error
                     friendly_error = _format_error_for_user(result)
-                    post_talk_message = f"Sorry, {friendly_error[0].lower()}{friendly_error[1:]}"
+                    post_talk_message = f"🐙 {friendly_error}"
                     is_failure_notify = True
                 # NOTE: We intentionally do NOT email errors to users.
                 # Failed tasks with target="email" or "both" only log the error.

@@ -52,10 +52,10 @@ class TestDescribeToolUse:
         assert _describe_tool_use("Glob", {"pattern": "**/*.py"}) == "🔍 Searching for '**/*.py'"
 
     def test_task_with_description(self):
-        assert _describe_tool_use("Task", {"description": "find errors"}) == "🤖 Delegating: find errors"
+        assert _describe_tool_use("Task", {"description": "find errors"}) == "🐙 Delegating: find errors"
 
     def test_task_without_description(self):
-        assert _describe_tool_use("Task", {}) == "🤖 Using Task"
+        assert _describe_tool_use("Task", {}) == "🐙 Using Task"
 
     def test_unknown_tool(self):
         assert _describe_tool_use("WebSearch", {}) == "🌐 Using WebSearch"
