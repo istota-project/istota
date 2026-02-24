@@ -14,11 +14,13 @@ Also switched the deploy update script from `git pull` to `git reset --hard orig
 - New config fields: `context_recency_hours` (0 = disabled) and `context_min_messages` (default 10)
 - Recency filter applied in both Talk and DB context paths, before selection/triage
 - `lookback_count` now caps message list before the selection check, acting as a hard limit regardless of triage mode
+- Fixed `load_config()` not parsing `context_recency_hours` and `context_min_messages` from TOML (fields existed on dataclass but explicit constructor call didn't include them)
+- Lookback cap applied before recency window in Talk path (was after, so recency ran on ~48 messages then lookback still gave 25)
 - Deploy update script uses `git reset --hard` instead of `git pull`/`git checkout`
 
 **Files modified:**
-- `src/istota/config.py` — Added `context_recency_hours` and `context_min_messages` to `ConversationConfig`
-- `src/istota/executor.py` — Added `_apply_recency_window_talk()` and `_apply_recency_window_db()`, applied in both context paths
+- `src/istota/config.py` — Added fields to `ConversationConfig` and `load_config()` parser
+- `src/istota/executor.py` — Added `_apply_recency_window_talk()` and `_apply_recency_window_db()`, lookback cap before recency in Talk path
 - `src/istota/context.py` — Moved `lookback_count` cap before `use_selection` check in `select_relevant_talk_context()`
 - `deploy/ansible/defaults/main.yml` — Added new config vars with inline docs for all conversation settings
 - `deploy/ansible/templates/config.toml.j2` — Added new config fields
