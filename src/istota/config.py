@@ -579,6 +579,8 @@ def load_config(config_path: Path | None = None) -> Config:
             use_selection=conv.get("use_selection", True),
             always_include_recent=conv.get("always_include_recent", 5),
             context_truncation=conv.get("context_truncation", 0),
+            context_recency_hours=conv.get("context_recency_hours", 0),
+            context_min_messages=conv.get("context_min_messages", 10),
             previous_tasks_count=conv.get("previous_tasks_count", 3),
             talk_context_limit=conv.get("talk_context_limit", 100),
         )
