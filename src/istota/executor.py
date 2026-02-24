@@ -641,7 +641,10 @@ def _build_talk_api_context(
             return f"(In reply to: {task.reply_to_content})"
         return None
 
-    # Apply recency window before selection
+    # Cap at lookback_count, then apply recency window
+    lookback = config.conversation.lookback_count
+    if len(talk_messages) > lookback:
+        talk_messages = talk_messages[-lookback:]
     talk_messages = _apply_recency_window_talk(talk_messages, config)
 
     # Reply parent handling: check if replied-to message is in the fetched history
