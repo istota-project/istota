@@ -107,16 +107,18 @@ istota_email_poll_folder: "INBOX"
 istota_email_bot_address: ""
 
 # Conversation context settings
-istota_conversation_enabled: true
-istota_conversation_lookback_count: 25
-istota_conversation_selection_model: "haiku"
-istota_conversation_selection_timeout: 30.0
-istota_conversation_skip_selection_threshold: 3
-istota_conversation_use_selection: true
-istota_conversation_always_include_recent: 10
-istota_conversation_context_truncation: 0
-istota_conversation_previous_tasks_count: 3
-istota_conversation_talk_context_limit: 100
+istota_conversation_enabled: true               # false = no conversation context at all
+istota_conversation_lookback_count: 25           # max messages to fetch from DB/cache
+istota_conversation_selection_model: "haiku"     # model for triage (only when use_selection=true)
+istota_conversation_selection_timeout: 30.0      # timeout for triage model call
+istota_conversation_skip_selection_threshold: 3  # skip triage if history <= this count
+istota_conversation_use_selection: true           # false = include all fetched messages, no LLM triage
+istota_conversation_always_include_recent: 10    # guaranteed recent messages before triage (only when use_selection=true)
+istota_conversation_context_truncation: 0        # max chars per bot response in context (0 = unlimited)
+istota_conversation_context_recency_hours: 0     # only include older messages within this time window (0 = disabled)
+istota_conversation_context_min_messages: 10     # always include at least this many recent messages regardless of age
+istota_conversation_previous_tasks_count: 3      # inject N recent scheduled/briefing tasks into context
+istota_conversation_talk_context_limit: 100      # max messages to fetch from Talk message cache
 
 # Admin users - users with full system access (DB, all mount paths, admin-only skills)
 # When empty, all users are admins (backward compatible default)

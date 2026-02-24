@@ -90,6 +90,8 @@ class ConversationConfig:
     use_selection: bool = True  # If False, include all messages without LLM selection
     always_include_recent: int = 5  # Always include this many recent messages without selection
     context_truncation: int = 0  # Max chars per bot response in context (0 to disable)
+    context_recency_hours: float = 0  # Include older messages only if within this window (0 to disable)
+    context_min_messages: int = 10  # Always include at least this many recent messages regardless of age
     previous_tasks_count: int = 3  # Number of recent unfiltered tasks to inject into context
     talk_context_limit: int = 100  # Messages to fetch from Talk API for context (max 200)
 

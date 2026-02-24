@@ -495,6 +495,96 @@ def _ensure_reply_parent_in_history(
     return history, None
 
 
+def _apply_recency_window_talk(
+    messages: list[db.TalkMessage],
+    config: Config,
+) -> list[db.TalkMessage]:
+    """Trim Talk messages to recency window, keeping a guaranteed minimum.
+
+    Always includes the most recent `context_min_messages`. Beyond that,
+    includes older messages only if they fall within `context_recency_hours`
+    of the newest message. Disabled when context_recency_hours == 0.
+
+    Messages must be in chronological order (oldest first).
+    """
+    recency_hours = config.conversation.context_recency_hours
+    if recency_hours <= 0 or not messages:
+        return messages
+
+    min_count = config.conversation.context_min_messages
+    if len(messages) <= min_count:
+        return messages
+
+    # Cutoff based on the newest message's timestamp
+    newest_ts = messages[-1].timestamp
+    cutoff_ts = newest_ts - (recency_hours * 3600)
+
+    # Walk backwards: guaranteed minimum, then include if within window
+    guaranteed = messages[-min_count:]
+    older = messages[:-min_count]
+    within_window = [m for m in older if m.timestamp >= cutoff_ts]
+
+    result = within_window + guaranteed
+    if len(result) < len(messages):
+        logger.info(
+            "Recency window trimmed Talk context from %d to %d messages "
+            "(min=%d, window=%.1fh, dropped=%d older)",
+            len(messages), len(result), min_count, recency_hours,
+            len(messages) - len(result),
+        )
+    return result
+
+
+def _apply_recency_window_db(
+    history: list[db.ConversationMessage],
+    config: Config,
+) -> list[db.ConversationMessage]:
+    """Trim DB conversation messages to recency window, keeping a guaranteed minimum.
+
+    Same logic as _apply_recency_window_talk but for ConversationMessage
+    (uses created_at datetime string instead of unix timestamp).
+
+    Messages must be in chronological order (oldest first).
+    """
+    recency_hours = config.conversation.context_recency_hours
+    if recency_hours <= 0 or not history:
+        return history
+
+    min_count = config.conversation.context_min_messages
+    if len(history) <= min_count:
+        return history
+
+    # Parse the newest message's created_at to get cutoff
+    newest = history[-1]
+    try:
+        newest_dt = datetime.fromisoformat(newest.created_at)
+    except (ValueError, TypeError):
+        return history  # Can't parse, skip filtering
+
+    cutoff_seconds = recency_hours * 3600
+    guaranteed = history[-min_count:]
+    older = history[:-min_count]
+
+    within_window = []
+    for msg in older:
+        try:
+            msg_dt = datetime.fromisoformat(msg.created_at)
+            if (newest_dt - msg_dt).total_seconds() <= cutoff_seconds:
+                within_window.append(msg)
+        except (ValueError, TypeError):
+            within_window.append(msg)  # Keep if unparseable
+
+    result = within_window + guaranteed
+    if len(result) < len(history):
+        logger.info(
+            "Recency window trimmed DB context from %d to %d messages "
+            "(min=%d, window=%.1fh, dropped=%d older)",
+            len(history), len(result), min_count, recency_hours,
+            len(history) - len(result),
+        )
+    return result
+
+
 def _build_talk_api_context(
     task: db.Task,
     config: Config,
@@ -550,6 +640,9 @@ def _build_talk_api_context(
         if task.reply_to_talk_id and task.reply_to_content:
             return f"(In reply to: {task.reply_to_content})"
         return None
+
+    # Apply recency window before selection
+    talk_messages = _apply_recency_window_talk(talk_messages, config)
 
     # Reply parent handling: check if replied-to message is in the fetched history
     reply_parent_talk_msg = None
@@ -654,6 +747,9 @@ def _build_db_context(
             )
 
     logger.debug("Context lookup: token=%s, history_count=%d", task.conversation_token, len(history))
+
+    # Apply recency window before selection
+    history = _apply_recency_window_db(history, config)
 
     if history:
         reply_parent_msg = None

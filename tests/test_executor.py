@@ -13,6 +13,8 @@ from istota.executor import (
     load_emissaries,
     _pre_transcribe_attachments,
     _detect_notification_reply,
+    _apply_recency_window_talk,
+    _apply_recency_window_db,
     _AUDIO_EXTENSIONS,
     API_RETRY_MAX_ATTEMPTS,
     API_RETRY_DELAY_SECONDS,
@@ -2021,3 +2023,172 @@ class TestNotificationReplyContextScoping:
         call_args = mock_run.call_args
         prompt_text = call_args.kwargs["input"]
         assert "replying to a scheduled notification" not in prompt_text
+
+
+# ---------------------------------------------------------------------------
+# TestRecencyWindow
+# ---------------------------------------------------------------------------
+
+
+class TestRecencyWindowTalk:
+    def _make_config(self, recency_hours=2.0, min_messages=10):
+        from istota.config import ConversationConfig
+        config = Config()
+        config.conversation = ConversationConfig(
+            context_recency_hours=recency_hours,
+            context_min_messages=min_messages,
+        )
+        return config
+
+    def _make_talk_msg(self, message_id, timestamp, content="msg"):
+        return db.TalkMessage(
+            message_id=message_id,
+            actor_id="alice",
+            actor_display_name="Alice",
+            is_bot=False,
+            content=content,
+            timestamp=timestamp,
+            actions_taken=None,
+            message_role="user",
+            task_id=None,
+        )
+
+    def test_disabled_when_zero(self):
+        config = self._make_config(recency_hours=0)
+        msgs = [self._make_talk_msg(i, 1000 + i) for i in range(20)]
+        result = _apply_recency_window_talk(msgs, config)
+        assert len(result) == 20
+
+    def test_empty_messages(self):
+        config = self._make_config()
+        assert _apply_recency_window_talk([], config) == []
+
+    def test_fewer_than_min_returns_all(self):
+        config = self._make_config(min_messages=10)
+        msgs = [self._make_talk_msg(i, 1000 + i) for i in range(8)]
+        result = _apply_recency_window_talk(msgs, config)
+        assert len(result) == 8
+
+    def test_all_within_window_returns_all(self):
+        config = self._make_config(recency_hours=2.0, min_messages=5)
+        now = 1000000
+        # 15 messages all within last hour
+        msgs = [self._make_talk_msg(i, now - (15 - i) * 60) for i in range(15)]
+        result = _apply_recency_window_talk(msgs, config)
+        assert len(result) == 15
+
+    def test_trims_old_messages_beyond_min(self):
+        config = self._make_config(recency_hours=2.0, min_messages=5)
+        now = 1000000
+        # 5 messages from 10 hours ago
+        old = [self._make_talk_msg(i, now - 36000 + i) for i in range(5)]
+        # 10 messages from last 30 minutes
+        recent = [self._make_talk_msg(10 + i, now - (10 - i) * 60) for i in range(10)]
+        msgs = old + recent
+        result = _apply_recency_window_talk(msgs, config)
+        # 5 guaranteed recent (min) is less than the 10 recent, but all 10 recent
+        # are within the 2h window, so we get 10 (within window) + 0 old = 10
+        # Wait: min_messages=5 means guaranteed = last 5, older = first 10
+        # Of the first 10 (5 old + 5 recent), only the 5 recent are within window
+        assert len(result) == 10  # 5 within window from older + 5 guaranteed
+
+    def test_guaranteed_minimum_always_kept(self):
+        config = self._make_config(recency_hours=1.0, min_messages=10)
+        now = 1000000
+        # 20 messages, all from 5 hours ago
+        msgs = [self._make_talk_msg(i, now - 18000 + i) for i in range(20)]
+        # newest is at now - 18000 + 19, all within ~0 of each other
+        # but the newest is the reference, so cutoff = newest - 3600
+        # all messages are within 20 seconds of each other, so all within window
+        # Let me make a better test: spread them out
+        old_msgs = [self._make_talk_msg(i, now - 50000 + i * 100) for i in range(15)]
+        recent_msgs = [self._make_talk_msg(15 + i, now - 60 + i * 10) for i in range(5)]
+        msgs = old_msgs + recent_msgs
+        result = _apply_recency_window_talk(msgs, config)
+        # 10 guaranteed (last 10), older 10 checked against window
+        # window = newest - 3600, old msgs are ~50000s ago, way outside
+        # So result = 10 guaranteed minimum
+        assert len(result) == 10
+
+    def test_partial_window_inclusion(self):
+        """Some older messages within window, some outside."""
+        config = self._make_config(recency_hours=1.0, min_messages=3)
+        now = 1000000
+        # 2 messages from 5 hours ago (outside window)
+        outside = [self._make_talk_msg(i, now - 18000 + i) for i in range(2)]
+        # 3 messages from 30 minutes ago (within window)
+        inside = [self._make_talk_msg(10 + i, now - 1800 + i * 60) for i in range(3)]
+        # 3 messages from 5 minutes ago (guaranteed min)
+        recent = [self._make_talk_msg(20 + i, now - 300 + i * 60) for i in range(3)]
+        msgs = outside + inside + recent
+        result = _apply_recency_window_talk(msgs, config)
+        # guaranteed = last 3 (recent), older = outside + inside
+        # inside (3) within window, outside (2) not
+        assert len(result) == 6  # 3 inside + 3 guaranteed
+
+
+class TestRecencyWindowDb:
+    def _make_config(self, recency_hours=2.0, min_messages=10):
+        from istota.config import ConversationConfig
+        config = Config()
+        config.conversation = ConversationConfig(
+            context_recency_hours=recency_hours,
+            context_min_messages=min_messages,
+        )
+        return config
+
+    def _make_msg(self, msg_id, created_at, prompt="q", result="a"):
+        return db.ConversationMessage(
+            id=msg_id, prompt=prompt, result=result, created_at=created_at,
+        )
+
+    def test_disabled_when_zero(self):
+        config = self._make_config(recency_hours=0)
+        msgs = [self._make_msg(i, "2026-02-23 12:00:00") for i in range(20)]
+        result = _apply_recency_window_db(msgs, config)
+        assert len(result) == 20
+
+    def test_empty_returns_empty(self):
+        config = self._make_config()
+        assert _apply_recency_window_db([], config) == []
+
+    def test_fewer_than_min_returns_all(self):
+        config = self._make_config(min_messages=10)
+        msgs = [self._make_msg(i, f"2026-02-23 12:0{i}:00") for i in range(5)]
+        result = _apply_recency_window_db(msgs, config)
+        assert len(result) == 5
+
+    def test_trims_old_db_messages(self):
+        config = self._make_config(recency_hours=1.0, min_messages=3)
+        msgs = [
+            self._make_msg(1, "2026-02-23 08:00:00"),  # 4h before newest
+            self._make_msg(2, "2026-02-23 09:00:00"),  # 3h before newest
+            self._make_msg(3, "2026-02-23 11:30:00"),  # 30m before newest
+            self._make_msg(4, "2026-02-23 11:45:00"),  # 15m before newest
+            self._make_msg(5, "2026-02-23 12:00:00"),  # newest
+        ]
+        result = _apply_recency_window_db(msgs, config)
+        # min=3 guaranteed (ids 3,4,5), older=[1,2], 1 and 2 are >1h old
+        assert len(result) == 3
+        assert [m.id for m in result] == [3, 4, 5]
+
+    def test_keeps_within_window_beyond_min(self):
+        config = self._make_config(recency_hours=2.0, min_messages=2)
+        msgs = [
+            self._make_msg(1, "2026-02-23 08:00:00"),  # outside
+            self._make_msg(2, "2026-02-23 10:30:00"),  # within 2h
+            self._make_msg(3, "2026-02-23 11:00:00"),  # within 2h
+            self._make_msg(4, "2026-02-23 11:30:00"),  # guaranteed
+            self._make_msg(5, "2026-02-23 12:00:00"),  # guaranteed (newest)
+        ]
+        result = _apply_recency_window_db(msgs, config)
+        # guaranteed = [4,5], older = [1,2,3], within window = [2,3]
+        assert len(result) == 4
+        assert [m.id for m in result] == [2, 3, 4, 5]
+
+    def test_unparseable_created_at_skips_filter(self):
+        config = self._make_config(recency_hours=1.0, min_messages=2)
+        msgs = [self._make_msg(i, "not-a-date") for i in range(5)]
+        result = _apply_recency_window_db(msgs, config)
+        # Can't parse newest, returns all
+        assert len(result) == 5
