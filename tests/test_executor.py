@@ -12,6 +12,7 @@ from istota.executor import (
     load_persona,
     load_emissaries,
     _pre_transcribe_attachments,
+    _detect_notification_reply,
     _AUDIO_EXTENSIONS,
     API_RETRY_MAX_ATTEMPTS,
     API_RETRY_DELAY_SECONDS,
@@ -1769,3 +1770,254 @@ class TestPromptOutputTarget:
         result = build_prompt(task, [], Config())
         assert "When the output target is \"email\"" in result
         assert "Do NOT use this tool when the output target is \"talk\"" in result
+
+
+# ---------------------------------------------------------------------------
+# TestDetectNotificationReply
+# ---------------------------------------------------------------------------
+
+
+class TestDetectNotificationReply:
+    def test_returns_parent_for_scheduled_source_type(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            # Create a completed scheduled parent task with a talk_response_id
+            parent_id = db.create_task(
+                conn, prompt="Drink water", user_id="alice",
+                source_type="scheduled", conversation_token="room1",
+            )
+            db.update_task_status(conn, parent_id, "completed", result="Time to drink water!")
+            # Set talk_response_id on the parent
+            conn.execute(
+                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
+                (42, parent_id),
+            )
+            conn.commit()
+
+            # Create a reply task
+            reply_id = db.create_task(
+                conn, prompt="Drinking", user_id="alice",
+                source_type="talk", conversation_token="room1",
+                reply_to_talk_id=42,
+            )
+            reply_task = db.get_task(conn, reply_id)
+
+            result = _detect_notification_reply(reply_task, Config(), conn)
+            assert result is not None
+            assert result.id == parent_id
+            assert result.source_type == "scheduled"
+
+    def test_returns_parent_for_briefing_source_type(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="Morning briefing", user_id="alice",
+                source_type="briefing", conversation_token="room1",
+            )
+            db.update_task_status(conn, parent_id, "completed", result="Good morning!")
+            conn.execute(
+                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
+                (99, parent_id),
+            )
+            conn.commit()
+
+            reply_id = db.create_task(
+                conn, prompt="Thanks", user_id="alice",
+                source_type="talk", conversation_token="room1",
+                reply_to_talk_id=99,
+            )
+            reply_task = db.get_task(conn, reply_id)
+
+            result = _detect_notification_reply(reply_task, Config(), conn)
+            assert result is not None
+            assert result.source_type == "briefing"
+
+    def test_returns_none_for_talk_source_type(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="What's up?", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.update_task_status(conn, parent_id, "completed", result="Not much!")
+            conn.execute(
+                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
+                (50, parent_id),
+            )
+            conn.commit()
+
+            reply_id = db.create_task(
+                conn, prompt="Cool", user_id="alice",
+                source_type="talk", conversation_token="room1",
+                reply_to_talk_id=50,
+            )
+            reply_task = db.get_task(conn, reply_id)
+
+            result = _detect_notification_reply(reply_task, Config(), conn)
+            assert result is None
+
+    def test_returns_none_when_no_reply_to_talk_id(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Hello", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            task = db.get_task(conn, task_id)
+
+            result = _detect_notification_reply(task, Config(), conn)
+            assert result is None
+
+    def test_returns_none_when_no_conn(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Hello", user_id="alice",
+                source_type="talk", conversation_token="room1",
+                reply_to_talk_id=42,
+            )
+            task = db.get_task(conn, task_id)
+
+        result = _detect_notification_reply(task, Config(), None)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestNotificationReplyContextScoping
+# ---------------------------------------------------------------------------
+
+
+class TestNotificationReplyContextScoping:
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "_index.toml").write_text(
+            '[files]\ndescription = "File ops"\nalways_include = true\n'
+        )
+        (skills_dir / "files.md").write_text("File operations guide.")
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+        )
+
+    @patch("istota.executor.subprocess.run")
+    def test_notification_reply_scopes_context(self, mock_run, tmp_path):
+        """Reply to a scheduled notification gets scoped context, not full history."""
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            # Create completed scheduled parent
+            parent_id = db.create_task(
+                conn, prompt="Drink water", user_id="alice",
+                source_type="scheduled", conversation_token="room1",
+            )
+            db.update_task_status(
+                conn, parent_id, "completed",
+                result="Time to hydrate! Remember to drink water.",
+            )
+            conn.execute(
+                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
+                (42, parent_id),
+            )
+            conn.commit()
+
+            # Create reply task
+            reply_id = db.create_task(
+                conn, prompt="Drinking", user_id="alice",
+                source_type="talk", conversation_token="room1",
+                reply_to_talk_id=42,
+            )
+            reply_task = db.get_task(conn, reply_id)
+
+            from istota.executor import execute_task
+            success, result, _actions = execute_task(
+                reply_task, config, [], conn=conn,
+            )
+
+        # Check the prompt contains the notification hint
+        call_args = mock_run.call_args
+        prompt_text = call_args.kwargs["input"]
+        assert "replying to a scheduled notification" in prompt_text
+        assert "respond very briefly" in prompt_text
+        assert "Time to hydrate" in prompt_text
+
+    @patch("istota.executor.subprocess.run")
+    def test_notification_reply_skips_full_context(self, mock_run, tmp_path):
+        """Notification reply should not call _build_talk_api_context."""
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="Reminder", user_id="alice",
+                source_type="scheduled", conversation_token="room1",
+            )
+            db.update_task_status(conn, parent_id, "completed", result="Do the thing")
+            conn.execute(
+                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
+                (42, parent_id),
+            )
+            conn.commit()
+
+            reply_id = db.create_task(
+                conn, prompt="Done", user_id="alice",
+                source_type="talk", conversation_token="room1",
+                reply_to_talk_id=42,
+            )
+            reply_task = db.get_task(conn, reply_id)
+
+            with patch("istota.executor._build_talk_api_context") as mock_talk_ctx:
+                from istota.executor import execute_task
+                execute_task(reply_task, config, [], conn=conn)
+                mock_talk_ctx.assert_not_called()
+
+    @patch("istota.executor.subprocess.run")
+    def test_non_notification_reply_uses_normal_context(self, mock_run, tmp_path):
+        """Reply to a regular talk message should use normal context loading."""
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            # Create completed talk parent (not scheduled)
+            parent_id = db.create_task(
+                conn, prompt="What's the weather?", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.update_task_status(conn, parent_id, "completed", result="It's sunny!")
+            conn.execute(
+                "UPDATE tasks SET talk_response_id = ? WHERE id = ?",
+                (42, parent_id),
+            )
+            conn.commit()
+
+            reply_id = db.create_task(
+                conn, prompt="Thanks", user_id="alice",
+                source_type="talk", conversation_token="room1",
+                reply_to_talk_id=42,
+            )
+            reply_task = db.get_task(conn, reply_id)
+
+            with patch("istota.executor._build_talk_api_context") as mock_talk_ctx:
+                mock_talk_ctx.return_value = None  # Fall through to DB context
+                from istota.executor import execute_task
+                execute_task(reply_task, config, [], conn=conn)
+                # Normal context path should be attempted
+                mock_talk_ctx.assert_called_once()
+
+        # Prompt should NOT contain notification hint
+        call_args = mock_run.call_args
+        prompt_text = call_args.kwargs["input"]
+        assert "replying to a scheduled notification" not in prompt_text

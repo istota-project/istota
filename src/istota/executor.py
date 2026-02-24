@@ -401,6 +401,25 @@ def _allowlist_pattern_to_case(pattern: str) -> str:
     return result
 
 
+def _detect_notification_reply(
+    task: db.Task,
+    config: Config,
+    conn: "db.sqlite3.Connection | None" = None,
+) -> db.Task | None:
+    """
+    Check if this task is a reply to a scheduled/briefing notification.
+
+    Returns the parent task if the user is replying to a scheduled or briefing
+    notification, so context can be scoped narrowly. Returns None otherwise.
+    """
+    if not task.reply_to_talk_id or not task.conversation_token or not conn:
+        return None
+    parent = db.get_reply_parent_task(conn, task.conversation_token, task.reply_to_talk_id)
+    if parent and parent.source_type in ("scheduled", "briefing"):
+        return parent
+    return None
+
+
 def _ensure_reply_parent_in_history(
     task: db.Task,
     history: list[db.ConversationMessage],
@@ -1084,6 +1103,7 @@ def execute_task(
 
     # Get conversation context if enabled
     conversation_context = None
+    notification_parent = _detect_notification_reply(task, config, conn)
     context_skip_reason = None
     if not use_context:
         context_skip_reason = "use_context=False"
@@ -1096,6 +1116,21 @@ def execute_task(
 
     if context_skip_reason:
         logger.info("Skipping context lookup: %s", context_skip_reason)
+    elif notification_parent is not None:
+        # Reply to a scheduled/briefing notification — scope context narrowly
+        parent_result = notification_parent.result or ""
+        if parent_result:
+            conversation_context = (
+                "[Note: The user is replying to a scheduled notification. "
+                "If they are simply acknowledging it, respond very briefly (1 sentence or less). "
+                "Do not investigate or bring up unrelated topics.]\n\n"
+                f"[Scheduled notification (task {notification_parent.id})]:\n"
+                f"{parent_result[:2000]}"
+            )
+        logger.info(
+            "Notification reply detected for task %d (parent task %d, source_type=%s)",
+            task.id, notification_parent.id, notification_parent.source_type,
+        )
     else:
         # Try Talk API-based context for Talk tasks, fall back to DB on failure
         _used_talk_api = False

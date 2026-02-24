@@ -1036,7 +1036,7 @@ def get_reply_parent_task(
                confirmation_prompt, priority, attempt_count, max_attempts,
                created_at, scheduled_for, output_target,
                talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent
+               heartbeat_silent, actions_taken, scheduled_job_id, queue
         FROM tasks
         WHERE conversation_token = ?
         AND (talk_message_id = ? OR talk_response_id = ?)

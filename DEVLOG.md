@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-24: Notification reply context scoping
+
+When a user replies to a scheduled job's output (e.g., "Drinking" in reply to a water reminder), the bot was loading 25+ messages of conversation history, picking up unrelated topics, and sending confusing multi-sentence responses. Fixed by scoping context for replies to scheduled/briefing notifications — now only the parent notification is loaded as context, with a prompt hint nudging brief responses for simple acknowledgments.
+
+**Key changes:**
+- Added `_detect_notification_reply()` in executor.py to identify when a task is a reply to a scheduled or briefing notification
+- Modified context loading in `execute_task()` to scope context narrowly for notification replies instead of loading full conversation history
+- Fixed `get_reply_parent_task()` SELECT in db.py to include `actions_taken`, `scheduled_job_id`, and `queue` columns
+
+**Files modified:**
+- `src/istota/executor.py` — Added `_detect_notification_reply()`, modified context block with notification reply branch
+- `src/istota/db.py` — Added missing columns to `get_reply_parent_task()` SELECT
+- `tests/test_executor.py` — Added `TestDetectNotificationReply` (5 tests) and `TestNotificationReplyContextScoping` (3 tests)
+
 ## 2026-02-24: Skill selection cleanup
 
 Reduced unnecessary context pollution by tightening skill selection. Previously, skills with `resource_types` (e.g., accounting, calendar, bookmarks) were loaded into every task prompt just because the user had a matching resource configured — even when the conversation had nothing to do with that skill. Now resource-type skills also require a keyword match in the prompt before loading.
