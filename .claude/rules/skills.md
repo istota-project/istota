@@ -52,7 +52,6 @@ Returns sorted list of skill names.
 | `todos` | — | todo, task, checklist, reminder, done, complete | todo_file | — |
 | `tasks` | — | subtask, queue, background, later | — | — | admin_only |
 | `markets` | — | market, stock, stocks, ticker, index, indices, futures, ... | — | briefing |
-| `notes` | — | — | notes_file | briefing |
 | `reminders` | — | remind, reminder, remind me, alert me, notify me, don't forget, ... | — | — |
 | `schedules` | — | schedule, recurring, cron, daily, weekly, ... | — | — |
 | `nextcloud` | — | share, sharing, nextcloud, permission, access | — | — |

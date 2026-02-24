@@ -54,7 +54,6 @@ istota/
 │       ├── memory/          # Memory file reference (doc-only)
 │       ├── memory_search/   # Memory search CLI (search, index, reindex, stats)
 │       ├── nextcloud/       # Nextcloud sharing + OCS API CLI (list, create, delete shares)
-│       ├── notes/           # Notes file reference (doc-only)
 │       ├── reminders/       # Time-based reminders via CRON.md (doc-only)
 │       ├── schedules/       # CRON.md job management reference (doc-only)
 │       ├── scripts/         # User scripts reference (doc-only)
@@ -113,7 +112,7 @@ Admin users listed in `/etc/istota/admins` (root-owned, one user ID per line). `
 
 ### Multi-user Resource Permissions
 Resources defined in per-user config (`config/users/{user_id}.toml`) or DB (from shared file organizer), merged at task time:
-- `calendar`, `folder`, `todo_file`, `notes_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`
+- `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`
 
 CalDAV calendars are auto-discovered if Nextcloud is configured; manual `calendar` resources are fallback.
 
@@ -180,9 +179,9 @@ Self-contained directories under `src/istota/skills/`, each with a `skill.toml` 
 
 Selection criteria (from `skill.toml`):
 - `always_include`: files, sensitive_actions, memory, scripts, memory_search
-- `resource_types`: calendar → calendar, ledger → accounting, karakeep → bookmarks
-- `source_types`: briefing → calendar, markets, notes, briefing
+- `source_types`: briefing → calendar, markets, briefing
 - `keywords`: pattern match on prompt (e.g., "email" → email skill)
+- `resource_types`: requires BOTH a keyword hit AND matching user resource (e.g., "invoice" + ledger resource → accounting)
 - `file_types`: attachment extensions (e.g., `.wav` → whisper)
 - `companion_skills`: when a skill is selected, also pull in listed companions (respects admin_only and dependency checks)
 - `admin_only`: tasks (filtered out for non-admin users)
@@ -239,7 +238,7 @@ Cron evaluated in user's timezone. Mode: morning (before noon) = futures, evenin
 
 **Boolean expansion**: `markets = true` or `news = true` in user BRIEFINGS.md expands using `[briefing_defaults]` from config.toml.
 
-**Components**: `calendar`, `todos`, `email` (booleans), `markets` ({futures, indices}), `news` ({lookback_hours, sources}), `notes`, `reminders` (random from REMINDERS notes_file)
+**Components**: `calendar`, `todos`, `email` (booleans), `markets` ({futures, indices}), `news` ({lookback_hours, sources}), `reminders` (random from REMINDERS reminders_file)
 
 **Pre-fetching**: Market data and newsletter IDs fetched before execution. State in `briefing_state` table. Priority 8.
 

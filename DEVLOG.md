@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-24: Skill selection cleanup
+
+Reduced unnecessary context pollution by tightening skill selection. Previously, skills with `resource_types` (e.g., accounting, calendar, bookmarks) were loaded into every task prompt just because the user had a matching resource configured — even when the conversation had nothing to do with that skill. Now resource-type skills also require a keyword match in the prompt before loading.
+
+Also removed the unused `notes_file` resource type and `notes` skill, which was redundant with `reminders_file` and `todo_file`.
+
+**Key changes:**
+- Resource-type skills now require both a matching resource AND a keyword hit in the prompt. Skills with `source_types` (e.g., calendar/notes for briefings) still load unconditionally for those source types.
+- Removed `notes` skill directory (`skill.toml` + `skill.md`), executor resource section for `notes_file`, example config entry, and test references.
+
+**Files modified:**
+- `src/istota/skills/_loader.py` — Changed resource_types from standalone match to keyword gate
+- `src/istota/skills/notes/` — Removed (skill.toml + skill.md)
+- `src/istota/executor.py` — Removed `notes_file` resource section in `build_prompt()`
+- `src/istota/config.py` — Removed `notes_file` from resource type comment
+- `config/users/alice.example.toml` — Removed `notes_file` example resource
+- `tests/test_skills_loader.py` — Updated and added tests for new selection behavior
+- `tests/test_config.py` — Updated resource test from `notes_file` to `reminders_file`
+
 ## 2026-02-24: Talk message cache bug fixes — bot responses in context
 
 Extended debugging session to fix bot responses being completely absent from conversation context after the poller-fed cache migration. The root cause was a multi-layered issue involving streaming progress deduplication, race conditions between the poller and scheduler threads, and SQLite upsert semantics.

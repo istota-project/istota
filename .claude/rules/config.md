@@ -196,7 +196,7 @@ class UserResource:
     id: int
     user_id: str
     resource_type: str      # "calendar", "folder", "todo_file", "email_folder",
-                            # "notes_file", "reminders_file", "shared_file",
+                            # "reminders_file", "shared_file",
                             # "ledger", "invoicing"
     resource_path: str
     display_name: str | None
