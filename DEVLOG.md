@@ -2,6 +2,47 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-24: Talk message cache bug fixes — bot responses in context
+
+Extended debugging session to fix bot responses being completely absent from conversation context after the poller-fed cache migration. The root cause was a multi-layered issue involving streaming progress deduplication, race conditions between the poller and scheduler threads, and SQLite upsert semantics.
+
+**Problem chain:**
+1. When `progress_text_max_chars=0`, the full bot response is sent as a streaming progress message. The dedup logic then sets `post_talk_message=None`, so `post_result_to_talk()` is never called — no `:result` message is ever posted to Talk.
+2. All bot messages in the cache had `:ack` or `:progress` reference_ids, which `build_talk_context()` correctly filters out (they're noise, not final answers). Zero `:result` messages existed.
+3. Initial fix attempts tried re-tagging the last `:progress` message to `:result` via an UPDATE query after task completion. But the poller and scheduler run in separate threads — the progress message might not be cached yet when the re-tag runs (race condition), causing the UPDATE to match 0 rows.
+4. Even when the re-tag succeeded, the poller's `INSERT OR REPLACE` would overwrite the re-tagged reference_id back to `:progress` on its next poll.
+
+**Key changes:**
+- Capture the Talk message ID returned by `post_result_to_talk()` in the progress callback (`last_progress_msg_id`). Previously the return value was discarded.
+- After task completion, use the captured progress message ID to directly upsert a `:result` cache entry. This works whether the poller has cached the message or not — no race condition.
+- Changed `upsert_talk_messages` from `INSERT OR REPLACE` to `ON CONFLICT DO UPDATE` with a CASE clause that preserves `:result` reference_ids. This prevents the poller from overwriting result tags on subsequent polls.
+- Show task IDs in formatted context output: `Bot (task 42):` instead of generic `Bot:`.
+- Changed `cleanup_old_talk_messages` from time-based retention (which triggered a backfill cycle every minute) to per-conversation cap (`talk_cache_max_per_conversation`, default 200).
+- Made `talk_cache_max_per_conversation` configurable via Ansible.
+
+**Commits in this session:**
+- `caade40` Fix talk cache cleanup/backfill cycle
+- `4a9228e` Make talk cache cap configurable
+- `a56d8ef` Show task IDs in talk context formatting
+- `a891231` Cache bot result messages immediately after posting
+- `b49e536` Cache result even when deduped as progress
+- `021fae1` Fix NameError in result cache when deduped
+- `e3acb85` Add info log for result cache debugging
+- `122b5b8` Re-tag progress as result instead of synthetic cache entry
+- `bdf010a` Preserve :result tags in cache across poller upserts
+- `4737a8f` Fix race condition in talk message cache result tagging (final fix)
+
+**Files modified:**
+- `src/istota/scheduler.py` — Progress callback captures msg ID, result cache logic simplified from re-tag to direct upsert
+- `src/istota/db.py` — `upsert_talk_messages` uses `ON CONFLICT DO UPDATE` with `:result` preservation CASE; `cleanup_old_talk_messages` changed to per-conversation cap
+- `src/istota/context.py` — `format_talk_context_for_prompt` shows task IDs for bot messages
+- `src/istota/config.py` — Added `talk_cache_max_per_conversation` to `SchedulerConfig`
+- `config/config.example.toml` — Documented `talk_cache_max_per_conversation`
+- `deploy/ansible/defaults/main.yml` — Added `istota_scheduler_talk_cache_max_per_conversation`
+- `deploy/ansible/templates/config.toml.j2` — Renders `talk_cache_max_per_conversation`
+- `tests/test_db.py` — Tests for per-conversation cap, `:result` preservation in upsert
+- `tests/test_talk_context.py` — Updated format tests for task ID display
+
 ## 2026-02-23: Poller-fed Talk message cache
 
 Eliminated per-task HTTP calls to the Talk API for conversation context. The talk poller already sees every message via long-polling — now it stores them in a local `talk_messages` SQLite table. Context building reads from this cache (fast local query, zero API calls). Backfills existing conversations on first encounter via `fetch_chat_history()`. Old messages cleaned up on the same retention schedule as tasks.

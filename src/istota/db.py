@@ -2717,11 +2717,26 @@ def upsert_talk_messages(
 
         conn.execute(
             """
-            INSERT OR REPLACE INTO talk_messages (
+            INSERT INTO talk_messages (
                 message_id, conversation_token, actor_id, actor_display_name,
                 actor_type, message_text, message_type, message_parameters,
                 timestamp, reference_id, deleted, parent_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_token, message_id) DO UPDATE SET
+                actor_id = excluded.actor_id,
+                actor_display_name = excluded.actor_display_name,
+                actor_type = excluded.actor_type,
+                message_text = excluded.message_text,
+                message_type = excluded.message_type,
+                message_parameters = excluded.message_parameters,
+                timestamp = excluded.timestamp,
+                deleted = excluded.deleted,
+                parent_id = excluded.parent_id,
+                reference_id = CASE
+                    WHEN talk_messages.reference_id LIKE '%:result'
+                    THEN talk_messages.reference_id
+                    ELSE excluded.reference_id
+                END
             """,
             (
                 msg.get("id"),
@@ -2810,13 +2825,28 @@ def has_cached_talk_messages(
 
 def cleanup_old_talk_messages(
     conn: sqlite3.Connection,
-    retention_days: int,
+    max_per_conversation: int = 200,
 ) -> int:
-    """Delete cached talk messages older than retention_days. Returns count deleted."""
-    import time as _time
-    cutoff = int(_time.time()) - (retention_days * 86400)
+    """Trim cached talk messages to keep only the latest N per conversation.
+
+    Uses a per-conversation cap instead of time-based retention to avoid
+    deleting old-but-still-useful context messages (which would trigger
+    repeated backfills).
+
+    Returns count of rows deleted.
+    """
     cursor = conn.execute(
-        "DELETE FROM talk_messages WHERE timestamp < ?",
-        (cutoff,),
+        """
+        DELETE FROM talk_messages
+        WHERE rowid IN (
+            SELECT rowid FROM talk_messages AS t
+            WHERE (
+                SELECT COUNT(*) FROM talk_messages AS t2
+                WHERE t2.conversation_token = t.conversation_token
+                  AND t2.message_id >= t.message_id
+            ) > ?
+        )
+        """,
+        (max_per_conversation,),
     )
     return cursor.rowcount

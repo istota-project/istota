@@ -484,7 +484,7 @@ def format_talk_context_for_prompt(
         ts = datetime.fromtimestamp(msg.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
         if msg.is_bot:
-            speaker = "Bot"
+            speaker = f"Bot (task {msg.task_id})" if msg.task_id else "Bot"
             content = msg.content
             if truncation > 0 and len(content) > truncation:
                 content = content[:truncation] + "...[truncated]"

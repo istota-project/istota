@@ -76,6 +76,7 @@ istota_scheduler_user_max_background_workers: 1    # Global per-user bg worker d
 istota_scheduler_scheduled_job_max_consecutive_failures: 5  # Auto-disable after N failures (0=never)
 istota_scheduler_feed_check_interval: 300                  # Seconds between feed polls
 istota_scheduler_feed_item_retention_days: 30              # Delete feed items older than N days
+istota_scheduler_talk_cache_max_per_conversation: 200      # Max cached talk messages per conversation
 
 # Logging settings
 istota_logging_level: "INFO"                        # INFO or DEBUG

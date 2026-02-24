@@ -199,10 +199,10 @@ Env var wiring is declarative via `[[env]]` sections in `skill.toml`. Skills wit
 - **Channel guidelines** (`config/guidelines/{source_type}.md`): Loaded per source type. Both optional.
 
 ### Conversation Context
-Talk tasks use a **Talk API-based context pipeline** that fetches recent messages directly from the Talk chat API (`GET /chat/{token}`), giving the bot the actual conversation visible to users — including messages from all participants, not just bot interactions. Email tasks fall back to the DB-based context path.
+Talk tasks use a **poller-fed local cache** for conversation context. The talk poller stores all messages it receives via long-polling into a `talk_messages` SQLite table. Context building reads from this cache (fast local query, zero per-task API calls). Email tasks fall back to the DB-based context path.
 
-**Talk API context flow** (`_build_talk_api_context` in executor.py):
-1. `TalkClient.fetch_chat_history(token, limit=talk_context_limit)` — fetches recent messages from Talk API (oldest-first)
+**Talk context flow** (`_build_talk_api_context` in executor.py):
+1. `db.get_cached_talk_messages(conn, token, limit=talk_context_limit)` — reads from local `talk_messages` cache (oldest-first)
 2. Parse `referenceId` fields to extract task IDs from bot result messages (format: `istota:task:{id}:result`)
 3. `db.get_task_metadata_for_context(task_ids)` — batch lookup of `actions_taken` and `source_type` for enrichment
 4. `build_talk_context()` — filter (skip system, deleted, ack, progress messages) and convert to `TalkMessage` list
@@ -210,9 +210,13 @@ Talk tasks use a **Talk API-based context pipeline** that fetches recent message
 6. `format_talk_context_for_prompt()` — individual message format showing all participants
 7. Reply parent handling: checks if `reply_to_talk_id` is in fetched messages, synthesizes from `reply_to_content` as fallback
 
+**Talk message cache**: The poller stores all received messages in `talk_messages` (composite PK: `conversation_token, message_id`). On first encounter with a conversation (no cache), a backfill fetches history via `fetch_chat_history()`. Old messages cleaned up per-conversation cap (`talk_cache_max_per_conversation`, default 200). The upsert uses `ON CONFLICT DO UPDATE` with a CASE clause that preserves `:result` reference_ids from being overwritten by the poller.
+
 **referenceId tagging**: All bot-sent messages include a `referenceId` field: `istota:task:{id}:ack` for acknowledgments, `istota:task:{id}:progress` for progress updates, `istota:task:{id}:result` for final results. Ack and progress messages are filtered out of context. Result messages are enriched with `actions_taken` from the DB.
 
-**Fallback**: Talk API failure falls through to the DB-based context path with a warning log. Email tasks always use the DB path.
+**Result caching**: When a task completes, the scheduler caches the bot's result message immediately so it's available for the next task's context. For deduped results (already sent as streaming progress), the last progress message's Talk ID is captured and used to upsert a `:result` cache entry. This avoids a race condition where the poller hasn't stored the progress message yet.
+
+**Fallback**: If cache is empty (e.g., email tasks, new conversations before first poll), falls through to the DB-based context path. Email tasks always use the DB path.
 
 **DB context path** (`_build_db_context`): Paired prompt/result format from completed tasks in the DB. Used for email tasks and as fallback. Includes `get_previous_tasks()` injection for scheduled/briefing continuity.
 

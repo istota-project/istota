@@ -129,6 +129,7 @@ class SchedulerConfig:
     scheduled_job_max_consecutive_failures: int = 5  # auto-disable after N failures (0 = never)
     feed_check_interval: int = 300  # seconds between feed polls
     feed_item_retention_days: int = 30  # delete feed items older than this
+    talk_cache_max_per_conversation: int = 200  # max cached talk messages per conversation
 
 
 @dataclass

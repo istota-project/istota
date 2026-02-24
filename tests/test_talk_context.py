@@ -344,13 +344,18 @@ class TestFormatTalkContextForPrompt:
     def test_bot_message(self):
         msg = TalkMessage(1, "istota", "Istota", True, "Hi there!", 1000000, None, "bot_result", 10)
         result = format_talk_context_for_prompt([msg])
+        assert "Bot (task 10): Hi there!" in result
+
+    def test_bot_message_no_task_id(self):
+        msg = TalkMessage(1, "istota", "Istota", True, "Hi there!", 1000000, None, "bot_result", None)
+        result = format_talk_context_for_prompt([msg])
         assert "Bot: Hi there!" in result
 
     def test_scheduled_message(self):
         msg = TalkMessage(1, "istota", "Istota", True, "Daily report", 1000000, None, "scheduled", 20)
         result = format_talk_context_for_prompt([msg])
-        # Scheduled messages from bot should still show as Bot
-        assert "Bot: Daily report" in result
+        # Scheduled messages from bot should still show as Bot with task ID
+        assert "Bot (task 20): Daily report" in result
 
     def test_truncation(self):
         long_content = "x" * 5000
@@ -394,7 +399,7 @@ class TestFormatTalkContextForPrompt:
         lines = result.split("\n")
         assert any("alice: Hey everyone" in l for l in lines)
         assert any("bob: Hi Alice!" in l for l in lines)
-        assert any("Bot: Hello!" in l for l in lines)
+        assert any("Bot (task 1): Hello!" in l for l in lines)
         assert any("carol: Nice" in l for l in lines)
 
     def test_user_with_no_actor_id(self):

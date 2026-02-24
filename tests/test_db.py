@@ -239,6 +239,34 @@ class TestTalkMessageCache:
             assert len(result) == 1
             assert result[0]["message"] == "updated"
 
+    def test_upsert_preserves_result_reference_id(self, db_path):
+        """Poller upserts should not overwrite :result tags set by scheduler."""
+        with db.get_db(db_path) as conn:
+            # Scheduler caches a result message
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(1, message="Done!", reference_id="istota:task:5:result"),
+            ])
+            # Poller later upserts the same message with :progress tag
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(1, message="Done!", reference_id="istota:task:5:progress"),
+            ])
+            result = db.get_cached_talk_messages(conn, "room1")
+            assert len(result) == 1
+            # :result tag should be preserved
+            assert result[0]["referenceId"] == "istota:task:5:result"
+
+    def test_upsert_updates_non_result_reference_id(self, db_path):
+        """Upserts should update reference_id when existing is not :result."""
+        with db.get_db(db_path) as conn:
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(1, reference_id="istota:task:5:progress"),
+            ])
+            db.upsert_talk_messages(conn, "room1", [
+                self._make_msg(1, reference_id="istota:task:5:result"),
+            ])
+            result = db.get_cached_talk_messages(conn, "room1")
+            assert result[0]["referenceId"] == "istota:task:5:result"
+
     def test_get_cached_limit_and_order(self, db_path):
         with db.get_db(db_path) as conn:
             msgs = [self._make_msg(i, timestamp=i * 100) for i in range(1, 21)]
@@ -288,23 +316,40 @@ class TestTalkMessageCache:
             assert db.has_cached_talk_messages(conn, "room2") is False
 
     def test_cleanup_old_messages(self, db_path):
-        import time
-        now = int(time.time())
         with db.get_db(db_path) as conn:
-            msgs = [
-                self._make_msg(1, timestamp=now - 86400 * 10),  # 10 days old
-                self._make_msg(2, timestamp=now - 86400 * 3),   # 3 days old
-                self._make_msg(3, timestamp=now),                # now
-            ]
+            # Insert 5 messages for room1
+            msgs = [self._make_msg(i, timestamp=i * 100) for i in range(1, 6)]
             db.upsert_talk_messages(conn, "room1", msgs)
 
-            deleted = db.cleanup_old_talk_messages(conn, retention_days=7)
-            assert deleted == 1  # only msg 1
+            # Cap at 3 per conversation — should delete the 2 oldest
+            deleted = db.cleanup_old_talk_messages(conn, max_per_conversation=3)
+            assert deleted == 2
 
             result = db.get_cached_talk_messages(conn, "room1")
-            assert len(result) == 2
-            assert result[0]["id"] == 2
-            assert result[1]["id"] == 3
+            assert len(result) == 3
+            assert result[0]["id"] == 3
+            assert result[1]["id"] == 4
+            assert result[2]["id"] == 5
+
+    def test_cleanup_per_conversation_independent(self, db_path):
+        with db.get_db(db_path) as conn:
+            # 4 messages in room1, 2 in room2
+            db.upsert_talk_messages(conn, "room1",
+                [self._make_msg(i, timestamp=i * 100) for i in range(1, 5)])
+            db.upsert_talk_messages(conn, "room2",
+                [self._make_msg(10 + i, timestamp=i * 100) for i in range(1, 3)])
+
+            # Cap at 2 per conversation
+            deleted = db.cleanup_old_talk_messages(conn, max_per_conversation=2)
+            assert deleted == 2  # only room1 has excess
+
+            r1 = db.get_cached_talk_messages(conn, "room1")
+            assert len(r1) == 2
+            assert r1[0]["id"] == 3
+            assert r1[1]["id"] == 4
+
+            r2 = db.get_cached_talk_messages(conn, "room2")
+            assert len(r2) == 2  # unchanged
 
     def test_message_parameters_json_roundtrip(self, db_path):
         """Both dict and list messageParameters survive serialization."""

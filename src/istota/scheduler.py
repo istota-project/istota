@@ -261,6 +261,7 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
     send_count = 0
     sched = config.scheduler
     sent_texts: list[str] = []
+    last_progress_msg_id: list[int | None] = [None]  # mutable container for nonlocal
 
     def callback(message: str, *, italicize: bool = True):
         nonlocal last_send, send_count
@@ -285,19 +286,21 @@ def _make_talk_progress_callback(config: Config, task: db.Task):
         else:
             formatted = f"*{msg}*"
         try:
-            asyncio.run(post_result_to_talk(
+            msg_id = asyncio.run(post_result_to_talk(
                 config, task, formatted,
                 reference_id=f"istota:task:{task.id}:progress",
             ))
             last_send = now
             send_count += 1
             sent_texts.append(msg)
+            last_progress_msg_id[0] = msg_id
             with db.get_db(config.db_path) as conn:
                 db.log_task(conn, task.id, "debug", f"Progress: {msg}")
         except Exception as e:
             logger.debug("Progress update failed: %s", e)
 
     callback.sent_texts = sent_texts
+    callback.last_progress_msg_id = last_progress_msg_id
     return callback
 
 
@@ -642,12 +645,12 @@ def process_one_task(
         user_resources = db.get_user_resources(conn, task.user_id)
 
     # Command tasks skip Talk ack, attachment download, and resource loading
+    progress_callback = None
     if task.command:
         success, result = _execute_command_task(task, config)
         actions_taken = None
     else:
         # Send progress update for Talk tasks
-        progress_callback = None
         is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
         if task.source_type == "talk" and task.conversation_token and not dry_run:
             if not is_rerun:
@@ -836,6 +839,7 @@ def process_one_task(
                 break
 
     # Deliver results outside DB context to avoid lock conflicts
+    response_msg_id = None
     if post_talk_message:
         response_msg_id = asyncio.run(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
@@ -848,6 +852,35 @@ def process_one_task(
                     db.update_talk_response_id(conn, task_id, response_msg_id)
             except Exception as e:
                 logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
+
+    # Cache the result so it's immediately available for context building.
+    # Two cases: (1) result was posted to Talk → cache with its real msg ID,
+    # (2) result was deduped (already sent as progress) → use the last progress
+    # message's Talk ID to cache a :result entry.  This avoids a race where the
+    # poller hasn't stored the progress message yet when a re-tag UPDATE runs.
+    # The upsert preserves :result tags, so the poller won't overwrite them.
+    cache_msg_id = response_msg_id
+    if not cache_msg_id and progress_callback and hasattr(progress_callback, "last_progress_msg_id"):
+        cache_msg_id = progress_callback.last_progress_msg_id[0]
+
+    if success and task.conversation_token and not is_failure_notify and cache_msg_id:
+        try:
+            with db.get_db(config.db_path) as conn:
+                cache_msg = {
+                    "id": cache_msg_id,
+                    "actorId": config.talk.bot_username,
+                    "actorDisplayName": config.talk.bot_username,
+                    "actorType": "users",
+                    "message": post_talk_message or result,
+                    "messageType": "comment",
+                    "messageParameters": {},
+                    "timestamp": int(time.time()),
+                    "referenceId": f"istota:task:{task.id}:result",
+                    "deleted": False,
+                }
+                db.upsert_talk_messages(conn, task.conversation_token, [cache_msg])
+        except Exception as e:
+            logger.warning("Failed to cache result message for task %d: %s", task_id, e)
     if post_email:
         email_result = strip_briefing_preamble(result) if task.source_type == "briefing" else result
         email_ok = asyncio.run(post_result_to_email(config, task, email_result))
@@ -1345,7 +1378,7 @@ async def run_cleanup_checks(config: Config) -> None:
         if deleted_feeds > 0:
             logger.info(f"Cleaned up {deleted_feeds} old feed item(s)")
 
-        deleted_msgs = db.cleanup_old_talk_messages(conn, sched.task_retention_days)
+        deleted_msgs = db.cleanup_old_talk_messages(conn, sched.talk_cache_max_per_conversation)
         if deleted_msgs > 0:
             logger.info(f"Cleaned up {deleted_msgs} old talk message(s)")
 

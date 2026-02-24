@@ -161,6 +161,8 @@ stale_pending_fail_hours = 24
 task_retention_days = 7
 # Delete emails older than N days from IMAP inbox (default: 7, 0 to disable)
 email_retention_days = 7
+# Max cached talk messages per conversation (default: 200)
+talk_cache_max_per_conversation = 200
 
 # Per-user worker pool settings
 # Maximum concurrent foreground (interactive) worker threads
