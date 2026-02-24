@@ -178,13 +178,15 @@ The prompt is built in this order:
 3. **Resources**: calendars, folders, todos, email folders, notes, reminders (from DB + config)
 4. **User memory**: `USER.md` content (skipped for briefings to prevent private context leakage)
 5. **Channel memory**: `CHANNEL.md` content (if `conversation_token` is set)
-6. **Tools section**: available tools documentation (file access, browser, CalDAV, sqlite3, email)
-7. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
-8. **Conversation context**: previous messages (selected by context module)
-9. **Request**: the actual prompt text + file attachments
-10. **Guidelines**: channel-specific formatting from `config/guidelines/{source_type}.md`
-11. **Skills changelog**: "what's new" if skills updated since last interaction
-12. **Skills documentation**: concatenated skill .md files, selectively loaded
+6. **Dated memories**: last N days of extracted memories (via `auto_load_dated_days`, skipped for briefings)
+6b. **Recalled memories**: BM25 search results from memory index (via `auto_recall`, skipped for briefings)
+8. **Tools section**: available tools documentation (file access, browser, CalDAV, sqlite3, email)
+9. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
+10. **Conversation context**: previous messages (selected by context module)
+11. **Request**: the actual prompt text + file attachments
+12. **Guidelines**: channel-specific formatting from `config/guidelines/{source_type}.md`
+13. **Skills changelog**: "what's new" if skills updated since last interaction
+14. **Skills documentation**: concatenated skill .md files, selectively loaded
 
 ### Subprocess invocation
 
@@ -259,25 +261,35 @@ Skills have a SHA-256 fingerprint (of all `skill.toml` + `skill.md` files). When
 
 ## Memory
 
-Istota has four layers of memory, each with different scope and lifecycle.
+Istota has a multi-tiered memory system. Each tier has different scope, lifecycle, and loading behavior. All personal memory is excluded from briefing prompts to prevent private context leaking into newsletter-style output.
 
-### User memory (USER.md)
+### Tier 1: User memory (USER.md)
 
-Persistent per-user memory at `/Users/{user_id}/{bot_dir}/config/USER.md`. Auto-loaded into every interactive prompt. Claude reads and writes this file during task execution. Contains preferences, facts, and ongoing context about the user.
+Persistent per-user memory at `/Users/{user_id}/{bot_dir}/config/USER.md`. Auto-loaded into every interactive prompt (skipped for briefings). Claude reads and writes this file during task execution. Contains preferences, facts, and ongoing context about the user.
 
-### Channel memory (CHANNEL.md)
+Optional nightly curation: when `curate_user_memory = true`, the sleep cycle runs a second Claude Sonnet pass that promotes durable facts from dated memories into USER.md and removes outdated entries. Controlled by `[sleep_cycle]` config.
 
-Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded when `conversation_token` is set. Contains shared context for group conversations (decisions, agreements, project status).
+### Tier 2: Channel memory (CHANNEL.md)
 
-### Dated memories (YYYY-MM-DD.md)
+Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded when `conversation_token` is set. Contains shared context for group conversations (decisions, agreements, project status). Written by Claude during task execution and by the channel sleep cycle.
 
-Written by the nightly sleep cycle to `/Users/{user_id}/memories/`. NOT auto-loaded into prompts. Available for Claude to read on demand. Managed retention via `memory_retention_days`.
+### Tier 3: Dated memories (YYYY-MM-DD.md)
 
-### Memory search
+Written by the nightly sleep cycle to `/Users/{user_id}/memories/`. Auto-loaded into prompts for the last N days (configurable via `auto_load_dated_days`, default 3, set 0 to disable). Skipped for briefings. Each entry includes task provenance references (`ref:TASK_ID`) for traceability. Managed retention via `memory_retention_days` (0 = unlimited).
+
+### Tier 4: Memory recall (BM25 auto-recall)
+
+When `auto_recall = true` in `[memory_search]` config, the executor performs a BM25 full-text search using the task prompt as query against indexed conversations and memory files. Returns up to `auto_recall_limit` (default 5) results formatted as bullet points. Independent of context triage — no LLM call needed, just SQLite FTS5. Skipped for briefings. When a `conversation_token` is set, also searches the channel namespace (`channel:{token}`).
+
+### Memory search index
 
 Hybrid BM25 + vector search (`memory_search.py`). Text is chunked (paragraph/sentence/word boundaries with overlap), content-hash deduped, and stored in `memory_chunks`. FTS5 provides BM25 ranking, `sqlite-vec` provides vector similarity (384-dim `all-MiniLM-L6-v2` embeddings). Results fused via Reciprocal Rank Fusion.
 
-Auto-indexed after task completion and after sleep cycle writes. Both wrapped in try/except — indexing failures never affect core processing. Disabled by default.
+Auto-indexed after task completion and after sleep cycle writes. Both wrapped in try/except — indexing failures never affect core processing. Enabled by default.
+
+### Memory size cap
+
+`max_memory_chars` (default 0 = unlimited) limits the total memory injected into prompts. When the cap is exceeded, components are truncated in order: recalled memories first, then dated memories. If the cap is still exceeded after removing both, a warning is logged but user memory and channel memory are preserved (they are the most stable and curated tiers).
 
 ### Sleep cycle
 
@@ -285,11 +297,23 @@ Direct subprocess (not a queued task), evaluated per user's timezone:
 
 1. Gather completed tasks from the last 24 hours
 2. Invoke `claude -p` with a memory extraction prompt (excludes existing USER.md to avoid duplication)
-3. Write extracted memories to dated file, or output `NO_NEW_MEMORIES`
-4. Cleanup old files per retention policy
-5. Trigger memory search indexing
+3. Extracted memories include task provenance: `- Fact learned (2026-01-28, ref:1234)`
+4. Write extracted memories to dated file, or output `NO_NEW_MEMORIES`
+5. Cleanup old files per retention policy
+6. Trigger memory search indexing
+7. If `curate_user_memory` enabled: run a second Claude pass to update USER.md from accumulated dated memories (outputs `NO_CHANGES_NEEDED` if nothing to update)
 
 Channel sleep cycle works the same way but runs in UTC and writes to `/Channels/{token}/memories/`.
+
+### Prompt assembly order
+
+Memory components appear in the prompt in this order:
+
+1. **User memory** (USER.md) — always loaded for interactive tasks
+2. **Channel memory** (CHANNEL.md) — loaded when in a conversation
+3. **Dated memories** — last N days of extracted memories
+4. **Recalled memories** — BM25 search results from the memory index
+5. *(then tools, rules, context, request, guidelines, skills)*
 
 ---
 
