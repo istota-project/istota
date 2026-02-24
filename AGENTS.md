@@ -219,7 +219,11 @@ Talk tasks use a **poller-fed local cache** for conversation context. The talk p
 
 **DB context path** (`_build_db_context`): Paired prompt/result format from completed tasks in the DB. Used for email tasks and as fallback. Includes `get_previous_tasks()` injection for scheduled/briefing continuity.
 
-**Selection**: Both paths use the same hybrid approach: recent N messages (`always_include_recent`, default 5) always included without model call; older messages triaged by selection model. Short histories (≤ `skip_selection_threshold`) skip selection entirely. Reply-to messages force-included. `use_selection=false` disables triage. Config: `[conversation]` section (enabled, lookback_count=25, skip_selection_threshold=3, always_include_recent=5, selection_model=haiku, use_selection, context_truncation=0, talk_context_limit=100).
+**Selection**: Both paths use the same hybrid approach: recent N messages (`always_include_recent`, default 5) always included without model call; older messages triaged by selection model. Short histories (≤ `skip_selection_threshold`) skip selection entirely. Reply-to messages force-included. `use_selection=false` disables triage. `lookback_count` always caps the message list regardless of selection mode. Config: `[conversation]` section (enabled, lookback_count=25, skip_selection_threshold=3, always_include_recent=5, selection_model=haiku, use_selection, context_truncation=0, context_recency_hours=0, context_min_messages=10, talk_context_limit=100).
+
+**Recency window**: When `context_recency_hours > 0`, messages beyond `context_min_messages` are only included if they fall within the recency window of the newest message. This trims stale context from long-idle conversations while preserving full history during active chat sessions. Applied before selection/triage in both Talk and DB paths.
+
+**Notification reply scoping**: When the user replies to a scheduled/briefing notification (detected via `reply_to_talk_id` → parent task's `source_type`), context is scoped to just the parent notification result instead of loading full conversation history. A prompt hint nudges brief responses for simple acknowledgments.
 
 **Actions tracking**: Tool use descriptions from streaming execution are stored as `actions_taken` (JSON array) on completed tasks. Context formatter appends compact `[Actions: ...]` lines after bot responses so the bot can see what tools it used previously. Capped at 15 actions, pipe-separated. Also included in triage text for the selection model.
 

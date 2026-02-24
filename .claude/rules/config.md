@@ -44,7 +44,8 @@ enabled: bool = True                lookback_count: int = 25
 selection_model: str = "haiku"      selection_timeout: float = 30.0
 skip_selection_threshold: int = 3   use_selection: bool = True
 always_include_recent: int = 5      context_truncation: int = 0
-previous_tasks_count: int = 3
+context_recency_hours: float = 0    context_min_messages: int = 10
+previous_tasks_count: int = 3       talk_context_limit: int = 100
 ```
 
 ### `SchedulerConfig` (L82-111)

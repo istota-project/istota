@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-24: Conversation context recency window and lookback fix
+
+Added time-based recency filtering for conversation context. Instead of always including a fixed number of messages, the system now includes a guaranteed minimum (default 10) plus any additional messages within a configurable time window (e.g., 2 hours). This means a rapid 20-message chat session loads fully, while 20 messages spread over 3 days only loads today's messages.
+
+Also fixed a bug where `lookback_count` was not applied when `use_selection=false` — the Talk path was loading all messages from the cache (up to `talk_context_limit=100`) instead of capping at `lookback_count`.
+
+Also switched the deploy update script from `git pull` to `git reset --hard origin/$BRANCH` to prevent "divergent branches" errors when the agent accidentally modifies tracked files on the server.
+
+**Key changes:**
+- New config fields: `context_recency_hours` (0 = disabled) and `context_min_messages` (default 10)
+- Recency filter applied in both Talk and DB context paths, before selection/triage
+- `lookback_count` now caps message list before the selection check, acting as a hard limit regardless of triage mode
+- Deploy update script uses `git reset --hard` instead of `git pull`/`git checkout`
+
+**Files modified:**
+- `src/istota/config.py` — Added `context_recency_hours` and `context_min_messages` to `ConversationConfig`
+- `src/istota/executor.py` — Added `_apply_recency_window_talk()` and `_apply_recency_window_db()`, applied in both context paths
+- `src/istota/context.py` — Moved `lookback_count` cap before `use_selection` check in `select_relevant_talk_context()`
+- `deploy/ansible/defaults/main.yml` — Added new config vars with inline docs for all conversation settings
+- `deploy/ansible/templates/config.toml.j2` — Added new config fields
+- `deploy/ansible/templates/istota-update.sh.j2` — Replaced `git pull`/`git checkout` with `git reset --hard`
+- `tests/test_executor.py` — Added `TestRecencyWindowTalk` (7 tests) and `TestRecencyWindowDb` (6 tests)
+
 ## 2026-02-24: Notification reply context scoping
 
 When a user replies to a scheduled job's output (e.g., "Drinking" in reply to a water reminder), the bot was loading 25+ messages of conversation history, picking up unrelated topics, and sending confusing multi-sentence responses. Fixed by scoping context for replies to scheduled/briefing notifications — now only the parent notification is loaded as context, with a prompt hint nudging brief responses for simple acknowledgments.
