@@ -282,7 +282,7 @@ class TestProcessChannelSleepCycle:
         assert result is False
 
     def test_no_mount_warning(self, db_path):
-        """Without mount, warns and returns False."""
+        """Without mount, warns, updates state, and returns False."""
         config = Config(
             db_path=db_path,
             channel_sleep_cycle=ChannelSleepCycleConfig(enabled=True),
@@ -303,6 +303,11 @@ class TestProcessChannelSleepCycle:
                     stderr="",
                 )
                 result = process_channel_sleep_cycle(config, conn, "room123")
+
+            # State must be updated even without mount, to avoid infinite reprocessing
+            last_run, last_task = db.get_channel_sleep_cycle_last_run(conn, "room123")
+            assert last_run is not None
+            assert last_task == t
 
         assert result is False
 

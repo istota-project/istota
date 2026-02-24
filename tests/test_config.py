@@ -371,14 +371,14 @@ class TestEmailConfig:
 class TestSleepCycleConfig:
     def test_defaults(self):
         sc = SleepCycleConfig()
-        assert sc.enabled is False
+        assert sc.enabled is True
         assert sc.cron == "0 2 * * *"
         assert sc.memory_retention_days == 0
         assert sc.lookback_hours == 24
 
     def test_config_default(self):
         cfg = Config()
-        assert cfg.sleep_cycle.enabled is False
+        assert cfg.sleep_cycle.enabled is True
 
     def test_load_from_toml(self, tmp_path):
         config_file = tmp_path / "config.toml"
@@ -402,7 +402,7 @@ lookback_hours = 36
 display_name = "Bob"
 """)
         cfg = load_config(config_file)
-        assert cfg.sleep_cycle.enabled is False
+        assert cfg.sleep_cycle.enabled is True
 
     def test_load_sleep_cycle_defaults(self, tmp_path):
         config_file = tmp_path / "config.toml"

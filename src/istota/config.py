@@ -137,7 +137,7 @@ class SchedulerConfig:
 @dataclass
 class SleepCycleConfig:
     """Sleep cycle (nightly memory extraction) configuration."""
-    enabled: bool = False
+    enabled: bool = True
     cron: str = "0 2 * * *"  # 2am in user's timezone
     memory_retention_days: int = 0  # 0 = unlimited retention
     lookback_hours: int = 24

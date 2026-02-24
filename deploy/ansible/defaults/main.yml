@@ -228,7 +228,7 @@ istota_memory_search_auto_index_conversations: true
 istota_memory_search_auto_index_memory_files: true
 
 # Sleep cycle settings (nightly memory extraction, cron evaluated per-user timezone)
-istota_sleep_cycle_enabled: false
+istota_sleep_cycle_enabled: true
 istota_sleep_cycle_cron: "0 2 * * *"
 istota_sleep_cycle_lookback_hours: 24
 istota_sleep_cycle_memory_retention_days: 0  # 0 = unlimited

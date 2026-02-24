@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-24: Sleep cycle default + no-mount state bug fix
+
+Sleep cycle was disabled by default (`enabled = false`), which meant deployments that didn't explicitly set it in config.toml silently had no nightly memory extraction. Changed the default to `true` (both in code and Ansible role).
+
+Also fixed a bug where `process_user_sleep_cycle()` and `process_channel_sleep_cycle()` returned without updating state when `config.use_mount` was `False`. This caused the sleep cycle to reprocess the same tasks on every run, never advancing its cursor — an infinite loop of wasted Claude calls that produced no output.
+
+**Key changes:**
+- `SleepCycleConfig.enabled` default: `False` → `True`
+- `istota_sleep_cycle_enabled` Ansible default: `false` → `true`
+- Added `_update_state()` / `_update_channel_state()` calls before early return in no-mount path
+- Tightened AGENTS.md (455 → 188 lines, moved implementation detail to `.claude/rules/`)
+
+**Files modified:**
+- `src/istota/config.py` — Changed `SleepCycleConfig.enabled` default to `True`
+- `src/istota/sleep_cycle.py` — Added state update in no-mount early return (both user and channel)
+- `deploy/ansible/defaults/main.yml` — Changed `istota_sleep_cycle_enabled` to `true`
+- `AGENTS.md` — Condensed from 455 to 188 lines
+- `tests/test_config.py` — Updated default assertions for sleep cycle
+- `tests/test_channel_sleep_cycle.py` — Added state verification to no-mount test
+
 ## 2026-02-24: Conversation context recency window and lookback fix
 
 Added time-based recency filtering for conversation context. Instead of always including a fixed number of messages, the system now includes a guaranteed minimum (default 10) plus any additional messages within a configurable time window (e.g., 2 hours). This means a rapid 20-message chat session loads fully, while 20 messages spread over 3 days only loads today's messages.

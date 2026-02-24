@@ -203,6 +203,7 @@ def process_user_sleep_cycle(
     # Write dated memory file
     if not config.use_mount:
         logger.warning("Sleep cycle requires mount mode, skipping file write for %s", user_id)
+        _update_state(config, conn, user_id, last_task_id)
         return False
 
     context_dir = _get_mount_path(config, get_user_memories_path(user_id))
@@ -530,6 +531,7 @@ def process_channel_sleep_cycle(
             "Channel sleep cycle requires mount mode, skipping file write for %s",
             conversation_token,
         )
+        _update_channel_state(config, conn, conversation_token, last_task_id)
         return False
 
     memories_dir = _get_mount_path(config, get_channel_memories_path(conversation_token))
