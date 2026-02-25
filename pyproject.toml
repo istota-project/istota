@@ -55,7 +55,7 @@ packages = ["src/istota"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 markers = [
-    "integration: tests requiring real Nextcloud connectivity (deselected by default)",
+    "integration: tests requiring external services (deselected by default)",
 ]
 addopts = "-m 'not integration'"
 asyncio_mode = "auto"

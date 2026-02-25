@@ -82,10 +82,41 @@
   when: istota_security_sandbox_enabled
 
 # Docker — inlined (replace with a dedicated role if you prefer)
+- name: Check if Docker CE apt repo is configured
+  stat:
+    path: /etc/apt/sources.list.d/download_docker_com_linux_{{ ansible_facts['distribution'] | lower }}.list
+  register: docker_repo_file
+  when: not istota_update_only and istota_browser_enabled
+
+- name: Add Docker CE apt repository
+  when: not istota_update_only and istota_browser_enabled and not docker_repo_file.stat.exists
+  block:
+    - name: Install apt dependencies for Docker repo
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
+        dest: /etc/apt/trusted.gpg.d/docker.asc
+        mode: '0644'
+
+    - name: Add Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ ansible_facts['dpkg_architecture'] }} signed-by=/etc/apt/trusted.gpg.d/docker.asc] https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }} {{ ansible_facts['distribution_release'] }} stable"
+        state: present
+
 - name: Install Docker for browser container
   apt:
+    update_cache: yes
     name:
-      - docker.io
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
       - docker-compose-plugin
     state: present
   when: not istota_update_only and istota_browser_enabled
