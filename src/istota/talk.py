@@ -232,6 +232,104 @@ class TalkClient:
             response.raise_for_status()
             return response.json().get("ocs", {}).get("data", [])
 
+    async def get_conversation_info(self, conversation_token: str) -> dict:
+        """Get conversation metadata (displayName, type, etc.)."""
+        url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room/{conversation_token}"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                auth=self.auth,
+                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            )
+            response.raise_for_status()
+            return response.json().get("ocs", {}).get("data", {})
+
+    async def fetch_full_history(
+        self, conversation_token: str, batch_size: int = 200,
+    ) -> list[dict]:
+        """Fetch complete message history by paginating backwards.
+
+        Returns all messages in oldest-first order.
+        """
+        url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
+        all_messages: list[dict] = []
+        last_known_id: int | None = None
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                params: dict = {"lookIntoFuture": 0, "limit": batch_size}
+                if last_known_id is not None:
+                    params["lastKnownMessageId"] = last_known_id
+
+                response = await client.get(
+                    url,
+                    auth=self.auth,
+                    headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+                    params=params,
+                )
+                if response.status_code == 304:
+                    break
+                response.raise_for_status()
+
+                messages = response.json().get("ocs", {}).get("data", [])
+                if not messages:
+                    break
+
+                # API returns newest-first; collect all then reverse at end
+                all_messages.extend(messages)
+                # The last item in the batch (oldest) — go further back
+                last_known_id = messages[-1]["id"]
+
+                if len(messages) < batch_size:
+                    break
+
+        # Reverse to oldest-first order
+        all_messages.reverse()
+        return all_messages
+
+    async def fetch_messages_since(
+        self, conversation_token: str, since_id: int, batch_size: int = 200,
+    ) -> list[dict]:
+        """Fetch messages newer than since_id by paginating forward.
+
+        Returns messages in oldest-first order.
+        """
+        url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
+        all_messages: list[dict] = []
+        current_id = since_id
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                params = {
+                    "lookIntoFuture": 1,
+                    "timeout": 0,
+                    "limit": batch_size,
+                    "lastKnownMessageId": current_id,
+                }
+
+                response = await client.get(
+                    url,
+                    auth=self.auth,
+                    headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+                    params=params,
+                )
+                if response.status_code == 304:
+                    break
+                response.raise_for_status()
+
+                messages = response.json().get("ocs", {}).get("data", [])
+                if not messages:
+                    break
+
+                all_messages.extend(messages)
+                current_id = messages[-1]["id"]
+
+                if len(messages) < batch_size:
+                    break
+
+        return all_messages
+
     async def download_attachment(
         self,
         file_path: str,

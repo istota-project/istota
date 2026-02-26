@@ -350,6 +350,138 @@ class TestFetchChatHistory:
         assert call_kwargs.kwargs["params"]["limit"] == 100
 
 
+class TestGetConversationInfo:
+    @pytest.mark.asyncio
+    async def test_returns_room_data(self, client):
+        mock_http = _mock_httpx_client()
+        room_data = {"token": "room1", "displayName": "Project Planning", "type": 2}
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ocs": {"data": room_data}}
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.get_conversation_info("room1")
+
+        assert result == room_data
+        call_kwargs = mock_http.get.call_args
+        assert "/api/v4/room/room1" in call_kwargs.args[0]
+
+
+class TestFetchFullHistory:
+    @pytest.mark.asyncio
+    async def test_single_batch(self, client):
+        """When all messages fit in one batch, returns oldest-first."""
+        mock_http = _mock_httpx_client()
+        # API returns newest-first
+        messages = [{"id": 3, "message": "C"}, {"id": 2, "message": "B"}, {"id": 1, "message": "A"}]
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"ocs": {"data": messages}}
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.fetch_full_history("room1", batch_size=200)
+
+        assert [m["id"] for m in result] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_multiple_batches(self, client):
+        """Paginates backwards to get full history."""
+        mock_http = _mock_httpx_client()
+
+        # First call (no lastKnownMessageId): newest batch (full batch_size)
+        batch1 = [{"id": 4, "message": "D"}, {"id": 3, "message": "C"}]
+        # Second call (lastKnownMessageId=3): older batch (less than batch_size = done)
+        batch2 = [{"id": 1, "message": "A"}]
+
+        resp1 = MagicMock(status_code=200)
+        resp1.json.return_value = {"ocs": {"data": batch1}}
+        resp2 = MagicMock(status_code=200)
+        resp2.json.return_value = {"ocs": {"data": batch2}}
+
+        mock_http.get = AsyncMock(side_effect=[resp1, resp2])
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.fetch_full_history("room1", batch_size=2)
+
+        assert [m["id"] for m in result] == [1, 3, 4]
+        assert mock_http.get.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_room(self, client):
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {"ocs": {"data": []}}
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.fetch_full_history("room1")
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_304_stops_pagination(self, client):
+        mock_http = _mock_httpx_client()
+        batch1 = [{"id": 2, "message": "B"}, {"id": 1, "message": "A"}]
+        resp1 = MagicMock(status_code=200)
+        resp1.json.return_value = {"ocs": {"data": batch1}}
+        resp2 = MagicMock(status_code=304)
+
+        mock_http.get = AsyncMock(side_effect=[resp1, resp2])
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.fetch_full_history("room1", batch_size=2)
+
+        assert [m["id"] for m in result] == [1, 2]
+
+
+class TestFetchMessagesSince:
+    @pytest.mark.asyncio
+    async def test_single_batch(self, client):
+        mock_http = _mock_httpx_client()
+        messages = [{"id": 11, "message": "new1"}, {"id": 12, "message": "new2"}]
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {"ocs": {"data": messages}}
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.fetch_messages_since("room1", since_id=10)
+
+        assert [m["id"] for m in result] == [11, 12]
+        call_kwargs = mock_http.get.call_args
+        params = call_kwargs.kwargs["params"]
+        assert params["lookIntoFuture"] == 1
+        assert params["timeout"] == 0
+        assert params["lastKnownMessageId"] == 10
+
+    @pytest.mark.asyncio
+    async def test_no_new_messages(self, client):
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock(status_code=304)
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.fetch_messages_since("room1", since_id=10)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_multiple_batches(self, client):
+        mock_http = _mock_httpx_client()
+        batch1 = [{"id": 11, "message": "A"}, {"id": 12, "message": "B"}]
+        batch2 = [{"id": 13, "message": "C"}]
+        resp1 = MagicMock(status_code=200)
+        resp1.json.return_value = {"ocs": {"data": batch1}}
+        resp2 = MagicMock(status_code=200)
+        resp2.json.return_value = {"ocs": {"data": batch2}}
+        mock_http.get = AsyncMock(side_effect=[resp1, resp2])
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.fetch_messages_since("room1", since_id=10, batch_size=2)
+
+        assert [m["id"] for m in result] == [11, 12, 13]
+
+
 class TestCleanMessageContent:
     def test_basic_text(self):
         msg = {"message": "Hello world", "messageParameters": {}}

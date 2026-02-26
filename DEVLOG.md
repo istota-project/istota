@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-25: !export command for conversation history
+
+New `!export` command that exports a Talk channel's complete conversation history to a file in the user's Nextcloud workspace. Uses the Talk API directly (rather than the pruned DB cache) to fetch the full history. Supports incremental appends for repeated exports of the same channel.
+
+**Key changes:**
+- `!export [markdown|text]` command — exports to `/Users/{user_id}/{bot_dir}/exports/conversations/{token}.md` (or `.txt`)
+- Full history pagination via Talk API (`lookIntoFuture=0` with `lastKnownMessageId`, backwards through all messages)
+- Incremental exports: metadata header tracks `last_id`, subsequent `!export` appends only new messages
+- Message coalescing: consecutive messages from the same actor grouped under a single header
+- System messages (joins, leaves, calls) filtered out, only user comments included
+- Frontmatter with channel title (from `get_conversation_info`) and participant list
+- Three new `TalkClient` methods: `get_conversation_info()`, `fetch_full_history()`, `fetch_messages_since()`
+
+**Files modified:**
+- `src/istota/talk.py` — Added `get_conversation_info()`, `fetch_full_history()`, `fetch_messages_since()` methods
+- `src/istota/commands.py` — Added `!export` command handler with formatting helpers (`_format_messages_markdown`, `_format_messages_text`, `_parse_export_metadata`, `_filter_user_messages`)
+- `tests/test_talk.py` — 12 new tests for Talk API methods (conversation info, full history pagination, forward pagination)
+- `tests/test_commands.py` — 15 new tests for export command and helpers (full/incremental/empty/filtered/format variants)
+
 ## 2026-02-24: Browse skill anti-hallucination & click-through navigation
 
 When researching news for briefings, Claude would fetch hub pages (apnews.com, bbc.com) then fabricate plausible-looking article URLs from headline text instead of using actual `href` values. Additionally, some sites detect bot behavior when URLs are loaded directly rather than clicked from the referring page. Fixed both problems with documentation and a new convenience subcommand.

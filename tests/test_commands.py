@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from istota import db
 from istota.commands import (
-    _read_claude_oauth_token, _format_utilization,
-    cmd_check, cmd_cron, cmd_help, cmd_memory, cmd_status, cmd_stop, cmd_usage,
+    _build_export_metadata, _filter_user_messages, _format_messages_markdown,
+    _format_messages_text, _format_utilization, _parse_export_metadata,
+    _read_claude_oauth_token,
+    cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_status, cmd_stop, cmd_usage,
     dispatch, parse_command,
 )
 from istota.config import Config, NextcloudConfig, SchedulerConfig, SecurityConfig, TalkConfig, UserConfig
@@ -1057,3 +1059,325 @@ class TestCmdUsage:
             client = AsyncMock()
             result = await cmd_help(config, conn, "alice", "room1", "", client)
         assert "!usage" in result
+
+
+# =============================================================================
+# TestExportHelpers
+# =============================================================================
+
+
+class TestParseExportMetadata:
+    def test_markdown_format(self):
+        line = "<!-- export:token=abc123,last_id=42,updated=2026-02-25T14:45:00Z -->"
+        result = _parse_export_metadata(line)
+        assert result == {"token": "abc123", "last_id": 42, "updated": "2026-02-25T14:45:00Z"}
+
+    def test_text_format(self):
+        line = "# export:token=room1,last_id=100,updated=2026-02-25T14:45:00Z"
+        result = _parse_export_metadata(line)
+        assert result == {"token": "room1", "last_id": 100, "updated": "2026-02-25T14:45:00Z"}
+
+    def test_invalid_line(self):
+        assert _parse_export_metadata("# Just a heading") is None
+        assert _parse_export_metadata("") is None
+
+    def test_with_leading_whitespace(self):
+        line = "  <!-- export:token=t,last_id=1,updated=2026-01-01T00:00:00Z -->"
+        result = _parse_export_metadata(line)
+        assert result is not None
+        assert result["token"] == "t"
+
+
+class TestBuildExportMetadata:
+    def test_markdown_format(self):
+        result = _build_export_metadata("room1", 42, "markdown")
+        assert result.startswith("<!-- export:token=room1,last_id=42,updated=")
+        assert result.endswith(" -->")
+
+    def test_text_format(self):
+        result = _build_export_metadata("room1", 42, "text")
+        assert result.startswith("# export:token=room1,last_id=42,updated=")
+        assert "-->" not in result
+
+
+class TestFilterUserMessages:
+    def test_filters_system_messages(self):
+        messages = [
+            {"id": 1, "actorType": "users", "messageType": "comment", "message": "hello"},
+            {"id": 2, "actorType": "guests", "messageType": "system", "message": "joined"},
+            {"id": 3, "actorType": "users", "messageType": "comment", "message": "bye"},
+            {"id": 4, "actorType": "users", "messageType": "comment_deleted", "message": ""},
+        ]
+        result = _filter_user_messages(messages)
+        assert [m["id"] for m in result] == [1, 3]
+
+    def test_empty_list(self):
+        assert _filter_user_messages([]) == []
+
+
+class TestFormatMessagesMarkdown:
+    def test_basic_messages(self):
+        messages = [
+            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000000, "message": "Hello", "messageParameters": {}},
+            {"actorDisplayName": "Bob", "actorId": "bob", "timestamp": 1740000060, "message": "Hi there", "messageParameters": {}},
+        ]
+        result = _format_messages_markdown(messages)
+        assert "**Alice**" in result
+        assert "Hello" in result
+        assert "**Bob**" in result
+        assert "Hi there" in result
+        assert "---" in result
+
+    def test_coalescing(self):
+        messages = [
+            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000000, "message": "Line 1", "messageParameters": {}},
+            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000010, "message": "Line 2", "messageParameters": {}},
+            {"actorDisplayName": "Bob", "actorId": "bob", "timestamp": 1740000060, "message": "Reply", "messageParameters": {}},
+        ]
+        result = _format_messages_markdown(messages)
+        # Alice should appear only once as a header
+        assert result.count("**Alice**") == 1
+        assert "Line 1" in result
+        assert "Line 2" in result
+        assert "**Bob**" in result
+
+    def test_empty_messages(self):
+        assert _format_messages_markdown([]) == ""
+
+
+class TestFormatMessagesText:
+    def test_basic_messages(self):
+        messages = [
+            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000000, "message": "Hello", "messageParameters": {}},
+            {"actorDisplayName": "Bob", "actorId": "bob", "timestamp": 1740000060, "message": "Hi", "messageParameters": {}},
+        ]
+        result = _format_messages_text(messages)
+        assert "Alice" in result
+        assert "Hello" in result
+        assert "Bob" in result
+        assert "---" not in result  # plaintext doesn't use HR
+
+    def test_coalescing(self):
+        messages = [
+            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000000, "message": "Line 1", "messageParameters": {}},
+            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000010, "message": "Line 2", "messageParameters": {}},
+        ]
+        result = _format_messages_text(messages)
+        # Alice header only once
+        lines = result.split("\n")
+        alice_headers = [l for l in lines if l.startswith("Alice")]
+        assert len(alice_headers) == 1
+
+
+# =============================================================================
+# TestCmdExport
+# =============================================================================
+
+
+class TestCmdExport:
+    def _make_messages(self, count=3, start_id=1):
+        """Generate test messages."""
+        messages = []
+        for i in range(count):
+            messages.append({
+                "id": start_id + i,
+                "actorType": "users",
+                "actorId": f"user{i % 2}",
+                "actorDisplayName": f"User{i % 2}",
+                "messageType": "comment",
+                "message": f"Message {start_id + i}",
+                "messageParameters": {},
+                "timestamp": 1740000000 + i * 60,
+            })
+        return messages
+
+    @pytest.mark.asyncio
+    async def test_no_mount_configured(self, make_config):
+        config = make_config()
+        config.nextcloud_mount_path = None
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            result = await cmd_export(config, conn, "alice", "room1", "", client)
+        assert "mount not configured" in result
+
+    @pytest.mark.asyncio
+    async def test_full_export_markdown(self, make_config):
+        config = make_config()
+        messages = self._make_messages(3)
+        client = AsyncMock()
+        client.fetch_full_history = AsyncMock(return_value=messages)
+        client.get_conversation_info = AsyncMock(return_value={"displayName": "Test Room"})
+        client.get_participants = AsyncMock(return_value=[
+            {"actorType": "users", "actorId": "user0", "displayName": "User0"},
+            {"actorType": "users", "actorId": "user1", "displayName": "User1"},
+        ])
+
+        with db.get_db(config.db_path) as conn:
+            result = await cmd_export(config, conn, "alice", "room1", "", client)
+
+        assert "Exported 3 messages" in result
+        assert "room1.md" in result
+
+        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        assert export_path.exists()
+        content = export_path.read_text()
+        assert "<!-- export:token=room1" in content
+        assert "# Test Room" in content
+        assert "**Participants:**" in content
+        assert "User0" in content
+        assert "Message 1" in content
+        assert "Message 3" in content
+
+    @pytest.mark.asyncio
+    async def test_full_export_text(self, make_config):
+        config = make_config()
+        messages = self._make_messages(2)
+        client = AsyncMock()
+        client.fetch_full_history = AsyncMock(return_value=messages)
+        client.get_conversation_info = AsyncMock(return_value={"displayName": "Test Room"})
+        client.get_participants = AsyncMock(return_value=[])
+
+        with db.get_db(config.db_path) as conn:
+            result = await cmd_export(config, conn, "alice", "room1", "text", client)
+
+        assert "Exported 2 messages" in result
+        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
+        assert export_path.exists()
+        content = export_path.read_text()
+        assert "# export:token=room1" in content
+        assert "====" in content
+        assert "---" not in content
+
+    @pytest.mark.asyncio
+    async def test_empty_channel(self, make_config):
+        config = make_config()
+        client = AsyncMock()
+        client.fetch_full_history = AsyncMock(return_value=[])
+
+        with db.get_db(config.db_path) as conn:
+            result = await cmd_export(config, conn, "alice", "room1", "", client)
+
+        assert "No messages to export" in result
+
+    @pytest.mark.asyncio
+    async def test_filters_system_messages(self, make_config):
+        config = make_config()
+        messages = [
+            {"id": 1, "actorType": "users", "actorId": "alice", "actorDisplayName": "Alice",
+             "messageType": "comment", "message": "Hello", "messageParameters": {}, "timestamp": 1740000000},
+            {"id": 2, "actorType": "guests", "actorId": "system", "actorDisplayName": "System",
+             "messageType": "system", "message": "joined", "messageParameters": {}, "timestamp": 1740000010},
+        ]
+        client = AsyncMock()
+        client.fetch_full_history = AsyncMock(return_value=messages)
+        client.get_conversation_info = AsyncMock(return_value={"displayName": "Room"})
+        client.get_participants = AsyncMock(return_value=[])
+
+        with db.get_db(config.db_path) as conn:
+            result = await cmd_export(config, conn, "alice", "room1", "", client)
+
+        assert "Exported 1 messages" in result
+
+    @pytest.mark.asyncio
+    async def test_incremental_export(self, make_config):
+        config = make_config()
+
+        # First do a full export
+        messages = self._make_messages(2, start_id=1)
+        client = AsyncMock()
+        client.fetch_full_history = AsyncMock(return_value=messages)
+        client.get_conversation_info = AsyncMock(return_value={"displayName": "Room"})
+        client.get_participants = AsyncMock(return_value=[])
+
+        with db.get_db(config.db_path) as conn:
+            await cmd_export(config, conn, "alice", "room1", "", client)
+
+        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        original_content = export_path.read_text()
+
+        # Now do incremental export
+        new_messages = self._make_messages(2, start_id=3)
+        client.fetch_messages_since = AsyncMock(return_value=new_messages)
+
+        with db.get_db(config.db_path) as conn:
+            result = await cmd_export(config, conn, "alice", "room1", "", client)
+
+        assert "Appended 2 new messages" in result
+        updated_content = export_path.read_text()
+        assert "Message 3" in updated_content
+        assert "Message 4" in updated_content
+        # Original messages should still be there
+        assert "Message 1" in updated_content
+        # Metadata should be updated with new last_id
+        meta = _parse_export_metadata(updated_content.split("\n")[0])
+        assert meta["last_id"] == 4
+
+    @pytest.mark.asyncio
+    async def test_incremental_no_new_messages(self, make_config):
+        config = make_config()
+
+        # Set up existing export file
+        export_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        export_path = export_dir / "room1.md"
+        export_path.write_text("<!-- export:token=room1,last_id=10,updated=2026-02-25T00:00:00Z -->\n\n# Room\n")
+
+        client = AsyncMock()
+        client.fetch_messages_since = AsyncMock(return_value=[])
+
+        with db.get_db(config.db_path) as conn:
+            result = await cmd_export(config, conn, "alice", "room1", "", client)
+
+        assert "No new messages" in result
+
+    @pytest.mark.asyncio
+    async def test_format_aliases(self, make_config):
+        """txt and plaintext should also work as format arguments."""
+        config = make_config()
+        messages = self._make_messages(1)
+        client = AsyncMock()
+        client.fetch_full_history = AsyncMock(return_value=messages)
+        client.get_conversation_info = AsyncMock(return_value={"displayName": "R"})
+        client.get_participants = AsyncMock(return_value=[])
+
+        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
+        for fmt_arg in ("txt", "plaintext", "text"):
+            # Remove existing file to avoid incremental path
+            if export_path.exists():
+                export_path.unlink()
+            with db.get_db(config.db_path) as conn:
+                result = await cmd_export(config, conn, "alice", "room1", fmt_arg, client)
+            assert "room1.txt" in result
+
+    @pytest.mark.asyncio
+    async def test_help_includes_export(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            result = await cmd_help(config, conn, "alice", "room1", "", client)
+        assert "!export" in result
+
+    @pytest.mark.asyncio
+    async def test_different_format_creates_separate_file(self, make_config):
+        """If existing export is .md but user asks for text, it creates .txt (new export)."""
+        config = make_config()
+
+        # Create existing markdown export
+        export_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        (export_dir / "room1.md").write_text("<!-- export:token=room1,last_id=10,updated=2026-02-25T00:00:00Z -->\n")
+
+        messages = self._make_messages(1)
+        client = AsyncMock()
+        client.fetch_full_history = AsyncMock(return_value=messages)
+        client.get_conversation_info = AsyncMock(return_value={"displayName": "R"})
+        client.get_participants = AsyncMock(return_value=[])
+
+        with db.get_db(config.db_path) as conn:
+            result = await cmd_export(config, conn, "alice", "room1", "text", client)
+
+        # Should create a new .txt file, not append to .md
+        assert "room1.txt" in result
+        assert "Exported 1 messages" in result
+        assert (export_dir / "room1.txt").exists()
+        assert (export_dir / "room1.md").exists()  # original still there

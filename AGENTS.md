@@ -142,7 +142,7 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 - Long-polling per conversation, message cache in `talk_messages` table
 - Progress updates: random ack before execution, streaming progress (rate-limited: min 8s, max 5/task)
 - Multi-user rooms: only responds when @mentioned; 2-person rooms behave like DMs
-- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`
+- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`, `!export`
 - Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no
 
 ### Skills

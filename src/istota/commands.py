@@ -7,13 +7,14 @@ import shutil
 import sqlite3
 import subprocess
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 
 from . import db
 from .config import Config
-from .talk import TalkClient, split_message
+from .talk import TalkClient, clean_message_content, split_message
 
 logger = logging.getLogger("istota.commands")
 
@@ -505,3 +506,235 @@ async def cmd_usage(config, conn, user_id, conversation_token, args, client):
     except Exception as e:
         logger.error("Failed to fetch usage: %s", e, exc_info=True)
         return f"**Error:** {e}"
+
+
+# =============================================================================
+# !export command
+# =============================================================================
+
+_EXPORT_META_RE = re.compile(
+    r"^(?:<!--|#)\s*export:token=([^,]+),last_id=(\d+),updated=([^\s>]+)"
+)
+
+
+def _parse_export_metadata(first_line: str) -> dict | None:
+    """Parse metadata from the first line of an export file."""
+    m = _EXPORT_META_RE.match(first_line.strip())
+    if not m:
+        return None
+    return {
+        "token": m.group(1),
+        "last_id": int(m.group(2)),
+        "updated": m.group(3),
+    }
+
+
+def _build_export_metadata(token: str, last_id: int, fmt: str) -> str:
+    """Build the metadata header line."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if fmt == "markdown":
+        return f"<!-- export:token={token},last_id={last_id},updated={ts} -->"
+    return f"# export:token={token},last_id={last_id},updated={ts}"
+
+
+def _format_timestamp(epoch: int, tz=None) -> str:
+    """Format a Unix epoch timestamp to a readable string."""
+    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    if tz:
+        dt = dt.astimezone(tz)
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def _format_messages_markdown(messages: list[dict], tz=None) -> str:
+    """Format messages as markdown with coalescing."""
+    lines: list[str] = []
+    prev_actor: str | None = None
+
+    for msg in messages:
+        actor = msg.get("actorDisplayName") or msg.get("actorId", "Unknown")
+        content = clean_message_content(msg)
+        timestamp = msg.get("timestamp", 0)
+
+        if actor == prev_actor:
+            # Coalesce: just append content under same header
+            lines.append("")
+            lines.append(content)
+        else:
+            # New actor group
+            if prev_actor is not None:
+                lines.append("")
+                lines.append("---")
+            lines.append("")
+            lines.append(f"**{actor}** — {_format_timestamp(timestamp, tz)}")
+            lines.append(content)
+            prev_actor = actor
+
+    # Final separator
+    if lines:
+        lines.append("")
+        lines.append("---")
+
+    return "\n".join(lines)
+
+
+def _format_messages_text(messages: list[dict], tz=None) -> str:
+    """Format messages as plaintext with coalescing."""
+    lines: list[str] = []
+    prev_actor: str | None = None
+
+    for msg in messages:
+        actor = msg.get("actorDisplayName") or msg.get("actorId", "Unknown")
+        content = clean_message_content(msg)
+        timestamp = msg.get("timestamp", 0)
+
+        if actor == prev_actor:
+            lines.append("")
+            lines.append(content)
+        else:
+            if prev_actor is not None:
+                lines.append("")
+            lines.append(f"{actor} — {_format_timestamp(timestamp, tz)}")
+            lines.append(content)
+            prev_actor = actor
+
+    return "\n".join(lines)
+
+
+def _filter_user_messages(messages: list[dict]) -> list[dict]:
+    """Filter to only user/bot comment messages (skip system messages)."""
+    return [
+        m for m in messages
+        if m.get("actorType") == "users"
+        and m.get("messageType") == "comment"
+    ]
+
+
+@command("export", "Export conversation history to a file: `!export [markdown|text]`")
+async def cmd_export(config, conn, user_id, conversation_token, args, client):
+    mount = config.nextcloud_mount_path
+    if mount is None:
+        return "Nextcloud mount not configured — cannot write export file."
+
+    # Parse format
+    fmt_arg = args.strip().lower()
+    if fmt_arg in ("text", "txt", "plaintext"):
+        fmt = "text"
+        ext = ".txt"
+    else:
+        fmt = "markdown"
+        ext = ".md"
+
+    # Build export path
+    export_dir = mount / "Users" / user_id / config.bot_dir_name / "exports" / "conversations"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    export_path = export_dir / f"{conversation_token}{ext}"
+
+    # Resolve user timezone
+    from zoneinfo import ZoneInfo
+
+    user_config = config.get_user(user_id)
+    tz_str = user_config.timezone if user_config else "UTC"
+    try:
+        tz = ZoneInfo(tz_str)
+    except Exception:
+        tz = None
+
+    # Check for existing export
+    existing_meta = None
+    if export_path.exists():
+        try:
+            first_line = export_path.read_text().split("\n", 1)[0]
+            existing_meta = _parse_export_metadata(first_line)
+        except Exception:
+            pass
+
+    if existing_meta and existing_meta["token"] == conversation_token:
+        # Incremental export
+        since_id = existing_meta["last_id"]
+        new_messages = await client.fetch_messages_since(conversation_token, since_id)
+        user_messages = _filter_user_messages(new_messages)
+
+        if not user_messages:
+            return "No new messages since last export."
+
+        last_id = user_messages[-1]["id"]
+
+        # Format new messages
+        if fmt == "markdown":
+            new_content = _format_messages_markdown(user_messages, tz=tz)
+        else:
+            new_content = _format_messages_text(user_messages, tz=tz)
+
+        # Read existing content, replace metadata line, append new messages
+        existing_content = export_path.read_text()
+        # Replace first line (metadata) with updated one
+        rest = existing_content.split("\n", 1)[1] if "\n" in existing_content else ""
+        new_meta = _build_export_metadata(conversation_token, last_id, fmt)
+        export_path.write_text(new_meta + "\n" + rest.rstrip("\n") + "\n" + new_content + "\n")
+
+        rel_path = f"/{export_path.relative_to(mount)}"
+        return f"Appended {len(user_messages)} new messages to `{rel_path}`"
+
+    else:
+        # Full export
+        all_messages = await client.fetch_full_history(conversation_token)
+        user_messages = _filter_user_messages(all_messages)
+
+        if not user_messages:
+            return "No messages to export."
+
+        last_id = user_messages[-1]["id"]
+
+        # Get conversation info for frontmatter
+        try:
+            room_info = await client.get_conversation_info(conversation_token)
+            title = room_info.get("displayName", conversation_token)
+        except Exception:
+            title = conversation_token
+
+        try:
+            participants = await client.get_participants(conversation_token)
+            participant_names = sorted(
+                p.get("displayName") or p.get("actorId", "")
+                for p in participants
+                if p.get("actorType") == "users"
+            )
+        except Exception:
+            participant_names = []
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        if tz:
+            now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
+
+        meta_line = _build_export_metadata(conversation_token, last_id, fmt)
+
+        if fmt == "markdown":
+            header_parts = [
+                meta_line,
+                "",
+                f"# {title}",
+                "",
+                f"**Exported:** {now_str}",
+            ]
+            if participant_names:
+                header_parts.append(f"**Participants:** {', '.join(participant_names)}")
+            header_parts.append("")
+            header_parts.append("---")
+            body = _format_messages_markdown(user_messages, tz=tz)
+        else:
+            header_parts = [
+                meta_line,
+                "",
+                title,
+                f"Exported: {now_str}",
+            ]
+            if participant_names:
+                header_parts.append(f"Participants: {', '.join(participant_names)}")
+            header_parts.append("=" * 40)
+            body = _format_messages_text(user_messages, tz=tz)
+
+        content = "\n".join(header_parts) + "\n" + body + "\n"
+        export_path.write_text(content)
+
+        rel_path = f"/{export_path.relative_to(mount)}"
+        return f"Exported {len(user_messages)} messages to `{rel_path}`"
