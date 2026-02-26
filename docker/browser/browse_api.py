@@ -8,6 +8,7 @@ cookie banner handling, and VNC captcha fallback.
 import atexit
 import logging
 import os
+import math
 import random
 import subprocess
 import threading
@@ -523,6 +524,11 @@ _STEALTH_SCRIPT = r"""
 """
 
 
+def _gauss_clamp(mu, sigma, lo, hi):
+    """Gaussian random clamped to [lo, hi]."""
+    return max(lo, min(hi, random.gauss(mu, sigma)))
+
+
 def _bezier_points(start, end, num_points=20):
     """Generate points along a quadratic bezier curve with a random control point."""
     sx, sy = start
@@ -534,6 +540,9 @@ def _bezier_points(start, end, num_points=20):
         t = i / num_points
         x = (1 - t) ** 2 * sx + 2 * (1 - t) * t * cx + t ** 2 * ex
         y = (1 - t) ** 2 * sy + 2 * (1 - t) * t * cy + t ** 2 * ey
+        # Add micro-jitter (±1-2px) to avoid perfectly smooth curves
+        x += random.uniform(-1.5, 1.5)
+        y += random.uniform(-1.5, 1.5)
         points.append((x, y))
     return points
 
@@ -549,9 +558,12 @@ def _simulate_human_behavior(page):
     """Simulate human-like mouse movements and scrolling after page load.
 
     Uses OS-level X11 input via xdotool instead of CDP Input.dispatchMouseEvent.
-    Mirrors the istota implementation's behavior (bezier mouse moves + light
-    scrolling) but through X11 events that are indistinguishable from real
-    hardware input.
+    Designed to mimic real human browsing cadence:
+    - Gaussian timing distributions (not uniform)
+    - Fitts's Law speed profile (slow start/end, fast middle)
+    - Reading pauses between scrolls
+    - Occasional idle pauses and scroll-backs
+    - Micro-jitter on mouse positions
     """
     try:
         viewport = page.viewport_size
@@ -563,46 +575,63 @@ def _simulate_human_behavior(page):
         if w < 100 or h < 100:
             return
 
+        # Brief reading pause — humans glance at the page before moving
+        time.sleep(_gauss_clamp(1.0, 0.4, 0.5, 1.8))
+
         # Start from a realistic position (not 0,0)
         cur_x = random.uniform(w * 0.3, w * 0.7)
         cur_y = random.uniform(h * 0.2, h * 0.5)
         _xdo("mousemove", "--screen", "0", str(int(cur_x)), str(int(cur_y)))
 
-        # 2-4 mouse movements to random positions along bezier curves
-        for _ in range(random.randint(2, 4)):
+        # 2-3 mouse movements to random positions along bezier curves
+        for _ in range(random.randint(2, 3)):
             target_x = random.uniform(50, w - 50)
             target_y = random.uniform(50, h - 50)
+            num_pts = random.randint(15, 30)
             points = _bezier_points(
                 (cur_x, cur_y), (target_x, target_y),
-                num_points=random.randint(12, 25),
+                num_points=num_pts,
             )
-            for px, py in points:
+            # Fitts's Law speed profile: slow at start/end, faster in middle
+            for i, (px, py) in enumerate(points):
                 _xdo("mousemove", "--screen", "0", str(int(px)), str(int(py)))
-                time.sleep(random.uniform(0.003, 0.015))
+                # Sinusoidal speed: slow at edges (0.02s), fast in middle (0.008s)
+                progress = i / max(len(points) - 1, 1)
+                speed = 0.008 + 0.014 * (1 - math.sin(progress * math.pi))
+                time.sleep(_gauss_clamp(speed, speed * 0.3, 0.005, 0.04))
             cur_x, cur_y = target_x, target_y
-            time.sleep(random.uniform(0.05, 0.2))
+            # Pause between movements
+            time.sleep(_gauss_clamp(0.3, 0.15, 0.1, 0.7))
 
-        # Random scroll down (like reading the page)
-        scroll_steps = random.randint(2, 5)
-        for _ in range(scroll_steps):
+            # 20% chance of an idle pause
+            if random.random() < 0.2:
+                time.sleep(_gauss_clamp(0.5, 0.3, 0.2, 1.2))
+
+        # Scroll down — the key detection vector was scrolls being too fast
+        scroll_steps = random.randint(1, 3)
+        for i in range(scroll_steps):
             _xdo("key", "Page_Down")
-            time.sleep(random.uniform(0.1, 0.4))
+            # Reading pause between scrolls — this is where humans spend time
+            time.sleep(_gauss_clamp(1.0, 0.4, 0.5, 2.0))
 
-        # Occasionally scroll back up a little
+        # Occasionally scroll back up a little (re-reading)
         if random.random() < 0.4:
             _xdo("key", "Page_Up")
-            time.sleep(random.uniform(0.1, 0.3))
+            time.sleep(_gauss_clamp(0.8, 0.3, 0.4, 1.5))
 
-        # One more mouse movement
+        # One more gentle mouse movement
         target_x = random.uniform(100, w - 100)
         target_y = random.uniform(50, h * 0.4)
+        num_pts = random.randint(10, 18)
         points = _bezier_points(
             (cur_x, cur_y), (target_x, target_y),
-            num_points=random.randint(8, 15),
+            num_points=num_pts,
         )
-        for px, py in points:
+        for i, (px, py) in enumerate(points):
             _xdo("mousemove", "--screen", "0", str(int(px)), str(int(py)))
-            time.sleep(random.uniform(0.003, 0.012))
+            progress = i / max(len(points) - 1, 1)
+            speed = 0.008 + 0.014 * (1 - math.sin(progress * math.pi))
+            time.sleep(_gauss_clamp(speed, speed * 0.3, 0.005, 0.04))
     except Exception:
         pass  # Non-critical — don't fail the browse request
 
@@ -976,8 +1005,8 @@ def browse():
         page.goto(url, timeout=timeout, wait_until="domcontentloaded")
         # Wait for DataDome challenge to resolve if present
         _wait_for_datadome(page)
-        # Wait for JS rendering, then simulate human behavior
-        page.wait_for_timeout(1000)
+        # Wait for JS rendering before interacting
+        page.wait_for_timeout(random.randint(1000, 2000))
         if not skip_behavior:
             _simulate_human_behavior(page)
 
@@ -1038,7 +1067,7 @@ def screenshot():
         try:
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
             _wait_for_datadome(page)
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(random.randint(1000, 2000))
             _simulate_human_behavior(page)
         except Exception as e:
             _close_session(session_id)
@@ -1082,7 +1111,7 @@ def extract():
         try:
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
             _wait_for_datadome(page)
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(random.randint(1000, 2000))
             _simulate_human_behavior(page)
         except Exception as e:
             _close_session(session_id)
