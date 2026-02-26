@@ -281,16 +281,16 @@ def _format_progress_body(
     """
     total = len(descriptions)
     if done:
-        header = f"*Done — {total} action{'s' if total != 1 else ''} taken*"
+        header = f"Done — {total} action{'s' if total != 1 else ''} taken"
     else:
-        header = f"*Working — {total} action{'s' if total != 1 else ''} so far…*"
+        header = f"Working — {total} action{'s' if total != 1 else ''} so far…"
 
     if total <= max_display:
-        lines = list(descriptions)
+        lines = [f"*{d}*" for d in descriptions]
     else:
         skip = total - max_display
         lines = [f"[+{skip} earlier]"]
-        lines.extend(descriptions[skip:])
+        lines.extend(f"*{d}*" for d in descriptions[skip:])
 
     return header + "\n" + "\n".join(lines)
 
