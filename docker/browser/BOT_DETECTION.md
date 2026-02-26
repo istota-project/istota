@@ -160,6 +160,20 @@ xdotool sends events through the X11 event pipeline, which Chrome receives as ge
 
 **Fix:** Patched `_evaluateOnNewDocument` in `crPage.js` to call the real CDP `Page.addScriptToEvaluateOnNewDocument` instead. This injects scripts into Chrome's V8 engine directly (before any page JS), without intercepting HTTP responses. The array-based storage is removed, so the route-based injection path never activates and `Fetch.enable` is never sent.
 
+### Cloudflare Challenge (economist.com) — Fixed
+
+Cloudflare challenge page ("Just a moment...") would spin forever when navigated via automation, but resolved instantly via manual VNC browsing with the same browser instance. Root cause: CDP commands detectable during the challenge fingerprinting window.
+
+**Two detection vectors:**
+
+**1. CDP Page.navigate:** `page.goto()` sends the CDP `Page.navigate` command. Manual browsing uses the address bar (keyboard input). Cloudflare's challenge JS can detect that navigation was triggered programmatically.
+
+**Fix:** Navigate via xdotool keyboard input — `Ctrl+L` (focus address bar), type URL, `Enter`. Uses X11 events identical to manual browsing. Falls back to CDP if xdotool fails. Applied to first navigation in new sessions; reused sessions already have the Cloudflare clearance cookie.
+
+**2. CDP Runtime.evaluate during challenge window:** Immediately after navigation, we called `page.evaluate()` for DataDome detection. This sends `Runtime.evaluate` CDP commands while Cloudflare's challenge JS is running its fingerprinting checks. The challenge detects active CDP usage and fails.
+
+**Fix:** Added 3-5 second passive wait (no CDP evaluate calls) after navigation. DataDome and captcha checks moved to after this window. `page.wait_for_timeout()` is a pure timer that doesn't send CDP commands.
+
 ### Behavioral Realism Improvements
 
 Replaced uniform-random timing model with human motor patterns:

@@ -554,6 +554,54 @@ def _xdo(*args):
                     capture_output=True)
 
 
+def _navigate_xdotool(page, url, timeout_ms=30000):
+    """Navigate by typing URL in Chrome's address bar via X11 input.
+
+    Avoids CDP Page.navigate which Cloudflare and other advanced bot
+    detection systems can detect. The keyboard input goes through X11
+    just like a real user typing a URL.
+    """
+    # Bring this tab to front so xdotool types in the right place.
+    # page.bring_to_front() uses CDP Page.bringToFront — a benign method
+    # that doesn't trigger detection (it's not in the sensitive list).
+    page.bring_to_front()
+    time.sleep(0.1)
+
+    _xdo("key", "ctrl+l")  # Focus + select all in address bar
+    time.sleep(0.15)
+    _xdo("type", "--delay", "8", "--clearmodifiers", url)
+    time.sleep(0.1)
+    _xdo("key", "Return")
+
+    # Wait for navigation. The page object tracks frame events passively
+    # (Page.frameNavigated, Page.lifecycleEvent) even for non-CDP navigations.
+    time.sleep(0.5)  # Give Chrome time to start navigation
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    except Exception:
+        pass  # Challenge pages may not fully load
+
+
+def _navigate_page(page, url, timeout_ms=30000, use_xdotool=True):
+    """Navigate to URL, preferring xdotool to avoid CDP detection.
+
+    For new sessions (first navigation), uses xdotool keyboard input.
+    Falls back to CDP page.goto() if xdotool fails.
+    """
+    if use_xdotool:
+        try:
+            _navigate_xdotool(page, url, timeout_ms)
+            # Verify navigation started (URL should change from about:blank)
+            if page.url == "about:blank" or page.url == "":
+                log.warning("xdotool navigation may have failed (still on blank), falling back to CDP")
+                page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+        except Exception as e:
+            log.warning("xdotool navigation failed (%s), falling back to CDP", e)
+            page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+    else:
+        page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+
+
 def _simulate_human_behavior(page):
     """Simulate human-like mouse movements and scrolling after page load.
 
@@ -575,8 +623,8 @@ def _simulate_human_behavior(page):
         if w < 100 or h < 100:
             return
 
-        # Brief reading pause — humans glance at the page before moving
-        time.sleep(_gauss_clamp(1.0, 0.4, 0.5, 1.8))
+        # Short pause before mouse movement (main wait already happened)
+        time.sleep(_gauss_clamp(0.4, 0.2, 0.1, 0.8))
 
         # Start from a realistic position (not 0,0)
         cur_x = random.uniform(w * 0.3, w * 0.7)
@@ -1002,11 +1050,18 @@ def browse():
         created_new = True
 
     try:
-        page.goto(url, timeout=timeout, wait_until="domcontentloaded")
-        # Wait for DataDome challenge to resolve if present
+        # New sessions: xdotool navigation avoids CDP Page.navigate detection.
+        # Reused sessions: CDP is fine, already past initial challenge.
+        _navigate_page(page, url, timeout_ms=timeout, use_xdotool=created_new)
+
+        # Passive wait: no CDP evaluate calls during this window.
+        # Cloudflare/DataDome challenge JS runs fingerprinting checks in
+        # the first few seconds — any Runtime.evaluate CDP calls during
+        # this period are detectable and cause challenges to fail.
+        page.wait_for_timeout(random.randint(3000, 5000))
+
+        # Now safe to check for DataDome (challenge window has passed)
         _wait_for_datadome(page)
-        # Wait for JS rendering before interacting
-        page.wait_for_timeout(random.randint(1000, 2000))
         if not skip_behavior:
             _simulate_human_behavior(page)
 
@@ -1065,9 +1120,9 @@ def screenshot():
         session_id, page = _create_session()
         created_new = True
         try:
-            page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+            _navigate_page(page, url, timeout_ms=timeout, use_xdotool=True)
+            page.wait_for_timeout(random.randint(3000, 5000))
             _wait_for_datadome(page)
-            page.wait_for_timeout(random.randint(1000, 2000))
             _simulate_human_behavior(page)
         except Exception as e:
             _close_session(session_id)
@@ -1109,9 +1164,9 @@ def extract():
         session_id, page = _create_session()
         created_new = True
         try:
-            page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+            _navigate_page(page, url, timeout_ms=timeout, use_xdotool=True)
+            page.wait_for_timeout(random.randint(3000, 5000))
             _wait_for_datadome(page)
-            page.wait_for_timeout(random.randint(1000, 2000))
             _simulate_human_behavior(page)
         except Exception as e:
             _close_session(session_id)
