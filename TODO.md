@@ -218,6 +218,13 @@
 - [x] Scheduler output_target extended for ntfy/all
 - [x] Ansible role updated (defaults, config template, user template)
 
+### Per-User Log Channel ✅
+- [x] Dedicated Talk room per user for verbose task execution logs
+- [x] Real-time tool call streaming via message editing (no rate limiting)
+- [x] Conversation token → display name resolution with process-level cache
+- [x] Composite callback when both Talk progress and log channel are active
+- [x] Progress style system: replace (latest + elapsed), full (append), legacy, none
+
 ### Graceful API Error Handling ✅
 - [x] Auto-retry transient API errors (5xx, 429) before counting against task attempts
 - [x] User-friendly error messages in Talk (no raw JSON)

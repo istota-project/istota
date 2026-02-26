@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-26: Per-user log channel & progress style modes
+
+Added a per-user log channel for verbose task execution logs and replaced the binary progress edit mode with a configurable progress style system.
+
+**Log channel:**
+- Dedicated Talk room per user that receives real-time tool call streaming during task execution
+- Enabled by setting `log_channel` (Talk room token) in per-user config; no separate toggle
+- Posts initial message on first tool call, edits in-place on every subsequent call (no rate limiting)
+- Resolves conversation tokens to display names via Talk API with process-level caching
+- Final message shows success/failure status with error details on failure
+- Source label format: `[task_id channel_name]` or `[task_id source_type]` for non-Talk sources
+- Composes with existing Talk progress callback as a composite when both are active
+
+**Progress style:**
+- Replaced `progress_edit_mode` (bool) with `progress_style` (string): `"replace"`, `"full"`, `"legacy"`, `"none"`
+- `"replace"` (new default): shows latest tool call + elapsed time, e.g. `⏳ *Reading config.py…* (4s)`. No rate limiting. Final: `Done — 12 actions (18s)`
+- `"full"`: previous append-all behavior (maps from `progress_edit_mode = true`)
+- `"legacy"`: individual posted messages (maps from `progress_edit_mode = false`)
+- `"none"`: silent, still accumulates descriptions for log channel and `actions_taken`
+- Backward compat: existing configs with `progress_edit_mode` auto-map to the right style
+
+**Files added:**
+- `tests/test_log_channel.py` — 28 tests for log channel (config, formatting, callbacks, integration)
+
+**Files modified:**
+- `src/istota/config.py` — Added `log_channel` to UserConfig, `progress_style` to SchedulerConfig
+- `src/istota/scheduler.py` — Log channel functions (`_resolve_channel_name`, `_make_log_channel_callback`, `_finalize_log_channel`), rewritten `_make_talk_progress_callback` with style branching, composite callback propagation
+- `config/config.example.toml` — Updated progress docs
+- `config/users/alice.example.toml` — Documented `log_channel`
+- `deploy/ansible/defaults/main.yml` — Added `log_channel` to user example, replaced `progress_edit_mode` with `progress_style`
+- `deploy/ansible/templates/user.toml.j2` — Renders `log_channel`
+- `deploy/ansible/templates/config.toml.j2` — Renders `progress_style`
+- `deploy/render_config.py` — Added `log_channel` to user field list
+- `tests/test_progress_callback.py` — Updated existing tests for style system, added replace/none/backward-compat tests
+
 ## 2026-02-26: Talk progress edit-in-place
 
 Progress updates during task execution now edit the initial ack message in-place instead of posting multiple separate messages. This reduces conversation noise from up to 5 progress posts per task down to a single message that updates with a running list of tool actions. The final result still posts as a new message.
