@@ -191,6 +191,7 @@ class UserConfig:
     invoicing_notifications: str = ""  # default surface for invoice notifications
     invoicing_conversation_token: str = ""  # Talk room for invoice notifications
     ntfy_topic: str = ""  # per-user ntfy topic override
+    log_channel: str = ""  # Talk room token for verbose task execution logs
     site_enabled: bool = False  # static website hosting at /~user/
     max_foreground_workers: int = 0  # per-user fg worker override (0 = use global default)
     max_background_workers: int = 0  # per-user bg worker override (0 = use global default)
@@ -448,6 +449,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         invoicing_notifications=user_data.get("invoicing_notifications", ""),
         invoicing_conversation_token=user_data.get("invoicing_conversation_token", ""),
         ntfy_topic=user_data.get("ntfy_topic", ""),
+        log_channel=user_data.get("log_channel", ""),
         site_enabled=user_data.get("site_enabled", False),
         max_foreground_workers=user_data.get("max_foreground_workers", 0),
         max_background_workers=user_data.get("max_background_workers", 0),

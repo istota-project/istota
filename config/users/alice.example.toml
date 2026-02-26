@@ -60,6 +60,10 @@ permissions = "write"
 invoicing_notifications = "talk"        # default surface: "talk", "email", "ntfy", "both", or "all"
 invoicing_conversation_token = "room123"  # Talk room for invoice notifications
 
+# Log channel: dedicated Talk room for verbose task execution logs
+# Shows real-time tool calls, timing, and task summaries without cluttering working channels
+# log_channel = "logroom123"
+
 # ntfy topic override (uses global [ntfy] topic if empty)
 # ntfy_topic = "alice-notifications"
 

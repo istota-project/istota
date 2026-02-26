@@ -136,6 +136,7 @@ istota_admin_users: []
 #     email_addresses:
 #       - "alice@example.com"
 #     timezone: "America/New_York"
+#     log_channel: ""               # Talk room token for verbose task execution logs
 #     max_foreground_workers: 2    # per-user override (0 or omit = use global default)
 #     max_background_workers: 1    # per-user override (0 or omit = use global default)
 #     resources:

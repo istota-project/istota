@@ -393,6 +393,146 @@ def _make_talk_progress_callback(
     return callback
 
 
+# ---------------------------------------------------------------------------
+# Log channel — verbose per-user task execution log
+# ---------------------------------------------------------------------------
+
+# Per-process cache: conversation_token → displayName
+_channel_name_cache: dict[str, str] = {}
+
+
+async def _resolve_channel_name(config: Config, conversation_token: str) -> str:
+    """Resolve a conversation token to its display name via Talk API.
+
+    Results are cached for the lifetime of the process.
+    """
+    if conversation_token in _channel_name_cache:
+        return _channel_name_cache[conversation_token]
+    try:
+        client = TalkClient(config)
+        info = await client.get_conversation_info(conversation_token)
+        name = info.get("displayName", conversation_token)
+        _channel_name_cache[conversation_token] = name
+        return name
+    except Exception:
+        logger.debug("Failed to resolve channel name for %s", conversation_token)
+        _channel_name_cache[conversation_token] = conversation_token
+        return conversation_token
+
+
+def _log_channel_source_label(task: db.Task, channel_name: str | None) -> str:
+    """Build the [task_id source] prefix for log channel messages."""
+    if task.conversation_token and channel_name:
+        return f"[{task.id} #{channel_name}]"
+    return f"[{task.id} {task.source_type}]"
+
+
+def _format_log_channel_body(
+    prefix: str, descriptions: list[str], *, done: bool = False,
+    success: bool = True, error: str | None = None,
+) -> str:
+    """Format a log channel message with accumulated tool descriptions."""
+    lines = [f"{prefix} {'✓' if done and success else '⏳' if not done else '✗'} "
+             f"{'done' if done and success else 'running…' if not done else 'failed'}"]
+    for desc in descriptions:
+        lines.append(f"  {desc}")
+    if done and error:
+        lines.append(f"  Error: {error[:200]}")
+    return "\n".join(lines)
+
+
+def _make_log_channel_callback(
+    config: Config, task: db.Task, log_channel: str, prefix: str,
+):
+    """Build a progress callback that streams tool calls to the log channel.
+
+    Unlike the Talk progress callback, this has NO rate limiting — every tool
+    call is emitted immediately via message editing.
+    """
+    all_descriptions: list[str] = []
+    log_msg_id: list[int | None] = [None]
+
+    def callback(message: str, *, italicize: bool = True):
+        # Skip text events — only log tool actions
+        if not italicize:
+            return
+        all_descriptions.append(message)
+
+        body = _format_log_channel_body(prefix, all_descriptions)
+
+        try:
+            if log_msg_id[0] is None:
+                # First tool call — post initial message
+                client = TalkClient(config)
+                response = asyncio.run(client.send_message(
+                    log_channel, body,
+                    reference_id=f"istota:log:{task.id}",
+                ))
+                log_msg_id[0] = response.get("ocs", {}).get("data", {}).get("id")
+            else:
+                # Subsequent calls — edit in place
+                asyncio.run(edit_talk_message(
+                    config,
+                    # Create a minimal task-like object with the log channel token
+                    db.Task(
+                        id=task.id, status="running", source_type=task.source_type,
+                        user_id=task.user_id, prompt="", conversation_token=log_channel,
+                    ),
+                    log_msg_id[0], body,
+                ))
+        except Exception as e:
+            logger.debug("Log channel update failed for task %d: %s", task.id, e)
+
+    callback.all_descriptions = all_descriptions
+    callback.log_msg_id = log_msg_id
+    return callback
+
+
+def _finalize_log_channel(
+    config: Config, task: db.Task, log_channel: str, prefix: str,
+    log_callback, success: bool, error: str | None = None,
+):
+    """Post/edit the final summary to the log channel."""
+    descriptions = getattr(log_callback, "all_descriptions", []) if log_callback else []
+    log_msg_id = getattr(log_callback, "log_msg_id", [None])[0] if log_callback else None
+
+    body = _format_log_channel_body(
+        prefix, descriptions, done=True, success=success, error=error,
+    )
+
+    try:
+        if log_msg_id is not None:
+            # Edit existing message with final state
+            asyncio.run(edit_talk_message(
+                config,
+                db.Task(
+                    id=task.id, status="running", source_type=task.source_type,
+                    user_id=task.user_id, prompt="", conversation_token=log_channel,
+                ),
+                log_msg_id, body,
+            ))
+        elif descriptions:
+            # No existing message (shouldn't happen, but fallback)
+            client = TalkClient(config)
+            asyncio.run(client.send_message(
+                log_channel, body,
+                reference_id=f"istota:log:{task.id}",
+            ))
+        else:
+            # No tool calls at all — post a one-liner
+            status = "✓ done" if success else "✗ failed"
+            line = f"{prefix} {status} (no tool calls)"
+            if error:
+                line += f" — {error[:200]}"
+            client = TalkClient(config)
+            asyncio.run(client.send_message(
+                log_channel, line,
+                reference_id=f"istota:log:{task.id}",
+            ))
+    except Exception as e:
+        logger.debug("Log channel finalize failed for task %d: %s", task.id, e)
+
+
 class UserWorker(threading.Thread):
     """Worker thread that processes tasks for a single user and queue serially."""
 
@@ -733,6 +873,23 @@ def process_one_task(
         # Get user resources
         user_resources = db.get_user_resources(conn, task.user_id)
 
+    # Log channel setup — resolve before execution starts
+    user_cfg = config.get_user(task.user_id)
+    log_channel = user_cfg.log_channel if user_cfg else ""
+    log_channel_prefix = ""
+    log_callback = None
+    if log_channel and config.nextcloud.url and not dry_run:
+        # Resolve source channel name for the log prefix
+        channel_name = None
+        if task.conversation_token:
+            try:
+                channel_name = asyncio.run(
+                    _resolve_channel_name(config, task.conversation_token),
+                )
+            except Exception:
+                channel_name = task.conversation_token
+        log_channel_prefix = _log_channel_source_label(task, channel_name)
+
     # Command tasks skip Talk ack, attachment download, and resource loading
     progress_callback = None
     if task.command:
@@ -754,6 +911,29 @@ def process_one_task(
                 progress_callback = _make_talk_progress_callback(
                     config, task, ack_msg_id=ack_msg_id,
                 )
+
+        # Build log channel callback (no rate limiting, streams every tool call)
+        if log_channel and log_channel_prefix:
+            log_callback = _make_log_channel_callback(
+                config, task, log_channel, log_channel_prefix,
+            )
+            # Compose with existing Talk progress callback
+            if progress_callback:
+                talk_cb = progress_callback
+
+                def _composite_callback(message, *, italicize=True):
+                    talk_cb(message, italicize=italicize)
+                    log_callback(message, italicize=italicize)
+
+                # Preserve Talk callback attributes for progress editing
+                _composite_callback.sent_texts = talk_cb.sent_texts
+                _composite_callback.last_progress_msg_id = talk_cb.last_progress_msg_id
+                _composite_callback.all_descriptions = talk_cb.all_descriptions
+                _composite_callback.ack_msg_id = talk_cb.ack_msg_id
+                _composite_callback.use_edit = talk_cb.use_edit
+                progress_callback = _composite_callback
+            else:
+                progress_callback = log_callback
 
         # Download Talk attachments to local filesystem before execution
         if task.source_type == "talk" and task.attachments:
@@ -929,6 +1109,14 @@ def process_one_task(
             ))
         except Exception as e:
             logger.debug("Final progress edit failed for task %d: %s", task_id, e)
+
+    # Finalize log channel message with completion status
+    if log_channel and log_channel_prefix:
+        error_msg = result if not success else None
+        _finalize_log_channel(
+            config, task, log_channel, log_channel_prefix,
+            log_callback, success, error=error_msg,
+        )
 
     # Deduplicate: strip text already sent as progress from the final result.
     # Only applies in legacy mode (progress_text_max_chars == 0, unlimited),

@@ -11,6 +11,9 @@ invoicing_notifications = "{{ user_config.invoicing_notifications }}"
 {% if user_config.invoicing_conversation_token is defined and user_config.invoicing_conversation_token %}
 invoicing_conversation_token = "{{ user_config.invoicing_conversation_token }}"
 {% endif %}
+{% if user_config.log_channel is defined and user_config.log_channel %}
+log_channel = "{{ user_config.log_channel }}"
+{% endif %}
 {% if user_config.ntfy_topic is defined and user_config.ntfy_topic %}
 ntfy_topic = "{{ user_config.ntfy_topic }}"
 {% endif %}

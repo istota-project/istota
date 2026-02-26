@@ -285,7 +285,7 @@ def render_user_toml(user_id: str, user_config: dict) -> str:
 
     lines.append(f'timezone = "{user_config.get("timezone", "UTC")}"')
 
-    for field in ("invoicing_notifications", "invoicing_conversation_token", "ntfy_topic"):
+    for field in ("invoicing_notifications", "invoicing_conversation_token", "log_channel", "ntfy_topic"):
         val = user_config.get(field, "")
         if val:
             lines.append(f'{field} = "{val}"')
