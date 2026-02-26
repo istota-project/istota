@@ -23,8 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm google-chrome-stable_current_amd64.deb \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user so Chrome can use its native sandbox
-# (Chrome refuses to sandbox as root: crbug.com/638180, shows yellow infobar warning)
+# Create non-root user so Chrome doesn't show --no-sandbox infobar
 RUN groupadd -r browser && useradd -r -g browser -G audio,video -d /home/browser -m browser
 
 WORKDIR /app
@@ -35,33 +34,36 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Patchright system deps (shared libs Chrome needs)
 RUN patchright install-deps chromium
 
-# Patch Patchright's init script tag to remove "playwright" from DOM elements.
-# Patchright injects <script class="injected-playwright-init-script-{hex}"> elements
-# that bot detectors can find via querySelectorAll('script[class*="playwright"]').
+# Patch Patchright source to remove "playwright" from identifiers.
+# These patches are still useful when Patchright connects via CDP.
 RUN find /usr/local/lib/python3.12/site-packages/patchright -name 'crPage.js' \
     -exec sed -i 's/injected-playwright-init-script-/x-init-/g' {} + && \
     find /usr/local/lib/python3.12/site-packages/patchright -name 'crPage.js' \
-    -exec sed -i "s/__playwright_utility_world__/__chrome_utility_world__/g" {} + && \
-    # Patch _evaluateOnNewDocument to use real CDP Page.addScriptToEvaluateOnNewDocument \
-    # instead of Patchright's no-op (which only pushes to an array for route-based injection). \
-    # Route-based injection modifies HTTP responses via Fetch.enable, which DataDome detects. \
-    # Real CDP injection runs scripts before page JS without any Fetch involvement. \
-    find /usr/local/lib/python3.12/site-packages/patchright -name 'crPage.js' \
-    -exec sed -i "s/this._evaluateOnNewDocumentScripts.push(initScript);/await this._client.send('Page.addScriptToEvaluateOnNewDocument', { source: initScript.source || initScript });/" {} +
+    -exec sed -i "s/__playwright_utility_world__/__chrome_utility_world__/g" {} +
 
-# Download autoconsent bundle for cookie consent handling
-RUN mkdir -p /app/vendor && \
-    curl -fsSL -o /app/vendor/autoconsent.playwright.js \
-    "https://cdn.jsdelivr.net/npm/@duckduckgo/autoconsent@14.28.0/dist/autoconsent.playwright.js"
+# Copy stealth extension source files
+COPY stealth-extension/manifest.json stealth-extension/stealth.js \
+     stealth-extension/autoconsent-prefix.js stealth-extension/autoconsent-suffix.js \
+     /app/stealth-extension/
 
-COPY browse_api.py .
+# Download autoconsent bundle and build the extension's autoconsent.js
+RUN curl -fsSL -o /tmp/autoconsent-bundle.js \
+    "https://cdn.jsdelivr.net/npm/@duckduckgo/autoconsent@14.28.0/dist/autoconsent.playwright.js" && \
+    cat /app/stealth-extension/autoconsent-prefix.js \
+        /tmp/autoconsent-bundle.js \
+        /app/stealth-extension/autoconsent-suffix.js \
+        > /app/stealth-extension/autoconsent.js && \
+    rm /tmp/autoconsent-bundle.js \
+       /app/stealth-extension/autoconsent-prefix.js \
+       /app/stealth-extension/autoconsent-suffix.js
+
+COPY browse_api.py chrome.py browsing.py xdotool.py ./
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
 # Set up directories the browser user needs write access to
 RUN mkdir -p /data/browser-profile /tmp/.X11-unix && \
     chown -R browser:browser /data/browser-profile /app
-
 
 # API port and noVNC port
 EXPOSE 9223 6080
