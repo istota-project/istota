@@ -177,25 +177,25 @@ class TestMakeTalkProgressCallback:
 
 class TestFormatProgressBody:
     def test_basic_format(self):
-        body = _format_progress_body(["Reading file.txt", "Running script"], 20)
+        body = _format_progress_body(["📄 Reading file.txt", "⚙️ Running script"], 20)
         assert "Working — 2 actions so far…" in body
-        assert "⚙️ Reading file.txt" in body
+        assert "📄 Reading file.txt" in body
         assert "⚙️ Running script" in body
 
     def test_done_format(self):
-        body = _format_progress_body(["Reading file.txt"], 20, done=True)
+        body = _format_progress_body(["📄 Reading file.txt"], 20, done=True)
         assert "Done — 1 action taken" in body
-        assert "⚙️ Reading file.txt" in body
+        assert "📄 Reading file.txt" in body
 
     def test_truncation_with_earlier_prefix(self):
-        items = [f"Action {i}" for i in range(25)]
+        items = [f"⚙️ Action {i}" for i in range(25)]
         body = _format_progress_body(items, 20)
         assert "[+5 earlier]" in body
         assert "⚙️ Action 5" in body
         assert "⚙️ Action 24" in body
         # Items 0-4 should NOT appear
-        assert "⚙️ Action 0" not in body
-        assert "⚙️ Action 4" not in body
+        assert "Action 0" not in body
+        assert "Action 4" not in body
 
     def test_no_truncation_when_within_limit(self):
         items = ["a", "b", "c"]
@@ -365,6 +365,30 @@ class TestEditModeCallback:
 
         callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
         assert callback.use_edit is False
+
+    def test_edit_mode_skips_text_events(self, tmp_path):
+        """Text events (italicize=False) should not be accumulated in edit mode."""
+        config = _make_config(tmp_path, progress_edit_mode=True)
+        task = _make_task()
+
+        with (
+            patch("istota.scheduler.asyncio.run", return_value=True) as mock_run,
+            patch("istota.scheduler.db.get_db") as mock_db,
+        ):
+            mock_conn = MagicMock()
+            mock_db.return_value.__enter__ = MagicMock(return_value=mock_conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("📄 Reading file.txt")  # tool use (italicize=True default)
+            callback("Some intermediate text", italicize=False)  # text event — skip
+            callback("✏️ Editing config.py")  # tool use
+
+        assert callback.all_descriptions == [
+            "📄 Reading file.txt", "✏️ Editing config.py",
+        ]
+        # Only 2 edits (text event was skipped entirely)
+        assert mock_run.call_count == 2
 
     def test_edit_mode_exception_swallowed(self, tmp_path):
         config = _make_config(tmp_path, progress_edit_mode=True)

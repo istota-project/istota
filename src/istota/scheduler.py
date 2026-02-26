@@ -274,7 +274,11 @@ async def edit_talk_message(
 def _format_progress_body(
     descriptions: list[str], max_display: int, *, done: bool = False,
 ) -> str:
-    """Format accumulated tool descriptions into a progress message body."""
+    """Format accumulated tool descriptions into a progress message body.
+
+    Descriptions already include emoji prefixes from stream_parser (e.g.
+    "📄 Reading file.txt"), so we don't add our own.
+    """
     total = len(descriptions)
     if done:
         header = f"*Done — {total} action{'s' if total != 1 else ''} taken*"
@@ -282,11 +286,11 @@ def _format_progress_body(
         header = f"*Working — {total} action{'s' if total != 1 else ''} so far…*"
 
     if total <= max_display:
-        lines = [f"⚙️ {d}" for d in descriptions]
+        lines = list(descriptions)
     else:
         skip = total - max_display
         lines = [f"[+{skip} earlier]"]
-        lines.extend(f"⚙️ {d}" for d in descriptions[skip:])
+        lines.extend(descriptions[skip:])
 
     return header + "\n" + "\n".join(lines)
 
@@ -321,7 +325,11 @@ def _make_talk_progress_callback(
         msg = message if max_chars == 0 else message[:max_chars]
 
         if use_edit:
-            # Edit mode: accumulate descriptions, edit ack message in-place
+            # Edit mode: accumulate tool descriptions, edit ack message in-place.
+            # Skip text events (italicize=False) — they're intermediate assistant
+            # prose, not tool actions, and would clutter the progress list.
+            if not italicize:
+                return
             all_descriptions.append(msg)
             now = time.time()
             if now - last_send < sched.progress_min_interval:
