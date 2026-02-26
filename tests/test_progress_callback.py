@@ -507,6 +507,19 @@ class TestReplaceModeCallback:
 
         assert callback.all_descriptions == ["Some action"]
 
+    def test_replace_collapses_multiline_messages(self, tmp_path):
+        """Multi-line tool output (e.g. inline scripts) should be collapsed to one line."""
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        multiline = '⚙️ python3 -c "\nimport json\n\nwith open(\'/srv/app/...'
+        with patch("istota.scheduler.asyncio.run", return_value=True) as mock_run:
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback(multiline)
+
+        assert "\n" not in callback.all_descriptions[0]
+        assert callback.all_descriptions[0].startswith("⚙️ python3 -c")
+
 
 class TestNoneModeCallback:
     """Tests for progress_style='none' — silent mode."""

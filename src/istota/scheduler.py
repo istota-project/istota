@@ -337,7 +337,10 @@ def _make_talk_progress_callback(
         nonlocal last_send, send_count
 
         max_chars = sched.progress_text_max_chars
-        msg = message if max_chars == 0 else message[:max_chars]
+        # Collapse multi-line tool output (e.g. inline scripts) to a single line
+        msg = message.replace("\n", " ").strip()
+        if max_chars:
+            msg = msg[:max_chars]
 
         # Skip text events for all edit-based modes
         if not italicize and style != "legacy":
@@ -486,7 +489,9 @@ def _make_log_channel_callback(
         # Skip text events — only log tool actions
         if not italicize:
             return
-        all_descriptions.append(message)
+        # Collapse multi-line tool output (e.g. inline scripts) to a single line
+        msg = message.replace("\n", " ").strip()
+        all_descriptions.append(msg)
 
         body = _format_log_channel_body(prefix, all_descriptions)
 
