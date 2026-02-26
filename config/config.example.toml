@@ -147,6 +147,10 @@ progress_show_tool_use = true
 progress_show_text = false
 # Max characters for text progress messages (0 = unlimited)
 progress_text_max_chars = 200
+# Edit ack message in-place with running tool updates instead of posting multiple messages
+progress_edit_mode = true
+# Max tool actions shown in the edited progress message
+progress_max_display_items = 20
 
 # Kill task execution after N minutes (default: 30)
 task_timeout_minutes = 30

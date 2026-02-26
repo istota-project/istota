@@ -256,57 +256,132 @@ def get_worker_id(user_id: str | None = None) -> str:
     return base
 
 
-def _make_talk_progress_callback(config: Config, task: db.Task):
+async def edit_talk_message(
+    config: Config, task: db.Task, message_id: int, message: str,
+) -> bool:
+    """Edit a Talk message in-place. Returns True on success, False on failure."""
+    if not config.nextcloud.url or not task.conversation_token:
+        return False
+    try:
+        client = TalkClient(config)
+        await client.edit_message(task.conversation_token, message_id, message)
+        return True
+    except Exception as e:
+        logger.debug("Edit message %d failed: %s", message_id, e)
+        return False
+
+
+def _format_progress_body(
+    descriptions: list[str], max_display: int, *, done: bool = False,
+) -> str:
+    """Format accumulated tool descriptions into a progress message body."""
+    total = len(descriptions)
+    if done:
+        header = f"*Done — {total} action{'s' if total != 1 else ''} taken*"
+    else:
+        header = f"*Working — {total} action{'s' if total != 1 else ''} so far…*"
+
+    if total <= max_display:
+        lines = [f"⚙️ {d}" for d in descriptions]
+    else:
+        skip = total - max_display
+        lines = [f"[+{skip} earlier]"]
+        lines.extend(f"⚙️ {d}" for d in descriptions[skip:])
+
+    return header + "\n" + "\n".join(lines)
+
+
+def _make_talk_progress_callback(
+    config: Config, task: db.Task, ack_msg_id: int | None = None,
+):
     """Build a rate-limited progress callback that posts updates to Talk.
 
-    The returned callback has a ``sent_texts`` attribute (list of raw strings)
-    that records every message successfully posted as progress.  Callers can
-    inspect this list to deduplicate the final result.
+    When ``progress_edit_mode`` is enabled and ``ack_msg_id`` is provided,
+    edits the ack message in-place with accumulated tool descriptions.
+    Otherwise falls back to posting individual progress messages (legacy).
+
+    The returned callback has:
+    - ``sent_texts``: list of raw strings posted as separate messages (legacy mode)
+    - ``last_progress_msg_id``: mutable [int|None] of last posted message ID (legacy mode)
+    - ``all_descriptions``: list of all tool descriptions seen (edit mode)
     """
     last_send = time.time()  # starts from initial ack message
     send_count = 0
     sched = config.scheduler
     sent_texts: list[str] = []
     last_progress_msg_id: list[int | None] = [None]  # mutable container for nonlocal
+    all_descriptions: list[str] = []
+
+    use_edit = sched.progress_edit_mode and ack_msg_id is not None
 
     def callback(message: str, *, italicize: bool = True):
         nonlocal last_send, send_count
-        if send_count >= sched.progress_max_messages:
-            return
-        now = time.time()
-        if now - last_send < sched.progress_min_interval:
-            return
+
         max_chars = sched.progress_text_max_chars
         msg = message if max_chars == 0 else message[:max_chars]
-        if not italicize:
-            formatted = msg
-        elif "\n" in msg:
-            formatted = "\n".join(f"*{line}*" if line.strip() else line for line in msg.split("\n"))
-        elif msg and not msg[0].isascii():
-            # First char is emoji — find where the text starts
-            parts = msg.split(" ", 1)
-            if len(parts) == 2:
-                formatted = f"{parts[0]} *{parts[1]}*"
+
+        if use_edit:
+            # Edit mode: accumulate descriptions, edit ack message in-place
+            all_descriptions.append(msg)
+            now = time.time()
+            if now - last_send < sched.progress_min_interval:
+                return
+            body = _format_progress_body(
+                all_descriptions, sched.progress_max_display_items,
+            )
+            try:
+                ok = asyncio.run(edit_talk_message(config, task, ack_msg_id, body))
+                if ok:
+                    last_send = now
+                    with db.get_db(config.db_path) as conn:
+                        db.log_task(conn, task.id, "debug", f"Progress: {msg}")
+                else:
+                    # Edit failed — fall through silently (don't flood with posts)
+                    logger.debug("Progress edit failed for task %d, skipping", task.id)
+            except Exception as e:
+                logger.debug("Progress edit failed: %s", e)
+        else:
+            # Legacy mode: post individual progress messages
+            if send_count >= sched.progress_max_messages:
+                return
+            now = time.time()
+            if now - last_send < sched.progress_min_interval:
+                return
+            if not italicize:
+                formatted = msg
+            elif "\n" in msg:
+                formatted = "\n".join(
+                    f"*{line}*" if line.strip() else line
+                    for line in msg.split("\n")
+                )
+            elif msg and not msg[0].isascii():
+                # First char is emoji — find where the text starts
+                parts = msg.split(" ", 1)
+                if len(parts) == 2:
+                    formatted = f"{parts[0]} *{parts[1]}*"
+                else:
+                    formatted = f"*{msg}*"
             else:
                 formatted = f"*{msg}*"
-        else:
-            formatted = f"*{msg}*"
-        try:
-            msg_id = asyncio.run(post_result_to_talk(
-                config, task, formatted,
-                reference_id=f"istota:task:{task.id}:progress",
-            ))
-            last_send = now
-            send_count += 1
-            sent_texts.append(msg)
-            last_progress_msg_id[0] = msg_id
-            with db.get_db(config.db_path) as conn:
-                db.log_task(conn, task.id, "debug", f"Progress: {msg}")
-        except Exception as e:
-            logger.debug("Progress update failed: %s", e)
+            try:
+                msg_id = asyncio.run(post_result_to_talk(
+                    config, task, formatted,
+                    reference_id=f"istota:task:{task.id}:progress",
+                ))
+                last_send = now
+                send_count += 1
+                sent_texts.append(msg)
+                last_progress_msg_id[0] = msg_id
+                with db.get_db(config.db_path) as conn:
+                    db.log_task(conn, task.id, "debug", f"Progress: {msg}")
+            except Exception as e:
+                logger.debug("Progress update failed: %s", e)
 
     callback.sent_texts = sent_texts
     callback.last_progress_msg_id = last_progress_msg_id
+    callback.all_descriptions = all_descriptions
+    callback.ack_msg_id = ack_msg_id
+    callback.use_edit = use_edit
     return callback
 
 
@@ -657,17 +732,20 @@ def process_one_task(
         actions_taken = None
     else:
         # Send progress update for Talk tasks
+        ack_msg_id = None
         is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
         if task.source_type == "talk" and task.conversation_token and not dry_run:
             if not is_rerun:
-                asyncio.run(post_result_to_talk(
+                ack_msg_id = asyncio.run(post_result_to_talk(
                     config, task, random.choice(PROGRESS_MESSAGES),
                     reference_id=f"istota:task:{task.id}:ack",
                 ))
 
             # Build streaming progress callback if enabled
             if config.scheduler.progress_updates:
-                progress_callback = _make_talk_progress_callback(config, task)
+                progress_callback = _make_talk_progress_callback(
+                    config, task, ack_msg_id=ack_msg_id,
+                )
 
         # Download Talk attachments to local filesystem before execution
         if task.source_type == "talk" and task.attachments:
@@ -825,11 +903,33 @@ def process_one_task(
         _process_deferred_subtasks(config, task, user_temp_dir)
         _process_deferred_tracking(config, task, user_temp_dir)
 
+    # Final cleanup edit: update the ack message with a summary of all actions taken
+    if (
+        progress_callback
+        and getattr(progress_callback, "use_edit", False)
+        and getattr(progress_callback, "all_descriptions", None)
+        and progress_callback.ack_msg_id is not None
+    ):
+        body = _format_progress_body(
+            progress_callback.all_descriptions,
+            config.scheduler.progress_max_display_items,
+            done=True,
+        )
+        try:
+            asyncio.run(edit_talk_message(
+                config, task, progress_callback.ack_msg_id, body,
+            ))
+        except Exception as e:
+            logger.debug("Final progress edit failed for task %d: %s", task_id, e)
+
     # Deduplicate: strip text already sent as progress from the final result.
-    # Only applies when progress_text_max_chars == 0 (unlimited), since truncated
-    # progress texts would leave dangling partial sentences if stripped as a prefix.
+    # Only applies in legacy mode (progress_text_max_chars == 0, unlimited),
+    # since truncated progress texts would leave dangling partial sentences
+    # if stripped as a prefix. In edit mode, no deduplication is needed since
+    # progress edits a single ack message and the result is a separate post.
     max_chars = config.scheduler.progress_text_max_chars
-    if post_talk_message and max_chars == 0 and progress_callback and hasattr(progress_callback, "sent_texts"):
+    use_edit = progress_callback and getattr(progress_callback, "use_edit", False)
+    if post_talk_message and max_chars == 0 and not use_edit and progress_callback and hasattr(progress_callback, "sent_texts"):
         result_stripped = post_talk_message.strip()
         for sent in progress_callback.sent_texts:
             sent_stripped = sent.strip()

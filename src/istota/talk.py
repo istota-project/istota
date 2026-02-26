@@ -103,6 +103,36 @@ class TalkClient:
             response.raise_for_status()
             return response.json()
 
+    async def edit_message(
+        self,
+        conversation_token: str,
+        message_id: int,
+        message: str,
+    ) -> dict:
+        """Edit an existing message in a Talk conversation."""
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat"
+            f"/{conversation_token}/{message_id}"
+        )
+
+        logger.debug(
+            "Editing message %d in %s (%d chars)",
+            message_id, conversation_token, len(message),
+        )
+        async with httpx.AsyncClient() as client:
+            response = await client.put(
+                url,
+                auth=self.auth,
+                headers={
+                    "OCS-APIRequest": "true",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json={"message": message},
+            )
+            response.raise_for_status()
+            return response.json()
+
     async def list_conversations(self) -> list[dict]:
         """List all conversations the user is part of."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"

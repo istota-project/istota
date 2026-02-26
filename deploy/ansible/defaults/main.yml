@@ -59,6 +59,8 @@ istota_scheduler_progress_max_messages: 5              # Max progress messages p
 istota_scheduler_progress_show_tool_use: true          # Show tool use descriptions
 istota_scheduler_progress_show_text: false             # Show intermediate assistant text (noisy)
 istota_scheduler_progress_text_max_chars: 200         # Max chars for text progress (0 = unlimited)
+istota_scheduler_progress_edit_mode: true             # Edit ack message in-place instead of multi-post
+istota_scheduler_progress_max_display_items: 20       # Max tool actions shown in edited progress message
 istota_scheduler_task_timeout_minutes: 30             # Kill task execution after N minutes
 
 # Scheduler robustness settings

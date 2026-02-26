@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-25: Talk progress edit-in-place
+
+Progress updates during task execution now edit the initial ack message in-place instead of posting multiple separate messages. This reduces conversation noise from up to 5 progress posts per task down to a single message that updates with a running list of tool actions. The final result still posts as a new message.
+
+**Key changes:**
+- `TalkClient.edit_message()` — new method using `PUT /ocs/v2.php/apps/spreed/api/v1/chat/{token}/{messageId}`
+- `edit_talk_message()` async helper in scheduler (wraps the client, returns bool)
+- `_format_progress_body()` — formats accumulated tool descriptions with header, `[+N earlier]` truncation for long lists
+- `_make_talk_progress_callback()` rewritten to support edit mode: accumulates descriptions, edits ack message in-place (rate-limited), no `progress_max_messages` cap needed in edit mode
+- Ack message ID captured from initial post and passed through to callback
+- Final cleanup edit after task completes shows "Done — N actions taken" summary
+- Legacy multi-post mode preserved when `progress_edit_mode=False`
+- Two new config fields: `progress_edit_mode` (default: true), `progress_max_display_items` (default: 20)
+
+**Files modified:**
+- `src/istota/talk.py` — Added `edit_message()` to TalkClient
+- `src/istota/config.py` — Added `progress_edit_mode` and `progress_max_display_items` to SchedulerConfig
+- `src/istota/scheduler.py` — Added `edit_talk_message()`, `_format_progress_body()`, rewrote progress callback, added ack ID capture and final cleanup edit
+- `config/config.example.toml` — Documented new fields
+- `deploy/ansible/defaults/main.yml` — Added Ansible defaults
+- `deploy/ansible/templates/config.toml.j2` — Added template vars
+- `tests/test_talk.py` — 2 new tests for `edit_message()` (success + HTTP error)
+- `tests/test_progress_callback.py` — 12 new tests for edit mode, format helper, and `edit_talk_message`
+
 ## 2026-02-25: !export command for conversation history
 
 New `!export` command that exports a Talk channel's complete conversation history to a file in the user's Nextcloud workspace. Uses the Talk API directly (rather than the pruned DB cache) to fetch the full history. Supports incremental appends for repeated exports of the same channel.

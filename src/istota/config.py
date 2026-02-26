@@ -114,6 +114,8 @@ class SchedulerConfig:
     progress_show_tool_use: bool = True    # show "Reading file.txt", "Running script..."
     progress_show_text: bool = False       # show intermediate assistant text (noisy)
     progress_text_max_chars: int = 200     # max chars for text progress messages (0 = unlimited)
+    progress_edit_mode: bool = True        # edit ack message in-place instead of posting multiple messages
+    progress_max_display_items: int = 20   # max tool actions shown in edited progress message
     task_timeout_minutes: int = 30  # kill task execution after this
     # Robustness settings
     confirmation_timeout_minutes: int = 120  # auto-cancel pending_confirmation after this
@@ -611,6 +613,8 @@ def load_config(config_path: Path | None = None) -> Config:
             progress_show_tool_use=sched.get("progress_show_tool_use", True),
             progress_show_text=sched.get("progress_show_text", False),
             progress_text_max_chars=sched.get("progress_text_max_chars", 200),
+            progress_edit_mode=sched.get("progress_edit_mode", True),
+            progress_max_display_items=sched.get("progress_max_display_items", 20),
             task_timeout_minutes=sched.get("task_timeout_minutes", 30),
             confirmation_timeout_minutes=sched.get("confirmation_timeout_minutes", 120),
             stale_pending_warn_minutes=sched.get("stale_pending_warn_minutes", 30),

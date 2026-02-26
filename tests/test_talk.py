@@ -63,6 +63,37 @@ class TestTalkClient:
         assert call_kwargs.kwargs["json"] == {"message": "Reply!", "replyTo": 10}
 
     @pytest.mark.asyncio
+    async def test_edit_message(self, client):
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ocs": {"data": {}}}
+        mock_http.put = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            result = await client.edit_message("room1", 42, "Updated text")
+
+        mock_http.put.assert_called_once()
+        call_kwargs = mock_http.put.call_args
+        assert "room1/42" in call_kwargs.args[0]
+        assert call_kwargs.kwargs["json"] == {"message": "Updated text"}
+        assert call_kwargs.kwargs["auth"] == ("istota", "pass")
+        assert call_kwargs.kwargs["headers"]["OCS-APIRequest"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_edit_message_raises_on_http_error(self, client):
+        mock_http = _mock_httpx_client()
+        import httpx
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404", request=MagicMock(), response=MagicMock(),
+        )
+        mock_http.put = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.edit_message("room1", 99, "fail")
+
+    @pytest.mark.asyncio
     async def test_list_conversations(self, client):
         mock_http = _mock_httpx_client()
         rooms = [{"token": "room1"}, {"token": "room2"}]

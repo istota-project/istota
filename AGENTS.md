@@ -78,7 +78,7 @@ istota/
 │   └── README.md            # Deployment documentation
 ├── docker/browser/          # Playwright browser container (Flask API)
 ├── scripts/                 # setup.sh, scheduler.sh
-├── tests/                   # pytest + pytest-asyncio (~2170 tests, 48 files)
+├── tests/                   # pytest + pytest-asyncio (~2346 tests, 50 files)
 ├── schema.sql
 └── pyproject.toml
 ```
