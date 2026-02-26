@@ -34,7 +34,8 @@ def _make_config(tmp_path, **overrides):
         progress_max_messages=3,
         progress_show_tool_use=True,
         progress_show_text=False,
-        progress_edit_mode=False,  # legacy mode by default for existing tests
+        progress_style="legacy",  # legacy mode by default for existing tests
+        progress_edit_mode=False,
     )
     defaults.update(overrides)
     config.scheduler = SchedulerConfig(**defaults)
@@ -262,10 +263,10 @@ class TestEditTalkMessage:
 
 
 class TestEditModeCallback:
-    """Tests for _make_talk_progress_callback with progress_edit_mode=True."""
+    """Tests for _make_talk_progress_callback with progress_style='full'."""
 
     def test_edit_mode_calls_edit_not_post(self, tmp_path):
-        config = _make_config(tmp_path, progress_edit_mode=True)
+        config = _make_config(tmp_path, progress_style="full")
         task = _make_task()
 
         with (
@@ -290,7 +291,7 @@ class TestEditModeCallback:
         assert callback.sent_texts == []
 
     def test_edit_mode_accumulates_descriptions(self, tmp_path):
-        config = _make_config(tmp_path, progress_edit_mode=True)
+        config = _make_config(tmp_path, progress_style="full")
         task = _make_task()
 
         with (
@@ -314,7 +315,7 @@ class TestEditModeCallback:
 
     def test_edit_mode_no_max_messages_cap(self, tmp_path):
         """Edit mode has no max_messages cap — single message, no spam."""
-        config = _make_config(tmp_path, progress_edit_mode=True, progress_max_messages=2)
+        config = _make_config(tmp_path, progress_style="full", progress_max_messages=2)
         task = _make_task()
 
         with (
@@ -334,7 +335,7 @@ class TestEditModeCallback:
         assert len(callback.all_descriptions) == 5
 
     def test_edit_mode_respects_min_interval(self, tmp_path):
-        config = _make_config(tmp_path, progress_edit_mode=True, progress_min_interval=100)
+        config = _make_config(tmp_path, progress_style="full", progress_min_interval=100)
         task = _make_task()
 
         with (
@@ -356,7 +357,7 @@ class TestEditModeCallback:
 
     def test_edit_mode_fallback_no_ack_msg_id(self, tmp_path):
         """When ack_msg_id is None, falls back to legacy mode."""
-        config = _make_config(tmp_path, progress_edit_mode=True)
+        config = _make_config(tmp_path, progress_style="full")
         task = _make_task()
 
         callback = _make_talk_progress_callback(config, task, ack_msg_id=None)
@@ -372,7 +373,7 @@ class TestEditModeCallback:
 
     def test_edit_mode_skips_text_events(self, tmp_path):
         """Text events (italicize=False) should not be accumulated in edit mode."""
-        config = _make_config(tmp_path, progress_edit_mode=True)
+        config = _make_config(tmp_path, progress_style="full")
         task = _make_task()
 
         with (
@@ -395,7 +396,7 @@ class TestEditModeCallback:
         assert mock_run.call_count == 2
 
     def test_edit_mode_exception_swallowed(self, tmp_path):
-        config = _make_config(tmp_path, progress_edit_mode=True)
+        config = _make_config(tmp_path, progress_style="full")
         task = _make_task()
 
         with patch("istota.scheduler.asyncio.run", side_effect=Exception("fail")):
@@ -405,3 +406,180 @@ class TestEditModeCallback:
 
         # Description still accumulated despite failure
         assert callback.all_descriptions == ["Some action"]
+
+
+# ---------------------------------------------------------------------------
+# Replace mode tests (progress_style="replace")
+# ---------------------------------------------------------------------------
+
+
+class TestReplaceModeCallback:
+    """Tests for _make_talk_progress_callback with progress_style='replace'."""
+
+    def test_replace_edits_ack_message(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run", return_value=True) as mock_run:
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("📄 Reading config.py")
+
+        assert callback.style == "replace"
+        assert callback.use_edit is True
+        assert len(callback.all_descriptions) == 1
+        # Should have called edit_talk_message via asyncio.run
+        assert mock_run.called
+        # sent_texts should be empty (no legacy posts)
+        assert callback.sent_texts == []
+
+    def test_replace_no_rate_limiting(self, tmp_path):
+        """Replace mode has no min_interval — every tool call triggers an edit."""
+        config = _make_config(tmp_path, progress_style="replace", progress_min_interval=100)
+        task = _make_task()
+
+        with (
+            patch("istota.scheduler.asyncio.run", return_value=True) as mock_run,
+        ):
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            for i in range(5):
+                callback(f"Action {i}")
+
+        # All 5 should have triggered edits (no rate limiting)
+        assert mock_run.call_count == 5
+        assert len(callback.all_descriptions) == 5
+
+    def test_replace_message_format(self, tmp_path):
+        """Replace mode message contains the tool description and elapsed time."""
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run", return_value=True):
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("📄 Reading config.py")
+
+        # Verify the format by checking the asyncio.run call
+        # The body should be: "⏳ *📄 Reading config.py…* (Ns)"
+        assert callback.all_descriptions == ["📄 Reading config.py"]
+        assert callback.style == "replace"
+
+    def test_replace_skips_text_events(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run", return_value=True) as mock_run:
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("📄 Reading file.txt")
+            callback("Some intermediate text", italicize=False)  # should be skipped
+            callback("⚙️ Running test")
+
+        assert callback.all_descriptions == ["📄 Reading file.txt", "⚙️ Running test"]
+        assert mock_run.call_count == 2
+
+    def test_replace_accumulates_all_descriptions(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run", return_value=True):
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("📄 Reading file.txt")
+            callback("✏️ Editing config.py")
+            callback("⚙️ Running tests")
+
+        assert callback.all_descriptions == [
+            "📄 Reading file.txt", "✏️ Editing config.py", "⚙️ Running tests",
+        ]
+
+    def test_replace_falls_back_to_legacy_without_ack_msg(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        callback = _make_talk_progress_callback(config, task, ack_msg_id=None)
+        assert callback.use_edit is False
+        assert callback.style == "legacy"
+
+    def test_replace_exception_swallowed(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run", side_effect=Exception("fail")):
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("Some action")
+
+        assert callback.all_descriptions == ["Some action"]
+
+
+class TestNoneModeCallback:
+    """Tests for progress_style='none' — silent mode."""
+
+    def test_none_still_accumulates_descriptions(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="none")
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run") as mock_run:
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("📄 Reading file.txt")
+            callback("⚙️ Running test")
+
+        # No API calls made
+        assert not mock_run.called
+        # But descriptions still accumulated (for log channel / actions_taken)
+        assert callback.all_descriptions == ["📄 Reading file.txt", "⚙️ Running test"]
+
+    def test_none_skips_text_events(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="none")
+        task = _make_task()
+
+        callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+        callback("📄 Reading file.txt")
+        callback("Some text", italicize=False)
+
+        assert callback.all_descriptions == ["📄 Reading file.txt"]
+
+
+class TestProgressStyleBackwardCompat:
+    """Test that progress_edit_mode maps correctly to progress_style."""
+
+    def test_config_default_is_replace(self):
+        config = Config()
+        assert config.scheduler.progress_style == "replace"
+
+    def test_toml_progress_edit_mode_true_maps_to_full(self, tmp_path):
+        from istota.config import load_config
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[scheduler]
+progress_edit_mode = true
+""")
+        config = load_config(config_file)
+        assert config.scheduler.progress_style == "full"
+
+    def test_toml_progress_edit_mode_false_maps_to_legacy(self, tmp_path):
+        from istota.config import load_config
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[scheduler]
+progress_edit_mode = false
+""")
+        config = load_config(config_file)
+        assert config.scheduler.progress_style == "legacy"
+
+    def test_toml_explicit_progress_style_wins(self, tmp_path):
+        from istota.config import load_config
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[scheduler]
+progress_style = "replace"
+progress_edit_mode = true
+""")
+        config = load_config(config_file)
+        assert config.scheduler.progress_style == "replace"
+
+    def test_toml_progress_style_none(self, tmp_path):
+        from istota.config import load_config
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[scheduler]
+progress_style = "none"
+""")
+        config = load_config(config_file)
+        assert config.scheduler.progress_style == "none"

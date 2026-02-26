@@ -60,7 +60,7 @@ class TestUserConfigLogChannelParsing:
 class TestLogChannelSourceLabel:
     def test_with_channel_name(self, make_task):
         task = make_task(id=42, conversation_token="abc123")
-        assert _log_channel_source_label(task, "Dev Room") == "[42 #Dev Room]"
+        assert _log_channel_source_label(task, "Dev Room") == "[42 Dev Room]"
 
     def test_without_channel_name(self, make_task):
         task = make_task(id=99, source_type="email")

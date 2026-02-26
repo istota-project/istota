@@ -298,25 +298,40 @@ def _format_progress_body(
 def _make_talk_progress_callback(
     config: Config, task: db.Task, ack_msg_id: int | None = None,
 ):
-    """Build a rate-limited progress callback that posts updates to Talk.
+    """Build a progress callback that posts updates to Talk.
 
-    When ``progress_edit_mode`` is enabled and ``ack_msg_id`` is provided,
-    edits the ack message in-place with accumulated tool descriptions.
-    Otherwise falls back to posting individual progress messages (legacy).
+    Behaviour depends on ``progress_style``:
+
+    - **"replace"** (default): Edit the ack message to show only the latest
+      tool call with elapsed time, e.g. ``⏳ Reading config.py… (4s)``.
+      No rate limiting — every tool call triggers an edit.
+    - **"full"**: Edit the ack message with accumulated tool descriptions
+      (append list). Rate-limited by ``progress_min_interval``.
+    - **"legacy"**: Post individual progress messages (pre-edit-mode compat).
+      Rate-limited by ``progress_min_interval`` and ``progress_max_messages``.
+    - **"none"**: Silent — no progress updates at all. Callback still
+      accumulates descriptions for log channel / actions_taken.
 
     The returned callback has:
     - ``sent_texts``: list of raw strings posted as separate messages (legacy mode)
     - ``last_progress_msg_id``: mutable [int|None] of last posted message ID (legacy mode)
-    - ``all_descriptions``: list of all tool descriptions seen (edit mode)
+    - ``all_descriptions``: list of all tool descriptions seen (all modes)
     """
-    last_send = time.time()  # starts from initial ack message
+    start_time = time.time()
+    last_send = start_time  # starts from initial ack message
     send_count = 0
     sched = config.scheduler
     sent_texts: list[str] = []
     last_progress_msg_id: list[int | None] = [None]  # mutable container for nonlocal
     all_descriptions: list[str] = []
 
-    use_edit = sched.progress_edit_mode and ack_msg_id is not None
+    # Resolve effective style, with ack_msg_id fallback
+    style = sched.progress_style
+    if style in ("replace", "full") and ack_msg_id is None:
+        style = "legacy"  # can't edit without an ack message
+
+    # Backward compat: use_edit is True for "full" and "replace" (both edit ack)
+    use_edit = style in ("replace", "full")
 
     def callback(message: str, *, italicize: bool = True):
         nonlocal last_send, send_count
@@ -324,10 +339,21 @@ def _make_talk_progress_callback(
         max_chars = sched.progress_text_max_chars
         msg = message if max_chars == 0 else message[:max_chars]
 
-        if use_edit:
-            # Edit mode: accumulate tool descriptions, edit ack message in-place.
-            # Skip text events (italicize=False) — they're intermediate assistant
-            # prose, not tool actions, and would clutter the progress list.
+        # Skip text events for all edit-based modes
+        if not italicize and style != "legacy":
+            return
+
+        if style == "replace":
+            all_descriptions.append(msg)
+            elapsed = int(time.time() - start_time)
+            body = f"⏳ *{msg}…* ({elapsed}s)"
+            try:
+                ok = asyncio.run(edit_talk_message(config, task, ack_msg_id, body))
+                if ok:
+                    last_send = time.time()
+            except Exception as e:
+                logger.debug("Progress replace edit failed: %s", e)
+        elif style == "full":
             if not italicize:
                 return
             all_descriptions.append(msg)
@@ -344,10 +370,13 @@ def _make_talk_progress_callback(
                     with db.get_db(config.db_path) as conn:
                         db.log_task(conn, task.id, "debug", f"Progress: {msg}")
                 else:
-                    # Edit failed — fall through silently (don't flood with posts)
                     logger.debug("Progress edit failed for task %d, skipping", task.id)
             except Exception as e:
                 logger.debug("Progress edit failed: %s", e)
+        elif style == "none":
+            # Silent — still accumulate for log channel
+            if italicize:
+                all_descriptions.append(msg)
         else:
             # Legacy mode: post individual progress messages
             if send_count >= sched.progress_max_messages:
@@ -363,7 +392,6 @@ def _make_talk_progress_callback(
                     for line in msg.split("\n")
                 )
             elif msg and not msg[0].isascii():
-                # First char is emoji — find where the text starts
                 parts = msg.split(" ", 1)
                 if len(parts) == 2:
                     formatted = f"{parts[0]} *{parts[1]}*"
@@ -390,6 +418,8 @@ def _make_talk_progress_callback(
     callback.all_descriptions = all_descriptions
     callback.ack_msg_id = ack_msg_id
     callback.use_edit = use_edit
+    callback.style = style
+    callback.start_time = start_time
     return callback
 
 
@@ -423,7 +453,7 @@ async def _resolve_channel_name(config: Config, conversation_token: str) -> str:
 def _log_channel_source_label(task: db.Task, channel_name: str | None) -> str:
     """Build the [task_id source] prefix for log channel messages."""
     if task.conversation_token and channel_name:
-        return f"[{task.id} #{channel_name}]"
+        return f"[{task.id} {channel_name}]"
     return f"[{task.id} {task.source_type}]"
 
 
@@ -1098,11 +1128,18 @@ def process_one_task(
         and getattr(progress_callback, "all_descriptions", None)
         and progress_callback.ack_msg_id is not None
     ):
-        body = _format_progress_body(
-            progress_callback.all_descriptions,
-            config.scheduler.progress_max_display_items,
-            done=True,
-        )
+        cb_style = getattr(progress_callback, "style", "full")
+        if cb_style == "replace":
+            # Brief summary: "Done — 12 actions (18s)"
+            total = len(progress_callback.all_descriptions)
+            elapsed = int(time.time() - progress_callback.start_time)
+            body = f"Done — {total} action{'s' if total != 1 else ''} ({elapsed}s)"
+        else:
+            body = _format_progress_body(
+                progress_callback.all_descriptions,
+                config.scheduler.progress_max_display_items,
+                done=True,
+            )
         try:
             asyncio.run(edit_talk_message(
                 config, task, progress_callback.ack_msg_id, body,
