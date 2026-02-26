@@ -423,6 +423,40 @@ enabled = false
         assert jobs[0].enabled is True
 
     @pytest.mark.asyncio
+    async def test_enable_job_resets_last_run_at(self, make_config):
+        """Enabling a job resets last_run_at so it won't fire immediately as catch-up."""
+        config = make_config()
+        cron_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "nightly"
+cron = "0 22 * * *"
+prompt = "stuff"
+enabled = false
+```
+""")
+        with db.get_db(config.db_path) as conn:
+            # Insert job with an old last_run_at (simulating a job disabled long ago)
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled, last_run_at)
+                   VALUES (?, ?, ?, ?, 0, '2026-01-01 00:00:00')""",
+                ("alice", "nightly", "0 22 * * *", "stuff"),
+            )
+            client = AsyncMock()
+            result = await cmd_cron(config, conn, "alice", "room1", "enable nightly", client)
+
+        assert "Enabled" in result
+        with db.get_db(config.db_path) as conn:
+            job = db.get_scheduled_job_by_name(conn, "alice", "nightly")
+            assert job.enabled is True
+            # last_run_at must have been reset — not the old 2026-01-01 value
+            assert job.last_run_at is not None
+            assert "2026-01-01" not in job.last_run_at
+
+    @pytest.mark.asyncio
     async def test_disable_job_updates_file_and_db(self, make_config):
         config = make_config()
         # Write CRON.md with enabled job

@@ -1549,11 +1549,17 @@ def delete_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
 
 
 def enable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
-    """Enable a scheduled job and reset failure count."""
+    """Enable a scheduled job, reset failure count, and reset last_run_at to now.
+
+    Resetting last_run_at prevents the scheduler from treating the re-enable as
+    a catch-up opportunity and firing immediately. The next run will occur at the
+    next scheduled window after the enable time.
+    """
     conn.execute(
         """
         UPDATE scheduled_jobs
-        SET enabled = 1, consecutive_failures = 0, last_error = NULL
+        SET enabled = 1, consecutive_failures = 0, last_error = NULL,
+            last_run_at = datetime('now')
         WHERE id = ?
         """,
         (job_id,),
