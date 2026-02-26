@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-24: Browse skill anti-hallucination & click-through navigation
+
+When researching news for briefings, Claude would fetch hub pages (apnews.com, bbc.com) then fabricate plausible-looking article URLs from headline text instead of using actual `href` values. Additionally, some sites detect bot behavior when URLs are loaded directly rather than clicked from the referring page. Fixed both problems with documentation and a new convenience subcommand.
+
+**Key changes:**
+- New "Researching from hub/index pages" section in skill.md documenting the click-through workflow (`interact --click` navigates within session, preserving cookies/referrer/state, returns full page content)
+- New "URL discipline" rules: never construct/guess URLs from text, always use `href` values from links array
+- New `links` subcommand: fetches a page and returns only the links array (no page text), with optional `--selector` for extracting links from specific elements via CSS
+- `links --selector` parses `<a href>` from HTML fragments returned by `/extract`, supports both URL+selector and session+selector modes
+
+**Files modified:**
+- `src/istota/skills/browse/skill.md` — Added research workflow, URL discipline, and `links` command docs
+- `src/istota/skills/browse/__init__.py` — Added `cmd_links()`, `links` subparser, href extraction from HTML
+- `tests/test_skills_browse.py` — 8 new tests (3 parser + 5 command: basic, selector, session+selector, empty, error)
+
 ## 2026-02-24: Personality pass — cybernetic space octopus
 
 Coherent personality sweep to make Istota feel more like a cybernetic space octopus and less like a generic bot. Updated persona, progress messages, error messages, and emoji usage across the codebase.

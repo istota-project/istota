@@ -15,7 +15,7 @@ if [ ! -f "$CERT_DIR/cert.pem" ]; then
     mkdir -p "$CERT_DIR"
     openssl req -x509 -newkey rsa:2048 -keyout "$CERT_DIR/key.pem" \
         -out "$CERT_DIR/cert.pem" -days 3650 -nodes \
-        -subj "/CN=istota-browser"
+        -subj "/CN=stealth-browser"
     cat "$CERT_DIR/key.pem" "$CERT_DIR/cert.pem" > "$CERT_DIR/combined.pem"
     chown -R browser:browser "$CERT_DIR"
 fi
@@ -58,4 +58,4 @@ rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonCookie" "$PROFILE_DIR/
 
 # Start the Flask API as the non-root browser user
 # This allows Chrome to use its native sandbox (Chrome refuses to sandbox as root)
-exec su -s /bin/bash browser -c "DISPLAY=:99 LANG=$LANG BROWSER_PROFILE_DIR=$PROFILE_DIR python /app/browse_api.py"
+exec su -s /bin/bash browser -c "DISPLAY=:99 LANG=$LANG TZ=$TZ BROWSER_PROFILE_DIR=$PROFILE_DIR python /app/browse_api.py"

@@ -1,8 +1,8 @@
 # Bot Detection Research & Evasion Notes
 
-Reference document for anti-detection work on the istota browser container.
+Reference document for anti-detection work on the stealth browser container.
 
-## Current Status (2026-02-01)
+## Current Status (2026-02-24)
 
 ### deviceandbrowserinfo.com/are_you_a_bot — 20/20 PASS
 
@@ -46,11 +46,14 @@ Basic detection tests all passing.
 - **`headless=False`** on Xvfb display — avoids all headless detection
 - **`no_viewport=True`** — disables Playwright's fixed viewport emulation (1280x720 default); viewport matches Chrome's window size naturally
 - **No CDP locale override** — `locale` param omitted to avoid `Emulation.setLocaleOverride` (causes worker language inconsistency). System locale set via container `LANG=en_US.UTF-8` + Chrome `--lang=en-US,en` flag
+- **No CDP timezone override** — `timezone_id` param omitted to avoid `Emulation.setTimezoneOverride`. Timezone set natively via `ENV TZ=America/New_York` in Dockerfile + passed through entrypoint
+- **OS-level input via xdotool** — mouse movements and scrolling use `xdotool` (X11 events) instead of CDP `Input.dispatchMouseEvent`. X11 events are indistinguishable from real hardware input, defeating DataDome's screenX/pageX coordinate leak detection
 - **Native navigator properties** — no JS overrides for webdriver, plugins, mimeTypes, languages, platform, hardwareConcurrency, deviceMemory. All use Chrome's native values to avoid property descriptor detection
 - **Stealth init script** — remaining evasions for properties that can't be set natively (see sections below)
 - **Patchright source patches** (applied in Dockerfile):
   - `crPage.js`: renamed `injected-playwright-init-script-` → `x-init-` (removes "playwright" from injected `<script>` class names)
   - `crPage.js`: renamed `__playwright_utility_world__` → `__chrome_utility_world__` (removes "playwright" from CDP world name)
+  - `crPage.js`: patched `_evaluateOnNewDocument` to call real CDP `Page.addScriptToEvaluateOnNewDocument` instead of Patchright's no-op (which stores scripts for route-based injection via `Fetch.enable`). This avoids DataDome detecting `Fetch.enable` while still injecting stealth scripts before page JS executes
 
 ## Chrome Launch Flags
 
@@ -80,7 +83,7 @@ Pixelscan inspects property descriptors via `Object.getOwnPropertyDescriptor` to
 - **languages** — `--lang=en-US,en` flag + container `LANG=en_US.UTF-8` (not Patchright `locale` which uses CDP emulation)
 - **platform** — Native `Linux x86_64` on Linux host
 - **hardwareConcurrency** — Native host CPU count
-- **deviceMemory** — Native host RAM bucket (≥8GB hosts report 8)
+- **deviceMemory** — Native host RAM bucket (>=8GB hosts report 8)
 
 Worker patch (section 21) stripped to WebGL-only — navigator properties are consistent between main context and workers without any JS overrides.
 
@@ -132,11 +135,39 @@ Init script (`_STEALTH_SCRIPT` in `browse_api.py`). Sections 1, 4, 5, 7, 8, 9 re
 - **Base:** `python:3.12-slim-bookworm` with real `google-chrome-stable`
 - **User:** Non-root `browser` user (entrypoint drops from root via `su`), suppresses `--no-sandbox` infobar
 - **Display:** Xvfb 1440x900, x11vnc, noVNC on port 6080
+- **Input:** `xdotool` for OS-level X11 mouse/keyboard events (replaces CDP input)
 - **Browser window:** `--window-size=1440,900` (Chrome sizes itself without a WM; `no_viewport=True` ensures viewport matches window)
 - **Locale:** `LANG=en_US.UTF-8` (generated via `locales` package)
+- **Timezone:** `TZ=America/New_York` (OS-level, not CDP emulation)
 - **Resources:** 2 CPUs, 3GB memory, 2GB shm
 - **Monitoring:** Background resource monitor (30s interval), request logging, Chrome stderr logging, page crash/context close event handlers
 - **Health endpoint:** `/health` (basic) or `/health?v=1` (Chrome process detail, memory breakdown)
+
+### DataDome (NYTimes) — Fixed
+
+Two separate DataDome detection vectors were fixed:
+
+**1. CDP Input Events:** DataDome detected CDP-dispatched input events (`Input.dispatchMouseEvent` via `page.mouse.move()`) through screenX/pageX coordinate leaks.
+
+**Fix:** Replaced all CDP input with OS-level X11 events via `xdotool`:
+- `xdotool mousemove --screen 0 X Y` for mouse movement
+- `xdotool key Page_Down` / `xdotool key Page_Up` for scrolling
+- `xdotool click 1` for clicks
+
+xdotool sends events through the X11 event pipeline, which Chrome receives as genuine OS input — indistinguishable from real hardware. Also removed `timezone_id` param (CDP `Emulation.setTimezoneOverride`) in favor of OS-level `TZ` env var.
+
+**2. Fetch.enable / Route-Based Injection:** Patchright's `_evaluateOnNewDocument` is a no-op that only pushes scripts to an array. Actual injection happens via HTTP response modification: the network manager intercepts responses via `Fetch.enable`, prepends `<script>` tags, and serves modified HTML via `Fetch.fulfillRequest`. DataDome detects `Fetch.enable` and blocks the session. Even a `"void 0;"` init script triggers this.
+
+**Fix:** Patched `_evaluateOnNewDocument` in `crPage.js` to call the real CDP `Page.addScriptToEvaluateOnNewDocument` instead. This injects scripts into Chrome's V8 engine directly (before any page JS), without intercepting HTTP responses. The array-based storage is removed, so the route-based injection path never activates and `Fetch.enable` is never sent.
+
+### Behavioral Realism Improvements
+
+Replaced uniform-random timing model with human motor patterns:
+- **Gaussian timing** — `random.gauss(0.008, 0.003)` bell-curve distribution matching real motor control
+- **Fitts's Law speed profile** — slow at start (acceleration), fast in middle, slow at end (deceleration) via `delay * (1 + 2 * abs(0.5 - progress))`
+- **Reading pause** — 1.5-4s pause after page load before any interaction
+- **Micro-jitter** — ±1-2px gaussian perturbation on each mouse position
+- **Idle moments** — 30% chance of 0.3-1.0s pause between movements (thinking/reading)
 
 ## Open Issues
 

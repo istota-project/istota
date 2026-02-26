@@ -3,6 +3,7 @@ FROM python:3.12-slim-bookworm
 # Set system locale so Chrome and Intl APIs use en_US natively
 # (avoids needing CDP Emulation.setLocaleOverride which only affects main page)
 ENV LANG=en_US.UTF-8
+ENV TZ=America/New_York
 
 # Install system deps: VNC, noVNC, Google Chrome, and utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -10,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     novnc \
     xvfb \
     x11-utils \
+    xdotool \
     wget \
     curl \
     openssl \
@@ -39,7 +41,13 @@ RUN patchright install-deps chromium
 RUN find /usr/local/lib/python3.12/site-packages/patchright -name 'crPage.js' \
     -exec sed -i 's/injected-playwright-init-script-/x-init-/g' {} + && \
     find /usr/local/lib/python3.12/site-packages/patchright -name 'crPage.js' \
-    -exec sed -i "s/__playwright_utility_world__/__chrome_utility_world__/g" {} +
+    -exec sed -i "s/__playwright_utility_world__/__chrome_utility_world__/g" {} + && \
+    # Patch _evaluateOnNewDocument to use real CDP Page.addScriptToEvaluateOnNewDocument \
+    # instead of Patchright's no-op (which only pushes to an array for route-based injection). \
+    # Route-based injection modifies HTTP responses via Fetch.enable, which DataDome detects. \
+    # Real CDP injection runs scripts before page JS without any Fetch involvement. \
+    find /usr/local/lib/python3.12/site-packages/patchright -name 'crPage.js' \
+    -exec sed -i "s/this._evaluateOnNewDocumentScripts.push(initScript);/await this._client.send('Page.addScriptToEvaluateOnNewDocument', { source: initScript.source || initScript });/" {} +
 
 # Download autoconsent bundle for cookie consent handling
 RUN mkdir -p /app/vendor && \

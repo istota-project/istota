@@ -403,18 +403,9 @@ _STEALTH_SCRIPT = r"""
     }
 
     // === 19. Battery API ===
-    // Ensure getBattery returns realistic values
-    if (navigator.getBattery) {
-        const _origGetBattery = navigator.getBattery.bind(navigator);
-        navigator.getBattery = function getBattery() {
-            return _origGetBattery().then(battery => {
-                // If charging level is exactly 1 with no events, it looks headless
-                // Real batteries have slightly less than 1.0
-                return battery;
-            });
-        };
-        _makeNative(navigator.getBattery, 'getBattery');
-    }
+    // Removed: the override was a no-op AND created a detectable own property
+    // on navigator (Object.getOwnPropertyNames(navigator) returns ["getBattery"]).
+    // Real Chrome in a Docker container returns a battery object natively.
 
     // === 20. Clean up Playwright/Puppeteer globals ===
     // Automation tools inject detectable global variables. Detection checks
@@ -536,31 +527,37 @@ def _bezier_points(start, end, num_points=20):
     """Generate points along a quadratic bezier curve with a random control point."""
     sx, sy = start
     ex, ey = end
-    # Random control point offset for natural-looking curve
     cx = (sx + ex) / 2 + random.uniform(-150, 150)
     cy = (sy + ey) / 2 + random.uniform(-100, 100)
     points = []
     for i in range(num_points + 1):
         t = i / num_points
-        # Quadratic bezier: B(t) = (1-t)^2*P0 + 2*(1-t)*t*P1 + t^2*P2
         x = (1 - t) ** 2 * sx + 2 * (1 - t) * t * cx + t ** 2 * ex
         y = (1 - t) ** 2 * sy + 2 * (1 - t) * t * cy + t ** 2 * ey
         points.append((x, y))
     return points
 
 
+def _xdo(*args):
+    """Run an xdotool command on the Xvfb display."""
+    env = {**os.environ, "DISPLAY": ":99"}
+    subprocess.run(["xdotool"] + list(args), env=env, timeout=5,
+                    capture_output=True)
+
+
 def _simulate_human_behavior(page):
     """Simulate human-like mouse movements and scrolling after page load.
 
-    Generates realistic browser events (MouseEvent, WheelEvent) through
-    Playwright's CDP layer so bot detection scripts see natural interaction.
+    Uses OS-level X11 input via xdotool instead of CDP Input.dispatchMouseEvent.
+    Mirrors the istota implementation's behavior (bezier mouse moves + light
+    scrolling) but through X11 events that are indistinguishable from real
+    hardware input.
     """
     try:
         viewport = page.viewport_size
         if viewport:
             w, h = viewport["width"], viewport["height"]
         else:
-            # viewport=None means Chrome manages sizing; get from evaluate
             dims = page.evaluate("[window.innerWidth, window.innerHeight]")
             w, h = dims[0], dims[1]
         if w < 100 or h < 100:
@@ -569,7 +566,7 @@ def _simulate_human_behavior(page):
         # Start from a realistic position (not 0,0)
         cur_x = random.uniform(w * 0.3, w * 0.7)
         cur_y = random.uniform(h * 0.2, h * 0.5)
-        page.mouse.move(cur_x, cur_y)
+        _xdo("mousemove", "--screen", "0", str(int(cur_x)), str(int(cur_y)))
 
         # 2-4 mouse movements to random positions along bezier curves
         for _ in range(random.randint(2, 4)):
@@ -580,23 +577,20 @@ def _simulate_human_behavior(page):
                 num_points=random.randint(12, 25),
             )
             for px, py in points:
-                page.mouse.move(px, py)
-                # Variable micro-delay: faster in middle, slower at start/end
+                _xdo("mousemove", "--screen", "0", str(int(px)), str(int(py)))
                 time.sleep(random.uniform(0.003, 0.015))
             cur_x, cur_y = target_x, target_y
-            # Small pause between movements
             time.sleep(random.uniform(0.05, 0.2))
 
         # Random scroll down (like reading the page)
         scroll_steps = random.randint(2, 5)
         for _ in range(scroll_steps):
-            delta = random.randint(80, 300)
-            page.mouse.wheel(0, delta)
+            _xdo("key", "Page_Down")
             time.sleep(random.uniform(0.1, 0.4))
 
         # Occasionally scroll back up a little
         if random.random() < 0.4:
-            page.mouse.wheel(0, -random.randint(50, 150))
+            _xdo("key", "Page_Up")
             time.sleep(random.uniform(0.1, 0.3))
 
         # One more mouse movement
@@ -607,24 +601,28 @@ def _simulate_human_behavior(page):
             num_points=random.randint(8, 15),
         )
         for px, py in points:
-            page.mouse.move(px, py)
+            _xdo("mousemove", "--screen", "0", str(int(px)), str(int(py)))
             time.sleep(random.uniform(0.003, 0.012))
     except Exception:
         pass  # Non-critical — don't fail the browse request
 
 
 def _ensure_browser():
-    """Ensure the browser is running and connected, restarting if needed."""
+    """Ensure the browser is running and connected, restarting if needed.
+
+    Uses a functional check (accessing pages) rather than is_connected(),
+    which is unreliable with launch_persistent_context in Patchright —
+    it can return False even when Chrome is running fine.
+    """
     global _context, _playwright
     if _context is None:
         _init_browser()
         return
     try:
-        connected = _context.browser.is_connected() if _context.browser else False
-    except Exception:
-        connected = False
-    if not connected:
-        log.warning("Browser disconnected — restarting")
+        # Functional check: can we actually interact with the context?
+        _ = len(_context.pages)
+    except Exception as e:
+        log.warning("Browser context unusable (%s) — restarting", e)
         _restart_browser()
 
 
@@ -680,7 +678,9 @@ def _init_browser():
         # Emulation.setLocaleOverride which only affects the main page, not
         # workers. This creates detectable language inconsistency. Instead,
         # --lang flag + container LANG env var set locale natively everywhere.
-        timezone_id="America/New_York",
+        # timezone_id also omitted — uses CDP Emulation.setTimezoneOverride
+        # which is detectable. Instead, TZ env var is set at OS level in
+        # Dockerfile (ENV TZ=America/New_York) and passed through entrypoint.
         args=[
             "--disable-blink-features=AutomationControlled",
             "--lang=en-US,en",
@@ -712,9 +712,12 @@ def _init_browser():
         "CONTEXT CLOSED — browser context shut down"
     ))
 
-    # Comprehensive stealth patches applied before any page JS runs
+    # Stealth and autoconsent init scripts — injected via context.add_init_script()
+    # which Patchright routes through _evaluateOnNewDocument(). We've patched
+    # Patchright to use the real CDP Page.addScriptToEvaluateOnNewDocument instead
+    # of its default route-based injection (which uses Fetch.enable, detectable by
+    # DataDome). Real CDP injection runs scripts before page JS loads.
     _context.add_init_script(_STEALTH_SCRIPT)
-    # Auto-dismiss cookie consent banners on every page load
     autoconsent_script = _build_autoconsent_init_script()
     if autoconsent_script:
         _context.add_init_script(autoconsent_script)
@@ -730,6 +733,49 @@ def _cleanup():
 
 
 atexit.register(_cleanup)
+
+
+def _setup_page_scripts(page):
+    """Set up per-page event handlers (crash/close logging).
+
+    Init scripts are injected at context level in _init_browser() via
+    add_init_script(), which uses CDP Page.addScriptToEvaluateOnNewDocument
+    (patched in Dockerfile). No per-page script injection needed.
+    """
+    pass
+
+
+def _wait_for_datadome(page, timeout_ms=15000):
+    """Wait for DataDome challenge to resolve if present.
+
+    DataDome serves a minimal HTML challenge page with a script from
+    captcha-delivery.com. The challenge creates an iframe that fingerprints
+    the browser, then sets a cookie and reloads the page. We detect the
+    challenge page and poll until the actual content loads.
+    """
+    try:
+        # Quick check: is this a DataDome challenge page?
+        is_challenge = page.evaluate(
+            "document.documentElement.outerHTML.indexOf('captcha-delivery') > -1"
+        )
+        if not is_challenge:
+            return
+        log.info("DataDome challenge detected — waiting for resolution")
+        deadline = time.time() + timeout_ms / 1000
+        while time.time() < deadline:
+            time.sleep(1)
+            try:
+                still_challenge = page.evaluate(
+                    "document.documentElement.outerHTML.indexOf('captcha-delivery') > -1"
+                )
+                if not still_challenge:
+                    log.info("DataDome challenge resolved")
+                    return
+            except Exception:
+                return  # Page navigated away
+        log.warning("DataDome challenge did not resolve within %dms", timeout_ms)
+    except Exception:
+        pass
 
 
 def _create_session():
@@ -756,10 +802,17 @@ def _create_session():
             _close_session_unlocked(oldest_sid)
 
     page = _context.new_page()
-    page.on("crash", lambda: log.error("PAGE CRASHED — tab renderer process died"))
-    page.on("close", lambda: log.debug("Page closed"))
+    _setup_page_scripts(page)
 
     session_id = str(uuid.uuid4())[:8]
+
+    def _on_crash():
+        log.error("PAGE CRASHED (session %s) — closing dead session", session_id)
+        _close_session(session_id)
+
+    page.on("crash", _on_crash)
+    page.on("close", lambda: log.debug("Page closed"))
+
     with _sessions_lock:
         _sessions[session_id] = {
             "page": page,
@@ -769,7 +822,7 @@ def _create_session():
 
 
 def _get_session(session_id):
-    """Get an existing session's page, or None if expired/missing."""
+    """Get an existing session's page, or None if expired/missing/crashed."""
     with _sessions_lock:
         session = _sessions.get(session_id)
         if session is None:
@@ -777,7 +830,11 @@ def _get_session(session_id):
         if time.time() - session["created_at"] > SESSION_TTL:
             _close_session_unlocked(session_id)
             return None
-        return session["page"]
+        page = session["page"]
+        if page.is_closed():
+            _close_session_unlocked(session_id)
+            return None
+        return page
 
 
 def _close_session_unlocked(session_id):
@@ -817,12 +874,30 @@ def _detect_captcha(page):
 
     for pattern in CAPTCHA_PATTERNS:
         if pattern in body_text:
-            return True
+            # Require short page text — real captcha pages have very little content.
+            # News articles mentioning "captcha" or "access denied" have much more.
+            if len(body_text) < 2000:
+                log.info("Captcha detected: pattern=%r, body_len=%d", pattern, len(body_text))
+                return True
+            else:
+                log.debug(
+                    "Captcha pattern %r found but page has %d chars — likely article content",
+                    pattern, len(body_text),
+                )
 
-    # Check for captcha iframes
+    # Check for captcha iframes — only if visibly displayed (many sites embed
+    # invisible reCAPTCHA that never shows a challenge).
     for frame in page.frames:
         for url_pattern in CAPTCHA_FRAME_URLS:
             if url_pattern in frame.url:
+                try:
+                    el = frame.frame_element()
+                    if not el.is_visible():
+                        log.debug("Captcha iframe hidden, ignoring: %r", frame.url)
+                        continue
+                except Exception:
+                    pass
+                log.info("Captcha detected: iframe=%r", frame.url)
                 return True
 
     return False
@@ -868,10 +943,11 @@ def _extract_page_content(page):
 def browse():
     """Navigate to URL and return page content.
 
-    Body: {"url": "...", "session_id": "...", "timeout": 30, "wait_for": "..."}
+    Body: {"url": "...", "session_id": "...", "timeout": 30, "wait_for": "...", "skip_behavior": false}
     - session_id: reuse existing session (optional)
     - timeout: navigation timeout in seconds (default 30)
     - wait_for: CSS selector to wait for after load (optional)
+    - skip_behavior: skip simulated mouse/scroll behavior after load (default false).
     """
     _cleanup_expired()
     data = request.get_json()
@@ -880,6 +956,8 @@ def browse():
     timeout = data.get("timeout", 30) * 1000  # ms
     wait_for = data.get("wait_for")
     keep_session = data.get("keep_session", False)
+
+    skip_behavior = data.get("skip_behavior", False)
 
     if not url:
         return jsonify({"error": "url is required"}), 400
@@ -896,9 +974,12 @@ def browse():
 
     try:
         page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+        # Wait for DataDome challenge to resolve if present
+        _wait_for_datadome(page)
         # Wait for JS rendering, then simulate human behavior
         page.wait_for_timeout(1000)
-        _simulate_human_behavior(page)
+        if not skip_behavior:
+            _simulate_human_behavior(page)
 
         if wait_for:
             try:
@@ -956,6 +1037,7 @@ def screenshot():
         created_new = True
         try:
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+            _wait_for_datadome(page)
             page.wait_for_timeout(1000)
             _simulate_human_behavior(page)
         except Exception as e:
@@ -999,6 +1081,7 @@ def extract():
         created_new = True
         try:
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+            _wait_for_datadome(page)
             page.wait_for_timeout(1000)
             _simulate_human_behavior(page)
         except Exception as e:
@@ -1014,10 +1097,17 @@ def extract():
             text = el.inner_text().strip()
             html = el.inner_html()
             if text:
-                results.append({
+                entry = {
                     "text": text[:10000],
                     "html": html[:10000],
-                })
+                }
+                # Include key attributes from the element itself
+                # (inner_html only has children, not the element's own attrs)
+                for attr in ("href", "src", "data-link-name", "id", "class"):
+                    val = el.get_attribute(attr)
+                    if val:
+                        entry[attr] = val[:500]
+                results.append(entry)
 
         if created_new:
             _close_session(session_id)

@@ -6,11 +6,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from istota.skills.browse import (
+    _links_from_extract,
     build_parser,
     cmd_close,
     cmd_extract,
     cmd_get,
     cmd_interact,
+    cmd_links,
     cmd_screenshot,
     get_api_url,
     main,
@@ -45,6 +47,12 @@ class TestBuildParser:
         assert args.keep_session is True
         assert args.timeout == 60
         assert args.wait_for == "article"
+        assert args.skip_behavior is False
+
+    def test_get_with_skip_behavior(self):
+        parser = build_parser()
+        args = parser.parse_args(["get", "https://example.com", "--skip-behavior"])
+        assert args.skip_behavior is True
 
     def test_get_with_session(self):
         parser = build_parser()
@@ -94,6 +102,27 @@ class TestBuildParser:
         assert args.command == "close"
         assert args.session_id == "sess1"
 
+    def test_links_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["links", "https://example.com"])
+        assert args.command == "links"
+        assert args.url == "https://example.com"
+        assert args.selector is None
+        assert args.session is None
+        assert args.timeout == 30
+
+    def test_links_with_selector(self):
+        parser = build_parser()
+        args = parser.parse_args(["links", "https://example.com", "-s", "nav a"])
+        assert args.selector == "nav a"
+
+    def test_links_with_session(self):
+        parser = build_parser()
+        args = parser.parse_args(["links", "--session", "abc123", "-s", ".links"])
+        assert args.session == "abc123"
+        assert args.selector == ".links"
+        assert args.url is None
+
 
 class TestCmdGet:
     @patch("istota.skills.browse.httpx.post")
@@ -133,6 +162,34 @@ class TestCmdGet:
 
         payload = mock_post.call_args[1]["json"]
         assert payload["session_id"] == "abc123"
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_get_with_skip_behavior(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok"}
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["get", "https://example.com", "--skip-behavior"])
+        cmd_get(args)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["skip_behavior"] is True
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_get_without_skip_behavior(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok"}
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["get", "https://example.com"])
+        cmd_get(args)
+
+        payload = mock_post.call_args[1]["json"]
+        assert "skip_behavior" not in payload
 
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
@@ -308,3 +365,239 @@ class TestMain:
         output = json.loads(captured.out)
         assert output["status"] == "error"
         assert "Cannot connect" in output["error"]
+
+
+class TestCmdLinks:
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_links_basic(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "title": "Hub Page",
+            "url": "https://news.example.com",
+            "text": "Lots of text...",
+            "links": [
+                {"text": "Article One", "href": "/article/one"},
+                {"text": "Article Two", "href": "/article/two"},
+            ],
+        }
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["links", "https://news.example.com"])
+        result = cmd_links(args)
+
+        assert result["status"] == "ok"
+        assert result["url"] == "https://news.example.com"
+        assert result["count"] == 2
+        assert result["links"] == [
+            {"text": "Article One", "href": "/article/one"},
+            {"text": "Article Two", "href": "/article/two"},
+        ]
+        # Should not contain text field
+        assert "text" not in result or result.get("text") is None
+        assert "title" not in result
+
+    @patch("istota.skills.browse.httpx.delete")
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_links_with_selector_href_attr(self, mock_url, mock_post, mock_delete):
+        """When extract returns href on elements directly (Guardian-style)."""
+        browse_resp = MagicMock()
+        browse_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com",
+            "session_id": "sess1",
+            "text": "...",
+            "links": [],
+        }
+        extract_resp = MagicMock()
+        extract_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com",
+            "selector": "a[data-link-name='article']",
+            "count": 2,
+            "elements": [
+                {
+                    "text": "Russia can keep fighting",
+                    "html": '<span class="dcr-n509ks">Russia can keep fighting</span>',
+                    "href": "/world/2026/feb/24/russia-fighting",
+                },
+                {
+                    "text": "Louvre president resigns",
+                    "html": '<span>Louvre president resigns</span>',
+                    "href": "/world/2026/feb/24/louvre-president",
+                },
+            ],
+        }
+        mock_post.side_effect = [browse_resp, extract_resp]
+        mock_delete_resp = MagicMock()
+        mock_delete_resp.json.return_value = {"status": "closed"}
+        mock_delete.return_value = mock_delete_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["links", "https://news.example.com", "-s", "a[data-link-name='article']"])
+        result = cmd_links(args)
+
+        assert result["status"] == "ok"
+        assert result["count"] == 2
+        assert result["links"] == [
+            {"text": "Russia can keep fighting", "href": "/world/2026/feb/24/russia-fighting"},
+            {"text": "Louvre president resigns", "href": "/world/2026/feb/24/louvre-president"},
+        ]
+        mock_delete.assert_called_once()
+
+    @patch("istota.skills.browse.httpx.delete")
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_links_with_selector_nested_anchors(self, mock_url, mock_post, mock_delete):
+        """When extract returns elements containing nested <a> tags (fallback)."""
+        browse_resp = MagicMock()
+        browse_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com",
+            "session_id": "sess1",
+            "text": "...",
+            "links": [],
+        }
+        extract_resp = MagicMock()
+        extract_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com",
+            "selector": "nav",
+            "count": 1,
+            "elements": [
+                {
+                    "text": "World News Sports",
+                    "html": '<a href="/world" class="nav-link">World News</a> <a href="/sports"><span>Sports</span></a>',
+                },
+            ],
+        }
+        mock_post.side_effect = [browse_resp, extract_resp]
+        mock_delete_resp = MagicMock()
+        mock_delete_resp.json.return_value = {"status": "closed"}
+        mock_delete.return_value = mock_delete_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["links", "https://news.example.com", "-s", "nav"])
+        result = cmd_links(args)
+
+        assert result["status"] == "ok"
+        assert result["count"] == 2
+        assert result["links"] == [
+            {"text": "World News", "href": "/world"},
+            {"text": "Sports", "href": "/sports"},
+        ]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_links_with_session_and_selector(self, mock_url, mock_post):
+        """Session + selector uses extract with href attribute."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com",
+            "selector": ".headlines a",
+            "count": 1,
+            "elements": [
+                {
+                    "text": "Breaking News",
+                    "html": '<span>Breaking News</span>',
+                    "href": "/breaking/123",
+                },
+            ],
+        }
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["links", "--session", "sess1", "-s", ".headlines a"])
+        result = cmd_links(args)
+
+        assert result["status"] == "ok"
+        assert result["count"] == 1
+        assert result["links"] == [{"text": "Breaking News", "href": "/breaking/123"}]
+        payload = mock_post.call_args[1]["json"]
+        assert payload["session_id"] == "sess1"
+        assert payload["selector"] == ".headlines a"
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_links_empty(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "title": "Empty Page",
+            "url": "https://example.com",
+            "text": "No links here",
+            "links": [],
+        }
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["links", "https://example.com"])
+        result = cmd_links(args)
+
+        assert result["status"] == "ok"
+        assert result["count"] == 0
+        assert result["links"] == []
+
+    def test_links_from_extract_prefers_href_attr(self):
+        """_links_from_extract uses href attr when present."""
+        data = {
+            "elements": [
+                {"text": "Article A", "html": "<span>Article A</span>", "href": "/a"},
+                {"text": "Article B", "html": "<span>Article B</span>", "href": "/b"},
+            ]
+        }
+        links = _links_from_extract(data)
+        assert links == [
+            {"text": "Article A", "href": "/a"},
+            {"text": "Article B", "href": "/b"},
+        ]
+
+    def test_links_from_extract_falls_back_to_inner_html(self):
+        """_links_from_extract parses <a> tags when no href attr."""
+        data = {
+            "elements": [
+                {
+                    "text": "Nav section",
+                    "html": '<a href="/x">Link X</a> and <a href="/y"><b>Link Y</b></a>',
+                },
+            ]
+        }
+        links = _links_from_extract(data)
+        assert links == [
+            {"text": "Link X", "href": "/x"},
+            {"text": "Link Y", "href": "/y"},
+        ]
+
+    def test_links_from_extract_mixed(self):
+        """Mix of elements with and without href attr."""
+        data = {
+            "elements": [
+                {"text": "Direct link", "html": "<span>Direct</span>", "href": "/direct"},
+                {"text": "Container", "html": '<a href="/nested">Nested</a>'},
+            ]
+        }
+        links = _links_from_extract(data)
+        assert len(links) == 2
+        assert links[0] == {"text": "Direct link", "href": "/direct"}
+        assert links[1] == {"text": "Nested", "href": "/nested"}
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_links_error_passthrough(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "error",
+            "error": "timeout",
+        }
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["links", "https://example.com"])
+        result = cmd_links(args)
+
+        assert result["status"] == "error"
+        assert result["error"] == "timeout"

@@ -5,6 +5,7 @@ Usage:
     python -m istota.skills.browse screenshot "https://example.com" [--output /tmp/shot.png]
     python -m istota.skills.browse extract "https://example.com" --selector "article"
     python -m istota.skills.browse interact <session_id> --click ".button" --fill "#input=value"
+    python -m istota.skills.browse links "https://example.com" [--selector "nav a"]
     python -m istota.skills.browse close <session_id>
 
 Reads BROWSER_API_URL env var for the container endpoint.
@@ -13,6 +14,7 @@ Reads BROWSER_API_URL env var for the container endpoint.
 import argparse
 import json
 import os
+import re
 import sys
 
 import httpx
@@ -37,6 +39,8 @@ def cmd_get(args):
         payload["session_id"] = args.session
     if args.wait_for:
         payload["wait_for"] = args.wait_for
+    if args.skip_behavior:
+        payload["skip_behavior"] = True
 
     resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
     return resp.json()
@@ -106,6 +110,101 @@ def cmd_interact(args):
     return resp.json()
 
 
+def _links_from_extract(data):
+    """Extract links from /extract response elements.
+
+    Prefers the 'href' attribute returned directly on each element
+    (set when the matched element is itself a link). Falls back to
+    parsing <a href> tags from inner HTML for nested links.
+    """
+    links = []
+    for el in data.get("elements", []):
+        href = el.get("href")
+        if href:
+            # Element itself is a link — use its text and href directly
+            links.append({"text": el.get("text", "").strip(), "href": href})
+        else:
+            # Search for <a> tags inside the element's inner HTML
+            html = el.get("html", "")
+            for match in re.finditer(
+                r'<a\s[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+                html,
+                re.DOTALL,
+            ):
+                h, text = match.group(1), match.group(2)
+                text = re.sub(r"<[^>]+>", "", text).strip()
+                links.append({"text": text, "href": h})
+    return links
+
+
+def cmd_links(args):
+    """Fetch a page and return only the links."""
+    url = get_api_url()
+
+    if args.selector and args.session:
+        # Extract links from specific elements in existing session
+        payload = {"selector": args.selector, "timeout": args.timeout}
+        payload["session_id"] = args.session
+        resp = httpx.post(f"{url}/extract", json=payload, timeout=REQUEST_TIMEOUT)
+        data = resp.json()
+        if data.get("status") != "ok":
+            return data
+        links = _links_from_extract(data)
+        return {
+            "status": "ok",
+            "url": data.get("url", ""),
+            "count": len(links),
+            "links": links,
+        }
+    elif args.selector:
+        # Fetch page then extract links from selector
+        payload = {"url": args.url, "timeout": args.timeout, "keep_session": False}
+        resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
+        browse_data = resp.json()
+        if browse_data.get("status") != "ok":
+            return browse_data
+        session_id = browse_data.get("session_id")
+        # Extract from selector
+        ext_payload = {"selector": args.selector, "timeout": args.timeout}
+        if session_id:
+            ext_payload["session_id"] = session_id
+        else:
+            ext_payload["url"] = args.url
+        ext_resp = httpx.post(f"{url}/extract", json=ext_payload, timeout=REQUEST_TIMEOUT)
+        data = ext_resp.json()
+        # Clean up session if we got one
+        if session_id:
+            try:
+                httpx.delete(f"{url}/sessions/{session_id}", timeout=5.0)
+            except Exception:
+                pass
+        if data.get("status") != "ok":
+            return data
+        links = _links_from_extract(data)
+        return {
+            "status": "ok",
+            "url": browse_data.get("url", args.url),
+            "count": len(links),
+            "links": links,
+        }
+    else:
+        # Simple: fetch page, return only links
+        payload = {"url": args.url, "timeout": args.timeout, "keep_session": False}
+        if args.session:
+            payload["session_id"] = args.session
+        resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
+        data = resp.json()
+        if data.get("status") != "ok":
+            return data
+        links = data.get("links", [])
+        return {
+            "status": "ok",
+            "url": data.get("url", args.url),
+            "count": len(links),
+            "links": links,
+        }
+
+
 def cmd_close(args):
     """Close a session."""
     url = get_api_url()
@@ -127,6 +226,8 @@ def build_parser():
     p_get.add_argument("--session", help="Reuse existing session ID")
     p_get.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
     p_get.add_argument("--wait-for", help="CSS selector to wait for after load")
+    p_get.add_argument("--skip-behavior", action="store_true",
+                       help="Skip simulated mouse/scroll after load (for DataDome-protected sites)")
 
     # screenshot
     p_ss = sub.add_parser("screenshot", help="Take a screenshot")
@@ -151,6 +252,13 @@ def build_parser():
     p_int.add_argument("--scroll", choices=["up", "down"], help="Scroll direction")
     p_int.add_argument("--scroll-amount", type=int, default=500, help="Scroll pixels")
 
+    # links
+    p_links = sub.add_parser("links", help="Fetch a page and return only links")
+    p_links.add_argument("url", nargs="?", help="URL to fetch links from")
+    p_links.add_argument("--selector", "-s", help="CSS selector to extract links from")
+    p_links.add_argument("--session", help="Existing session ID")
+    p_links.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
+
     # close
     p_close = sub.add_parser("close", help="Close a session")
     p_close.add_argument("session_id", help="Session ID to close")
@@ -167,6 +275,7 @@ def main(argv=None):
         "screenshot": cmd_screenshot,
         "extract": cmd_extract,
         "interact": cmd_interact,
+        "links": cmd_links,
         "close": cmd_close,
     }
 
