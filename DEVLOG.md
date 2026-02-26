@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-26: Email skill clarity, progress fixes, fava restart
+
+Three targeted fixes addressing bugs found in production usage.
+
+**Key changes:**
+- Clarified email skill docs: added decision section explaining `send` vs `output`, with explicit warning about the common mistake of using `output` for Talk-originated email requests (which silently drops the email since the scheduler only delivers deferred output for email-source tasks).
+- Progress messages in Talk now collapse multi-line tool output (e.g. inline python scripts) to a single line before display. Applied to both Talk progress callback and log channel callback.
+- Moved fava restart from accounting skill to scheduler. The `_restart_fava()` call inside the accounting CLI was running inside the bubblewrap sandbox where `sudo`/`systemctl` aren't available, so it silently failed. The scheduler now restarts fava after any successful task that invoked the accounting skill, running outside the sandbox.
+
+**Files modified:**
+- `src/istota/skills/email/skill.md` — Rewrote with `send` vs `output` decision guide and common mistake callout
+- `src/istota/scheduler.py` — Added `_restart_fava_service()`, newline collapsing in progress callbacks
+- `src/istota/skills/accounting/__init__.py` — Removed dead `_restart_fava()` and its call sites
+- `tests/test_progress_callback.py` — Added test for multi-line message collapsing
+- `tests/test_scheduler.py` — Added `TestRestartFavaService` tests
+- `tests/test_skills_accounting.py` — Replaced old `TestRestartFava` with `TestAppendToLedgerNoRestart`
+
 ## 2026-02-26: Per-user log channel & progress style modes
 
 Added a per-user log channel for verbose task execution logs and replaced the binary progress edit mode with a configurable progress style system.
