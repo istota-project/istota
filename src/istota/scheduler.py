@@ -25,7 +25,7 @@ from . import db
 from .briefing import build_briefing_prompt
 from .briefing_loader import get_briefings_for_user
 from .config import Config, load_config
-from .executor import execute_task, parse_api_error
+from .executor import execute_task, is_transient_api_error, parse_api_error
 from .nextcloud_api import hydrate_user_configs
 from .talk import TalkClient, split_message
 from .email_poller import get_email_config
@@ -998,6 +998,15 @@ def process_one_task(
     post_email = False
     is_failure_notify = False
 
+    # Guard: detect API errors masquerading as successful results
+    # (Claude Code may exit 0 with API error text as output)
+    if success and parse_api_error(result):
+        logger.warning(
+            "Task %d: result contains API error despite success flag, treating as failure",
+            task_id,
+        )
+        success = False
+
     with db.get_db(config.db_path) as conn:
         if success:
             # Check if the result is a confirmation request
@@ -1083,7 +1092,11 @@ def process_one_task(
                 db.update_task_status(conn, task_id, "failed", error=result)
                 db.log_task(conn, task_id, "error", f"Task failed permanently: {result[:500]}")
 
-                if target in ("talk", "both", "all") and task.conversation_token:
+                if task.source_type in ("briefing", "scheduled"):
+                    # Suppress user-facing error delivery for automated tasks.
+                    # Errors are logged to DB and log_channel; no need to confuse users.
+                    db.log_task(conn, task_id, "info", "Suppressed error delivery for automated task")
+                elif target in ("talk", "both", "all") and task.conversation_token:
                     # Use user-friendly error message, not raw error
                     friendly_error = _format_error_for_user(result)
                     post_talk_message = f"🐙 {friendly_error}"

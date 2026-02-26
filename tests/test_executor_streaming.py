@@ -729,3 +729,125 @@ class TestChannelMemoryInPrompt:
 
         assert "## Channel memory" not in result
         mocks["istota.executor.read_channel_memory"].assert_not_called()
+
+
+class TestSimpleExecutionRetry:
+    """Test that _execute_simple retries transient API errors."""
+
+    def _api_error_output(self, status_code=500):
+        return f'API Error: {status_code} {{"error": {{"message": "Internal server error"}}, "request_id": "req_123"}}'
+
+    def test_retries_transient_api_error(self, tmp_path):
+        """Simple execution retries on 500 API error and succeeds on second attempt."""
+        config = _make_config(tmp_path)
+        task = _make_task()
+
+        call_count = 0
+
+        def fake_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            mock = MagicMock()
+            mock.stderr = ""
+            if call_count == 1:
+                mock.stdout = self._api_error_output(500)
+                mock.returncode = 1
+            else:
+                mock.stdout = "Success on retry"
+                mock.returncode = 0
+            return mock
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.run", side_effect=fake_run),
+            patch("istota.executor.time.sleep"),
+        ]
+        with contextmanager_chain(patches):
+            success, result, _actions = execute_task(task, config, [])
+
+        assert success is True
+        assert result == "Success on retry"
+        assert call_count == 2
+
+    def test_no_retry_for_non_transient_error(self, tmp_path):
+        """Simple execution does NOT retry non-transient errors (e.g. 400)."""
+        config = _make_config(tmp_path)
+        task = _make_task()
+
+        call_count = 0
+
+        def fake_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            mock = MagicMock()
+            mock.stdout = 'API Error: 400 {"error": {"message": "Bad request"}}'
+            mock.stderr = ""
+            mock.returncode = 1
+            return mock
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.run", side_effect=fake_run),
+            patch("istota.executor.time.sleep"),
+        ]
+        with contextmanager_chain(patches):
+            success, result, _actions = execute_task(task, config, [])
+
+        assert success is False
+        assert call_count == 1  # No retry
+
+    def test_fails_after_max_retries(self, tmp_path):
+        """Simple execution gives up after 3 transient API errors."""
+        config = _make_config(tmp_path)
+        task = _make_task()
+
+        call_count = 0
+
+        def fake_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            mock = MagicMock()
+            mock.stdout = self._api_error_output(500)
+            mock.stderr = ""
+            mock.returncode = 1
+            return mock
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.run", side_effect=fake_run),
+            patch("istota.executor.time.sleep"),
+        ]
+        with contextmanager_chain(patches):
+            success, result, _actions = execute_task(task, config, [])
+
+        assert success is False
+        assert "API Error" in result
+        assert call_count == 3
+
+    def test_retries_429_rate_limit(self, tmp_path):
+        """Simple execution retries on 429 rate limit errors."""
+        config = _make_config(tmp_path)
+        task = _make_task()
+
+        call_count = 0
+
+        def fake_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            mock = MagicMock()
+            mock.stderr = ""
+            if call_count <= 2:
+                mock.stdout = self._api_error_output(429)
+                mock.returncode = 1
+            else:
+                mock.stdout = "Finally succeeded"
+                mock.returncode = 0
+            return mock
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.run", side_effect=fake_run),
+            patch("istota.executor.time.sleep"),
+        ]
+        with contextmanager_chain(patches):
+            success, result, _actions = execute_task(task, config, [])
+
+        assert success is True
+        assert result == "Finally succeeded"
+        assert call_count == 3

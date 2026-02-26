@@ -2959,3 +2959,163 @@ class TestMultiWorkerPerUser:
             assert len(keys) == len(set(keys))
 
         pool.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# TestApiErrorInSuccessResult
+# ---------------------------------------------------------------------------
+
+
+class TestApiErrorInSuccessResult:
+    """Test that process_one_task detects API errors in 'successful' results."""
+
+    def _make_config(self, db_path, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example.com", username="istota", app_password="secret"),
+            talk=TalkConfig(enabled=True, bot_username="istota"),
+            email=EmailConfig(enabled=False),
+            scheduler=SchedulerConfig(),
+            nextcloud_mount_path=mount,
+            temp_dir=tmp_path / "temp",
+        )
+
+    @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_api_error_in_result_flips_to_failure(self, mock_arun, mock_exec, db_path, tmp_path):
+        """When execute_task returns success=True but result contains API error, treat as failure."""
+        api_error = 'API Error: 500 {"error": {"message": "Internal server error"}, "request_id": "req_abc"}'
+        mock_exec.return_value = (True, api_error, None)
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="Briefing", user_id="testuser", source_type="briefing")
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is False
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        # Should be pending for retry (first attempt)
+        assert task.status == "pending"
+        assert task.attempt_count == 1
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Here is your morning briefing...", None))
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_normal_result_not_affected(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Normal successful results are not falsely detected as API errors."""
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="Briefing", user_id="testuser", source_type="briefing")
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is True
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "completed"
+
+
+# ---------------------------------------------------------------------------
+# TestBriefingFailureSuppression
+# ---------------------------------------------------------------------------
+
+
+class TestBriefingFailureSuppression:
+    """Test that briefing/scheduled task failures don't send error notifications to users."""
+
+    def _make_config(self, db_path, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example.com", username="istota", app_password="secret"),
+            talk=TalkConfig(enabled=True, bot_username="istota"),
+            email=EmailConfig(enabled=False),
+            scheduler=SchedulerConfig(),
+            nextcloud_mount_path=mount,
+            temp_dir=tmp_path / "temp",
+        )
+
+    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None))
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_briefing_failure_no_talk_notification(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Failed briefing tasks should not send error messages to Talk."""
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Morning briefing", user_id="testuser",
+                source_type="briefing", conversation_token="room1",
+            )
+            # Exhaust retries so it fails permanently
+            conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?", (task_id,))
+
+        result = process_one_task(config)
+        assert result is not None
+        _, success = result
+        assert success is False
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "failed"
+
+        # asyncio.run should NOT be called for Talk error notification
+        assert mock_arun.call_count == 0
+
+    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None))
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_scheduled_failure_no_talk_notification(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Failed scheduled tasks should not send error messages to Talk."""
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Daily check", user_id="testuser",
+                source_type="scheduled", conversation_token="room1",
+            )
+            conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?", (task_id,))
+
+        result = process_one_task(config)
+        assert result is not None
+        _, success = result
+        assert success is False
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "failed"
+
+        # No Talk notification for scheduled failures
+        assert mock_arun.call_count == 0
+
+    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None))
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_interactive_failure_still_notifies(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Interactive (Talk) task failures should still send error messages."""
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Help me", user_id="testuser",
+                source_type="talk", conversation_token="room1",
+            )
+            conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?", (task_id,))
+
+        result = process_one_task(config)
+        assert result is not None
+        _, success = result
+        assert success is False
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "failed"
+
+        # Should have Talk notification with error
+        assert mock_arun.call_count >= 1

@@ -1770,7 +1770,7 @@ def execute_task(
         return False, f"Execution error: {e}", None
 
 
-def _execute_simple(
+def _execute_simple_once(
     cmd: list[str],
     env: dict,
     config: Config,
@@ -1778,7 +1778,7 @@ def _execute_simple(
     result_file: Path,
     prompt: str = "",
 ) -> tuple[bool, str, str | None]:
-    """Execute Claude Code with subprocess.run (no streaming).
+    """Execute Claude Code once with subprocess.run (no streaming).
 
     Prompt is passed via stdin to avoid E2BIG errors from large CLI arguments.
     """
@@ -1807,6 +1807,46 @@ def _execute_simple(
         return False, result.stderr.strip(), None
     else:
         return False, f"Claude Code produced no output (rc={result.returncode})", None
+
+
+def _execute_simple(
+    cmd: list[str],
+    env: dict,
+    config: Config,
+    task: db.Task,
+    result_file: Path,
+    prompt: str = "",
+) -> tuple[bool, str, str | None]:
+    """Execute Claude Code with subprocess.run, with auto-retry for transient API errors."""
+    last_error = ""
+
+    for attempt in range(API_RETRY_MAX_ATTEMPTS):
+        success, result, actions = _execute_simple_once(cmd, env, config, task, result_file, prompt)
+
+        if success:
+            return True, result, actions
+
+        # Check if this is a transient API error worth retrying
+        if not is_transient_api_error(result):
+            return False, result, None
+
+        last_error = result
+        parsed = parse_api_error(result)
+        request_id = parsed.get("request_id", "unknown") if parsed else "unknown"
+
+        if attempt < API_RETRY_MAX_ATTEMPTS - 1:
+            logger.warning(
+                "Task %d: transient API error (attempt %d/%d, request_id=%s), retrying in %ds...",
+                task.id, attempt + 1, API_RETRY_MAX_ATTEMPTS, request_id, API_RETRY_DELAY_SECONDS,
+            )
+            time.sleep(API_RETRY_DELAY_SECONDS)
+        else:
+            logger.error(
+                "Task %d: transient API error persisted after %d attempts (request_id=%s)",
+                task.id, API_RETRY_MAX_ATTEMPTS, request_id,
+            )
+
+    return False, last_error, None
 
 
 def _execute_streaming_once(
