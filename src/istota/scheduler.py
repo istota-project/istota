@@ -833,6 +833,27 @@ def _process_deferred_tracking(
     return count
 
 
+def _restart_fava_service(user_id: str) -> None:
+    """Restart the user's Fava service to pick up ledger changes.
+
+    Runs outside the sandbox (in the scheduler process) so it has access
+    to sudo/systemctl. Silently ignored if fava is not installed.
+    """
+    service = f"istota-fava-{user_id}.service"
+    try:
+        result = subprocess.run(
+            ["sudo", "--non-interactive", "systemctl", "restart", service],
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            logger.info("Restarted %s after accounting task", service)
+        else:
+            logger.debug("Fava restart skipped (rc=%d): %s", result.returncode, result.stderr.decode().strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.debug("Fava restart skipped: %s", e)
+
+
 def _execute_command_task(
     task: db.Task, config: Config,
 ) -> tuple[bool, str]:
@@ -1140,6 +1161,10 @@ def process_one_task(
         user_temp_dir = get_user_temp_dir(config, task.user_id)
         _process_deferred_subtasks(config, task, user_temp_dir)
         _process_deferred_tracking(config, task, user_temp_dir)
+
+    # Restart Fava if accounting skill was used (runs outside sandbox)
+    if success and actions_taken and "istota.skills.accounting" in actions_taken:
+        _restart_fava_service(task.user_id)
 
     # Final cleanup edit: update the ack message with a summary of all actions taken
     if (

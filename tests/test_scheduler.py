@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -2172,6 +2173,52 @@ class TestDeferredOperations:
         with db.get_db(db_path) as conn:
             tasks = db.list_tasks(conn, user_id="testuser")
         assert all(t.source_type != "subtask" for t in tasks)
+
+
+# ---------------------------------------------------------------------------
+# TestRestartFavaService
+# ---------------------------------------------------------------------------
+
+
+class TestRestartFavaService:
+    """Tests for _restart_fava_service (scheduler-side fava restart)."""
+
+    def test_calls_systemctl_restart(self):
+        from istota.scheduler import _restart_fava_service
+
+        with patch("istota.scheduler.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            _restart_fava_service("alice")
+            mock_run.assert_called_once_with(
+                ["sudo", "--non-interactive", "systemctl", "restart", "istota-fava-alice.service"],
+                capture_output=True,
+                timeout=10,
+            )
+
+    def test_ignores_timeout(self):
+        from istota.scheduler import _restart_fava_service
+
+        with patch(
+            "istota.scheduler.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("sudo", 10),
+        ):
+            _restart_fava_service("alice")  # Should not raise
+
+    def test_ignores_file_not_found(self):
+        from istota.scheduler import _restart_fava_service
+
+        with patch(
+            "istota.scheduler.subprocess.run",
+            side_effect=FileNotFoundError("sudo"),
+        ):
+            _restart_fava_service("alice")  # Should not raise
+
+    def test_logs_nonzero_exit_as_debug(self):
+        from istota.scheduler import _restart_fava_service
+
+        with patch("istota.scheduler.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stderr=b"Unit not found")
+            _restart_fava_service("alice")  # Should not raise
 
 
 # ---------------------------------------------------------------------------

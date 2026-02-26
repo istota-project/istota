@@ -1101,22 +1101,6 @@ def _backup_ledger(ledger_path: Path, max_backups: int = 10) -> Path | None:
     return backup_path
 
 
-def _restart_fava() -> None:
-    """Restart the user's Fava service to pick up ledger changes."""
-    user_id = os.environ.get("ISTOTA_USER_ID", "")
-    if not user_id:
-        return
-    service = f"istota-fava-{user_id}.service"
-    try:
-        subprocess.run(
-            ["sudo", "--non-interactive", "systemctl", "restart", service],
-            capture_output=True,
-            timeout=10,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-
-
 def _append_to_ledger(ledger_path: Path, entries: list[str]) -> None:
     """Append beancount entries to the main ledger file with backup."""
     if not entries:
@@ -1125,7 +1109,6 @@ def _append_to_ledger(ledger_path: Path, entries: list[str]) -> None:
     with open(ledger_path, "a") as f:
         for entry in entries:
             f.write(f"\n{entry}\n")
-    _restart_fava()
 
 
 def _parse_ledger_transactions(ledger_path: Path) -> set[str]:
@@ -2046,7 +2029,6 @@ def cmd_add_transaction(args) -> dict:
     # Append transaction
     with open(txn_file, "a") as f:
         f.write(f"\n{txn}")
-    _restart_fava()
 
     # Validate ledger after adding
     success, errors = _run_bean_check(ledger_path)

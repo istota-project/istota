@@ -1680,50 +1680,11 @@ class TestAppendToLedger:
         assert not (tmp_path / "backups").exists()
 
 
-class TestRestartFava:
-    def test_calls_systemctl_restart(self, monkeypatch):
-        from unittest.mock import patch
+class TestAppendToLedgerNoRestart:
+    """Fava restart was moved to the scheduler (outside sandbox). Verify
+    _append_to_ledger no longer attempts it."""
 
-        from istota.skills.accounting import _restart_fava
-
-        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-        with patch("istota.skills.accounting.subprocess.run") as mock_run:
-            _restart_fava()
-            mock_run.assert_called_once_with(
-                [
-                    "sudo",
-                    "--non-interactive",
-                    "systemctl",
-                    "restart",
-                    "istota-fava-alice.service",
-                ],
-                capture_output=True,
-                timeout=10,
-            )
-
-    def test_noop_without_user_id(self, monkeypatch):
-        from unittest.mock import patch
-
-        from istota.skills.accounting import _restart_fava
-
-        monkeypatch.delenv("ISTOTA_USER_ID", raising=False)
-        with patch("istota.skills.accounting.subprocess.run") as mock_run:
-            _restart_fava()
-            mock_run.assert_not_called()
-
-    def test_ignores_failures(self, monkeypatch):
-        from unittest.mock import patch
-
-        from istota.skills.accounting import _restart_fava
-
-        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-        with patch(
-            "istota.skills.accounting.subprocess.run",
-            side_effect=subprocess.TimeoutExpired("sudo", 10),
-        ):
-            _restart_fava()  # Should not raise
-
-    def test_append_to_ledger_triggers_restart(self, tmp_path, monkeypatch):
+    def test_append_to_ledger_does_not_call_subprocess(self, tmp_path, monkeypatch):
         from unittest.mock import patch
 
         from istota.skills.accounting import _append_to_ledger
@@ -1732,9 +1693,9 @@ class TestRestartFava:
         ledger = tmp_path / "main.beancount"
         ledger.write_text("2026-01-01 open Assets:Bank USD\n")
 
-        with patch("istota.skills.accounting._restart_fava") as mock_restart:
+        with patch("istota.skills.accounting.subprocess.run") as mock_run:
             _append_to_ledger(ledger, ["2026-01-15 * \"Test\" \"\"\n  Expenses:Test  1 USD\n  Assets:Bank"])
-            mock_restart.assert_called_once()
+            mock_run.assert_not_called()
 
 
 class TestBackupLedger:
