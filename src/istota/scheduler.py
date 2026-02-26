@@ -961,6 +961,8 @@ def process_one_task(
                 _composite_callback.all_descriptions = talk_cb.all_descriptions
                 _composite_callback.ack_msg_id = talk_cb.ack_msg_id
                 _composite_callback.use_edit = talk_cb.use_edit
+                _composite_callback.style = talk_cb.style
+                _composite_callback.start_time = talk_cb.start_time
                 progress_callback = _composite_callback
             else:
                 progress_callback = log_callback
