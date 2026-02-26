@@ -135,7 +135,7 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
     - New jobs are inserted
     - Existing jobs have definition fields updated (preserving state fields)
     - Orphaned DB jobs (not in file) are deleted
-    - enabled logic: file false → DB 0; file true → no override (preserves !cron disable)
+    - enabled logic: file is authoritative (symmetric: file false → DB 0, file true → DB 1)
     """
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
     db_by_name = {j.name: j for j in db_jobs}
@@ -154,9 +154,8 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
                 "silent_unless_action": 1 if fj.silent_unless_action else 0,
                 "once": 1 if fj.once else 0,
             }
-            # Only force-disable from file; don't re-enable (preserves !cron disable)
-            if not fj.enabled:
-                updates["enabled"] = 0
+            # File is authoritative for enabled state (symmetric sync)
+            updates["enabled"] = 1 if fj.enabled else 0
 
             # Reset last_run_at when cron expression changes to prevent
             # catch-up runs for past slots in the new expression
@@ -249,6 +248,39 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
     logger.info(
         "Migrated %d DB scheduled job(s) to CRON.md for user %s",
         len(file_jobs), user_id,
+    )
+    return True
+
+
+def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: bool) -> bool:
+    """
+    Update a job's enabled state in the user's CRON.md file.
+
+    Loads all jobs, updates the target job's enabled field, and rewrites the file.
+    Returns True if the job was found and updated.
+    """
+    if not config.use_mount:
+        return False
+
+    jobs = load_cron_jobs(config, user_id)
+    if jobs is None:
+        return False
+
+    found = False
+    for job in jobs:
+        if job.name == job_name:
+            job.enabled = enabled
+            found = True
+            break
+
+    if not found:
+        return False
+
+    cron_path = config.nextcloud_mount_path / get_user_cron_path(user_id, config.bot_dir_name).lstrip("/")
+    cron_path.write_text(generate_cron_md(jobs))
+    logger.info(
+        "%s job '%s' in CRON.md for user %s",
+        "Enabled" if enabled else "Disabled", job_name, user_id,
     )
     return True
 

@@ -13,6 +13,7 @@ from istota.cron_loader import (
     migrate_db_jobs_to_file,
     remove_job_from_cron_md,
     sync_cron_jobs_to_db,
+    update_job_enabled_in_cron_md,
 )
 from istota.storage import get_user_cron_path
 
@@ -378,8 +379,8 @@ class TestSyncCronJobsToDb:
 
         assert job.enabled is False
 
-    def test_file_enabled_true_does_not_override_disabled(self, db_path):
-        """If !cron disable was used, file enabled=true should not re-enable."""
+    def test_file_enabled_true_overrides_disabled(self, db_path):
+        """File is authoritative: enabled=true in file re-enables a DB-disabled job."""
         with db.get_db(db_path) as conn:
             conn.execute(
                 """INSERT INTO scheduled_jobs
@@ -392,7 +393,7 @@ class TestSyncCronJobsToDb:
             sync_cron_jobs_to_db(conn, "alice", file_jobs)
             job = db.get_scheduled_job_by_name(conn, "alice", "j1")
 
-        assert job.enabled is False
+        assert job.enabled is True
 
     def test_new_job_respects_enabled_false(self, db_path):
         file_jobs = [CronJob(name="new-disabled", cron="0 * * * *", prompt="test", enabled=False)]
@@ -841,4 +842,97 @@ prompt = "test"
     def test_no_mount_returns_false(self, tmp_path):
         config = Config(db_path=tmp_path / "test.db")
         result = remove_job_from_cron_md(config, "alice", "any-job")
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# TestUpdateJobEnabledInCronMd
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateJobEnabledInCronMd:
+    """Tests for update_job_enabled_in_cron_md()."""
+
+    def test_disable_job_in_file(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt = "Run daily check"
+```
+""")
+        result = update_job_enabled_in_cron_md(config, "alice", "daily-check", False)
+        assert result is True
+
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].enabled is False
+
+    def test_enable_job_in_file(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "paused"
+cron = "0 9 * * *"
+prompt = "paused job"
+enabled = false
+```
+""")
+        result = update_job_enabled_in_cron_md(config, "alice", "paused", True)
+        assert result is True
+
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].enabled is True
+
+    def test_leaves_other_jobs_intact(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "j1"
+cron = "0 9 * * *"
+prompt = "first"
+
+[[jobs]]
+name = "j2"
+cron = "0 12 * * *"
+prompt = "second"
+target = "email"
+```
+""")
+        update_job_enabled_in_cron_md(config, "alice", "j1", False)
+
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 2
+        assert jobs[0].name == "j1"
+        assert jobs[0].enabled is False
+        assert jobs[1].name == "j2"
+        assert jobs[1].enabled is True
+        assert jobs[1].target == "email"
+
+    def test_job_not_found_returns_false(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "existing"
+cron = "0 9 * * *"
+prompt = "test"
+```
+""")
+        result = update_job_enabled_in_cron_md(config, "alice", "nonexistent", False)
+        assert result is False
+
+    def test_no_cron_file_returns_false(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        result = update_job_enabled_in_cron_md(config, "alice", "any-job", False)
+        assert result is False
+
+    def test_no_mount_returns_false(self, tmp_path):
+        config = Config(db_path=tmp_path / "test.db")
+        result = update_job_enabled_in_cron_md(config, "alice", "any-job", False)
         assert result is False

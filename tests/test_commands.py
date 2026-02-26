@@ -384,7 +384,80 @@ class TestCmdCron:
         assert "3 failures" in result
 
     @pytest.mark.asyncio
-    async def test_enable_job(self, make_config):
+    async def test_enable_job_updates_file_and_db(self, make_config):
+        config = make_config()
+        # Write CRON.md with disabled job
+        cron_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "broken"
+cron = "0 * * * *"
+prompt = "stuff"
+enabled = false
+```
+""")
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled, consecutive_failures)
+                   VALUES (?, ?, ?, ?, 0, 5)""",
+                ("alice", "broken", "0 * * * *", "stuff"),
+            )
+            client = AsyncMock()
+            result = await cmd_cron(config, conn, "alice", "room1", "enable broken", client)
+
+        assert "Enabled" in result
+        assert "DB-only" not in result
+        # DB updated
+        with db.get_db(config.db_path) as conn:
+            job = db.get_scheduled_job_by_name(conn, "alice", "broken")
+            assert job.enabled is True
+            assert job.consecutive_failures == 0
+        # File updated
+        from istota.cron_loader import load_cron_jobs
+        jobs = load_cron_jobs(config, "alice")
+        assert jobs[0].enabled is True
+
+    @pytest.mark.asyncio
+    async def test_disable_job_updates_file_and_db(self, make_config):
+        config = make_config()
+        # Write CRON.md with enabled job
+        cron_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "active-job"
+cron = "0 * * * *"
+prompt = "stuff"
+```
+""")
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "active-job", "0 * * * *", "stuff"),
+            )
+            client = AsyncMock()
+            result = await cmd_cron(config, conn, "alice", "room1", "disable active-job", client)
+
+        assert "Disabled" in result
+        assert "DB-only" not in result
+        # DB updated
+        with db.get_db(config.db_path) as conn:
+            job = db.get_scheduled_job_by_name(conn, "alice", "active-job")
+            assert job.enabled is False
+        # File updated
+        from istota.cron_loader import load_cron_jobs
+        jobs = load_cron_jobs(config, "alice")
+        assert jobs[0].enabled is False
+
+    @pytest.mark.asyncio
+    async def test_enable_without_cron_file_warns(self, make_config):
+        """Without CRON.md, enable falls back to DB-only with a warning."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
             conn.execute(
@@ -396,27 +469,10 @@ class TestCmdCron:
             result = await cmd_cron(config, conn, "alice", "room1", "enable broken", client)
 
         assert "Enabled" in result
+        assert "DB-only" in result
         with db.get_db(config.db_path) as conn:
             job = db.get_scheduled_job_by_name(conn, "alice", "broken")
             assert job.enabled is True
-            assert job.consecutive_failures == 0
-
-    @pytest.mark.asyncio
-    async def test_disable_job(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
-                   VALUES (?, ?, ?, ?, 1)""",
-                ("alice", "active-job", "0 * * * *", "stuff"),
-            )
-            client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "disable active-job", client)
-
-        assert "Disabled" in result
-        with db.get_db(config.db_path) as conn:
-            job = db.get_scheduled_job_by_name(conn, "alice", "active-job")
-            assert job.enabled is False
 
     @pytest.mark.asyncio
     async def test_enable_nonexistent(self, make_config):

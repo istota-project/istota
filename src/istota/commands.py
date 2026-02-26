@@ -235,6 +235,8 @@ async def cmd_memory(config, conn, user_id, conversation_token, args, client):
 
 @command("cron", "List/enable/disable scheduled jobs: `!cron`, `!cron enable <name>`, `!cron disable <name>`")
 async def cmd_cron(config, conn, user_id, conversation_token, args, client):
+    from .cron_loader import update_job_enabled_in_cron_md
+
     parts = args.strip().split(maxsplit=1)
     subcmd = parts[0].lower() if parts else ""
     job_name = parts[1].strip() if len(parts) > 1 else ""
@@ -243,15 +245,25 @@ async def cmd_cron(config, conn, user_id, conversation_token, args, client):
         job = db.get_scheduled_job_by_name(conn, user_id, job_name)
         if not job:
             return f"No scheduled job named '{job_name}' found."
+        # Write to CRON.md (source of truth); DB updated on next sync
+        if update_job_enabled_in_cron_md(config, user_id, job_name, True):
+            db.enable_scheduled_job(conn, job.id)
+            return f"Enabled scheduled job '{job_name}' (failure count reset)."
+        # Fallback: no CRON.md file, update DB directly
         db.enable_scheduled_job(conn, job.id)
-        return f"Enabled scheduled job '{job_name}' (failure count reset)."
+        return f"Enabled scheduled job '{job_name}' (failure count reset). Note: no CRON.md file found — change is DB-only and may not persist."
 
     if subcmd == "disable" and job_name:
         job = db.get_scheduled_job_by_name(conn, user_id, job_name)
         if not job:
             return f"No scheduled job named '{job_name}' found."
+        # Write to CRON.md (source of truth); DB updated on next sync
+        if update_job_enabled_in_cron_md(config, user_id, job_name, False):
+            db.disable_scheduled_job(conn, job.id)
+            return f"Disabled scheduled job '{job_name}'."
+        # Fallback: no CRON.md file, update DB directly
         db.disable_scheduled_job(conn, job.id)
-        return f"Disabled scheduled job '{job_name}'."
+        return f"Disabled scheduled job '{job_name}'. Note: no CRON.md file found — change is DB-only and may not persist."
 
     # Default: list all jobs
     jobs = db.get_user_scheduled_jobs(conn, user_id)

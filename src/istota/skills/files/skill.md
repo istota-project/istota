@@ -22,3 +22,5 @@ rm /srv/mount/nextcloud/content/path/to/file.txt
 ```
 
 All changes are saved directly to Nextcloud via the mount. No need to download files to a temp directory first.
+
+**Attachment troubleshooting:** If a user shares a file via Talk but you can't find it at the expected path, it's likely because the user hasn't shared their Nextcloud Talk folder (e.g. `Talk/` or `Talk (2)/`) with the bot user. Let them know: "I can't access your Talk attachments. Please share your Talk folder with me in Nextcloud — otherwise files shared via chat won't be visible to me." There may also be a short delay (~2 minutes) after sharing before files become accessible.
