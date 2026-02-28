@@ -79,6 +79,7 @@ istota_scheduler_scheduled_job_max_consecutive_failures: 5  # Auto-disable after
 istota_scheduler_feed_check_interval: 300                  # Seconds between feed polls
 istota_scheduler_feed_item_retention_days: 30              # Delete feed items older than N days
 istota_scheduler_talk_cache_max_per_conversation: 200      # Max cached talk messages per conversation
+istota_scheduler_temp_file_retention_days: 7               # Delete temp files older than N days (0=disable)
 
 # Logging settings
 istota_logging_level: "INFO"                        # INFO or DEBUG
@@ -243,7 +244,7 @@ istota_sleep_cycle_curate_user_memory: false  # nightly USER.md curation from da
 
 # Channel sleep cycle settings (shared channel memory extraction)
 istota_channel_sleep_cycle_enabled: true
-istota_channel_sleep_cycle_cron: "0 3 * * *"
+istota_channel_sleep_cycle_cron: "0 11 * * *"
 istota_channel_sleep_cycle_lookback_hours: 24
 istota_channel_sleep_cycle_memory_retention_days: 0  # 0 = unlimited
 

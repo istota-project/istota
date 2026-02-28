@@ -122,6 +122,10 @@ def render_config_toml(s: dict) -> str:
     lines.append(f'use_selection = {tobool(conv.get("use_selection", True))}')
     lines.append(f'always_include_recent = {conv.get("always_include_recent", 10)}')
     lines.append(f'context_truncation = {conv.get("context_truncation", 0)}')
+    lines.append(f'context_recency_hours = {conv.get("context_recency_hours", 0)}')
+    lines.append(f'context_min_messages = {conv.get("context_min_messages", 10)}')
+    lines.append(f'previous_tasks_count = {conv.get("previous_tasks_count", 3)}')
+    lines.append(f'talk_context_limit = {conv.get("talk_context_limit", 100)}')
 
     # [logging]
     lines.extend(['', '[logging]'])
@@ -143,6 +147,8 @@ def render_config_toml(s: dict) -> str:
         ("heartbeat_check_interval", 60), ("progress_updates", True),
         ("progress_min_interval", 8), ("progress_max_messages", 5),
         ("progress_show_tool_use", True), ("progress_show_text", False),
+        ("progress_text_max_chars", 200), ("progress_style", "replace"),
+        ("progress_max_display_items", 20),
         ("task_timeout_minutes", 30), ("confirmation_timeout_minutes", 120),
         ("stale_pending_warn_minutes", 30), ("stale_pending_fail_hours", 2),
         ("max_retry_age_minutes", 60), ("task_retention_days", 7),
@@ -151,11 +157,14 @@ def render_config_toml(s: dict) -> str:
         ("user_max_foreground_workers", 2), ("user_max_background_workers", 1),
         ("scheduled_job_max_consecutive_failures", 5),
         ("feed_check_interval", 300), ("feed_item_retention_days", 30),
+        ("talk_cache_max_per_conversation", 200), ("temp_file_retention_days", 7),
     ]
     for key, default in sched_fields:
         val = sch.get(key, default)
         if isinstance(val, bool) or (isinstance(default, bool)):
             lines.append(f'{key} = {tobool(val)}')
+        elif isinstance(val, str) or isinstance(default, str):
+            lines.append(f'{key} = "{val}"')
         else:
             lines.append(f'{key} = {val}')
 
