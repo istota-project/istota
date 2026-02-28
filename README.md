@@ -78,11 +78,11 @@ The bot gets files, calendars, contacts, Talk messaging, and sharing through the
 
 In practice this means:
 
-- Zero Nextcloud configuration. Create a user account, invite it to a chat. No admin panel changes, no app installation, no API tokens on the Nextcloud side.
-- File sharing is native. Users share files with the bot the same way they share with colleagues. The bot shares files back the same way. Permissions, links, and access control are handled by Nextcloud.
-- Multi-user comes free. Nextcloud already handles user isolation, file ownership, and access control. Istota inherits all of it rather than reimplementing it.
-- Self-hosted end to end. Your data stays on your Nextcloud server and the VM running Istota. No external services required beyond the Claude API.
-- User self-service. Config files (persona, briefings, cron jobs, heartbeat checks) live in the user's shared Nextcloud folder. Users edit them with any text editor or the Nextcloud web UI, no CLI access needed.
+- **Zero Nextcloud configuration.** Create a user account, invite it to a chat. No admin panel changes, no app installation, no API tokens on the Nextcloud side.
+- **File sharing is native.** Users share files with the bot the same way they share with colleagues. The bot shares files back the same way. Permissions, links, and access control are handled by Nextcloud.
+- **Multi-user comes free.** Nextcloud already handles user isolation, file ownership, and access control. Istota inherits all of it rather than reimplementing it.
+- **Self-hosted end to end.** Your data stays on your Nextcloud server and the VM running Istota. No external services required beyond the Claude API.
+- **User self-service.** Config files (persona, briefings, cron jobs, heartbeat checks) live in the user's shared Nextcloud folder. Users edit them with any text editor or the Nextcloud web UI, no CLI access needed.
 
 The tradeoff is that Istota only works with Nextcloud. If you use Google Workspace or Microsoft 365, this isn't for you. If you already run Nextcloud (or are willing to), you get an assistant that uses your existing infrastructure directly rather than wrapping it in API adapters.
 
