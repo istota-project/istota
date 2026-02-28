@@ -271,6 +271,31 @@ def sync(
 # =============================================================================
 
 
+def cmd_status(args) -> dict:
+    """Test connectivity and return current Garmin user info."""
+    garmin_cfg = load_config(args.config)
+    token_dir = garmin_cfg.get("token_dir", "/srv/app/istota/data/garmin_tokens")
+    client = garmin_login(garmin_cfg["email"], garmin_cfg["password"], token_dir)
+
+    try:
+        user_data = client.get_user_summary(date.today().strftime("%Y-%m-%d"))
+    except Exception:
+        user_data = {}
+
+    try:
+        user_profile = client.get_full_name()
+    except Exception:
+        user_profile = None
+
+    return {
+        "status": "ok",
+        "email": garmin_cfg["email"],
+        "display_name": user_profile,
+        "daily_steps": user_data.get("totalSteps"),
+        "resting_heart_rate": user_data.get("restingHeartRate"),
+    }
+
+
 def cmd_sync(args) -> dict:
     """Run the Garmin → calendar sync."""
     tz = ZoneInfo(DEFAULT_USER_TZ)
@@ -318,6 +343,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show what would be done without making changes",
     )
 
+    p_status = sub.add_parser("status", help="Test Garmin Connect connectivity and show user info")
+    p_status.add_argument(
+        "--config",
+        help="Path to GARMIN.md config file (overrides GARMIN_CONFIG env var)",
+    )
+
     return parser
 
 
@@ -325,7 +356,7 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    commands = {"sync": cmd_sync}
+    commands = {"sync": cmd_sync, "status": cmd_status}
 
     try:
         result = commands[args.command](args)
