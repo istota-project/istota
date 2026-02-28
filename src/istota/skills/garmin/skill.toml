@@ -1,3 +1,2 @@
-description = "Garmin Connect integration — sync run activities to the calendar"
-keywords = ["garmin", "run", "running", "workout", "activity", "fitness", "strava"]
-resource_types = ["calendar"]
+description = "Garmin Connect data access — activities, stats, and health metrics"
+keywords = ["garmin", "run", "running", "workout", "activity", "fitness", "strava", "steps", "heart rate", "sleep", "body battery"]

@@ -1583,6 +1583,13 @@ def execute_task(
             if is_admin:
                 env["ISTOTA_DB_PATH"] = str(config.db_path)
 
+        # Garmin config path (in user's bot config folder, only set if file exists)
+        if config.nextcloud_mount_path and task:
+            from .storage import get_user_config_path
+            garmin_path = config.nextcloud_mount_path / get_user_config_path(task.user_id, config.bot_dir_name).lstrip("/") / "GARMIN.md"
+            if garmin_path.exists():
+                env["GARMIN_CONFIG"] = str(garmin_path)
+
         # Karakeep bookmarks (per-user API credentials from resource config)
         if user_config:
             karakeep_resources = [

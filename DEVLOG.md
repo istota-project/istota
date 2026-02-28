@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-28: Review and fix garmin skill
+
+Reviewed the new garmin skill committed from the Zorg fork. Fixed several issues: env var names didn't match what executor.py provides, skill.toml description was stale from an earlier calendar-sync design, workspace path was hardcoded to "zorg" instead of using `bot_dir_name`, and token cache used a global path instead of per-user temp directories.
+
+**Key changes:**
+- Fixed env var names: `NEXTCLOUD_MOUNT` → `NEXTCLOUD_MOUNT_PATH`, `ISTOTA_USER` → `ISTOTA_USER_ID`
+- Removed `_default_config_path()` that hardcoded `zorg` workspace name — skill now requires `GARMIN_CONFIG` env var (set by executor) or `--config` flag
+- Added `GARMIN_CONFIG` wiring in executor.py, following same pattern as `INVOICING_CONFIG`/`ACCOUNTING_CONFIG` (resolves via `storage.get_user_config_path()`)
+- Token cache now uses `$ISTOTA_DEFERRED_DIR/garmin_tokens` (per-user temp dir) instead of global `/srv/app/istota/data/garmin_tokens`
+- Updated skill.toml: fixed description, removed incorrect `resource_types = ["calendar"]`, added more keywords
+- Added `garminconnect>=0.2.0` dependency (was already in pyproject.toml, ran `uv sync`)
+
+**Files modified:**
+- `src/istota/skills/garmin/__init__.py` — Fixed env vars, removed hardcoded paths, per-user token dir
+- `src/istota/skills/garmin/skill.toml` — Corrected description and keywords
+- `src/istota/skills/garmin/skill.md` — Updated config path and token dir docs
+- `src/istota/executor.py` — Added `GARMIN_CONFIG` env var wiring
+- `uv.lock` — Added garminconnect and transitive deps
+
 ## 2026-02-28: Fix DB lock during briefing prefetch, browser stability
 
 Production crash: `check_briefings()` held a DB write transaction open while doing slow network I/O (yfinance, FinViz, IMAP newsletter fetching). When FinViz timed out (~2 min), the Talk poller thread couldn't access the DB, causing "database is locked" errors and eventually a deadlocked main loop.

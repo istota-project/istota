@@ -19,8 +19,8 @@ Config:
         token_dir = "/optional/path/to/token/cache"
         ```
 
-    The config file path is taken from the GARMIN_CONFIG env var,
-    defaulting to <NEXTCLOUD_MOUNT>/Users/<user>/zorg/config/GARMIN.md.
+    The config file path is taken from the GARMIN_CONFIG env var
+    (set by executor.py) or the --config CLI flag.
 """
 
 import argparse
@@ -39,19 +39,14 @@ import garminconnect
 # =============================================================================
 
 
-def _default_config_path() -> str:
-    """Return default GARMIN.md path, using NEXTCLOUD_MOUNT env if available."""
-    mount = os.environ.get("NEXTCLOUD_MOUNT", "/srv/mount/nextcloud/content")
-    user = os.environ.get("ISTOTA_USER", "alice")
-    return os.path.join(mount, "Users", user, "zorg", "config", "GARMIN.md")
-
-
 def load_config(config_path: str | None = None) -> dict:
     """Parse GARMIN.md and return the [garmin] config block as a dict.
 
     Raises ValueError if the file has no TOML block or missing email.
     """
-    path = config_path or os.environ.get("GARMIN_CONFIG") or _default_config_path()
+    path = config_path or os.environ.get("GARMIN_CONFIG", "")
+    if not path:
+        raise ValueError("GARMIN_CONFIG env var not set and no --config provided")
 
     with open(path) as f:
         content = f.read()
@@ -101,7 +96,12 @@ def garmin_login(email: str, password: str, token_dir: str) -> garminconnect.Gar
 def _get_client(args) -> tuple[garminconnect.Garmin, dict]:
     """Load config and return authenticated Garmin client + config dict."""
     garmin_cfg = load_config(getattr(args, "config", None))
-    token_dir = garmin_cfg.get("token_dir", "/srv/app/istota/data/garmin_tokens")
+    deferred_dir = os.environ.get("ISTOTA_DEFERRED_DIR", "")
+    if deferred_dir:
+        default_token_dir = os.path.join(deferred_dir, "garmin_tokens")
+    else:
+        default_token_dir = "/tmp/istota/garmin_tokens"
+    token_dir = garmin_cfg.get("token_dir", default_token_dir)
     client = garmin_login(garmin_cfg["email"], garmin_cfg["password"], token_dir)
     return client, garmin_cfg
 

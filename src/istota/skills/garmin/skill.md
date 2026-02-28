@@ -15,11 +15,9 @@ token_dir = "/optional/token/cache/path"
 \```
 ```
 
-Default config path: `<NEXTCLOUD_MOUNT>/Users/<user>/zorg/config/GARMIN.md`
+The `GARMIN_CONFIG` env var is set automatically by the executor, pointing to `Users/<user>/{BOT_DIR}/config/GARMIN.md`. Override with `--config` flag.
 
-Override with the `GARMIN_CONFIG` environment variable or `--config` flag.
-
-Tokens are cached in `token_dir` (default: `/srv/app/istota/data/garmin_tokens`) to avoid repeated password auth.
+Tokens are cached in `token_dir` (default: `$ISTOTA_DEFERRED_DIR/garmin_tokens`, i.e. the per-user temp directory) to avoid repeated password auth.
 
 ## CLI
 
