@@ -54,9 +54,9 @@ Per-user worker threads handle concurrency — foreground tasks (chat) and backg
 
 **Messaging** — Nextcloud Talk (DMs and multi-user rooms with @mention support), email (IMAP/SMTP with threading), TASKS.md file polling, CLI.
 
-**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright), git/GitLab/GitHub development workflows, beancount accounting with invoicing, Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), RSS/Atom/Tumblr/Are.na feeds, and more. Skills are a curated standard library rather than a plugin marketplace.
+**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with anti-detection), git/GitLab/GitHub development workflows, beancount accounting with invoicing, Garmin Connect fitness data, Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), RSS/Atom/Tumblr/Are.na feeds, and more. Skills are a curated standard library rather than a plugin marketplace.
 
-**Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), and dated memory files from nightly extraction. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
+**Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Optional memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
 
 **Scheduling** — Cron jobs via CRON.md (AI prompts or shell commands), natural-language reminders as one-shot cron entries, scheduled briefings with calendar/markets/news/todos components, invoice generation schedules.
 
@@ -91,7 +91,7 @@ Each user gets a shared Nextcloud folder:
 
 ```bash
 uv sync                                    # Install dependencies
-uv run pytest tests/ -v                    # Run tests (~2346 unit tests)
+uv run pytest tests/ -v                    # Run tests (~2400 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```

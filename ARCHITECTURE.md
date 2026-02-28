@@ -53,6 +53,19 @@ Task lifecycle: `pending → locked → running → completed | failed | pending
 | `skills_loader.py` | Thin wrapper re-exporting from `skills/_loader.py`. Loads skill documentation from self-contained skill directories under `src/istota/skills/`. Skills are selectively included based on keywords, resource types, source types, and file types defined in each skill's `skill.toml` manifest. |
 | `stream_parser.py` | Parses Claude Code's `--output-format stream-json` line by line into typed events: `ToolUseEvent`, `TextEvent`, `ResultEvent`. |
 
+### Talk progress
+
+Progress updates during execution use a three-mode `progress_style` config:
+- **`replace`** (default): edits the initial ack message in-place, showing the latest tool action + elapsed time. Avoids chat noise.
+- **`full`**: appends all tool actions as separate messages (legacy behavior).
+- **`none`**: silent, no progress updates.
+
+Rate-limited: `progress_min_interval` (8s), capped at `progress_max_messages` (5) per task. Multi-line tool output is collapsed to the first line. Progress callbacks carry the Talk message ID from the ack so subsequent updates edit the same message.
+
+### Log channel
+
+Per-user verbose logging to a dedicated Talk conversation. When `log_channel` is set in per-user config, every tool action is posted to that room with a `[task_id #channel]` prefix and status emoji (⏳ running, ✓ done, ✗ failed). This provides full observability without cluttering the user's chat. Log channel callbacks compose with progress callbacks — both fire on each event.
+
 ### Storage and state
 
 | Module | What it does |
@@ -100,12 +113,30 @@ Skills expose Python CLIs invoked by Claude Code inside the sandbox via `python 
 | `calendar/` | CalDAV read/write/update (auto-discovered from Nextcloud credentials). Subcommands: `list` (`--date`, `--week`), `create`, `update`, `delete`. |
 | `email.py` | IMAP/SMTP: send, reply, search, list, delete, newsletter extraction |
 | `files.py` | Nextcloud file operations (mount-aware, rclone fallback) |
-| `browse.py` | Headless browser via Dockerized Playwright container (Flask API) |
+| `browse/` | Headless browser via Dockerized Playwright container (Flask API) |
+| `garmin/` | Garmin Connect data access: activities, stats, health metrics. Subcommands: `connect`, `user`, `activities`, `stats`, `health`. JSON output. |
 | `markets.py` | yfinance wrapper for market data |
 | `transcribe.py` | OCR via Tesseract |
 | `whisper/` | Audio transcription via faster-whisper (CPU, int8) |
 | `nextcloud/` | Nextcloud sharing CLI: list, create, delete shares; search sharees. Uses `nextcloud_client.py`. |
 | `memory_search.py` | Memory search CLI: search, index, reindex, stats |
+| `bookmarks/` | Karakeep bookmark management CLI |
+
+---
+
+## Browser container
+
+The headless browser runs in a Docker container (`docker/browser/`) exposing a Flask API for Playwright operations. The container is structured into focused modules:
+
+| Module | Purpose |
+|---|---|
+| `browse_api.py` | Flask API endpoints: `get`, `screenshot`, `extract`, `interact`, `close`, `health` |
+| `chrome.py` | Chrome process lifecycle and CDP connection management. Launches Chrome with a stealth extension, manages Patchright CDP connections (lazy connect for extraction, disconnect before navigation to avoid Cloudflare detection). |
+| `browsing.py` | Human simulation: Gaussian mouse movements, Bezier curves, scrolling patterns. Captcha detection via frame URL matching. |
+| `xdotool.py` | X11 input helpers for CDP-free browser interaction. URL navigation via keyboard input to avoid CDP detection by bot protection systems. |
+| `stealth-extension/` | Chrome extension (manifest v3) injected at launch. Overrides navigator properties, WebGL fingerprints, and handles cookie consent banners. Replaces Patchright's route-based script injection. |
+
+Anti-detection strategy: Chrome launches with the stealth extension natively. Patchright connects via CDP only for content extraction, then disconnects. Navigation uses xdotool keyboard input rather than CDP commands. Human simulation adds 5-10s delays between page actions with realistic mouse movement patterns.
 
 ---
 
@@ -203,11 +234,13 @@ Environment variables pass credentials (Nextcloud, CalDAV, SMTP/IMAP, browser AP
 ### Streaming execution
 
 The executor reads Claude Code's stdout line-by-line, parsing `stream-json` events:
-- `ToolUseEvent` → forwarded as progress updates to Talk (rate-limited: min 8s apart, max 5 per task)
+- `ToolUseEvent` → forwarded as progress updates to Talk
 - `TextEvent` → forwarded as progress (lower priority than tool events)
 - `ResultEvent` → final result (success or error)
 
 Cancellation is checked on each event via `db.is_task_cancelled()`.
+
+Both streaming and simple execution modes retry transient API errors (5xx, 429) up to 3 times with 5s delays. The scheduler additionally detects API errors in successful results (Claude Code may exit 0 with error text) and retries those too. Background tasks (briefings, scheduled jobs) suppress error notifications to avoid noise — failures are logged to the DB and log channel only.
 
 ---
 
@@ -216,13 +249,16 @@ Cancellation is checked on each event via `db.is_task_cancelled()`.
 The context module (`context.py`) selects which previous messages to include in the prompt. This keeps token usage reasonable while preserving relevant history.
 
 1. Fetch last `lookback_count` (25) messages for the conversation
-2. If total <= `skip_selection_threshold` (3): include all, skip selection
-3. Most recent `always_include_recent` (5) messages are always included
-4. Older messages are triaged by a selection model (Haiku via Claude CLI subprocess) that returns which message IDs are relevant
-5. Selected older messages + guaranteed recent messages are combined in chronological order
-6. On any error: fall back to guaranteed recent messages only
+2. Apply recency window: if `context_recency_hours` > 0, exclude messages older than the cutoff while always keeping at least `context_min_messages` (10) recent messages
+3. If total <= `skip_selection_threshold` (3): include all, skip selection
+4. Most recent `always_include_recent` (5) messages are always included
+5. Older messages are triaged by a selection model (Haiku via Claude CLI subprocess) that returns which message IDs are relevant
+6. Selected older messages + guaranteed recent messages are combined in chronological order
+7. On any error: fall back to guaranteed recent messages only
 
 Reply-to messages are force-included regardless of selection. Actions taken (tool use descriptions) are appended after bot responses so Claude can see what it did previously.
+
+Talk context uses a poller-fed message cache (`talk_messages` table) populated by the talk poller, avoiding redundant API calls. Bot responses are captured in the cache via `:result` reference IDs. Cache size is bounded per conversation (`talk_cache_max_per_conversation`, default 200).
 
 ---
 
@@ -237,9 +273,8 @@ Infrastructure lives in `skills/_types.py` (SkillMeta, EnvSpec dataclasses), `sk
 Skill discovery uses layered priority: bundled `skill.toml` directories < operator overrides in `config/skills/`. A skill is selected if any of these match (from its `skill.toml`):
 - `always_include = true` (files, sensitive_actions, memory, scripts, memory_search)
 - `source_types` matches the task's source type (e.g., briefing → calendar, markets, notes)
-- User has a resource type the skill is linked to (`resource_types`, e.g., `ledger` → accounting)
+- Any `keywords` found in the prompt text (e.g., "email" → email skill). If the skill also declares `resource_types`, the user must have at least one matching resource — keyword alone is not enough.
 - Attachment file extensions match (`file_types`, e.g., `.wav` → whisper)
-- Any `keywords` found in the prompt text (e.g., "email" → email skill)
 
 Admin-only skills (`tasks`, `schedules`) are filtered out for non-admin users. Skills with `dependencies` are skipped with a warning if the dependency is not installed.
 
@@ -351,6 +386,8 @@ With the sandbox, the DB is read-only inside the subprocess. Skills write JSON r
 - `task_{id}_subtasks.json` → subtask creation (admin-only)
 - `task_{id}_tracked_transactions.json` → transaction dedup tracking
 
+Post-completion hooks also run unsandboxed: the scheduler restarts per-user Fava services after accounting skill tasks (since `systemctl` is unavailable inside the sandbox).
+
 ---
 
 ## Nextcloud integration
@@ -389,7 +426,7 @@ The talk poller runs in a background daemon thread. It long-polls each conversat
 
 **Reply threading**: Final responses in group chats use `reply_to` on the original message and prepend `@{user_id}` for notification. Intermediate messages (ack, progress updates) are sent without reply threading to avoid noise.
 
-Progress updates during task execution: random acknowledgment before execution starts, then streaming tool-use descriptions rate-limited to min 8s apart and max 5 per task.
+Progress updates during task execution: random acknowledgment before execution starts, then streaming tool-use descriptions. Default `progress_style = "replace"` edits the ack message in-place with the latest action + elapsed time. Legacy `"full"` mode appends separate messages. Rate-limited: min 8s apart, max 5 per task.
 
 ### CalDAV
 
@@ -412,6 +449,7 @@ SQLite with WAL mode. All operations in `db.py`. Schema in `schema.sql`.
 | `task_logs` | Structured task-level observability |
 | `processed_emails` | Email dedup with RFC 5322 thread tracking |
 | `talk_poll_state` | Last message ID per Talk conversation |
+| `talk_messages` | Poller-fed message cache for conversation context |
 | `istota_file_tasks` | Tasks sourced from TASKS.md files (content-hash identity) |
 | `scheduled_jobs` | Cron job definitions (synced from CRON.md) |
 | `sleep_cycle_state` | Per-user nightly memory extraction state |
@@ -478,6 +516,7 @@ Commands prefixed with `!` are intercepted in the talk poller before task creati
 | `!cron` | List/enable/disable scheduled jobs |
 | `!usage` | Claude API usage and billing stats |
 | `!check` | Run system health check (self-check heartbeat) |
+| `!export [markdown\|text]` | Export conversation history to a file. First run exports all messages; subsequent runs incrementally append new messages. Exports to `{bot_dir}/exports/conversations/`. |
 
 ---
 
@@ -495,7 +534,7 @@ Nextcloud mount via rclone: full VFS cache, 1h max age, 5s dir cache, 10s poll i
 
 ## Testing
 
-TDD with pytest + pytest-asyncio. ~2170 tests across 48 files. Real SQLite via `tmp_path` (no DB mocking). `unittest.mock` for external dependencies.
+TDD with pytest + pytest-asyncio. ~2400 tests across 51 files. Real SQLite via `tmp_path` (no DB mocking). `unittest.mock` for external dependencies.
 
 Shared fixtures in `conftest.py`: `db_path` (initialized from schema.sql), `db_conn`, `make_task`, `make_config`, `make_user_config`.
 
@@ -511,7 +550,7 @@ uv run pytest tests/ --cov=istota --cov-report=term-missing  # Coverage
 
 ## Dependencies
 
-Core: `httpx` (HTTP), `caldav` + `icalendar` (CalDAV), `croniter` (cron), `tomli` (TOML), `yfinance` (markets), `imap-tools` (email), `beancount` + `beanquery` + `fava` (accounting), `weasyprint` (PDF), `feedparser` (RSS), `pytesseract` (OCR).
+Core: `httpx` (HTTP), `caldav` + `icalendar` (CalDAV), `croniter` (cron), `tomli` (TOML), `yfinance` (markets), `imap-tools` (email), `beancount` + `beanquery` + `fava` (accounting), `weasyprint` (PDF), `feedparser` (RSS), `pytesseract` (OCR), `garminconnect` (Garmin data).
 
 Optional extras: `memory-search` (sqlite-vec, sentence-transformers), `whisper` (faster-whisper), `dev` (pytest).
 

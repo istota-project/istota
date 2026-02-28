@@ -62,6 +62,7 @@ istota/
 │       ├── todos/           # Todo list reference (doc-only)
 │       ├── transcribe/      # OCR transcription via Tesseract
 │       ├── website/         # Website management reference (doc-only)
+│       ├── garmin/          # Garmin Connect data access (activities, stats, health)
 │       └── whisper/         # Audio transcription via faster-whisper
 ├── config/
 │   ├── config.toml          # Active configuration (gitignored)
@@ -78,7 +79,7 @@ istota/
 │   └── README.md            # Deployment documentation
 ├── docker/browser/          # Playwright browser container (Flask API)
 ├── scripts/                 # setup.sh, scheduler.sh
-├── tests/                   # pytest + pytest-asyncio (~2346 tests, 50 files)
+├── tests/                   # pytest + pytest-asyncio (~2400 tests, 51 files)
 ├── schema.sql
 └── pyproject.toml
 ```
@@ -140,20 +141,21 @@ Resources defined in per-user config or DB, merged at task time. Types: `calenda
 Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 
 - Long-polling per conversation, message cache in `talk_messages` table
-- Progress updates: random ack before execution, streaming progress (rate-limited: min 8s, max 5/task)
+- Progress updates: random ack before execution, streaming progress (rate-limited: min 8s, max 5/task). `progress_style`: `replace` (edit ack in-place, default), `full` (append), `none` (silent)
+- Per-user log channel (`log_channel` config): verbose tool-by-tool execution logs posted to a dedicated Talk room
 - Multi-user rooms: only responds when @mentioned; 2-person rooms behave like DMs
-- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`, `!export`
+- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`, `!export` (conversation history export)
 - Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no
 
 ### Skills
-Self-contained directories under `src/istota/skills/`, each with `skill.toml` manifest and `skill.md` doc. Selection based on: `always_include`, `source_types`, `keywords`, `resource_types` (requires keyword + resource), `file_types`, `companion_skills`.
+Self-contained directories under `src/istota/skills/`, each with `skill.toml` manifest and `skill.md` doc. Selection based on: `always_include`, `source_types`, `keywords` (if skill also has `resource_types`, requires both keyword match + user has resource), `file_types`, `companion_skills`.
 
 Audio attachments pre-transcribed before skill selection so keyword matching works on voice memos.
 
 Env var wiring is declarative via `[[env]]` in `skill.toml`. Action skills expose `python -m istota.skills.<name>` CLI with JSON output.
 
 ### Conversation Context
-Talk tasks use a poller-fed local cache (`talk_messages` table). Email tasks use DB-based context. Both paths use hybrid selection: recent N messages always included, older messages triaged by LLM. Config in `[conversation]` section.
+Talk tasks use a poller-fed local cache (`talk_messages` table, bounded by `talk_cache_max_per_conversation`). Email tasks use DB-based context. Both paths use hybrid selection: recent N messages always included, older messages triaged by LLM. Recency window (`context_recency_hours`, default 0 = disabled) filters out old messages while guaranteeing at least `context_min_messages` (10). Config in `[conversation]` section.
 
 ### Input Channels
 - **Talk**: Long-polling, message cache, referenceId tagging for ack/progress/result messages
@@ -191,7 +193,7 @@ With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR
 
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2170 tests across 48 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2400 tests across 51 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests
