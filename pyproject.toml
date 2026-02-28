@@ -21,6 +21,7 @@ dependencies = [
     "feedparser>=6.0.0",
     "monarchmoneycommunity @ git+https://github.com/bradleyseanf/monarchmoney@main",
     "requests>=2.32.5",
+    "garminconnect>=0.2.0",
 ]
 
 [project.optional-dependencies]
