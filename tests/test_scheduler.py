@@ -382,8 +382,7 @@ class TestDownloadTalkAttachments:
 class TestCheckBriefings:
     def test_no_briefings(self, db_path):
         config = Config(db_path=db_path, users={})
-        with db.get_db(db_path) as conn:
-            result = check_briefings(conn, config)
+        result = check_briefings(db_path, config)
         assert result == []
 
     @patch("istota.scheduler.build_briefing_prompt", return_value="Test briefing prompt")
@@ -410,8 +409,7 @@ class TestCheckBriefings:
                 ("alice", "morning", yesterday),
             )
 
-        with db.get_db(db_path) as conn:
-            result = check_briefings(conn, config)
+        result = check_briefings(db_path, config)
 
         assert len(result) == 1
         mock_build.assert_called_once()
@@ -439,8 +437,7 @@ class TestCheckBriefings:
                 ("alice", "morning", now),
             )
 
-        with db.get_db(db_path) as conn:
-            result = check_briefings(conn, config)
+        result = check_briefings(db_path, config)
 
         assert result == []
 
@@ -460,8 +457,7 @@ class TestCheckBriefings:
         user = UserConfig(timezone="UTC", briefings=[briefing])
         config = Config(db_path=db_path, users={"alice": user})
 
-        with db.get_db(db_path) as conn:
-            result = check_briefings(conn, config)
+        result = check_briefings(db_path, config)
         assert len(result) == 1
 
     @patch("istota.scheduler.build_briefing_prompt", return_value="Test prompt")
@@ -479,8 +475,7 @@ class TestCheckBriefings:
 
         now = datetime.now(ZoneInfo("UTC"))
         if now.hour < 23 or (now.hour == 23 and now.minute < 59):
-            with db.get_db(db_path) as conn:
-                result = check_briefings(conn, config)
+            result = check_briefings(db_path, config)
             assert result == []
 
     def test_missing_conversation_token_skipped_for_talk(self, db_path):
@@ -493,8 +488,7 @@ class TestCheckBriefings:
         user = UserConfig(timezone="UTC", briefings=[briefing])
         config = Config(db_path=db_path, users={"alice": user})
 
-        with db.get_db(db_path) as conn:
-            result = check_briefings(conn, config)
+        result = check_briefings(db_path, config)
         assert result == []
 
     @patch("istota.scheduler.build_briefing_prompt", return_value="Test briefing prompt")
@@ -517,8 +511,7 @@ class TestCheckBriefings:
                 ("alice", "morning", yesterday),
             )
 
-        with db.get_db(db_path) as conn:
-            result = check_briefings(conn, config)
+        result = check_briefings(db_path, config)
         assert len(result) == 1
 
 

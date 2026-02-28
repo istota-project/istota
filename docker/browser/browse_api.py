@@ -32,15 +32,41 @@ log = logging.getLogger(__name__)
 _sessions = {}  # id -> {tab_index, created_at}
 _sessions_lock = threading.Lock()
 SESSION_TTL = 600  # 10 minutes
-MAX_SESSIONS = int(os.environ.get("MAX_BROWSER_SESSIONS", "3"))
+MAX_SESSIONS = int(os.environ.get("MAX_BROWSER_SESSIONS", "2"))
+MEMORY_REJECT_PCT = 85  # reject new sessions above this
+MEMORY_EVICT_PCT = 80   # evict oldest idle session above this
 
 
 # ---------------------------------------------------------------------------
 # Session helpers
 # ---------------------------------------------------------------------------
 
+def _get_memory_pct():
+    """Return container memory usage percentage, or 0 if unavailable."""
+    try:
+        with open("/sys/fs/cgroup/memory.current") as f:
+            current = int(f.read().strip())
+        with open("/sys/fs/cgroup/memory.max") as f:
+            v = f.read().strip()
+            limit = int(v) if v != "max" else None
+        if limit:
+            return round(current / limit * 100, 1)
+    except Exception:
+        pass
+    return 0
+
+
 def _create_session():
-    """Create a new browser tab session."""
+    """Create a new browser tab session.
+
+    Raises RuntimeError if memory pressure is too high.
+    """
+    mem_pct = _get_memory_pct()
+    if mem_pct > MEMORY_REJECT_PCT:
+        raise RuntimeError(
+            f"Memory pressure too high ({mem_pct}%), refusing new session"
+        )
+
     chrome.connect_cdp()
     ctx = chrome.get_context()
 
@@ -50,19 +76,8 @@ def _create_session():
             oldest = min(_sessions, key=lambda s: _sessions[s]["created_at"])
             _close_session_unlocked(oldest)
 
-    pages = ctx.pages
-    tab_index = None
-
-    # Reuse an existing about:blank tab not claimed by a session
-    used = {s["tab_index"] for s in _sessions.values()}
-    for i, p in enumerate(pages):
-        if p.url in ("about:blank", "chrome://newtab/") and i not in used:
-            tab_index = i
-            break
-
-    if tab_index is None:
-        ctx.new_page()
-        tab_index = len(ctx.pages) - 1
+    ctx.new_page()
+    tab_index = len(ctx.pages) - 1
 
     session_id = str(uuid.uuid4())[:8]
     with _sessions_lock:
@@ -86,19 +101,33 @@ def _get_session(session_id):
 
 
 def _close_session_unlocked(session_id):
-    """Close a session (caller must hold lock).
+    """Close a session and its tab (caller must hold lock).
 
-    Navigates the tab to about:blank to free memory but doesn't close it
-    (closing would shift tab indices for other sessions).
+    Closes the tab to free renderer processes, then adjusts tab indices
+    for remaining sessions. If it's the last tab, navigates to about:blank
+    instead (Chrome exits when all tabs close).
     """
     session = _sessions.pop(session_id, None)
-    if session and chrome.is_cdp_connected():
+    if not session:
+        return
+    closed_index = session["tab_index"]
+    if chrome.is_cdp_connected():
         try:
-            page = chrome.get_page_by_index(session["tab_index"])
-            if page and page.url not in ("about:blank", "chrome://newtab/"):
+            page = chrome.get_page_by_index(closed_index)
+            if not page:
+                return
+            ctx = chrome.get_context()
+            if len(ctx.pages) <= 1:
+                # Last tab — navigate to blank instead of closing
                 page.goto("about:blank", timeout=5000)
+                return
+            page.close()
         except Exception:
             pass
+    # Shift down indices above the closed tab
+    for s in _sessions.values():
+        if s["tab_index"] > closed_index:
+            s["tab_index"] -= 1
 
 
 def _close_session(session_id):
@@ -107,14 +136,14 @@ def _close_session(session_id):
 
 
 def _evict_expired():
-    """Remove expired sessions. Caller must hold lock."""
+    """Remove expired sessions and close their tabs. Caller must hold lock."""
     now = time.time()
     expired = [
         sid for sid, s in _sessions.items()
         if now - s["created_at"] > SESSION_TTL
     ]
     for sid in expired:
-        _sessions.pop(sid, None)
+        _close_session_unlocked(sid)
 
 
 def _get_page(tab_index):
@@ -620,7 +649,7 @@ def _log_request_end(response):
 
 
 def _resource_monitor():
-    """Background thread logging Chrome resource usage every 30 seconds."""
+    """Background thread: log usage every 30s, evict sessions under pressure."""
     while True:
         time.sleep(30)
         try:
@@ -646,19 +675,34 @@ def _resource_monitor():
             except Exception:
                 pass
 
-            with _sessions_lock:
-                sessions = len(_sessions)
-
             pct = (
                 round(container_mb / limit_mb * 100, 1)
                 if container_mb and limit_mb else 0
             )
+
+            # Active eviction under memory pressure
+            if pct > MEMORY_EVICT_PCT:
+                with _sessions_lock:
+                    if _sessions:
+                        oldest = min(
+                            _sessions,
+                            key=lambda s: _sessions[s]["created_at"],
+                        )
+                        log.warning(
+                            "Memory at %.1f%% — evicting session %s",
+                            pct, oldest,
+                        )
+                        _close_session_unlocked(oldest)
+
+            with _sessions_lock:
+                sessions = len(_sessions)
+
             msg = (
                 f"sessions={sessions} "
                 f"chrome_procs={chrome_count} chrome_rss={chrome_rss_mb}MB "
                 f"container={container_mb}MB/{limit_mb}MB ({pct}%)"
             )
-            if pct > 80:
+            if pct > MEMORY_EVICT_PCT:
                 log.warning("HIGH MEMORY: %s", msg)
             elif pct > 60:
                 log.info("monitor: %s", msg)

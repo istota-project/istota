@@ -1564,83 +1564,96 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
             return False
 
 
-def check_briefings(conn, app_config: Config) -> list[int]:
+def check_briefings(db_path, app_config: Config) -> list[int]:
     """
     Check for briefings that should run and queue them as tasks.
 
-    Reads briefing configurations from app_config (config.toml) and tracks
-    last_run_at in the database.
+    Uses three phases to avoid holding DB locks during slow network I/O:
+    1. Short DB read to check which briefings are due
+    2. Network pre-fetch (market data, newsletters) with NO DB connection
+    3. Short DB write to create tasks
 
     Args:
-        conn: Database connection
+        db_path: Path to the database file
         app_config: Application config with user briefings
 
     Returns:
         List of created task IDs
     """
+    # Phase 1: Short DB read — check which briefings are due
+    due_briefings: list[tuple[str, str, "BriefingConfig"]] = []
+
+    with db.get_db(db_path) as conn:
+        for user_id, user_config in app_config.users.items():
+            briefings = get_briefings_for_user(app_config, user_id)
+            if not briefings:
+                continue
+
+            user_tz_str = user_config.timezone
+
+            try:
+                user_tz = ZoneInfo(user_tz_str)
+            except Exception:
+                user_tz = ZoneInfo("UTC")
+                user_tz_str = "UTC"
+
+            now = _now(user_tz)
+
+            for briefing in briefings:
+                if not briefing.cron:
+                    continue
+                if not briefing.conversation_token and briefing.output in ("talk", "both"):
+                    continue
+
+                should_run = False
+                last_run_at = db.get_briefing_last_run(conn, user_id, briefing.name)
+
+                if last_run_at:
+                    last_run = datetime.fromisoformat(last_run_at)
+                    if last_run.tzinfo is None:
+                        last_run = last_run.replace(tzinfo=ZoneInfo("UTC"))
+                    cron = croniter(briefing.cron, last_run.astimezone(user_tz))
+                    next_run = cron.get_next(datetime)
+                    should_run = now >= next_run
+                else:
+                    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    cron = croniter(briefing.cron, today_start)
+                    next_run = cron.get_next(datetime)
+                    should_run = now >= next_run
+
+                if should_run:
+                    due_briefings.append((user_id, user_tz_str, briefing))
+
+    if not due_briefings:
+        return []
+
+    # Phase 2: Network pre-fetch — NO DB connection held
+    # build_briefing_prompt does yfinance, FinViz, IMAP fetches which can
+    # take minutes if endpoints are slow/down. Doing this outside the DB
+    # transaction prevents "database is locked" errors for other threads.
+    prepared: list[tuple[str, "BriefingConfig", str]] = []
+    for user_id, user_tz_str, briefing in due_briefings:
+        prompt = build_briefing_prompt(
+            briefing, user_id, app_config, user_tz_str,
+        )
+        prepared.append((user_id, briefing, prompt))
+
+    # Phase 3: Short DB write — create tasks and update last_run
     created_tasks = []
-
-    # Iterate through all users and their briefings (bot config > admin config)
-    for user_id, user_config in app_config.users.items():
-        briefings = get_briefings_for_user(app_config, user_id)
-        if not briefings:
-            continue
-
-        user_tz_str = user_config.timezone
-
-        # Get current time in user's timezone
-        try:
-            user_tz = ZoneInfo(user_tz_str)
-        except Exception:
-            user_tz = ZoneInfo("UTC")
-            user_tz_str = "UTC"
-
-        now = _now(user_tz)
-
-        for briefing in briefings:
-            if not briefing.cron:
-                continue
-            if not briefing.conversation_token and briefing.output in ("talk", "both"):
-                continue
-
-            # Check if this briefing should run
-            should_run = False
-            last_run_at = db.get_briefing_last_run(conn, user_id, briefing.name)
-
-            if last_run_at:
-                # Parse last_run_at — DB stores UTC via datetime('now')
-                last_run = datetime.fromisoformat(last_run_at)
-                if last_run.tzinfo is None:
-                    last_run = last_run.replace(tzinfo=ZoneInfo("UTC"))
-                cron = croniter(briefing.cron, last_run.astimezone(user_tz))
-                next_run = cron.get_next(datetime)
-                should_run = now >= next_run
-            else:
-                # Never run before - check if we're past the first scheduled time today
-                today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                cron = croniter(briefing.cron, today_start)
-                next_run = cron.get_next(datetime)
-                should_run = now >= next_run
-
-            if should_run:
-                # Build enhanced briefing prompt with pre-fetched data
-                prompt = build_briefing_prompt(
-                    briefing, user_id, app_config, user_tz_str,
-                )
-
-                task_id = db.create_task(
-                    conn,
-                    prompt=prompt,
-                    user_id=user_id,
-                    source_type="briefing",
-                    conversation_token=briefing.conversation_token,
-                    output_target=briefing.output,
-                    priority=8,  # Higher priority for briefings
-                    queue="background",
-                )
-
-                db.set_briefing_last_run(conn, user_id, briefing.name)
-                created_tasks.append(task_id)
+    with db.get_db(db_path) as conn:
+        for user_id, briefing, prompt in prepared:
+            task_id = db.create_task(
+                conn,
+                prompt=prompt,
+                user_id=user_id,
+                source_type="briefing",
+                conversation_token=briefing.conversation_token,
+                output_target=briefing.output,
+                priority=8,
+                queue="background",
+            )
+            db.set_briefing_last_run(conn, user_id, briefing.name)
+            created_tasks.append(task_id)
 
     return created_tasks
 
@@ -1966,12 +1979,13 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
         except Exception as e:
             logger.error("Error polling Talk: %s", e)
 
-    # Check briefings, scheduled jobs, and sleep cycles
-    with db.get_db(config.db_path) as conn:
-        briefing_tasks = check_briefings(conn, config)
-        if briefing_tasks:
-            logger.info("Queued %d briefing(s)", len(briefing_tasks))
+    # Check briefings (manages own DB connections to avoid holding locks during network I/O)
+    briefing_tasks = check_briefings(config.db_path, config)
+    if briefing_tasks:
+        logger.info("Queued %d briefing(s)", len(briefing_tasks))
 
+    # Check scheduled jobs and sleep cycles
+    with db.get_db(config.db_path) as conn:
         scheduled_tasks = check_scheduled_jobs(conn, config)
         if scheduled_tasks:
             logger.info("Queued %d scheduled job(s)", len(scheduled_tasks))
@@ -2162,13 +2176,13 @@ def run_daemon(config: Config) -> None:
 
         now = time.time()
 
-        # Check briefings periodically
+        # Check briefings periodically (manages own DB connections to avoid
+        # holding locks during slow network pre-fetching)
         if now - last_briefing_check >= config.scheduler.briefing_check_interval:
             try:
-                with db.get_db(config.db_path) as conn:
-                    briefing_tasks = check_briefings(conn, config)
-                    if briefing_tasks:
-                        logger.info("Queued %d briefing(s)", len(briefing_tasks))
+                briefing_tasks = check_briefings(config.db_path, config)
+                if briefing_tasks:
+                    logger.info("Queued %d briefing(s)", len(briefing_tasks))
             except Exception as e:
                 logger.error("Error checking briefings: %s", e)
             last_briefing_check = now

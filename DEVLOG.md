@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-02-28: Fix DB lock during briefing prefetch, browser stability
+
+Production crash: `check_briefings()` held a DB write transaction open while doing slow network I/O (yfinance, FinViz, IMAP newsletter fetching). When FinViz timed out (~2 min), the Talk poller thread couldn't access the DB, causing "database is locked" errors and eventually a deadlocked main loop.
+
+Also improved browser container stability with memory-aware session management and automatic health-based restarts.
+
+**Key changes:**
+- Split `check_briefings()` into 3 phases: short DB read (check schedules), network prefetch (no DB held), short DB write (create tasks). Function now takes `db_path` instead of `conn` and manages its own connections.
+- Browser container: added memory pressure checks (reject new sessions above 85%, evict idle above 80%), renderer process limits, JS heap caps.
+- Browser session management: close tabs fully instead of navigating to about:blank, adjust tab indices after close.
+- Added browser health check cron (`/etc/cron.d/`): restarts container if unhealthy (every 2 min check) plus daily forced restart at 5 AM.
+
+**Files added/modified:**
+- `src/istota/scheduler.py` — Refactored `check_briefings()` to avoid holding DB locks during network I/O
+- `tests/test_scheduler.py` — Updated all `check_briefings` calls to pass `db_path` instead of `conn`
+- `docker/browser/browse_api.py` — Memory pressure checks, tab closing, session eviction
+- `docker/browser/chrome.py` — Added `--renderer-process-limit=4` and `--js-flags=--max-old-space-size=256`
+- `deploy/ansible/templates/istota-browser-health.cron.j2` — New cron template for health check + daily restart
+- `deploy/ansible/tasks/main.yml` — Added browser health cron deployment tasks
+- `deploy/ansible/defaults/main.yml` — Added `istota_browser_restart_cron` default
+
 ## 2026-02-26: Email skill clarity, progress fixes, fava restart
 
 Three targeted fixes addressing bugs found in production usage.

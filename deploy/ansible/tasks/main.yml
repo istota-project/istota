@@ -630,6 +630,21 @@
     - "{{ istota_home }}/browser.env"
   when: not istota_browser_enabled
 
+- name: Deploy browser health check cron
+  template:
+    src: istota-browser-health.cron.j2
+    dest: "/etc/cron.d/{{ istota_namespace }}-browser-health"
+    owner: root
+    group: root
+    mode: "0644"
+  when: istota_browser_enabled
+
+- name: Remove browser health check cron when disabled
+  file:
+    path: "/etc/cron.d/{{ istota_namespace }}-browser-health"
+    state: absent
+  when: not istota_browser_enabled
+
 # ============================================================
 # BACKUP TASKS
 # ============================================================

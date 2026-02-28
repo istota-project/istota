@@ -52,6 +52,8 @@ def launch_chrome():
         "--enable-unsafe-swiftshader",
         "--use-gl=swiftshader",
         "--enable-webgl",
+        "--renderer-process-limit=4",
+        "--js-flags=--max-old-space-size=256",
         "--enable-features=SharedArrayBuffer",
         "--disable-features=DnsOverHttps",
         "--disable-client-side-phishing-detection",

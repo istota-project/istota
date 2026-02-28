@@ -1,0 +1,4 @@
+# {{ istota_namespace | capitalize }} browser container health check - managed by Ansible
+MAILTO=""
+*/2 * * * * root docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' {{ istota_namespace }}-browser 2>/dev/null | grep -q unhealthy && docker compose -f {{ istota_home }}/docker-compose.browser.yml restart >> /var/log/{{ istota_namespace }}/browser-health.log 2>&1
+{{ istota_browser_restart_cron }} root docker compose -f {{ istota_home }}/docker-compose.browser.yml restart >> /var/log/{{ istota_namespace }}/browser-health.log 2>&1

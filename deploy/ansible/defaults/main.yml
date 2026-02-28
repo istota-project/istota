@@ -209,7 +209,8 @@ istota_browser_vnc_external_url: ""  # e.g. https://vnc.example.com:6080
 istota_browser_max_sessions: 3
 istota_browser_shm_size: "2gb"
 istota_browser_cpu_limit: "{{ ansible_facts['processor_vcpus'] }}"
-istota_browser_memory_limit: "2G"
+istota_browser_memory_limit: "3G"
+istota_browser_restart_cron: "0 5 * * *"  # Daily restart (5 AM)
 
 # ntfy push notification settings (one-way broadcast notifications)
 istota_ntfy_enabled: false
