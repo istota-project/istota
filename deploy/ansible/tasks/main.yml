@@ -425,6 +425,7 @@
     uv sync
     {% if istota_memory_search_enabled %}--extra memory-search{% endif %}
     {% if istota_whisper_enabled %}--extra whisper{% endif %}
+    {% if istota_location_enabled | default(false) %}--extra location{% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"
   environment:
@@ -658,13 +659,6 @@
   notify:
     - reload systemd
     - "restart istota-webhooks"
-
-- name: Install location dependencies
-  shell: "{{ istota_home }}/.venv/bin/uv sync --extra location"
-  args:
-    chdir: "{{ istota_repo_dir }}"
-  become_user: "{{ istota_user }}"
-  when: istota_location_enabled | default(false)
 
 - name: Enable and start webhook receiver
   systemd:

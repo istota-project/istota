@@ -23,7 +23,8 @@ python -m istota.skills.location history --date 2026-02-15
 python -m istota.skills.location places
 
 # Save current location as a named place
-# Reads the most recent ping and writes a new [[places]] entry to LOCATION.md
+# Reads the most recent ping and appends a [[places]] entry to LOCATION.md
+# The webhooks service needs a restart (or SIGHUP) to pick up the new place
 python -m istota.skills.location learn "coffee shop"
 python -m istota.skills.location learn "gym" --category gym --radius 75
 ```

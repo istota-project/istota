@@ -55,6 +55,8 @@ _WIZ_NTFY_ENABLED=false
 _WIZ_NTFY_SERVER=""
 _WIZ_NTFY_TOPIC=""
 _WIZ_NTFY_TOKEN=""
+_WIZ_LOCATION_ENABLED=false
+_WIZ_WEBHOOKS_PORT=8765
 _WIZ_BACKUP_ENABLED=true
 _WIZ_USERS_BLOCK=""
 _WIZ_ADMIN_BLOCK="admin_users = []"
@@ -501,6 +503,15 @@ wiz_features() {
         prompt_secret _WIZ_NTFY_TOKEN "ntfy access token (optional, press Enter to skip)"
     fi
 
+    # Location tracking
+    echo
+    dim "GPS location tracking via Overland app (webhook receiver)."
+    prompt_bool _WIZ_LOCATION_ENABLED "Enable GPS location tracking?" "n"
+    if [ "$_WIZ_LOCATION_ENABLED" = "true" ]; then
+        echo
+        prompt_value _WIZ_WEBHOOKS_PORT "Webhook receiver port" "8765"
+    fi
+
     # Backups
     echo
     dim "Automated backups of the database and Nextcloud files with rotation."
@@ -565,6 +576,7 @@ wiz_review() {
     echo -e "  ${_BOLD}Channel sleep:${_RESET}     $_WIZ_CHANNEL_SLEEP_ENABLED"
     echo -e "  ${_BOLD}Whisper:${_RESET}           $_WIZ_WHISPER_ENABLED$([ "$_WIZ_WHISPER_ENABLED" = "true" ] && echo " (model: $_WIZ_WHISPER_MODEL)")"
     echo -e "  ${_BOLD}ntfy:${_RESET}              $_WIZ_NTFY_ENABLED$([ "$_WIZ_NTFY_ENABLED" = "true" ] && echo " (topic: $_WIZ_NTFY_TOPIC)")"
+    echo -e "  ${_BOLD}Location:${_RESET}          $_WIZ_LOCATION_ENABLED$([ "$_WIZ_LOCATION_ENABLED" = "true" ] && echo " (port: $_WIZ_WEBHOOKS_PORT)")"
     echo -e "  ${_BOLD}Backups:${_RESET}           $_WIZ_BACKUP_ENABLED"
     echo -e "  ${_BOLD}Browser:${_RESET}           $_WIZ_BROWSER_ENABLED"
     echo -e "  ${_BOLD}Claude token:${_RESET}      $([ -n "$_WIZ_CLAUDE_TOKEN" ] && echo "provided" || echo "authenticate later")"
@@ -641,6 +653,10 @@ enabled = $_WIZ_NTFY_ENABLED
 server_url = "$_WIZ_NTFY_SERVER"
 topic = "$_WIZ_NTFY_TOPIC"
 token = "$_WIZ_NTFY_TOKEN"
+
+[location]
+enabled = $_WIZ_LOCATION_ENABLED
+webhooks_port = $_WIZ_WEBHOOKS_PORT
 
 [backup]
 enabled = $_WIZ_BACKUP_ENABLED
@@ -1244,11 +1260,13 @@ deploy_code() {
 
     # Check settings for optional features
     if [ -f "$SETTINGS_FILE" ]; then
-        local mem_search whisper
+        local mem_search whisper location
         mem_search=$(read_setting "memory_search.enabled" "true")
         whisper=$(read_setting "whisper.enabled" "false")
+        location=$(read_setting "location.enabled" "false")
         [ "$mem_search" = "True" ] || [ "$mem_search" = "true" ] && extras="$extras --extra memory-search"
         [ "$whisper" = "True" ] || [ "$whisper" = "true" ] && extras="$extras --extra whisper"
+        [ "$location" = "True" ] || [ "$location" = "true" ] && extras="$extras --extra location"
     fi
 
     # shellcheck disable=SC2086
@@ -1325,6 +1343,7 @@ init_db(Path('$db_path'))
         sqlite3 "$db_path" "ALTER TABLE processed_emails ADD COLUMN \"references\" TEXT;" 2>/dev/null || true
         sqlite3 "$db_path" "ALTER TABLE tasks ADD COLUMN output_target TEXT;" 2>/dev/null || true
         sqlite3 "$db_path" "ALTER TABLE scheduled_jobs ADD COLUMN output_target TEXT;" 2>/dev/null || true
+        sqlite3 "$db_path" "ALTER TABLE tasks ADD COLUMN actions_taken TEXT;" 2>/dev/null || true
         ok "Database ready"
     fi
 }
@@ -1374,6 +1393,23 @@ EOF
 
     systemctl daemon-reload
     systemctl enable istota-scheduler
+
+    # Enable webhooks service if location is enabled
+    if [ -f "$SETTINGS_FILE" ]; then
+        local location_enabled
+        location_enabled=$(read_setting "location.enabled" "false")
+        if [ "$location_enabled" = "True" ] || [ "$location_enabled" = "true" ]; then
+            if [ -f /etc/systemd/system/istota-webhooks.service ]; then
+                systemctl enable istota-webhooks
+                ok "Webhooks service enabled"
+            fi
+        else
+            # Disable if location was turned off
+            systemctl stop istota-webhooks 2>/dev/null || true
+            systemctl disable istota-webhooks 2>/dev/null || true
+        fi
+    fi
+
     ok "Services deployed"
 }
 
@@ -1381,6 +1417,17 @@ start_services() {
     info "Starting services"
     systemctl restart istota-scheduler
     ok "Scheduler started"
+
+    if [ -f "$SETTINGS_FILE" ]; then
+        local location_enabled
+        location_enabled=$(read_setting "location.enabled" "false")
+        if [ "$location_enabled" = "True" ] || [ "$location_enabled" = "true" ]; then
+            if [ -f /etc/systemd/system/istota-webhooks.service ]; then
+                systemctl restart istota-webhooks
+                ok "Webhooks service started"
+            fi
+        fi
+    fi
 }
 
 # ============================================================
@@ -1400,6 +1447,21 @@ verify_installation() {
         warn "Scheduler service is not running"
         dim "Check logs: journalctl -u istota-scheduler -n 20"
         all_ok=false
+    fi
+
+    # Check webhooks service if location enabled
+    if [ -f "$SETTINGS_FILE" ]; then
+        local location_enabled
+        location_enabled=$(read_setting "location.enabled" "false")
+        if [ "$location_enabled" = "True" ] || [ "$location_enabled" = "true" ]; then
+            if systemctl is-active --quiet istota-webhooks; then
+                ok "Webhooks service is running"
+            else
+                warn "Webhooks service is not running"
+                dim "Check logs: journalctl -u istota-webhooks -n 20"
+                all_ok=false
+            fi
+        fi
     fi
 
     # Check Claude CLI — prefer .local/bin, fall back to system PATH

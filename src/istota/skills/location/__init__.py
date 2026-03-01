@@ -208,24 +208,15 @@ def cmd_learn(args):
         sys.exit(1)
 
     lat, lon = row["lat"], row["lon"]
+    conn.close()
 
-    # Insert into DB
-    conn.execute(
-        """
-        INSERT INTO places (user_id, name, lat, lon, radius_meters, category)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT (user_id, name) DO UPDATE SET
-            lat = excluded.lat, lon = excluded.lon,
-            radius_meters = excluded.radius_meters, category = excluded.category
-        """,
-        (user_id, name, lat, lon, radius, category),
-    )
-    conn.commit()
-
-    # Also write to LOCATION.md if accessible via mount
+    # Write to LOCATION.md (source of truth — DB synced on webhook reload)
     mount_path = os.environ.get("NEXTCLOUD_MOUNT_PATH", "")
-    if mount_path:
-        _append_place_to_location_md(mount_path, user_id, name, lat, lon, radius, category)
+    if not mount_path:
+        print(json.dumps({"error": "NEXTCLOUD_MOUNT_PATH not set, cannot write LOCATION.md"}))
+        sys.exit(1)
+
+    _append_place_to_location_md(mount_path, user_id, name, lat, lon, radius, category)
 
     print(json.dumps({
         "status": "ok",
@@ -233,9 +224,8 @@ def cmd_learn(args):
         "lat": round(lat, 6),
         "lon": round(lon, 6),
         "radius_meters": radius,
-        "message": f"Saved '{name}' at {lat:.4f}, {lon:.4f}",
+        "message": f"Saved '{name}' at {lat:.4f}, {lon:.4f}. Restart webhooks service to sync.",
     }))
-    conn.close()
 
 
 def _append_place_to_location_md(

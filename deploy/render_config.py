@@ -158,6 +158,7 @@ def render_config_toml(s: dict) -> str:
         ("scheduled_job_max_consecutive_failures", 5),
         ("feed_check_interval", 300), ("feed_item_retention_days", 30),
         ("talk_cache_max_per_conversation", 200), ("temp_file_retention_days", 7),
+        ("location_ping_retention_days", 365),
     ]
     for key, default in sched_fields:
         val = sch.get(key, default)
@@ -276,6 +277,11 @@ def render_config_toml(s: dict) -> str:
         github_reviewer = get(s, "developer.github_reviewer", "")
         if github_reviewer:
             lines.append(f'github_reviewer = "{github_reviewer}"')
+
+    # [location]
+    if get(s, "location.enabled", False):
+        lines.extend(['', '[location]', 'enabled = true'])
+        lines.append(f'webhooks_port = {get(s, "location.webhooks_port", 8765)}')
 
     lines.append('')
     lines.append('# User configuration is in per-user files: config/users/{user_id}.toml')
@@ -450,6 +456,57 @@ def render_systemd_service(s: dict) -> str:
     return "\n".join(lines)
 
 
+def render_webhooks_service(s: dict) -> str:
+    home = get(s, "home", "/srv/app/istota")
+    namespace = get(s, "namespace", "istota")
+    package = get(s, "package", "istota")
+    user = get(s, "user", namespace)
+    group = get(s, "group", namespace)
+    use_mount = get(s, "use_nextcloud_mount", True)
+    mount_path = get(s, "nextcloud_mount_path", "/srv/mount/nextcloud/content")
+    use_env_file = get(s, "use_environment_file", True)
+    port = get(s, "location.webhooks_port", 8765)
+
+    lines = ["[Unit]"]
+    lines.append(f"Description={namespace.capitalize()} Webhook Receiver")
+    lines.append("After=network.target")
+
+    lines.extend(["", "[Service]"])
+    lines.append("Type=simple")
+    lines.append(f"User={user}")
+    lines.append(f"Group={group}")
+    lines.append(f"WorkingDirectory={home}/src")
+    lines.append(f"ExecStart={home}/.venv/bin/uvicorn {package}.webhook_receiver:app --host 127.0.0.1 --port {port}")
+    lines.append("Restart=always")
+    lines.append("RestartSec=5")
+    lines.append("")
+    lines.append("# Environment")
+    lines.append(f"Environment=PATH={home}/.venv/bin:/usr/local/bin:/usr/bin:/bin")
+    lines.append(f"Environment=HOME={home}")
+    lines.append("Environment=PYTHONUNBUFFERED=1")
+    if use_env_file:
+        lines.append(f"EnvironmentFile=/etc/{namespace}/secrets.env")
+    lines.append("")
+    lines.append("# Logging")
+    lines.append("StandardOutput=journal")
+    lines.append("StandardError=journal")
+    lines.append(f"SyslogIdentifier={namespace}-webhooks")
+    lines.append("")
+    lines.append("# Security hardening")
+    lines.append("NoNewPrivileges=true")
+    lines.append("ProtectSystem=strict")
+    lines.append("ProtectHome=read-only")
+    lines.append("PrivateTmp=true")
+    lines.append(f"ReadWritePaths={home}")
+    if use_mount:
+        lines.append(f"ReadWritePaths={mount_path}")
+
+    lines.extend(["", "[Install]"])
+    lines.append("WantedBy=multi-user.target")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_logrotate(s: dict) -> str:
     namespace = get(s, "namespace", "istota")
     user = get(s, "user", namespace)
@@ -506,6 +563,10 @@ def main():
 
     # Systemd service
     files["/etc/systemd/system/istota-scheduler.service"] = render_systemd_service(s)
+
+    # Webhooks service (location tracking)
+    if get(s, "location.enabled", False):
+        files["/etc/systemd/system/istota-webhooks.service"] = render_webhooks_service(s)
 
     # Logrotate
     files[f"/etc/logrotate.d/{namespace}"] = render_logrotate(s)
