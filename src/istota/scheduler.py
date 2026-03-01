@@ -342,8 +342,10 @@ def _make_talk_progress_callback(
         if max_chars:
             msg = msg[:max_chars]
 
-        # Skip text events for all edit-based modes
-        if not italicize and style != "legacy":
+        # Skip text events — posting the full assistant response as progress
+        # causes duplicate messages (the result is posted again as the final
+        # delivery). Only tool-use descriptions should appear as progress.
+        if not italicize:
             return
 
         if style == "replace":
@@ -963,6 +965,12 @@ def process_one_task(
                     config, task, random.choice(PROGRESS_MESSAGES),
                     reference_id=f"istota:task:{task.id}:ack",
                 ))
+                if ack_msg_id is None:
+                    logger.warning(
+                        "Ack message posted but no message ID returned for task %d "
+                        "(progress will fall back to legacy mode)",
+                        task.id,
+                    )
 
             # Build streaming progress callback if enabled
             if config.scheduler.progress_updates:
@@ -1210,7 +1218,9 @@ def process_one_task(
     max_chars = config.scheduler.progress_text_max_chars
     use_edit = progress_callback and getattr(progress_callback, "use_edit", False)
     if post_talk_message and max_chars == 0 and not use_edit and progress_callback and hasattr(progress_callback, "sent_texts"):
-        result_stripped = post_talk_message.strip()
+        # Normalize newlines to spaces for comparison — progress callback
+        # collapses newlines (line 341) but the final result has originals.
+        result_stripped = post_talk_message.replace("\n", " ").strip()
         for sent in progress_callback.sent_texts:
             sent_stripped = sent.strip()
             if sent_stripped == result_stripped:
