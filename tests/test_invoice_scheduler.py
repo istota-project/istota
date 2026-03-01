@@ -412,8 +412,14 @@ class TestCheckScheduledInvoices:
         mock_gen.return_value = [{"invoice_number": "INV-000001", "client": "Acme Corp", "total": 100.0}]
 
         with db.get_db(config.db_path) as conn:
-            # Simulate generation already happened on the 15th
-            db.set_invoice_schedule_generation(conn, "alice", "acme")
+            # Simulate generation already happened on the 15th of Feb
+            conn.execute(
+                """
+                INSERT INTO invoice_schedule_state (user_id, client_key, last_generation_at)
+                VALUES (?, ?, ?)
+                """,
+                ("alice", "acme", "2026-02-15T10:00:00+00:00"),
+            )
 
         with patch("istota.invoice_scheduler.datetime") as mock_dt:
             # Now it's the 16th — past both reminder and generation day
