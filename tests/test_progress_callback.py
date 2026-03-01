@@ -150,6 +150,28 @@ class TestMakeTalkProgressCallback:
             # Should not raise
             callback("Some message")
 
+    def test_legacy_skips_text_events(self, tmp_path):
+        """Text events (italicize=False) should not be posted in legacy mode."""
+        config = _make_config(tmp_path)
+        task = _make_task()
+
+        with (
+            patch("istota.scheduler.asyncio.run") as mock_run,
+            patch("istota.scheduler.db.get_db") as mock_db,
+        ):
+            mock_conn = MagicMock()
+            mock_db.return_value.__enter__ = MagicMock(return_value=mock_conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+
+            callback = _make_talk_progress_callback(config, task)
+            callback("Reading file.txt")  # tool use — should post
+            callback("Here is the full response text", italicize=False)  # text event — skip
+            callback("Writing output.json")  # tool use — should post
+
+        # Only 2 posts (text event was skipped)
+        assert mock_run.call_count == 2
+        assert callback.sent_texts == ["Reading file.txt", "Writing output.json"]
+
     def test_callback_logs_progress(self, tmp_path):
         config = _make_config(tmp_path)
         task = _make_task()
