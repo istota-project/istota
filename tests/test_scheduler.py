@@ -588,6 +588,32 @@ class TestCheckScheduledJobs:
             result = check_scheduled_jobs(conn, config)
         assert len(result) == 1
 
+    @patch("istota.scheduler._sync_cron_files")
+    def test_skip_log_channel_flows_to_task(self, mock_sync, db_path):
+        """skip_log_channel on a scheduled job should propagate to the created task."""
+        user = UserConfig(timezone="UTC")
+        config = Config(db_path=db_path, users={"alice": user})
+
+        yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled,
+                    last_run_at, created_at, skip_log_channel)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "quiet-job", "0 0 * * *", "Check stuff", 1,
+                 yesterday, yesterday, 1),
+            )
+
+        now = datetime.now(ZoneInfo("UTC"))
+        if now.hour > 0:
+            with db.get_db(db_path) as conn:
+                result = check_scheduled_jobs(conn, config)
+            assert len(result) == 1
+            with db.get_db(db_path) as conn:
+                task = db.get_task(conn, result[0])
+            assert task.skip_log_channel is True
+
     def test_sync_called_before_evaluation(self, db_path):
         """_sync_cron_files should be called at the start of check_scheduled_jobs."""
         user = UserConfig(timezone="UTC")

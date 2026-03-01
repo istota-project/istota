@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-01: Per-job log channel suppression
+
+Added `skip_log_channel` option for scheduled jobs. Frequent scheduled jobs (e.g., every few minutes) were spamming the per-user log channel with tool-by-tool execution logs. `silent_unless_action` already controls whether results are posted to Talk, but there was no way to suppress log channel output. The new field flows from CRON.md through the full pipeline: CronJob → ScheduledJob (DB) → Task → checked in process_one_task().
+
+**Key changes:**
+- `skip_log_channel: bool` field on CronJob, ScheduledJob, and Task dataclasses
+- DB migrations for both `scheduled_jobs` and `tasks` tables
+- Schema, sync, and generation support in cron_loader.py
+- Scheduler suppresses log channel setup when task.skip_log_channel is True
+
+**Files modified:**
+- `src/istota/cron_loader.py` — CronJob field, parsing, generation, sync
+- `src/istota/db.py` — ScheduledJob + Task fields, migrations, create_task, row readers
+- `src/istota/scheduler.py` — Flow-through in check_scheduled_jobs, suppression in process_one_task
+- `schema.sql` — Column additions to both tables
+- `tests/test_cron_loader.py` — Parsing, generation, sync tests
+- `tests/test_log_channel.py` — Suppression test in process_one_task
+- `tests/test_scheduler.py` — Flow-through test in check_scheduled_jobs
+
 ## 2026-03-01: Webhook receiver review and fixes
 
 Reviewed the location/webhooks implementation and fixed several issues. Renamed `location_receiver.py` to `webhook_receiver.py` and the systemd service from `istota-location` to `istota-webhooks` to support future webhook endpoints beyond GPS. Renamed nginx config from `istota-site.conf.j2` to `istota.conf.j2` since it now serves both site hosting and webhooks.

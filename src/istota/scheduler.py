@@ -932,6 +932,8 @@ def process_one_task(
     # Log channel setup — resolve before execution starts
     user_cfg = config.get_user(task.user_id)
     log_channel = user_cfg.log_channel if user_cfg else ""
+    if task.skip_log_channel:
+        log_channel = ""
     log_channel_prefix = ""
     log_callback = None
     if log_channel and config.nextcloud.url and not dry_run:
@@ -1949,6 +1951,7 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     output_target=job.output_target,
                     priority=5,
                     heartbeat_silent=job.silent_unless_action,
+                    skip_log_channel=job.skip_log_channel,
                     scheduled_job_id=job.id,
                     command=job.command,
                     queue="background",

@@ -169,7 +169,7 @@ Talk tasks use a poller-fed local cache (`talk_messages` table, bounded by `talk
 Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user's timezone. Components: `calendar`, `todos`, `email`, `markets`, `news`, `reminders`. Market data pre-fetched. Memory isolated from briefing prompts.
 
 ### Scheduled Jobs
-Defined in user's `CRON.md` (markdown with TOML `[[jobs]]`). Job types: `prompt` (Claude Code) or `command` (shell). One-time jobs (`once = true`) auto-deleted after success. Auto-disable after 5 consecutive failures. Results excluded from interactive context.
+Defined in user's `CRON.md` (markdown with TOML `[[jobs]]`). Job types: `prompt` (Claude Code) or `command` (shell). One-time jobs (`once = true`) auto-deleted after success. Auto-disable after 5 consecutive failures. Results excluded from interactive context. Per-job `skip_log_channel = true` suppresses log channel output for frequent jobs.
 
 ### Sleep Cycle
 Nightly memory extraction (direct subprocess). Gathers completed tasks → Claude extracts memories → writes dated memory files with task provenance (`ref:TASK_ID`). Channel sleep cycle runs in parallel for shared context. Optional USER.md curation pass (`curate_user_memory`). Config: `[sleep_cycle]`, `[channel_sleep_cycle]`.

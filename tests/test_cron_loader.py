@@ -80,6 +80,7 @@ silent_unless_action = true
         assert jobs[0].room == "room1"
         assert jobs[0].enabled is True
         assert jobs[0].silent_unless_action is False
+        assert jobs[0].skip_log_channel is False
 
         assert jobs[1].name == "weekly"
         assert jobs[1].target == "email"
@@ -103,6 +104,24 @@ prompt = "Do stuff"
         assert jobs[0].room == ""
         assert jobs[0].enabled is True
         assert jobs[0].silent_unless_action is False
+        assert jobs[0].skip_log_channel is False
+
+    def test_skip_log_channel(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+# Jobs
+
+```toml
+[[jobs]]
+name = "quiet"
+cron = "*/5 * * * *"
+prompt = "Check something"
+skip_log_channel = true
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].skip_log_channel is True
 
     def test_enabled_false(self, mount_path, make_config_with_mount):
         config = make_config_with_mount()
@@ -200,6 +219,7 @@ class TestGenerateCronMd:
         assert "room" not in content
         assert "enabled" not in content
         assert "silent_unless_action" not in content
+        assert "skip_log_channel" not in content
 
     def test_includes_disabled(self):
         jobs = [CronJob(name="off", cron="0 * * * *", prompt="test", enabled=False)]
@@ -210,6 +230,11 @@ class TestGenerateCronMd:
         jobs = [CronJob(name="quiet", cron="0 * * * *", prompt="test", silent_unless_action=True)]
         content = generate_cron_md(jobs)
         assert "silent_unless_action = true" in content
+
+    def test_includes_skip_log_channel(self):
+        jobs = [CronJob(name="nolog", cron="0 * * * *", prompt="test", skip_log_channel=True)]
+        content = generate_cron_md(jobs)
+        assert "skip_log_channel = true" in content
 
     def test_round_trip(self, mount_path, make_config_with_mount):
         """Generate → write → load should preserve all fields."""
@@ -288,6 +313,17 @@ class TestSyncCronJobsToDb:
         assert jobs[0].output_target == "talk"
         assert jobs[1].name == "j2"
         assert jobs[1].output_target == "email"
+
+    def test_insert_with_skip_log_channel(self, db_path):
+        file_jobs = [
+            CronJob(name="nolog", cron="*/5 * * * *", prompt="check", skip_log_channel=True),
+        ]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+
+        assert len(jobs) == 1
+        assert jobs[0].skip_log_channel is True
 
     def test_update_existing_job(self, db_path):
         with db.get_db(db_path) as conn:

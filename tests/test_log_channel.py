@@ -353,6 +353,26 @@ class TestProcessOneTaskLogChannel:
     @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     @patch("istota.scheduler._finalize_log_channel")
+    def test_skip_log_channel_suppresses_logging(
+        self, mock_finalize, mock_arun, mock_exec, db_path, tmp_path,
+    ):
+        users = {"testuser": UserConfig(log_channel="logroom")}
+        config = self._make_config(db_path, tmp_path, users=users)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="Hello", user_id="testuser",
+                source_type="scheduled", skip_log_channel=True,
+            )
+
+        result = process_one_task(config)
+        assert result is not None
+        _, success = result
+        assert success is True
+        mock_finalize.assert_not_called()
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    @patch("istota.scheduler._finalize_log_channel")
     def test_no_log_channel_when_unconfigured(
         self, mock_finalize, mock_arun, mock_exec, db_path, tmp_path,
     ):

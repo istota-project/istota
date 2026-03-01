@@ -25,6 +25,7 @@ class CronJob:
     room: str = ""  # conversation_token
     enabled: bool = True
     silent_unless_action: bool = False
+    skip_log_channel: bool = False
     once: bool = False
 
 
@@ -85,6 +86,7 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
             room=j.get("room", ""),
             enabled=j.get("enabled", True),
             silent_unless_action=j.get("silent_unless_action", False),
+            skip_log_channel=j.get("skip_log_channel", False),
             once=j.get("once", False),
         ))
 
@@ -120,6 +122,8 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
             lines.append("enabled = false")
         if job.silent_unless_action:
             lines.append("silent_unless_action = true")
+        if job.skip_log_channel:
+            lines.append("skip_log_channel = true")
         if job.once:
             lines.append("once = true")
 
@@ -152,6 +156,7 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
                 "conversation_token": fj.room or None,
                 "output_target": fj.target or None,
                 "silent_unless_action": 1 if fj.silent_unless_action else 0,
+                "skip_log_channel": 1 if fj.skip_log_channel else 0,
                 "once": 1 if fj.once else 0,
             }
             # File is authoritative for enabled state (symmetric sync)
@@ -183,14 +188,15 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
                 """INSERT INTO scheduled_jobs
                    (user_id, name, cron_expression, prompt, command,
                     conversation_token, output_target, enabled, silent_unless_action,
-                    once)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    skip_log_channel, once)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id, fj.name, fj.cron, fj.prompt,
                     fj.command or None,
                     fj.room or None, fj.target or None,
                     1 if fj.enabled else 0,
                     1 if fj.silent_unless_action else 0,
+                    1 if fj.skip_log_channel else 0,
                     1 if fj.once else 0,
                 ),
             )
@@ -238,6 +244,7 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             room=j.conversation_token or "",
             enabled=j.enabled,
             silent_unless_action=j.silent_unless_action,
+            skip_log_channel=j.skip_log_channel,
             once=j.once,
         )
         for j in db_jobs

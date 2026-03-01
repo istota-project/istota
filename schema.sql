@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action
 
+    -- Log channel suppression (per-task opt-out)
+    skip_log_channel INTEGER DEFAULT 0,  -- Whether to suppress log channel output
+
     -- Scheduled job tracking
     scheduled_job_id INTEGER,       -- Links task back to originating scheduled job
 
@@ -185,6 +188,7 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     last_error TEXT,
     last_success_at TEXT,
     once INTEGER DEFAULT 0,                 -- One-time job: auto-removed after successful execution
+    skip_log_channel INTEGER DEFAULT 0,     -- Suppress log channel output for tasks from this job
     UNIQUE(user_id, name)
 );
 
