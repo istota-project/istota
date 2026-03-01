@@ -219,6 +219,20 @@ def create_task(
     queue: str = "foreground",
 ) -> int:
     """Create a new task and return its ID."""
+    # Guard against duplicate Talk messages (race between overlapping poll cycles)
+    if talk_message_id is not None:
+        existing = conn.execute(
+            "SELECT id FROM tasks WHERE talk_message_id = ? AND conversation_token = ?",
+            (talk_message_id, conversation_token),
+        ).fetchone()
+        if existing:
+            logger.warning(
+                "Duplicate talk_message_id %d in conversation %s — "
+                "task %d already exists, skipping",
+                talk_message_id, conversation_token, existing[0],
+            )
+            return existing[0]
+
     cursor = conn.execute(
         """
         INSERT INTO tasks (

@@ -84,6 +84,42 @@ class TestHasActiveForegroundTaskForChannel:
             assert db.has_active_foreground_task_for_channel(conn, "room1") is False
 
 
+class TestCreateTaskTalkDedup:
+    def test_duplicate_talk_message_id_returns_existing(self, db_path):
+        with db.get_db(db_path) as conn:
+            task1 = db.create_task(
+                conn, prompt="hello", user_id="alice",
+                conversation_token="room1", talk_message_id=999,
+            )
+            task2 = db.create_task(
+                conn, prompt="hello again", user_id="alice",
+                conversation_token="room1", talk_message_id=999,
+            )
+            assert task2 == task1
+
+    def test_same_message_id_different_conversation_creates_new(self, db_path):
+        with db.get_db(db_path) as conn:
+            task1 = db.create_task(
+                conn, prompt="hello", user_id="alice",
+                conversation_token="room1", talk_message_id=999,
+            )
+            task2 = db.create_task(
+                conn, prompt="hello", user_id="alice",
+                conversation_token="room2", talk_message_id=999,
+            )
+            assert task2 != task1
+
+    def test_null_talk_message_id_allows_duplicates(self, db_path):
+        with db.get_db(db_path) as conn:
+            task1 = db.create_task(
+                conn, prompt="job1", user_id="alice",
+            )
+            task2 = db.create_task(
+                conn, prompt="job2", user_id="alice",
+            )
+            assert task2 != task1
+
+
 class TestCountPendingTasksForUserQueue:
     def test_counts_pending_fg_tasks(self, db_path):
         with db.get_db(db_path) as conn:
