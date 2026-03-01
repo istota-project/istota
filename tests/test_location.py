@@ -18,7 +18,7 @@ from istota.location_loader import (
     parse_location_data,
     sync_places_to_db,
 )
-from istota.location_receiver import haversine, resolve_place
+from istota.webhook_receiver import haversine, resolve_place
 from istota.storage import get_user_location_path
 
 
@@ -452,10 +452,10 @@ class TestResolvePlace:
 
 
 class TestStateMachine:
-    """Tests for the state machine logic in location_receiver."""
+    """Tests for the state machine logic in webhook_receiver."""
 
     def _process(self, conn, user_id, place_id, place, timestamp, actions=None):
-        from istota.location_receiver import _update_state_machine
+        from istota.webhook_receiver import _update_state_machine
         ping_id = db.insert_location_ping(
             conn, user_id, timestamp, 0.0, 0.0,
         )
@@ -602,7 +602,7 @@ class TestOverlandPayloadParsing:
 
     def test_parse_feature_coordinates(self):
         """Verify coordinate extraction from GeoJSON Feature."""
-        from istota.location_receiver import _process_feature
+        from istota.webhook_receiver import _process_feature
 
         feature = {
             "type": "Feature",
@@ -638,7 +638,7 @@ class TestOverlandPayloadParsing:
             assert p.wifi == "home-wifi"
 
     def test_parse_negative_speed_becomes_none(self):
-        from istota.location_receiver import _process_feature
+        from istota.webhook_receiver import _process_feature
 
         feature = {
             "type": "Feature",
@@ -661,7 +661,7 @@ class TestOverlandPayloadParsing:
 
     def test_feature_with_activity_string(self):
         """Overland can send activity as a string instead of motion array."""
-        from istota.location_receiver import _process_feature
+        from istota.webhook_receiver import _process_feature
 
         feature = {
             "type": "Feature",
@@ -681,7 +681,7 @@ class TestOverlandPayloadParsing:
             assert p.activity_type == "other_navigation"
 
     def test_empty_coordinates_skipped(self):
-        from istota.location_receiver import _process_feature
+        from istota.webhook_receiver import _process_feature
 
         feature = {
             "type": "Feature",

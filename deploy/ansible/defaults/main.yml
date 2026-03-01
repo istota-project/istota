@@ -80,6 +80,7 @@ istota_scheduler_feed_check_interval: 300                  # Seconds between fee
 istota_scheduler_feed_item_retention_days: 30              # Delete feed items older than N days
 istota_scheduler_talk_cache_max_per_conversation: 200      # Max cached talk messages per conversation
 istota_scheduler_temp_file_retention_days: 7               # Delete temp files older than N days (0=disable)
+istota_scheduler_location_ping_retention_days: 365         # Delete location pings older than N days (0=unlimited)
 
 # Logging settings
 istota_logging_level: "INFO"                        # INFO or DEBUG
@@ -224,7 +225,7 @@ istota_ntfy_priority: 3                    # default priority (1=min, 3=default,
 
 # Location tracking (Overland GPS receiver)
 istota_location_enabled: false
-istota_location_port: 8765
+istota_webhooks_port: 8765
 
 # Whisper audio transcription (faster-whisper CPU, int8)
 istota_whisper_enabled: false
@@ -298,7 +299,9 @@ istota_developer_github_api_allowlist:            # API endpoint allowlist (enfo
 # Nginx site hosting
 istota_site_enabled: false
 istota_site_base_path: "{{ istota_home }}/html"
-istota_site_hostname: "{{ istota_namespace }}.example.com"
+# Public hostname for nginx (site hosting, webhooks, etc.)
+# istota_site_hostname is accepted as a backward-compatible alias
+istota_hostname: "{{ istota_site_hostname | default(istota_namespace + '.example.com') }}"
 
 # Fava web UI settings (beancount ledger viewer)
 istota_fava_enabled: false

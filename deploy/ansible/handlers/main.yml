@@ -14,9 +14,9 @@
     chdir: "{{ istota_home }}"
   when: istota_browser_enabled
 
-- name: "restart istota-location"
+- name: "restart istota-webhooks"
   systemd:
-    name: "{{ istota_namespace }}-location"
+    name: "{{ istota_namespace }}-webhooks"
     state: restarted
   when: istota_location_enabled | default(false)
 

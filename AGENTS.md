@@ -21,7 +21,7 @@ istota/
 │   ├── heartbeat.py         # Heartbeat monitoring system
 │   ├── invoice_scheduler.py # Scheduled invoice generation + reminders
 │   ├── location_loader.py   # LOCATION.md parser + place sync
-│   ├── location_receiver.py # FastAPI GPS receiver (Overland)
+│   ├── webhook_receiver.py   # FastAPI webhook receiver (Overland GPS, etc.)
 │   ├── logging_setup.py     # Central logging configuration
 │   ├── nextcloud_api.py     # Nextcloud API user metadata hydration
 │   ├── nextcloud_client.py  # Shared Nextcloud HTTP plumbing (OCS + WebDAV)

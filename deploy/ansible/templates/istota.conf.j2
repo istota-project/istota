@@ -1,11 +1,11 @@
-# {{ istota_namespace | capitalize }} static site hosting — {{ istota_site_hostname }}
+# {{ istota_namespace | capitalize }} — {{ istota_hostname }}
 # Managed by Ansible — do not edit manually
 
 # Redirect HTTP to HTTPS
 server {
   listen [::]:80;
   listen 80;
-  server_name {{ istota_site_hostname }};
+  server_name {{ istota_hostname }};
 
   # include /etc/nginx/snippets/letsencrypt.conf;
 
@@ -19,17 +19,15 @@ server {
   listen 443 ssl;
   http2 on;
 
-  server_name {{ istota_site_hostname }};
+  server_name {{ istota_hostname }};
 
   # Default SSL certificates (comment out after Let's Encrypt enabled)
   include /etc/nginx/snippets/snakeoil.conf;
 
   # Uncomment block after Let's Encrypt cert is generated
-  # ssl_certificate /etc/letsencrypt/live/{{ istota_site_hostname }}/fullchain.pem;
-  # ssl_certificate_key /etc/letsencrypt/live/{{ istota_site_hostname }}/privkey.pem;
-  # ssl_trusted_certificate /etc/letsencrypt/live/{{ istota_site_hostname }}/chain.pem;
-
-  root {{ istota_home }}/html;
+  # ssl_certificate /etc/letsencrypt/live/{{ istota_hostname }}/fullchain.pem;
+  # ssl_certificate_key /etc/letsencrypt/live/{{ istota_hostname }}/privkey.pem;
+  # ssl_trusted_certificate /etc/letsencrypt/live/{{ istota_hostname }}/chain.pem;
 
   charset utf-8;
 
@@ -37,6 +35,9 @@ server {
   add_header X-Robots-Tag "noindex, nofollow" always;
 
   # include /etc/nginx/snippets/letsencrypt.conf;
+
+{% if istota_site_enabled %}
+  root {{ istota_home }}/html;
 
   # Per-user site locations
 {% for user in _istota_site_users %}
@@ -61,4 +62,16 @@ server {
   }
 
 {% endfor %}
+{% endif %}
+
+{% if istota_location_enabled %}
+  location /webhooks/ {
+    proxy_pass http://127.0.0.1:{{ istota_webhooks_port }}/webhooks/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    client_max_body_size 10m;
+  }
+{% endif %}
 }

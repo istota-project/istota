@@ -855,7 +855,7 @@ Overland posts location batches to your server endpoint.
 1. Install Overland from the App Store
 2. Set your ingest token below
 3. In Overland Settings > Server, set URL to:
-   `https://your-server.com/location?token=YOUR_TOKEN`
+   `https://your-server.com/webhooks/location?token=YOUR_TOKEN`
 4. Define your known places
 
 ## Settings

@@ -11,18 +11,18 @@ Places are defined in LOCATION.md (TOML-in-markdown, same pattern as CRON.md and
 **Key changes:**
 - New DB tables: `location_pings`, `places`, `visits`, `location_state` with indexes
 - Location loader (`location_loader.py`): parses LOCATION.md, syncs places to DB, builds token-to-user map
-- FastAPI receiver (`location_receiver.py`): POST /location endpoint with token auth, haversine place resolution, visit state machine with hysteresis
+- FastAPI receiver (`webhook_receiver.py`): POST /webhooks/location endpoint with token auth, haversine place resolution, visit state machine with hysteresis
 - Location skill CLI: `current`, `history`, `places`, `learn` subcommands. `learn` saves current GPS position as a named place in both DB and LOCATION.md
 - Storage seeding: LOCATION.md template and example, added to user workspace setup
-- Config: `LocationReceiverConfig` dataclass with `enabled` and `receiver_port` fields
+- Config: `LocationReceiverConfig` dataclass with `enabled` and `webhooks_port` fields
 - Ansible: systemd service template, conditional deployment, handler for restarts
 - Optional dependency group `[location]` for fastapi + uvicorn
 
 **Files added:**
 - `src/istota/location_loader.py` — LOCATION.md parser and place sync
-- `src/istota/location_receiver.py` — FastAPI ingest endpoint with state machine
+- `src/istota/webhook_receiver.py` — FastAPI webhook receiver with location state machine
 - `src/istota/skills/location/` — Skill directory (CLI, skill.toml, skill.md, __main__.py)
-- `deploy/ansible/templates/istota-location.service.j2` — Systemd service
+- `deploy/ansible/templates/istota-webhooks.service.j2` — Systemd service for webhook receiver
 - `tests/test_location.py` — 45 tests covering loader, DB, haversine, state machine, CLI
 
 **Files modified:**

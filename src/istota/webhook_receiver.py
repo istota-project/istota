@@ -1,9 +1,9 @@
-"""FastAPI receiver for Overland GPS location data.
+"""FastAPI webhook receiver for istota.
 
-Run as: uvicorn istota.location_receiver:app --host 127.0.0.1 --port 8765
+Run as: uvicorn istota.webhook_receiver:app --host 127.0.0.1 --port 8765
 
-Auth: token in query param (?token=SECRET) or Authorization: Bearer header.
-Token-to-user mapping is built from each user's LOCATION.md ingest_token.
+Currently handles:
+- /webhooks/location — Overland GPS location data
 """
 
 import logging
@@ -14,7 +14,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Query, Request
+from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from . import db
@@ -27,7 +27,7 @@ from .location_loader import (
     sync_places_to_db,
 )
 
-logger = logging.getLogger("istota.location_receiver")
+logger = logging.getLogger("istota.webhook_receiver")
 
 # Module-level state, populated on startup
 _config = None
@@ -78,10 +78,12 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Istota Location Receiver", lifespan=lifespan)
+app = FastAPI(title="Istota Webhook Receiver", lifespan=lifespan)
+
+location_router = APIRouter(prefix="/webhooks/location")
 
 
-@app.post("/location")
+@location_router.post("")
 async def receive_location(
     request: Request,
     token: str = Query(default=""),
@@ -129,6 +131,9 @@ async def receive_location(
         conn.close()
 
     return JSONResponse({"result": "ok"})
+
+
+app.include_router(location_router)
 
 
 def _process_feature(
@@ -244,23 +249,13 @@ def _update_state_machine(
 
     if consecutive >= HYSTERESIS_THRESHOLD:
         # Transition confirmed
-        old_place_name = None
         if current_visit_id is not None:
-            # Close old visit
             db.close_visit(conn, current_visit_id, timestamp)
-            # Get old place name for exit action
-            old_visit = db.get_open_visit(conn, user_id)
-            if old_visit is None:
-                # Visit was just closed, look it up
-                old_places = db.get_places(conn, user_id)
-                for p in old_places:
-                    if p.id == current_place_id:
-                        old_place_name = p.name
-                        break
 
-        if old_place_name is None and current_place_id is not None:
-            places_list = db.get_places(conn, user_id)
-            for p in places_list:
+        # Look up old place name for exit action
+        old_place_name = None
+        if current_place_id is not None:
+            for p in db.get_places(conn, user_id):
                 if p.id == current_place_id:
                     old_place_name = p.name
                     break

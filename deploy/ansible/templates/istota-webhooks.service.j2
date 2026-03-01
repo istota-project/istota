@@ -1,5 +1,5 @@
 [Unit]
-Description={{ istota_namespace | capitalize }} Location Receiver
+Description={{ istota_namespace | capitalize }} Webhook Receiver
 After=network.target
 
 [Service]
@@ -7,7 +7,7 @@ Type=simple
 User={{ istota_user }}
 Group={{ istota_group }}
 WorkingDirectory={{ istota_repo_dir }}
-ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.location_receiver:app --host 127.0.0.1 --port {{ istota_location_port }}
+ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.webhook_receiver:app --host 127.0.0.1 --port {{ istota_webhooks_port }}
 Restart=always
 RestartSec=5
 
@@ -22,7 +22,7 @@ EnvironmentFile=/etc/{{ istota_namespace }}/secrets.env
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier={{ istota_namespace }}-location
+SyslogIdentifier={{ istota_namespace }}-webhooks
 
 # Security hardening
 NoNewPrivileges=true

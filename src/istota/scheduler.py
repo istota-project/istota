@@ -1788,7 +1788,14 @@ async def run_cleanup_checks(config: Config) -> None:
         except Exception as e:
             logger.error(f"Error cleaning up temp files: {e}")
 
-    # 8. Clean up old Claude session logs
+    # 8. Clean up old location pings
+    if sched.location_ping_retention_days > 0:
+        with db.get_db(config.db_path) as conn:
+            deleted_pings = db.cleanup_old_location_pings(conn, sched.location_ping_retention_days)
+            if deleted_pings > 0:
+                logger.info(f"Cleaned up {deleted_pings} old location ping(s)")
+
+    # 9. Clean up old Claude session logs
     if sched.temp_file_retention_days > 0:
         try:
             deleted_logs = cleanup_old_claude_logs(sched.temp_file_retention_days)

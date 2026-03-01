@@ -646,18 +646,18 @@
   when: not istota_browser_enabled
 
 # ============================================================
-# LOCATION RECEIVER
+# WEBHOOK RECEIVER (location tracking, etc.)
 # ============================================================
 
-- name: Deploy location receiver service
+- name: Deploy webhook receiver service
   template:
-    src: istota-location.service.j2
-    dest: "/etc/systemd/system/{{ istota_namespace }}-location.service"
+    src: istota-webhooks.service.j2
+    dest: "/etc/systemd/system/{{ istota_namespace }}-webhooks.service"
     mode: '0644'
   when: istota_location_enabled | default(false)
   notify:
     - reload systemd
-    - "restart istota-location"
+    - "restart istota-webhooks"
 
 - name: Install location dependencies
   shell: "{{ istota_home }}/.venv/bin/uv sync --extra location"
@@ -666,33 +666,47 @@
   become_user: "{{ istota_user }}"
   when: istota_location_enabled | default(false)
 
-- name: Enable and start location receiver
+- name: Enable and start webhook receiver
   systemd:
-    name: "{{ istota_namespace }}-location"
+    name: "{{ istota_namespace }}-webhooks"
     enabled: yes
     state: started
     daemon_reload: yes
   when: istota_location_enabled | default(false)
 
-- name: Find existing location service
-  stat:
-    path: "/etc/systemd/system/{{ istota_namespace }}-location.service"
-  register: location_service_file
-  when: not (istota_location_enabled | default(false))
-
-- name: Stop and disable location receiver when disabled
+- name: Stop and disable old location service (migration)
   systemd:
     name: "{{ istota_namespace }}-location"
     enabled: no
     state: stopped
-  when: not (istota_location_enabled | default(false)) and (location_service_file.stat.exists | default(false))
   failed_when: false
 
-- name: Remove location service file when disabled
+- name: Remove old location service file (migration)
   file:
     path: "/etc/systemd/system/{{ istota_namespace }}-location.service"
     state: absent
-  when: not (istota_location_enabled | default(false)) and (location_service_file.stat.exists | default(false))
+  notify:
+    - reload systemd
+
+- name: Find existing webhooks service
+  stat:
+    path: "/etc/systemd/system/{{ istota_namespace }}-webhooks.service"
+  register: webhooks_service_file
+  when: not (istota_location_enabled | default(false))
+
+- name: Stop and disable webhook receiver when disabled
+  systemd:
+    name: "{{ istota_namespace }}-webhooks"
+    enabled: no
+    state: stopped
+  when: not (istota_location_enabled | default(false)) and (webhooks_service_file.stat.exists | default(false))
+  failed_when: false
+
+- name: Remove webhooks service file when disabled
+  file:
+    path: "/etc/systemd/system/{{ istota_namespace }}-webhooks.service"
+    state: absent
+  when: not (istota_location_enabled | default(false)) and (webhooks_service_file.stat.exists | default(false))
   notify:
     - reload systemd
 
@@ -909,11 +923,11 @@
 # ============================================================
 
 # nginx — inlined (replace with a dedicated role if you prefer)
-- name: Install nginx for site hosting
+- name: Install nginx
   apt:
     name: nginx
     state: present
-  when: istota_site_enabled and not istota_update_only
+  when: (istota_site_enabled or istota_location_enabled | default(false)) and not istota_update_only
 
 - name: Build list of site users
   set_fact:
@@ -967,22 +981,22 @@
     label: "{{ item.key }}"
   when: istota_site_enabled
 
-- name: Deploy nginx site config
+- name: Deploy nginx config
   template:
-    src: istota-site.conf.j2
-    dest: "/etc/nginx/conf.d/{{ istota_site_hostname }}.conf"
+    src: istota.conf.j2
+    dest: "/etc/nginx/conf.d/{{ istota_hostname }}.conf"
     owner: root
     group: root
     mode: "0644"
-  when: istota_site_enabled
+  when: istota_site_enabled or istota_location_enabled | default(false)
   notify:
     - reload nginx
 
-- name: Remove nginx site config when disabled
+- name: Remove nginx config when all features disabled
   file:
-    path: "/etc/nginx/conf.d/{{ istota_site_hostname }}.conf"
+    path: "/etc/nginx/conf.d/{{ istota_hostname }}.conf"
     state: absent
-  when: not istota_site_enabled
+  when: not istota_site_enabled and not (istota_location_enabled | default(false))
   notify:
     - reload nginx
 
