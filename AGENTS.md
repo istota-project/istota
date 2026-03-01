@@ -20,6 +20,8 @@ istota/
 │   ├── executor.py          # Claude Code execution wrapper (Popen + stream-json)
 │   ├── heartbeat.py         # Heartbeat monitoring system
 │   ├── invoice_scheduler.py # Scheduled invoice generation + reminders
+│   ├── location_loader.py   # LOCATION.md parser + place sync
+│   ├── location_receiver.py # FastAPI GPS receiver (Overland)
 │   ├── logging_setup.py     # Central logging configuration
 │   ├── nextcloud_api.py     # Nextcloud API user metadata hydration
 │   ├── nextcloud_client.py  # Shared Nextcloud HTTP plumbing (OCS + WebDAV)
@@ -63,6 +65,7 @@ istota/
 │       ├── transcribe/      # OCR transcription via Tesseract
 │       ├── website/         # Website management reference (doc-only)
 │       ├── garmin/          # Garmin Connect data access (activities, stats, health)
+│       ├── location/       # GPS location tracking CLI (Overland)
 │       └── whisper/         # Audio transcription via faster-whisper
 ├── config/
 │   ├── config.toml          # Active configuration (gitignored)

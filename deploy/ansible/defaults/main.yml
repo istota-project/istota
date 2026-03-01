@@ -222,6 +222,10 @@ istota_ntfy_username: ""                   # basic auth (alternative to token)
 istota_ntfy_password: ""
 istota_ntfy_priority: 3                    # default priority (1=min, 3=default, 5=max)
 
+# Location tracking (Overland GPS receiver)
+istota_location_enabled: false
+istota_location_port: 8765
+
 # Whisper audio transcription (faster-whisper CPU, int8)
 istota_whisper_enabled: false
 istota_whisper_model: "small"              # Model to pre-download (tiny/base/small/medium/large-v3)

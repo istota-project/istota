@@ -377,3 +377,61 @@ CREATE TABLE IF NOT EXISTS istota_kv (
 );
 
 CREATE INDEX IF NOT EXISTS idx_istota_kv_ns ON istota_kv(user_id, namespace);
+
+-- Location pings (GPS data from Overland iOS app)
+CREATE TABLE IF NOT EXISTS location_pings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL,           -- device timestamp (ISO 8601)
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    altitude REAL,
+    accuracy REAL,                     -- horizontal accuracy (meters)
+    speed REAL,                        -- m/s, -1 if unavailable
+    course REAL,                       -- degrees, -1 if unavailable
+    battery REAL,                      -- 0.0–1.0
+    activity_type TEXT,                -- stationary, walking, running, automotive, cycling
+    wifi TEXT,                         -- SSID if available
+    place_id INTEGER REFERENCES places(id),
+    visit_id INTEGER REFERENCES visits(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_location_pings_user_time ON location_pings(user_id, timestamp);
+
+-- Named places (geofences)
+CREATE TABLE IF NOT EXISTS places (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    radius_meters INTEGER NOT NULL DEFAULT 100,
+    category TEXT,                     -- home, gym, work, food, other
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    notes TEXT,
+    UNIQUE(user_id, name)
+);
+
+-- Visits (contiguous time at a place)
+CREATE TABLE IF NOT EXISTS visits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    place_id INTEGER REFERENCES places(id),
+    place_name TEXT NOT NULL,          -- snapshot (place name can change)
+    entered_at TEXT NOT NULL,
+    exited_at TEXT,                    -- NULL = still here
+    duration_sec INTEGER,              -- computed on exit
+    ping_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_visits_user_time ON visits(user_id, entered_at);
+
+-- Location state machine (per-user hysteresis tracking)
+CREATE TABLE IF NOT EXISTS location_state (
+    user_id TEXT PRIMARY KEY,
+    current_place_id INTEGER REFERENCES places(id),
+    current_visit_id INTEGER REFERENCES visits(id),
+    consecutive_count INTEGER DEFAULT 0,
+    last_ping_place_id INTEGER
+);

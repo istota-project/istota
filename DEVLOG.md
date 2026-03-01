@@ -2,6 +2,37 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-01: Location awareness (Overland GPS tracking)
+
+Added GPS-based location tracking using the Overland iOS app as data source. This is the first HTTP-receiving endpoint in istota — everything else is polling-based. The receiver runs as a separate FastAPI service behind nginx, accepting Overland's GeoJSON batch payloads.
+
+Places are defined in LOCATION.md (TOML-in-markdown, same pattern as CRON.md and BRIEFINGS.md). A hysteresis state machine requires 2 consecutive pings at a new place before confirming a transition, preventing spurious enter/exit events. On transitions, configurable actions fire via ntfy, Talk, or cron_prompt.
+
+**Key changes:**
+- New DB tables: `location_pings`, `places`, `visits`, `location_state` with indexes
+- Location loader (`location_loader.py`): parses LOCATION.md, syncs places to DB, builds token-to-user map
+- FastAPI receiver (`location_receiver.py`): POST /location endpoint with token auth, haversine place resolution, visit state machine with hysteresis
+- Location skill CLI: `current`, `history`, `places`, `learn` subcommands. `learn` saves current GPS position as a named place in both DB and LOCATION.md
+- Storage seeding: LOCATION.md template and example, added to user workspace setup
+- Config: `LocationReceiverConfig` dataclass with `enabled` and `receiver_port` fields
+- Ansible: systemd service template, conditional deployment, handler for restarts
+- Optional dependency group `[location]` for fastapi + uvicorn
+
+**Files added:**
+- `src/istota/location_loader.py` — LOCATION.md parser and place sync
+- `src/istota/location_receiver.py` — FastAPI ingest endpoint with state machine
+- `src/istota/skills/location/` — Skill directory (CLI, skill.toml, skill.md, __main__.py)
+- `deploy/ansible/templates/istota-location.service.j2` — Systemd service
+- `tests/test_location.py` — 45 tests covering loader, DB, haversine, state machine, CLI
+
+**Files modified:**
+- `schema.sql` — Added location tables and indexes
+- `src/istota/db.py` — Location DB functions (~300 lines)
+- `src/istota/storage.py` — Location path, template, seeding
+- `src/istota/config.py` — LocationReceiverConfig
+- `pyproject.toml` — `location` optional dependency group
+- `deploy/ansible/` — defaults, tasks, handlers, config template
+
 ## 2026-02-28: Review and fix garmin skill
 
 Reviewed the new garmin skill committed from the Zorg fork. Fixed several issues: env var names didn't match what executor.py provides, skill.toml description was stale from an earlier calendar-sync design, workspace path was hardcoded to "zorg" instead of using `bot_dir_name`, and token cache used a global path instead of per-user temp directories.

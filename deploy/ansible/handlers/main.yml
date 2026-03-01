@@ -14,6 +14,12 @@
     chdir: "{{ istota_home }}"
   when: istota_browser_enabled
 
+- name: "restart istota-location"
+  systemd:
+    name: "{{ istota_namespace }}-location"
+    state: restarted
+  when: istota_location_enabled | default(false)
+
 - name: restart fava services
   shell: "systemctl restart {{ istota_namespace }}-fava-*.service"
   failed_when: false

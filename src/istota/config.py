@@ -251,6 +251,13 @@ class DeveloperConfig:
 
 
 @dataclass
+class LocationReceiverConfig:
+    """Location receiver (Overland GPS) configuration."""
+    enabled: bool = False
+    receiver_port: int = 8765
+
+
+@dataclass
 class SiteConfig:
     """Static website hosting configuration."""
     enabled: bool = False
@@ -298,6 +305,7 @@ class Config:
     developer: DeveloperConfig = field(default_factory=DeveloperConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     site: SiteConfig = field(default_factory=SiteConfig)
+    location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     rclone_remote: str = "nextcloud"  # rclone remote name
@@ -714,6 +722,13 @@ def load_config(config_path: Path | None = None) -> Config:
             enabled=s.get("enabled", False),
             hostname=s.get("hostname", ""),
             base_path=s.get("base_path", ""),
+        )
+
+    if "location" in data:
+        loc = data["location"]
+        config.location = LocationReceiverConfig(
+            enabled=loc.get("enabled", False),
+            receiver_port=loc.get("receiver_port", 8765),
         )
 
     if "developer" in data:

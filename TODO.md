@@ -290,3 +290,13 @@
 - [x] Plugin architecture: self-contained skill directories with `skill.toml` manifests, declarative env var wiring, directory-based discovery
 - [x] Markets skill: interactive CLI with quote, summary, finviz commands + keyword triggers
 - [ ] More specialized skills with specific commands/tools
+- [x] Location tracking via Overland GPS (FastAPI receiver, place resolution, visit state machine, CLI skill)
+
+## Priority 5: Location Awareness (Phase 2+)
+
+### Visits & Analytics (Deferred)
+- [ ] Dwell detection (periodic check for open visits exceeding dwell threshold)
+- [ ] `stats` CLI subcommand (time-at-place aggregation by month/year)
+- [ ] `top` CLI subcommand (ranked places by visit count/duration)
+- [ ] Briefing integration (location component in morning summaries)
+- [ ] Year-review analytics

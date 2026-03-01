@@ -207,6 +207,12 @@ enabled = true
 base_path = "{{ istota_site_base_path }}"
 hostname = "{{ istota_site_hostname }}"
 {% endif %}
+{% if istota_location_enabled | default(false) %}
+
+[location]
+enabled = true
+receiver_port = {{ istota_location_port }}
+{% endif %}
 {% if istota_developer_enabled %}
 
 [developer]

@@ -646,6 +646,57 @@
   when: not istota_browser_enabled
 
 # ============================================================
+# LOCATION RECEIVER
+# ============================================================
+
+- name: Deploy location receiver service
+  template:
+    src: istota-location.service.j2
+    dest: "/etc/systemd/system/{{ istota_namespace }}-location.service"
+    mode: '0644'
+  when: istota_location_enabled | default(false)
+  notify:
+    - reload systemd
+    - "restart istota-location"
+
+- name: Install location dependencies
+  shell: "{{ istota_home }}/.venv/bin/uv sync --extra location"
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  become_user: "{{ istota_user }}"
+  when: istota_location_enabled | default(false)
+
+- name: Enable and start location receiver
+  systemd:
+    name: "{{ istota_namespace }}-location"
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: istota_location_enabled | default(false)
+
+- name: Find existing location service
+  stat:
+    path: "/etc/systemd/system/{{ istota_namespace }}-location.service"
+  register: location_service_file
+  when: not (istota_location_enabled | default(false))
+
+- name: Stop and disable location receiver when disabled
+  systemd:
+    name: "{{ istota_namespace }}-location"
+    enabled: no
+    state: stopped
+  when: not (istota_location_enabled | default(false)) and (location_service_file.stat.exists | default(false))
+  failed_when: false
+
+- name: Remove location service file when disabled
+  file:
+    path: "/etc/systemd/system/{{ istota_namespace }}-location.service"
+    state: absent
+  when: not (istota_location_enabled | default(false)) and (location_service_file.stat.exists | default(false))
+  notify:
+    - reload systemd
+
+# ============================================================
 # BACKUP TASKS
 # ============================================================
 

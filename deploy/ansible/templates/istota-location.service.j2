@@ -1,0 +1,38 @@
+[Unit]
+Description={{ istota_namespace | capitalize }} Location Receiver
+After=network.target
+
+[Service]
+Type=simple
+User={{ istota_user }}
+Group={{ istota_group }}
+WorkingDirectory={{ istota_repo_dir }}
+ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.location_receiver:app --host 127.0.0.1 --port {{ istota_location_port }}
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=PATH={{ istota_home }}/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME={{ istota_home }}
+Environment=PYTHONUNBUFFERED=1
+{% if istota_use_environment_file | default(false) %}
+EnvironmentFile=/etc/{{ istota_namespace }}/secrets.env
+{% endif %}
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{ istota_namespace }}-location
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths={{ istota_home }}
+{% if istota_use_nextcloud_mount %}
+ReadWritePaths={{ istota_nextcloud_mount_path }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

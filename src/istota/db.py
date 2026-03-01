@@ -2856,3 +2856,461 @@ def cleanup_old_talk_messages(
         (max_per_conversation,),
     )
     return cursor.rowcount
+
+
+# ============================================================================
+# Location tracking functions
+# ============================================================================
+
+
+@dataclass
+class LocationPing:
+    """A single GPS location ping."""
+    id: int
+    user_id: str
+    timestamp: str
+    received_at: str
+    lat: float
+    lon: float
+    altitude: float | None
+    accuracy: float | None
+    speed: float | None
+    course: float | None
+    battery: float | None
+    activity_type: str | None
+    wifi: str | None
+    place_id: int | None
+    visit_id: int | None
+
+
+@dataclass
+class Place:
+    """A named geographic place (geofence)."""
+    id: int
+    user_id: str
+    name: str
+    lat: float
+    lon: float
+    radius_meters: int
+    category: str | None
+    created_at: str
+    notes: str | None
+
+
+@dataclass
+class Visit:
+    """A contiguous time spent at a place."""
+    id: int
+    user_id: str
+    place_id: int | None
+    place_name: str
+    entered_at: str
+    exited_at: str | None
+    duration_sec: int | None
+    ping_count: int
+
+
+@dataclass
+class LocationState:
+    """Per-user state machine for location tracking."""
+    user_id: str
+    current_place_id: int | None
+    current_visit_id: int | None
+    consecutive_count: int
+    last_ping_place_id: int | None
+
+
+def insert_location_ping(
+    conn: sqlite3.Connection,
+    user_id: str,
+    timestamp: str,
+    lat: float,
+    lon: float,
+    *,
+    altitude: float | None = None,
+    accuracy: float | None = None,
+    speed: float | None = None,
+    course: float | None = None,
+    battery: float | None = None,
+    activity_type: str | None = None,
+    wifi: str | None = None,
+    place_id: int | None = None,
+    visit_id: int | None = None,
+) -> int:
+    """Insert a location ping. Returns the new row ID."""
+    cursor = conn.execute(
+        """
+        INSERT INTO location_pings (
+            user_id, timestamp, lat, lon, altitude, accuracy,
+            speed, course, battery, activity_type, wifi,
+            place_id, visit_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id, timestamp, lat, lon, altitude, accuracy,
+            speed, course, battery, activity_type, wifi,
+            place_id, visit_id,
+        ),
+    )
+    return cursor.lastrowid
+
+
+def insert_location_pings_batch(
+    conn: sqlite3.Connection,
+    pings: list[dict],
+) -> int:
+    """Bulk insert location pings. Each dict must have user_id, timestamp, lat, lon.
+    Returns count inserted."""
+    count = 0
+    for p in pings:
+        insert_location_ping(
+            conn,
+            p["user_id"], p["timestamp"], p["lat"], p["lon"],
+            altitude=p.get("altitude"),
+            accuracy=p.get("accuracy"),
+            speed=p.get("speed"),
+            course=p.get("course"),
+            battery=p.get("battery"),
+            activity_type=p.get("activity_type"),
+            wifi=p.get("wifi"),
+            place_id=p.get("place_id"),
+            visit_id=p.get("visit_id"),
+        )
+        count += 1
+    return count
+
+
+def get_latest_ping(
+    conn: sqlite3.Connection,
+    user_id: str,
+) -> LocationPing | None:
+    """Get the most recent location ping for a user."""
+    cursor = conn.execute(
+        """
+        SELECT id, user_id, timestamp, received_at, lat, lon,
+               altitude, accuracy, speed, course, battery,
+               activity_type, wifi, place_id, visit_id
+        FROM location_pings
+        WHERE user_id = ?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return LocationPing(**dict(row))
+
+
+def get_pings(
+    conn: sqlite3.Connection,
+    user_id: str,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 100,
+) -> list[LocationPing]:
+    """Get location pings for a user, newest first."""
+    conditions = ["user_id = ?"]
+    params: list = [user_id]
+    if since:
+        conditions.append("timestamp >= ?")
+        params.append(since)
+    if until:
+        conditions.append("timestamp <= ?")
+        params.append(until)
+    where = " AND ".join(conditions)
+    params.append(limit)
+    cursor = conn.execute(
+        f"""
+        SELECT id, user_id, timestamp, received_at, lat, lon,
+               altitude, accuracy, speed, course, battery,
+               activity_type, wifi, place_id, visit_id
+        FROM location_pings
+        WHERE {where}
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        params,
+    )
+    return [LocationPing(**dict(row)) for row in cursor.fetchall()]
+
+
+def update_ping_place(
+    conn: sqlite3.Connection,
+    ping_id: int,
+    place_id: int | None,
+    visit_id: int | None = None,
+) -> None:
+    """Update the place_id and visit_id on a ping."""
+    conn.execute(
+        "UPDATE location_pings SET place_id = ?, visit_id = ? WHERE id = ?",
+        (place_id, visit_id, ping_id),
+    )
+
+
+# -- Places --
+
+def insert_place(
+    conn: sqlite3.Connection,
+    user_id: str,
+    name: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 100,
+    category: str | None = None,
+    notes: str | None = None,
+) -> int:
+    """Insert a named place. Returns the new row ID."""
+    cursor = conn.execute(
+        """
+        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, name, lat, lon, radius_meters, category, notes),
+    )
+    return cursor.lastrowid
+
+
+def get_places(
+    conn: sqlite3.Connection,
+    user_id: str,
+) -> list[Place]:
+    """Get all places for a user."""
+    cursor = conn.execute(
+        """
+        SELECT id, user_id, name, lat, lon, radius_meters, category, created_at, notes
+        FROM places
+        WHERE user_id = ?
+        ORDER BY name
+        """,
+        (user_id,),
+    )
+    return [Place(**dict(row)) for row in cursor.fetchall()]
+
+
+def get_place_by_name(
+    conn: sqlite3.Connection,
+    user_id: str,
+    name: str,
+) -> Place | None:
+    """Get a place by name."""
+    cursor = conn.execute(
+        """
+        SELECT id, user_id, name, lat, lon, radius_meters, category, created_at, notes
+        FROM places WHERE user_id = ? AND name = ?
+        """,
+        (user_id, name),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return Place(**dict(row))
+
+
+def upsert_place(
+    conn: sqlite3.Connection,
+    user_id: str,
+    name: str,
+    lat: float,
+    lon: float,
+    radius_meters: int = 100,
+    category: str | None = None,
+    notes: str | None = None,
+) -> int:
+    """Insert or update a place by (user_id, name). Returns the row ID."""
+    cursor = conn.execute(
+        """
+        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (user_id, name) DO UPDATE SET
+            lat = excluded.lat,
+            lon = excluded.lon,
+            radius_meters = excluded.radius_meters,
+            category = excluded.category,
+            notes = excluded.notes
+        RETURNING id
+        """,
+        (user_id, name, lat, lon, radius_meters, category, notes),
+    )
+    row = cursor.fetchone()
+    return row[0]
+
+
+def delete_place(
+    conn: sqlite3.Connection,
+    user_id: str,
+    name: str,
+) -> bool:
+    """Delete a place by name. Returns True if deleted."""
+    cursor = conn.execute(
+        "DELETE FROM places WHERE user_id = ? AND name = ?",
+        (user_id, name),
+    )
+    return cursor.rowcount > 0
+
+
+# -- Visits --
+
+def insert_visit(
+    conn: sqlite3.Connection,
+    user_id: str,
+    place_id: int | None,
+    place_name: str,
+    entered_at: str,
+) -> int:
+    """Start a new visit. Returns the new row ID."""
+    cursor = conn.execute(
+        """
+        INSERT INTO visits (user_id, place_id, place_name, entered_at, ping_count)
+        VALUES (?, ?, ?, ?, 1)
+        """,
+        (user_id, place_id, place_name, entered_at),
+    )
+    return cursor.lastrowid
+
+
+def close_visit(
+    conn: sqlite3.Connection,
+    visit_id: int,
+    exited_at: str,
+) -> None:
+    """Close a visit by setting exited_at and computing duration."""
+    conn.execute(
+        """
+        UPDATE visits SET
+            exited_at = ?,
+            duration_sec = CAST(
+                (julianday(?) - julianday(entered_at)) * 86400 AS INTEGER
+            )
+        WHERE id = ?
+        """,
+        (exited_at, exited_at, visit_id),
+    )
+
+
+def increment_visit_ping_count(
+    conn: sqlite3.Connection,
+    visit_id: int,
+) -> None:
+    """Increment the ping count on a visit."""
+    conn.execute(
+        "UPDATE visits SET ping_count = ping_count + 1 WHERE id = ?",
+        (visit_id,),
+    )
+
+
+def get_open_visit(
+    conn: sqlite3.Connection,
+    user_id: str,
+) -> Visit | None:
+    """Get the currently open visit for a user (exited_at IS NULL)."""
+    cursor = conn.execute(
+        """
+        SELECT id, user_id, place_id, place_name, entered_at,
+               exited_at, duration_sec, ping_count
+        FROM visits
+        WHERE user_id = ? AND exited_at IS NULL
+        ORDER BY entered_at DESC LIMIT 1
+        """,
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return Visit(**dict(row))
+
+
+def get_visits(
+    conn: sqlite3.Connection,
+    user_id: str,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 50,
+) -> list[Visit]:
+    """Get visits for a user, newest first."""
+    conditions = ["user_id = ?"]
+    params: list = [user_id]
+    if since:
+        conditions.append("entered_at >= ?")
+        params.append(since)
+    if until:
+        conditions.append("entered_at <= ?")
+        params.append(until)
+    where = " AND ".join(conditions)
+    params.append(limit)
+    cursor = conn.execute(
+        f"""
+        SELECT id, user_id, place_id, place_name, entered_at,
+               exited_at, duration_sec, ping_count
+        FROM visits
+        WHERE {where}
+        ORDER BY entered_at DESC
+        LIMIT ?
+        """,
+        params,
+    )
+    return [Visit(**dict(row)) for row in cursor.fetchall()]
+
+
+# -- Location state machine --
+
+def get_location_state(
+    conn: sqlite3.Connection,
+    user_id: str,
+) -> LocationState | None:
+    """Get the current location state for a user."""
+    cursor = conn.execute(
+        """
+        SELECT user_id, current_place_id, current_visit_id,
+               consecutive_count, last_ping_place_id
+        FROM location_state
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return LocationState(**dict(row))
+
+
+def set_location_state(
+    conn: sqlite3.Connection,
+    user_id: str,
+    current_place_id: int | None,
+    current_visit_id: int | None,
+    consecutive_count: int,
+    last_ping_place_id: int | None = None,
+) -> None:
+    """Update (upsert) the location state for a user."""
+    conn.execute(
+        """
+        INSERT INTO location_state (
+            user_id, current_place_id, current_visit_id,
+            consecutive_count, last_ping_place_id
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (user_id) DO UPDATE SET
+            current_place_id = excluded.current_place_id,
+            current_visit_id = excluded.current_visit_id,
+            consecutive_count = excluded.consecutive_count,
+            last_ping_place_id = excluded.last_ping_place_id
+        """,
+        (user_id, current_place_id, current_visit_id,
+         consecutive_count, last_ping_place_id),
+    )
+
+
+def cleanup_old_location_pings(
+    conn: sqlite3.Connection,
+    retention_days: int = 365,
+) -> int:
+    """Delete location pings older than retention_days. Returns count deleted."""
+    cursor = conn.execute(
+        """
+        DELETE FROM location_pings
+        WHERE received_at < datetime('now', ? || ' days')
+        """,
+        (f"-{retention_days}",),
+    )
+    return cursor.rowcount

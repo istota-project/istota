@@ -54,7 +54,7 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 
 **Messaging** — Nextcloud Talk (DMs and multi-user rooms with @mention support), email (IMAP/SMTP with threading), TASKS.md file polling, CLI.
 
-**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, beancount accounting with invoicing, Garmin Connect fitness data, Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), RSS/Atom/Tumblr/Are.na feeds, and more. Skills are a curated standard library, not a plugin marketplace.
+**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, beancount accounting with invoicing, GPS location tracking (Overland), Garmin Connect fitness data, Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), RSS/Atom/Tumblr/Are.na feeds, and more. Skills are a curated standard library, not a plugin marketplace.
 
 **Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Configurable memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
 
@@ -123,7 +123,8 @@ Each user gets a shared Nextcloud folder:
 │   ├── PERSONA.md       # Personality customization
 │   ├── BRIEFINGS.md     # Briefing schedule
 │   ├── CRON.md          # Scheduled jobs
-│   └── HEARTBEAT.md     # Health monitoring config
+│   ├── HEARTBEAT.md     # Health monitoring config
+│   └── LOCATION.md      # GPS location tracking config
 ├── exports/             # Bot-generated files
 └── examples/            # Reference documentation
 ```
@@ -142,6 +143,7 @@ Optional dependency groups:
 ```bash
 uv sync --extra memory-search    # sqlite-vec + sentence-transformers for semantic search
 uv sync --extra whisper          # faster-whisper for audio transcription
+uv sync --extra location         # fastapi + uvicorn for GPS location receiver
 ```
 
 ## Further reading
