@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-01: Webhook receiver review and fixes
+
+Reviewed the location/webhooks implementation and fixed several issues. Renamed `location_receiver.py` to `webhook_receiver.py` and the systemd service from `istota-location` to `istota-webhooks` to support future webhook endpoints beyond GPS. Renamed nginx config from `istota-site.conf.j2` to `istota.conf.j2` since it now serves both site hosting and webhooks.
+
+**Key changes:**
+- Fixed wrong endpoint URL in LOCATION.md template (`/location` → `/webhooks/location`)
+- Simplified dead code in state machine (removed `get_open_visit()` after `close_visit()` that always returned None)
+- Added `client_max_body_size 10m` to nginx webhooks location block
+- Renamed `istota_site_hostname` → `istota_hostname` across all Ansible templates (backward compat via Jinja2 `default()` filter)
+- Added location ping cleanup to scheduler (`location_ping_retention_days`, default 365 days)
+- Added Ansible migration tasks to stop/remove old `istota-location` service
+- nginx is now also installed when `istota_location_enabled` is true (was site-only)
+
+**Files modified:**
+- `src/istota/webhook_receiver.py` — Simplified state machine dead code
+- `src/istota/storage.py` — Fixed endpoint URL in LOCATION.md template
+- `src/istota/config.py` — Added `location_ping_retention_days` to SchedulerConfig
+- `src/istota/scheduler.py` — Added location ping cleanup to `run_cleanup_checks()`
+- `deploy/ansible/defaults/main.yml` — Renamed hostname variable, added ping retention default
+- `deploy/ansible/tasks/main.yml` — Service rename, migration tasks, nginx condition fix
+- `deploy/ansible/handlers/main.yml` — Handler rename
+- `deploy/ansible/templates/` — Renamed and updated nginx, service, config, and HTML templates
+
 ## 2026-03-01: Location awareness (Overland GPS tracking)
 
 Added GPS-based location tracking using the Overland iOS app as data source. This is the first HTTP-receiving endpoint in istota — everything else is polling-based. The receiver runs as a separate FastAPI service behind nginx, accepting Overland's GeoJSON batch payloads.
