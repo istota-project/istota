@@ -129,6 +129,10 @@ istota_conversation_talk_context_limit: 100      # max messages to fetch from Ta
 # Deployed as /etc/<namespace>/admins (root-owned, not editable by service user or Claude)
 istota_admin_users: []
 
+# Instance-wide disabled skills (list of skill names to exclude from selection)
+# Example: ["browse", "whisper"]
+istota_disabled_skills: []
+
 # Users configuration (dict of user_id -> user config)
 # Each user gets a per-user config file at config/users/{user_id}.toml
 # Example:
@@ -141,6 +145,7 @@ istota_admin_users: []
 #     log_channel: ""               # Talk room token for verbose task execution logs
 #     max_foreground_workers: 2    # per-user override (0 or omit = use global default)
 #     max_background_workers: 1    # per-user override (0 or omit = use global default)
+#     disabled_skills: []          # per-user skill exclusion list
 #     resources:
 #       - type: "folder"
 #         path: "/alice/Projects"

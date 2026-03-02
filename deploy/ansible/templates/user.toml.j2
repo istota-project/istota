@@ -26,6 +26,9 @@ max_foreground_workers = {{ user_config.max_foreground_workers }}
 {% if user_config.max_background_workers is defined %}
 max_background_workers = {{ user_config.max_background_workers }}
 {% endif %}
+{% if user_config.disabled_skills is defined and user_config.disabled_skills %}
+disabled_skills = {{ user_config.disabled_skills | to_json }}
+{% endif %}
 {% if user_config.resources is defined and user_config.resources %}
 {% for resource in user_config.resources %}
 {% if resource.type == 'karakeep' %}

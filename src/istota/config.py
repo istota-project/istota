@@ -197,6 +197,7 @@ class UserConfig:
     site_enabled: bool = False  # static website hosting at /~user/
     max_foreground_workers: int = 0  # per-user fg worker override (0 = use global default)
     max_background_workers: int = 0  # per-user bg worker override (0 = use global default)
+    disabled_skills: list[str] = field(default_factory=list)  # skills to exclude from selection
 
 
 @dataclass
@@ -313,6 +314,7 @@ class Config:
     nextcloud_mount_path: Path | None = None  # If set, use mount instead of rclone CLI
     skills_dir: Path = field(default_factory=lambda: Path("config/skills"))
     bundled_skills_dir: Path | None = None  # Override bundled skills dir (for testing)
+    disabled_skills: list[str] = field(default_factory=list)  # instance-wide skills to exclude
     temp_dir: Path = field(default_factory=lambda: Path("/tmp/istota"))
     users_dir: Path | None = None  # config/users/ directory for per-user TOML files
 
@@ -463,6 +465,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         site_enabled=user_data.get("site_enabled", False),
         max_foreground_workers=user_data.get("max_foreground_workers", 0),
         max_background_workers=user_data.get("max_background_workers", 0),
+        disabled_skills=user_data.get("disabled_skills", []),
     )
 
 
@@ -543,6 +546,9 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "skills_dir" in data:
         config.skills_dir = Path(data["skills_dir"])
+
+    if "disabled_skills" in data:
+        config.disabled_skills = data["disabled_skills"]
 
     if "temp_dir" in data:
         config.temp_dir = Path(data["temp_dir"])

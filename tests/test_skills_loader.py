@@ -209,6 +209,65 @@ class TestSelectSkills:
         )
         assert result == sorted(result)
 
+    def test_disabled_skills_excluded(self):
+        index = self._make_index()
+        result = select_skills(
+            "send email about schedule",
+            "talk",
+            set(),
+            index,
+            disabled_skills={"email", "schedules"},
+        )
+        assert "files" in result  # always_include, not disabled
+        assert "email" not in result  # disabled
+        assert "schedules" not in result  # disabled
+
+    def test_disabled_always_include_still_excluded(self):
+        index = self._make_index()
+        result = select_skills(
+            "hello",
+            "talk",
+            set(),
+            index,
+            disabled_skills={"files"},
+        )
+        assert "files" not in result
+
+    def test_disabled_source_type_still_excluded(self):
+        index = self._make_index()
+        result = select_skills(
+            "briefing",
+            "briefing",
+            set(),
+            index,
+            disabled_skills={"markets"},
+        )
+        assert "markets" not in result
+
+    def test_disabled_companion_not_pulled_in(self):
+        index = {
+            "whisper": SkillMeta(
+                name="whisper",
+                description="Transcription",
+                keywords=["transcribe"],
+                companion_skills=["reminders"],
+            ),
+            "reminders": SkillMeta(
+                name="reminders",
+                description="Reminders",
+                keywords=["remind"],
+            ),
+        }
+        result = select_skills(
+            "transcribe this",
+            "talk",
+            set(),
+            index,
+            disabled_skills={"reminders"},
+        )
+        assert "whisper" in result
+        assert "reminders" not in result
+
 
 class TestLoadSkills:
     def test_load_existing_skills(self, tmp_path):

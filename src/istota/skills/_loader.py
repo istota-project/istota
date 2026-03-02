@@ -188,6 +188,7 @@ def select_skills(
     skill_index: dict[str, SkillMeta],
     is_admin: bool = True,
     attachments: list[str] | None = None,
+    disabled_skills: set[str] | None = None,
 ) -> list[str]:
     """Select relevant skills based on prompt and context.
 
@@ -200,12 +201,17 @@ def select_skills(
 
     Skills with admin_only=true are skipped for non-admin users.
     Skills with unmet dependencies are skipped with a debug log.
+    Skills in disabled_skills are skipped entirely (instance-wide + per-user).
     """
     selected = set()
     prompt_lower = prompt.lower()
     attachment_extensions = _get_attachment_extensions(attachments)
+    disabled = disabled_skills or set()
 
     for name, meta in skill_index.items():
+        if name in disabled:
+            continue
+
         if meta.admin_only and not is_admin:
             continue
 
@@ -239,7 +245,7 @@ def select_skills(
     for name in selected:
         meta = skill_index[name]
         for companion in meta.companion_skills:
-            if companion in skill_index and companion not in selected:
+            if companion in skill_index and companion not in selected and companion not in disabled:
                 cmeta = skill_index[companion]
                 if cmeta.admin_only and not is_admin:
                     continue

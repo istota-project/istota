@@ -1273,6 +1273,12 @@ def execute_task(
     _bundled_dir = config.bundled_skills_dir
     skill_index = load_skill_index(config.skills_dir, bundled_dir=_bundled_dir)
     user_resource_types = {r.resource_type for r in user_resources}
+    # Combine instance-wide and per-user disabled skills
+    user_config = config.get_user(task.user_id)
+    _disabled = set(config.disabled_skills)
+    if user_config:
+        _disabled |= set(user_config.disabled_skills)
+
     selected_skills = select_skills(
         prompt=task.prompt,
         source_type=task.source_type,
@@ -1280,6 +1286,7 @@ def execute_task(
         skill_index=skill_index,
         is_admin=is_admin,
         attachments=task.attachments,
+        disabled_skills=_disabled if _disabled else None,
     )
     skills_doc = load_skills(
         config.skills_dir, selected_skills, config.bot_name, config.bot_dir_name,

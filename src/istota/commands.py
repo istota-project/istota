@@ -295,6 +295,12 @@ async def cmd_skills(config, conn, user_id, conversation_token, args, client):
 
     is_admin = config.is_admin(user_id)
 
+    # Collect disabled skills (instance-wide + per-user)
+    disabled = set(config.disabled_skills)
+    user_config = config.get_user(user_id)
+    if user_config:
+        disabled |= set(user_config.disabled_skills)
+
     lines = ["**Available Skills**", ""]
     for name in sorted(index):
         meta = index[name]
@@ -302,6 +308,8 @@ async def cmd_skills(config, conn, user_id, conversation_token, args, client):
             continue
 
         tags = []
+        if name in disabled:
+            tags.append("disabled")
         if meta.always_include:
             tags.append("always")
         if meta.admin_only:

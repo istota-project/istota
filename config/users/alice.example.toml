@@ -71,6 +71,9 @@ invoicing_conversation_token = "room123"  # Talk room for invoice notifications
 # max_foreground_workers = 2
 # max_background_workers = 1
 
+# Per-user disabled skills (excluded from keyword matching and loading)
+# disabled_skills = ["browse", "whisper"]
+
 # Briefings (can also be configured in workspace/BRIEFINGS.md, which takes precedence)
 [[briefings]]
 name = "morning"

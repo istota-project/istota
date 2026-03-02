@@ -77,6 +77,9 @@ def render_config_toml(s: dict) -> str:
         lines.append(f'nextcloud_mount_path = "{mount_path}"')
     lines.append(f'rclone_remote = "{get(s, "rclone_remote", "nextcloud")}"')
     lines.append(f'skills_dir = "{home}/src/config/skills"')
+    disabled = get(s, "disabled_skills", [])
+    if disabled:
+        lines.append(f'disabled_skills = {json.dumps(disabled)}')
     lines.append(f'temp_dir = "{home}/tmp"')
 
     # [security]

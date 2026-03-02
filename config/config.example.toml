@@ -29,6 +29,9 @@ rclone_remote = "nextcloud"
 # Path to skills directory (individual skill files loaded selectively)
 skills_dir = "config/skills"
 
+# Skills to exclude from selection (instance-wide)
+# disabled_skills = ["browse", "whisper"]
+
 # Temporary directory for task execution
 temp_dir = "/tmp/istota"
 
