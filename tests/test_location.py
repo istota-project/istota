@@ -63,7 +63,7 @@ class TestParseLocationData:
     def test_empty_data(self):
         cfg = parse_location_data({})
         assert cfg.settings.ingest_token == ""
-        assert cfg.settings.default_radius == 100
+        assert cfg.settings.default_radius == 10
         assert cfg.places == []
         assert cfg.actions == []
 
@@ -87,7 +87,7 @@ class TestParseLocationData:
         assert cfg.places[0].radius_meters == 150
         assert cfg.places[0].category == "home"
         assert cfg.places[1].name == "gym"
-        assert cfg.places[1].radius_meters == 100  # default
+        assert cfg.places[1].radius_meters == 10  # default
 
     def test_places_use_default_radius(self):
         cfg = parse_location_data({
