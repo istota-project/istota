@@ -833,7 +833,7 @@ See `examples/LOCATION.md` for all options.
 ```toml
 # [settings]
 # ingest_token = "your-secret-token"   # Shared secret for Overland endpoint
-# default_radius = 10                  # meters
+# default_radius = 25                  # meters
 
 # [[places]]
 # name = "home"
@@ -863,7 +863,7 @@ Overland posts location batches to your server endpoint.
 ```toml
 [settings]
 ingest_token = "your-secret-token"     # Shared secret for Overland endpoint
-default_radius = 10                    # Default geofence radius (meters)
+default_radius = 25                    # Default geofence radius (meters)
 
 [[places]]
 name = "home"

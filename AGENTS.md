@@ -65,7 +65,7 @@ istota/
 │       ├── transcribe/      # OCR transcription via Tesseract
 │       ├── website/         # Website management reference (doc-only)
 │       ├── garmin/          # Garmin Connect data access (activities, stats, health)
-│       ├── location/       # GPS location tracking CLI (Overland)
+│       ├── location/       # GPS location tracking + calendar attendance (Overland)
 │       └── whisper/         # Audio transcription via faster-whisper
 ├── config/
 │   ├── config.toml          # Active configuration (gitignored)

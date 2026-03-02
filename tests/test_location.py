@@ -1,13 +1,17 @@
 """Tests for location tracking: loader, DB functions, haversine, state machine, CLI."""
 
+import io
 import json
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from istota import db
 from istota.config import Config, UserConfig
+from istota.geo import haversine
 from istota.location_loader import (
     LocationAction,
     LocationConfig,
@@ -18,7 +22,7 @@ from istota.location_loader import (
     parse_location_data,
     sync_places_to_db,
 )
-from istota.webhook_receiver import haversine, resolve_place
+from istota.webhook_receiver import resolve_place
 from istota.storage import get_user_location_path
 
 
@@ -63,7 +67,7 @@ class TestParseLocationData:
     def test_empty_data(self):
         cfg = parse_location_data({})
         assert cfg.settings.ingest_token == ""
-        assert cfg.settings.default_radius == 10
+        assert cfg.settings.default_radius == 25
         assert cfg.places == []
         assert cfg.actions == []
 
@@ -87,7 +91,7 @@ class TestParseLocationData:
         assert cfg.places[0].radius_meters == 150
         assert cfg.places[0].category == "home"
         assert cfg.places[1].name == "gym"
-        assert cfg.places[1].radius_meters == 10  # default
+        assert cfg.places[1].radius_meters == 25  # default
 
     def test_places_use_default_radius(self):
         cfg = parse_location_data({
@@ -780,3 +784,399 @@ class TestLocationCLI:
             output = json.loads(captured.getvalue())
             assert len(output) == 1
             assert output[0]["lat"] == 34.0
+
+
+# ===========================================================================
+# Geocode cache DB tests
+# ===========================================================================
+
+
+class TestGeocodeCache:
+    def test_cache_miss_returns_none(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            assert db.get_cached_geocode(conn, "123 Main St") is None
+
+    def test_cache_and_retrieve(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.cache_geocode(conn, "123 Main St", 34.05, -118.4)
+            conn.commit()
+
+            result = db.get_cached_geocode(conn, "123 Main St")
+            assert result == (34.05, -118.4)
+
+    def test_cache_upsert(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.cache_geocode(conn, "123 Main St", 34.05, -118.4)
+            db.cache_geocode(conn, "123 Main St", 35.0, -119.0)
+            conn.commit()
+
+            result = db.get_cached_geocode(conn, "123 Main St")
+            assert result == (35.0, -119.0)
+
+
+# ===========================================================================
+# Attendance helper tests
+# ===========================================================================
+
+
+class TestVirtualLocationDetection:
+    def test_zoom_link(self):
+        from istota.skills.location import _is_virtual_location
+        assert _is_virtual_location("https://zoom.us/j/12345") is True
+
+    def test_google_meet(self):
+        from istota.skills.location import _is_virtual_location
+        assert _is_virtual_location("meet.google.com/abc-def") is True
+
+    def test_teams(self):
+        from istota.skills.location import _is_virtual_location
+        assert _is_virtual_location("Microsoft Teams Meeting") is True
+
+    def test_physical_location(self):
+        from istota.skills.location import _is_virtual_location
+        assert _is_virtual_location("123 Main St, San Francisco") is False
+
+    def test_conference_room(self):
+        from istota.skills.location import _is_virtual_location
+        assert _is_virtual_location("Conference Room B") is False
+
+
+class TestPlaceMatching:
+    def test_exact_match(self):
+        from istota.skills.location import _match_place
+        places = [{"name": "gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
+        result = _match_place("gym", places)
+        assert result is not None
+        assert result["name"] == "gym"
+
+    def test_case_insensitive(self):
+        from istota.skills.location import _match_place
+        places = [{"name": "Downtown Gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
+        result = _match_place("downtown gym", places)
+        assert result is not None
+
+    def test_substring_match_location_in_place(self):
+        from istota.skills.location import _match_place
+        places = [{"name": "Downtown Gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
+        result = _match_place("gym", places)
+        assert result is not None
+        assert result["name"] == "Downtown Gym"
+
+    def test_substring_match_place_in_location(self):
+        from istota.skills.location import _match_place
+        places = [{"name": "gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
+        result = _match_place("The gym on 5th Ave", places)
+        assert result is not None
+
+    def test_no_match(self):
+        from istota.skills.location import _match_place
+        places = [{"name": "gym", "lat": 34.0, "lon": -118.0, "radius_meters": 100}]
+        result = _match_place("dentist office", places)
+        assert result is None
+
+    def test_empty_places(self):
+        from istota.skills.location import _match_place
+        assert _match_place("gym", []) is None
+
+
+class TestGeocodeLocation:
+    def test_cache_hit(self, tmp_path):
+        from istota.skills.location import _geocode_location
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.cache_geocode(conn, "123 Main St", 34.05, -118.4)
+            conn.commit()
+
+            result = _geocode_location("123 Main St", conn)
+            assert result == (34.05, -118.4)
+
+    def test_nominatim_called_on_miss(self, tmp_path):
+        from istota.skills.location import _geocode_location
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            mock_result = MagicMock()
+            mock_result.latitude = 37.7749
+            mock_result.longitude = -122.4194
+
+            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
+                mock_geolocator = MagicMock()
+                mock_geolocator.geocode.return_value = mock_result
+                mock_nom_cls.return_value = mock_geolocator
+
+                result = _geocode_location("San Francisco, CA", conn)
+                assert result == (37.7749, -122.4194)
+
+                # Should be cached now
+                cached = db.get_cached_geocode(conn, "San Francisco, CA")
+                assert cached == (37.7749, -122.4194)
+
+    def test_nominatim_failure_returns_none(self, tmp_path):
+        from istota.skills.location import _geocode_location
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
+                mock_geolocator = MagicMock()
+                mock_geolocator.geocode.return_value = None
+                mock_nom_cls.return_value = mock_geolocator
+
+                result = _geocode_location("nonexistent place xyz", conn)
+                assert result is None
+
+    def test_nominatim_exception_returns_none(self, tmp_path):
+        from istota.skills.location import _geocode_location
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
+                mock_geolocator = MagicMock()
+                mock_geolocator.geocode.side_effect = Exception("timeout")
+                mock_nom_cls.return_value = mock_geolocator
+
+                result = _geocode_location("123 Main St", conn)
+                assert result is None
+
+
+# ===========================================================================
+# Attendance command tests
+# ===========================================================================
+
+
+def _make_calendar_event(
+    uid="ev1",
+    summary="Meeting",
+    start=None,
+    end=None,
+    location=None,
+    all_day=False,
+):
+    """Create a mock CalendarEvent."""
+    from istota.skills.calendar import CalendarEvent
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/Los_Angeles")
+    if start is None:
+        start = datetime(2026, 3, 1, 10, 0, tzinfo=tz)
+    if end is None:
+        end = datetime(2026, 3, 1, 11, 0, tzinfo=tz)
+    return CalendarEvent(
+        uid=uid,
+        summary=summary,
+        start=start,
+        end=end,
+        location=location,
+        all_day=all_day,
+    )
+
+
+class TestCmdAttendance:
+    def _run_attendance(self, tmp_path, events, pings=None, places=None, args_overrides=None):
+        """Helper to run cmd_attendance with mocked CalDAV and DB."""
+        from istota.skills.location import cmd_attendance
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            # Insert places
+            for p in (places or []):
+                db.insert_place(conn, "alice", p["name"], p["lat"], p["lon"],
+                                p.get("radius_meters", 100), p.get("category", "other"))
+            # Insert pings
+            for ping in (pings or []):
+                db.insert_location_ping(
+                    conn, "alice", ping["timestamp"], ping["lat"], ping["lon"],
+                    accuracy=ping.get("accuracy", 5.0),
+                )
+            conn.commit()
+
+        env = {
+            "ISTOTA_DB_PATH": str(db_path),
+            "ISTOTA_USER_ID": "alice",
+            "CALDAV_URL": "https://cloud.example.com/remote.php/dav",
+            "CALDAV_USERNAME": "alice",
+            "CALDAV_PASSWORD": "secret",
+            "TZ": "America/Los_Angeles",
+        }
+
+        args = MagicMock()
+        args.date = "2026-03-01"
+        args.event = None
+        if args_overrides:
+            for k, v in args_overrides.items():
+                setattr(args, k, v)
+
+        mock_client = MagicMock()
+        mock_calendars = [("Personal", "https://cal.example.com/personal", True)]
+
+        with patch.dict("os.environ", env):
+            with patch("istota.skills.calendar.get_caldav_client", return_value=mock_client):
+                with patch("istota.skills.calendar.get_calendars_for_user", return_value=mock_calendars):
+                    with patch("istota.skills.calendar.get_events", return_value=events):
+                        captured = io.StringIO()
+                        old_stdout = sys.stdout
+                        sys.stdout = captured
+                        try:
+                            cmd_attendance(args)
+                        finally:
+                            sys.stdout = old_stdout
+
+        return json.loads(captured.getvalue())
+
+    def test_no_events(self, tmp_path):
+        result = self._run_attendance(tmp_path, events=[])
+        assert result["date"] == "2026-03-01"
+        assert result["events"] == []
+
+    def test_all_day_event_filtered(self, tmp_path):
+        events = [_make_calendar_event(location="123 Main St", all_day=True)]
+        result = self._run_attendance(tmp_path, events=events)
+        assert result["events"] == []
+
+    def test_no_location_filtered(self, tmp_path):
+        events = [_make_calendar_event(location=None)]
+        result = self._run_attendance(tmp_path, events=events)
+        assert result["events"] == []
+
+    def test_virtual_location_filtered(self, tmp_path):
+        events = [_make_calendar_event(location="https://zoom.us/j/12345")]
+        result = self._run_attendance(tmp_path, events=events)
+        assert result["events"] == []
+
+    def test_attendance_confirmed_with_nearby_pings(self, tmp_path):
+        events = [_make_calendar_event(
+            uid="dentist1",
+            summary="Dentist",
+            location="dentist office",
+        )]
+        places = [{"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200}]
+        pings = [
+            {"timestamp": "2026-03-01T17:45:00Z", "lat": 34.0501, "lon": -118.4001},  # 10:45 PT, within window
+            {"timestamp": "2026-03-01T18:30:00Z", "lat": 34.0502, "lon": -118.3999},  # 11:30 PT, within window
+        ]
+        result = self._run_attendance(tmp_path, events=events, pings=pings, places=places)
+        assert len(result["events"]) == 1
+        ev = result["events"][0]
+        assert ev["attended"] is True
+        assert ev["resolution_source"] == "place"
+        assert ev["nearby_ping_count"] == 2
+
+    def test_no_pings_no_attendance(self, tmp_path):
+        events = [_make_calendar_event(
+            summary="Dentist",
+            location="dentist office",
+        )]
+        places = [{"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200}]
+        result = self._run_attendance(tmp_path, events=events, pings=[], places=places)
+        assert len(result["events"]) == 1
+        ev = result["events"][0]
+        assert ev["attended"] is None
+
+    def test_pings_too_far_away(self, tmp_path):
+        events = [_make_calendar_event(
+            summary="Dentist",
+            location="dentist office",
+        )]
+        places = [{"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 100}]
+        # Pings far from the dentist
+        pings = [
+            {"timestamp": "2026-03-01T18:00:00Z", "lat": 35.0, "lon": -119.0},
+        ]
+        result = self._run_attendance(tmp_path, events=events, pings=pings, places=places)
+        ev = result["events"][0]
+        assert ev["attended"] is None
+
+    def test_ungeocoded_event(self, tmp_path):
+        events = [_make_calendar_event(
+            summary="Meeting",
+            location="Some Unknown Place XYZ123",
+        )]
+        # No places, geocoding will fail
+        with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
+            mock_geolocator = MagicMock()
+            mock_geolocator.geocode.return_value = None
+            mock_nom_cls.return_value = mock_geolocator
+
+            result = self._run_attendance(tmp_path, events=events)
+
+        assert len(result["events"]) == 1
+        ev = result["events"][0]
+        assert ev["location_resolved"] is False
+        assert ev["attended"] is None
+
+    def test_geocoded_event_with_attendance(self, tmp_path):
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/Los_Angeles")
+        events = [_make_calendar_event(
+            summary="Dentist",
+            location="123 Main St, LA",
+            start=datetime(2026, 3, 1, 10, 0, tzinfo=tz),
+            end=datetime(2026, 3, 1, 11, 0, tzinfo=tz),
+        )]
+        # Ping near geocoded location
+        pings = [
+            {"timestamp": "2026-03-01T18:00:00Z", "lat": 34.0501, "lon": -118.4001},
+        ]
+
+        mock_result = MagicMock()
+        mock_result.latitude = 34.05
+        mock_result.longitude = -118.4
+
+        with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
+            mock_geolocator = MagicMock()
+            mock_geolocator.geocode.return_value = mock_result
+            mock_nom_cls.return_value = mock_geolocator
+
+            result = self._run_attendance(tmp_path, events=events, pings=pings)
+
+        ev = result["events"][0]
+        assert ev["attended"] is True
+        assert ev["resolution_source"] == "geocode"
+
+    def test_event_filter_by_title(self, tmp_path):
+        events = [
+            _make_calendar_event(uid="ev1", summary="Dentist", location="dentist office"),
+            _make_calendar_event(uid="ev2", summary="Gym", location="gym"),
+        ]
+        places = [
+            {"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200},
+            {"name": "gym", "lat": 34.1, "lon": -118.1, "radius_meters": 100},
+        ]
+        result = self._run_attendance(
+            tmp_path, events=events, places=places,
+            args_overrides={"event": "dentist"},
+        )
+        assert len(result["events"]) == 1
+        assert result["events"][0]["summary"] == "Dentist"
+
+    def test_event_filter_by_uid(self, tmp_path):
+        events = [
+            _make_calendar_event(uid="abc123", summary="Dentist", location="dentist office"),
+            _make_calendar_event(uid="def456", summary="Gym", location="gym"),
+        ]
+        places = [
+            {"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200},
+            {"name": "gym", "lat": 34.1, "lon": -118.1, "radius_meters": 100},
+        ]
+        result = self._run_attendance(
+            tmp_path, events=events, places=places,
+            args_overrides={"event": "abc123"},
+        )
+        assert len(result["events"]) == 1
+        assert result["events"][0]["uid"] == "abc123"
+
+    def test_place_radius_used(self, tmp_path):
+        """Place with large radius should detect pings that would be outside default 200m."""
+        events = [_make_calendar_event(
+            summary="Park",
+            location="big park",
+        )]
+        # Place with 2km radius
+        places = [{"name": "big park", "lat": 34.05, "lon": -118.4, "radius_meters": 2000}]
+        # Ping ~500m away (would fail with 200m default, but passes with 2km)
+        pings = [
+            {"timestamp": "2026-03-01T18:00:00Z", "lat": 34.055, "lon": -118.4},
+        ]
+        result = self._run_attendance(tmp_path, events=events, pings=pings, places=places)
+        ev = result["events"][0]
+        assert ev["attended"] is True
+        assert ev["radius_meters"] == 2000

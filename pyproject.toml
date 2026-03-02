@@ -41,6 +41,7 @@ whisper = [
 location = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
+    "geopy>=2.4",
 ]
 
 [project.scripts]

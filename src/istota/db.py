@@ -3083,7 +3083,7 @@ def insert_place(
     name: str,
     lat: float,
     lon: float,
-    radius_meters: int = 100,
+    radius_meters: int = 25,
     category: str | None = None,
     notes: str | None = None,
 ) -> int:
@@ -3140,7 +3140,7 @@ def upsert_place(
     name: str,
     lat: float,
     lon: float,
-    radius_meters: int = 100,
+    radius_meters: int = 25,
     category: str | None = None,
     notes: str | None = None,
 ) -> int:
@@ -3324,6 +3324,42 @@ def set_location_state(
         """,
         (user_id, current_place_id, current_visit_id,
          consecutive_count, last_ping_place_id),
+    )
+
+
+# ============================================================================
+# Geocode cache functions
+# ============================================================================
+
+
+def get_cached_geocode(
+    conn: sqlite3.Connection,
+    location_text: str,
+) -> tuple[float, float] | None:
+    """Look up a cached geocode result. Returns (lat, lon) or None."""
+    cursor = conn.execute(
+        "SELECT lat, lon FROM geocode_cache WHERE location_text = ?",
+        (location_text,),
+    )
+    row = cursor.fetchone()
+    if row:
+        return (row["lat"], row["lon"])
+    return None
+
+
+def cache_geocode(
+    conn: sqlite3.Connection,
+    location_text: str,
+    lat: float,
+    lon: float,
+) -> None:
+    """Cache a geocode result."""
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO geocode_cache (location_text, lat, lon)
+        VALUES (?, ?, ?)
+        """,
+        (location_text, lat, lon),
     )
 
 
