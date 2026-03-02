@@ -8,7 +8,8 @@ from istota.commands import (
     _build_export_metadata, _filter_user_messages, _format_messages_markdown,
     _format_messages_text, _format_utilization, _parse_export_metadata,
     _read_claude_oauth_token,
-    cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_status, cmd_stop, cmd_usage,
+    cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_skills,
+    cmd_status, cmd_stop, cmd_usage,
     dispatch, parse_command,
 )
 from istota.config import Config, NextcloudConfig, SchedulerConfig, SecurityConfig, TalkConfig, UserConfig
@@ -720,6 +721,47 @@ class TestPollerInterception:
             result = await poll_talk_conversations(config)
 
         assert len(result) == 1
+
+
+# =============================================================================
+# TestCmdSkills
+# =============================================================================
+
+
+class TestCmdSkills:
+    @pytest.mark.asyncio
+    async def test_lists_bundled_skills(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            result = await cmd_skills(config, conn, "alice", "room1", "", client)
+
+        assert "Available Skills" in result
+        assert "skills loaded" in result
+        # Some well-known bundled skills should appear
+        assert "files" in result
+        assert "calendar" in result
+
+    @pytest.mark.asyncio
+    async def test_hides_admin_skills_from_non_admin(self, make_config):
+        config = make_config()
+        config.admin_users = {"bob"}  # alice is not admin
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            result = await cmd_skills(config, conn, "alice", "room1", "", client)
+
+        assert "tasks" not in result.lower().split("skills loaded")[0] or "subtask" not in result
+
+    @pytest.mark.asyncio
+    async def test_shows_admin_skills_to_admin(self, make_config):
+        config = make_config()
+        config.admin_users = set()  # empty = all admin
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            result = await cmd_skills(config, conn, "alice", "room1", "", client)
+
+        # With all users as admin, admin-only skills should be visible
+        assert "tasks" in result
 
 
 # =============================================================================

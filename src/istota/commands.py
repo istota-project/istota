@@ -285,6 +285,43 @@ async def cmd_cron(config, conn, user_id, conversation_token, args, client):
     return "\n".join(lines)
 
 
+@command("skills", "List available skills and their triggers")
+async def cmd_skills(config, conn, user_id, conversation_token, args, client):
+    from .skills._loader import load_skill_index
+
+    skills_dir = config.skills_dir
+    bundled_dir = getattr(config, "bundled_skills_dir", None)
+    index = load_skill_index(skills_dir, bundled_dir=bundled_dir)
+
+    is_admin = config.is_admin(user_id)
+
+    lines = ["**Available Skills**", ""]
+    for name in sorted(index):
+        meta = index[name]
+        if meta.admin_only and not is_admin:
+            continue
+
+        tags = []
+        if meta.always_include:
+            tags.append("always")
+        if meta.admin_only:
+            tags.append("admin")
+        if meta.keywords:
+            tags.append(f"keywords: {', '.join(meta.keywords[:5])}")
+        if meta.resource_types:
+            tags.append(f"resources: {', '.join(meta.resource_types)}")
+        if meta.source_types:
+            tags.append(f"sources: {', '.join(meta.source_types)}")
+
+        tag_str = f" ({'; '.join(tags)})" if tags else ""
+        lines.append(f"- **{name}**: {meta.description}{tag_str}")
+
+    lines.append("")
+    lines.append(f"{len(index)} skills loaded")
+
+    return "\n".join(lines)
+
+
 @command("check", "Run Claude Code health check")
 async def cmd_check(config, conn, user_id, conversation_token, args, client):
     from .executor import build_bwrap_cmd, build_clean_env
