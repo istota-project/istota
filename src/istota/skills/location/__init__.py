@@ -324,8 +324,9 @@ def cmd_attendance(args):
     from istota.skills.calendar import (
         CalendarEvent,
         get_caldav_client,
-        get_calendars_for_user,
+        list_calendars,
         get_events,
+        update_event,
     )
     from istota import db
     from datetime import timedelta
@@ -363,25 +364,25 @@ def cmd_attendance(args):
 
     client = get_caldav_client(caldav_url, caldav_user, caldav_pass)
 
-    # Fetch events from all calendars
+    # Fetch events from all calendars visible to this client (including shared calendars)
     try:
-        calendars = get_calendars_for_user(client, caldav_user)
+        calendars = list_calendars(client)
     except Exception as e:
         print(json.dumps({"error": f"Failed to list calendars: {e}"}))
         conn.close()
         sys.exit(1)
 
-    all_events: list[CalendarEvent] = []
-    for cal_name, cal_url, _writable in calendars:
+    all_events: list[tuple[CalendarEvent, str]] = []
+    for cal_name, cal_url in calendars:
         try:
             events = get_events(client, cal_url, day_start, day_end)
-            all_events.extend(events)
+            all_events.extend((ev, cal_url) for ev in events)
         except Exception:
             continue
 
     # Filter events
     filtered = []
-    for ev in all_events:
+    for ev, cal_url in all_events:
         if ev.all_day:
             continue
         if not ev.location:
@@ -393,7 +394,7 @@ def cmd_attendance(args):
             query = args.event.lower()
             if query != ev.uid.lower() and query not in ev.summary.lower():
                 continue
-        filtered.append(ev)
+        filtered.append((ev, cal_url))
 
     if not filtered:
         print(json.dumps({"date": str(target_date), "events": []}))
@@ -410,7 +411,7 @@ def cmd_attendance(args):
     default_radius = 200
 
     results = []
-    for ev in filtered:
+    for ev, cal_url in filtered:
         # Resolve location to coordinates
         event_lat, event_lon, radius = None, None, default_radius
         source = None
@@ -477,6 +478,12 @@ def cmd_attendance(args):
             entry["first_nearby_ping"] = nearby_pings[-1].timestamp  # pings are newest-first
             entry["last_nearby_ping"] = nearby_pings[0].timestamp
             entry["nearby_ping_count"] = len(nearby_pings)
+            if not ev.summary.startswith("✅"):
+                try:
+                    update_event(client, cal_url, ev.uid, summary=f"✅ {ev.summary}")
+                    entry["checkmark_added"] = True
+                except Exception:
+                    entry["checkmark_added"] = False
         else:
             entry["attended"] = None
 
