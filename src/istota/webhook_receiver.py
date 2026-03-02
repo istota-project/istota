@@ -116,9 +116,21 @@ async def receive_location(
 
     conn = _get_conn()
     try:
-        with _lock:
-            places = _places_cache.get(user_id, [])
-            actions = _actions_cache.get(user_id, [])
+        # Reload places from LOCATION.md on each batch so new places
+        # take effect without a service restart (ISSUE-009).
+        loc_config = load_location_config(_config, user_id)
+        if loc_config:
+            sync_places_to_db(conn, user_id, loc_config.places)
+            conn.commit()
+            places = db.get_places(conn, user_id)
+            actions = loc_config.actions
+            with _lock:
+                _places_cache[user_id] = places
+                _actions_cache[user_id] = actions
+        else:
+            with _lock:
+                places = _places_cache.get(user_id, [])
+                actions = _actions_cache.get(user_id, [])
 
         for feature in locations:
             _process_feature(conn, user_id, feature, places, actions)
