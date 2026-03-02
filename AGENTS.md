@@ -32,7 +32,7 @@ istota/
 │   ├── sleep_cycle.py       # Nightly memory extraction
 │   ├── storage.py           # Bot-managed Nextcloud storage
 │   ├── stream_parser.py     # Parse stream-json events
-│   ├── commands.py          # !command dispatch (help, stop, status, memory, cron)
+│   ├── commands.py          # !command dispatch (help, stop, status, memory, cron, skills, usage, check, export)
 │   ├── talk.py              # Nextcloud Talk API client (user API)
 │   ├── talk_poller.py       # Talk conversation polling
 │   ├── tasks_file_poller.py # TASKS.md file monitoring
@@ -94,6 +94,9 @@ Talk Poll ──►┐
 Email Poll ──►├─► SQLite Queue → Scheduler → Claude Code → Talk/Email Response
 TASKS.md ────►│
 CLI ─────────►┘
+
+GPS Webhook ──► Location DB → Place detection → Notifications (ntfy/Talk)
+
 ```
 
 - **Talk poller**: Background daemon thread, long-polling per conversation, WAL mode for concurrent DB access
@@ -147,11 +150,11 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 - Progress updates: random ack before execution, streaming progress (rate-limited: min 8s, max 5/task). `progress_style`: `replace` (edit ack in-place, default), `full` (append), `none` (silent)
 - Per-user log channel (`log_channel` config): verbose tool-by-tool execution logs posted to a dedicated Talk room
 - Multi-user rooms: only responds when @mentioned; 2-person rooms behave like DMs
-- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`, `!export` (conversation history export)
+- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`, `!export` (conversation history export), `!skills` (list available skills)
 - Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no
 
 ### Skills
-Self-contained directories under `src/istota/skills/`, each with `skill.toml` manifest and `skill.md` doc. Selection based on: `always_include`, `source_types`, `keywords` (if skill also has `resource_types`, requires both keyword match + user has resource), `file_types`, `companion_skills`.
+Self-contained directories under `src/istota/skills/`, each with `skill.toml` manifest and `skill.md` doc. Selection based on: `always_include`, `source_types`, `keywords` (if skill also has `resource_types`, requires both keyword match + user has resource), `file_types`, `companion_skills`. Skills can be excluded via `disabled_skills` at instance level (top-level config) and per-user level (user config), both merged at selection time.
 
 Audio attachments pre-transcribed before skill selection so keyword matching works on voice memos.
 
@@ -182,6 +185,20 @@ Hybrid BM25 + vector search using sqlite-vec and sentence-transformers. Auto-ind
 
 ### Invoicing System
 Config-driven invoice generation (`INVOICING.md`) with PDF export via WeasyPrint. Cash-basis accounting — income recognized at payment time. Multi-entity support. Work log in `_INVOICES.md`. Scheduled generation for `schedule = "monthly"` clients. Overdue detection with notifications.
+
+### GPS Location Tracking
+Overland GPS webhook receiver (`webhook_receiver.py`) ingests location pings and detects place transitions. Runs as a separate FastAPI service (`uvicorn istota.webhook_receiver:app`).
+
+Config: `[location]` section — `enabled: bool = False`, `webhooks_port: int = 8765`.
+
+Per-user config via `LOCATION.md` in the user's bot config folder (TOML format):
+- `[settings]`: `ingest_token`, `default_radius`
+- `[[places]]`: named locations with `lat`, `lon`, `radius_meters`, `category`
+- `[[actions]]`: triggered on `enter`/`exit` events — surfaces: `ntfy`, `talk`, `silent`, `cron_prompt`
+
+Place detection uses hysteresis (2 consecutive pings required) to avoid flapping. LOCATION.md is reloaded on every ping batch — changes take effect without restart.
+
+DB tables: `location_pings`, `location_places`, `location_visits`, `location_state`. Old pings cleaned after `location_ping_retention_days` (365).
 
 ### Filesystem Sandbox (bubblewrap)
 Per-user filesystem isolation via `bwrap`. Non-admins see only their Nextcloud subtree + system libs. Admins see full mount + DB (RO by default). No network isolation. Graceful degradation if not Linux or bwrap not found.
