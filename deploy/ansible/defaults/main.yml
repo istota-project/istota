@@ -130,6 +130,11 @@ istota_conversation_talk_context_limit: 100      # max messages to fetch from Ta
 istota_admin_users: []
 
 # Instance-wide disabled skills (list of skill names to exclude from selection)
+# This controls prompt selection only — whether the bot considers a skill when
+# building prompts. Feature flags like browser_enabled, developer_enabled, etc.
+# control infrastructure (deploying containers, configuring services, setting
+# env vars). Both layers are needed: a feature flag deploys the backend, while
+# disabled_skills prevents the skill doc from being loaded into prompts.
 # Example: ["browse", "whisper"]
 istota_disabled_skills: []
 
