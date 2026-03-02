@@ -1006,11 +1006,11 @@ class TestCmdAttendance:
                 setattr(args, k, v)
 
         mock_client = MagicMock()
-        mock_calendars = [("Personal", "https://cal.example.com/personal", True)]
+        mock_calendars = [("Personal", "https://cal.example.com/personal")]
 
         with patch.dict("os.environ", env):
             with patch("istota.skills.calendar.get_caldav_client", return_value=mock_client):
-                with patch("istota.skills.calendar.get_calendars_for_user", return_value=mock_calendars):
+                with patch("istota.skills.calendar.list_calendars", return_value=mock_calendars):
                     with patch("istota.skills.calendar.get_events", return_value=events):
                         captured = io.StringIO()
                         old_stdout = sys.stdout

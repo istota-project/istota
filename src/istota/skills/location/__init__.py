@@ -326,7 +326,6 @@ def cmd_attendance(args):
         get_caldav_client,
         list_calendars,
         get_events,
-        update_event,
     )
     from istota import db
     from datetime import timedelta
@@ -372,17 +371,17 @@ def cmd_attendance(args):
         conn.close()
         sys.exit(1)
 
-    all_events: list[tuple[CalendarEvent, str]] = []
+    all_events: list[CalendarEvent] = []
     for cal_name, cal_url in calendars:
         try:
             events = get_events(client, cal_url, day_start, day_end)
-            all_events.extend((ev, cal_url) for ev in events)
+            all_events.extend(events)
         except Exception:
             continue
 
     # Filter events
     filtered = []
-    for ev, cal_url in all_events:
+    for ev in all_events:
         if ev.all_day:
             continue
         if not ev.location:
@@ -394,7 +393,7 @@ def cmd_attendance(args):
             query = args.event.lower()
             if query != ev.uid.lower() and query not in ev.summary.lower():
                 continue
-        filtered.append((ev, cal_url))
+        filtered.append(ev)
 
     if not filtered:
         print(json.dumps({"date": str(target_date), "events": []}))
@@ -411,7 +410,7 @@ def cmd_attendance(args):
     default_radius = 200
 
     results = []
-    for ev, cal_url in filtered:
+    for ev in filtered:
         # Resolve location to coordinates
         event_lat, event_lon, radius = None, None, default_radius
         source = None
@@ -478,12 +477,6 @@ def cmd_attendance(args):
             entry["first_nearby_ping"] = nearby_pings[-1].timestamp  # pings are newest-first
             entry["last_nearby_ping"] = nearby_pings[0].timestamp
             entry["nearby_ping_count"] = len(nearby_pings)
-            if not ev.summary.startswith("✅"):
-                try:
-                    update_event(client, cal_url, ev.uid, summary=f"✅ {ev.summary}")
-                    entry["checkmark_added"] = True
-                except Exception:
-                    entry["checkmark_added"] = False
         else:
             entry["attended"] = None
 
