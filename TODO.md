@@ -292,6 +292,7 @@
 - [x] Markets skill: interactive CLI with quote, summary, finviz commands + keyword triggers
 - [ ] More specialized skills with specific commands/tools
 - [x] Location tracking via Overland GPS (FastAPI receiver, place resolution, visit state machine, CLI skill)
+- [x] Calendar attendance correlation via GPS pings (geocoding, place matching, proximity check)
 
 ## Priority 5: Location Awareness (Phase 2+)
 

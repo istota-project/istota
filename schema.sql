@@ -431,6 +431,14 @@ CREATE TABLE IF NOT EXISTS visits (
 
 CREATE INDEX IF NOT EXISTS idx_visits_user_time ON visits(user_id, entered_at);
 
+-- Geocode cache (forward geocoding results for calendar event locations)
+CREATE TABLE IF NOT EXISTS geocode_cache (
+    location_text TEXT PRIMARY KEY,
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Location state machine (per-user hysteresis tracking)
 CREATE TABLE IF NOT EXISTS location_state (
     user_id TEXT PRIMARY KEY,

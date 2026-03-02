@@ -264,6 +264,228 @@ def _append_place_to_location_md(
     loc_file.write_text(content)
 
 
+_VIRTUAL_LOCATION_PATTERNS = [
+    "zoom.us", "zoom", "meet.google", "teams.microsoft",
+    "teams", "webex", "skype", "hangouts", "facetime",
+    "google meet", "microsoft teams",
+]
+
+
+def _is_virtual_location(location: str) -> bool:
+    """Check if a location string indicates a virtual meeting."""
+    loc_lower = location.lower()
+    return any(p in loc_lower for p in _VIRTUAL_LOCATION_PATTERNS)
+
+
+def _match_place(location_text: str, places):
+    """Fuzzy-match a location string against known places (case-insensitive substring).
+
+    Returns (place_name, lat, lon, radius_meters) or None.
+    """
+    loc_lower = location_text.lower()
+    for place in places:
+        if place["name"].lower() in loc_lower or loc_lower in place["name"].lower():
+            return {
+                "name": place["name"],
+                "lat": place["lat"],
+                "lon": place["lon"],
+                "radius_meters": place["radius_meters"],
+            }
+    return None
+
+
+def _geocode_location(location_text: str, conn):
+    """Resolve location text to lat/lon via cache or Nominatim.
+
+    Returns (lat, lon) or None.
+    """
+    from istota.db import get_cached_geocode, cache_geocode
+
+    cached = get_cached_geocode(conn, location_text)
+    if cached:
+        return cached
+
+    try:
+        from geopy.geocoders import Nominatim
+        geolocator = Nominatim(user_agent="istota")
+        result = geolocator.geocode(location_text, timeout=10)
+        if result:
+            cache_geocode(conn, location_text, result.latitude, result.longitude)
+            conn.commit()
+            return (result.latitude, result.longitude)
+    except Exception:
+        pass
+
+    return None
+
+
+def cmd_attendance(args):
+    from istota.geo import haversine
+    from istota.skills.calendar import (
+        CalendarEvent,
+        get_caldav_client,
+        get_calendars_for_user,
+        get_events,
+    )
+    from istota import db
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    conn = _get_conn()
+    user_id = _get_user_id()
+
+    # Determine timezone
+    tz_name = os.environ.get("TZ", "America/Los_Angeles")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("America/Los_Angeles")
+
+    # Determine date
+    if args.date:
+        target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
+    else:
+        target_date = datetime.now(tz).date()
+
+    # Build day boundaries in local timezone
+    day_start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=tz)
+    day_end = day_start + timedelta(days=1)
+
+    # Connect to CalDAV
+    caldav_url = os.environ.get("CALDAV_URL", "")
+    caldav_user = os.environ.get("CALDAV_USERNAME", "")
+    caldav_pass = os.environ.get("CALDAV_PASSWORD", "")
+
+    if not all([caldav_url, caldav_user, caldav_pass]):
+        print(json.dumps({"error": "CalDAV credentials not set (CALDAV_URL, CALDAV_USERNAME, CALDAV_PASSWORD)"}))
+        conn.close()
+        sys.exit(1)
+
+    client = get_caldav_client(caldav_url, caldav_user, caldav_pass)
+
+    # Fetch events from all calendars
+    try:
+        calendars = get_calendars_for_user(client, caldav_user)
+    except Exception as e:
+        print(json.dumps({"error": f"Failed to list calendars: {e}"}))
+        conn.close()
+        sys.exit(1)
+
+    all_events: list[CalendarEvent] = []
+    for cal_name, cal_url, _writable in calendars:
+        try:
+            events = get_events(client, cal_url, day_start, day_end)
+            all_events.extend(events)
+        except Exception:
+            continue
+
+    # Filter events
+    filtered = []
+    for ev in all_events:
+        if ev.all_day:
+            continue
+        if not ev.location:
+            continue
+        if _is_virtual_location(ev.location):
+            continue
+        # Optional --event filter
+        if args.event:
+            query = args.event.lower()
+            if query != ev.uid.lower() and query not in ev.summary.lower():
+                continue
+        filtered.append(ev)
+
+    if not filtered:
+        print(json.dumps({"date": str(target_date), "events": []}))
+        conn.close()
+        return
+
+    # Load known places from DB
+    places_rows = conn.execute(
+        "SELECT name, lat, lon, radius_meters FROM places WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    places = [dict(r) for r in places_rows]
+
+    default_radius = 200
+
+    results = []
+    for ev in filtered:
+        # Resolve location to coordinates
+        event_lat, event_lon, radius = None, None, default_radius
+        source = None
+
+        # Try place match first
+        place_match = _match_place(ev.location, places)
+        if place_match:
+            event_lat = place_match["lat"]
+            event_lon = place_match["lon"]
+            radius = place_match["radius_meters"]
+            source = "place"
+        else:
+            # Try geocode
+            coords = _geocode_location(ev.location, conn)
+            if coords:
+                event_lat, event_lon = coords
+                source = "geocode"
+
+        entry = {
+            "summary": ev.summary,
+            "uid": ev.uid,
+            "start": ev.start.isoformat(),
+            "end": ev.end.isoformat(),
+            "location": ev.location,
+            "location_resolved": source is not None,
+            "resolution_source": source,
+        }
+
+        if event_lat is None:
+            entry["attended"] = None
+            results.append(entry)
+            continue
+
+        entry["event_lat"] = round(event_lat, 6)
+        entry["event_lon"] = round(event_lon, 6)
+        entry["radius_meters"] = radius
+
+        # Query pings for event time window (with 30min buffer)
+        ev_start = ev.start
+        ev_end = ev.end
+        # Ensure timezone-aware for comparison
+        if ev_start.tzinfo is None:
+            ev_start = ev_start.replace(tzinfo=tz)
+        if ev_end.tzinfo is None:
+            ev_end = ev_end.replace(tzinfo=tz)
+
+        # Convert to UTC for DB query (pings stored as UTC ISO strings)
+        window_start = (ev_start - timedelta(minutes=30)).astimezone(timezone.utc)
+        window_end = (ev_end + timedelta(minutes=30)).astimezone(timezone.utc)
+        ping_since = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        ping_until = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        pings = db.get_pings(conn, user_id, since=ping_since, until=ping_until, limit=1000)
+
+        # Check proximity
+        nearby_pings = []
+        for ping in pings:
+            dist = haversine(event_lat, event_lon, ping.lat, ping.lon)
+            if dist <= radius:
+                nearby_pings.append(ping)
+
+        if nearby_pings:
+            entry["attended"] = True
+            entry["first_nearby_ping"] = nearby_pings[-1].timestamp  # pings are newest-first
+            entry["last_nearby_ping"] = nearby_pings[0].timestamp
+            entry["nearby_ping_count"] = len(nearby_pings)
+        else:
+            entry["attended"] = None
+
+        results.append(entry)
+
+    print(json.dumps({"date": str(target_date), "events": results}))
+    conn.close()
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Location tracking CLI")
     sub = parser.add_subparsers(dest="command")
@@ -281,6 +503,10 @@ def build_parser():
     learn.add_argument("--category", default="other", help="Place category")
     learn.add_argument("--radius", type=int, default=100, help="Geofence radius in meters")
 
+    attend = sub.add_parser("attendance", help="Check calendar attendance via GPS")
+    attend.add_argument("--date", help="Date to check (YYYY-MM-DD, default: today)")
+    attend.add_argument("--event", help="Filter by event UID or title substring")
+
     return parser
 
 
@@ -293,6 +519,7 @@ def main():
         "history": cmd_history,
         "places": cmd_places,
         "learn": cmd_learn,
+        "attendance": cmd_attendance,
     }
 
     if args.command in commands:

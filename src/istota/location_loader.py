@@ -18,7 +18,7 @@ _TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
 @dataclass
 class LocationSettings:
     ingest_token: str = ""
-    default_radius: int = 10
+    default_radius: int = 25
 
 
 @dataclass
@@ -26,7 +26,7 @@ class LocationPlace:
     name: str
     lat: float
     lon: float
-    radius_meters: int = 10
+    radius_meters: int = 25
     category: str = "other"
 
 
@@ -82,7 +82,7 @@ def parse_location_data(data: dict) -> LocationConfig:
     settings_data = data.get("settings", {})
     settings = LocationSettings(
         ingest_token=settings_data.get("ingest_token", ""),
-        default_radius=settings_data.get("default_radius", 10),
+        default_radius=settings_data.get("default_radius", 25),
     )
 
     places = []

@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-01: Calendar attendance via GPS correlation
+
+Cross-references calendar events with GPS pings to confirm whether the user attended in-person events. Resolves event locations by matching against known places first, then forward geocoding via Nominatim (cached in DB). Filters out all-day events, events without locations, and virtual meetings (Zoom, Teams, etc). Uses a 30-minute buffer around event times and configurable radius (from matched place or default 200m).
+
+**Key changes:**
+- Extracted `haversine()` from `webhook_receiver.py` into shared `geo.py` module
+- Added `geocode_cache` table for caching Nominatim results
+- Added `attendance` subcommand to location skill CLI
+- Added `geopy>=2.4` to location extras for forward geocoding
+- Added `calendar` resource type to location skill for skill selection
+
+**Files added/modified:**
+- `src/istota/geo.py` — New shared module with `haversine()` and `_EARTH_RADIUS_M`
+- `src/istota/webhook_receiver.py` — Imports haversine from `geo.py`
+- `src/istota/db.py` — Added `get_cached_geocode()` and `cache_geocode()`
+- `src/istota/skills/location/__init__.py` — Added `cmd_attendance()` with CalDAV integration, place matching, geocoding, proximity check
+- `src/istota/skills/location/skill.toml` — Added `resource_types = ["calendar"]` and `"attendance"` keyword
+- `src/istota/skills/location/skill.md` — Documented attendance subcommand
+- `schema.sql` — Added `geocode_cache` table
+- `pyproject.toml` — Added `geopy>=2.4` to location extras
+- `tests/test_location.py` — 19 new tests (75 total): geocode cache, virtual detection, place matching, geocoding, full attendance command
+
 ## 2026-03-01: Per-job log channel suppression
 
 Added `skip_log_channel` option for scheduled jobs. Frequent scheduled jobs (e.g., every few minutes) were spamming the per-user log channel with tool-by-tool execution logs. `silent_unless_action` already controls whether results are posted to Talk, but there was no way to suppress log channel output. The new field flows from CRON.md through the full pipeline: CronJob → ScheduledJob (DB) → Task → checked in process_one_task().

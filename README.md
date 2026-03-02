@@ -143,7 +143,7 @@ Optional dependency groups:
 ```bash
 uv sync --extra memory-search    # sqlite-vec + sentence-transformers for semantic search
 uv sync --extra whisper          # faster-whisper for audio transcription
-uv sync --extra location         # fastapi + uvicorn for GPS location receiver
+uv sync --extra location         # fastapi + uvicorn + geopy for GPS location receiver
 ```
 
 ## Further reading
