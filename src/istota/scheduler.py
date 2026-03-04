@@ -875,6 +875,20 @@ def _execute_command_task(
         env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path)
     if task.conversation_token:
         env["ISTOTA_CONVERSATION_TOKEN"] = task.conversation_token
+    # CalDAV credentials so command tasks can use the calendar skill
+    if config.caldav_url:
+        env["CALDAV_URL"] = config.caldav_url
+    if config.caldav_username:
+        env["CALDAV_USERNAME"] = config.caldav_username
+    if config.caldav_password:
+        env["CALDAV_PASSWORD"] = config.caldav_password
+    # Nextcloud OCS API credentials
+    if config.nextcloud.url:
+        env["NC_URL"] = config.nextcloud.url
+    if config.nextcloud.username:
+        env["NC_USER"] = config.nextcloud.username
+    if config.nextcloud.app_password:
+        env["NC_PASS"] = config.nextcloud.app_password
 
     try:
         proc = subprocess.run(
