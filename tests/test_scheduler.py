@@ -1674,6 +1674,53 @@ class TestExecuteCommandTask:
             job = db.get_scheduled_job_by_name(conn, "alice", "cmd-job")
         assert job.consecutive_failures == 1
 
+    def test_caldav_env_vars_passed(self, db_path, tmp_path):
+        config = Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example.com", username="ncuser", app_password="ncpass"),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+        (tmp_path / "temp").mkdir(exist_ok=True)
+        task = self._make_task(
+            command="echo $CALDAV_URL:$CALDAV_USERNAME:$NC_URL:$NC_USER",
+        )
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "https://nc.example.com/remote.php/dav" in result
+        assert "ncuser" in result
+
+    def test_garmin_config_env_var(self, db_path, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        temp = tmp_path / "temp"
+        temp.mkdir(exist_ok=True)
+        config = Config(
+            db_path=db_path,
+            nextcloud_mount_path=mount,
+            temp_dir=temp,
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+        )
+        # Create GARMIN.md in the expected user config path
+        from istota.storage import get_user_config_path
+        garmin_dir = mount / get_user_config_path("alice", config.bot_dir_name).lstrip("/")
+        garmin_dir.mkdir(parents=True, exist_ok=True)
+        garmin_file = garmin_dir / "GARMIN.md"
+        garmin_file.write_text("garmin config")
+        task = self._make_task(command="echo $GARMIN_CONFIG")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert str(garmin_file) in result
+
+    def test_garmin_config_not_set_when_file_missing(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(command="echo ${GARMIN_CONFIG:-unset}")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert result == "unset"
+
 
 # ---------------------------------------------------------------------------
 # TestDualWorkerQueue

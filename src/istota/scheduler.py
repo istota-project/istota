@@ -889,6 +889,12 @@ def _execute_command_task(
         env["NC_USER"] = config.nextcloud.username
     if config.nextcloud.app_password:
         env["NC_PASS"] = config.nextcloud.app_password
+    # Garmin config path (in user's bot config folder, only set if file exists)
+    if config.nextcloud_mount_path:
+        from .storage import get_user_config_path
+        garmin_path = config.nextcloud_mount_path / get_user_config_path(task.user_id, config.bot_dir_name).lstrip("/") / "GARMIN.md"
+        if garmin_path.exists():
+            env["GARMIN_CONFIG"] = str(garmin_path)
 
     try:
         proc = subprocess.run(
