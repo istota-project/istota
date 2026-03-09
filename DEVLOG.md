@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-09: Fix DST double-fire in scheduled jobs and briefings
+
+After the spring-forward DST transition (March 8), scheduled jobs and briefings fired twice — once at the wrong time and once at the correct time. croniter miscomputes the next fire time when given a tz-aware datetime that crosses a DST boundary (e.g. PST→PDT). The fix strips timezone info before passing to croniter, working entirely with naive wall-clock times for the should-run comparison.
+
+**Key changes:**
+- Both `check_briefings()` and `check_scheduled_jobs()` now convert datetimes to naive local wall-clock times before croniter evaluation
+- Conversion chain: UTC from DB → tz-aware UTC → `.astimezone(user_tz)` → `.replace(tzinfo=None)` → croniter
+- All comparison paths naivified: last_run_at, created_at fallback, and today_start fallback
+- `check_scheduled_jobs()` now uses `_now()` wrapper for testability (was `datetime.now()` directly)
+
+**Files modified:**
+- `src/istota/scheduler.py` — Naive datetime handling in `check_briefings()` and `check_scheduled_jobs()`
+- `tests/test_scheduler.py` — 4 new DST tests: spring-forward no-double-fire and correct-time-fire for both jobs and briefings
+
 ## 2026-03-01: Calendar attendance via GPS correlation
 
 Cross-references calendar events with GPS pings to confirm whether the user attended in-person events. Resolves event locations by matching against known places first, then forward geocoding via Nominatim (cached in DB). Filters out all-day events, events without locations, and virtual meetings (Zoom, Teams, etc). Uses a 30-minute buffer around event times and configurable radius (from matched place or default 200m).

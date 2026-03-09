@@ -623,6 +623,139 @@ class TestCheckScheduledJobs:
                 check_scheduled_jobs(conn, config)
             mock_sync.assert_called_once_with(conn, config)
 
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_dst_spring_forward_no_double_fire(self, mock_now, mock_sync, db_path):
+        """Job should not fire early when last_run_at is from before DST spring-forward.
+
+        Scenario: 10 PM daily job. Last ran March 7, 22:00 PST (UTC-8).
+        DST spring-forward on March 8. Now is March 8, 21:30 PDT (UTC-7).
+        croniter with tz-aware datetimes would compute next_run as 21:00 PDT (wrong).
+        With naive wall-clock times, next_run should be 22:00, so job should NOT fire.
+        """
+        user = UserConfig(timezone="America/Los_Angeles")
+        config = Config(db_path=db_path, users={"alice": user})
+
+        # last_run_at stored as UTC: March 8 06:00 UTC = March 7 22:00 PST
+        last_run_utc = "2026-03-08 06:00:00"
+        created_at = "2026-03-01 00:00:00"
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, conversation_token,
+                    enabled, last_run_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "nightly", "0 22 * * *", "Nightly check", "room1",
+                 1, last_run_utc, created_at),
+            )
+
+        # Now is March 9, 04:30 UTC = March 8, 21:30 PDT (before 10 PM)
+        la_tz = ZoneInfo("America/Los_Angeles")
+        fake_now_utc = datetime(2026, 3, 9, 4, 30, 0, tzinfo=ZoneInfo("UTC"))
+        mock_now.return_value = fake_now_utc.astimezone(la_tz)
+
+        with db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+
+        assert result == [], "Job fired early due to DST transition — double-fire bug"
+
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_dst_spring_forward_fires_at_correct_time(self, mock_now, mock_sync, db_path):
+        """Job should fire at the correct wall-clock time after DST spring-forward."""
+        user = UserConfig(timezone="America/Los_Angeles")
+        config = Config(db_path=db_path, users={"alice": user})
+
+        # last_run_at stored as UTC: March 8 06:00 UTC = March 7 22:00 PST
+        last_run_utc = "2026-03-08 06:00:00"
+        created_at = "2026-03-01 00:00:00"
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, conversation_token,
+                    enabled, last_run_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "nightly", "0 22 * * *", "Nightly check", "room1",
+                 1, last_run_utc, created_at),
+            )
+
+        # Now is March 9, 05:05 UTC = March 8, 22:05 PDT (past 10 PM)
+        la_tz = ZoneInfo("America/Los_Angeles")
+        fake_now_utc = datetime(2026, 3, 9, 5, 5, 0, tzinfo=ZoneInfo("UTC"))
+        mock_now.return_value = fake_now_utc.astimezone(la_tz)
+
+        with db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+
+        assert len(result) == 1, "Job should fire at the correct wall-clock time"
+
+
+class TestCheckBriefingsDST:
+    """DST-related tests for check_briefings."""
+
+    @patch("istota.scheduler.build_briefing_prompt", return_value="Test prompt")
+    @patch("istota.scheduler._now")
+    def test_dst_spring_forward_no_double_fire(self, mock_now, mock_build, db_path):
+        """Briefing should not fire early when last_run_at crosses DST boundary.
+
+        Scenario: 6 AM weekday briefing. Last ran Friday March 7, 06:00 PST.
+        DST spring-forward March 8. Now is Monday March 9, 05:30 PDT.
+        Should NOT fire yet (5:30 AM < 6:00 AM wall-clock).
+        """
+        la_tz = ZoneInfo("America/Los_Angeles")
+        # Now = March 9, 12:30 UTC = March 9, 05:30 PDT
+        mock_now.return_value = datetime(2026, 3, 9, 12, 30, 0, tzinfo=la_tz).astimezone(la_tz)
+        # Actually set a proper time
+        mock_now.return_value = datetime(2026, 3, 9, 5, 30, 0, tzinfo=la_tz)
+
+        briefing = BriefingConfig(
+            name="morning",
+            cron="0 6 * * 1-5",
+            conversation_token="room1",
+            components={},
+        )
+        user = UserConfig(timezone="America/Los_Angeles", briefings=[briefing])
+        config = Config(db_path=db_path, users={"alice": user})
+
+        # last_run_at: March 7, 14:00 UTC = March 7, 06:00 PST
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO briefing_state (user_id, briefing_name, last_run_at) VALUES (?, ?, ?)",
+                ("alice", "morning", "2026-03-07 14:00:00"),
+            )
+
+        result = check_briefings(db_path, config)
+        assert result == [], "Briefing fired early due to DST transition — double-fire bug"
+
+    @patch("istota.scheduler.build_briefing_prompt", return_value="Test prompt")
+    @patch("istota.scheduler._now")
+    def test_dst_spring_forward_fires_at_correct_time(self, mock_now, mock_build, db_path):
+        """Briefing should fire at the correct wall-clock time after DST spring-forward."""
+        la_tz = ZoneInfo("America/Los_Angeles")
+        # Now = March 9, 06:05 PDT
+        mock_now.return_value = datetime(2026, 3, 9, 6, 5, 0, tzinfo=la_tz)
+
+        briefing = BriefingConfig(
+            name="morning",
+            cron="0 6 * * 1-5",
+            conversation_token="room1",
+            components={},
+        )
+        user = UserConfig(timezone="America/Los_Angeles", briefings=[briefing])
+        config = Config(db_path=db_path, users={"alice": user})
+
+        # last_run_at: March 7, 14:00 UTC = March 7, 06:00 PST
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO briefing_state (user_id, briefing_name, last_run_at) VALUES (?, ?, ?)",
+                ("alice", "morning", "2026-03-07 14:00:00"),
+            )
+
+        result = check_briefings(db_path, config)
+        assert len(result) == 1, "Briefing should fire at the correct wall-clock time"
+
 
 class TestSyncCronFiles:
     """Tests for _sync_cron_files edge cases."""

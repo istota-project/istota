@@ -1630,6 +1630,10 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
                 user_tz_str = "UTC"
 
             now = _now(user_tz)
+            # Use naive wall-clock times for croniter to avoid DST bugs.
+            # croniter miscomputes next fire time when a tz-aware datetime
+            # crosses a DST boundary (e.g. PST→PDT), causing double-fires.
+            now_naive = now.replace(tzinfo=None)
 
             for briefing in briefings:
                 if not briefing.cron:
@@ -1644,14 +1648,15 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
                     last_run = datetime.fromisoformat(last_run_at)
                     if last_run.tzinfo is None:
                         last_run = last_run.replace(tzinfo=ZoneInfo("UTC"))
-                    cron = croniter(briefing.cron, last_run.astimezone(user_tz))
+                    base = last_run.astimezone(user_tz).replace(tzinfo=None)
+                    cron = croniter(briefing.cron, base)
                     next_run = cron.get_next(datetime)
-                    should_run = now >= next_run
+                    should_run = now_naive >= next_run
                 else:
-                    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    today_start = now_naive.replace(hour=0, minute=0, second=0, microsecond=0)
                     cron = croniter(briefing.cron, today_start)
                     next_run = cron.get_next(datetime)
-                    should_run = now >= next_run
+                    should_run = now_naive >= next_run
 
                 if should_run:
                     due_briefings.append((user_id, user_tz_str, briefing))
@@ -1935,7 +1940,11 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
         except Exception:
             user_tz = ZoneInfo("UTC")
 
-        now = datetime.now(user_tz)
+        now = _now(user_tz)
+        # Use naive wall-clock times for croniter to avoid DST bugs.
+        # croniter miscomputes next fire time when a tz-aware datetime
+        # crosses a DST boundary (e.g. PST→PDT), causing double-fires.
+        now_naive = now.replace(tzinfo=None)
 
         for job in user_jobs:
             should_run = False
@@ -1945,12 +1954,13 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                 if last_run.tzinfo is None:
                     # DB stores UTC via datetime('now')
                     last_run = last_run.replace(tzinfo=ZoneInfo("UTC"))
-                cron = croniter(job.cron_expression, last_run.astimezone(user_tz))
+                base = last_run.astimezone(user_tz).replace(tzinfo=None)
+                cron = croniter(job.cron_expression, base)
                 next_run = cron.get_next(datetime)
-                should_run = now >= next_run
+                should_run = now_naive >= next_run
                 logger.debug(
                     "Job '%s': last_run=%s next_run=%s now=%s should_run=%s",
-                    job.name, last_run, next_run, now, should_run,
+                    job.name, last_run, next_run, now_naive, should_run,
                 )
             else:
                 # Use created_at as base so jobs don't fire immediately
@@ -1960,15 +1970,15 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     if base.tzinfo is None:
                         # DB stores UTC via datetime('now')
                         base = base.replace(tzinfo=ZoneInfo("UTC"))
-                    base = base.astimezone(user_tz)
+                    base = base.astimezone(user_tz).replace(tzinfo=None)
                 else:
-                    base = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    base = now_naive.replace(hour=0, minute=0, second=0, microsecond=0)
                 cron = croniter(job.cron_expression, base)
                 next_run = cron.get_next(datetime)
-                should_run = now >= next_run
+                should_run = now_naive >= next_run
                 logger.debug(
                     "Job '%s' (never run): base=%s next_run=%s now=%s should_run=%s",
-                    job.name, base, next_run, now, should_run,
+                    job.name, base, next_run, now_naive, should_run,
                 )
 
             if should_run:
