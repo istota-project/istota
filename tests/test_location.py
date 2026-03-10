@@ -1180,3 +1180,451 @@ class TestCmdAttendance:
         ev = result["events"][0]
         assert ev["attended"] is True
         assert ev["radius_meters"] == 2000
+
+
+# ===========================================================================
+# Reverse geocode cache DB tests
+# ===========================================================================
+
+
+class TestReverseGeocodeCache:
+    def test_cache_miss_returns_none(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            result = db.get_reverse_geocode(conn, 34.05, -118.25)
+            assert result is None
+
+    def test_store_and_retrieve(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            data = {
+                "display_name": "123 Main St, Los Angeles, CA",
+                "neighborhood": "Downtown",
+                "suburb": "Central LA",
+                "road": "Main St",
+                "city": "Los Angeles",
+            }
+            db.cache_reverse_geocode(conn, 34.05, -118.25, data)
+            conn.commit()
+
+            result = db.get_reverse_geocode(conn, 34.05, -118.25)
+            assert result is not None
+            assert result["display_name"] == "123 Main St, Los Angeles, CA"
+            assert result["neighborhood"] == "Downtown"
+            assert result["suburb"] == "Central LA"
+            assert result["road"] == "Main St"
+            assert result["city"] == "Los Angeles"
+
+    def test_rounding_hits_same_entry(self, tmp_path):
+        """Nearby coords (within ~11m) should hit the same cache entry."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            data = {
+                "display_name": "Test Place",
+                "neighborhood": None,
+                "suburb": None,
+                "road": "Test Rd",
+                "city": "Test City",
+            }
+            db.cache_reverse_geocode(conn, 34.05001, -118.25002, data)
+            conn.commit()
+
+            # Slightly different coords that round to the same 4-decimal value
+            result = db.get_reverse_geocode(conn, 34.05004, -118.25001)
+            assert result is not None
+            assert result["display_name"] == "Test Place"
+
+    def test_upsert_overwrites(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            data1 = {
+                "display_name": "Old Name",
+                "neighborhood": None,
+                "suburb": None,
+                "road": None,
+                "city": None,
+            }
+            db.cache_reverse_geocode(conn, 34.05, -118.25, data1)
+            conn.commit()
+
+            data2 = {
+                "display_name": "New Name",
+                "neighborhood": "New Hood",
+                "suburb": None,
+                "road": None,
+                "city": None,
+            }
+            db.cache_reverse_geocode(conn, 34.05, -118.25, data2)
+            conn.commit()
+
+            result = db.get_reverse_geocode(conn, 34.05, -118.25)
+            assert result["display_name"] == "New Name"
+            assert result["neighborhood"] == "New Hood"
+
+
+# ===========================================================================
+# Reverse geocode function tests (geo.py)
+# ===========================================================================
+
+
+class TestReverseGeocode:
+    def test_cache_hit(self, tmp_path):
+        from istota.geo import reverse_geocode
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.cache_reverse_geocode(conn, 34.05, -118.25, {
+                "display_name": "Cached Place",
+                "neighborhood": "Hood",
+                "suburb": "Sub",
+                "road": "Road",
+                "city": "City",
+            })
+            conn.commit()
+
+            result = reverse_geocode(34.05, -118.25, conn)
+            assert result["source"] == "cache"
+            assert result["display_name"] == "Cached Place"
+
+    def test_nominatim_called_on_miss(self, tmp_path):
+        from istota.geo import reverse_geocode
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            mock_result = MagicMock()
+            mock_result.address = "456 Oak Ave, Pasadena, CA"
+            mock_result.raw = {
+                "address": {
+                    "road": "Oak Ave",
+                    "neighbourhood": "Old Town",
+                    "suburb": "South Pasadena",
+                    "city": "Pasadena",
+                }
+            }
+
+            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
+                mock_geolocator = MagicMock()
+                mock_geolocator.reverse.return_value = mock_result
+                mock_nom_cls.return_value = mock_geolocator
+
+                result = reverse_geocode(34.15, -118.14, conn)
+                assert result["source"] == "nominatim"
+                assert result["display_name"] == "456 Oak Ave, Pasadena, CA"
+                assert result["road"] == "Oak Ave"
+                assert result["neighborhood"] == "Old Town"
+
+                # Should be cached now
+                cached = db.get_reverse_geocode(conn, 34.15, -118.14)
+                assert cached is not None
+                assert cached["display_name"] == "456 Oak Ave, Pasadena, CA"
+
+    def test_nominatim_returns_none(self, tmp_path):
+        from istota.geo import reverse_geocode
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
+                mock_geolocator = MagicMock()
+                mock_geolocator.reverse.return_value = None
+                mock_nom_cls.return_value = mock_geolocator
+
+                result = reverse_geocode(0.0, 0.0, conn)
+                assert result["source"] == "error"
+                assert "error" in result
+
+    def test_nominatim_exception(self, tmp_path):
+        from istota.geo import reverse_geocode
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            with patch("geopy.geocoders.Nominatim") as mock_nom_cls:
+                mock_geolocator = MagicMock()
+                mock_geolocator.reverse.side_effect = Exception("timeout")
+                mock_nom_cls.return_value = mock_geolocator
+
+                result = reverse_geocode(34.05, -118.25, conn)
+                assert result["source"] == "error"
+                assert "timeout" in result["error"]
+
+
+# ===========================================================================
+# Cluster pings tests (geo.py)
+# ===========================================================================
+
+
+class TestClusterPings:
+    def test_empty_input(self):
+        from istota.geo import cluster_pings
+
+        assert cluster_pings([]) == []
+
+    def test_single_ping(self):
+        from istota.geo import cluster_pings
+
+        pings = [{"lat": 34.05, "lon": -118.25, "timestamp": "2026-03-08T10:00:00Z"}]
+        result = cluster_pings(pings)
+        assert len(result) == 1
+        assert result[0]["ping_count"] == 1
+        assert result[0]["lat"] == 34.05
+        assert result[0]["first_ts"] == "2026-03-08T10:00:00Z"
+        assert result[0]["last_ts"] == "2026-03-08T10:00:00Z"
+
+    def test_two_close_pings_one_cluster(self):
+        from istota.geo import cluster_pings
+
+        # Two pings ~10m apart — well within 200m default radius
+        pings = [
+            {"lat": 34.05000, "lon": -118.25000, "timestamp": "2026-03-08T10:00:00Z"},
+            {"lat": 34.05005, "lon": -118.25005, "timestamp": "2026-03-08T10:05:00Z"},
+        ]
+        result = cluster_pings(pings)
+        assert len(result) == 1
+        assert result[0]["ping_count"] == 2
+
+    def test_two_distant_pings_two_clusters(self):
+        from istota.geo import cluster_pings
+
+        # Two pings ~5km apart
+        pings = [
+            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-03-08T10:00:00Z"},
+            {"lat": 34.10, "lon": -118.25, "timestamp": "2026-03-08T11:00:00Z"},
+        ]
+        result = cluster_pings(pings)
+        assert len(result) == 2
+        assert result[0]["ping_count"] == 1
+        assert result[1]["ping_count"] == 1
+
+    def test_cluster_carries_place_info(self):
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-03-08T10:00:00Z",
+             "place_id": 42, "place_name": "home"},
+            {"lat": 34.05001, "lon": -118.25001, "timestamp": "2026-03-08T10:05:00Z",
+             "place_id": 42, "place_name": "home"},
+        ]
+        result = cluster_pings(pings)
+        assert len(result) == 1
+        assert result[0]["place_id"] == 42
+        assert result[0]["place_name"] == "home"
+
+
+# ===========================================================================
+# reverse-geocode CLI command tests
+# ===========================================================================
+
+
+class TestCmdReverseGeocode:
+    def test_returns_json(self, tmp_path):
+        from istota.skills.location import cmd_reverse_geocode
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.cache_reverse_geocode(conn, 34.05, -118.25, {
+                "display_name": "Test Place",
+                "neighborhood": "Hood",
+                "suburb": "Sub",
+                "road": "Road",
+                "city": "City",
+            })
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        args = MagicMock()
+        args.lat = 34.05
+        args.lon = -118.25
+
+        with patch.dict("os.environ", env, clear=False):
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_reverse_geocode(args)
+            finally:
+                sys.stdout = old_stdout
+
+        result = json.loads(captured.getvalue())
+        assert result["source"] == "cache"
+        assert result["display_name"] == "Test Place"
+
+    def test_nominatim_fallback(self, tmp_path):
+        from istota.skills.location import cmd_reverse_geocode
+
+        db_path = _init_db(tmp_path)
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        args = MagicMock()
+        args.lat = 34.15
+        args.lon = -118.14
+
+        mock_result = MagicMock()
+        mock_result.address = "789 Pine St"
+        mock_result.raw = {"address": {"road": "Pine St", "city": "Glendale"}}
+
+        with patch.dict("os.environ", env, clear=False), \
+             patch("geopy.geocoders.Nominatim") as mock_nom_cls:
+            mock_geolocator = MagicMock()
+            mock_geolocator.reverse.return_value = mock_result
+            mock_nom_cls.return_value = mock_geolocator
+
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_reverse_geocode(args)
+            finally:
+                sys.stdout = old_stdout
+
+        result = json.loads(captured.getvalue())
+        assert result["source"] == "nominatim"
+        assert result["road"] == "Pine St"
+
+
+# ===========================================================================
+# day-summary CLI command tests
+# ===========================================================================
+
+
+class TestCmdDaySummary:
+    def _run_day_summary(self, tmp_path, pings=None, places=None,
+                         date="2026-03-08", tz="America/Los_Angeles",
+                         nominatim_results=None):
+        """Helper to run cmd_day_summary with test DB and optional mocks."""
+        from istota.skills.location import cmd_day_summary
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            for p in (places or []):
+                db.insert_place(conn, "alice", p["name"], p["lat"], p["lon"],
+                                p.get("radius_meters", 100), p.get("category", "other"))
+            for ping in (pings or []):
+                place_id = ping.get("place_id")
+                db.insert_location_ping(
+                    conn, "alice", ping["timestamp"], ping["lat"], ping["lon"],
+                    accuracy=ping.get("accuracy", 5.0),
+                    place_id=place_id,
+                )
+            conn.commit()
+
+        env = {
+            "ISTOTA_DB_PATH": str(db_path),
+            "ISTOTA_USER_ID": "alice",
+            "TZ": tz,
+        }
+        args = MagicMock()
+        args.date = date
+        args.tz = tz
+
+        mock_nom = MagicMock()
+        if nominatim_results:
+            mock_nom.reverse.side_effect = nominatim_results
+        else:
+            mock_nom.reverse.return_value = None
+
+        with patch.dict("os.environ", env, clear=False), \
+             patch("geopy.geocoders.Nominatim", return_value=mock_nom):
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_day_summary(args)
+            finally:
+                sys.stdout = old_stdout
+
+        return json.loads(captured.getvalue())
+
+    def test_no_pings_empty_stops(self, tmp_path):
+        result = self._run_day_summary(tmp_path)
+        assert result["date"] == "2026-03-08"
+        assert result["stops"] == []
+        assert result["ping_count"] == 0
+
+    def test_single_stop_at_saved_place(self, tmp_path):
+        """Pings at a saved place should use the place name."""
+        # March 8 in PST = UTC 2026-03-08T08:00:00Z to 2026-03-09T08:00:00Z
+        places = [{"name": "home", "lat": 34.05, "lon": -118.25, "radius_meters": 150}]
+        # Insert a place and get its ID — we use place_id=1 since it's the first insert
+        pings = [
+            {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.05, "lon": -118.25, "place_id": 1},
+            {"timestamp": "2026-03-08T17:00:00Z", "lat": 34.0501, "lon": -118.2501, "place_id": 1},
+            {"timestamp": "2026-03-08T18:00:00Z", "lat": 34.0502, "lon": -118.2502, "place_id": 1},
+        ]
+        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        assert len(result["stops"]) == 1
+        assert result["stops"][0]["location"] == "home"
+        assert result["stops"][0]["location_source"] == "saved_place"
+        assert result["stops"][0]["ping_count"] == 3
+
+    def test_transit_filtered(self, tmp_path):
+        """Clusters with <=2 pings and no place match should be excluded as transit."""
+        pings = [
+            # 3 pings at one spot (kept)
+            {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.05, "lon": -118.25},
+            {"timestamp": "2026-03-08T16:05:00Z", "lat": 34.0501, "lon": -118.2501},
+            {"timestamp": "2026-03-08T16:10:00Z", "lat": 34.0502, "lon": -118.2502},
+            # 1 ping far away (filtered as transit)
+            {"timestamp": "2026-03-08T17:00:00Z", "lat": 34.15, "lon": -118.35},
+        ]
+        result = self._run_day_summary(tmp_path, pings=pings)
+        assert len(result["stops"]) == 1
+        assert result["transit_pings"] == 1
+
+    def test_proximity_place_match(self, tmp_path):
+        """Cluster centroid near a saved place (within radius) uses place name."""
+        places = [{"name": "cafe", "lat": 34.05, "lon": -118.25, "radius_meters": 50}]
+        # Pings ~30m from saved place — within max(50, 100) = 100m
+        pings = [
+            {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.05025, "lon": -118.25},
+            {"timestamp": "2026-03-08T16:05:00Z", "lat": 34.05027, "lon": -118.25001},
+            {"timestamp": "2026-03-08T16:10:00Z", "lat": 34.05029, "lon": -118.25002},
+        ]
+        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        assert len(result["stops"]) == 1
+        assert result["stops"][0]["location"] == "cafe"
+        assert result["stops"][0]["location_source"] == "saved_place_proximity"
+
+    def test_reverse_geocode_fallback(self, tmp_path):
+        """When no place match, reverse geocode should be used."""
+        mock_result = MagicMock()
+        mock_result.address = "789 Elm St, Burbank, CA"
+        mock_result.raw = {
+            "address": {
+                "road": "Elm St",
+                "suburb": "Magnolia Park",
+                "city": "Burbank",
+            }
+        }
+
+        pings = [
+            {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.18, "lon": -118.33},
+            {"timestamp": "2026-03-08T16:05:00Z", "lat": 34.1801, "lon": -118.3301},
+            {"timestamp": "2026-03-08T16:10:00Z", "lat": 34.1802, "lon": -118.3302},
+        ]
+        result = self._run_day_summary(
+            tmp_path, pings=pings,
+            nominatim_results=[mock_result],
+        )
+        assert len(result["stops"]) == 1
+        assert result["stops"][0]["location"] == "Magnolia Park"
+        assert result["stops"][0]["suburb"] == "Magnolia Park"
+
+    def test_consecutive_same_location_merged(self, tmp_path):
+        """Two consecutive clusters at the same saved place should merge."""
+        places = [{"name": "office", "lat": 34.05, "lon": -118.25, "radius_meters": 200}]
+        pings = [
+            # Cluster 1 at office
+            {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.05, "lon": -118.25, "place_id": 1},
+            {"timestamp": "2026-03-08T16:05:00Z", "lat": 34.0501, "lon": -118.2501, "place_id": 1},
+            {"timestamp": "2026-03-08T16:10:00Z", "lat": 34.0502, "lon": -118.2502, "place_id": 1},
+            # Brief transit ping (filtered out)
+            {"timestamp": "2026-03-08T17:00:00Z", "lat": 34.15, "lon": -118.35},
+            # Cluster 2 at office again
+            {"timestamp": "2026-03-08T18:00:00Z", "lat": 34.05, "lon": -118.25, "place_id": 1},
+            {"timestamp": "2026-03-08T18:05:00Z", "lat": 34.0501, "lon": -118.2501, "place_id": 1},
+            {"timestamp": "2026-03-08T18:10:00Z", "lat": 34.0502, "lon": -118.2502, "place_id": 1},
+        ]
+        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        # Two clusters at "office" with transit filtered → should merge into one
+        assert len(result["stops"]) == 1
+        assert result["stops"][0]["location"] == "office"
+        assert result["stops"][0]["ping_count"] == 6

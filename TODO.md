@@ -296,6 +296,12 @@
 
 ## Priority 5: Location Awareness (Phase 2+)
 
+### Reverse Geocoding & Day Summary ✅
+- [x] Reverse geocode cache in main DB (replaces standalone script's separate cache)
+- [x] `reverse-geocode` CLI subcommand (single lat/lon → place name)
+- [x] `day-summary` CLI subcommand (cluster pings, resolve names, filter transit)
+- [x] Greedy sequential clustering in shared `geo.py`
+
 ### Visits & Analytics (Deferred)
 - [ ] Dwell detection (periodic check for open visits exceeding dwell threshold)
 - [ ] `stats` CLI subcommand (time-at-place aggregation by month/year)
