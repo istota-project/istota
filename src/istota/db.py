@@ -3363,6 +3363,52 @@ def cache_geocode(
     )
 
 
+def get_reverse_geocode(
+    conn: sqlite3.Connection,
+    lat: float,
+    lon: float,
+) -> dict | None:
+    """Look up a cached reverse geocode result. Returns dict or None."""
+    lat_rounded = round(lat, 4)
+    lon_rounded = round(lon, 4)
+    cursor = conn.execute(
+        """SELECT display_name, neighborhood, suburb, road, city
+           FROM reverse_geocode_cache
+           WHERE lat_rounded = ? AND lon_rounded = ?""",
+        (lat_rounded, lon_rounded),
+    )
+    row = cursor.fetchone()
+    if row:
+        return dict(row)
+    return None
+
+
+def cache_reverse_geocode(
+    conn: sqlite3.Connection,
+    lat: float,
+    lon: float,
+    result: dict,
+) -> None:
+    """Cache a reverse geocode result. Rounds to 4 decimal places (~11m)."""
+    lat_rounded = round(lat, 4)
+    lon_rounded = round(lon, 4)
+    conn.execute(
+        """INSERT OR REPLACE INTO reverse_geocode_cache
+           (lat_rounded, lon_rounded, display_name, neighborhood, suburb, road, city, raw_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            lat_rounded,
+            lon_rounded,
+            result.get("display_name"),
+            result.get("neighborhood"),
+            result.get("suburb"),
+            result.get("road"),
+            result.get("city"),
+            json.dumps(result.get("raw", {})),
+        ),
+    )
+
+
 def cleanup_old_location_pings(
     conn: sqlite3.Connection,
     retention_days: int = 365,

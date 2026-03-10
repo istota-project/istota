@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-09: Reverse geocoding and day summary for location skill
+
+Integrated the standalone `reverse_geocode.py` script into the location skill. Coordinates are reverse geocoded via Nominatim and cached in a new `reverse_geocode_cache` table in the main DB (replacing the script's separate cache DB). GPS pings are clustered into stops with a greedy sequential algorithm, then resolved to place names via saved places, proximity matching, or reverse geocoding.
+
+**Key changes:**
+- Added `reverse_geocode_cache` table with rounded REAL keys (4 decimal places, ~11m precision)
+- Added `reverse_geocode()` and `cluster_pings()` to shared `geo.py` module
+- Added `reverse-geocode` and `day-summary` CLI subcommands to location skill
+- Day summary: clusters pings → filters transit → resolves names → merges consecutive same-location stops
+
+**Files added/modified:**
+- `schema.sql` — Added `reverse_geocode_cache` table
+- `src/istota/db.py` — Added `get_reverse_geocode()` and `cache_reverse_geocode()`
+- `src/istota/geo.py` — Added `reverse_geocode()` (cache + Nominatim fallback) and `cluster_pings()`
+- `src/istota/skills/location/__init__.py` — Added `cmd_reverse_geocode` and `cmd_day_summary`
+- `src/istota/skills/location/skill.toml` — Added keywords for new subcommands
+- `src/istota/skills/location/skill.md` — Documented new subcommands with output examples
+- `tests/test_location.py` — 21 new tests across 5 test classes (96 total)
+
 ## 2026-03-09: Fix DST double-fire in scheduled jobs and briefings
 
 After the spring-forward DST transition (March 8), scheduled jobs and briefings fired twice — once at the wrong time and once at the correct time. croniter miscomputes the next fire time when given a tz-aware datetime that crosses a DST boundary (e.g. PST→PDT). The fix strips timezone info before passing to croniter, working entirely with naive wall-clock times for the should-run comparison.

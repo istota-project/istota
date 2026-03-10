@@ -5,6 +5,8 @@ CLI:
     python -m istota.skills.location history [--limit N] [--date YYYY-MM-DD]
     python -m istota.skills.location places
     python -m istota.skills.location learn NAME [--category CAT] [--radius N]
+    python -m istota.skills.location reverse-geocode --lat N --lon N
+    python -m istota.skills.location day-summary --date YYYY-MM-DD [--tz TZ]
 """
 
 import argparse
@@ -13,7 +15,7 @@ import os
 import re
 import sys
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -486,6 +488,148 @@ def cmd_attendance(args):
     conn.close()
 
 
+def cmd_reverse_geocode(args):
+    from istota.geo import reverse_geocode
+
+    conn = _get_conn()
+    result = reverse_geocode(args.lat, args.lon, conn)
+    print(json.dumps(result, indent=2))
+    conn.close()
+
+
+def cmd_day_summary(args):
+    from istota.geo import reverse_geocode, cluster_pings, haversine
+
+    conn = _get_conn()
+    user_id = _get_user_id()
+
+    tz_name = getattr(args, "tz", None) or os.environ.get("TZ", "America/Los_Angeles")
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/Los_Angeles")
+
+    target_date = args.date or datetime.now(tz).strftime("%Y-%m-%d")
+
+    # Day boundaries in UTC
+    day_start_local = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=tz)
+    day_end_local = day_start_local + timedelta(days=1)
+    since_utc = day_start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    until_utc = day_end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    rows = conn.execute(
+        """
+        SELECT lp.timestamp, lp.lat, lp.lon, lp.activity_type, lp.accuracy,
+               lp.place_id, p.name as place_name
+        FROM location_pings lp
+        LEFT JOIN places p ON lp.place_id = p.id
+        WHERE lp.user_id = ? AND lp.timestamp >= ? AND lp.timestamp < ?
+        ORDER BY lp.timestamp ASC
+        """,
+        (user_id, since_utc, until_utc),
+    ).fetchall()
+
+    if not rows:
+        print(json.dumps({"date": target_date, "stops": [], "ping_count": 0}))
+        conn.close()
+        return
+
+    pings = [dict(r) for r in rows]
+    clusters = cluster_pings(pings, radius_m=250)
+
+    # Filter transit (<=2 pings, no place match)
+    stops = []
+    transit_pings = 0
+    for c in clusters:
+        if c["ping_count"] <= 2 and not c["place_name"]:
+            transit_pings += c["ping_count"]
+            continue
+        stops.append(c)
+
+    # Load saved places for proximity matching
+    saved_places = conn.execute(
+        "SELECT name, lat, lon, radius_meters FROM places WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    saved_places = [dict(r) for r in saved_places]
+
+    # Resolve location names
+    for stop in stops:
+        if stop["place_name"]:
+            stop["location"] = stop["place_name"]
+            stop["location_source"] = "saved_place"
+        else:
+            matched = False
+            for sp in saved_places:
+                dist = haversine(stop["lat"], stop["lon"], sp["lat"], sp["lon"])
+                if dist <= max(sp["radius_meters"], 100):
+                    stop["location"] = sp["name"]
+                    stop["location_source"] = "saved_place_proximity"
+                    matched = True
+                    break
+
+            if not matched:
+                geo = reverse_geocode(stop["lat"], stop["lon"], conn)
+                name = (
+                    geo.get("suburb")
+                    or geo.get("neighborhood")
+                    or geo.get("road")
+                    or geo.get("city")
+                    or "unknown"
+                )
+                stop["location"] = name
+                stop["location_source"] = geo.get("source", "unknown")
+                stop["road"] = geo.get("road")
+                stop["neighborhood"] = geo.get("neighborhood")
+                stop["suburb"] = geo.get("suburb")
+
+        # Convert timestamps to local time
+        for key in ("first_ts", "last_ts"):
+            try:
+                utc_dt = datetime.fromisoformat(stop[key]).replace(tzinfo=timezone.utc)
+                stop[key + "_local"] = utc_dt.astimezone(tz).strftime("%H:%M")
+            except Exception:
+                stop[key + "_local"] = stop[key]
+
+    # Merge consecutive stops at the same location
+    merged = []
+    for stop in stops:
+        if merged and merged[-1]["location"] == stop["location"]:
+            prev = merged[-1]
+            prev["last_ts"] = stop["last_ts"]
+            prev["last_ts_local"] = stop.get("last_ts_local")
+            prev["ping_count"] += stop["ping_count"]
+        else:
+            merged.append(stop)
+
+    result = {
+        "date": target_date,
+        "timezone": tz_name,
+        "ping_count": len(pings),
+        "transit_pings": transit_pings,
+        "stops": [
+            {
+                "location": s["location"],
+                "location_source": s.get("location_source"),
+                "road": s.get("road"),
+                "neighborhood": s.get("neighborhood"),
+                "suburb": s.get("suburb"),
+                "arrived": s.get("first_ts_local"),
+                "departed": s.get("last_ts_local"),
+                "ping_count": s["ping_count"],
+                "lat": round(s["lat"], 5),
+                "lon": round(s["lon"], 5),
+            }
+            for s in merged
+        ],
+    }
+
+    print(json.dumps(result, indent=2))
+    conn.close()
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Location tracking CLI")
     sub = parser.add_subparsers(dest="command")
@@ -507,6 +651,14 @@ def build_parser():
     attend.add_argument("--date", help="Date to check (YYYY-MM-DD, default: today)")
     attend.add_argument("--event", help="Filter by event UID or title substring")
 
+    rgeo = sub.add_parser("reverse-geocode", help="Reverse geocode a lat/lon pair")
+    rgeo.add_argument("--lat", type=float, required=True)
+    rgeo.add_argument("--lon", type=float, required=True)
+
+    dsum = sub.add_parser("day-summary", help="Day summary with reverse-geocoded locations")
+    dsum.add_argument("--date", help="Date (YYYY-MM-DD, default: today)")
+    dsum.add_argument("--tz", help="Timezone (default: TZ env var or America/Los_Angeles)")
+
     return parser
 
 
@@ -520,6 +672,8 @@ def main():
         "places": cmd_places,
         "learn": cmd_learn,
         "attendance": cmd_attendance,
+        "reverse-geocode": cmd_reverse_geocode,
+        "day-summary": cmd_day_summary,
     }
 
     if args.command in commands:

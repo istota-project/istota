@@ -33,6 +33,14 @@ python -m istota.skills.location learn "gym" --category gym --radius 75
 python -m istota.skills.location attendance
 python -m istota.skills.location attendance --date 2026-02-15
 python -m istota.skills.location attendance --event "dentist"
+
+# Reverse geocode a single coordinate pair
+python -m istota.skills.location reverse-geocode --lat 34.05 --lon -118.25
+
+# Day summary: clusters pings into stops, resolves names via saved places
+# or reverse geocoding, filters transit, merges consecutive same-location stops
+python -m istota.skills.location day-summary --date 2026-03-08
+python -m istota.skills.location day-summary --date 2026-03-08 --tz America/New_York
 ```
 
 ## Output Examples
@@ -97,6 +105,55 @@ python -m istota.skills.location attendance --event "dentist"
   "lon": -118.39,
   "radius_meters": 100,
   "message": "Saved 'coffee shop' at 34.0600, -118.3900"
+}
+```
+
+### reverse-geocode
+
+```json
+{
+  "display_name": "123 Main St, Los Angeles, CA 90012, USA",
+  "neighborhood": "Downtown",
+  "suburb": "Central LA",
+  "road": "Main St",
+  "city": "Los Angeles",
+  "source": "nominatim"
+}
+```
+
+### day-summary
+
+Clusters the day's pings into stops. Resolves location names by: (1) direct place match from ping data, (2) proximity match against saved places (100m minimum radius), (3) reverse geocoding via Nominatim. Filters out transit clusters (1-2 pings without a place match). Merges consecutive stops at the same location.
+
+```json
+{
+  "date": "2026-03-08",
+  "timezone": "America/Los_Angeles",
+  "ping_count": 120,
+  "transit_pings": 8,
+  "stops": [
+    {
+      "location": "home",
+      "location_source": "saved_place",
+      "arrived": "08:00",
+      "departed": "09:30",
+      "ping_count": 20,
+      "lat": 34.05,
+      "lon": -118.25
+    },
+    {
+      "location": "Magnolia Park",
+      "location_source": "nominatim",
+      "road": "Elm St",
+      "neighborhood": null,
+      "suburb": "Magnolia Park",
+      "arrived": "10:15",
+      "departed": "12:30",
+      "ping_count": 25,
+      "lat": 34.18,
+      "lon": -118.33
+    }
+  ]
 }
 ```
 

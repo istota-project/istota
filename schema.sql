@@ -439,6 +439,20 @@ CREATE TABLE IF NOT EXISTS geocode_cache (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Reverse geocode cache (coords → place name via Nominatim)
+CREATE TABLE IF NOT EXISTS reverse_geocode_cache (
+    lat_rounded REAL NOT NULL,
+    lon_rounded REAL NOT NULL,
+    display_name TEXT,
+    neighborhood TEXT,
+    suburb TEXT,
+    road TEXT,
+    city TEXT,
+    raw_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (lat_rounded, lon_rounded)
+);
+
 -- Location state machine (per-user hysteresis tracking)
 CREATE TABLE IF NOT EXISTS location_state (
     user_id TEXT PRIMARY KEY,
