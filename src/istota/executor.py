@@ -999,6 +999,7 @@ def build_prompt(
     output_target: str | None = None,
     recalled_memories: str | None = None,
     excluded_resource_types: set[str] | None = None,
+    skip_persona: bool = False,
 ) -> str:
     """Build the full prompt for Claude Code execution."""
     # Group resources by type
@@ -1067,16 +1068,16 @@ def build_prompt(
 
     resources_text = "\n\n".join(resource_sections) if resource_sections else "No specific resources configured."
 
-    # Load emissaries (constitutional principles, global only)
+    # Load emissaries and persona (skipped for neutral output like briefings)
     emissaries_section = ""
-    if emissaries:
+    if emissaries and not skip_persona:
         emissaries_section = f"\n\n{emissaries}\n"
 
-    # Load persona (always included if exists)
-    persona = load_persona(config, user_id=task.user_id)
     persona_section = ""
-    if persona:
-        persona_section = f"\n\n{persona}\n"
+    if not skip_persona:
+        persona = load_persona(config, user_id=task.user_id)
+        if persona:
+            persona_section = f"\n\n{persona}\n"
 
     # Load channel-specific guidelines
     channel_guidelines = load_channel_guidelines(config, task.source_type)
@@ -1342,6 +1343,7 @@ def execute_task(
     # Compute behavior flags from selected skills
     _selected_metas = [skill_index[n] for n in selected_skills if n in skill_index]
     _skip_memory = any(m.exclude_memory for m in _selected_metas)
+    _skip_persona = any(m.exclude_persona for m in _selected_metas)
     _excluded_resource_types = {rt for m in _selected_metas for rt in m.exclude_resources}
 
     # Skills changelog: detect changes for interactive tasks
@@ -1503,6 +1505,7 @@ def execute_task(
         output_target=effective_output_target,
         recalled_memories=recalled_memories,
         excluded_resource_types=_excluded_resource_types or None,
+        skip_persona=_skip_persona,
     )
 
     # Log prompt size breakdown
