@@ -17,6 +17,9 @@ from istota.config import (
 )
 from istota.executor import (
     _CREDENTIAL_ENV_PATTERNS,
+    _CREDENTIAL_SKILL_MAP,
+    _allowed_credentials_for_skills,
+    _build_skill_credential_map,
     build_allowed_tools,
     build_clean_env,
     build_stripped_env,
@@ -78,6 +81,18 @@ class TestBuildCleanEnv:
         import sys
         venv_bin = str(Path(sys.prefix).resolve() / "bin")
         assert venv_bin in env["PATH"]
+
+
+    def test_does_not_include_oauth_token(self):
+        """CLAUDE_CODE_OAUTH_TOKEN must not leak into Claude's env."""
+        config = Config()
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "HOME": "/home/test",
+            "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-secret",
+        }, clear=True):
+            env = build_clean_env(config)
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
 class TestBuildStrippedEnv:
@@ -258,3 +273,77 @@ class TestConfigEnvVarOverrides:
         config = load_config(config_file)
         assert config.security.sandbox_enabled is False
         assert config.security.skill_proxy_enabled is False
+
+
+class TestCredentialSkillScoping:
+    """Tests for per-skill credential scoping helpers."""
+
+    def test_email_skills_get_email_credentials(self):
+        result = _allowed_credentials_for_skills(["email"])
+        assert result == {"SMTP_PASSWORD", "IMAP_PASSWORD"}
+
+    def test_developer_skills_get_developer_credentials(self):
+        result = _allowed_credentials_for_skills(["developer"])
+        assert result == {"GITLAB_TOKEN", "GITHUB_TOKEN"}
+
+    def test_calendar_gets_caldav_password(self):
+        result = _allowed_credentials_for_skills(["calendar"])
+        assert result == {"CALDAV_PASSWORD"}
+
+    def test_location_gets_caldav_password(self):
+        """Location skill needs CALDAV_PASSWORD for attendance subcommand."""
+        result = _allowed_credentials_for_skills(["location"])
+        assert result == {"CALDAV_PASSWORD"}
+
+    def test_multiple_skills_union(self):
+        result = _allowed_credentials_for_skills(["email", "developer", "calendar"])
+        assert result == {
+            "SMTP_PASSWORD", "IMAP_PASSWORD",
+            "GITLAB_TOKEN", "GITHUB_TOKEN",
+            "CALDAV_PASSWORD",
+        }
+
+    def test_skills_with_no_credentials(self):
+        result = _allowed_credentials_for_skills(["browse", "transcribe", "markets"])
+        assert result == set()
+
+    def test_empty_skills_list(self):
+        result = _allowed_credentials_for_skills([])
+        assert result == set()
+
+    def test_nextcloud_gets_nc_pass(self):
+        result = _allowed_credentials_for_skills(["nextcloud"])
+        assert result == {"NC_PASS"}
+
+    def test_files_has_no_credentials(self):
+        """files skill is doc-only (no CLI), works via mount — no creds needed."""
+        result = _allowed_credentials_for_skills(["files"])
+        assert result == set()
+
+    def test_bookmarks_gets_karakeep(self):
+        result = _allowed_credentials_for_skills(["bookmarks"])
+        assert result == {"KARAKEEP_API_KEY"}
+
+    def test_build_skill_credential_map_email(self):
+        result = _build_skill_credential_map(["email"])
+        assert result == {"email": {"SMTP_PASSWORD", "IMAP_PASSWORD"}}
+
+    def test_build_skill_credential_map_developer(self):
+        result = _build_skill_credential_map(["developer"])
+        assert result == {"developer": {"GITLAB_TOKEN", "GITHUB_TOKEN"}}
+
+    def test_build_skill_credential_map_no_creds(self):
+        result = _build_skill_credential_map(["browse", "markets"])
+        assert result == {}
+
+    def test_build_skill_credential_map_mixed(self):
+        result = _build_skill_credential_map(["email", "browse", "calendar"])
+        assert "email" in result
+        assert "calendar" in result
+        assert "browse" not in result
+
+    def test_credential_skill_map_covers_all_proxy_vars(self):
+        """Every var in _PROXY_CREDENTIAL_VARS should appear in _CREDENTIAL_SKILL_MAP."""
+        from istota.executor import _PROXY_CREDENTIAL_VARS
+        mapped_vars = set(_CREDENTIAL_SKILL_MAP.keys())
+        assert mapped_vars == _PROXY_CREDENTIAL_VARS

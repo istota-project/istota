@@ -275,6 +275,10 @@
 - [x] Credential isolation via skill proxy (Unix socket, strips secrets from Claude's env)
 - [x] Skill proxy phase 2: GITLAB_TOKEN, GITHUB_TOKEN (credential-fetch helper + proxy-aware shell scripts)
 - [x] Fix skill proxy socket visibility inside bwrap sandbox (bind-mount from /tmp)
+- [x] Per-skill credential scoping (credential-fetch and skill CLI env limited to selected skills' needs)
+- [x] OAuth token hardening (removed env var passthrough, RO .credentials.json mount)
+- [x] .developer/ scripts mounted read-only (prevent credential-fetch script replacement)
+- [x] Admin Nextcloud mount scoped to user dir (was full content tree)
 - [ ] Skill proxy phase 3: GARMIN_CONFIG file path exclusion via bwrap
 - [ ] Network proxy for agent subprocesses (domain allowlist)
 

@@ -150,6 +150,105 @@ class TestProxyCredentialLookup:
         assert resp["returncode"] == 0
 
 
+class TestProxyScopedCredentials:
+    """Test credential scoping via allowed_credentials and skill_credential_map."""
+
+    def _send_request(self, sock_path, request_dict):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect(str(sock_path))
+        sock.sendall((json.dumps(request_dict) + "\n").encode())
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n" in chunk:
+                break
+        sock.close()
+        return json.loads(b"".join(chunks).decode().strip())
+
+    def test_allowed_credential_returned(self, sock_path):
+        cred_env = {"GITLAB_TOKEN": "glpat-secret", "NC_PASS": "nc_secret"}
+        allowed = {"GITLAB_TOKEN"}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"},
+                        allowed_credentials=allowed):
+            resp = self._send_request(sock_path, {
+                "type": "credential", "name": "GITLAB_TOKEN",
+            })
+        assert resp == {"value": "glpat-secret"}
+
+    def test_disallowed_credential_rejected(self, sock_path):
+        cred_env = {"GITLAB_TOKEN": "glpat-secret", "NC_PASS": "nc_secret"}
+        allowed = {"GITLAB_TOKEN"}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"},
+                        allowed_credentials=allowed):
+            resp = self._send_request(sock_path, {
+                "type": "credential", "name": "NC_PASS",
+            })
+        assert "error" in resp
+        assert "not available" in resp["error"]
+
+    def test_none_allowed_credentials_allows_all(self, sock_path):
+        """allowed_credentials=None means no scoping (backward compat)."""
+        cred_env = {"GITLAB_TOKEN": "glpat-secret", "NC_PASS": "nc_secret"}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"},
+                        allowed_credentials=None):
+            resp = self._send_request(sock_path, {
+                "type": "credential", "name": "NC_PASS",
+            })
+        assert resp == {"value": "nc_secret"}
+
+    def test_empty_allowed_set_blocks_all(self, sock_path):
+        cred_env = {"GITLAB_TOKEN": "glpat-secret"}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"},
+                        allowed_credentials=set()):
+            resp = self._send_request(sock_path, {
+                "type": "credential", "name": "GITLAB_TOKEN",
+            })
+        assert "error" in resp
+
+    @patch("istota.skill_proxy.subprocess.run")
+    def test_skill_cli_gets_only_mapped_credentials(self, mock_run, sock_path):
+        mock_run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
+        cred_env = {"SMTP_PASSWORD": "smtp_secret", "GITLAB_TOKEN": "gl_secret"}
+        skill_map = {"email": {"SMTP_PASSWORD"}}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"},
+                        skill_credential_map=skill_map):
+            self._send_request(sock_path, {"skill": "email", "args": ["send"]})
+
+        called_env = mock_run.call_args.kwargs.get("env") or mock_run.call_args[1].get("env")
+        assert called_env["SMTP_PASSWORD"] == "smtp_secret"
+        assert "GITLAB_TOKEN" not in called_env
+
+    @patch("istota.skill_proxy.subprocess.run")
+    def test_skill_not_in_map_gets_no_credentials(self, mock_run, sock_path):
+        mock_run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
+        cred_env = {"SMTP_PASSWORD": "smtp_secret", "GITLAB_TOKEN": "gl_secret"}
+        skill_map = {"email": {"SMTP_PASSWORD"}}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"},
+                        skill_credential_map=skill_map):
+            self._send_request(sock_path, {"skill": "calendar", "args": ["list"]})
+
+        called_env = mock_run.call_args.kwargs.get("env") or mock_run.call_args[1].get("env")
+        assert "SMTP_PASSWORD" not in called_env
+        assert "GITLAB_TOKEN" not in called_env
+
+    @patch("istota.skill_proxy.subprocess.run")
+    def test_none_skill_map_allows_all_credentials(self, mock_run, sock_path):
+        """skill_credential_map=None means all credentials (backward compat)."""
+        mock_run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
+        cred_env = {"SMTP_PASSWORD": "smtp_secret", "GITLAB_TOKEN": "gl_secret"}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"},
+                        skill_credential_map=None):
+            self._send_request(sock_path, {"skill": "email", "args": ["send"]})
+
+        called_env = mock_run.call_args.kwargs.get("env") or mock_run.call_args[1].get("env")
+        assert called_env["SMTP_PASSWORD"] == "smtp_secret"
+        assert called_env["GITLAB_TOKEN"] == "gl_secret"
+
+
 class TestProxyCredentialVarsCompleteness:
     """Verify the credential var set covers what executor.py actually injects."""
 

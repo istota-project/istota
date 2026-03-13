@@ -53,11 +53,15 @@ class SkillProxy:
         credential_env: dict[str, str],
         base_env: dict[str, str],
         timeout: int = 300,
+        allowed_credentials: set[str] | None = None,
+        skill_credential_map: dict[str, set[str]] | None = None,
     ):
         self.socket_path = socket_path
         self.credential_env = credential_env
         self.base_env = base_env
         self.timeout = timeout
+        self.allowed_credentials = allowed_credentials
+        self.skill_credential_map = skill_credential_map
         self._server_sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -140,6 +144,11 @@ class SkillProxy:
 
             if req_type == "credential":
                 name = request.get("name", "")
+                # Scope check: if allowed_credentials is set, only return
+                # credentials needed by the selected skills for this task.
+                if self.allowed_credentials is not None and name not in self.allowed_credentials:
+                    self._send_response(conn, {"error": f"Credential not available for this task: {name!r}"})
+                    return
                 if name not in self.credential_env:
                     self._send_response(conn, {"error": f"Unknown credential: {name!r}"})
                     return
@@ -161,9 +170,16 @@ class SkillProxy:
             # Build command
             cmd = [sys.executable, "-m", f"istota.skills.{skill}"] + args
 
-            # Merge envs: base gets credentials layered on top
+            # Merge envs: base gets only the credentials this skill needs
             merged_env = dict(self.base_env)
-            merged_env.update(self.credential_env)
+            if self.skill_credential_map is not None:
+                allowed_vars = self.skill_credential_map.get(skill, set())
+                for var in allowed_vars:
+                    if var in self.credential_env:
+                        merged_env[var] = self.credential_env[var]
+            else:
+                # Backward compat: no map means all credentials
+                merged_env.update(self.credential_env)
 
             try:
                 result = subprocess.run(

@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-13: Sandbox security fixes (red team findings 1-4)
+
+Four fixes from a red team assessment that found the bwrap sandbox had credential exposure vectors. Network isolation (finding #5) is deferred.
+
+**Key changes:**
+- Scoped credential-fetch and skill CLI credentials per-skill via `_CREDENTIAL_SKILL_MAP`. The proxy now only returns credentials needed by the task's selected skills, and each skill CLI subprocess only gets its own credentials merged into env. Backward-compatible (None = allow all).
+- Removed `CLAUDE_CODE_OAUTH_TOKEN` from `build_clean_env()` — Claude Code reads auth from `.credentials.json` directly, so the env var was an unnecessary exposure surface.
+- Mounted `~/.claude/.credentials.json` as read-only in the sandbox (was RW) to prevent token persistence attacks.
+- Mounted `.developer/` directory (credential-fetch scripts, git helpers) as read-only inside the sandbox to prevent script replacement attacks.
+- Scoped Nextcloud mount for admin users — admins now get the same per-user mount as non-admins (own user dir + channel dir + explicit resources) instead of the full Nextcloud content tree. Cross-user file access requires a UserResource or the Nextcloud API skill.
+
+**Files modified:**
+- `src/istota/executor.py` — Added `_CREDENTIAL_SKILL_MAP`, `_allowed_credentials_for_skills()`, `_build_skill_credential_map()`. Removed OAuth token passthrough. Changed `.credentials.json` to RO mount. Added `.developer/` RO overlay. Unified admin/non-admin Nextcloud mount scoping. Removed `not is_admin` guard on per-resource mounts.
+- `src/istota/skill_proxy.py` — Added `allowed_credentials` and `skill_credential_map` params to `SkillProxy`. Credential-fetch checks scope before returning. Skill CLI env merge uses per-skill credential map.
+- `tests/test_security.py` — Added `TestCredentialSkillScoping` (15 tests) and OAuth token exclusion test.
+- `tests/test_skill_proxy.py` — Added `TestProxyScopedCredentials` (7 tests) for credential-fetch and skill CLI scoping.
+- `tests/test_sandbox.py` — Added `TestBuildBwrapCmdCredentials` and `TestBuildBwrapCmdDeveloperDir`. Updated admin mount tests for scoped behavior.
+
 ## 2026-03-13: Fix skill proxy socket invisible inside bwrap sandbox
 
 The proxy socket at `/tmp/istota-proxy-{task_id}.sock` was invisible inside the bwrap sandbox because bwrap mounts a fresh tmpfs at `/tmp`. Restructured the executor flow so the proxy starts before `build_bwrap_cmd` runs, and the socket file is explicitly bind-mounted into the sandbox.
