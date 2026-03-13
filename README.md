@@ -166,4 +166,4 @@ Skills with missing dependencies are automatically excluded from prompt selectio
 ***
 © 2026 [Stefan Kubicki](https://kubicki.org) • a [CYNIUM](https://cynium.com) release • shipped from the [Atoll](https://kubicki.org/atoll)
 ***
-Canonical URL: https://forge.example.com/alice/istota
+Canonical URL: https://forge.example.com/cynium/istota
