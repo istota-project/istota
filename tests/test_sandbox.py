@@ -233,12 +233,57 @@ class TestBuildBwrapCmdNonAdmin:
 class TestBuildBwrapCmdAdmin:
     """Tests for admin user sandbox."""
 
-    def test_full_mount_rw(self, sandbox_config, make_sandbox_task):
+    def test_user_dir_mounted_rw_not_full_mount(self, sandbox_config, make_sandbox_task):
+        """Admin gets scoped user dir, not the full Nextcloud mount."""
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, True)
-        mount = str(sandbox_config.nextcloud_mount_path.resolve())
+        mount = sandbox_config.nextcloud_mount_path.resolve()
+        full_mount = str(mount)
+        user_dir = str(mount / "Users" / "alice")
         bind_pairs = _get_bind_pairs(result, "--bind")
-        assert any(src == mount for src, _ in bind_pairs)
+        assert any(src == user_dir for src, _ in bind_pairs), \
+            f"Admin user dir not in bind pairs: {bind_pairs}"
+        assert not any(src == full_mount for src, _ in bind_pairs), \
+            "Full Nextcloud mount should not be exposed to admin"
+
+    def test_admin_channel_dir_mounted_rw(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        result = _run_bwrap(sandbox_config, task, True)
+        mount = sandbox_config.nextcloud_mount_path.resolve()
+        channel_dir = str(mount / "Channels" / "room123")
+        bind_pairs = _get_bind_pairs(result, "--bind")
+        assert any(src == channel_dir for src, _ in bind_pairs)
+
+    def test_admin_resource_mount_ro(self, sandbox_config, make_sandbox_task):
+        """Admin per-resource mounts work (previously only non-admin had them)."""
+        task = make_sandbox_task()
+        shared_path = sandbox_config.nextcloud_mount_path / "Shared" / "report.csv"
+        shared_path.parent.mkdir(parents=True, exist_ok=True)
+        shared_path.touch()
+        resource = db.UserResource(
+            id=1, user_id="alice", resource_type="shared_file",
+            resource_path="/Shared/report.csv", display_name="report",
+            permissions="read",
+        )
+        result = _run_bwrap(sandbox_config, task, True, resources=[resource])
+        resolved = str(shared_path.resolve())
+        ro_pairs = _get_bind_pairs(result, "--ro-bind")
+        assert any(src == resolved for src, _ in ro_pairs)
+
+    def test_admin_resource_mount_rw(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        shared_path = sandbox_config.nextcloud_mount_path / "Shared" / "data.csv"
+        shared_path.parent.mkdir(parents=True, exist_ok=True)
+        shared_path.touch()
+        resource = db.UserResource(
+            id=1, user_id="alice", resource_type="shared_file",
+            resource_path="/Shared/data.csv", display_name="data",
+            permissions="readwrite",
+        )
+        result = _run_bwrap(sandbox_config, task, True, resources=[resource])
+        resolved = str(shared_path.resolve())
+        bind_pairs = _get_bind_pairs(result, "--bind")
+        assert any(src == resolved for src, _ in bind_pairs)
 
     def test_db_ro_by_default(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
@@ -279,6 +324,84 @@ class TestBuildBwrapCmdAdmin:
         result = _run_bwrap(sandbox_config, task, True)
         repos_str = str(repos_dir.resolve())
         assert repos_str not in result
+
+
+class TestBuildBwrapCmdCredentials:
+    """Tests for Claude Code credential file mount."""
+
+    def test_credentials_json_mounted_ro(self, sandbox_config, make_sandbox_task):
+        """~/.claude/.credentials.json should be --ro-bind, not --bind."""
+        task = make_sandbox_task()
+        home = Path(os.environ.get("HOME", "/tmp"))
+        claude_dir = home / ".claude"
+        creds = claude_dir / ".credentials.json"
+
+        # Only test if the file actually exists on this machine
+        if not creds.exists():
+            pytest.skip("No .credentials.json on this machine")
+
+        result = _run_bwrap(sandbox_config, task, False)
+        creds_str = str(creds.resolve())
+
+        ro_pairs = _get_bind_pairs(result, "--ro-bind")
+        rw_pairs = _get_bind_pairs(result, "--bind")
+
+        assert any(src == creds_str for src, _ in ro_pairs), \
+            f".credentials.json not in --ro-bind pairs"
+        assert not any(src == creds_str for src, _ in rw_pairs), \
+            f".credentials.json should not be in --bind (RW) pairs"
+
+
+class TestBuildBwrapCmdDeveloperDir:
+    """Tests for .developer/ directory read-only mount."""
+
+    def test_developer_dir_mounted_ro_when_present(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+        dev_dir = user_temp / ".developer"
+        dev_dir.mkdir()
+
+        result = _run_bwrap(sandbox_config, task, False, user_temp=user_temp)
+        resolved = str(dev_dir.resolve())
+        ro_pairs = _get_bind_pairs(result, "--ro-bind")
+        assert any(src == resolved for src, _ in ro_pairs), \
+            f".developer/ not in --ro-bind pairs: {ro_pairs}"
+
+    def test_developer_dir_after_user_temp_bind(self, sandbox_config, make_sandbox_task):
+        """The --ro-bind for .developer/ must come after the --bind for user_temp."""
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+        dev_dir = user_temp / ".developer"
+        dev_dir.mkdir()
+
+        result = _run_bwrap(sandbox_config, task, False, user_temp=user_temp)
+        temp_resolved = str(user_temp.resolve())
+        dev_resolved = str(dev_dir.resolve())
+
+        # Find positions
+        bind_idx = None
+        ro_bind_idx = None
+        for i, arg in enumerate(result):
+            if arg == "--bind" and i + 1 < len(result) and result[i + 1] == temp_resolved:
+                bind_idx = i
+            if arg == "--ro-bind" and i + 1 < len(result) and result[i + 1] == dev_resolved:
+                ro_bind_idx = i
+        assert bind_idx is not None, "user_temp --bind not found"
+        assert ro_bind_idx is not None, ".developer --ro-bind not found"
+        assert ro_bind_idx > bind_idx, \
+            f"--ro-bind for .developer/ ({ro_bind_idx}) should come after --bind for user_temp ({bind_idx})"
+
+    def test_no_developer_dir_no_extra_bind(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+        # No .developer/ directory created
+
+        result = _run_bwrap(sandbox_config, task, False, user_temp=user_temp)
+        result_str = " ".join(result)
+        assert ".developer" not in result_str
 
 
 class TestBuildBwrapCmdPathResolution:

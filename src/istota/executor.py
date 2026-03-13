@@ -169,10 +169,10 @@ def build_clean_env(config: Config) -> dict[str, str]:
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
-    # Pass through Claude CLI auth token if present (set via EnvironmentFile)
-    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if oauth_token:
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
+    # NOTE: CLAUDE_CODE_OAUTH_TOKEN is intentionally NOT passed through.
+    # Claude Code reads auth from ~/.claude/.credentials.json directly.
+    # Exposing the token as an env var makes it trivially extractable via
+    # `env` or /proc/*/environ inside the sandbox.
     return env
 
 
@@ -196,6 +196,41 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "GITLAB_TOKEN",
     "GITHUB_TOKEN",
 })
+
+
+# Maps each credential env var to the set of skills that need it.
+# Used to scope both credential-fetch responses and skill CLI env merging.
+_CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
+    "CALDAV_PASSWORD": frozenset({"calendar", "location"}),
+    "NC_PASS": frozenset({"nextcloud"}),
+    "SMTP_PASSWORD": frozenset({"email"}),
+    "IMAP_PASSWORD": frozenset({"email"}),
+    "KARAKEEP_API_KEY": frozenset({"bookmarks"}),
+    "GITLAB_TOKEN": frozenset({"developer"}),
+    "GITHUB_TOKEN": frozenset({"developer"}),
+}
+
+
+def _allowed_credentials_for_skills(selected_skills: list[str]) -> set[str]:
+    """Return the set of credential env var names needed by selected skills."""
+    skills_set = set(selected_skills)
+    return {
+        var for var, allowed_skills in _CREDENTIAL_SKILL_MAP.items()
+        if skills_set & allowed_skills
+    }
+
+
+def _build_skill_credential_map(selected_skills: list[str]) -> dict[str, set[str]]:
+    """Return per-skill mapping: skill_name -> {credential var names it needs}."""
+    result: dict[str, set[str]] = {}
+    for skill in selected_skills:
+        creds = set()
+        for var, allowed_skills in _CREDENTIAL_SKILL_MAP.items():
+            if skill in allowed_skills:
+                creds.add(var)
+        if creds:
+            result[skill] = creds
+    return result
 
 
 def _split_credential_env(env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
@@ -324,7 +359,7 @@ def build_bwrap_cmd(
         _tmpfs(claude_dir)
         creds = claude_dir / ".credentials.json"
         if creds.exists():
-            _bind(creds)  # RW: OAuth token refresh writes here
+            _ro_bind(creds)  # RO: prevents token persistence attacks
         settings = claude_dir / "settings.json"
         if settings.exists():
             _ro_bind(settings)
@@ -337,27 +372,28 @@ def build_bwrap_cmd(
     # --- User workspace (RW) ---
     _bind(user_temp_dir.resolve())
 
+    # .developer/ scripts (credential-fetch, git helpers) must be read-only
+    # to prevent a compromised subprocess from replacing them to intercept
+    # credentials.  A later --ro-bind on a subdir overrides the parent --bind.
+    dev_dir = user_temp_dir.resolve() / ".developer"
+    if dev_dir.is_dir():
+        _ro_bind(dev_dir)
+
     # --- Skill proxy socket (RO inside sandbox) ---
     if proxy_sock and proxy_sock.exists():
         _ro_bind(proxy_sock)
 
-    # --- Nextcloud mounts ---
+    # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
     mount = config.nextcloud_mount_path
     if mount:
         mount = mount.resolve()
-        if is_admin:
-            # Admin: full mount RW
-            _bind(mount)
-        else:
-            # Non-admin: only their own user dir RW
-            user_dir = mount / "Users" / task.user_id
-            if user_dir.exists():
-                _bind(user_dir)
-            # Active channel dir RW (agent writes CHANNEL.md)
-            if task.conversation_token:
-                channel_dir = mount / "Channels" / task.conversation_token
-                if channel_dir.exists():
-                    _bind(channel_dir)
+        user_dir = mount / "Users" / task.user_id
+        if user_dir.exists():
+            _bind(user_dir)
+        if task.conversation_token:
+            channel_dir = mount / "Channels" / task.conversation_token
+            if channel_dir.exists():
+                _bind(channel_dir)
 
     # --- DB access for admin ---
     if is_admin:
@@ -388,7 +424,7 @@ def build_bwrap_cmd(
             _bind(repos)
 
     # --- Per-resource mounts ---
-    if mount and not is_admin:
+    if mount:
         for r in user_resources:
             if not r.resource_path:
                 continue
@@ -1855,9 +1891,13 @@ def execute_task(
                 # build_bwrap_cmd() bind-mounts this file into the sandbox.
                 _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{task.id}.sock"
                 env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
+                allowed_creds = _allowed_credentials_for_skills(selected_skills)
+                skill_cred_map = _build_skill_credential_map(selected_skills)
                 _proxy_ctx = SkillProxy(
                     _proxy_sock, credential_env, env,
                     timeout=config.security.skill_proxy_timeout,
+                    allowed_credentials=allowed_creds,
+                    skill_credential_map=skill_cred_map,
                 )
 
         def _build_and_run():
