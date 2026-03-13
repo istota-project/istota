@@ -18,6 +18,7 @@ istota/
 │   ├── executor.py          # Claude Code execution wrapper (Popen + stream-json)
 │   ├── skill_proxy.py       # Unix socket proxy for credential-isolated skill CLI calls
 │   ├── skill_client.py      # istota-skill console script (proxy client + direct fallback)
+│   ├── network_proxy.py     # CONNECT proxy for network isolation (domain allowlist)
 │   ├── heartbeat.py         # Heartbeat monitoring system
 │   ├── invoice_scheduler.py # Scheduled invoice generation + reminders
 │   ├── location_loader.py   # LOCATION.md parser + place sync
@@ -200,7 +201,12 @@ Place detection uses hysteresis (2 consecutive pings required) to avoid flapping
 DB tables: `location_pings`, `location_places`, `location_visits`, `location_state`. Old pings cleaned after `location_ping_retention_days` (365).
 
 ### Filesystem Sandbox (bubblewrap)
-Per-user filesystem isolation via `bwrap`. Non-admins see only their Nextcloud subtree + system libs. Admins see full mount + DB (RO by default). No network isolation. Graceful degradation if not Linux or bwrap not found.
+Per-user filesystem isolation via `bwrap`. Non-admins see only their Nextcloud subtree + system libs. Admins see full mount + DB (RO by default). Graceful degradation if not Linux or bwrap not found.
+
+### Network Isolation (CONNECT Proxy)
+When `[security.network] enabled`, each task's sandbox gets `--unshare-net` (own network namespace, no external connectivity). Outbound traffic goes through a CONNECT proxy on a Unix socket (`network_proxy.py`) that only tunnels allowlisted `host:port` pairs. A TCP-to-Unix bridge script inside the sandbox listens on `127.0.0.1:18080` and forwards to the proxy socket. Claude Code sees `HTTPS_PROXY=http://127.0.0.1:18080`.
+
+Default allowlist: `api.anthropic.com:443`, `mcp-proxy.anthropic.com:443` (Claude API), `pypi.org:443`, `files.pythonhosted.org:443` (package installs, configurable via `allow_pypi`). Git remote hosts added from `[developer]` config when the developer skill is selected. Operator extras via `extra_hosts`. No MITM — TLS is end-to-end. Config: `[security.network]` section.
 
 ### Credential Isolation (Skill Proxy)
 When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY) are stripped from Claude's env. Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread, which injects credentials server-side. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled. Config: `[security]` section, `skill_proxy_enabled`, `skill_proxy_timeout`.

@@ -52,6 +52,11 @@ temp_dir = "/tmp/istota"
 # skill_proxy_timeout = 300        # timeout for proxied skill commands (seconds)
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 
+# [security.network]
+# enabled = true                   # --unshare-net + CONNECT proxy (requires sandbox)
+# allow_pypi = true                # add pypi.org + files.pythonhosted.org to allowlist
+# extra_hosts = []                 # operator-specific additions (e.g. ["registry.example.com:443"])
+
 [nextcloud]
 # Nextcloud server URL
 url = "https://nextcloud.example.com"

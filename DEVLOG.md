@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-13: Network isolation for sandbox (--unshare-net + CONNECT proxy)
+
+Outbound network access from the bwrap sandbox is now restricted to an allowlist of host:port pairs. Each task gets its own network namespace via `--unshare-net`. A CONNECT proxy on a Unix socket (outside the sandbox) tunnels allowed traffic; a TCP-to-Unix bridge inside the sandbox forwards from `127.0.0.1:18080` to the proxy socket. Direct network access from the sandbox is impossible.
+
+**Key changes:**
+- `NetworkProxy` class in `network_proxy.py`: Unix socket CONNECT proxy with domain allowlist, per-task lifecycle (same pattern as SkillProxy). No MITM — TLS is end-to-end.
+- Bridge script (`net-bridge`): written to `.developer/` (RO inside sandbox), started as background process by a shell wrapper before `exec`ing Claude Code with `HTTPS_PROXY`/`HTTP_PROXY` env vars.
+- `build_bwrap_cmd()` adds `--unshare-net`, bind-mounts proxy socket, wraps command in shell that starts bridge and execs claude with proxy env vars. Uses `"$@"` to preserve original argv.
+- `_build_network_allowlist()`: merges default hosts (Anthropic API), PyPI (configurable), operator extras, and developer git remote hosts from config.
+- Default allowlist: `api.anthropic.com:443`, `mcp-proxy.anthropic.com:443`, `pypi.org:443`, `files.pythonhosted.org:443`. Git hosts added when developer skill is selected.
+- `[security.network]` config section: `enabled` (default true), `allow_pypi` (default true), `extra_hosts` (operator additions).
+- Executor uses `contextlib.ExitStack` to manage both SkillProxy and NetworkProxy lifecycles.
+
+**Files added:**
+- `src/istota/network_proxy.py` — CONNECT proxy, bridge script, `write_bridge_script()`
+- `tests/test_network_proxy.py` — Proxy lifecycle, blocking (403), tunneling (200 + bidirectional data), bridge script validation
+
+**Files modified:**
+- `src/istota/config.py` — Added `NetworkConfig` dataclass, nested in `SecurityConfig`, parsed from `[security.network]`
+- `src/istota/executor.py` — Added `_build_network_allowlist()`, `net_proxy_sock` param on `build_bwrap_cmd()`, network proxy lifecycle with ExitStack
+- `tests/test_sandbox.py` — Added `TestNetworkProxyBwrapIntegration`, `TestBuildNetworkAllowlist`, `TestNetworkConfigParsing`
+- `config/config.example.toml` — Documented `[security.network]` section
+- `deploy/ansible/defaults/main.yml` — Added `istota_security_network_*` vars
+- `deploy/ansible/templates/config.toml.j2` — Renders `[security.network]` section
+
 ## 2026-03-13: Sandbox security fixes (red team findings 1-4)
 
 Four fixes from a red team assessment that found the bwrap sandbox had credential exposure vectors. Network isolation (finding #5) is deferred.
