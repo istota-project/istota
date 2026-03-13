@@ -1,4 +1,5 @@
 description = "Briefing formatting guidelines for Nextcloud Talk"
 source_types = ["briefing"]
 exclude_memory = true
+exclude_persona = true
 exclude_resources = ["reminders_file"]
