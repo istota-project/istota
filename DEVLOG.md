@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-13: Fix network proxy killing streaming API connections
+
+The CONNECT proxy's 30-second request-parsing timeout was persisting into the tunnel phase, causing streaming API responses to die mid-generation when Claude Code didn't send data for >30 seconds (normal during response streaming — the client is just receiving).
+
+**Key changes:**
+- Clear socket timeouts to `None` on both client and upstream sockets after the CONNECT tunnel is established, so the tunnel stays alive for the full duration of the API call.
+- Enable TCP keepalive on upstream connections to detect silently dead connections (NAT timeouts, load balancer drops) instead of blocking forever on `recv`.
+- Fix bridge script inside sandbox to use `shutdown(SHUT_WR)` instead of `close()` for graceful half-close, preventing data loss when one direction finishes before the other.
+- Add debug logging in the bridge forwarding loop (direction, target host, errors) instead of silent `except OSError: pass`.
+- Remove unused `timeout` parameter from `NetworkProxy.__init__` (was accepted and stored but never used).
+
+**Files modified:**
+- `src/istota/network_proxy.py` — Timeout fix, TCP keepalive, bridge script fix, debug logging, removed dead code
+- `src/istota/executor.py` — Removed unused `timeout=` kwarg from `NetworkProxy()` call
+
 ## 2026-03-13: Fix lost intermediate text + Talk poller latency
 
 Two fixes for response quality and Talk polling performance.

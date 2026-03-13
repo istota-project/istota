@@ -1988,7 +1988,6 @@ def execute_task(
             _net_proxy_sock = Path(tempfile.gettempdir()) / f"istota-net-{task.id}.sock"
             _net_proxy_ctx = NetworkProxy(
                 _net_proxy_sock, allowed_hosts,
-                timeout=config.security.skill_proxy_timeout,
             )
 
         def _build_and_run():

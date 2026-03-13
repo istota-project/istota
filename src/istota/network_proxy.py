@@ -35,10 +35,8 @@ def bridge(tcp_conn, unix_path):
                 dst.sendall(data)
         except OSError: pass
         finally:
-            try: src.close()
-            except: pass
-            try: dst.close()
-            except: pass
+            try: dst.shutdown(socket.SHUT_WR)
+            except OSError: pass
     threading.Thread(target=forward, args=(tcp_conn, unix_conn), daemon=True).start()
     forward(unix_conn, tcp_conn)
 
@@ -51,6 +49,19 @@ while True:
     conn, _ = srv.accept()
     threading.Thread(target=bridge, args=(conn, sock_path), daemon=True).start()
 """
+
+
+def _enable_tcp_keepalive(sock: socket.socket) -> None:
+    """Enable TCP keepalive on a socket to detect dead connections."""
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    # Linux-specific tuning: start probes after 60s idle, every 10s, fail after 6
+    for opt, val in [
+        ("TCP_KEEPIDLE", 60),
+        ("TCP_KEEPINTVL", 10),
+        ("TCP_KEEPCNT", 6),
+    ]:
+        if hasattr(socket, opt):
+            sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
 
 
 def write_bridge_script(path: Path) -> None:
@@ -76,11 +87,9 @@ class NetworkProxy:
         self,
         socket_path: Path,
         allowed_hosts: set[str],  # {"api.anthropic.com:443", ...}
-        timeout: int = 300,
     ):
         self.socket_path = socket_path
         self.allowed_hosts = allowed_hosts
-        self.timeout = timeout
         self._server_sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -210,8 +219,19 @@ class NetworkProxy:
 
         client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
 
+        # Clear the 30s request-parsing timeout — the tunnel may be
+        # idle for long stretches during streaming API responses.
+        client.settimeout(None)
+        upstream.settimeout(None)
+
+        # Enable TCP keepalive on upstream to detect dead connections
+        # (NAT timeouts, load balancer drops, etc.)
+        _enable_tcp_keepalive(upstream)
+
+        logger.debug("Network proxy tunnel established: %s", target)
+
         try:
-            self._bridge(client, upstream)
+            self._bridge(client, upstream, target)
         finally:
             try:
                 upstream.close()
@@ -219,25 +239,34 @@ class NetworkProxy:
                 pass
 
     @staticmethod
-    def _bridge(a: socket.socket, b: socket.socket) -> None:
+    def _bridge(
+        a: socket.socket, b: socket.socket, target: str = "",
+    ) -> None:
         """Bidirectional forwarding between two sockets."""
 
-        def forward(src: socket.socket, dst: socket.socket) -> None:
+        def forward(
+            src: socket.socket, dst: socket.socket, label: str,
+        ) -> None:
             try:
                 while True:
                     data = src.recv(65536)
                     if not data:
                         break
                     dst.sendall(data)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("Network proxy bridge %s error: %s", label, e)
             finally:
                 try:
                     dst.shutdown(socket.SHUT_WR)
                 except OSError:
                     pass
 
-        t = threading.Thread(target=forward, args=(a, b), daemon=True)
+        label = f"[{target}]" if target else ""
+        t = threading.Thread(
+            target=forward, args=(a, b, f"{label} client→upstream"),
+            daemon=True,
+        )
         t.start()
-        forward(b, a)
+        forward(b, a, f"{label} upstream→client")
         t.join(timeout=5)
+        logger.debug("Network proxy tunnel closed: %s", target)
