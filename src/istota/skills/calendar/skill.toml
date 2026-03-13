@@ -1,5 +1,4 @@
 description = "Calendar operations with CalDAV"
 keywords = ["calendar", " cal ", "event", "meeting", "schedule", "appointment", "caldav"]
-resource_types = ["calendar"]
 dependencies = ["caldav", "icalendar"]
 source_types = ["briefing"]
