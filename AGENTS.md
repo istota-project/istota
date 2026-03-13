@@ -9,8 +9,6 @@ Claude Code-powered assistant bot with Nextcloud Talk interface.
 ```
 istota/
 ├── src/istota/
-│   ├── briefing.py          # Re-export shim (logic in skills/briefing/)
-│   ├── briefing_loader.py   # Re-export shim (logic in skills/briefing/)
 │   ├── cron_loader.py       # CRON.md loading + DB sync for scheduled jobs
 │   ├── cli.py               # CLI for local testing and administration
 │   ├── config.py            # TOML configuration loading
@@ -28,7 +26,6 @@ istota/
 │   ├── notifications.py     # Central notification dispatcher (Talk, Email, ntfy)
 │   ├── scheduler.py         # Task processor, briefing scheduler, all polling
 │   ├── shared_file_organizer.py # Auto-organize files shared with bot
-│   ├── skills_loader.py     # Thin wrapper re-exporting from skills/_loader.py
 │   ├── sleep_cycle.py       # Nightly memory extraction
 │   ├── storage.py           # Bot-managed Nextcloud storage
 │   ├── stream_parser.py     # Parse stream-json events

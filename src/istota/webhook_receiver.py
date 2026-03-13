@@ -365,7 +365,7 @@ def _fire_actions(
 # Haversine distance
 # =============================================================================
 
-from istota.geo import haversine  # noqa: E402 — re-exported for backward compat
+from istota.geo import haversine  # noqa: E402
 
 
 def resolve_place(lat: float, lon: float, places: list) -> object | None:

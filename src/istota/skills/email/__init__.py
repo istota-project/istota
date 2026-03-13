@@ -100,8 +100,6 @@ def list_emails(
     folder: str = "INBOX",
     limit: int = 20,
     config: EmailConfig | None = None,
-    # Legacy parameter for backwards compatibility, ignored
-    account: str = "istota",
 ) -> list[EmailEnvelope]:
     """List email envelopes in a folder."""
     if config is None:
@@ -129,8 +127,6 @@ def read_email(
     folder: str = "INBOX",
     config: EmailConfig | None = None,
     envelope: EmailEnvelope | None = None,
-    # Legacy parameter for backwards compatibility, ignored
-    account: str = "istota",
 ) -> Email:
     """Read a specific email by UID."""
     if config is None:
@@ -171,9 +167,6 @@ def download_attachments(
     target_dir: Path,
     folder: str = "INBOX",
     config: EmailConfig | None = None,
-    # Legacy parameters for backwards compatibility, ignored
-    himalaya_downloads_dir: Path | None = None,
-    account: str | None = None,
 ) -> list[Path]:
     """
     Download attachments for an email directly to target_dir.
@@ -214,8 +207,6 @@ def send_email(
     config: EmailConfig | None = None,
     from_addr: str | None = None,
     content_type: str = "plain",
-    # Legacy parameter for backwards compatibility, ignored
-    account: str = "istota",
 ) -> None:
     """Send an email."""
     if config is None:
@@ -244,8 +235,6 @@ def reply_to_email(
     in_reply_to: str | None = None,
     references: str | None = None,
     content_type: str = "plain",
-    # Legacy parameter for backwards compatibility, ignored
-    account: str = "istota",
 ) -> None:
     """
     Send a reply email with proper threading headers.
@@ -330,8 +319,6 @@ def search_emails(
     folder: str = "INBOX",
     limit: int = 20,
     config: EmailConfig | None = None,
-    # Legacy parameter for backwards compatibility, ignored
-    account: str = "istota",
 ) -> list[EmailEnvelope]:
     """
     Search emails using IMAP search syntax.
@@ -384,8 +371,6 @@ def get_emails_from_senders(
     max_age_hours: int = 6,
     folder: str = "INBOX",
     config: EmailConfig | None = None,
-    # Legacy parameter for backwards compatibility, ignored
-    account: str | None = None,
 ) -> list[EmailEnvelope]:
     """Get recent emails from specific senders (for news briefings)."""
     if config is None:
@@ -449,8 +434,6 @@ def get_newsletters(
     lookback_hours: int = 12,
     folder: str = "INBOX",
     config: EmailConfig | None = None,
-    # Legacy parameter for backwards compatibility, ignored
-    account: str = "istota",
 ) -> list[EmailEnvelope]:
     """
     Get recent newsletter emails from configured sources.
@@ -524,8 +507,6 @@ def delete_email(
     email_id: str,
     folder: str = "INBOX",
     config: EmailConfig | None = None,
-    # Legacy parameter for backwards compatibility, ignored
-    account: str = "istota",
 ) -> bool:
     """
     Delete an email by UID.

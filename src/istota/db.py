@@ -55,18 +55,6 @@ class UserResource:
 
 
 @dataclass
-class BriefingConfig:
-    id: int
-    user_id: str
-    name: str
-    cron_expression: str
-    conversation_token: str
-    components: dict
-    enabled: bool
-    last_run_at: str | None
-
-
-@dataclass
 class ProcessedEmail:
     id: int
     email_id: str
@@ -643,69 +631,6 @@ def add_user_resource(
         (user_id, resource_type, resource_path, display_name, permissions),
     )
     return cursor.fetchone()[0]
-
-
-def get_briefing_configs(
-    conn: sqlite3.Connection,
-    user_id: str | None = None,
-    enabled_only: bool = True,
-) -> list[BriefingConfig]:
-    """Get briefing configurations."""
-    query = "SELECT * FROM briefing_configs WHERE 1=1"
-    params: list = []
-
-    if user_id:
-        query += " AND user_id = ?"
-        params.append(user_id)
-    if enabled_only:
-        query += " AND enabled = 1"
-
-    cursor = conn.execute(query, params)
-    return [
-        BriefingConfig(
-            id=row["id"],
-            user_id=row["user_id"],
-            name=row["name"],
-            cron_expression=row["cron_expression"],
-            conversation_token=row["conversation_token"],
-            components=json.loads(row["components"]),
-            enabled=bool(row["enabled"]),
-            last_run_at=row["last_run_at"],
-        )
-        for row in cursor.fetchall()
-    ]
-
-
-def add_briefing_config(
-    conn: sqlite3.Connection,
-    user_id: str,
-    name: str,
-    cron_expression: str,
-    conversation_token: str,
-    components: dict,
-) -> int:
-    """Add or update a briefing configuration."""
-    cursor = conn.execute(
-        """
-        INSERT INTO briefing_configs (user_id, name, cron_expression, conversation_token, components)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (user_id, name) DO UPDATE SET
-            cron_expression = excluded.cron_expression,
-            conversation_token = excluded.conversation_token,
-            components = excluded.components
-        RETURNING id
-        """,
-        (user_id, name, cron_expression, conversation_token, json.dumps(components)),
-    )
-    return cursor.fetchone()[0]
-
-
-def update_briefing_last_run(conn: sqlite3.Connection, briefing_id: int) -> None:
-    """Update the last run timestamp for a briefing (legacy DB-based briefings)."""
-    conn.execute(
-        "UPDATE briefing_configs SET last_run_at = datetime('now') WHERE id = ?",
-        (briefing_id,),
-    )
 
 
 def get_briefing_last_run(conn: sqlite3.Connection, user_id: str, briefing_name: str) -> str | None:

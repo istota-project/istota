@@ -35,7 +35,6 @@ def _make_config(tmp_path, **overrides):
         progress_show_tool_use=True,
         progress_show_text=False,
         progress_style="legacy",  # legacy mode by default for existing tests
-        progress_edit_mode=False,
     )
     defaults.update(overrides)
     config.scheduler = SchedulerConfig(**defaults)
@@ -43,7 +42,7 @@ def _make_config(tmp_path, **overrides):
 
 
 class TestMakeTalkProgressCallback:
-    """Legacy mode tests (progress_edit_mode=False)."""
+    """Legacy mode tests (progress_style="legacy")."""
 
     def test_callback_posts_to_talk(self, tmp_path):
         config = _make_config(tmp_path)
@@ -385,14 +384,6 @@ class TestEditModeCallback:
         callback = _make_talk_progress_callback(config, task, ack_msg_id=None)
         assert callback.use_edit is False
 
-    def test_edit_mode_fallback_disabled(self, tmp_path):
-        """When progress_edit_mode=False, uses legacy mode."""
-        config = _make_config(tmp_path, progress_edit_mode=False)
-        task = _make_task()
-
-        callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
-        assert callback.use_edit is False
-
     def test_edit_mode_skips_text_events(self, tmp_path):
         """Text events (italicize=False) should not be accumulated in edit mode."""
         config = _make_config(tmp_path, progress_style="full")
@@ -571,42 +562,11 @@ class TestNoneModeCallback:
         assert callback.all_descriptions == ["📄 Reading file.txt"]
 
 
-class TestProgressStyleBackwardCompat:
-    """Test that progress_edit_mode maps correctly to progress_style."""
+class TestProgressStyleConfig:
+    """Test progress_style config loading."""
 
     def test_config_default_is_replace(self):
         config = Config()
-        assert config.scheduler.progress_style == "replace"
-
-    def test_toml_progress_edit_mode_true_maps_to_full(self, tmp_path):
-        from istota.config import load_config
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[scheduler]
-progress_edit_mode = true
-""")
-        config = load_config(config_file)
-        assert config.scheduler.progress_style == "full"
-
-    def test_toml_progress_edit_mode_false_maps_to_legacy(self, tmp_path):
-        from istota.config import load_config
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[scheduler]
-progress_edit_mode = false
-""")
-        config = load_config(config_file)
-        assert config.scheduler.progress_style == "legacy"
-
-    def test_toml_explicit_progress_style_wins(self, tmp_path):
-        from istota.config import load_config
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[scheduler]
-progress_style = "replace"
-progress_edit_mode = true
-""")
-        config = load_config(config_file)
         assert config.scheduler.progress_style == "replace"
 
     def test_toml_progress_style_none(self, tmp_path):
