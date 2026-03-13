@@ -2132,6 +2132,10 @@ def _execute_streaming_once(
     # Accumulate tool use descriptions for actions_taken
     actions_descriptions: list[str] = []
 
+    # Accumulate intermediate text blocks (between tool calls) so they aren't
+    # lost — the final ResultEvent only contains the last assistant turn's text.
+    intermediate_texts: list[str] = []
+
     # Capture stderr in a thread to avoid deadlock when both pipes are full
     stderr_lines = []
 
@@ -2192,6 +2196,8 @@ def _execute_streaming_once(
                 final_result = event
             elif isinstance(event, ToolUseEvent):
                 actions_descriptions.append(event.description)
+            elif isinstance(event, TextEvent):
+                intermediate_texts.append(event.text)
             if isinstance(event, ToolUseEvent) and show_tool_use and on_progress:
                 try:
                     on_progress(event.description)
@@ -2234,12 +2240,20 @@ def _execute_streaming_once(
 
     stderr_output = "".join(stderr_lines).strip()
 
-    # Extract result: prefer ResultEvent, fall back to result file, then stderr
+    # Extract result: prefer ResultEvent, fall back to result file, then stderr.
+    # The ResultEvent only contains the last assistant turn's text. Intermediate
+    # text blocks (status updates between tool calls) are accumulated separately
+    # and prepended if they aren't already part of the final text.
     if final_result is not None:
+        result_text = final_result.text.strip()
         if final_result.success:
-            return True, final_result.text.strip(), actions_json
+            # Prepend intermediate texts that aren't in the final result
+            missing = [t for t in intermediate_texts if t not in result_text]
+            if missing:
+                result_text = "\n\n".join(missing) + "\n\n" + result_text
+            return True, result_text, actions_json
         else:
-            return False, final_result.text.strip() or stderr_output or "Unknown error", None
+            return False, result_text or stderr_output or "Unknown error", None
 
     # Fallback: result file
     if result_file.exists():

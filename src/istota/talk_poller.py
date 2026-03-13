@@ -15,6 +15,11 @@ logger = logging.getLogger("istota.talk_poller")
 _participant_cache: dict[str, tuple[list[dict], float]] = {}
 _PARTICIPANT_CACHE_TTL = 300  # 5 minutes
 
+# Conversation list cache: avoids calling list_conversations() every poll cycle.
+# Rooms change rarely; refreshing every 60s is sufficient.
+_conversation_cache: tuple[list[dict], float] | None = None
+_CONVERSATION_CACHE_TTL = 60  # seconds
+
 
 def extract_attachments(message: dict) -> list[str]:
     """
@@ -158,15 +163,34 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     if not config.nextcloud.url:
         return []
 
+    global _conversation_cache
+
     client = TalkClient(config)
     created_tasks = []
 
-    # Get all conversations the bot is part of
-    try:
-        conversations = await client.list_conversations()
-    except Exception as e:
-        logger.error("Error listing Talk conversations: %s: %s", type(e).__name__, e)
-        return []
+    # Get all conversations, using cache to avoid blocking every cycle
+    now = time.monotonic()
+    cache_valid = (
+        _conversation_cache is not None
+        and now - _conversation_cache[1] < _CONVERSATION_CACHE_TTL
+    )
+
+    if cache_valid:
+        conversations = _conversation_cache[0]
+    else:
+        try:
+            conversations = await client.list_conversations()
+            _conversation_cache = (conversations, now)
+        except Exception as e:
+            if _conversation_cache is not None:
+                logger.debug(
+                    "list_conversations failed (%s: %s), using cached list (%d rooms)",
+                    type(e).__name__, e, len(_conversation_cache[0]),
+                )
+                conversations = _conversation_cache[0]
+            else:
+                logger.warning("Error listing Talk conversations: %s: %s", type(e).__name__, e)
+                return []
 
     # Build list of conversations to poll and initialize new ones
     poll_tasks = []

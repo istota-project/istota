@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-13: Fix lost intermediate text + Talk poller latency
+
+Two fixes for response quality and Talk polling performance.
+
+**Key changes:**
+- Intermediate text blocks (status updates between tool calls) were being lost from task results. The `ResultEvent` from Claude Code's stream-json only contains the last assistant turn's text, so intermediate `TextEvent`s are now accumulated during streaming and prepended to the final result (deduplicated against the ResultEvent text).
+- Talk poller `list_conversations()` and 6 other TalkClient methods used httpx's default 5s timeout, causing frequent ReadTimeout errors when Nextcloud was busy during task execution. Increased default to 15s via `DEFAULT_TIMEOUT` class constant.
+- Conversation list is now cached with a 60s TTL. Most poll cycles skip the API call entirely. On timeout/error the cached list is used as fallback instead of aborting the cycle.
+- Downgraded `list_conversations` failure from ERROR to WARNING (transient, self-recovering).
+- Replaced manual `_participant_cache.clear()` in tests with an autouse fixture that resets both caches.
+
+**Files modified:**
+- `src/istota/executor.py` — Accumulate `TextEvent` texts, prepend missing ones to result
+- `src/istota/talk.py` — Added `DEFAULT_TIMEOUT = 15`, applied to all bare `httpx.AsyncClient()` calls
+- `src/istota/talk_poller.py` — Conversation list cache (60s TTL + error fallback), log level fix
+- `tests/test_executor_streaming.py` — Tests for intermediate text accumulation and deduplication
+- `tests/test_talk_poller.py` — Autouse cache reset fixture, conversation cache tests
+
 ## 2026-03-13: Network isolation for sandbox (--unshare-net + CONNECT proxy)
 
 Outbound network access from the bwrap sandbox is now restricted to an allowlist of host:port pairs. Each task gets its own network namespace via `--unshare-net`. A CONNECT proxy on a Unix socket (outside the sandbox) tunnels allowed traffic; a TCP-to-Unix bridge inside the sandbox forwards from `127.0.0.1:18080` to the proxy socket. Direct network access from the sandbox is impossible.
