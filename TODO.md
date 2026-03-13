@@ -280,7 +280,7 @@
 - [x] .developer/ scripts mounted read-only (prevent credential-fetch script replacement)
 - [x] Admin Nextcloud mount scoped to user dir (was full content tree)
 - [ ] Skill proxy phase 3: GARMIN_CONFIG file path exclusion via bwrap
-- [ ] Network proxy for agent subprocesses (domain allowlist)
+- [x] Network proxy for agent subprocesses (domain allowlist)
 
 ## Priority 4: Future Ideas
 

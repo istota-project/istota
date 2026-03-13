@@ -34,6 +34,13 @@ sandbox_admin_db_write = {{ istota_security_sandbox_admin_db_write | lower }}
 skill_proxy_enabled = {{ istota_security_skill_proxy_enabled | lower }}
 skill_proxy_timeout = {{ istota_security_skill_proxy_timeout }}
 
+[security.network]
+enabled = {{ istota_security_network_enabled | lower }}
+allow_pypi = {{ istota_security_network_allow_pypi | lower }}
+{% if istota_security_network_extra_hosts %}
+extra_hosts = {{ istota_security_network_extra_hosts | to_json }}
+{% endif %}
+
 [nextcloud]
 url = "{{ istota_nextcloud_url }}"
 username = "{{ istota_nextcloud_username }}"

@@ -9,8 +9,11 @@ from unittest.mock import patch
 import pytest
 
 from istota import db
-from istota.config import Config, DeveloperConfig, SecurityConfig
-from istota.executor import build_bwrap_cmd
+from istota.config import Config, DeveloperConfig, NetworkConfig, SecurityConfig
+from istota.executor import (
+    _build_network_allowlist,
+    build_bwrap_cmd,
+)
 
 
 @pytest.fixture
@@ -445,3 +448,212 @@ sandbox_admin_db_write = true
         config = load_config(config_file)
         assert config.security.sandbox_enabled is True
         assert config.security.sandbox_admin_db_write is True
+
+
+class TestNetworkProxyBwrapIntegration:
+    """Tests for --unshare-net and shell wrapper in bwrap command."""
+
+    def test_unshare_net_added(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True)
+        sock = sandbox_config.temp_dir / "net.sock"
+        sock.touch()
+        p1, p2 = _patch_linux()
+        with p1, p2:
+            result = build_bwrap_cmd(
+                ["claude", "-p", "-"], sandbox_config, task, False,
+                [], user_temp, net_proxy_sock=sock,
+            )
+        assert "--unshare-net" in result
+
+    def test_no_unshare_net_without_sock(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        result = _run_bwrap(sandbox_config, task, False)
+        assert "--unshare-net" not in result
+
+    def test_proxy_socket_bind_mounted(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True)
+        sock = sandbox_config.temp_dir / "net.sock"
+        sock.touch()
+        p1, p2 = _patch_linux()
+        with p1, p2:
+            result = build_bwrap_cmd(
+                ["claude", "-p", "-"], sandbox_config, task, False,
+                [], user_temp, net_proxy_sock=sock,
+            )
+        ro_pairs = _get_bind_pairs(result, "--ro-bind")
+        assert any(src == str(sock.resolve()) for src, _ in ro_pairs)
+
+    def test_shell_wrapper_present(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True)
+        sock = sandbox_config.temp_dir / "net.sock"
+        sock.touch()
+        p1, p2 = _patch_linux()
+        with p1, p2:
+            result = build_bwrap_cmd(
+                ["claude", "-p", "-"], sandbox_config, task, False,
+                [], user_temp, net_proxy_sock=sock,
+            )
+        sep_idx = result.index("--")
+        after_sep = result[sep_idx + 1:]
+        # Should start with /bin/sh -c
+        assert after_sep[0] == "/bin/sh"
+        assert after_sep[1] == "-c"
+        # Shell script should reference HTTPS_PROXY
+        shell_cmd = after_sep[2]
+        assert "HTTPS_PROXY=" in shell_cmd
+        assert "HTTP_PROXY=" in shell_cmd
+        assert "NO_PROXY=" in shell_cmd
+        assert "net-bridge" in shell_cmd
+        # Original cmd should follow as positional args
+        assert "claude" in after_sep
+        assert "-p" in after_sep
+
+    def test_original_cmd_preserved_in_wrapper(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True)
+        sock = sandbox_config.temp_dir / "net.sock"
+        sock.touch()
+        p1, p2 = _patch_linux()
+        with p1, p2:
+            result = build_bwrap_cmd(
+                ["claude", "-p", "-", "--allowedTools", "Read"],
+                sandbox_config, task, False, [], user_temp,
+                net_proxy_sock=sock,
+            )
+        sep_idx = result.index("--")
+        after_sep = result[sep_idx + 1:]
+        # "sh" is $0, then the original cmd follows
+        assert after_sep[3] == "sh"
+        assert after_sep[4:] == ["claude", "-p", "-", "--allowedTools", "Read"]
+
+
+class TestBuildNetworkAllowlist:
+    """Tests for _build_network_allowlist."""
+
+    def _make_config(self, **overrides):
+        net_kw = {}
+        for k in ("enabled", "allow_pypi", "extra_hosts"):
+            if k in overrides:
+                net_kw[k] = overrides.pop(k)
+        network = NetworkConfig(**net_kw) if net_kw else NetworkConfig()
+        return Config(security=SecurityConfig(network=network), **overrides)
+
+    def test_default_hosts_always_present(self):
+        config = self._make_config()
+        hosts = _build_network_allowlist(config, [])
+        assert "api.anthropic.com:443" in hosts
+        assert "mcp-proxy.anthropic.com:443" in hosts
+
+    def test_pypi_hosts_when_allowed(self):
+        config = self._make_config(allow_pypi=True)
+        hosts = _build_network_allowlist(config, [])
+        assert "pypi.org:443" in hosts
+        assert "files.pythonhosted.org:443" in hosts
+
+    def test_no_pypi_hosts_when_disabled(self):
+        config = self._make_config(allow_pypi=False)
+        hosts = _build_network_allowlist(config, [])
+        assert "pypi.org:443" not in hosts
+        assert "files.pythonhosted.org:443" not in hosts
+
+    def test_extra_hosts_included(self):
+        config = self._make_config(extra_hosts=["registry.example.com:443"])
+        hosts = _build_network_allowlist(config, [])
+        assert "registry.example.com:443" in hosts
+
+    def test_developer_gitlab_host(self):
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir="/tmp/repos",
+                gitlab_url="https://gitlab.example.com",
+            ),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "gitlab.example.com:443" in hosts
+
+    def test_developer_github_host(self):
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir="/tmp/repos",
+                github_url="https://github.com",
+            ),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "github.com:443" in hosts
+        assert "api.github.com:443" in hosts
+
+    def test_developer_hosts_only_when_skill_selected(self):
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir="/tmp/repos",
+                gitlab_url="https://gitlab.example.com",
+            ),
+        )
+        hosts = _build_network_allowlist(config, ["calendar"])
+        assert "gitlab.example.com:443" not in hosts
+
+    def test_developer_custom_port(self):
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir="/tmp/repos",
+                gitlab_url="https://gitlab.example.com:8443",
+            ),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "gitlab.example.com:8443" in hosts
+
+
+class TestNetworkConfigParsing:
+    def test_defaults(self):
+        nc = NetworkConfig()
+        assert nc.enabled is True
+        assert nc.allow_pypi is True
+        assert nc.extra_hosts == []
+
+    def test_security_config_includes_network(self):
+        sc = SecurityConfig()
+        assert isinstance(sc.network, NetworkConfig)
+        assert sc.network.enabled is True
+
+    def test_from_config_load(self, tmp_path):
+        from istota.config import load_config
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[security]
+sandbox_enabled = true
+
+[security.network]
+enabled = false
+allow_pypi = false
+extra_hosts = ["custom.example.com:443"]
+""")
+        config = load_config(config_file)
+        assert config.security.network.enabled is False
+        assert config.security.network.allow_pypi is False
+        assert config.security.network.extra_hosts == ["custom.example.com:443"]
+
+    def test_defaults_when_network_section_missing(self, tmp_path):
+        from istota.config import load_config
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[security]
+sandbox_enabled = true
+""")
+        config = load_config(config_file)
+        assert config.security.network.enabled is True
+        assert config.security.network.allow_pypi is True

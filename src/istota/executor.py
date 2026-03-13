@@ -1,5 +1,6 @@
 """Claude Code execution wrapper."""
 
+import contextlib
 import json
 import logging
 import os
@@ -211,6 +212,49 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
 }
 
 
+# --- Network proxy allowlist ---
+
+_DEFAULT_NETWORK_HOSTS = frozenset({
+    "api.anthropic.com:443",
+    "mcp-proxy.anthropic.com:443",
+})
+
+_PYPI_HOSTS = frozenset({
+    "pypi.org:443",
+    "files.pythonhosted.org:443",
+})
+
+
+def _build_network_allowlist(config: Config, selected_skills: list[str]) -> set[str]:
+    """Build per-task network allowlist from config and selected skills."""
+    hosts: set[str] = set(_DEFAULT_NETWORK_HOSTS)
+
+    if config.security.network.allow_pypi:
+        hosts |= _PYPI_HOSTS
+
+    hosts.update(config.security.network.extra_hosts)
+
+    # Developer skill: add git remote hosts from config
+    if "developer" in selected_skills and config.developer.enabled:
+        from urllib.parse import urlparse
+
+        for url in [config.developer.gitlab_url, config.developer.github_url]:
+            if url:
+                parsed = urlparse(url)
+                host = parsed.hostname
+                port = parsed.port or 443
+                if host:
+                    hosts.add(f"{host}:{port}")
+
+        # GitHub API lives on a separate host from github.com
+        if config.developer.github_url:
+            parsed = urlparse(config.developer.github_url)
+            if parsed.hostname and "github.com" in parsed.hostname:
+                hosts.add("api.github.com:443")
+
+    return hosts
+
+
 def _allowed_credentials_for_skills(selected_skills: list[str]) -> set[str]:
     """Return the set of credential env var names needed by selected skills."""
     skills_set = set(selected_skills)
@@ -268,6 +312,7 @@ def build_bwrap_cmd(
     user_resources: list[db.UserResource],
     user_temp_dir: Path,
     proxy_sock: Path | None = None,
+    net_proxy_sock: Path | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -383,6 +428,12 @@ def build_bwrap_cmd(
     if proxy_sock and proxy_sock.exists():
         _ro_bind(proxy_sock)
 
+    # --- Network isolation ---
+    if net_proxy_sock:
+        args.append("--unshare-net")
+        if net_proxy_sock.exists():
+            _ro_bind(net_proxy_sock)
+
     # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
     mount = config.nextcloud_mount_path
     if mount:
@@ -452,7 +503,27 @@ def build_bwrap_cmd(
     # --- Lifecycle ---
     args.extend(["--die-with-parent", "--chdir", str(user_temp_dir.resolve())])
     args.append("--")
-    args.extend(cmd)
+
+    if net_proxy_sock:
+        # Wrap the command in a shell that starts the TCP-to-Unix bridge
+        # as a background process, waits for it to bind, then execs the
+        # original command with HTTPS_PROXY pointed at the bridge.
+        # "$@" preserves the original argv from cmd.
+        from .network_proxy import BRIDGE_PORT
+        bridge_path = str(user_temp_dir.resolve() / ".developer" / "net-bridge")
+        sock_path = str(net_proxy_sock)
+        shell_cmd = (
+            f"python3 {bridge_path} {sock_path} {BRIDGE_PORT} & "
+            f"sleep 0.2; "
+            f"exec env "
+            f"HTTPS_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
+            f"HTTP_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
+            f'NO_PROXY= "$@"'
+        )
+        args.extend(["/bin/sh", "-c", shell_cmd, "sh"] + cmd)
+    else:
+        args.extend(cmd)
+
     return args
 
 
@@ -1900,6 +1971,26 @@ def execute_task(
                     skill_credential_map=skill_cred_map,
                 )
 
+        # Network isolation via CONNECT proxy: outbound traffic restricted
+        # to an allowlist of host:port pairs via --unshare-net + proxy.
+        _net_proxy_ctx = None
+        _net_proxy_sock = None
+        if config.security.network.enabled and config.security.sandbox_enabled:
+            from .network_proxy import NetworkProxy, write_bridge_script
+
+            allowed_hosts = _build_network_allowlist(config, selected_skills)
+
+            # Write bridge script to .developer/ (RO inside sandbox)
+            dev_dir = Path(user_temp_dir) / ".developer"
+            dev_dir.mkdir(parents=True, exist_ok=True)
+            write_bridge_script(dev_dir / "net-bridge")
+
+            _net_proxy_sock = Path(tempfile.gettempdir()) / f"istota-net-{task.id}.sock"
+            _net_proxy_ctx = NetworkProxy(
+                _net_proxy_sock, allowed_hosts,
+                timeout=config.security.skill_proxy_timeout,
+            )
+
         def _build_and_run():
             nonlocal cmd
             # Wrap in bwrap sandbox if enabled (after proxy start so socket exists)
@@ -1907,16 +1998,18 @@ def execute_task(
                 cmd = build_bwrap_cmd(
                     cmd, config, task, is_admin, user_resources,
                     Path(user_temp_dir), proxy_sock=_proxy_sock,
+                    net_proxy_sock=_net_proxy_sock,
                 )
             if use_streaming:
                 return _execute_streaming(cmd, env, config, task, on_progress, result_file, prompt)
             else:
                 return _execute_simple(cmd, env, config, task, result_file, prompt)
 
-        if _proxy_ctx is not None:
-            with _proxy_ctx:
-                success, result, actions = _build_and_run()
-        else:
+        with contextlib.ExitStack() as stack:
+            if _proxy_ctx is not None:
+                stack.enter_context(_proxy_ctx)
+            if _net_proxy_ctx is not None:
+                stack.enter_context(_net_proxy_ctx)
             success, result, actions = _build_and_run()
 
         # Update skills fingerprint after successful interactive execution

@@ -267,6 +267,14 @@ class SiteConfig:
 
 
 @dataclass
+class NetworkConfig:
+    """Network isolation via CONNECT proxy (requires sandbox)."""
+    enabled: bool = True  # --unshare-net + proxy; false keeps current open-network behavior
+    allow_pypi: bool = True  # add pypi.org + files.pythonhosted.org to allowlist
+    extra_hosts: list[str] = field(default_factory=list)  # operator-specific additions
+
+
+@dataclass
 class SecurityConfig:
     """Security hardening configuration."""
     sandbox_enabled: bool = True  # bwrap filesystem isolation per user
@@ -276,6 +284,7 @@ class SecurityConfig:
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     ])
+    network: NetworkConfig = field(default_factory=NetworkConfig)
 
 
 @dataclass
@@ -758,11 +767,18 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "security" in data:
         sec = data["security"]
+        net_data = sec.get("network", {})
+        network_config = NetworkConfig(
+            enabled=net_data.get("enabled", True),
+            allow_pypi=net_data.get("allow_pypi", True),
+            extra_hosts=net_data.get("extra_hosts", []),
+        )
         config.security = SecurityConfig(
             sandbox_enabled=sec.get("sandbox_enabled", True),
             sandbox_admin_db_write=sec.get("sandbox_admin_db_write", False),
             skill_proxy_enabled=sec.get("skill_proxy_enabled", True),
             skill_proxy_timeout=sec.get("skill_proxy_timeout", 300),
+            network=network_config,
             **({
                 "passthrough_env_vars": sec["passthrough_env_vars"]
             } if "passthrough_env_vars" in sec else {}),
