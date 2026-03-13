@@ -75,17 +75,79 @@ class TestSplitCredentialEnv:
         assert len(cred) == 2
         assert clean == {}
 
-    def test_does_not_strip_phase2_tokens(self):
-        """GITLAB_TOKEN and GITHUB_TOKEN stay in clean env for phase 1."""
+    def test_strips_developer_tokens(self):
+        """GITLAB_TOKEN and GITHUB_TOKEN are stripped to credential env."""
         env = {
             "GITLAB_TOKEN": "glpat-xxx",
             "GITHUB_TOKEN": "ghp_xxx",
             "CALDAV_PASSWORD": "secret",
         }
         cred, clean = _split_credential_env(env)
-        assert "GITLAB_TOKEN" in clean
-        assert "GITHUB_TOKEN" in clean
+        assert "GITLAB_TOKEN" in cred
+        assert "GITHUB_TOKEN" in cred
+        assert "GITLAB_TOKEN" not in clean
+        assert "GITHUB_TOKEN" not in clean
         assert "CALDAV_PASSWORD" in cred
+
+
+class TestProxyCredentialLookup:
+    """Test the credential lookup protocol extension."""
+
+    def _send_request(self, sock_path, request_dict):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect(str(sock_path))
+        sock.sendall((json.dumps(request_dict) + "\n").encode())
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n" in chunk:
+                break
+        sock.close()
+        return json.loads(b"".join(chunks).decode().strip())
+
+    def test_returns_credential_value(self, sock_path):
+        cred_env = {"GITLAB_TOKEN": "glpat-secret", "NC_PASS": "nc_secret"}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"}):
+            resp = self._send_request(sock_path, {
+                "type": "credential", "name": "GITLAB_TOKEN",
+            })
+        assert resp == {"value": "glpat-secret"}
+
+    def test_returns_error_for_unknown_credential(self, sock_path):
+        cred_env = {"GITLAB_TOKEN": "glpat-secret"}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"}):
+            resp = self._send_request(sock_path, {
+                "type": "credential", "name": "NONEXISTENT",
+            })
+        assert "error" in resp
+        assert "Unknown credential" in resp["error"]
+
+    def test_does_not_leak_base_env(self, sock_path):
+        """Credential lookup only returns values from credential_env, not base_env."""
+        cred_env = {"GITLAB_TOKEN": "glpat-secret"}
+        base_env = {"PATH": "/usr/bin", "HOME": "/home/user"}
+        with SkillProxy(sock_path, cred_env, base_env):
+            resp = self._send_request(sock_path, {
+                "type": "credential", "name": "PATH",
+            })
+        assert "error" in resp
+
+    @patch("istota.skill_proxy.subprocess.run")
+    def test_skill_requests_still_work(self, mock_run, sock_path):
+        """Existing skill requests (no 'type' field) continue to work."""
+        mock_run.return_value = MagicMock(
+            stdout='{"ok": true}', stderr="", returncode=0,
+        )
+        cred_env = {"GITLAB_TOKEN": "glpat-secret"}
+        with SkillProxy(sock_path, cred_env, {"PATH": "/usr/bin"}):
+            resp = self._send_request(sock_path, {
+                "skill": "email", "args": ["send"],
+            })
+        assert resp["returncode"] == 0
 
 
 class TestProxyCredentialVarsCompleteness:
@@ -105,6 +167,12 @@ class TestProxyCredentialVarsCompleteness:
 
     def test_karakeep_api_key_in_set(self):
         assert "KARAKEEP_API_KEY" in _PROXY_CREDENTIAL_VARS
+
+    def test_gitlab_token_in_set(self):
+        assert "GITLAB_TOKEN" in _PROXY_CREDENTIAL_VARS
+
+    def test_github_token_in_set(self):
+        assert "GITHUB_TOKEN" in _PROXY_CREDENTIAL_VARS
 
 
 # ---------------------------------------------------------------------------

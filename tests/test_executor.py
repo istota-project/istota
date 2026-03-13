@@ -23,7 +23,7 @@ from istota.executor import (
 )
 from pathlib import Path
 
-from istota.config import Config, DeveloperConfig, ResourceConfig, SchedulerConfig, SiteConfig, UserConfig
+from istota.config import Config, DeveloperConfig, ResourceConfig, SchedulerConfig, SecurityConfig, SiteConfig, UserConfig
 from istota import db
 
 
@@ -938,6 +938,179 @@ class TestGitHubEnvVars:
         from pathlib import Path
         cred_content = Path(env["GIT_CONFIG_VALUE_0"]).read_text()
         assert "x-access-token" in cred_content
+
+
+# ---------------------------------------------------------------------------
+# TestDeveloperProxyAwareScripts
+# ---------------------------------------------------------------------------
+
+
+class TestDeveloperProxyAwareScripts:
+    """When skill_proxy_enabled, developer scripts use credential-fetch instead of env vars."""
+
+    def _make_config(self, tmp_path, proxy_enabled=True):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
+        (skills_dir / "files.md").write_text("File operations guide.")
+        dev = DeveloperConfig(
+            enabled=True,
+            repos_dir="/srv/repos",
+            gitlab_url="https://gitlab.example.com",
+            gitlab_token="glpat-test",
+            gitlab_username="istotabot",
+            github_url="https://github.com",
+            github_token="ghp_test123",
+            github_username="githubbot",
+        )
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            developer=dev,
+            security=SecurityConfig(
+                mode="restricted",
+                skill_proxy_enabled=proxy_enabled,
+                skill_proxy_timeout=30,
+            ),
+        )
+
+    def _make_task(self, conn):
+        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
+        return db.get_task(conn, task_id)
+
+    @staticmethod
+    def _get_claude_env(mock_run, result=None):
+        """Extract env dict from the claude subprocess.run call (the one with env kwarg)."""
+        for call in mock_run.call_args_list:
+            if "env" in call.kwargs:
+                return call.kwargs["env"]
+        extra = f", result={result}" if result else ""
+        pytest.fail(f"No subprocess.run call with env found (calls={mock_run.call_count}{extra})")
+
+    @patch("istota.executor.subprocess.run")
+    def test_credential_fetch_script_created(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path, proxy_enabled=True)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        cred_fetch = tmp_path / "temp" / "alice" / ".developer" / "credential-fetch"
+        assert cred_fetch.exists()
+        assert cred_fetch.stat().st_mode & 0o700
+        content = cred_fetch.read_text()
+        assert "ISTOTA_SKILL_PROXY_SOCK" in content
+        assert "credential" in content
+
+    @patch("istota.executor.subprocess.run")
+    def test_gitlab_scripts_use_credential_fetch(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path, proxy_enabled=True)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = self._get_claude_env(mock_run)
+        # Git credential helper uses credential-fetch
+        cred_content = Path(env["GIT_CONFIG_VALUE_0"]).read_text()
+        assert "credential-fetch" in cred_content
+        assert "GITLAB_TOKEN" in cred_content
+        assert "$GITLAB_TOKEN" not in cred_content  # Not direct env var
+
+        # API wrapper uses credential-fetch
+        api_content = Path(env["GITLAB_API_CMD"]).read_text()
+        assert "credential-fetch" in api_content
+        assert "GITLAB_TOKEN" in api_content
+        # No literal token in scripts
+        assert "glpat-test" not in api_content
+        assert "glpat-test" not in cred_content
+
+    @patch("istota.executor.subprocess.run")
+    def test_github_scripts_use_credential_fetch(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path, proxy_enabled=True)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = self._get_claude_env(mock_run)
+        # Find the GitHub credential helper (may be index 0 or 1)
+        for i in range(int(env.get("GIT_CONFIG_COUNT", "0"))):
+            key = env.get(f"GIT_CONFIG_KEY_{i}", "")
+            if "github.com" in key:
+                gh_cred_content = Path(env[f"GIT_CONFIG_VALUE_{i}"]).read_text()
+                assert "credential-fetch" in gh_cred_content
+                assert "GITHUB_TOKEN" in gh_cred_content
+                break
+        else:
+            pytest.fail("No GitHub credential helper found")
+
+        # API wrapper uses credential-fetch
+        api_content = Path(env["GITHUB_API_CMD"]).read_text()
+        assert "credential-fetch" in api_content
+        assert "GITHUB_TOKEN" in api_content
+        assert "ghp_test123" not in api_content
+
+    @patch("istota.executor.subprocess.run")
+    def test_tokens_stripped_from_claude_env(self, mock_run, tmp_path):
+        """With proxy enabled, GITLAB_TOKEN and GITHUB_TOKEN should not be in Claude's env."""
+        config = self._make_config(tmp_path, proxy_enabled=True)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            result = execute_task(task, config, [], conn=conn)
+
+        env = self._get_claude_env(mock_run, result=result)
+        assert "GITLAB_TOKEN" not in env
+        assert "GITHUB_TOKEN" not in env
+        # Proxy socket should be set
+        assert "ISTOTA_SKILL_PROXY_SOCK" in env
+
+    @patch("istota.executor.subprocess.run")
+    def test_proxy_disabled_uses_env_vars(self, mock_run, tmp_path):
+        """Without proxy, scripts use $GITLAB_TOKEN and $GITHUB_TOKEN env vars directly."""
+        config = self._make_config(tmp_path, proxy_enabled=False)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = self._get_claude_env(mock_run)
+        # Tokens present in env
+        assert env["GITLAB_TOKEN"] == "glpat-test"
+        assert env["GITHUB_TOKEN"] == "ghp_test123"
+
+        # Scripts use $TOKEN_NAME directly, not credential-fetch
+        api_content = Path(env["GITLAB_API_CMD"]).read_text()
+        assert "$GITLAB_TOKEN" in api_content
+        assert "credential-fetch" not in api_content
+
+        cred_content = Path(env["GIT_CONFIG_VALUE_0"]).read_text()
+        assert "$GITLAB_TOKEN" in cred_content
+        assert "credential-fetch" not in cred_content
+
+        # No credential-fetch script created
+        cred_fetch = tmp_path / "temp" / "alice" / ".developer" / "credential-fetch"
+        assert not cred_fetch.exists()
 
 
 class TestAllowlistPatternConversion:

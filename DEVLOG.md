@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-13: Skill proxy phase 2 — isolate developer tokens
+
+Extended the skill proxy to cover `GITLAB_TOKEN` and `GITHUB_TOKEN`. These were previously passed directly to Claude's env because they're consumed by shell scripts (git credential helpers, API wrappers), not by `istota-skill` CLI commands. Now when the proxy is enabled, a `credential-fetch` helper script queries the proxy socket at runtime, and the shell scripts call it instead of reading env vars.
+
+**Key changes:**
+- Added `credential` request type to proxy protocol (`{"type": "credential", "name": "GITLAB_TOKEN"}` → `{"value": "glpat-xxx"}`)
+- Added `GITLAB_TOKEN` and `GITHUB_TOKEN` to `_PROXY_CREDENTIAL_VARS` (stripped from Claude's env when proxy enabled)
+- New `credential-fetch` Python script written to `{dev_bin}/` — queries proxy socket for credential values
+- Git credential helpers and API wrappers rewritten to use `credential-fetch` when proxy is enabled, env vars when disabled
+- Fixed proxy socket path to use `/tmp` to avoid AF_UNIX path length limits
+
+**Files modified:**
+- `src/istota/skill_proxy.py` — Added credential lookup handler in `_handle_connection`
+- `src/istota/executor.py` — Added tokens to `_PROXY_CREDENTIAL_VARS`, credential-fetch script generation, proxy-aware shell script templates
+- `tests/test_skill_proxy.py` — Added `TestProxyCredentialLookup` (4 tests), updated token stripping test, added completeness checks
+- `tests/test_executor.py` — Added `TestDeveloperProxyAwareScripts` (5 tests) for proxy-aware script generation
+
 ## 2026-03-12: Credential isolation via skill proxy
 
 Added a Unix socket proxy that runs skill CLI commands with credentials injected server-side. When enabled, the Claude subprocess never sees secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY). A thin client (`istota-skill`) replaces `python -m istota.skills.X` in all skill docs and prompt templates, with a direct-execution fallback when the proxy is disabled.

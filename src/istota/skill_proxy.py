@@ -135,6 +135,17 @@ class SkillProxy:
                 })
                 return
 
+            # Route by request type: "credential" for lookups, default for skill calls
+            req_type = request.get("type")
+
+            if req_type == "credential":
+                name = request.get("name", "")
+                if name not in self.credential_env:
+                    self._send_response(conn, {"error": f"Unknown credential: {name!r}"})
+                    return
+                self._send_response(conn, {"value": self.credential_env[name]})
+                return
+
             skill = request.get("skill", "")
             args = request.get("args", [])
 

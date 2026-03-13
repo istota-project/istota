@@ -187,14 +187,16 @@ def build_stripped_env() -> dict[str, str]:
 
 
 # Env vars that carry secrets and should be routed through the skill proxy.
-# Phase 1: credentials consumed by skill CLIs. Phase 2 will add GITLAB_TOKEN,
-# GITHUB_TOKEN, GARMIN_CONFIG.
+# Skill CLIs get these via subprocess env merge; developer shell scripts
+# (git credential helpers, API wrappers) fetch them via credential-fetch.
 _PROXY_CREDENTIAL_VARS = frozenset({
     "CALDAV_PASSWORD",
     "NC_PASS",
     "SMTP_PASSWORD",
     "IMAP_PASSWORD",
     "KARAKEEP_API_KEY",
+    "GITLAB_TOKEN",
+    "GITHUB_TOKEN",
 })
 
 
@@ -1645,8 +1647,9 @@ def execute_task(
                 env["KARAKEEP_API_KEY"] = karakeep_resources[0].api_key
 
         # Developer skill (git + GitLab/GitHub workflows)
-        # Tokens are never exposed as env vars directly — instead we write helper
-        # scripts that embed the credential, so it stays out of Claude's context.
+        # When the skill proxy is enabled, tokens are fetched at runtime via
+        # credential-fetch (a small Python script that queries the proxy socket).
+        # When disabled, tokens are read from env vars directly.
         if config.developer.enabled and config.developer.repos_dir:
             env["DEVELOPER_REPOS_DIR"] = config.developer.repos_dir
             env["GITLAB_URL"] = config.developer.gitlab_url
@@ -1665,18 +1668,54 @@ def execute_task(
             dev_bin = Path(user_temp_dir) / ".developer"
             dev_bin.mkdir(parents=True, exist_ok=True)
             git_config_index = 0
+            _use_proxy = config.security.skill_proxy_enabled
+
+            # Write credential-fetch helper when proxy is enabled.
+            # Shell scripts call this instead of reading env vars directly.
+            if _use_proxy:
+                cred_fetch = dev_bin / "credential-fetch"
+                cred_fetch.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import json, socket, sys\n"
+                    "import os\n"
+                    "sock_path = os.environ.get('ISTOTA_SKILL_PROXY_SOCK', '')\n"
+                    "if not sock_path:\n"
+                    "    print('ISTOTA_SKILL_PROXY_SOCK not set', file=sys.stderr)\n"
+                    "    sys.exit(1)\n"
+                    "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+                    "s.connect(sock_path)\n"
+                    "s.sendall(json.dumps({'type': 'credential', 'name': sys.argv[1]}).encode() + b'\\n')\n"
+                    "d = b''\n"
+                    "while b'\\n' not in d:\n"
+                    "    c = s.recv(4096)\n"
+                    "    if not c: break\n"
+                    "    d += c\n"
+                    "s.close()\n"
+                    "r = json.loads(d)\n"
+                    "if 'error' in r:\n"
+                    "    print(r['error'], file=sys.stderr)\n"
+                    "    sys.exit(1)\n"
+                    "print(r.get('value', ''), end='')\n"
+                )
+                cred_fetch.chmod(0o700)
+                _cred_fetch_cmd = str(cred_fetch)
+
+            # Helper: token expression for shell scripts
+            def _token_expr(var_name: str) -> str:
+                if _use_proxy:
+                    return f"$({_cred_fetch_cmd} {var_name})"
+                return f"${var_name}"
 
             if config.developer.gitlab_token:
                 env["GITLAB_TOKEN"] = config.developer.gitlab_token
 
                 # Git credential helper — git calls this automatically for HTTPS auth
-                # Reads token from GITLAB_TOKEN env var (no secrets on disk)
                 git_cred = dev_bin / "git-credential-helper"
                 git_cred.write_text(
                     "#!/bin/sh\n"
                     '[ "$1" = "get" ] || exit 0\n'
                     f"echo username={config.developer.gitlab_username}\n"
-                    'echo password=$GITLAB_TOKEN\n'
+                    f"echo password={_token_expr('GITLAB_TOKEN')}\n"
                 )
                 git_cred.chmod(0o700)
                 gitlab_host = config.developer.gitlab_url.rstrip("/")
@@ -1686,12 +1725,17 @@ def execute_task(
 
                 # GitLab API wrapper — usage: gitlab-api METHOD /api/v4/... [curl args]
                 # Enforces an endpoint allowlist and strips query strings for matching.
-                # Reads token from GITLAB_TOKEN env var (no secrets on disk)
                 api_script = dev_bin / "gitlab-api"
                 allowlist_cases = "\n".join(
                     f"  {_allowlist_pattern_to_case(p)}) ;;"
                     for p in config.developer.gitlab_api_allowlist
                 )
+                if _use_proxy:
+                    token_line = f'TOKEN=$({_cred_fetch_cmd} GITLAB_TOKEN)\n'
+                    curl_header = '"PRIVATE-TOKEN: $TOKEN"'
+                else:
+                    token_line = ""
+                    curl_header = '"PRIVATE-TOKEN: $GITLAB_TOKEN"'
                 api_script.write_text(
                     "#!/bin/sh\n"
                     'METHOD="$1"; shift\n'
@@ -1702,7 +1746,8 @@ def execute_task(
                     '  *) printf \'{"error":"endpoint not allowed: %s %s"}\\n\' '
                     '"$METHOD" "$CLEAN" >&2; exit 1 ;;\n'
                     "esac\n"
-                    f'curl -s --header "PRIVATE-TOKEN: $GITLAB_TOKEN" '
+                    f'{token_line}'
+                    f'curl -s --header {curl_header} '
                     f'--request "$METHOD" "{gitlab_host}$ENDPOINT" "$@"\n'
                 )
                 api_script.chmod(0o700)
@@ -1712,14 +1757,13 @@ def execute_task(
                 env["GITHUB_TOKEN"] = config.developer.github_token
 
                 # Git credential helper for GitHub
-                # Reads token from GITHUB_TOKEN env var (no secrets on disk)
                 gh_username = config.developer.github_username or "x-access-token"
                 gh_cred = dev_bin / "git-credential-helper-github"
                 gh_cred.write_text(
                     "#!/bin/sh\n"
                     '[ "$1" = "get" ] || exit 0\n'
                     f"echo username={gh_username}\n"
-                    'echo password=$GITHUB_TOKEN\n'
+                    f"echo password={_token_expr('GITHUB_TOKEN')}\n"
                 )
                 gh_cred.chmod(0o700)
                 github_host = config.developer.github_url.rstrip("/")
@@ -1729,7 +1773,6 @@ def execute_task(
 
                 # GitHub API wrapper — usage: github-api METHOD /endpoint [curl args]
                 # Enforces an endpoint allowlist and strips query strings for matching.
-                # Reads token from GITHUB_TOKEN env var (no secrets on disk)
                 gh_api_script = dev_bin / "github-api"
                 gh_allowlist_cases = "\n".join(
                     f"  {_allowlist_pattern_to_case(p)}) ;;"
@@ -1741,6 +1784,12 @@ def execute_task(
                     gh_api_base = "https://api.github.com"
                 else:
                     gh_api_base = f"{gh_host_stripped}/api/v3"
+                if _use_proxy:
+                    gh_token_line = f'TOKEN=$({_cred_fetch_cmd} GITHUB_TOKEN)\n'
+                    gh_curl_header = '"Authorization: Bearer $TOKEN"'
+                else:
+                    gh_token_line = ""
+                    gh_curl_header = '"Authorization: Bearer $GITHUB_TOKEN"'
                 gh_api_script.write_text(
                     "#!/bin/sh\n"
                     'METHOD="$1"; shift\n'
@@ -1751,7 +1800,8 @@ def execute_task(
                     '  *) printf \'{"error":"endpoint not allowed: %s %s"}\\n\' '
                     '"$METHOD" "$CLEAN" >&2; exit 1 ;;\n'
                     "esac\n"
-                    f'curl -s --header "Authorization: Bearer $GITHUB_TOKEN" '
+                    f'{gh_token_line}'
+                    f'curl -s --header {gh_curl_header} '
                     f'--header "Accept: application/vnd.github+json" '
                     f'--request "$METHOD" "{gh_api_base}$ENDPOINT" "$@"\n'
                 )
@@ -1797,7 +1847,8 @@ def execute_task(
             from .skill_proxy import SkillProxy
             credential_env, env = _split_credential_env(env)
             if credential_env:
-                proxy_sock = Path(user_temp_dir) / ".skill-proxy.sock"
+                # Use /tmp for socket path to stay within AF_UNIX length limit (~104 chars)
+                proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{task.id}.sock"
                 env["ISTOTA_SKILL_PROXY_SOCK"] = str(proxy_sock)
                 _proxy_ctx = SkillProxy(
                     proxy_sock, credential_env, env,
