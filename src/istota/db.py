@@ -644,13 +644,17 @@ def get_briefing_last_run(conn: sqlite3.Connection, user_id: str, briefing_name:
 
 
 def set_briefing_last_run(conn: sqlite3.Connection, user_id: str, briefing_name: str) -> None:
-    """Set the last run timestamp for a config-based briefing."""
+    """Set the last run timestamp for a config-based briefing.
+
+    Truncates seconds to :00 so croniter (minute resolution) never computes
+    a next-fire time within the same minute, preventing double-fires.
+    """
     conn.execute(
         """
         INSERT INTO briefing_state (user_id, briefing_name, last_run_at)
-        VALUES (?, ?, datetime('now'))
+        VALUES (?, ?, strftime('%Y-%m-%d %H:%M:00', 'now'))
         ON CONFLICT (user_id, briefing_name) DO UPDATE SET
-            last_run_at = datetime('now')
+            last_run_at = strftime('%Y-%m-%d %H:%M:00', 'now')
         """,
         (user_id, briefing_name),
     )
@@ -1425,9 +1429,13 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
 
 
 def set_scheduled_job_last_run(conn: sqlite3.Connection, job_id: int) -> None:
-    """Update last_run_at to now for a scheduled job."""
+    """Update last_run_at to now for a scheduled job.
+
+    Truncates seconds to :00 so croniter (minute resolution) never computes
+    a next-fire time within the same minute, preventing double-fires.
+    """
     conn.execute(
-        "UPDATE scheduled_jobs SET last_run_at = datetime('now') WHERE id = ?",
+        "UPDATE scheduled_jobs SET last_run_at = strftime('%Y-%m-%d %H:%M:00', 'now') WHERE id = ?",
         (job_id,),
     )
 
