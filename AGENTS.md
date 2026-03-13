@@ -9,8 +9,8 @@ Claude Code-powered assistant bot with Nextcloud Talk interface.
 ```
 istota/
 ├── src/istota/
-│   ├── briefing.py          # Briefing prompt builder with pre-fetching
-│   ├── briefing_loader.py   # Workspace BRIEFINGS.md loading + admin defaults merging
+│   ├── briefing.py          # Re-export shim (logic in skills/briefing/)
+│   ├── briefing_loader.py   # Re-export shim (logic in skills/briefing/)
 │   ├── cron_loader.py       # CRON.md loading + DB sync for scheduled jobs
 │   ├── cli.py               # CLI for local testing and administration
 │   ├── config.py            # TOML configuration loading
@@ -43,7 +43,7 @@ istota/
 │       ├── _env.py          # Declarative env var resolver + setup_env() hook dispatch
 │       ├── accounting/      # Beancount ledger ops + Monarch Money sync + invoicing
 │       ├── bookmarks/       # Karakeep bookmark management
-│       ├── briefing/        # Briefing format reference (doc-only)
+│       ├── briefing/        # Briefing prompt builder, config loader, post-processing
 │       ├── briefings_config/ # User briefing schedule config (doc-only)
 │       ├── browse/          # Web browsing CLI (Docker container API)
 │       ├── calendar/        # CalDAV operations CLI

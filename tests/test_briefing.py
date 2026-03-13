@@ -2,7 +2,7 @@
 
 from unittest.mock import patch, MagicMock
 
-from istota.briefing import (
+from istota.skills.briefing import (
     _strip_html,
     _parse_reminders,
     _fetch_market_data,
@@ -144,7 +144,7 @@ class TestBuildBriefingPrompt:
         assert "calendar" in result.lower()
         assert "TODO" in result
 
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing.datetime")
     def test_morning_mode(self, mock_dt):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -160,7 +160,7 @@ class TestBuildBriefingPrompt:
         assert "morning" in result.lower()
         assert "Today's calendar" in result
 
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing.datetime")
     def test_evening_mode(self, mock_dt):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -188,7 +188,7 @@ class TestBuildBriefingPrompt:
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
         assert "TODO" in result
 
-    @patch("istota.briefing._fetch_todo_items")
+    @patch("istota.skills.briefing._fetch_todo_items")
     def test_todos_prefetched_when_available(self, mock_fetch):
         mock_fetch.return_value = "## Pending TODO Items (pre-fetched)\n- [ ] Buy groceries"
         briefing = self._make_briefing(components={"todos": True})
@@ -203,8 +203,8 @@ class TestBuildBriefingPrompt:
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
         assert "preamble" in result.lower()
 
-    @patch("istota.briefing._fetch_market_data")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_market_data")
+    @patch("istota.skills.briefing.datetime")
     def test_markets_component(self, mock_dt, mock_fetch):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -223,7 +223,7 @@ class TestBuildBriefingPrompt:
         assert "Market Data" in result
         mock_fetch.assert_called_once()
 
-    @patch("istota.briefing._fetch_random_reminder")
+    @patch("istota.skills.briefing._fetch_random_reminder")
     def test_reminders_component(self, mock_reminder):
         mock_reminder.return_value = "Stay curious."
         user_cfg = UserConfig(
@@ -460,8 +460,8 @@ class TestWeekendMarketSkip:
         defaults.update(kwargs)
         return BriefingConfig(**defaults)
 
-    @patch("istota.briefing._fetch_market_data")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_market_data")
+    @patch("istota.skills.briefing.datetime")
     def test_weekday_fetches_market_data(self, mock_dt, mock_fetch):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -478,8 +478,8 @@ class TestWeekendMarketSkip:
         mock_fetch.assert_called_once()
         assert "Market Data" in result
 
-    @patch("istota.briefing._fetch_market_data")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_market_data")
+    @patch("istota.skills.briefing.datetime")
     def test_saturday_skips_market_data(self, mock_dt, mock_fetch):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -494,8 +494,8 @@ class TestWeekendMarketSkip:
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
         mock_fetch.assert_not_called()
 
-    @patch("istota.briefing._fetch_market_data")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_market_data")
+    @patch("istota.skills.briefing.datetime")
     def test_sunday_skips_market_data(self, mock_dt, mock_fetch):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -514,8 +514,8 @@ class TestWeekendMarketSkip:
 class TestNewsletterSectionSplit:
     """Test that newsletter prompt instructs Claude to split stories between NEWS and MARKETS."""
 
-    @patch("istota.briefing._fetch_newsletter_content")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_newsletter_content")
+    @patch("istota.skills.briefing.datetime")
     def test_newsletter_prompt_instructs_section_split(self, mock_dt, mock_news):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -545,9 +545,9 @@ class TestNewsletterSectionSplit:
         assert "MARKETS section" in result
         mock_news.assert_called_once()
 
-    @patch("istota.briefing._fetch_newsletter_content")
-    @patch("istota.briefing._fetch_market_data")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_newsletter_content")
+    @patch("istota.skills.briefing._fetch_market_data")
+    @patch("istota.skills.briefing.datetime")
     def test_weekend_skips_quotes_but_fetches_newsletters(self, mock_dt, mock_market, mock_news):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -738,8 +738,8 @@ class TestFetchCalendarEvents:
 class TestCalendarPreFetchInPrompt:
     """Test that calendar events are pre-fetched and embedded in the prompt."""
 
-    @patch("istota.briefing._fetch_calendar_events")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_calendar_events")
+    @patch("istota.skills.briefing.datetime")
     def test_calendar_prefetched_in_prompt(self, mock_dt, mock_cal):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -763,8 +763,8 @@ class TestCalendarPreFetchInPrompt:
         # Should NOT have the fallback instruction
         assert "Today's calendar events" not in result
 
-    @patch("istota.briefing._fetch_calendar_events")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_calendar_events")
+    @patch("istota.skills.briefing.datetime")
     def test_calendar_fallback_when_prefetch_fails(self, mock_dt, mock_cal):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -826,9 +826,9 @@ class TestFetchFinvizMarketData:
 class TestFinvizInBriefingPrompt:
     """Test FinViz integration in build_briefing_prompt."""
 
-    @patch("istota.briefing._fetch_finviz_market_data")
-    @patch("istota.briefing._fetch_market_data")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_finviz_market_data")
+    @patch("istota.skills.briefing._fetch_market_data")
+    @patch("istota.skills.briefing.datetime")
     def test_evening_includes_finviz(self, mock_dt, mock_market, mock_finviz):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -853,9 +853,9 @@ class TestFinvizInBriefingPrompt:
         assert "MOVERS" in result
         mock_finviz.assert_called_once()
 
-    @patch("istota.briefing._fetch_finviz_market_data")
-    @patch("istota.briefing._fetch_market_data")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_finviz_market_data")
+    @patch("istota.skills.briefing._fetch_market_data")
+    @patch("istota.skills.briefing.datetime")
     def test_morning_does_not_include_finviz(self, mock_dt, mock_market, mock_finviz):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -877,9 +877,9 @@ class TestFinvizInBriefingPrompt:
 
         mock_finviz.assert_not_called()
 
-    @patch("istota.briefing._fetch_finviz_market_data")
-    @patch("istota.briefing._fetch_market_data")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_finviz_market_data")
+    @patch("istota.skills.briefing._fetch_market_data")
+    @patch("istota.skills.briefing.datetime")
     def test_weekend_evening_skips_finviz(self, mock_dt, mock_market, mock_finviz):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -899,9 +899,9 @@ class TestFinvizInBriefingPrompt:
 
         mock_finviz.assert_not_called()
 
-    @patch("istota.briefing._fetch_finviz_market_data")
-    @patch("istota.briefing._fetch_market_data")
-    @patch("istota.briefing.datetime")
+    @patch("istota.skills.briefing._fetch_finviz_market_data")
+    @patch("istota.skills.briefing._fetch_market_data")
+    @patch("istota.skills.briefing.datetime")
     def test_markets_disabled_skips_finviz(self, mock_dt, mock_market, mock_finviz):
         from datetime import datetime
         from zoneinfo import ZoneInfo

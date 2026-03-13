@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.briefing_loader import (
+from istota.skills.briefing import (
     _expand_boolean_components,
     _load_workspace_briefings,
     get_briefings_for_user,

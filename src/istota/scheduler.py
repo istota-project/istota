@@ -22,8 +22,12 @@ from croniter import croniter
 logger = logging.getLogger("istota.scheduler")
 
 from . import db
-from .briefing import build_briefing_prompt
-from .briefing_loader import get_briefings_for_user
+from .skills.briefing import (
+    build_briefing_prompt,
+    get_briefings_for_user,
+    strip_briefing_preamble,
+    strip_markdown as _strip_markdown,
+)
 from .config import Config, load_config
 from .executor import execute_task, is_transient_api_error, parse_api_error
 from .nextcloud_api import hydrate_user_configs
@@ -36,29 +40,6 @@ from .tasks_file_poller import handle_tasks_file_completion
 def _now(tz=None):
     """Current time — thin wrapper for testability."""
     return datetime.now(tz)
-
-
-# Pattern to detect the start of actual briefing content (emoji section header)
-_BRIEFING_SECTION_RE = re.compile(
-    r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B50]",  # Emoji at start of line
-    re.MULTILINE,
-)
-
-
-def strip_briefing_preamble(text: str) -> str:
-    """Strip any preamble/reasoning before the first emoji section header.
-
-    Briefings always start with an emoji-prefixed section header (e.g. 📰, 📈, 📅).
-    If the model outputs thinking/reasoning before the first section, strip it.
-    """
-    match = _BRIEFING_SECTION_RE.search(text)
-    if match and match.start() > 0:
-        stripped = text[match.start():]
-        logger.debug(
-            "Stripped %d chars of briefing preamble", match.start(),
-        )
-        return stripped
-    return text
 
 
 # Graceful shutdown flag
@@ -1312,16 +1293,6 @@ def process_one_task(
         handle_tasks_file_completion(config, task, file_handler_success, result)
 
     return task_id, success
-
-
-def _strip_markdown(text: str) -> str:
-    """Strip markdown formatting for plain text output (bold, italic, links)."""
-    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # **bold**
-    text = re.sub(r"\*(.+?)\*", r"\1", text)       # *italic*
-    text = re.sub(r"_(.+?)_", r"\1", text)          # _italic_
-    text = re.sub(r"==(.+?)==", r"\1", text)         # ==highlight==
-    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [text](url)
-    return text
 
 
 async def post_result_to_talk(

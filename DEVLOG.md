@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-12: Consolidate briefing system into skill module
+
+Moved all briefing logic (prompt builder, config loader, post-processing) into `src/istota/skills/briefing/__init__.py`. Replaced 4 hardcoded `source_type == "briefing"` checks in executor.py with generic flags driven by skill metadata (`exclude_memory`, `exclude_resources`). Any future skill can now opt out of memory or hide resource types without touching executor code.
+
+**Key changes:**
+- Added `exclude_memory` and `exclude_resources` fields to `SkillMeta` in `_types.py`
+- Created `skills/briefing/__init__.py` consolidating code from `briefing.py`, `briefing_loader.py`, and `scheduler.py`
+- Replaced `briefing.py` and `briefing_loader.py` with thin re-export shims
+- Removed `strip_briefing_preamble()`, `_strip_markdown()`, `_BRIEFING_SECTION_RE` from scheduler.py
+- Executor now computes `_skip_memory` and `_excluded_resource_types` from selected skill metas
+- Updated skill.toml with `exclude_memory = true` and `exclude_resources = ["reminders_file"]`
+
+**Files modified:**
+- `src/istota/skills/_types.py` — Added `exclude_memory`, `exclude_resources` to SkillMeta
+- `src/istota/skills/_loader.py` — Read new fields in `_load_skill_toml()` and `_load_legacy_index()`
+- `src/istota/skills/briefing/__init__.py` — New: all briefing logic consolidated
+- `src/istota/skills/briefing/skill.toml` — Added exclude flags
+- `src/istota/briefing.py` — Re-export shim
+- `src/istota/briefing_loader.py` — Re-export shim
+- `src/istota/scheduler.py` — Changed imports, removed moved functions
+- `src/istota/executor.py` — Flag-based checks replacing hardcoded briefing guards
+- `tests/test_briefing.py` — Updated 33 `@patch` targets
+- `tests/test_briefing_loader.py` — Updated imports
+- `tests/test_executor.py` — Updated for flag-based behavior
+- `tests/test_executor_streaming.py` — Updated mock skill index
+
 ## 2026-03-12: Skill dependency isolation and enhanced !skills
 
 Moved heavy optional dependencies out of the base `dependencies` list into extras groups. Skills now declare their Python dependencies in `skill.toml`, and modules use import guards so the system stays importable without optional packages. The `!skills` command now shows availability status with install hints.

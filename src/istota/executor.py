@@ -846,11 +846,12 @@ def _recall_memories(
     config: Config,
     conn: "db.sqlite3.Connection | None",
     task: db.Task,
+    skip_memory: bool = False,
 ) -> str | None:
     """BM25 search using task prompt as query. Independent of context triage."""
     if not config.memory_search.enabled or not config.memory_search.auto_recall:
         return None
-    if task.source_type == "briefing":
+    if skip_memory:
         return None
 
     try:
@@ -964,6 +965,7 @@ def build_prompt(
     source_type: str | None = None,
     output_target: str | None = None,
     recalled_memories: str | None = None,
+    excluded_resource_types: set[str] | None = None,
 ) -> str:
     """Build the full prompt for Claude Code execution."""
     # Group resources by type
@@ -1012,7 +1014,8 @@ def build_prompt(
         )
         resource_sections.append(f"Email Folders:\n{email_list}")
 
-    if "reminders_file" in resources_by_type and task.source_type != "briefing":
+    _excluded_rt = excluded_resource_types or set()
+    if "reminders_file" in resources_by_type and "reminders_file" not in _excluded_rt:
         reminders = resources_by_type["reminders_file"]
         reminders_list = "\n".join(
             f"  - {r.display_name or r.resource_path}: {r.resource_path} ({r.permissions})"
@@ -1303,6 +1306,11 @@ def execute_task(
     if selected_skills:
         logger.debug("Selected skills: %s", ", ".join(selected_skills))
 
+    # Compute behavior flags from selected skills
+    _selected_metas = [skill_index[n] for n in selected_skills if n in skill_index]
+    _skip_memory = any(m.exclude_memory for m in _selected_metas)
+    _excluded_resource_types = {rt for m in _selected_metas for rt in m.exclude_resources}
+
     # Skills changelog: detect changes for interactive tasks
     skills_changelog = None
     _is_interactive = task.source_type in ("talk", "email")
@@ -1376,11 +1384,10 @@ def execute_task(
             conversation_context = _build_db_context(task, config, conn)
 
     # Load user memory (auto-create directories if missing)
-    # Skip personal memory for briefings — they should use only their
-    # pre-fetched components (markets, calendar, news) to avoid leaking
-    # private context into newsletter-style output.
+    # Skills with exclude_memory=true (e.g. briefing) skip personal memory
+    # to avoid leaking private context into newsletter-style output.
     user_memory = None
-    if task.source_type != "briefing":
+    if not _skip_memory:
         try:
             user_memory = read_user_memory_v2(config, task.user_id)
             if user_memory is None:
@@ -1418,7 +1425,7 @@ def execute_task(
     dated_memories = None
     if (config.sleep_cycle.enabled
             and config.sleep_cycle.auto_load_dated_days > 0
-            and task.source_type != "briefing"):
+            and not _skip_memory):
         try:
             dated_memories = read_dated_memories(
                 config, task.user_id,
@@ -1429,7 +1436,7 @@ def execute_task(
     user_config = config.get_user(task.user_id)
 
     # Auto-recall memories via BM25 search
-    recalled_memories = _recall_memories(config, conn, task)
+    recalled_memories = _recall_memories(config, conn, task, skip_memory=_skip_memory)
 
     # Apply memory size cap
     user_memory, dated_memories, channel_memory, recalled_memories = _apply_memory_cap(
@@ -1462,6 +1469,7 @@ def execute_task(
         source_type=task.source_type,
         output_target=effective_output_target,
         recalled_memories=recalled_memories,
+        excluded_resource_types=_excluded_resource_types or None,
     )
 
     # Log prompt size breakdown

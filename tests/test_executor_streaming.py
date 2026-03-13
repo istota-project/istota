@@ -632,12 +632,16 @@ class TestDatedMemoriesInPrompt:
 
     def test_briefing_excludes_user_memory(self, tmp_path):
         """Briefing tasks should not include user memory to avoid leaking private context."""
+        from istota.skills._types import SkillMeta
         config = _make_config(tmp_path)
         task = _make_task(source_type="briefing")
 
+        briefing_meta = SkillMeta(name="briefing", description="Briefing", exclude_memory=True)
         with ExitStack() as stack:
             _apply_executor_patches(stack, {
                 "istota.executor.read_user_memory_v2": "Portfolio: 5% SGOL position",
+                "istota.skills_loader.load_skill_index": {"briefing": briefing_meta},
+                "istota.skills_loader.select_skills": ["briefing"],
             })
             success, result, _actions = execute_task(task, config, [], dry_run=True)
 

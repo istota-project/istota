@@ -65,6 +65,8 @@ def _load_skill_toml(skill_dir: Path) -> SkillMeta | None:
         companion_skills=data.get("companion_skills", []),
         env_specs=_parse_env_specs(data.get("env", [])),
         dependencies=data.get("dependencies", []),
+        exclude_memory=data.get("exclude_memory", False),
+        exclude_resources=data.get("exclude_resources", []),
         skill_dir=str(skill_dir),
     )
 
@@ -114,6 +116,8 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
             source_types=meta.get("source_types", []),
             file_types=meta.get("file_types", []),
             companion_skills=meta.get("companion_skills", []),
+            exclude_memory=meta.get("exclude_memory", False),
+            exclude_resources=meta.get("exclude_resources", []),
         )
         for name, meta in data.items()
         if isinstance(meta, dict)

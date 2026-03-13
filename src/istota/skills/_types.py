@@ -40,5 +40,7 @@ class SkillMeta:
     companion_skills: list[str] = field(default_factory=list)
     env_specs: list[EnvSpec] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
+    exclude_memory: bool = False
+    exclude_resources: list[str] = field(default_factory=list)
     # Where the skill was loaded from (for doc/code resolution)
     skill_dir: str = ""

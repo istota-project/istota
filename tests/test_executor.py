@@ -2264,12 +2264,12 @@ class TestRecallMemories:
         task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
         assert _recall_memories(config, None, task) is None
 
-    def test_returns_none_for_briefing(self):
+    def test_returns_none_when_skip_memory(self):
         from istota.executor import _recall_memories
         from istota.config import MemorySearchConfig
         config = Config(memory_search=MemorySearchConfig(enabled=True, auto_recall=True))
-        task = db.Task(id=1, prompt="test", user_id="alice", source_type="briefing", status="running")
-        assert _recall_memories(config, None, task) is None
+        task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
+        assert _recall_memories(config, None, task, skip_memory=True) is None
 
     @patch("istota.memory_search.search")
     def test_formats_results(self, mock_search):
@@ -2443,6 +2443,12 @@ class TestDatedMemoriesAutoLoad:
     @patch("istota.executor.subprocess.run")
     def test_dated_memories_skipped_for_briefing(self, mock_run, tmp_path):
         config = self._make_config(tmp_path, auto_load_days=3)
+        # Add briefing skill with exclude_memory so flag-based check works
+        briefing_dir = config.skills_dir / "briefing"
+        briefing_dir.mkdir(parents=True)
+        (briefing_dir / "skill.toml").write_text(
+            'description = "Briefing"\nsource_types = ["briefing"]\nexclude_memory = true\n'
+        )
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
