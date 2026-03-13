@@ -4,6 +4,8 @@ Also provides a CLI for sending email directly from Claude Code:
     python -m istota.skills.email send --to <addr> --subject <subj> --body <body> [--html]
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -17,7 +19,12 @@ from email.message import EmailMessage
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 
-from imap_tools import AND, MailBox, MailboxLoginError
+try:
+    from imap_tools import AND, MailBox, MailboxLoginError
+except ImportError:
+    AND = None
+    MailBox = None
+    MailboxLoginError = None
 
 
 @dataclass
@@ -68,8 +75,14 @@ def _sanitize_header(value: str) -> str:
     return value.replace("\r", " ").replace("\n", " ").strip()
 
 
+def _require_imap_tools():
+    if MailBox is None:
+        raise ImportError("imap-tools not installed. Install with: uv sync --extra email")
+
+
 def _get_mailbox(config: EmailConfig) -> MailBox:
     """Create a MailBox connection based on config."""
+    _require_imap_tools()
     # Port 993 uses implicit TLS, port 143 uses STARTTLS
     if config.imap_port == 993:
         return MailBox(config.imap_host, port=config.imap_port)

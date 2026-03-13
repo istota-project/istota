@@ -287,7 +287,7 @@ async def cmd_cron(config, conn, user_id, conversation_token, args, client):
 
 @command("skills", "List available skills and their triggers")
 async def cmd_skills(config, conn, user_id, conversation_token, args, client):
-    from .skills._loader import load_skill_index
+    from .skills._loader import get_skill_availability, load_skill_index
 
     skills_dir = config.skills_dir
     bundled_dir = getattr(config, "bundled_skills_dir", None)
@@ -301,15 +301,33 @@ async def cmd_skills(config, conn, user_id, conversation_token, args, client):
     if user_config:
         disabled |= set(user_config.disabled_skills)
 
-    lines = ["**Available Skills**", ""]
+    # Check for detail view: !skills <name>
+    skill_arg = args.strip() if args else ""
+    if skill_arg and skill_arg in index:
+        return _format_skill_detail(index[skill_arg], skill_arg, disabled, is_admin)
+
+    available = []
+    unavailable = []
+    disabled_skills = []
+
     for name in sorted(index):
         meta = index[name]
         if meta.admin_only and not is_admin:
             continue
 
-        tags = []
         if name in disabled:
-            tags.append("disabled")
+            disabled_skills.append((name, meta))
+            continue
+
+        status, missing_dep = get_skill_availability(meta)
+        if status == "unavailable":
+            unavailable.append((name, meta, missing_dep))
+        else:
+            available.append((name, meta))
+
+    lines = [f"**Skills** ({len(index)} total)", ""]
+    for name, meta in available:
+        tags = []
         if meta.always_include:
             tags.append("always")
         if meta.admin_only:
@@ -320,12 +338,59 @@ async def cmd_skills(config, conn, user_id, conversation_token, args, client):
             tags.append(f"resources: {', '.join(meta.resource_types)}")
         if meta.source_types:
             tags.append(f"sources: {', '.join(meta.source_types)}")
-
         tag_str = f" ({'; '.join(tags)})" if tags else ""
         lines.append(f"- **{name}**: {meta.description}{tag_str}")
 
-    lines.append("")
-    lines.append(f"{len(index)} skills loaded")
+    if unavailable:
+        lines.append("")
+        lines.append("**Unavailable** (install to enable):")
+        for name, meta, missing_dep in unavailable:
+            lines.append(f"- {name} — missing `{missing_dep}` (`uv sync --extra {name}`)")
+
+    if disabled_skills:
+        lines.append("")
+        lines.append("**Disabled**:")
+        for name, meta in disabled_skills:
+            lines.append(f"- {name} — {meta.description}")
+
+    return "\n".join(lines)
+
+
+def _format_skill_detail(meta, name, disabled, is_admin):
+    """Format detailed view for a single skill."""
+    from .skills._loader import get_skill_availability
+
+    lines = [f"**{name}**: {meta.description}", ""]
+
+    status, missing_dep = get_skill_availability(meta)
+    if name in disabled:
+        lines.append("Status: disabled by config")
+    elif status == "unavailable":
+        lines.append(f"Status: unavailable (missing `{missing_dep}`)")
+        lines.append(f"Install: `uv sync --extra {name}`")
+    else:
+        lines.append("Status: available")
+
+    if meta.always_include:
+        lines.append("Selection: always included")
+    else:
+        triggers = []
+        if meta.keywords:
+            triggers.append(f"keywords: {', '.join(meta.keywords)}")
+        if meta.resource_types:
+            triggers.append(f"resource types: {', '.join(meta.resource_types)}")
+        if meta.source_types:
+            triggers.append(f"source types: {', '.join(meta.source_types)}")
+        if meta.file_types:
+            triggers.append(f"file types: {', '.join(meta.file_types)}")
+        if triggers:
+            lines.append(f"Triggers: {'; '.join(triggers)}")
+
+    if meta.admin_only:
+        lines.append("Access: admin only")
+
+    if meta.dependencies:
+        lines.append(f"Dependencies: {', '.join(meta.dependencies)}")
 
     return "\n".join(lines)
 

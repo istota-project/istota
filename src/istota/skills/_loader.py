@@ -181,6 +181,23 @@ def _check_dependencies(meta: SkillMeta) -> bool:
     return True
 
 
+def get_skill_availability(meta: SkillMeta) -> tuple[str, str | None]:
+    """Check if a skill's dependencies are installed.
+
+    Returns ("available", None) or ("unavailable", "package_name").
+    """
+    if not meta.dependencies:
+        return ("available", None)
+    for dep in meta.dependencies:
+        pkg_name = dep.split(">=")[0].split("==")[0].split("<")[0].split(">")[0].strip()
+        pkg_name = pkg_name.replace("-", "_")
+        try:
+            importlib.import_module(pkg_name)
+        except ImportError:
+            return ("unavailable", pkg_name)
+    return ("available", None)
+
+
 def select_skills(
     prompt: str,
     source_type: str,

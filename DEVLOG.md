@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-12: Skill dependency isolation and enhanced !skills
+
+Moved heavy optional dependencies out of the base `dependencies` list into extras groups. Skills now declare their Python dependencies in `skill.toml`, and modules use import guards so the system stays importable without optional packages. The `!skills` command now shows availability status with install hints.
+
+**Key changes:**
+- Moved 11 packages (caldav, icalendar, yfinance, imap-tools, beancount, beanquery, fava, weasyprint, monarchmoney, pytesseract, garminconnect) from base deps to 6 new extras groups
+- Added `all` extras group for full installs: `uv sync --extra all`
+- Added `dependencies` field to 6 skill.toml files (garmin, transcribe, markets, accounting, calendar, email)
+- Added `try/except ImportError` guards in garmin, transcribe, calendar, email modules
+- Added `get_skill_availability()` to `_loader.py` for checking dep status
+- Rewrote `!skills` command: groups by available/unavailable/disabled, shows install hints
+- Added `!skills <name>` detail view (status, triggers, dependencies)
+- Updated Ansible/install.sh to use `--extra all` by default (`istota_install_all_extras` flag)
+- Deleted stale `packages/` directory from reverted external-package experiment
+
+**Files modified:**
+- `pyproject.toml` — Extras groups, reduced base deps to httpx/croniter/tomli/feedparser/requests
+- `src/istota/skills/{garmin,transcribe,calendar,email}/__init__.py` — Import guards
+- `src/istota/skills/{garmin,transcribe,markets,accounting,calendar,email}/skill.toml` — Added dependencies
+- `src/istota/skills/_loader.py` — Added `get_skill_availability()`
+- `src/istota/skills_loader.py` — Re-exported new function
+- `src/istota/commands.py` — Rewrote `cmd_skills` with grouped output and detail view
+- `deploy/ansible/{defaults/main.yml,tasks/main.yml,templates/istota-update.sh.j2}` — `--extra all` support
+- `deploy/install.sh` — Default to `--extra all`
+- `tests/test_skills_loader.py` — 8 new tests (availability, dependency exclusion)
+- `tests/test_commands.py` — 3 new tests + updated existing for new output format
+
 ## 2026-03-09: Reverse geocoding and day summary for location skill
 
 Integrated the standalone `reverse_geocode.py` script into the location skill. Coordinates are reverse geocoded via Nominatim and cached in a new `reverse_geocode_cache` table in the main DB (replacing the script's separate cache DB). GPS pings are clustered into stops with a greedy sequential algorithm, then resolved to place names via saved places, proximity matching, or reverse geocoding.

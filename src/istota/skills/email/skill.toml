@@ -1,4 +1,5 @@
 description = "Email sending and response formatting"
 keywords = ["email", "mail", "send", "inbox", "reply", "message"]
 resource_types = ["email_folder"]
+dependencies = ["imap_tools"]
 source_types = ["email"]

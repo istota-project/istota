@@ -293,6 +293,8 @@
 - [ ] More specialized skills with specific commands/tools
 - [x] Location tracking via Overland GPS (FastAPI receiver, place resolution, visit state machine, CLI skill)
 - [x] Calendar attendance correlation via GPS pings (geocoding, place matching, proximity check)
+- [x] Dependency isolation: optional deps in extras groups, import guards, `!skills` availability display
+- [ ] Config validation / "unconfigured" skill status (declarative credential requirements)
 
 ## Priority 5: Location Awareness (Phase 2+)
 

@@ -736,8 +736,8 @@ class TestCmdSkills:
             client = AsyncMock()
             result = await cmd_skills(config, conn, "alice", "room1", "", client)
 
-        assert "Available Skills" in result
-        assert "skills loaded" in result
+        assert "Skills" in result
+        assert "total" in result
         # Some well-known bundled skills should appear
         assert "files" in result
         assert "calendar" in result
@@ -750,7 +750,8 @@ class TestCmdSkills:
             client = AsyncMock()
             result = await cmd_skills(config, conn, "alice", "room1", "", client)
 
-        assert "tasks" not in result.lower().split("skills loaded")[0] or "subtask" not in result
+        # tasks skill is admin_only, should not appear for non-admin
+        assert "**tasks**" not in result
 
     @pytest.mark.asyncio
     async def test_shows_admin_skills_to_admin(self, make_config):
@@ -762,6 +763,45 @@ class TestCmdSkills:
 
         # With all users as admin, admin-only skills should be visible
         assert "tasks" in result
+
+    @pytest.mark.asyncio
+    async def test_shows_unavailable_skills(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            with patch("istota.skills._loader.get_skill_availability") as mock_avail:
+                # Make one skill unavailable
+                def side_effect(meta):
+                    if meta.name == "garmin":
+                        return ("unavailable", "garminconnect")
+                    return ("available", None)
+                mock_avail.side_effect = side_effect
+                result = await cmd_skills(config, conn, "alice", "room1", "", client)
+
+        assert "Unavailable" in result
+        assert "garminconnect" in result
+
+    @pytest.mark.asyncio
+    async def test_shows_disabled_skills(self, make_config):
+        config = make_config()
+        config.disabled_skills = ["browse"]
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            result = await cmd_skills(config, conn, "alice", "room1", "", client)
+
+        assert "Disabled" in result
+        assert "browse" in result
+
+    @pytest.mark.asyncio
+    async def test_skill_detail_view(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            result = await cmd_skills(config, conn, "alice", "room1", "calendar", client)
+
+        assert "**calendar**" in result
+        assert "Status:" in result
+        assert "CalDAV" in result
 
 
 # =============================================================================

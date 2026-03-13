@@ -23,6 +23,8 @@ Config:
     (set by executor.py) or the --config CLI flag.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -31,7 +33,10 @@ import sys
 import tomllib
 from datetime import date, datetime
 
-import garminconnect
+try:
+    import garminconnect
+except ImportError:
+    garminconnect = None
 
 
 # =============================================================================
@@ -69,8 +74,10 @@ def load_config(config_path: str | None = None) -> dict:
 # =============================================================================
 
 
-def garmin_login(email: str, password: str, token_dir: str) -> garminconnect.Garmin:
+def garmin_login(email: str, password: str, token_dir: str) -> "garminconnect.Garmin":
     """Authenticate with Garmin Connect, using cached tokens when available."""
+    if garminconnect is None:
+        raise ImportError("garminconnect not installed. Install with: uv sync --extra garmin")
     os.makedirs(token_dir, exist_ok=True)
 
     # Try token-based login first
@@ -93,7 +100,7 @@ def garmin_login(email: str, password: str, token_dir: str) -> garminconnect.Gar
     return client
 
 
-def _get_client(args) -> tuple[garminconnect.Garmin, dict]:
+def _get_client(args) -> tuple["garminconnect.Garmin", dict]:
     """Load config and return authenticated Garmin client + config dict."""
     garmin_cfg = load_config(getattr(args, "config", None))
     deferred_dir = os.environ.get("ISTOTA_DEFERRED_DIR", "")

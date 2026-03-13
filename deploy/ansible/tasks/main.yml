@@ -423,9 +423,12 @@
 - name: Install Python dependencies with uv
   command: >
     uv sync
+    {% if istota_install_all_extras | default(true) %}--extra all
+    {% else %}
     {% if istota_memory_search_enabled %}--extra memory-search{% endif %}
     {% if istota_whisper_enabled %}--extra whisper{% endif %}
     {% if istota_location_enabled | default(false) %}--extra location{% endif %}
+    {% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"
   environment:

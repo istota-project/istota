@@ -237,6 +237,10 @@ istota_ntfy_priority: 3                    # default priority (1=min, 3=default,
 istota_location_enabled: false
 istota_webhooks_port: 8765
 
+# Install all optional Python dependencies (--extra all)
+# Set to false to use per-feature flags for fine-grained control
+istota_install_all_extras: true
+
 # Whisper audio transcription (faster-whisper CPU, int8)
 istota_whisper_enabled: false
 istota_whisper_model: "small"              # Model to pre-download (tiny/base/small/medium/large-v3)

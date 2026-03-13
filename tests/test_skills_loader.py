@@ -2,9 +2,12 @@
 
 from pathlib import Path
 
+from unittest.mock import patch
+
 from istota.skills._loader import (
     _get_attachment_extensions,
     compute_skills_fingerprint,
+    get_skill_availability,
     load_skill_index,
     load_skills,
     load_skills_changelog,
@@ -980,3 +983,80 @@ class TestSkillEnvSpecs:
         (skill_dir / "skill.toml").write_text('description = "No env"\n')
         index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
         assert index["simple"].env_specs == []
+
+
+class TestGetSkillAvailability:
+    def test_no_dependencies(self):
+        meta = SkillMeta(name="files", description="File ops")
+        status, missing = get_skill_availability(meta)
+        assert status == "available"
+        assert missing is None
+
+    def test_available_dependency(self):
+        meta = SkillMeta(name="test", description="Test", dependencies=["json"])
+        status, missing = get_skill_availability(meta)
+        assert status == "available"
+        assert missing is None
+
+    def test_missing_dependency(self):
+        meta = SkillMeta(
+            name="test", description="Test",
+            dependencies=["nonexistent_package_xyz"],
+        )
+        status, missing = get_skill_availability(meta)
+        assert status == "unavailable"
+        assert missing == "nonexistent_package_xyz"
+
+    def test_first_missing_reported(self):
+        meta = SkillMeta(
+            name="test", description="Test",
+            dependencies=["json", "nonexistent_abc", "nonexistent_def"],
+        )
+        status, missing = get_skill_availability(meta)
+        assert status == "unavailable"
+        assert missing == "nonexistent_abc"
+
+    def test_version_specifier_stripped(self):
+        meta = SkillMeta(
+            name="test", description="Test",
+            dependencies=["nonexistent_pkg>=1.0.0"],
+        )
+        status, missing = get_skill_availability(meta)
+        assert status == "unavailable"
+        assert missing == "nonexistent_pkg"
+
+    def test_dashes_converted_to_underscores(self):
+        # "faster-whisper" -> "faster_whisper"
+        meta = SkillMeta(
+            name="test", description="Test",
+            dependencies=["some-fake-package>=1.0"],
+        )
+        status, missing = get_skill_availability(meta)
+        assert status == "unavailable"
+        assert missing == "some_fake_package"
+
+
+class TestDependencyBasedSkillExclusion:
+    def test_skill_with_missing_dep_excluded_from_selection(self):
+        index = {
+            "files": SkillMeta(name="files", description="File ops", always_include=True),
+            "garmin": SkillMeta(
+                name="garmin", description="Garmin",
+                keywords=["garmin"],
+                dependencies=["nonexistent_garminconnect_xyz"],
+            ),
+        }
+        selected = select_skills("check my garmin data", "talk", set(), index)
+        assert "files" in selected
+        assert "garmin" not in selected
+
+    def test_always_include_skill_with_missing_dep_excluded(self):
+        index = {
+            "broken": SkillMeta(
+                name="broken", description="Broken",
+                always_include=True,
+                dependencies=["nonexistent_pkg_xyz"],
+            ),
+        }
+        selected = select_skills("anything", "talk", set(), index)
+        assert "broken" not in selected

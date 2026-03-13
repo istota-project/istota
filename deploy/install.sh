@@ -1258,16 +1258,8 @@ deploy_code() {
     uv_bin=$(command -v uv || echo "/root/.local/bin/uv")
     local extras=""
 
-    # Check settings for optional features
-    if [ -f "$SETTINGS_FILE" ]; then
-        local mem_search whisper location
-        mem_search=$(read_setting "memory_search.enabled" "true")
-        whisper=$(read_setting "whisper.enabled" "false")
-        location=$(read_setting "location.enabled" "false")
-        [ "$mem_search" = "True" ] || [ "$mem_search" = "true" ] && extras="$extras --extra memory-search"
-        [ "$whisper" = "True" ] || [ "$whisper" = "true" ] && extras="$extras --extra whisper"
-        [ "$location" = "True" ] || [ "$location" = "true" ] && extras="$extras --extra location"
-    fi
+    # Install all extras by default for full functionality
+    extras="--extra all"
 
     # shellcheck disable=SC2086
     (cd "$ISTOTA_HOME/src" && PATH="/root/.local/bin:$PATH" $uv_bin sync $extras 2>&1 | tail -5)

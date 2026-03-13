@@ -7,6 +7,8 @@ Also provides a CLI for calendar operations from Claude Code:
     python -m istota.skills.calendar delete --calendar URL --uid UID
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -16,8 +18,16 @@ from datetime import date, datetime, timedelta
 from typing import Iterator
 from zoneinfo import ZoneInfo
 
-import caldav
-from icalendar import Calendar, Event
+try:
+    import caldav
+except ImportError:
+    caldav = None
+
+try:
+    from icalendar import Calendar, Event
+except ImportError:
+    Calendar = None
+    Event = None
 
 
 @dataclass
@@ -31,8 +41,14 @@ class CalendarEvent:
     all_day: bool = False
 
 
-def get_caldav_client(url: str, username: str, password: str) -> caldav.DAVClient:
+def _require_caldav():
+    if caldav is None:
+        raise ImportError("caldav not installed. Install with: uv sync --extra calendar")
+
+
+def get_caldav_client(url: str, username: str, password: str):
     """Create a CalDAV client."""
+    _require_caldav()
     return caldav.DAVClient(url=url, username=username, password=password)
 
 

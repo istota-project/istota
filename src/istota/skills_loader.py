@@ -11,6 +11,7 @@ from .skills._types import SkillMeta  # noqa: F401
 from .skills._loader import (  # noqa: F401
     _get_attachment_extensions,
     compute_skills_fingerprint,
+    get_skill_availability,
     load_skill_index,
     load_skills,
     load_skills_changelog,

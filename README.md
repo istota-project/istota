@@ -132,19 +132,27 @@ Each user gets a shared Nextcloud folder:
 ## Development
 
 ```bash
-uv sync                                    # Install dependencies
-uv run pytest tests/ -v                    # Run tests (~2400 unit tests)
+uv sync --extra all                        # Install all dependencies
+uv run pytest tests/ -v                    # Run tests (~2500 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
 
-Optional dependency groups:
+Most skill dependencies are optional. Install everything with `--extra all`, or pick individual groups:
 
 ```bash
+uv sync --extra calendar         # caldav + icalendar
+uv sync --extra email            # imap-tools
+uv sync --extra markets          # yfinance
+uv sync --extra accounting       # beancount + fava + weasyprint + monarchmoney
+uv sync --extra transcribe       # pytesseract (OCR)
+uv sync --extra garmin           # garminconnect
 uv sync --extra memory-search    # sqlite-vec + sentence-transformers for semantic search
 uv sync --extra whisper          # faster-whisper for audio transcription
 uv sync --extra location         # fastapi + uvicorn + geopy for GPS location receiver
 ```
+
+Skills with missing dependencies are automatically excluded from prompt selection. Use `!skills` in Talk to see which are available.
 
 ## Further reading
 

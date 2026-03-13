@@ -10,11 +10,16 @@ import json
 import sys
 from pathlib import Path
 
-import pytesseract
-from PIL import Image, ImageEnhance
+try:
+    import pytesseract
+    from PIL import Image, ImageEnhance
+except ImportError:
+    pytesseract = None
+    Image = None
+    ImageEnhance = None
 
 
-def preprocess_image(image: Image.Image) -> Image.Image:
+def preprocess_image(image):
     """Apply preprocessing for better OCR results.
 
     Converts to grayscale and enhances contrast.
@@ -26,6 +31,8 @@ def preprocess_image(image: Image.Image) -> Image.Image:
 
 def cmd_ocr(args) -> dict:
     """Run Tesseract OCR on an image file."""
+    if pytesseract is None:
+        raise ImportError("pytesseract not installed. Install with: uv sync --extra transcribe")
     path = Path(args.image_path)
     if not path.exists():
         return {"status": "error", "error": f"Image not found: {path}"}
