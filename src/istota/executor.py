@@ -1235,7 +1235,7 @@ Output target: {output_target or 'text'}
 You have access to:
 {file_tools}{browser_tool}
 - caldav via curl or the caldav Python library for calendar operations{db_tool_line}
-- Email sending is handled by the bot internally. When the output target is "email", use the email output tool: `istota-skill email output --subject "..." --body "..." [--html]`. Use `--body-file` for long content. Do NOT use this tool when the output target is "talk" — just respond with text. See the email skill for details.
+- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
 
 {rules_section}
 {context_section}

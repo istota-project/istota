@@ -1767,11 +1767,12 @@ class TestPromptOutputTarget:
         assert "Source: cli" in result
         assert "Output target: text" in result
 
-    def test_email_tool_line_references_output_target(self):
+    def test_email_tool_line_distinguishes_send_and_output(self):
         task = self._make_task(source_type="talk")
         result = build_prompt(task, [], Config())
-        assert "When the output target is \"email\"" in result
-        assert "Do NOT use this tool when the output target is \"talk\"" in result
+        assert "email send" in result
+        assert "email output" in result
+        assert "Only use `output` when this task arrived as an incoming email" in result
 
 
 # ---------------------------------------------------------------------------

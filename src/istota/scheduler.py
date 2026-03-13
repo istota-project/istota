@@ -816,6 +816,27 @@ def _process_deferred_tracking(
     return count
 
 
+def _warn_orphaned_email_output(task: db.Task, user_temp_dir: Path) -> None:
+    """Warn and clean up deferred email output files that won't be delivered.
+
+    This catches the case where Claude mistakenly used `email output` instead
+    of `email send` for a non-email task (e.g. a Talk user asking to send an
+    email). The deferred file has no recipient and the scheduler won't process
+    it because the output target isn't "email".
+    """
+    path = user_temp_dir / f"task_{task.id}_email_output.json"
+    if not path.exists():
+        return
+    logger.warning(
+        "Orphaned deferred email output file for task %d (source=%s): "
+        "Claude used `email output` instead of `email send`. "
+        "The email was NOT delivered. Removing file.",
+        task.id,
+        task.source_type,
+    )
+    path.unlink(missing_ok=True)
+
+
 def _restart_fava_service(user_id: str) -> None:
     """Restart the user's Fava service to pick up ledger changes.
 
@@ -1172,6 +1193,7 @@ def process_one_task(
         user_temp_dir = get_user_temp_dir(config, task.user_id)
         _process_deferred_subtasks(config, task, user_temp_dir)
         _process_deferred_tracking(config, task, user_temp_dir)
+        _warn_orphaned_email_output(task, user_temp_dir)
 
     # Restart Fava if accounting skill was used (runs outside sandbox)
     if success and actions_taken and "istota.skills.accounting" in actions_taken:

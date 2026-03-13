@@ -2373,6 +2373,42 @@ class TestDeferredOperations:
             tasks = db.list_tasks(conn, user_id="testuser")
         assert all(t.source_type != "subtask" for t in tasks)
 
+    def test_warn_orphaned_email_output_removes_file(self, tmp_path):
+        """Orphaned deferred email output file is logged and removed."""
+        from istota.scheduler import _warn_orphaned_email_output
+
+        task = db.Task(
+            id=42, status="completed", prompt="Send email",
+            user_id="testuser", source_type="talk",
+        )
+        user_temp = tmp_path / "temp" / "testuser"
+        user_temp.mkdir(parents=True)
+        orphan = user_temp / "task_42_email_output.json"
+        orphan.write_text('{"subject": "Hi", "body": "text", "format": "plain"}')
+
+        with patch("istota.scheduler.logger") as mock_log:
+            _warn_orphaned_email_output(task, user_temp)
+
+        assert not orphan.exists()
+        mock_log.warning.assert_called_once()
+        assert "Orphaned" in mock_log.warning.call_args[0][0]
+
+    def test_warn_orphaned_email_output_no_file_is_noop(self, tmp_path):
+        """No warning when there is no orphaned file."""
+        from istota.scheduler import _warn_orphaned_email_output
+
+        task = db.Task(
+            id=42, status="completed", prompt="Hello",
+            user_id="testuser", source_type="talk",
+        )
+        user_temp = tmp_path / "temp" / "testuser"
+        user_temp.mkdir(parents=True)
+
+        with patch("istota.scheduler.logger") as mock_log:
+            _warn_orphaned_email_output(task, user_temp)
+
+        mock_log.warning.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # TestRestartFavaService
