@@ -274,6 +274,7 @@
 - [x] Deferred DB operations for sandbox-safe writes (subtasks + transaction tracking via JSON files)
 - [x] Credential isolation via skill proxy (Unix socket, strips secrets from Claude's env)
 - [x] Skill proxy phase 2: GITLAB_TOKEN, GITHUB_TOKEN (credential-fetch helper + proxy-aware shell scripts)
+- [x] Fix skill proxy socket visibility inside bwrap sandbox (bind-mount from /tmp)
 - [ ] Skill proxy phase 3: GARMIN_CONFIG file path exclusion via bwrap
 - [ ] Network proxy for agent subprocesses (domain allowlist)
 

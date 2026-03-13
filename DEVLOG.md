@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-13: Fix skill proxy socket invisible inside bwrap sandbox
+
+The proxy socket at `/tmp/istota-proxy-{task_id}.sock` was invisible inside the bwrap sandbox because bwrap mounts a fresh tmpfs at `/tmp`. Restructured the executor flow so the proxy starts before `build_bwrap_cmd` runs, and the socket file is explicitly bind-mounted into the sandbox.
+
+Also fixed `_warn_orphaned_email_output` deleting deferred email files for briefings. The function was meant to catch Talk users whose tasks mistakenly used `email output`, but it ran unconditionally and nuked legitimate deferred files before `post_result_to_email` could read them. Added a guard to skip tasks with email-related output targets.
+
+**Key changes:**
+- `build_bwrap_cmd` now accepts `proxy_sock` parameter and bind-mounts it (RO) into the sandbox
+- Executor restructured: proxy starts before bwrap args are built (socket must exist for bind-mount)
+- `_warn_orphaned_email_output` skips tasks with `source_type="email"` or `output_target` in `("email", "both", "all")`
+
+**Files modified:**
+- `src/istota/executor.py` — Added `proxy_sock` param to `build_bwrap_cmd`, restructured proxy/bwrap ordering
+- `src/istota/scheduler.py` — Added guard condition to `_warn_orphaned_email_output`
+- `tests/test_scheduler.py` — Added 3 tests for orphaned email skip cases
+
 ## 2026-03-13: Skill proxy phase 2 — isolate developer tokens
 
 Extended the skill proxy to cover `GITLAB_TOKEN` and `GITHUB_TOKEN`. These were previously passed directly to Claude's env because they're consumed by shell scripts (git credential helpers, API wrappers), not by `istota-skill` CLI commands. Now when the proxy is enabled, a `credential-fetch` helper script queries the proxy socket at runtime, and the shell scripts call it instead of reading env vars.
