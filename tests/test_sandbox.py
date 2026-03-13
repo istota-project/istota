@@ -31,7 +31,6 @@ def sandbox_config(tmp_path):
         nextcloud_mount_path=mount,
         skills_dir=tmp_path / "skills",
         security=SecurityConfig(
-            mode="restricted",
             sandbox_enabled=True,
         ),
     )
@@ -308,7 +307,7 @@ class TestSecurityConfigSandboxFields:
 
     def test_defaults(self):
         sc = SecurityConfig()
-        assert sc.sandbox_enabled is False
+        assert sc.sandbox_enabled is True
         assert sc.sandbox_admin_db_write is False
 
     def test_from_config_load(self, tmp_path):

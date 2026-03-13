@@ -620,7 +620,6 @@ $_WIZ_ADMIN_BLOCK
 claude_oauth_token = "$_WIZ_CLAUDE_TOKEN"
 
 [security]
-mode = "restricted"
 sandbox_enabled = true
 
 [email]

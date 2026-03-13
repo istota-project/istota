@@ -269,10 +269,9 @@ class SiteConfig:
 @dataclass
 class SecurityConfig:
     """Security hardening configuration."""
-    mode: str = "permissive"  # "permissive" or "restricted"
-    sandbox_enabled: bool = False  # bwrap filesystem isolation per user
+    sandbox_enabled: bool = True  # bwrap filesystem isolation per user
     sandbox_admin_db_write: bool = False  # allow admin DB writes in sandbox
-    skill_proxy_enabled: bool = False  # proxy skill CLI calls via Unix socket
+    skill_proxy_enabled: bool = True  # proxy skill CLI calls via Unix socket
     skill_proxy_timeout: int = 300  # timeout for proxied skill commands (seconds)
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
@@ -760,10 +759,9 @@ def load_config(config_path: Path | None = None) -> Config:
     if "security" in data:
         sec = data["security"]
         config.security = SecurityConfig(
-            mode=sec.get("mode", "permissive"),
-            sandbox_enabled=sec.get("sandbox_enabled", False),
+            sandbox_enabled=sec.get("sandbox_enabled", True),
             sandbox_admin_db_write=sec.get("sandbox_admin_db_write", False),
-            skill_proxy_enabled=sec.get("skill_proxy_enabled", False),
+            skill_proxy_enabled=sec.get("skill_proxy_enabled", True),
             skill_proxy_timeout=sec.get("skill_proxy_timeout", 300),
             **({
                 "passthrough_env_vars": sec["passthrough_env_vars"]

@@ -84,7 +84,6 @@ def render_config_toml(s: dict) -> str:
 
     # [security]
     lines.extend(['', '[security]'])
-    lines.append(f'mode = "{get(s, "security.mode", "restricted")}"')
     lines.append(f'sandbox_enabled = {tobool(get(s, "security.sandbox_enabled", True))}')
     lines.append(f'sandbox_admin_db_write = {tobool(get(s, "security.sandbox_admin_db_write", False))}')
 

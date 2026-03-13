@@ -813,7 +813,7 @@ class TestCmdCheck:
     @pytest.mark.asyncio
     async def test_all_pass_no_sandbox(self, make_config):
         """All fast checks pass, sandbox disabled, Claude execution passes."""
-        config = make_config()
+        config = make_config(security=SecurityConfig(sandbox_enabled=False))
         with db.get_db(config.db_path) as conn:
             # Create a completed task in the last hour
             t = db.create_task(conn, prompt="test", user_id="alice", source_type="cli")
@@ -929,7 +929,7 @@ class TestCmdCheck:
 
     @pytest.mark.asyncio
     async def test_execution_wrong_output(self, make_config):
-        config = make_config()
+        config = make_config(security=SecurityConfig(sandbox_enabled=False))
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
             with (

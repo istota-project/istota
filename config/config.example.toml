@@ -38,18 +38,17 @@ temp_dir = "/tmp/istota"
 # ============================================================================
 # Security Hardening
 # ============================================================================
-# mode: "permissive" (default) — inherits full parent env, uses --dangerously-skip-permissions
-#        "restricted" — clean subprocess env, uses --allowedTools whitelist
-# Heartbeat/cron env stripping is always on regardless of mode.
+# Claude subprocess runs with a clean minimal environment and --allowedTools
+# whitelist. Credentials are injected per-task and optionally routed through
+# the skill proxy (enabled by default) for credential isolation.
 # Secrets can be provided via env vars (e.g. from systemd EnvironmentFile=):
 #   ISTOTA_NC_APP_PASSWORD, ISTOTA_IMAP_PASSWORD, ISTOTA_SMTP_PASSWORD,
 #   ISTOTA_GITLAB_TOKEN, ISTOTA_GITHUB_TOKEN, ISTOTA_NTFY_TOKEN, ISTOTA_NTFY_PASSWORD
 
 # [security]
-# mode = "permissive"
-# sandbox_enabled = false          # bwrap filesystem isolation per user (Linux only)
+# sandbox_enabled = true           # bwrap filesystem isolation per user (Linux only)
 # sandbox_admin_db_write = false   # allow admin DB writes inside sandbox
-# skill_proxy_enabled = false      # proxy skill CLI calls via Unix socket (credential isolation)
+# skill_proxy_enabled = true       # proxy skill CLI calls via Unix socket (credential isolation)
 # skill_proxy_timeout = 300        # timeout for proxied skill commands (seconds)
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 

@@ -211,8 +211,7 @@ class TestSimpleExecution:
             execute_task(task, config, [])
 
         assert "--output-format" not in captured_cmd
-        # Default permissive mode uses --dangerously-skip-permissions
-        assert "--dangerously-skip-permissions" in captured_cmd
+        assert "--allowedTools" in captured_cmd
 
     def test_cli_not_found(self, tmp_path):
         """FileNotFoundError from subprocess.run is handled gracefully."""
@@ -443,8 +442,7 @@ class TestStreamingExecution:
         idx = captured_cmd.index("--output-format")
         assert captured_cmd[idx + 1] == "stream-json"
         assert "--verbose" in captured_cmd
-        # Default permissive mode uses --dangerously-skip-permissions
-        assert "--dangerously-skip-permissions" in captured_cmd
+        assert "--allowedTools" in captured_cmd
 
     def test_timeout_kills_process(self, tmp_path):
         """Timeout fires and returns proper error message."""

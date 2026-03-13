@@ -614,6 +614,7 @@ class TestDeveloperEnvVars:
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
             developer=dev,
+            security=SecurityConfig(skill_proxy_enabled=False),
         )
 
     def _make_task(self, conn):
@@ -785,6 +786,7 @@ class TestGitHubEnvVars:
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
             developer=dev,
+            security=SecurityConfig(skill_proxy_enabled=False),
         )
 
     def _make_task(self, conn):
@@ -972,7 +974,6 @@ class TestDeveloperProxyAwareScripts:
             temp_dir=tmp_path / "temp",
             developer=dev,
             security=SecurityConfig(
-                mode="restricted",
                 skill_proxy_enabled=proxy_enabled,
                 skill_proxy_timeout=30,
             ),
@@ -1260,6 +1261,7 @@ class TestKarakeepEnvVars:
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=mount_path,
             users=users,
+            security=SecurityConfig(skill_proxy_enabled=False),
         )
 
     def _make_task(self, conn):

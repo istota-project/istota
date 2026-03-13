@@ -26,7 +26,7 @@ Returns `(success, result_text, actions_taken_json)`. `actions_taken` is a JSON 
 9. **Build prompt** (L600-605)
 10. **Dry run check** (L618-619): return prompt text
 11. **Write prompt file** (L621-623): `task_{id}_prompt.txt`
-12. **Build command**: `--allowedTools` (restricted) or `--dangerously-skip-permissions` (permissive)
+12. **Build command**: `--allowedTools` whitelist
 13. **Build env** (L643-725): see env var table below
 14. **Execute** (L726-729): streaming or simple
 15. **Update fingerprint** (L731-742): on success, interactive only
@@ -93,16 +93,13 @@ def build_prompt(
 
 ## Popen Command
 ```python
-# Restricted mode (config.security.mode == "restricted"):
 cmd = ["claude", "-p", prompt, "--allowedTools", "Read", "Write", "Edit", "Grep", "Glob", "Bash"]
-# Permissive mode (default, backward compat):
-cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
 # If streaming (on_progress provided):
 cmd += ["--output-format", "stream-json", "--verbose"]
 ```
 - Working dir: `str(config.temp_dir)`
 - Timeout: `config.scheduler.task_timeout_minutes * 60`
-- Env: `build_clean_env(config)` + task-specific vars (restricted = minimal env; permissive = os.environ)
+- Env: `build_clean_env(config)` + task-specific vars (always minimal env)
 
 ## API Retry Logic (L915-952)
 - `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` + `429`
@@ -125,7 +122,7 @@ cmd += ["--output-format", "stream-json", "--verbose"]
 ## Security Functions
 | Function | Purpose |
 |---|---|
-| `build_clean_env(config)` | Minimal env for Claude subprocess (restricted) or os.environ (permissive) |
+| `build_clean_env(config)` | Minimal env for Claude subprocess (PATH, HOME, PYTHONUNBUFFERED + passthrough vars) |
 | `build_stripped_env()` | os.environ minus credential vars (PASSWORD/TOKEN/SECRET/API_KEY/NC_PASS/PRIVATE_KEY/APP_PASSWORD). For heartbeat/cron commands. Always-on. |
 | `build_allowed_tools(is_admin, skill_names)` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash"]`. All Bash allowed — clean env is the boundary. |
 | `_CREDENTIAL_ENV_PATTERNS` | Frozenset of credential substrings to strip |

@@ -326,9 +326,9 @@ class TestConfigLoading:
 
     def test_load_security_skill_proxy_defaults(self, tmp_path):
         p = tmp_path / "config.toml"
-        p.write_text('[security]\nmode = "restricted"\n')
+        p.write_text('[security]\nsandbox_enabled = true\n')
         cfg = load_config(p)
-        assert cfg.security.skill_proxy_enabled is False
+        assert cfg.security.skill_proxy_enabled is True
         assert cfg.security.skill_proxy_timeout == 300
 
 

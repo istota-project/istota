@@ -222,14 +222,10 @@ The prompt is built in this order:
 ### Subprocess invocation
 
 ```
-# Permissive mode (default):
-claude -p <prompt> --dangerously-skip-permissions --output-format stream-json --verbose
-
-# Restricted mode:
 claude -p <prompt> --allowedTools Read Write Edit Grep Glob Bash --output-format stream-json --verbose
 ```
 
-Environment variables pass credentials (Nextcloud, CalDAV, SMTP/IMAP, browser API, ledger paths, etc.) to the subprocess. In restricted mode, `build_clean_env()` constructs a minimal environment. In permissive mode, the full `os.environ` is used.
+Environment variables pass credentials (Nextcloud, CalDAV, SMTP/IMAP, browser API, ledger paths, etc.) to the subprocess. `build_clean_env()` constructs a minimal environment (PATH, HOME, PYTHONUNBUFFERED, configured passthrough vars). When the skill proxy is enabled (default), credentials are stripped from Claude's env and routed through a Unix socket proxy instead.
 
 ### Streaming execution
 

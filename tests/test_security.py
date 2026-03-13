@@ -24,15 +24,8 @@ from istota.executor import (
 
 
 class TestBuildCleanEnv:
-    def test_permissive_mode_returns_full_env(self):
-        config = Config(security=SecurityConfig(mode="permissive"))
-        with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test", "SECRET_KEY": "abc"}, clear=True):
-            env = build_clean_env(config)
-        assert env["PATH"] == "/usr/bin"
-        assert env["SECRET_KEY"] == "abc"
-
-    def test_restricted_mode_returns_minimal_env(self):
-        config = Config(security=SecurityConfig(mode="restricted"))
+    def test_returns_minimal_env(self):
+        config = Config()
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",
             "HOME": "/home/test",
@@ -50,9 +43,8 @@ class TestBuildCleanEnv:
         assert "SECRET_KEY" not in env
         assert "SOME_TOKEN" not in env
 
-    def test_restricted_mode_includes_passthrough_vars(self):
+    def test_includes_passthrough_vars(self):
         config = Config(security=SecurityConfig(
-            mode="restricted",
             passthrough_env_vars=["LANG", "TZ"],
         ))
         with patch.dict(os.environ, {
@@ -67,9 +59,8 @@ class TestBuildCleanEnv:
         assert env["TZ"] == "America/New_York"
         assert "OTHER_VAR" not in env
 
-    def test_restricted_mode_skips_missing_passthrough_vars(self):
+    def test_skips_missing_passthrough_vars(self):
         config = Config(security=SecurityConfig(
-            mode="restricted",
             passthrough_env_vars=["LANG", "TZ"],
         ))
         with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
@@ -77,8 +68,8 @@ class TestBuildCleanEnv:
         assert "LANG" not in env
         assert "TZ" not in env
 
-    def test_restricted_mode_default_path_when_missing(self):
-        config = Config(security=SecurityConfig(mode="restricted"))
+    def test_default_path_when_missing(self):
+        config = Config()
         with patch.dict(os.environ, {"HOME": "/home/test"}, clear=True):
             env = build_clean_env(config)
         # Should include default system paths and the venv bin dir
@@ -252,14 +243,18 @@ class TestConfigEnvVarOverrides:
         assert config.ntfy.token == "toml-ntfy-token"
         assert config.ntfy.password == "toml-ntfy-pw"
 
-    def test_security_config_parsed_from_toml(self, tmp_path):
-        config_file = tmp_path / "config.toml"
-        config_file.write_text('[security]\nmode = "restricted"\n')
-        config = load_config(config_file)
-        assert config.security.mode == "restricted"
-
-    def test_security_config_default_permissive(self, tmp_path):
+    def test_security_config_defaults(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("")
         config = load_config(config_file)
-        assert config.security.mode == "permissive"
+        assert config.security.sandbox_enabled is True
+        assert config.security.skill_proxy_enabled is True
+
+    def test_security_config_overrides(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            '[security]\nsandbox_enabled = false\nskill_proxy_enabled = false\n'
+        )
+        config = load_config(config_file)
+        assert config.security.sandbox_enabled is False
+        assert config.security.skill_proxy_enabled is False

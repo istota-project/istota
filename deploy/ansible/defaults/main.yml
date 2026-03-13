@@ -349,9 +349,6 @@ istota_auto_update_cron: "*/5 * * * *"
 istota_configure_rclone: true
 
 # Security hardening
-# mode: "permissive" (inherits full env, uses --dangerously-skip-permissions)
-#        "restricted" (clean env, uses --allowedTools whitelist)
-istota_security_mode: "restricted"
 istota_security_sandbox_enabled: true             # bwrap filesystem isolation per user
 istota_security_sandbox_admin_db_write: false     # allow admin DB writes inside sandbox
 istota_security_skill_proxy_enabled: true         # proxy skill CLI calls via Unix socket (credential isolation)

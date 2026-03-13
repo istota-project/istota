@@ -66,7 +66,8 @@ lookback_hours: int = 24     memory_retention_days: int = 0
 
 ### `SecurityConfig`
 ```
-mode: str = "permissive"     # "permissive" or "restricted"
+sandbox_enabled: bool = True         skill_proxy_enabled: bool = True
+sandbox_admin_db_write: bool = False skill_proxy_timeout: int = 300
 passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 ```
 

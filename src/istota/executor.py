@@ -146,14 +146,12 @@ _CREDENTIAL_ENV_PATTERNS = frozenset({
 
 
 def build_clean_env(config: Config) -> dict[str, str]:
-    """Build base environment for Claude subprocess.
+    """Build minimal environment for Claude subprocess.
 
-    In permissive mode, inherits full os.environ.
-    In restricted mode, returns a minimal env (PATH, HOME, PYTHONUNBUFFERED)
-    plus any configured passthrough vars.
+    Returns a restricted env (PATH, HOME, PYTHONUNBUFFERED) plus any
+    configured passthrough vars. Credentials are injected per-task by
+    execute_task() and optionally routed through the skill proxy.
     """
-    if config.security.mode == "permissive":
-        return dict(os.environ)
     # Ensure the active Python venv bin dir is on PATH so skills can run
     # as `python -m istota.skills.*` inside the sandbox. Use sys.prefix
     # (not sys.executable) to get the venv root — sys.executable resolves
@@ -1530,11 +1528,8 @@ def execute_task(
     try:
         # Build command
         use_streaming = on_progress is not None
-        if config.security.mode == "restricted":
-            allowed = build_allowed_tools(is_admin, selected_skills)
-            cmd = ["claude", "-p", "-", "--allowedTools"] + allowed
-        else:
-            cmd = ["claude", "-p", "-", "--dangerously-skip-permissions"]
+        allowed = build_allowed_tools(is_admin, selected_skills)
+        cmd = ["claude", "-p", "-", "--allowedTools"] + allowed
         if config.model:
             cmd += ["--model", config.model]
         if use_streaming:

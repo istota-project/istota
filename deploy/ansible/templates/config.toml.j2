@@ -29,16 +29,15 @@ disabled_skills = {{ istota_disabled_skills | to_json }}
 temp_dir = "{{ istota_home }}/tmp"
 
 [security]
-mode = "{{ istota_security_mode | default('permissive') }}"
-sandbox_enabled = {{ istota_security_sandbox_enabled | default(false) | lower }}
-sandbox_admin_db_write = {{ istota_security_sandbox_admin_db_write | default(false) | lower }}
-skill_proxy_enabled = {{ istota_security_skill_proxy_enabled | default(false) | lower }}
-skill_proxy_timeout = {{ istota_security_skill_proxy_timeout | default(300) }}
+sandbox_enabled = {{ istota_security_sandbox_enabled | lower }}
+sandbox_admin_db_write = {{ istota_security_sandbox_admin_db_write | lower }}
+skill_proxy_enabled = {{ istota_security_skill_proxy_enabled | lower }}
+skill_proxy_timeout = {{ istota_security_skill_proxy_timeout }}
 
 [nextcloud]
 url = "{{ istota_nextcloud_url }}"
 username = "{{ istota_nextcloud_username }}"
-{% if not istota_use_environment_file | default(false) %}
+{% if not istota_use_environment_file %}
 app_password = "{{ istota_nextcloud_app_password }}"
 {% endif %}
 
@@ -52,7 +51,7 @@ enabled = {{ istota_email_enabled | lower }}
 imap_host = "{{ istota_email_imap_host }}"
 imap_port = {{ istota_email_imap_port }}
 imap_user = "{{ istota_email_imap_user }}"
-{% if not istota_use_environment_file | default(false) %}
+{% if not istota_use_environment_file %}
 imap_password = "{{ istota_email_imap_password }}"
 {% endif %}
 smtp_host = "{{ istota_email_smtp_host }}"
@@ -157,12 +156,12 @@ sources = [
 enabled = true
 server_url = "{{ istota_ntfy_server_url }}"
 topic = "{{ istota_ntfy_topic }}"
-{% if istota_ntfy_token and not istota_use_environment_file | default(false) %}
+{% if istota_ntfy_token and not istota_use_environment_file %}
 token = "{{ istota_ntfy_token }}"
 {% endif %}
 {% if istota_ntfy_username %}
 username = "{{ istota_ntfy_username }}"
-{% if not istota_use_environment_file | default(false) %}
+{% if not istota_use_environment_file %}
 password = "{{ istota_ntfy_password }}"
 {% endif %}
 {% endif %}
@@ -228,7 +227,7 @@ repos_dir = "{{ istota_developer_repos_dir }}"
 author_credit = "{{ istota_developer_author_credit }}"
 {% endif %}
 gitlab_url = "{{ istota_developer_gitlab_url }}"
-{% if not istota_use_environment_file | default(false) %}
+{% if not istota_use_environment_file %}
 gitlab_token = "{{ istota_developer_gitlab_token }}"
 {% endif %}
 gitlab_username = "{{ istota_developer_gitlab_username }}"
@@ -240,7 +239,7 @@ gitlab_api_allowlist = [
 {% endfor %}
 ]
 github_url = "{{ istota_developer_github_url }}"
-{% if not istota_use_environment_file | default(false) %}
+{% if not istota_use_environment_file %}
 github_token = "{{ istota_developer_github_token }}"
 {% endif %}
 github_username = "{{ istota_developer_github_username }}"
