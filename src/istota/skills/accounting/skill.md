@@ -4,11 +4,11 @@ Multiple ledgers can be configured (e.g., personal, business, trading). Use `--l
 
 ```bash
 # List available ledgers
-python -m istota.skills.accounting list
+istota-skill accounting list
 
 # Work with a specific ledger
-python -m istota.skills.accounting --ledger "Business" balances
-python -m istota.skills.accounting -l "Trading" wash-sales
+istota-skill accounting --ledger "Business" balances
+istota-skill accounting -l "Trading" wash-sales
 ```
 
 Environment variables:
@@ -36,31 +36,31 @@ Always validate the ledger after making changes:
 
 ```bash
 # Validate ledger
-python -m istota.skills.accounting check
+istota-skill accounting check
 
 # Show all account balances
-python -m istota.skills.accounting balances
+istota-skill accounting balances
 
 # Filter balances by account pattern
-python -m istota.skills.accounting balances --account "Assets:Bank"
+istota-skill accounting balances --account "Assets:Bank"
 
 # Run a BQL query
-python -m istota.skills.accounting query "SELECT date, narration, account, position WHERE account ~ 'Expenses:Food' ORDER BY date DESC LIMIT 10"
+istota-skill accounting query "SELECT date, narration, account, position WHERE account ~ 'Expenses:Food' ORDER BY date DESC LIMIT 10"
 
 # Generate income statement for current year
-python -m istota.skills.accounting report income-statement
+istota-skill accounting report income-statement
 
 # Generate balance sheet
-python -m istota.skills.accounting report balance-sheet --year 2025
+istota-skill accounting report balance-sheet --year 2025
 
 # Show open lots for a security
-python -m istota.skills.accounting lots AAPL
+istota-skill accounting lots AAPL
 
 # Detect wash sale violations
-python -m istota.skills.accounting wash-sales --year 2025
+istota-skill accounting wash-sales --year 2025
 
 # Import from Monarch Money CSV
-python -m istota.skills.accounting import-monarch /path/to/export.csv --account Assets:Bank:Checking
+istota-skill accounting import-monarch /path/to/export.csv --account Assets:Bank:Checking
 ```
 
 Output is JSON with `status: ok|error`:
@@ -82,7 +82,7 @@ Output is JSON with `status: ok|error`:
 
 ### For single transactions:
 ```bash
-python -m istota.skills.accounting add-transaction \
+istota-skill accounting add-transaction \
   --date 2026-02-01 \
   --payee "Whole Foods" \
   --narration "Weekly groceries" \
@@ -93,7 +93,7 @@ python -m istota.skills.accounting add-transaction \
 
 ### For bulk imports:
 ```bash
-python -m istota.skills.accounting import-monarch export.csv --account Assets:Bank:Checking
+istota-skill accounting import-monarch export.csv --account Assets:Bank:Checking
 ```
 
 ### When to use each approach:
@@ -209,23 +209,23 @@ description = "Flight to NYC"
 
 ```bash
 # Generate invoices for a billing period (creates PDFs only, no ledger entries)
-python -m istota.skills.accounting invoice generate --period 2026-02
-python -m istota.skills.accounting invoice generate --period 2026-02 --client acme
-python -m istota.skills.accounting invoice generate --period 2026-02 --dry-run
+istota-skill accounting invoice generate --period 2026-02
+istota-skill accounting invoice generate --period 2026-02 --client acme
+istota-skill accounting invoice generate --period 2026-02 --dry-run
 
 # List invoices (outstanding by default)
-python -m istota.skills.accounting invoice list
-python -m istota.skills.accounting invoice list --client acme
-python -m istota.skills.accounting invoice list --all
+istota-skill accounting invoice list
+istota-skill accounting invoice list --client acme
+istota-skill accounting invoice list --all
 
 # Record invoice payment (creates income posting - cash-basis)
-python -m istota.skills.accounting invoice paid INV-000001 --date 2026-02-15
-python -m istota.skills.accounting invoice paid INV-000001 --date 2026-02-15 --bank "Assets:Bank:Savings"
-python -m istota.skills.accounting invoice paid INV-000001 --date 2026-02-15 --no-post
+istota-skill accounting invoice paid INV-000001 --date 2026-02-15
+istota-skill accounting invoice paid INV-000001 --date 2026-02-15 --bank "Assets:Bank:Savings"
+istota-skill accounting invoice paid INV-000001 --date 2026-02-15 --no-post
 
 # Create a manual single invoice
-python -m istota.skills.accounting invoice create acme --service consulting --qty 40
-python -m istota.skills.accounting invoice create acme --item "Travel expenses" 340.50
+istota-skill accounting invoice create acme --service consulting --qty 40
+istota-skill accounting invoice create acme --item "Travel expenses" 340.50
 ```
 
 ### Invoice Generation Flow
@@ -348,5 +348,5 @@ SELECT date, payee, narration, account, position WHERE date >= 2026-01-01 ORDER 
 SELECT account, units(sum(position)), cost(sum(position)) WHERE account ~ '^Assets:Investment' GROUP BY account
 
 -- Outstanding invoices are tracked via work log, not A/R balances
--- Use: python -m istota.skills.accounting invoice list
+-- Use: istota-skill accounting invoice list
 ```

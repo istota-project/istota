@@ -6,25 +6,25 @@ Transcribe audio files locally using faster-whisper (CPU, int8 quantization). Su
 
 ```bash
 # Basic transcription (auto-selects model based on available RAM)
-python -m istota.skills.whisper transcribe /path/to/audio.wav
+istota-skill whisper transcribe /path/to/audio.wav
 
 # Specify model and language
-python -m istota.skills.whisper transcribe /path/to/audio.wav --model small --language en
+istota-skill whisper transcribe /path/to/audio.wav --model small --language en
 
 # Output as SRT subtitles and save to file
-python -m istota.skills.whisper transcribe /path/to/audio.wav --output srt --save
+istota-skill whisper transcribe /path/to/audio.wav --output srt --save
 
 # Output as WebVTT
-python -m istota.skills.whisper transcribe /path/to/audio.wav --output vtt
+istota-skill whisper transcribe /path/to/audio.wav --output vtt
 
 # Plain text output
-python -m istota.skills.whisper transcribe /path/to/audio.wav --output text
+istota-skill whisper transcribe /path/to/audio.wav --output text
 
 # List available models and RAM requirements
-python -m istota.skills.whisper models
+istota-skill whisper models
 
 # Pre-download a model
-python -m istota.skills.whisper download small
+istota-skill whisper download small
 ```
 
 ## Output (JSON format)

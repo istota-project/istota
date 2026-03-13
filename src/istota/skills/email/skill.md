@@ -8,7 +8,7 @@
 ## Sending email (`send`)
 
 ```bash
-python -m istota.skills.email send --to "recipient@example.com" --subject "Subject line" --body "Email body text"
+istota-skill email send --to "recipient@example.com" --subject "Subject line" --body "Email body text"
 ```
 
 Options:
@@ -26,7 +26,7 @@ For HTML emails with complex formatting, write the body to a temp file first and
 When this task originated from an incoming email (source_type "email") and you are composing the reply, use `output`:
 
 ```bash
-python -m istota.skills.email output --subject "Subject line" --body "The email content"
+istota-skill email output --subject "Subject line" --body "The email content"
 ```
 
 Options:
@@ -45,7 +45,7 @@ cat > /tmp/email_body.txt << 'BODY'
 The full email content goes here.
 Multiple paragraphs, quotes, etc.
 BODY
-python -m istota.skills.email output --subject "Subject" --body-file /tmp/email_body.txt
+istota-skill email output --subject "Subject" --body-file /tmp/email_body.txt
 ```
 
 **When to use HTML:** Use `--html` when the content benefits from rich formatting (tables, styled sections, links). For simple text responses, use plain text (the default).

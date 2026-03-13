@@ -272,6 +272,9 @@
 - [ ] Rate limiting for API calls
 - [x] Per-user filesystem isolation (bubblewrap sandbox with mount namespaces)
 - [x] Deferred DB operations for sandbox-safe writes (subtasks + transaction tracking via JSON files)
+- [x] Credential isolation via skill proxy (Unix socket, strips secrets from Claude's env)
+- [ ] Skill proxy phase 2: GITLAB_TOKEN, GITHUB_TOKEN (requires credential helper rewrite)
+- [ ] Skill proxy phase 2: GARMIN_CONFIG file path exclusion via bwrap
 - [ ] Network proxy for agent subprocesses (domain allowlist)
 
 ## Priority 4: Future Ideas

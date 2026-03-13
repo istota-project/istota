@@ -272,6 +272,8 @@ class SecurityConfig:
     mode: str = "permissive"  # "permissive" or "restricted"
     sandbox_enabled: bool = False  # bwrap filesystem isolation per user
     sandbox_admin_db_write: bool = False  # allow admin DB writes in sandbox
+    skill_proxy_enabled: bool = False  # proxy skill CLI calls via Unix socket
+    skill_proxy_timeout: int = 300  # timeout for proxied skill commands (seconds)
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     ])

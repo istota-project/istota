@@ -6,40 +6,40 @@ Search, browse, and manage bookmarks from the user's Karakeep vault.
 
 ```bash
 # Search bookmarks (full-text, ranked by relevance)
-python -m istota.skills.bookmarks search "machine learning papers"
-python -m istota.skills.bookmarks search "recipe" --limit 5 --sort desc
+istota-skill bookmarks search "machine learning papers"
+istota-skill bookmarks search "recipe" --limit 5 --sort desc
 
 # List/browse bookmarks
-python -m istota.skills.bookmarks list --limit 10
-python -m istota.skills.bookmarks list --favourited
-python -m istota.skills.bookmarks list --archived
-python -m istota.skills.bookmarks list --tag "programming"
-python -m istota.skills.bookmarks list --in-list "Read Later" --limit 10
+istota-skill bookmarks list --limit 10
+istota-skill bookmarks list --favourited
+istota-skill bookmarks list --archived
+istota-skill bookmarks list --tag "programming"
+istota-skill bookmarks list --in-list "Read Later" --limit 10
 
 # Get a single bookmark's details
-python -m istota.skills.bookmarks get BOOKMARK_ID
-python -m istota.skills.bookmarks get BOOKMARK_ID --include-content
+istota-skill bookmarks get BOOKMARK_ID
+istota-skill bookmarks get BOOKMARK_ID --include-content
 
 # Add a bookmark (link or text)
-python -m istota.skills.bookmarks add "https://example.com/article"
-python -m istota.skills.bookmarks add "https://example.com" --title "Great article" --tags "tech,reading" --note "Must read"
-python -m istota.skills.bookmarks add "Note to self: check this pattern" --text --tags "idea"
+istota-skill bookmarks add "https://example.com/article"
+istota-skill bookmarks add "https://example.com" --title "Great article" --tags "tech,reading" --note "Must read"
+istota-skill bookmarks add "Note to self: check this pattern" --text --tags "idea"
 
 # Tag operations
-python -m istota.skills.bookmarks tags                    # list all tags
-python -m istota.skills.bookmarks tags --search "prog"    # filter tags by name
-python -m istota.skills.bookmarks tag BOOKMARK_ID "newtag1,newtag2"
-python -m istota.skills.bookmarks untag BOOKMARK_ID "oldtag"
+istota-skill bookmarks tags                    # list all tags
+istota-skill bookmarks tags --search "prog"    # filter tags by name
+istota-skill bookmarks tag BOOKMARK_ID "newtag1,newtag2"
+istota-skill bookmarks untag BOOKMARK_ID "oldtag"
 
 # Lists
-python -m istota.skills.bookmarks lists                   # show all lists
-python -m istota.skills.bookmarks list-bookmarks LIST_ID  # bookmarks in a list
+istota-skill bookmarks lists                   # show all lists
+istota-skill bookmarks list-bookmarks LIST_ID  # bookmarks in a list
 
 # AI summarization
-python -m istota.skills.bookmarks summarize BOOKMARK_ID
+istota-skill bookmarks summarize BOOKMARK_ID
 
 # User stats
-python -m istota.skills.bookmarks stats
+istota-skill bookmarks stats
 ```
 
 ## Output

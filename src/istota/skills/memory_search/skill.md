@@ -6,19 +6,19 @@ Search across past conversations and memory files using hybrid BM25 + semantic s
 
 ```bash
 # Search for relevant memories
-python -m istota.skills.memory_search search "query text" [--limit 10] [--source-type TYPE]
+istota-skill memory_search search "query text" [--limit 10] [--source-type TYPE]
 
 # Index a specific conversation
-python -m istota.skills.memory_search index conversation TASK_ID
+istota-skill memory_search index conversation TASK_ID
 
 # Index a specific file
-python -m istota.skills.memory_search index file /path/to/file.md [--source-type TYPE]
+istota-skill memory_search index file /path/to/file.md [--source-type TYPE]
 
 # Reindex all conversations and memory files
-python -m istota.skills.memory_search reindex [--lookback-days 90]
+istota-skill memory_search reindex [--lookback-days 90]
 
 # Show indexing stats
-python -m istota.skills.memory_search stats
+istota-skill memory_search stats
 ```
 
 ## Source Types

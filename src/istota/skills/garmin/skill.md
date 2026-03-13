@@ -23,27 +23,27 @@ Tokens are cached in `token_dir` (default: `$ISTOTA_DEFERRED_DIR/garmin_tokens`,
 
 ```bash
 # Test authentication
-python -m istota.skills.garmin connect
+istota-skill garmin connect
 
 # User profile and devices
-python -m istota.skills.garmin user
+istota-skill garmin user
 
 # Activities (default: today, limit 10)
-python -m istota.skills.garmin activities
-python -m istota.skills.garmin activities --date 2026-02-15
-python -m istota.skills.garmin activities --limit 20
-python -m istota.skills.garmin activities --type running
+istota-skill garmin activities
+istota-skill garmin activities --date 2026-02-15
+istota-skill garmin activities --limit 20
+istota-skill garmin activities --type running
 
 # Daily stats: steps, calories, stress, body battery
-python -m istota.skills.garmin stats
-python -m istota.skills.garmin stats --date 2026-02-15
+istota-skill garmin stats
+istota-skill garmin stats --date 2026-02-15
 
 # Health metrics: resting HR, sleep, HRV
-python -m istota.skills.garmin health
-python -m istota.skills.garmin health --date 2026-02-15
+istota-skill garmin health
+istota-skill garmin health --date 2026-02-15
 
 # All commands accept --config to override config file path
-python -m istota.skills.garmin activities --config /path/to/GARMIN.md
+istota-skill garmin activities --config /path/to/GARMIN.md
 ```
 
 All output is JSON.
@@ -112,10 +112,10 @@ Output pipes cleanly into `jq` or Python:
 
 ```bash
 # Get today's run distance in km
-python -m istota.skills.garmin activities --type running | jq '.[0].distance / 1000'
+istota-skill garmin activities --type running | jq '.[0].distance / 1000'
 
 # Check if a run was completed today
-python -m istota.skills.garmin activities --type running | python3 -c "import sys,json; acts=json.load(sys.stdin); print('run' if acts else 'no run')"
+istota-skill garmin activities --type running | python3 -c "import sys,json; acts=json.load(sys.stdin); print('run' if acts else 'no run')"
 ```
 
 ## Dependencies

@@ -5,8 +5,8 @@ When you receive images containing text (screenshots, documents, handwritten not
 ## Usage
 
 ```bash
-python -m istota.skills.transcribe ocr /path/to/image.png
-python -m istota.skills.transcribe ocr /path/to/image.png --preprocess
+istota-skill transcribe ocr /path/to/image.png
+istota-skill transcribe ocr /path/to/image.png --preprocess
 ```
 
 Use `--preprocess` for low-contrast or noisy images. This applies grayscale conversion and contrast enhancement.
@@ -49,10 +49,10 @@ When transcribing images:
 
 Extract text from a screenshot:
 ```bash
-python -m istota.skills.transcribe ocr /srv/mount/nextcloud/content/Users/alice/inbox/screenshot.png
+istota-skill transcribe ocr /srv/mount/nextcloud/content/Users/alice/inbox/screenshot.png
 ```
 
 Process a handwritten note with preprocessing:
 ```bash
-python -m istota.skills.transcribe ocr /tmp/handwritten_note.jpg --preprocess
+istota-skill transcribe ocr /tmp/handwritten_note.jpg --preprocess
 ```

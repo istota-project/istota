@@ -24,8 +24,8 @@ Include the pre-fetched market data in your briefing. Copy FinViz data as-is —
 
 ### Interactive Use
 For market questions in chat, use the CLI:
-- `python -m istota.skills.markets quote AAPL MSFT GOOGL` — get quotes for specific symbols
-- `python -m istota.skills.markets summary` — broad market overview (S&P 500, Nasdaq, Dow, VIX, Gold, Oil, 10Y Treasury)
-- `python -m istota.skills.markets finviz` — market headlines, movers, futures, forex, earnings, economic data (requires browser API)
+- `istota-skill markets quote AAPL MSFT GOOGL` — get quotes for specific symbols
+- `istota-skill markets summary` — broad market overview (S&P 500, Nasdaq, Dow, VIX, Gold, Oil, 10Y Treasury)
+- `istota-skill markets finviz` — market headlines, movers, futures, forex, earnings, economic data (requires browser API)
 
 All commands output JSON.

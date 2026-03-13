@@ -12,35 +12,35 @@ All commands output JSON. The `ISTOTA_DB_PATH` and `ISTOTA_USER_ID` environment 
 
 ```bash
 # Current location + place/visit info
-python -m istota.skills.location current
+istota-skill location current
 
 # Recent pings (default: last 20)
-python -m istota.skills.location history
-python -m istota.skills.location history --limit 50
-python -m istota.skills.location history --date 2026-02-15
+istota-skill location history
+istota-skill location history --limit 50
+istota-skill location history --date 2026-02-15
 
 # List known places
-python -m istota.skills.location places
+istota-skill location places
 
 # Save current location as a named place
 # Reads the most recent ping and appends a [[places]] entry to LOCATION.md
 # New places take effect on the next incoming ping (no restart needed)
-python -m istota.skills.location learn "coffee shop"
-python -m istota.skills.location learn "gym" --category gym --radius 75
+istota-skill location learn "coffee shop"
+istota-skill location learn "gym" --category gym --radius 75
 
 # Check calendar attendance via GPS pings
 # Requires CALDAV_URL, CALDAV_USERNAME, CALDAV_PASSWORD env vars
-python -m istota.skills.location attendance
-python -m istota.skills.location attendance --date 2026-02-15
-python -m istota.skills.location attendance --event "dentist"
+istota-skill location attendance
+istota-skill location attendance --date 2026-02-15
+istota-skill location attendance --event "dentist"
 
 # Reverse geocode a single coordinate pair
-python -m istota.skills.location reverse-geocode --lat 34.05 --lon -118.25
+istota-skill location reverse-geocode --lat 34.05 --lon -118.25
 
 # Day summary: clusters pings into stops, resolves names via saved places
 # or reverse geocoding, filters transit, merges consecutive same-location stops
-python -m istota.skills.location day-summary --date 2026-03-08
-python -m istota.skills.location day-summary --date 2026-03-08 --tz America/New_York
+istota-skill location day-summary --date 2026-03-08
+istota-skill location day-summary --date 2026-03-08 --tz America/New_York
 ```
 
 ## Output Examples

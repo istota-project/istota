@@ -186,6 +186,34 @@ def build_stripped_env() -> dict[str, str]:
     }
 
 
+# Env vars that carry secrets and should be routed through the skill proxy.
+# Phase 1: credentials consumed by skill CLIs. Phase 2 will add GITLAB_TOKEN,
+# GITHUB_TOKEN, GARMIN_CONFIG.
+_PROXY_CREDENTIAL_VARS = frozenset({
+    "CALDAV_PASSWORD",
+    "NC_PASS",
+    "SMTP_PASSWORD",
+    "IMAP_PASSWORD",
+    "KARAKEEP_API_KEY",
+})
+
+
+def _split_credential_env(env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """Split env into (credential_env, clean_env).
+
+    Returns credentials removed from the main env dict. The credential dict
+    is passed to the skill proxy; the clean dict goes to Claude's subprocess.
+    """
+    credential_env = {}
+    clean_env = {}
+    for k, v in env.items():
+        if k in _PROXY_CREDENTIAL_VARS:
+            credential_env[k] = v
+        else:
+            clean_env[k] = v
+    return credential_env, clean_env
+
+
 def build_allowed_tools(is_admin: bool, skill_names: list[str]) -> list[str]:
     """Build --allowedTools list for restricted security mode.
 
@@ -1140,7 +1168,7 @@ The following are relevant previous messages from this conversation:
     # Browser tool line (only when enabled)
     browser_tool = ""
     if config.browser.enabled:
-        browser_tool = "\n- Web browser for JS-rendered pages: python -m istota.skills.browse (see browse skill for details)"
+        browser_tool = "\n- Web browser for JS-rendered pages: istota-skill browse (see browse skill for details)"
 
     # Compute user's local time
     user_config = config.get_user(task.user_id)
@@ -1167,7 +1195,7 @@ The following are relevant previous messages from this conversation:
    - Emails to external addresses DO need confirmation
    - Modifying calendars, deleting files, sharing externally need confirmation
 3. To create subtasks, write a JSON file to $ISTOTA_DEFERRED_DIR/task_{task.id}_subtasks.json with format: [{{"prompt": "...", "conversation_token": "...", "priority": 5}}]. They will be queued after this task completes.
-4. Do NOT write to the SQLite database directly (e.g. via sqlite3 CLI or Python sqlite3 module). The database is read-only in your environment. All database modifications are handled by the skill CLI commands (e.g. `python -m istota.skills.accounting`, `python -m istota.skills.memory_search`) or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
+4. Do NOT write to the SQLite database directly (e.g. via sqlite3 CLI or Python sqlite3 module). The database is read-only in your environment. All database modifications are handled by the skill CLI commands (e.g. `istota-skill accounting`, `istota-skill memory_search`) or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
 5. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
 6. Never edit or create files in your own source directory.
 7. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
@@ -1207,7 +1235,7 @@ Output target: {output_target or 'text'}
 You have access to:
 {file_tools}{browser_tool}
 - caldav via curl or the caldav Python library for calendar operations{db_tool_line}
-- Email sending is handled by the bot internally. When the output target is "email", use the email output tool: `python -m istota.skills.email output --subject "..." --body "..." [--html]`. Use `--body-file` for long content. Do NOT use this tool when the output target is "talk" — just respond with text. See the email skill for details.
+- Email sending is handled by the bot internally. When the output target is "email", use the email output tool: `istota-skill email output --subject "..." --body "..." [--html]`. Use `--body-file` for long content. Do NOT use this tool when the output target is "talk" — just respond with text. See the email skill for details.
 
 {rules_section}
 {context_section}
@@ -1762,14 +1790,35 @@ def execute_task(
             if k not in env:
                 env[k] = v
 
+        # Credential isolation via skill proxy: strip secrets from Claude's env
+        # and run skill CLIs through a Unix socket proxy that injects them.
+        _proxy_ctx = None
+        if config.security.skill_proxy_enabled:
+            from .skill_proxy import SkillProxy
+            credential_env, env = _split_credential_env(env)
+            if credential_env:
+                proxy_sock = Path(user_temp_dir) / ".skill-proxy.sock"
+                env["ISTOTA_SKILL_PROXY_SOCK"] = str(proxy_sock)
+                _proxy_ctx = SkillProxy(
+                    proxy_sock, credential_env, env,
+                    timeout=config.security.skill_proxy_timeout,
+                )
+
         # Wrap in bwrap sandbox if enabled
         if config.security.sandbox_enabled:
             cmd = build_bwrap_cmd(cmd, config, task, is_admin, user_resources, Path(user_temp_dir))
 
-        if use_streaming:
-            success, result, actions = _execute_streaming(cmd, env, config, task, on_progress, result_file, prompt)
+        def _run_claude():
+            if use_streaming:
+                return _execute_streaming(cmd, env, config, task, on_progress, result_file, prompt)
+            else:
+                return _execute_simple(cmd, env, config, task, result_file, prompt)
+
+        if _proxy_ctx is not None:
+            with _proxy_ctx:
+                success, result, actions = _run_claude()
         else:
-            success, result, actions = _execute_simple(cmd, env, config, task, result_file, prompt)
+            success, result, actions = _run_claude()
 
         # Update skills fingerprint after successful interactive execution
         if success and _is_interactive:

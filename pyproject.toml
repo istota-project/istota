@@ -70,6 +70,7 @@ all = [
 [project.scripts]
 istota = "istota.cli:main"
 istota-scheduler = "istota.scheduler:main"
+istota-skill = "istota.skill_client:main"
 
 [build-system]
 requires = ["hatchling"]

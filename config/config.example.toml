@@ -49,6 +49,8 @@ temp_dir = "/tmp/istota"
 # mode = "permissive"
 # sandbox_enabled = false          # bwrap filesystem isolation per user (Linux only)
 # sandbox_admin_db_write = false   # allow admin DB writes inside sandbox
+# skill_proxy_enabled = false      # proxy skill CLI calls via Unix socket (credential isolation)
+# skill_proxy_timeout = 300        # timeout for proxied skill commands (seconds)
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 
 [nextcloud]

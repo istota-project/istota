@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-12: Credential isolation via skill proxy
+
+Added a Unix socket proxy that runs skill CLI commands with credentials injected server-side. When enabled, the Claude subprocess never sees secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY). A thin client (`istota-skill`) replaces `python -m istota.skills.X` in all skill docs and prompt templates, with a direct-execution fallback when the proxy is disabled.
+
+**Key changes:**
+- SkillProxy class: Unix socket server as context manager, threaded accept loop, skill allowlist validation, concurrent request handling
+- `istota-skill` console script: connects to proxy socket or falls back to direct `python -m` execution
+- Executor splits env into credential and clean dicts when `skill_proxy_enabled` is true, starts proxy around Claude execution
+- All 13 skill.md files updated: `python -m istota.skills.X` → `istota-skill X`
+- Prompt templates in executor.py updated to use `istota-skill` syntax
+- Config: `skill_proxy_enabled` (default false) and `skill_proxy_timeout` (300s) in SecurityConfig
+
+**Files added/modified:**
+- `src/istota/skill_proxy.py` — New: SkillProxy server with allowlist, protocol, timeout handling
+- `src/istota/skill_client.py` — New: thin client with proxy and direct-exec paths
+- `tests/test_skill_proxy.py` — New: 28 tests (proxy lifecycle, protocol, client, credential splitting, allowlist validation)
+- `pyproject.toml` — Added `istota-skill` entry point
+- `src/istota/config.py` — Added `skill_proxy_enabled`, `skill_proxy_timeout` to SecurityConfig
+- `src/istota/executor.py` — Added `_split_credential_env()`, `_PROXY_CREDENTIAL_VARS`, proxy lifecycle, updated prompt references
+- `src/istota/skills/*/skill.md` (13 files) — CLI example updates
+- `config/config.example.toml` — Documented new security fields
+- `deploy/ansible/defaults/main.yml` — Added ansible vars, enabled by default
+- `deploy/ansible/templates/config.toml.j2` — Added config template lines
+
 ## 2026-03-12: Consolidate briefing system and remove legacy code
 
 Moved all briefing logic into `src/istota/skills/briefing/__init__.py`, replaced hardcoded `source_type == "briefing"` checks in executor.py with generic flags driven by skill metadata, then removed all backward-compatibility shims and dead code.

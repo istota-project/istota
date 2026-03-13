@@ -11,22 +11,22 @@ The simplest way to interact with calendars is via the CLI:
 
 ```bash
 # List today's events from all calendars
-python -m istota.skills.calendar list --tz "America/Los_Angeles"
+istota-skill calendar list --tz "America/Los_Angeles"
 
 # List tomorrow's events
-python -m istota.skills.calendar list --date tomorrow --tz "America/Los_Angeles"
+istota-skill calendar list --date tomorrow --tz "America/Los_Angeles"
 
 # List events for a specific date
-python -m istota.skills.calendar list --date 2026-02-15 --tz "America/Los_Angeles"
+istota-skill calendar list --date 2026-02-15 --tz "America/Los_Angeles"
 
 # List from a specific calendar
-python -m istota.skills.calendar list --calendar "https://..." --date today
+istota-skill calendar list --calendar "https://..." --date today
 
 # List events for the next 7 days
-python -m istota.skills.calendar list --week --tz "America/Los_Angeles"
+istota-skill calendar list --week --tz "America/Los_Angeles"
 
 # Create an event
-python -m istota.skills.calendar create \
+istota-skill calendar create \
   --calendar "https://..." \
   --summary "Team Meeting" \
   --start "2026-02-15 14:00" \
@@ -34,7 +34,7 @@ python -m istota.skills.calendar create \
   --location "Conference Room A"
 
 # Update an event
-python -m istota.skills.calendar update \
+istota-skill calendar update \
   --calendar "https://..." \
   --uid "event-uid-here" \
   --summary "Updated Title" \
@@ -42,13 +42,13 @@ python -m istota.skills.calendar update \
   --end "2026-02-15 16:00"
 
 # Update: clear optional fields
-python -m istota.skills.calendar update \
+istota-skill calendar update \
   --calendar "https://..." \
   --uid "event-uid-here" \
   --clear-location --clear-description
 
 # Delete an event
-python -m istota.skills.calendar delete --calendar "https://..." --uid "event-uid-here"
+istota-skill calendar delete --calendar "https://..." --uid "event-uid-here"
 ```
 
 **Always pass `--tz` with the user's timezone** (from prompt metadata) to ensure correct date boundaries.

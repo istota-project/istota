@@ -32,6 +32,8 @@ temp_dir = "{{ istota_home }}/tmp"
 mode = "{{ istota_security_mode | default('permissive') }}"
 sandbox_enabled = {{ istota_security_sandbox_enabled | default(false) | lower }}
 sandbox_admin_db_write = {{ istota_security_sandbox_admin_db_write | default(false) | lower }}
+skill_proxy_enabled = {{ istota_security_skill_proxy_enabled | default(false) | lower }}
+skill_proxy_timeout = {{ istota_security_skill_proxy_timeout | default(300) }}
 
 [nextcloud]
 url = "{{ istota_nextcloud_url }}"

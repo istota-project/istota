@@ -29,7 +29,7 @@ silent_unless_action = true
 [[jobs]]
 name = "memory-stats"
 cron = "0 6 * * *"
-command = "python -m istota.skills.memory_search stats"
+command = "istota-skill memory_search stats"
 target = "talk"
 room = "ROOM_TOKEN"
 \`\`\`
