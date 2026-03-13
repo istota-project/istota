@@ -313,6 +313,24 @@ class TestConfigLoading:
         cfg = load_config(p)
         assert cfg.skills_dir == Path("/opt/istota/skills")
 
+    def test_load_security_skill_proxy(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[security]\n'
+            'skill_proxy_enabled = true\n'
+            'skill_proxy_timeout = 120\n'
+        )
+        cfg = load_config(p)
+        assert cfg.security.skill_proxy_enabled is True
+        assert cfg.security.skill_proxy_timeout == 120
+
+    def test_load_security_skill_proxy_defaults(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text('[security]\nmode = "restricted"\n')
+        cfg = load_config(p)
+        assert cfg.security.skill_proxy_enabled is False
+        assert cfg.security.skill_proxy_timeout == 300
+
 
 class TestConfigMethods:
     def test_find_user_by_email_found(self):
