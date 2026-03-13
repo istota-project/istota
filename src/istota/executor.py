@@ -232,6 +232,7 @@ def build_bwrap_cmd(
     is_admin: bool,
     user_resources: list[db.UserResource],
     user_temp_dir: Path,
+    proxy_sock: Path | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -335,6 +336,10 @@ def build_bwrap_cmd(
 
     # --- User workspace (RW) ---
     _bind(user_temp_dir.resolve())
+
+    # --- Skill proxy socket (RO inside sandbox) ---
+    if proxy_sock and proxy_sock.exists():
+        _ro_bind(proxy_sock)
 
     # --- Nextcloud mounts ---
     mount = config.nextcloud_mount_path
@@ -1838,23 +1843,28 @@ def execute_task(
         # Credential isolation via skill proxy: strip secrets from Claude's env
         # and run skill CLIs through a Unix socket proxy that injects them.
         _proxy_ctx = None
+        _proxy_sock = None
         if config.security.skill_proxy_enabled:
             from .skill_proxy import SkillProxy
             credential_env, env = _split_credential_env(env)
             if credential_env:
-                # Use /tmp for socket path to stay within AF_UNIX length limit (~104 chars)
-                proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{task.id}.sock"
-                env["ISTOTA_SKILL_PROXY_SOCK"] = str(proxy_sock)
+                # Use /tmp for socket path to stay within AF_UNIX length limit (~104 chars).
+                # build_bwrap_cmd() bind-mounts this file into the sandbox.
+                _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{task.id}.sock"
+                env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
                 _proxy_ctx = SkillProxy(
-                    proxy_sock, credential_env, env,
+                    _proxy_sock, credential_env, env,
                     timeout=config.security.skill_proxy_timeout,
                 )
 
-        # Wrap in bwrap sandbox if enabled
-        if config.security.sandbox_enabled:
-            cmd = build_bwrap_cmd(cmd, config, task, is_admin, user_resources, Path(user_temp_dir))
-
-        def _run_claude():
+        def _build_and_run():
+            nonlocal cmd
+            # Wrap in bwrap sandbox if enabled (after proxy start so socket exists)
+            if config.security.sandbox_enabled:
+                cmd = build_bwrap_cmd(
+                    cmd, config, task, is_admin, user_resources,
+                    Path(user_temp_dir), proxy_sock=_proxy_sock,
+                )
             if use_streaming:
                 return _execute_streaming(cmd, env, config, task, on_progress, result_file, prompt)
             else:
@@ -1862,9 +1872,9 @@ def execute_task(
 
         if _proxy_ctx is not None:
             with _proxy_ctx:
-                success, result, actions = _run_claude()
+                success, result, actions = _build_and_run()
         else:
-            success, result, actions = _run_claude()
+            success, result, actions = _build_and_run()
 
         # Update skills fingerprint after successful interactive execution
         if success and _is_interactive:
