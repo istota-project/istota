@@ -42,5 +42,3 @@ class SkillMeta:
     dependencies: list[str] = field(default_factory=list)
     # Where the skill was loaded from (for doc/code resolution)
     skill_dir: str = ""
-    # Python module for external packages (e.g., "istota_browse")
-    module_name: str = ""
