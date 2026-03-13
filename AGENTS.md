@@ -45,7 +45,7 @@ istota/
 │       ├── bookmarks/       # Karakeep bookmark management
 │       ├── briefing/        # Briefing format reference (doc-only)
 │       ├── briefings_config/ # User briefing schedule config (doc-only)
-│       ├── browse/          # Web browsing CLI (Docker container API)
+│       ├── browse/          # Backward-compat shim (code in packages/istota-browse)
 │       ├── calendar/        # CalDAV operations CLI
 │       ├── developer/       # Git/GitLab/GitHub workflows (doc-only)
 │       ├── feeds_config/    # Feed subscription config (doc-only)
@@ -80,11 +80,13 @@ istota/
 │   ├── render_config.py     # Python config generator for install.sh
 │   ├── install.sh           # Main deployment script
 │   └── README.md            # Deployment documentation
+├── packages/
+│   └── istota-browse/       # External browse skill package (entry point: istota.skills)
 ├── docker/browser/          # Playwright browser container (Flask API)
 ├── scripts/                 # setup.sh, scheduler.sh
-├── tests/                   # pytest + pytest-asyncio (~2400 tests, 51 files)
+├── tests/                   # pytest + pytest-asyncio (~2500 tests, 52 files)
 ├── schema.sql
-└── pyproject.toml
+└── pyproject.toml           # uv workspace root (members: packages/*)
 ```
 
 ## Architecture
@@ -159,6 +161,8 @@ Self-contained directories under `src/istota/skills/`, each with `skill.toml` ma
 Audio attachments pre-transcribed before skill selection so keyword matching works on voice memos.
 
 Env var wiring is declarative via `[[env]]` in `skill.toml`. Action skills expose `python -m istota.skills.<name>` CLI with JSON output.
+
+**External skill packages**: Skills can also live in separate packages under `packages/` (uv workspace members). They register via `[project.entry-points."istota.skills"]` and are discovered at runtime by `_discover_entrypoint_skills()`. Discovery order: bundled → entry points → operator overrides. The `browse` skill is the first external package (`packages/istota-browse/`); the bundled `src/istota/skills/browse/` is a backward-compat shim. Tests pass `skip_entrypoints=True` to isolate from installed packages.
 
 ### Conversation Context
 Talk tasks use a poller-fed local cache (`talk_messages` table, bounded by `talk_cache_max_per_conversation`). Email tasks use DB-based context. Both paths use hybrid selection: recent N messages always included, older messages triaged by LLM. Recency window (`context_recency_hours`, default 0 = disabled) filters out old messages while guaranteeing at least `context_min_messages` (10). Config in `[conversation]` section.

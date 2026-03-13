@@ -1,2 +1,14 @@
 description = "Web browsing and scraping via headless browser"
 keywords = ["browse", "website", "web page", "scrape", "screenshot", "url", "http", "visit", "open page", "fetch page", "web search", "look up", "check the site"]
+
+[[env]]
+var = "BROWSER_API_URL"
+from = "config"
+config_path = "browser.api_url"
+when = "browser.enabled"
+
+[[env]]
+var = "BROWSER_VNC_URL"
+from = "config"
+config_path = "browser.vnc_url"
+when = "browser.enabled"

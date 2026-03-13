@@ -1271,7 +1271,12 @@ def execute_task(
     is_admin = config.is_admin(task.user_id)
 
     _bundled_dir = config.bundled_skills_dir
-    skill_index = load_skill_index(config.skills_dir, bundled_dir=_bundled_dir)
+    _skip_ep = bool(config.bundled_skills_dir)
+    skill_index = load_skill_index(
+        config.skills_dir,
+        bundled_dir=_bundled_dir,
+        skip_entrypoints=_skip_ep,
+    )
     user_resource_types = {r.resource_type for r in user_resources}
     # Combine instance-wide and per-user disabled skills
     user_config = config.get_user(task.user_id)
@@ -1291,6 +1296,7 @@ def execute_task(
     skills_doc = load_skills(
         config.skills_dir, selected_skills, config.bot_name, config.bot_dir_name,
         skill_index=skill_index, bundled_dir=_bundled_dir,
+        skip_entrypoints=_skip_ep,
     )
     if skills_doc:
         # Resolve per-user scripts directory
@@ -1306,7 +1312,7 @@ def execute_task(
     # Skills changelog: detect changes for interactive tasks
     skills_changelog = None
     _is_interactive = task.source_type in ("talk", "email")
-    current_fingerprint = compute_skills_fingerprint(config.skills_dir, bundled_dir=_bundled_dir)
+    current_fingerprint = compute_skills_fingerprint(config.skills_dir, bundled_dir=_bundled_dir, skip_entrypoints=_skip_ep)
     if _is_interactive:
         try:
             def _check_fingerprint(c):
@@ -1527,11 +1533,6 @@ def execute_task(
                 env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path / "Users" / task.user_id)
             else:
                 env["NEXTCLOUD_MOUNT_PATH"] = ""
-
-        # Browser container credentials
-        if config.browser.enabled:
-            env["BROWSER_API_URL"] = config.browser.api_url
-            env["BROWSER_VNC_URL"] = config.browser.vnc_url
 
         # Email credentials for direct sending from Claude Code
         if config.email.enabled:

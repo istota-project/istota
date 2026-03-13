@@ -2,6 +2,43 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-12: Package breakout phase 1 — browse skill extraction
+
+Extracted the browse skill into a separate package (`packages/istota-browse/`) as a proof of concept for moving domain-specific integrations into independently installable workspace members. Added entry point-based skill discovery so external packages register via `[project.entry-points."istota.skills"]` and are found at runtime without any hardcoded imports.
+
+**Key changes:**
+- Added `module_name` field to `SkillMeta` for external package resolution
+- Added `_discover_entrypoint_skills()` to `_loader.py` — scans `importlib.metadata.entry_points(group="istota.skills")`, loads each module, finds `skill.toml` in its package directory
+- New discovery layer between bundled and operator overrides (bundled → entry points → operator overrides)
+- Added `skip_entrypoints` param to `load_skill_index()`, `compute_skills_fingerprint()`, and `load_skills()` for test isolation
+- `dispatch_setup_env_hooks()` uses `meta.module_name` when set, falling back to `istota.skills.{name}`
+- Removed hardcoded `BROWSER_API_URL`/`BROWSER_VNC_URL` from executor.py — now declarative via `[[env]]` in the browse package's `skill.toml`
+- Root `pyproject.toml` gets `[tool.uv.workspace]` with `members = ["packages/*"]`
+- Ansible `uv sync` updated to `--all-packages` to install workspace members on deploy
+- Bundled `src/istota/skills/browse/` replaced with backward-compat shim that re-exports from `istota_browse`
+
+**Files added:**
+- `packages/istota-browse/pyproject.toml` — Package config with entry point registration
+- `packages/istota-browse/src/istota_browse/__init__.py` — Browse CLI (moved from bundled)
+- `packages/istota-browse/src/istota_browse/__main__.py` — `python -m istota_browse` support
+- `packages/istota-browse/src/istota_browse/skill.toml` — Manifest with declarative env vars
+- `packages/istota-browse/src/istota_browse/skill.md` — Skill docs with updated CLI paths
+
+**Files modified:**
+- `src/istota/skills/_types.py` — Added `module_name: str = ""` to `SkillMeta`
+- `src/istota/skills/_loader.py` — Entry point discovery, `skip_entrypoints` param, fingerprint includes EP skills
+- `src/istota/skills/_env.py` — Uses `meta.module_name` in `dispatch_setup_env_hooks()`
+- `src/istota/executor.py` — Passes `skip_entrypoints` when `bundled_skills_dir` set; removed hardcoded browser env vars
+- `src/istota/skills/browse/__init__.py` — Replaced with re-export shim
+- `src/istota/skills/browse/__main__.py` — Delegates to `istota_browse.main()`
+- `src/istota/skills/browse/skill.toml` — Removed (provided by package)
+- `src/istota/skills/browse/skill.md` — Removed (provided by package)
+- `pyproject.toml` — Added `[tool.uv.workspace]`
+- `deploy/ansible/tasks/main.yml` — `uv sync` → `uv sync --all-packages`
+- `tests/test_skills_browse.py` — Imports from `istota_browse` directly
+- `tests/test_skills_loader.py` — 10 new entry point discovery tests, `skip_entrypoints=True` everywhere
+- `tests/test_executor.py` — `skip_entrypoints` in fingerprint calls
+
 ## 2026-03-09: Reverse geocoding and day summary for location skill
 
 Integrated the standalone `reverse_geocode.py` script into the location skill. Coordinates are reverse geocoded via Nominatim and cached in a new `reverse_geocode_cache` table in the main DB (replacing the script's separate cache DB). GPS pings are clustered into stops with a greedy sequential algorithm, then resolved to place names via saved places, proximity matching, or reverse geocoding.

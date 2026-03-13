@@ -497,7 +497,7 @@ class TestSkillsFingerprintIntegration:
 
         # Pre-store the current fingerprint
         from istota.skills_loader import compute_skills_fingerprint
-        fp = compute_skills_fingerprint(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+        fp = compute_skills_fingerprint(config.skills_dir, bundled_dir=config.bundled_skills_dir, skip_entrypoints=bool(config.bundled_skills_dir))
 
         with db.get_db(config.db_path) as conn:
             db.set_user_skills_fingerprint(conn, "alice", fp)
@@ -548,7 +548,7 @@ class TestSkillsFingerprintIntegration:
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
         from istota.skills_loader import compute_skills_fingerprint
-        expected_fp = compute_skills_fingerprint(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+        expected_fp = compute_skills_fingerprint(config.skills_dir, bundled_dir=config.bundled_skills_dir, skip_entrypoints=bool(config.bundled_skills_dir))
 
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn, source_type="talk")

@@ -2,7 +2,7 @@
 
 ## Skills Loader (`src/istota/skills_loader.py`)
 
-### `SkillMeta` Dataclass (L12-21)
+### `SkillMeta` Dataclass
 ```python
 @dataclass
 class SkillMeta:
@@ -13,15 +13,22 @@ class SkillMeta:
     keywords: list[str] = field(default_factory=list)
     resource_types: list[str] = field(default_factory=list)
     source_types: list[str] = field(default_factory=list)
+    file_types: list[str] = field(default_factory=list)
+    companion_skills: list[str] = field(default_factory=list)
+    env_specs: list[EnvSpec] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
+    skill_dir: str = ""
+    module_name: str = ""  # Python module for external packages (e.g., "istota_browse")
 ```
 
 ### Functions
 ```python
-load_skill_index(skills_dir: Path) -> dict[str, SkillMeta]       # L24-43: Load _index.toml
-select_skills(prompt, source_type, user_resource_types, skill_index, is_admin=True) -> list[str]  # L46-89
-compute_skills_fingerprint(skills_dir: Path) -> str               # L92-105: SHA-256, first 12 hex chars
-load_skills_changelog(skills_dir: Path) -> str | None             # L108-114: CHANGELOG.md
-load_skills(skills_dir: Path, skill_names: list[str]) -> str      # L117-130: Concatenate skill docs
+load_skill_index(skills_dir, bundled_dir=None, skip_entrypoints=False) -> dict[str, SkillMeta]
+select_skills(prompt, source_type, user_resource_types, skill_index, is_admin=True, ...) -> list[str]
+compute_skills_fingerprint(skills_dir, bundled_dir=None, skip_entrypoints=False) -> str
+load_skills_changelog(skills_dir, bundled_dir=None) -> str | None
+load_skills(skills_dir, skill_names, ..., skip_entrypoints=False) -> str
+_discover_entrypoint_skills() -> dict[str, SkillMeta]  # Entry point discovery
 ```
 
 ### Selection Logic (`select_skills`, L46-89)

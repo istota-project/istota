@@ -132,8 +132,8 @@ Each user gets a shared Nextcloud folder:
 ## Development
 
 ```bash
-uv sync                                    # Install dependencies
-uv run pytest tests/ -v                    # Run tests (~2400 unit tests)
+uv sync --all-packages                     # Install dependencies + workspace packages
+uv run pytest tests/ -v                    # Run tests (~2500 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
@@ -141,9 +141,9 @@ uv run istota task "hello" -u alice -x     # Test execution
 Optional dependency groups:
 
 ```bash
-uv sync --extra memory-search    # sqlite-vec + sentence-transformers for semantic search
-uv sync --extra whisper          # faster-whisper for audio transcription
-uv sync --extra location         # fastapi + uvicorn + geopy for GPS location receiver
+uv sync --all-packages --extra memory-search    # sqlite-vec + sentence-transformers for semantic search
+uv sync --all-packages --extra whisper          # faster-whisper for audio transcription
+uv sync --all-packages --extra location         # fastapi + uvicorn + geopy for GPS location receiver
 ```
 
 ## Further reading

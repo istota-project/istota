@@ -1,8 +1,10 @@
 """Tests for istota.skills_loader (and underlying skills._loader)."""
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from istota.skills._loader import (
+    _discover_entrypoint_skills,
     _get_attachment_extensions,
     compute_skills_fingerprint,
     load_skill_index,
@@ -51,7 +53,7 @@ class TestLoadSkillIndex:
             'description = "Email formatting"\n'
             'keywords = ["email", "mail"]\n'
         ))
-        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path))
+        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
         assert len(index) == 3
         assert index["files"].name == "files"
         assert index["files"].description == "Nextcloud file operations"
@@ -64,7 +66,7 @@ class TestLoadSkillIndex:
             '[minimal]\n'
             'description = "Bare skill"\n'
         ))
-        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path))
+        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
         meta = index["minimal"]
         assert meta.always_include is False
         assert meta.keywords == []
@@ -72,12 +74,12 @@ class TestLoadSkillIndex:
         assert meta.source_types == []
 
     def test_load_index_missing_file(self, tmp_path):
-        index = load_skill_index(tmp_path / "nonexistent", bundled_dir=_empty_bundled(tmp_path))
+        index = load_skill_index(tmp_path / "nonexistent", bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
         assert index == {}
 
     def test_load_index_empty_file(self, tmp_path):
         skills_dir = _write_index(tmp_path / "skills", "")
-        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path))
+        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
         assert index == {}
 
 
@@ -455,7 +457,7 @@ class TestAdminOnlySkills:
             'keywords = ["schedule"]\n'
             'admin_only = true\n'
         ))
-        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path))
+        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
         assert index["schedules"].admin_only is True
 
     def test_admin_only_default_false(self, tmp_path):
@@ -463,7 +465,7 @@ class TestAdminOnlySkills:
             '[email]\n'
             'description = "Email"\n'
         ))
-        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path))
+        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
         assert index["email"].admin_only is False
 
 
@@ -582,7 +584,7 @@ class TestFileTypeSelection:
             'keywords = ["audio"]\n'
             'file_types = ["mp3", "wav"]\n'
         ))
-        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path))
+        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
         assert index["whisper"].file_types == ["mp3", "wav"]
 
     def test_file_types_default_empty(self, tmp_path):
@@ -590,7 +592,7 @@ class TestFileTypeSelection:
             '[email]\n'
             'description = "Email"\n'
         ))
-        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path))
+        index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
         assert index["email"].file_types == []
 
 
@@ -699,7 +701,7 @@ class TestCompanionSkills:
             'file_types = ["mp3"]\n'
             'companion_skills = ["reminders", "calendar"]\n'
         )
-        index = load_skill_index(tmp_path / "empty_skills", bundled_dir=bundled)
+        index = load_skill_index(tmp_path / "empty_skills", bundled_dir=bundled, skip_entrypoints=True)
         assert index["whisper"].companion_skills == ["reminders", "calendar"]
 
     def test_companion_skills_default_empty(self, tmp_path):
@@ -707,7 +709,7 @@ class TestCompanionSkills:
         skill_dir = bundled / "email"
         skill_dir.mkdir(parents=True)
         (skill_dir / "skill.toml").write_text('description = "Email"\n')
-        index = load_skill_index(tmp_path / "empty_skills", bundled_dir=bundled)
+        index = load_skill_index(tmp_path / "empty_skills", bundled_dir=bundled, skip_entrypoints=True)
         assert index["email"].companion_skills == []
 
 
@@ -722,7 +724,7 @@ class TestDirectoryBasedDiscovery:
             'description = "My new skill"\n'
             'keywords = ["foo", "bar"]\n'
         )
-        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
+        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled, skip_entrypoints=True)
         assert "my_skill" in index
         assert index["my_skill"].description == "My new skill"
         assert index["my_skill"].keywords == ["foo", "bar"]
@@ -740,7 +742,7 @@ class TestDirectoryBasedDiscovery:
             'resource_type = "my_service"\n'
             'field = "base_url"\n'
         )
-        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
+        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled, skip_entrypoints=True)
         meta = index["test_skill"]
         assert len(meta.env_specs) == 1
         assert meta.env_specs[0].var == "MY_API_URL"
@@ -756,7 +758,7 @@ class TestDirectoryBasedDiscovery:
             'description = "Audio processing"\n'
             'dependencies = ["faster-whisper>=1.1.0"]\n'
         )
-        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
+        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled, skip_entrypoints=True)
         assert index["audio"].dependencies == ["faster-whisper>=1.1.0"]
 
     def test_operator_override_wins_over_bundled(self, tmp_path):
@@ -770,7 +772,7 @@ class TestDirectoryBasedDiscovery:
         override_dir.mkdir(parents=True)
         (override_dir / "skill.toml").write_text('description = "Operator override"\n')
 
-        index = load_skill_index(config_skills, bundled_dir=bundled)
+        index = load_skill_index(config_skills, bundled_dir=bundled, skip_entrypoints=True)
         assert index["my_skill"].description == "Operator override"
 
     def test_operator_override_wins_over_legacy_index(self, tmp_path):
@@ -782,7 +784,7 @@ class TestDirectoryBasedDiscovery:
         override_dir.mkdir(parents=True)
         (override_dir / "skill.toml").write_text('description = "Directory override"\n')
 
-        index = load_skill_index(config_skills, bundled_dir=bundled)
+        index = load_skill_index(config_skills, bundled_dir=bundled, skip_entrypoints=True)
         assert index["my_skill"].description == "Directory override"
 
     def test_bundled_wins_over_legacy_index(self, tmp_path):
@@ -794,14 +796,14 @@ class TestDirectoryBasedDiscovery:
         skill_dir.mkdir(parents=True)
         (skill_dir / "skill.toml").write_text('description = "Bundled"\n')
 
-        index = load_skill_index(config_skills, bundled_dir=bundled)
+        index = load_skill_index(config_skills, bundled_dir=bundled, skip_entrypoints=True)
         assert index["my_skill"].description == "Bundled"
 
     def test_legacy_only_skills_still_work(self, tmp_path):
         config_skills = tmp_path / "config_skills"
         _write_index(config_skills, '[legacy_skill]\ndescription = "Old style"\nkeywords = ["old"]\n')
 
-        index = load_skill_index(config_skills, bundled_dir=_empty_bundled(tmp_path))
+        index = load_skill_index(config_skills, bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
         assert "legacy_skill" in index
         assert index["legacy_skill"].keywords == ["old"]
 
@@ -814,7 +816,7 @@ class TestDirectoryBasedDiscovery:
         (bundled / ".hidden").mkdir(parents=True)
         (bundled / ".hidden" / "skill.toml").write_text('description = "Should not load"\n')
 
-        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
+        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled, skip_entrypoints=True)
         assert "__pycache__" not in index
         assert "_loader" not in index
         assert ".hidden" not in index
@@ -829,7 +831,7 @@ class TestDirectoryBasedDiscovery:
         config_skills = tmp_path / "config_skills"
         config_skills.mkdir()
 
-        index = load_skill_index(config_skills, bundled_dir=bundled)
+        index = load_skill_index(config_skills, bundled_dir=bundled, skip_entrypoints=True)
         result = load_skills(config_skills, ["my_skill"], skill_index=index, bundled_dir=bundled)
         assert "Bundled doc content." in result
 
@@ -845,7 +847,7 @@ class TestDirectoryBasedDiscovery:
         override_doc.mkdir(parents=True)
         (override_doc / "skill.md").write_text("Operator doc override.")
 
-        index = load_skill_index(config_skills, bundled_dir=bundled)
+        index = load_skill_index(config_skills, bundled_dir=bundled, skip_entrypoints=True)
         result = load_skills(config_skills, ["my_skill"], skill_index=index, bundled_dir=bundled)
         assert "Operator doc override." in result
         assert "Bundled doc." not in result
@@ -856,7 +858,7 @@ class TestDirectoryBasedDiscovery:
         _write_index(config_skills, '[my_skill]\ndescription = "Legacy"\n')
         _write_skill(config_skills, "my_skill", "Legacy flat doc.")
 
-        index = load_skill_index(config_skills, bundled_dir=bundled)
+        index = load_skill_index(config_skills, bundled_dir=bundled, skip_entrypoints=True)
         result = load_skills(config_skills, ["my_skill"], skill_index=index, bundled_dir=bundled)
         assert "Legacy flat doc." in result
 
@@ -948,7 +950,7 @@ class TestSkillEnvSpecs:
             'resource_type = "karakeep"\n'
             'field = "api_key"\n'
         )
-        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
+        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled, skip_entrypoints=True)
         meta = index["bookmarks"]
         assert len(meta.env_specs) == 2
         assert meta.env_specs[0].var == "KARAKEEP_BASE_URL"
@@ -967,7 +969,7 @@ class TestSkillEnvSpecs:
             'config_path = "browser.api_url"\n'
             'when = "browser.enabled"\n'
         )
-        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
+        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled, skip_entrypoints=True)
         spec = index["browse"].env_specs[0]
         assert spec.source == "config"
         assert spec.config_path == "browser.api_url"
@@ -978,5 +980,178 @@ class TestSkillEnvSpecs:
         skill_dir = bundled / "simple"
         skill_dir.mkdir(parents=True)
         (skill_dir / "skill.toml").write_text('description = "No env"\n')
-        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
+        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled, skip_entrypoints=True)
         assert index["simple"].env_specs == []
+
+
+class TestEntryPointDiscovery:
+    """Tests for entry point-based skill discovery."""
+
+    def _make_ep_module(self, tmp_path, name, toml_content):
+        """Create a fake module directory with skill.toml for entry point testing."""
+        mod_dir = tmp_path / name
+        mod_dir.mkdir(parents=True)
+        (mod_dir / "__init__.py").write_text("")
+        (mod_dir / "skill.toml").write_text(toml_content)
+        return mod_dir
+
+    def _mock_entry_point(self, name, mod_dir):
+        """Create a mock entry point that loads a module with __file__ pointing to mod_dir."""
+        ep = MagicMock()
+        ep.name = name
+        mod = MagicMock()
+        mod.__file__ = str(mod_dir / "__init__.py")
+        mod.__name__ = f"istota_{name}"
+        ep.load.return_value = mod
+        return ep
+
+    @patch("istota.skills._loader.importlib.metadata.entry_points")
+    def test_discovers_entry_point_skill(self, mock_eps, tmp_path):
+        mod_dir = self._make_ep_module(
+            tmp_path, "my_ext",
+            'description = "External skill"\nkeywords = ["ext"]\n',
+        )
+        mock_eps.return_value = [self._mock_entry_point("my_ext", mod_dir)]
+
+        skills = _discover_entrypoint_skills()
+        assert "my_ext" in skills
+        assert skills["my_ext"].description == "External skill"
+        assert skills["my_ext"].keywords == ["ext"]
+        assert skills["my_ext"].module_name == "istota_my_ext"
+
+    @patch("istota.skills._loader.importlib.metadata.entry_points")
+    def test_entry_point_name_overrides_dir_name(self, mock_eps, tmp_path):
+        # Directory is named "istota_browse" but entry point name is "browse"
+        mod_dir = self._make_ep_module(
+            tmp_path, "istota_browse",
+            'description = "Browse"\n',
+        )
+        mock_eps.return_value = [self._mock_entry_point("browse", mod_dir)]
+
+        skills = _discover_entrypoint_skills()
+        assert "browse" in skills
+        assert "istota_browse" not in skills
+
+    @patch("istota.skills._loader.importlib.metadata.entry_points")
+    def test_entry_point_load_failure_skipped(self, mock_eps):
+        ep = MagicMock()
+        ep.name = "broken"
+        ep.load.side_effect = ImportError("missing dep")
+        mock_eps.return_value = [ep]
+
+        skills = _discover_entrypoint_skills()
+        assert skills == {}
+
+    @patch("istota.skills._loader.importlib.metadata.entry_points")
+    def test_entry_point_no_skill_toml_skipped(self, mock_eps, tmp_path):
+        mod_dir = tmp_path / "no_toml"
+        mod_dir.mkdir(parents=True)
+        (mod_dir / "__init__.py").write_text("")
+        # No skill.toml
+
+        mock_eps.return_value = [self._mock_entry_point("no_toml", mod_dir)]
+
+        skills = _discover_entrypoint_skills()
+        assert skills == {}
+
+    @patch("istota.skills._loader.importlib.metadata.entry_points")
+    def test_skip_entrypoints_suppresses_discovery(self, mock_eps, tmp_path):
+        mod_dir = self._make_ep_module(
+            tmp_path, "ext_skill",
+            'description = "External"\n',
+        )
+        mock_eps.return_value = [self._mock_entry_point("ext_skill", mod_dir)]
+
+        # With skip_entrypoints=True, entry points should not appear
+        index = load_skill_index(
+            tmp_path / "empty_config",
+            bundled_dir=_empty_bundled(tmp_path),
+            skip_entrypoints=True,
+        )
+        assert "ext_skill" not in index
+
+    @patch("istota.skills._loader.importlib.metadata.entry_points")
+    def test_entry_point_layer_priority(self, mock_eps, tmp_path):
+        """Entry point skills override bundled, but operator overrides win."""
+        # Bundled skill
+        bundled = tmp_path / "bundled"
+        skill_dir = bundled / "my_skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "skill.toml").write_text('description = "Bundled"\n')
+
+        # Entry point skill with same name
+        ep_dir = self._make_ep_module(
+            tmp_path, "ep_my_skill",
+            'description = "Entry point"\n',
+        )
+        mock_eps.return_value = [self._mock_entry_point("my_skill", ep_dir)]
+
+        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
+        assert index["my_skill"].description == "Entry point"
+
+    @patch("istota.skills._loader.importlib.metadata.entry_points")
+    def test_operator_override_wins_over_entry_point(self, mock_eps, tmp_path):
+        # Entry point skill
+        ep_dir = self._make_ep_module(
+            tmp_path, "ep_skill",
+            'description = "Entry point"\n',
+        )
+        mock_eps.return_value = [self._mock_entry_point("my_skill", ep_dir)]
+
+        # Operator override
+        config_skills = tmp_path / "config_skills"
+        override_dir = config_skills / "my_skill"
+        override_dir.mkdir(parents=True)
+        (override_dir / "skill.toml").write_text('description = "Operator override"\n')
+
+        index = load_skill_index(config_skills, bundled_dir=_empty_bundled(tmp_path))
+        assert index["my_skill"].description == "Operator override"
+
+    @patch("istota.skills._loader._discover_entrypoint_skills")
+    def test_fingerprint_includes_entry_point_skills(self, mock_discover, tmp_path):
+        """compute_skills_fingerprint should differ when entry point skills change."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        bundled = _empty_bundled(tmp_path)
+
+        # No entry point skills
+        mock_discover.return_value = {}
+        fp1 = compute_skills_fingerprint(skills_dir, bundled_dir=bundled)
+
+        # With an entry point skill
+        ep_dir = tmp_path / "ep_browse"
+        ep_dir.mkdir(parents=True)
+        (ep_dir / "skill.toml").write_text('description = "Browse"\n')
+        (ep_dir / "skill.md").write_text("Browse docs.")
+        mock_discover.return_value = {
+            "browse": SkillMeta(
+                name="browse", description="Browse",
+                skill_dir=str(ep_dir), module_name="istota_browse",
+            ),
+        }
+        fp2 = compute_skills_fingerprint(skills_dir, bundled_dir=bundled)
+
+        assert fp1 != fp2
+
+    @patch("istota.skills._loader._discover_entrypoint_skills")
+    def test_fingerprint_skips_entrypoints_when_requested(self, mock_discover, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        bundled = _empty_bundled(tmp_path)
+
+        ep_dir = tmp_path / "ep_browse"
+        ep_dir.mkdir(parents=True)
+        (ep_dir / "skill.toml").write_text('description = "Browse"\n')
+        mock_discover.return_value = {
+            "browse": SkillMeta(
+                name="browse", description="Browse",
+                skill_dir=str(ep_dir), module_name="istota_browse",
+            ),
+        }
+
+        fp_with = compute_skills_fingerprint(skills_dir, bundled_dir=bundled, skip_entrypoints=False)
+        fp_without = compute_skills_fingerprint(skills_dir, bundled_dir=bundled, skip_entrypoints=True)
+
+        # skip_entrypoints=True should not call _discover_entrypoint_skills
+        # and should produce a different fingerprint
+        assert fp_with != fp_without

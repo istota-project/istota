@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota.skills.browse import (
+from istota_browse import (
     _links_from_extract,
     build_parser,
     cmd_close,
@@ -125,8 +125,8 @@ class TestBuildParser:
 
 
 class TestCmdGet:
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_basic_get(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -149,8 +149,8 @@ class TestCmdGet:
         assert call_args[1]["json"]["url"] == "https://example.com"
         assert call_args[1]["json"]["keep_session"] is False
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_get_with_session(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"status": "ok", "session_id": "abc123"}
@@ -163,8 +163,8 @@ class TestCmdGet:
         payload = mock_post.call_args[1]["json"]
         assert payload["session_id"] == "abc123"
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_get_with_skip_behavior(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"status": "ok"}
@@ -177,8 +177,8 @@ class TestCmdGet:
         payload = mock_post.call_args[1]["json"]
         assert payload["skip_behavior"] is True
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_get_without_skip_behavior(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"status": "ok"}
@@ -191,8 +191,8 @@ class TestCmdGet:
         payload = mock_post.call_args[1]["json"]
         assert "skip_behavior" not in payload
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_captcha_response(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -213,8 +213,8 @@ class TestCmdGet:
 
 
 class TestCmdScreenshot:
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_screenshot_saves_file(self, mock_url, mock_post, tmp_path):
         mock_resp = MagicMock()
         mock_resp.headers = {"content-type": "image/png"}
@@ -230,8 +230,8 @@ class TestCmdScreenshot:
         assert result["path"] == output
         assert (tmp_path / "shot.png").read_bytes() == b"\x89PNG fake image data"
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_screenshot_error(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.headers = {"content-type": "application/json"}
@@ -246,8 +246,8 @@ class TestCmdScreenshot:
 
 
 class TestCmdExtract:
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_extract(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -270,8 +270,8 @@ class TestCmdExtract:
 
 
 class TestCmdInteract:
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_click_actions(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -290,8 +290,8 @@ class TestCmdInteract:
         assert payload["session_id"] == "sess1"
         assert payload["actions"] == [{"type": "click", "selector": ".btn"}]
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_fill_actions(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"status": "ok", "session_id": "sess1", "actions": []}
@@ -304,8 +304,8 @@ class TestCmdInteract:
         payload = mock_post.call_args[1]["json"]
         assert payload["actions"] == [{"type": "fill", "selector": "#email", "value": "test@example.com"}]
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_scroll_action(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"status": "ok", "session_id": "sess1", "actions": []}
@@ -320,8 +320,8 @@ class TestCmdInteract:
 
 
 class TestCmdClose:
-    @patch("istota.skills.browse.httpx.delete")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.delete")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_close(self, mock_url, mock_delete):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"status": "closed", "session_id": "sess1"}
@@ -338,8 +338,8 @@ class TestCmdClose:
 
 
 class TestMain:
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_main_outputs_json(self, mock_url, mock_post, capsys):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"status": "ok", "title": "Test"}
@@ -351,8 +351,8 @@ class TestMain:
         output = json.loads(captured.out)
         assert output["status"] == "ok"
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_main_connection_error(self, mock_url, mock_post, capsys):
         import httpx
         mock_post.side_effect = httpx.ConnectError("Connection refused")
@@ -368,8 +368,8 @@ class TestMain:
 
 
 class TestCmdLinks:
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_links_basic(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -399,9 +399,9 @@ class TestCmdLinks:
         assert "text" not in result or result.get("text") is None
         assert "title" not in result
 
-    @patch("istota.skills.browse.httpx.delete")
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.delete")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_links_with_selector_href_attr(self, mock_url, mock_post, mock_delete):
         """When extract returns href on elements directly (Guardian-style)."""
         browse_resp = MagicMock()
@@ -448,9 +448,9 @@ class TestCmdLinks:
         ]
         mock_delete.assert_called_once()
 
-    @patch("istota.skills.browse.httpx.delete")
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.delete")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_links_with_selector_nested_anchors(self, mock_url, mock_post, mock_delete):
         """When extract returns elements containing nested <a> tags (fallback)."""
         browse_resp = MagicMock()
@@ -490,8 +490,8 @@ class TestCmdLinks:
             {"text": "Sports", "href": "/sports"},
         ]
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_links_with_session_and_selector(self, mock_url, mock_post):
         """Session + selector uses extract with href attribute."""
         mock_resp = MagicMock()
@@ -521,8 +521,8 @@ class TestCmdLinks:
         assert payload["session_id"] == "sess1"
         assert payload["selector"] == ".headlines a"
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_links_empty(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -585,8 +585,8 @@ class TestCmdLinks:
         assert links[0] == {"text": "Direct link", "href": "/direct"}
         assert links[1] == {"text": "Nested", "href": "/nested"}
 
-    @patch("istota.skills.browse.httpx.post")
-    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    @patch("istota_browse.httpx.post")
+    @patch("istota_browse.get_api_url", return_value="http://test:9223")
     def test_links_error_passthrough(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {

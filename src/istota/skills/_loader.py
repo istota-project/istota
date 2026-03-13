@@ -12,6 +12,7 @@ Discovery order (later wins):
 
 import hashlib
 import importlib
+import importlib.metadata
 import logging
 import tomllib
 from pathlib import Path
@@ -90,6 +91,46 @@ def _discover_directory_skills(base_dir: Path) -> dict[str, SkillMeta]:
     return skills
 
 
+def _discover_entrypoint_skills() -> dict[str, SkillMeta]:
+    """Discover skills registered via entry points (istota.skills group).
+
+    External packages register themselves with:
+        [project.entry-points."istota.skills"]
+        browse = "istota_browse"
+
+    Each entry point is imported to find its package directory, then
+    skill.toml is loaded from that directory.
+    """
+    skills = {}
+    try:
+        eps = importlib.metadata.entry_points(group="istota.skills")
+    except Exception:
+        return skills
+
+    for ep in eps:
+        try:
+            mod = ep.load()
+        except Exception as e:
+            logger.warning("Failed to load entry point %s: %s", ep.name, e)
+            continue
+
+        mod_file = getattr(mod, "__file__", None)
+        if not mod_file:
+            continue
+
+        skill_dir = Path(mod_file).parent
+        meta = _load_skill_toml(skill_dir)
+        if meta is None:
+            continue
+
+        # Override name to match entry point name (not directory name)
+        meta.name = ep.name
+        meta.module_name = mod.__name__
+        skills[ep.name] = meta
+
+    return skills
+
+
 def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
     """Load skill metadata from legacy _index.toml format."""
     index_path = skills_dir / "_index.toml"
@@ -123,17 +164,20 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
 def load_skill_index(
     skills_dir: Path,
     bundled_dir: Path | None = None,
+    skip_entrypoints: bool = False,
 ) -> dict[str, SkillMeta]:
     """Load all skill metadata with layered discovery.
 
     Discovery priority (later wins):
     1. Legacy _index.toml in skills_dir (lowest priority)
     2. Bundled skill.toml directories (in src/istota/skills/)
-    3. Operator skill.toml directories in skills_dir (highest priority)
+    3. Entry point skills from installed packages
+    4. Operator skill.toml directories in skills_dir (highest priority)
 
     Args:
         skills_dir: Operator config skills directory (e.g. config/skills/).
         bundled_dir: Override for bundled skills directory (for testing).
+        skip_entrypoints: Skip entry point discovery (for testing isolation).
     """
     if bundled_dir is None:
         bundled_dir = _BUNDLED_SKILLS_DIR
@@ -145,7 +189,12 @@ def load_skill_index(
     bundled = _discover_directory_skills(bundled_dir)
     skills.update(bundled)
 
-    # Layer 3: Operator overrides from config/skills/*/skill.toml
+    # Layer 3: Entry point skills from installed packages
+    if not skip_entrypoints:
+        ep_skills = _discover_entrypoint_skills()
+        skills.update(ep_skills)
+
+    # Layer 4: Operator overrides from config/skills/*/skill.toml
     overrides = _discover_directory_skills(skills_dir)
     skills.update(overrides)
 
@@ -307,6 +356,7 @@ def load_skills(
     bot_dir: str = "",
     skill_index: dict[str, SkillMeta] | None = None,
     bundled_dir: Path | None = None,
+    skip_entrypoints: bool = False,
 ) -> str:
     """Load and concatenate selected skill docs, substituting placeholders."""
     if not bot_dir:
@@ -328,19 +378,20 @@ def load_skills(
     if not parts:
         return ""
 
-    fingerprint = compute_skills_fingerprint(skills_dir, bundled_dir)
+    fingerprint = compute_skills_fingerprint(skills_dir, bundled_dir, skip_entrypoints=skip_entrypoints)
     return f"## Skills Reference (v: {fingerprint})\n\n" + "\n\n".join(parts)
 
 
 def compute_skills_fingerprint(
     skills_dir: Path,
     bundled_dir: Path | None = None,
+    skip_entrypoints: bool = False,
 ) -> str:
     """Compute a content hash of all skill files for change detection.
 
-    Hashes all skill.toml + skill.md files from both bundled and operator dirs,
-    plus legacy _index.toml and *.md files. Sorted by name for determinism.
-    Returns the first 12 chars of the hex digest.
+    Hashes all skill.toml + skill.md files from bundled, entry point, and
+    operator dirs, plus legacy _index.toml and *.md files. Sorted by name
+    for determinism. Returns the first 12 chars of the hex digest.
     """
     if bundled_dir is None:
         bundled_dir = _BUNDLED_SKILLS_DIR
@@ -365,6 +416,17 @@ def compute_skills_fingerprint(
             for f in sorted(child.glob("skill.*")):
                 h.update(f"{child.name}/{f.name}".encode())
                 h.update(f.read_bytes())
+
+    # Entry point skill directories
+    if not skip_entrypoints:
+        ep_skills = _discover_entrypoint_skills()
+        for name in sorted(ep_skills):
+            meta = ep_skills[name]
+            if meta.skill_dir:
+                skill_path = Path(meta.skill_dir)
+                for f in sorted(skill_path.glob("skill.*")):
+                    h.update(f"entrypoint/{name}/{f.name}".encode())
+                    h.update(f.read_bytes())
 
     # Operator skill directories
     if skills_dir.is_dir():

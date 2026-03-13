@@ -58,6 +58,9 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/istota"]
 
+[tool.uv.workspace]
+members = ["packages/*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 markers = [

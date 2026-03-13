@@ -175,7 +175,7 @@ def dispatch_setup_env_hooks(
             continue
 
         # Try to import the skill's Python package
-        module_name = f"istota.skills.{skill_name}"
+        module_name = meta.module_name or f"istota.skills.{skill_name}"
         try:
             mod = importlib.import_module(module_name)
         except ImportError:
