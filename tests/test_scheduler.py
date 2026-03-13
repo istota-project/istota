@@ -2409,6 +2409,56 @@ class TestDeferredOperations:
 
         mock_log.warning.assert_not_called()
 
+    def test_warn_orphaned_skips_email_source(self, tmp_path):
+        """Don't delete deferred file when source_type is email."""
+        from istota.scheduler import _warn_orphaned_email_output
+
+        task = db.Task(
+            id=42, status="completed", prompt="Reply",
+            user_id="testuser", source_type="email",
+        )
+        user_temp = tmp_path / "temp" / "testuser"
+        user_temp.mkdir(parents=True)
+        deferred = user_temp / "task_42_email_output.json"
+        deferred.write_text('{"subject": "Re: Hi", "body": "ok"}')
+
+        _warn_orphaned_email_output(task, user_temp)
+        assert deferred.exists()
+
+    def test_warn_orphaned_skips_email_output_target(self, tmp_path):
+        """Don't delete deferred file when output_target includes email."""
+        from istota.scheduler import _warn_orphaned_email_output
+
+        task = db.Task(
+            id=42, status="completed", prompt="Briefing",
+            user_id="testuser", source_type="briefing",
+            output_target="email",
+        )
+        user_temp = tmp_path / "temp" / "testuser"
+        user_temp.mkdir(parents=True)
+        deferred = user_temp / "task_42_email_output.json"
+        deferred.write_text('{"subject": "Briefing", "body": "content"}')
+
+        _warn_orphaned_email_output(task, user_temp)
+        assert deferred.exists()
+
+    def test_warn_orphaned_skips_both_output_target(self, tmp_path):
+        """Don't delete deferred file when output_target is 'both' (talk+email)."""
+        from istota.scheduler import _warn_orphaned_email_output
+
+        task = db.Task(
+            id=42, status="completed", prompt="Briefing",
+            user_id="testuser", source_type="briefing",
+            output_target="both",
+        )
+        user_temp = tmp_path / "temp" / "testuser"
+        user_temp.mkdir(parents=True)
+        deferred = user_temp / "task_42_email_output.json"
+        deferred.write_text('{"subject": "Briefing", "body": "content"}')
+
+        _warn_orphaned_email_output(task, user_temp)
+        assert deferred.exists()
+
 
 # ---------------------------------------------------------------------------
 # TestRestartFavaService

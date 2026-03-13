@@ -823,7 +823,13 @@ def _warn_orphaned_email_output(task: db.Task, user_temp_dir: Path) -> None:
     of `email send` for a non-email task (e.g. a Talk user asking to send an
     email). The deferred file has no recipient and the scheduler won't process
     it because the output target isn't "email".
+
+    Skips tasks whose output_target or source_type involves email, since
+    those legitimately use the deferred file for delivery.
     """
+    target = task.output_target or ""
+    if task.source_type == "email" or target in ("email", "both", "all"):
+        return
     path = user_temp_dir / f"task_{task.id}_email_output.json"
     if not path.exists():
         return
