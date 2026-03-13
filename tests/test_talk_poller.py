@@ -1,12 +1,14 @@
 """Tests for Talk conversation polling and task creation."""
 
 import asyncio
+import time
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from istota import db
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
+from istota import talk_poller as _talk_poller_mod
 from istota.talk_poller import (
     _get_participants,
     _is_multi_user,
@@ -18,6 +20,16 @@ from istota.talk_poller import (
     is_bot_mentioned,
     poll_talk_conversations,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_poller_caches():
+    """Reset module-level caches between tests."""
+    _participant_cache.clear()
+    _talk_poller_mod._conversation_cache = None
+    yield
+    _participant_cache.clear()
+    _talk_poller_mod._conversation_cache = None
 
 
 @pytest.fixture
@@ -713,7 +725,7 @@ class TestGetParticipantsAndMultiUser:
 
     @pytest.mark.asyncio
     async def test_type_2_with_2_participants(self):
-        _participant_cache.clear()
+
         client = MagicMock()
         client.get_participants = AsyncMock(return_value=[
             {"actorId": "alice", "displayName": "Alice"},
@@ -725,7 +737,7 @@ class TestGetParticipantsAndMultiUser:
 
     @pytest.mark.asyncio
     async def test_type_2_with_3_participants(self):
-        _participant_cache.clear()
+
         client = MagicMock()
         client.get_participants = AsyncMock(return_value=[
             {"actorId": "alice", "displayName": "Alice"},
@@ -737,7 +749,7 @@ class TestGetParticipantsAndMultiUser:
 
     @pytest.mark.asyncio
     async def test_caching(self):
-        _participant_cache.clear()
+
         client = MagicMock()
         client.get_participants = AsyncMock(return_value=[
             {"actorId": "alice", "displayName": "Alice"},
@@ -756,7 +768,7 @@ class TestGetParticipantsAndMultiUser:
 
     @pytest.mark.asyncio
     async def test_api_error_falls_back_to_empty(self):
-        _participant_cache.clear()
+
         client = MagicMock()
         client.get_participants = AsyncMock(side_effect=Exception("API error"))
         participants = await _get_participants(client, "room4", 2)
@@ -793,7 +805,7 @@ class TestPollTalkConversationsGroupRoom:
     @pytest.mark.asyncio
     async def test_group_room_skips_without_mention(self, make_config):
         """In a 3+ person room, messages without @mention are skipped."""
-        _participant_cache.clear()
+
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}
 
@@ -821,7 +833,7 @@ class TestPollTalkConversationsGroupRoom:
     @pytest.mark.asyncio
     async def test_group_room_processes_with_mention(self, make_config):
         """In a 3+ person room, messages with @mention are processed."""
-        _participant_cache.clear()
+
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}
 
@@ -865,7 +877,7 @@ class TestPollTalkConversationsGroupRoom:
     @pytest.mark.asyncio
     async def test_two_person_group_acts_like_dm(self, make_config):
         """A type-2 room with only 2 participants doesn't require mention."""
-        _participant_cache.clear()
+
         config = make_config()
 
         msg = _msg(id=103, actor_id="alice", message="Hello there")
@@ -896,7 +908,7 @@ class TestPollTalkConversationsGroupRoom:
     @pytest.mark.asyncio
     async def test_dm_unchanged(self, make_config):
         """Type-1 DM always processes without mention."""
-        _participant_cache.clear()
+
         config = make_config()
 
         msg = _msg(id=104, actor_id="alice", message="Hello")
@@ -1092,3 +1104,96 @@ class TestTalkMessageCacheIntegration:
 
             # fetch_chat_history should NOT have been called
             mock_instance.fetch_chat_history.assert_not_called()
+
+
+class TestConversationListCache:
+    """Tests for the conversation list caching in poll_talk_conversations."""
+
+    @pytest.mark.asyncio
+    async def test_cached_list_avoids_api_call(self, make_config):
+        """Second poll cycle uses cached conversation list."""
+        config = make_config()
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            mock_instance.fetch_chat_history = AsyncMock(return_value=[])
+
+            # First call populates cache
+            await poll_talk_conversations(config)
+            assert mock_instance.list_conversations.call_count == 1
+
+            # Second call within TTL uses cache
+            await poll_talk_conversations(config)
+            assert mock_instance.list_conversations.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cache_expires_after_ttl(self, make_config):
+        """Conversation list is refreshed after TTL expires."""
+        config = make_config()
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            mock_instance.fetch_chat_history = AsyncMock(return_value=[])
+
+            await poll_talk_conversations(config)
+            assert mock_instance.list_conversations.call_count == 1
+
+            # Expire the cache
+            _talk_poller_mod._conversation_cache = (
+                _talk_poller_mod._conversation_cache[0],
+                time.monotonic() - 120,  # well past TTL
+            )
+
+            await poll_talk_conversations(config)
+            assert mock_instance.list_conversations.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_cache_on_error(self, make_config):
+        """If list_conversations fails, use cached list instead of returning empty."""
+        config = make_config()
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            rooms = [{"token": "room1", "type": 1}]
+            mock_instance.list_conversations = AsyncMock(return_value=rooms)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            mock_instance.fetch_chat_history = AsyncMock(return_value=[])
+
+            # Populate cache
+            await poll_talk_conversations(config)
+
+            # Expire cache and make API fail
+            _talk_poller_mod._conversation_cache = (
+                _talk_poller_mod._conversation_cache[0],
+                time.monotonic() - 120,
+            )
+            mock_instance.list_conversations = AsyncMock(
+                side_effect=Exception("ReadTimeout")
+            )
+
+            # Should still work using cached rooms
+            result = await poll_talk_conversations(config)
+            # No crash, poll proceeded with cached list
+            assert result == []  # no messages, but didn't abort
+
+    @pytest.mark.asyncio
+    async def test_no_cache_on_first_error(self, make_config):
+        """If list_conversations fails with no cache, returns empty."""
+        config = make_config()
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(
+                side_effect=Exception("ReadTimeout")
+            )
+
+            result = await poll_talk_conversations(config)
+            assert result == []

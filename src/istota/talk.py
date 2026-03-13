@@ -67,6 +67,11 @@ def clean_message_content(message: dict, bot_username: str | None = None) -> str
 class TalkClient:
     """Client for Nextcloud Talk user API (not bot API)."""
 
+    # Default timeout for short API calls (list rooms, send message, etc.).
+    # httpx default is 5s which is too aggressive when the server is busy
+    # (e.g. during task execution).
+    DEFAULT_TIMEOUT = 15
+
     def __init__(self, config: Config):
         self.config = config
         self.base_url = config.nextcloud.url.rstrip("/")
@@ -89,7 +94,7 @@ class TalkClient:
             data["referenceId"] = reference_id
 
         logger.debug("Sending message to %s (%d chars)", conversation_token, len(message))
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
             response = await client.post(
                 url,
                 auth=self.auth,
@@ -119,7 +124,7 @@ class TalkClient:
             "Editing message %d in %s (%d chars)",
             message_id, conversation_token, len(message),
         )
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
             response = await client.put(
                 url,
                 auth=self.auth,
@@ -137,7 +142,7 @@ class TalkClient:
         """List all conversations the user is part of."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
             response = await client.get(
                 url,
                 auth=self.auth,
@@ -211,7 +216,7 @@ class TalkClient:
         """
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
             response = await client.get(
                 url,
                 auth=self.auth,
@@ -253,7 +258,7 @@ class TalkClient:
         """Get participants of a conversation."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room/{conversation_token}/participants"
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
             response = await client.get(
                 url,
                 auth=self.auth,
@@ -266,7 +271,7 @@ class TalkClient:
         """Get conversation metadata (displayName, type, etc.)."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room/{conversation_token}"
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
             response = await client.get(
                 url,
                 auth=self.auth,
@@ -373,7 +378,7 @@ class TalkClient:
         """
         url = f"{self.base_url}/remote.php/webdav/{file_path.lstrip('/')}"
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
             response = await client.get(url, auth=self.auth)
             response.raise_for_status()
 

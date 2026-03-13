@@ -342,7 +342,9 @@ class TestStreamingExecution:
             )
 
         assert success is True
-        assert result == "File has 42 lines."
+        # "Done." was an intermediate text block — now included in result
+        assert "Done." in result
+        assert "File has 42 lines." in result
         assert len(progress_calls) == 2
         assert progress_calls[0] == "📄 Reading data.txt"
         assert progress_calls[1] == "⚙️ Count lines"
@@ -526,6 +528,105 @@ class TestStreamingExecution:
 
         assert success is False
         assert "API key expired" in result
+
+    def test_intermediate_texts_prepended_to_result(self, tmp_path):
+        """Intermediate text blocks between tool calls are included in the result."""
+        config = _make_config(tmp_path)
+        task = _make_task()
+
+        stream_lines = [
+            json.dumps({"type": "system", "subtype": "init", "cwd": "/tmp"}) + "\n",
+            # First assistant turn: diagnostic text
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": "I found the root cause: the config is misconfigured."},
+                ]},
+            }) + "\n",
+            # Second turn: tool call (text would be a ToolUseEvent, not TextEvent)
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": "/tmp/config.toml"}},
+                ]},
+            }) + "\n",
+            json.dumps({"type": "user", "message": {"role": "user"}}) + "\n",
+            # Third turn: more diagnostic text
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": "The setting is wrong on line 42."},
+                ]},
+            }) + "\n",
+            # Fourth turn: tool call
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "id": "t2", "name": "Edit",
+                     "input": {"file_path": "/tmp/config.toml", "old_string": "x", "new_string": "y"}},
+                ]},
+            }) + "\n",
+            json.dumps({"type": "user", "message": {"role": "user"}}) + "\n",
+            # Final turn: brief summary (this is what ResultEvent contains)
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "Fixed it."}]},
+            }) + "\n",
+            json.dumps({
+                "type": "result", "subtype": "success", "result": "Fixed it.",
+            }) + "\n",
+        ]
+
+        mock_process = self._make_mock_process(stream_lines)
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.Popen", return_value=mock_process),
+        ]
+        with contextmanager_chain(patches):
+            success, result, _actions = execute_task(
+                task, config, [], on_progress=lambda m, **kw: None,
+            )
+
+        assert success is True
+        # All three text blocks should be in the result
+        assert "I found the root cause" in result
+        assert "The setting is wrong on line 42" in result
+        assert "Fixed it." in result
+        # Intermediate texts come before the final result
+        assert result.index("root cause") < result.index("Fixed it.")
+
+    def test_intermediate_texts_not_duplicated(self, tmp_path):
+        """If the ResultEvent already contains intermediate text, don't duplicate."""
+        config = _make_config(tmp_path)
+        task = _make_task()
+
+        stream_lines = [
+            json.dumps({"type": "system", "subtype": "init", "cwd": "/tmp"}) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "The answer is 42."}]},
+            }) + "\n",
+            # ResultEvent contains the same text
+            json.dumps({
+                "type": "result", "subtype": "success", "result": "The answer is 42.",
+            }) + "\n",
+        ]
+
+        mock_process = self._make_mock_process(stream_lines)
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.Popen", return_value=mock_process),
+        ]
+        with contextmanager_chain(patches):
+            success, result, _actions = execute_task(
+                task, config, [], on_progress=lambda m, **kw: None,
+            )
+
+        assert success is True
+        # Should not duplicate the text
+        assert result == "The answer is 42."
+        assert result.count("The answer is 42.") == 1
 
     def test_no_output_at_all(self, tmp_path):
         """When streaming Claude produces nothing, descriptive error is returned."""
