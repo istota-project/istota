@@ -763,6 +763,8 @@ def load_config(config_path: Path | None = None) -> Config:
             mode=sec.get("mode", "permissive"),
             sandbox_enabled=sec.get("sandbox_enabled", False),
             sandbox_admin_db_write=sec.get("sandbox_admin_db_write", False),
+            skill_proxy_enabled=sec.get("skill_proxy_enabled", False),
+            skill_proxy_timeout=sec.get("skill_proxy_timeout", 300),
             **({
                 "passthrough_env_vars": sec["passthrough_env_vars"]
             } if "passthrough_env_vars" in sec else {}),
