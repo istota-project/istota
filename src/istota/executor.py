@@ -1266,7 +1266,7 @@ def execute_task(
         task.prompt = enriched_prompt
 
     # Select and load relevant skills
-    from .skills_loader import (
+    from .skills._loader import (
         load_skill_index, select_skills, load_skills,
         compute_skills_fingerprint, load_skills_changelog,
     )

@@ -1,4 +1,4 @@
-"""Configuration loading for istota.briefing module."""
+"""Tests for istota.skills.briefing module."""
 
 from unittest.mock import patch, MagicMock
 
@@ -258,13 +258,7 @@ class TestFetchMarketData:
 
     def test_import_error_returns_none(self):
         market_config = {"futures": ["ES=F"]}
-        with patch(
-            "istota.briefing._fetch_market_data.__module__", side_effect=ImportError, create=True
-        ):
-            # The real function catches ImportError internally
-            # Force the import to fail by patching the module lookup
-            pass
-        # Directly test: if the markets module is not installed, returns None
+        # If the markets module is not installed, returns None
         with patch.dict("sys.modules", {"istota.skills.markets": None}):
             result = _fetch_market_data(market_config, "morning")
             assert result is None

@@ -48,9 +48,9 @@ _EXECUTOR_PATCHES = [
     "istota.executor.ensure_channel_directories",
     "istota.executor.get_caldav_client",
     "istota.executor.get_calendars_for_user",
-    "istota.skills_loader.load_skill_index",
-    "istota.skills_loader.select_skills",
-    "istota.skills_loader.load_skills",
+    "istota.skills._loader.load_skill_index",
+    "istota.skills._loader.select_skills",
+    "istota.skills._loader.load_skills",
 ]
 
 _EXECUTOR_PATCH_RETURNS = [
@@ -564,9 +564,9 @@ class TestDryRun:
             patch("istota.executor.ensure_channel_directories"),
             patch("istota.executor.get_caldav_client"),
             patch("istota.executor.get_calendars_for_user", return_value=None),
-            patch("istota.skills_loader.load_skill_index", return_value={}),
-            patch("istota.skills_loader.select_skills", return_value=[]),
-            patch("istota.skills_loader.load_skills", return_value=None),
+            patch("istota.skills._loader.load_skill_index", return_value={}),
+            patch("istota.skills._loader.select_skills", return_value=[]),
+            patch("istota.skills._loader.load_skills", return_value=None),
         ):
             success, result, _actions = execute_task(task, config, [], dry_run=True)
 
@@ -640,8 +640,8 @@ class TestDatedMemoriesInPrompt:
         with ExitStack() as stack:
             _apply_executor_patches(stack, {
                 "istota.executor.read_user_memory_v2": "Portfolio: 5% SGOL position",
-                "istota.skills_loader.load_skill_index": {"briefing": briefing_meta},
-                "istota.skills_loader.select_skills": ["briefing"],
+                "istota.skills._loader.load_skill_index": {"briefing": briefing_meta},
+                "istota.skills._loader.select_skills": ["briefing"],
             })
             success, result, _actions = execute_task(task, config, [], dry_run=True)
 

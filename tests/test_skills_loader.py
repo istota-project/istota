@@ -1,4 +1,4 @@
-"""Tests for istota.skills_loader (and underlying skills._loader)."""
+"""Tests for istota.skills._loader."""
 
 from pathlib import Path
 
