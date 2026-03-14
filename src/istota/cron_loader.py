@@ -21,6 +21,7 @@ class CronJob:
     cron: str
     prompt: str = ""
     command: str = ""
+    prompt_file: str = ""  # path relative to mount; resolved to prompt at load time
     target: str = ""  # "talk", "email", or ""
     room: str = ""  # conversation_token
     enabled: bool = True
@@ -59,12 +60,30 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
         cron = j.get("cron", "").strip()
         prompt = j.get("prompt", "").strip()
         command = j.get("command", "").strip()
+        prompt_file = j.get("prompt_file", "").strip()
         if not name or not cron:
             logger.warning(
                 "Skipping incomplete job in CRON.md for %s: name=%r cron=%r",
                 user_id, name, cron,
             )
             continue
+        # Resolve prompt_file to prompt contents
+        if prompt_file:
+            if prompt or command:
+                logger.warning(
+                    "Skipping job '%s' in CRON.md for %s: prompt_file cannot be combined with prompt or command",
+                    name, user_id,
+                )
+                continue
+            file_path = config.nextcloud_mount_path / prompt_file.lstrip("/")
+            try:
+                prompt = file_path.read_text().strip()
+            except OSError as e:
+                logger.warning(
+                    "Skipping job '%s' in CRON.md for %s: cannot read prompt_file %s: %s",
+                    name, user_id, prompt_file, e,
+                )
+                continue
         if prompt and command:
             logger.warning(
                 "Skipping job '%s' in CRON.md for %s: cannot have both prompt and command",
@@ -82,6 +101,7 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
             cron=cron,
             prompt=prompt,
             command=command,
+            prompt_file=prompt_file,
             target=j.get("target", ""),
             room=j.get("room", ""),
             enabled=j.get("enabled", True),
@@ -112,6 +132,8 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
         lines.append(f'cron = "{job.cron}"')
         if job.command:
             lines.append(_toml_string("command", job.command))
+        elif job.prompt_file:
+            lines.append(_toml_string("prompt_file", job.prompt_file))
         else:
             lines.append(_toml_string("prompt", job.prompt))
         if job.target:

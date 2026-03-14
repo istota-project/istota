@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-16: External prompt files for CRON.md jobs
+
+Added `prompt_file` field to CRON.md scheduled jobs so long prompts can live in separate files instead of being inlined in the TOML block.
+
+**Key changes:**
+- `CronJob` dataclass gets `prompt_file: str` field. The loader resolves the file path against the Nextcloud mount and reads its contents as the prompt at parse time, so downstream code (scheduler, executor) sees a normal prompt string with no changes needed.
+- `generate_cron_md()` preserves `prompt_file` references on round-trip serialization instead of inlining the resolved prompt text back into the TOML.
+- Validation: `prompt_file` is mutually exclusive with `prompt` and `command`. Missing files are warned and skipped.
+- Skill docs updated with the new field.
+
+**Files modified:**
+- `src/istota/cron_loader.py` — `prompt_file` field, file resolution in `load_cron_jobs()`, round-trip in `generate_cron_md()`
+- `src/istota/skills/schedules/skill.md` — Documented `prompt_file` field
+- `tests/test_cron_loader.py` — `TestPromptFile` class (8 tests)
+
 ## 2026-03-15: Progress message fixes and self-contained responses
 
 Fixed several progress message edge cases and added a prompt-level fix for incomplete final responses. Also added an opt-in live text message feature for intermediate progress text (off by default).

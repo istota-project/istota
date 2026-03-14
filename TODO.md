@@ -125,6 +125,7 @@
 - [x] Shell command jobs (`command` field, mutually exclusive with `prompt`, subprocess execution)
 - [x] One-time jobs (`once = true`) auto-removed from DB and CRON.md after successful execution
 - [x] Per-job log channel suppression (`skip_log_channel = true` in CRON.md)
+- [x] External prompt files (`prompt_file` field loads prompt from file instead of inline)
 
 ### User Timezone from Nextcloud ✅
 - [x] Fetch user's timezone from Nextcloud API instead of requiring manual config

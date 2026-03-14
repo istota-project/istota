@@ -39,8 +39,9 @@ room = "ROOM_TOKEN"
 
 - `name`: Unique per user, short identifier (e.g., `daily-report`, `weekly-cleanup`)
 - `cron`: Standard 5-field cron (minute hour day month weekday). Evaluated in the user's configured timezone
-- `prompt`: The full prompt text that will be executed as a task (via Claude Code). Mutually exclusive with `command`
-- `command`: A shell command to run directly via subprocess (not Claude Code). Mutually exclusive with `prompt`. Each job must have exactly one of `prompt` or `command`
+- `prompt`: The full prompt text that will be executed as a task (via Claude Code). Mutually exclusive with `command` and `prompt_file`
+- `prompt_file`: Path to a file containing the prompt text (relative to Nextcloud mount root, e.g. `/Users/alice/scripts/prompts/my-job.txt`). The file contents are read at load time and used as the prompt. Mutually exclusive with `prompt` and `command`. Useful for long prompts that would clutter CRON.md
+- `command`: A shell command to run directly via subprocess (not Claude Code). Mutually exclusive with `prompt` and `prompt_file`. Each job must have exactly one of `prompt`, `prompt_file`, or `command`
 - `target`: Where to deliver results — `"talk"` (post to room), `"email"` (send to user's email), or omit for no delivery
 - `room`: Talk conversation token (required when `target` is `"talk"`)
 - `enabled`: Set to `false` to pause the job (default: true). Use `!cron disable/enable` for runtime control

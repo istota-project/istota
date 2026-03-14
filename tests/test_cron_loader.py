@@ -886,6 +886,130 @@ prompt = "test"
 # ---------------------------------------------------------------------------
 
 
+class TestPromptFile:
+    """Tests for prompt_file field support — load prompt from external file."""
+
+    def test_parse_prompt_file(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        # Write the prompt file
+        prompt_path = mount_path / "Users/alice/scripts/prompts/my-prompt.txt"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text("Do the thing\nwith multiple lines")
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "from-file"
+cron = "0 9 * * *"
+prompt_file = "/Users/alice/scripts/prompts/my-prompt.txt"
+target = "email"
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].prompt == "Do the thing\nwith multiple lines"
+        assert jobs[0].prompt_file == "/Users/alice/scripts/prompts/my-prompt.txt"
+
+    def test_prompt_file_missing_warns_and_skips(self, mount_path, make_config_with_mount, caplog):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "bad-ref"
+cron = "0 9 * * *"
+prompt_file = "/Users/alice/scripts/prompts/nonexistent.txt"
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 0
+        assert "nonexistent.txt" in caplog.text
+
+    def test_prompt_and_prompt_file_rejected(self, mount_path, make_config_with_mount, caplog):
+        config = make_config_with_mount()
+        prompt_path = mount_path / "Users/alice/scripts/prompts/exists.txt"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text("file prompt")
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "conflict"
+cron = "0 9 * * *"
+prompt = "inline prompt"
+prompt_file = "/Users/alice/scripts/prompts/exists.txt"
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 0
+
+    def test_generate_preserves_prompt_file(self):
+        """generate_cron_md should emit prompt_file, not inline the prompt."""
+        jobs = [CronJob(
+            name="from-file", cron="0 9 * * *",
+            prompt="loaded content", prompt_file="/Users/alice/prompts/test.txt",
+            target="email",
+        )]
+        content = generate_cron_md(jobs)
+        assert 'prompt_file = "/Users/alice/prompts/test.txt"' in content
+        assert "prompt =" not in content  # Should NOT inline the prompt
+
+    def test_generate_without_prompt_file_uses_prompt(self):
+        """Jobs without prompt_file should still emit prompt as before."""
+        jobs = [CronJob(name="inline", cron="0 9 * * *", prompt="inline text")]
+        content = generate_cron_md(jobs)
+        assert 'prompt = "inline text"' in content
+        assert "prompt_file" not in content
+
+    def test_round_trip_prompt_file(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        prompt_path = mount_path / "Users/alice/scripts/prompts/round-trip.txt"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text("round trip content")
+        original = [CronJob(
+            name="rt", cron="0 9 * * *",
+            prompt="round trip content", prompt_file="/Users/alice/scripts/prompts/round-trip.txt",
+        )]
+        content = generate_cron_md(original)
+        _write_cron_md(mount_path, "alice", content)
+        loaded = load_cron_jobs(config, "alice")
+        assert len(loaded) == 1
+        assert loaded[0].prompt == "round trip content"
+        assert loaded[0].prompt_file == "/Users/alice/scripts/prompts/round-trip.txt"
+
+    def test_sync_prompt_file_to_db_uses_resolved_prompt(self, db_path, mount_path, make_config_with_mount):
+        """DB should get the resolved prompt text, not the file path."""
+        config = make_config_with_mount(db_path=db_path)
+        file_jobs = [CronJob(
+            name="from-file", cron="0 9 * * *",
+            prompt="resolved content", prompt_file="/some/path.txt",
+        )]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].prompt == "resolved content"
+
+    def test_command_and_prompt_file_rejected(self, mount_path, make_config_with_mount, caplog):
+        config = make_config_with_mount()
+        prompt_path = mount_path / "Users/alice/scripts/prompts/exists.txt"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text("file prompt")
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "conflict"
+cron = "0 9 * * *"
+command = "echo hello"
+prompt_file = "/Users/alice/scripts/prompts/exists.txt"
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestUpdateJobEnabledInCronMd
+# ---------------------------------------------------------------------------
+
+
 class TestUpdateJobEnabledInCronMd:
     """Tests for update_job_enabled_in_cron_md()."""
 
