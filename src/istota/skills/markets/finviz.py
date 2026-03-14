@@ -399,37 +399,52 @@ def _format_surprise(release: EconomicRelease) -> str:
         return f" (exp. {release.expected}, prior: {release.prior})"
 
 
-def fetch_finviz_data(api_url: str | None = None) -> FinVizData | None:
+def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizData | None:
     """Fetch and parse FinViz homepage data via the headless browser API.
 
     Args:
         api_url: Browser API URL. Defaults to BROWSER_API_URL env var or localhost:9223.
+        retries: Number of retry attempts on failure (default 2, so up to 3 total).
 
     Returns:
         Parsed FinVizData, or None on failure.
     """
+    import time
+
     if api_url is None:
         api_url = os.environ.get("BROWSER_API_URL", DEFAULT_API_URL)
 
-    try:
-        resp = httpx.post(
-            f"{api_url}/browse",
-            json={"url": FINVIZ_URL, "timeout": 30},
-            timeout=BROWSE_TIMEOUT,
-        )
-        result = resp.json()
+    last_error = None
+    for attempt in range(1 + retries):
+        if attempt > 0:
+            delay = 5 * attempt
+            logger.info("FinViz retry %d/%d after %ds", attempt, retries, delay)
+            time.sleep(delay)
 
-        if result.get("status") != "ok":
-            logger.warning("FinViz fetch failed: %s", result.get("error", result.get("status")))
-            return None
+        try:
+            resp = httpx.post(
+                f"{api_url}/browse",
+                json={"url": FINVIZ_URL, "timeout": 30},
+                timeout=BROWSE_TIMEOUT,
+            )
+            result = resp.json()
 
-        text = result.get("text", "")
-        if not text:
-            logger.warning("FinViz returned empty page text")
-            return None
+            if result.get("status") != "ok":
+                last_error = result.get("error", result.get("status"))
+                logger.warning("FinViz fetch failed (attempt %d): %s", attempt + 1, last_error)
+                continue
 
-        return parse_finviz_page(text)
+            text = result.get("text", "")
+            if not text:
+                last_error = "empty page text"
+                logger.warning("FinViz returned empty page text (attempt %d)", attempt + 1)
+                continue
 
-    except Exception as e:
-        logger.warning("FinViz fetch error: %s", e)
-        return None
+            return parse_finviz_page(text)
+
+        except Exception as e:
+            last_error = str(e)
+            logger.warning("FinViz fetch error (attempt %d): %s", attempt + 1, e)
+
+    logger.warning("FinViz fetch failed after %d attempts: %s", 1 + retries, last_error)
+    return None
