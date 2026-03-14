@@ -4,14 +4,73 @@ A self-hosted AI agent that lives in your Nextcloud instance. Powered by Claude 
 
 ## Quick start (Docker)
 
+> **Experimental.** The Docker deployment is functional but should be considered unstable. The stable, canonical deployment method is to a dedicated Debian/Ubuntu VM using the [install script](#quick-start-bare-metal) or the Ansible role at `deploy/ansible/`.
+
+The Docker setup spins up a complete stack from scratch: Postgres, Redis, a fresh Nextcloud instance, and the Istota scheduler. If you already have a Nextcloud instance, skip to [bare metal](#quick-start-bare-metal) — the Docker Compose creates its own Nextcloud and is meant for evaluation or standalone deployments, not for connecting to an existing one.
+
+### 1. Configure
+
 ```bash
 cd docker
 cp .env.example .env
-# Edit .env: set CLAUDE_CODE_OAUTH_TOKEN and passwords
+```
+
+Edit `.env` and set at minimum:
+
+- `CLAUDE_CODE_OAUTH_TOKEN` — generate one with `claude setup-token` (or set `ANTHROPIC_API_KEY` for direct API access)
+- `ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `BOT_PASSWORD`, `USER_PASSWORD` — pick something real
+- `USER_NAME` — your Nextcloud username
+
+Optional but recommended:
+
+- `USER_DISPLAY_NAME` — your full name
+- `USER_TIMEZONE` — e.g. `America/New_York` (defaults to UTC)
+- `USER_EMAIL` — enables email-related features
+
+### 2. Start
+
+```bash
 docker compose up -d
 ```
 
-Nextcloud at `http://localhost:8080`. Log in with the credentials you set in `.env`, open Talk, and start chatting. Everything is provisioned automatically: Nextcloud users, Talk rooms, shared folders, and the Istota scheduler.
+First start takes a few minutes: Nextcloud initializes the database, creates user accounts, installs apps (Talk, Calendar, External Storage), sets up shared folders, and creates a Talk room between you and the bot. The Istota container waits for all of this before starting the scheduler.
+
+### 3. Chat
+
+Open `http://localhost:8080`, log in with your `USER_NAME` / `USER_PASSWORD`, go to Talk, and start chatting. The bot responds through the same Talk interface.
+
+### Optional services
+
+The browser container (Playwright with bot-detection countermeasures) and the GPS webhook receiver run as Docker Compose profiles:
+
+```bash
+docker compose --profile browser up -d              # Add browser
+docker compose --profile location up -d             # Add GPS webhook receiver
+docker compose --profile browser --profile location up -d  # Both
+```
+
+The browser container requires an x86-64 host (Chrome has no ARM packages).
+
+### Configuration
+
+The `.env` file exposes most of the same settings available in the Ansible role: scheduler intervals, conversation context tuning, progress updates, sleep cycle, memory search, email (IMAP/SMTP), ntfy notifications, developer skill (GitLab/GitHub), and per-user overrides. See `.env.example` for the full list with defaults.
+
+The config file at `/data/config/config.toml` inside the container is generated on first start and not overwritten on subsequent starts. To change settings after initial setup, either delete the config and restart (it regenerates from env vars), or edit it directly:
+
+```bash
+docker compose exec istota vi /data/config/config.toml
+docker compose restart istota
+```
+
+### Differences from bare metal
+
+The Docker deployment differs from a bare metal / Ansible installation in a few ways:
+
+- **No network proxy.** The CONNECT-based network proxy (domain allowlist) is disabled — Docker's own network isolation serves the same purpose. Bubblewrap filesystem sandboxing and the skill credential proxy are enabled and work inside the container (bubblewrap gracefully degrades if the kernel doesn't allow user namespaces — add `--cap-add SYS_ADMIN` to the istota service if needed).
+- **Single user.** The Docker setup provisions one human user. Additional users can be added by editing `config.toml` directly and creating them in Nextcloud.
+- **Bundled Nextcloud.** The Compose file creates a new Nextcloud instance. If you already run Nextcloud, use the bare metal installer or Ansible role instead — they connect to your existing instance without creating a second one.
+- **No backups or auto-update.** The Ansible role sets up cron-based DB backups and optional auto-update. In Docker, volume backups are your responsibility.
+- **All Python extras installed.** The Docker image includes every optional dependency (accounting, whisper, garmin, memory-search, etc.) so all skills are available without rebuilding.
 
 ## Quick start (bare metal)
 
