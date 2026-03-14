@@ -100,9 +100,7 @@ The tradeoff is that Istota only works with Nextcloud. If you use Google Workspa
 | Language | Python | TypeScript/Node.js |
 | License | MIT | MIT |
 
-OpenClaw is a consumer-oriented personal assistant with broad channel support, voice interaction, native companion apps, and a large community skill ecosystem. It works well as a single user's always-available AI across many messaging platforms.
-
-Istota is a server-oriented system for households and small teams that already run Nextcloud. It trades channel breadth for direct Nextcloud integration, native multi-user isolation, and operational features (task queuing, scheduling, monitoring, sandboxing) built for unattended long-running operation.
+OpenClaw connects to many messaging platforms and has a large community skill registry. Istota talks through Nextcloud and ships a smaller set of built-in skills with filesystem sandboxing and multi-user isolation.
 
 ## User workspace
 
