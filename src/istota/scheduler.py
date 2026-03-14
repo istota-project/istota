@@ -1252,15 +1252,17 @@ def process_one_task(
     if (
         progress_callback
         and getattr(progress_callback, "use_edit", False)
-        and getattr(progress_callback, "all_descriptions", None)
+        and getattr(progress_callback, "all_descriptions", None) is not None
         and progress_callback.ack_msg_id is not None
     ):
         cb_style = getattr(progress_callback, "style", "full")
         if cb_style == "replace":
-            # Brief summary: "Done — 12 actions (18s)"
             total = len(progress_callback.all_descriptions)
             elapsed = int(time.time() - progress_callback.start_time)
-            body = f"Done — {total} action{'s' if total != 1 else ''} ({elapsed}s)"
+            if total == 0:
+                body = f"Done ({elapsed}s)"
+            else:
+                body = f"Done — {total} action{'s' if total != 1 else ''} ({elapsed}s)"
         else:
             body = _format_progress_body(
                 progress_callback.all_descriptions,
