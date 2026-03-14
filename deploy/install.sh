@@ -3,7 +3,7 @@
 # Installs or updates istota on a Debian/Ubuntu server
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/stefankubicki/istota/main/deploy/install.sh -o install.sh
+#   curl -fsSL https://raw.githubusercontent.com/muinyc/istota/main/deploy/install.sh -o install.sh
 #   sudo bash install.sh
 #
 #   install.sh [OPTIONS]
@@ -27,7 +27,7 @@ ISTOTA_HOME="${ISTOTA_HOME:-/srv/app/istota}"
 ISTOTA_NAMESPACE="${ISTOTA_NAMESPACE:-istota}"
 ISTOTA_USER="${ISTOTA_USER:-$ISTOTA_NAMESPACE}"
 ISTOTA_GROUP="${ISTOTA_GROUP:-$ISTOTA_NAMESPACE}"
-REPO_URL="${ISTOTA_REPO_URL:-https://github.com/stefankubicki/istota.git}"
+REPO_URL="${ISTOTA_REPO_URL:-https://github.com/muinyc/istota.git}"
 REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
 REPO_TAG="${ISTOTA_REPO_TAG:-}"
 UPDATE_ONLY=false

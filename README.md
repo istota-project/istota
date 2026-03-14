@@ -77,7 +77,7 @@ The Docker deployment differs from a bare metal / Ansible installation in a few 
 Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a Claude Code OAuth token.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/stefankubicki/istota/main/deploy/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/muinyc/istota/main/deploy/install.sh -o install.sh
 sudo bash install.sh
 ```
 
