@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-14: Docker deployment expansion
+
+Expanded the Docker deployment from a minimal quickstart to a fully configurable stack approaching parity with the Ansible role. All skills are now available, security layers are preserved, and optional services (browser, GPS webhooks) are integrated via Compose profiles.
+
+**Key changes:**
+- Dockerfile installs `--extra all` (accounting, whisper, garmin, memory-search) plus system deps (weasyprint libs, tesseract-ocr, bubblewrap).
+- Entrypoint generates config.toml from ~170 environment variables covering every config section: scheduler intervals, conversation context, progress updates, sleep cycle, memory search, email, ntfy, browser, location, developer skill.
+- Browser container and GPS webhook receiver integrated into main docker-compose.yml via Compose profiles (`--profile browser`, `--profile location`).
+- Bubblewrap sandbox and skill credential proxy enabled by default in Docker. Bwrap gracefully degrades with a cached runtime probe (`_bwrap_available()`) when the kernel denies namespace creation (common in containers without CAP_SYS_ADMIN).
+- OAuth token passthrough conditioned on actual bwrap availability, not just `sandbox_enabled` config — fixes auth failure when sandbox is configured but degrades at runtime, while preserving credential isolation when bwrap is functional.
+- README quickstart expanded with step-by-step guide, optional services, configuration notes, and differences from bare metal. Marked as experimental.
+
+**Files modified:**
+- `docker/istota/Dockerfile` — `--extra all`, bubblewrap, weasyprint/tesseract system deps
+- `docker/istota/entrypoint.sh` — Full config generation from env vars, security settings
+- `docker/docker-compose.yml` — ~170 env var passthrough, browser + webhooks services
+- `docker/.env.example` — Comprehensive configuration reference with defaults
+- `src/istota/executor.py` — `_bwrap_available()` cached probe, conditional OAuth passthrough
+- `README.md` — Expanded Docker quickstart, experimental notice
+
 ## 2026-03-14: Docker Compose deployment
 
 Full Docker Compose stack that takes a new user from zero to a working Istota instance with a single `docker compose up`. Bundles Nextcloud, PostgreSQL, Redis, and the Istota scheduler in four containers with automatic provisioning.

@@ -145,6 +145,48 @@ _CREDENTIAL_ENV_PATTERNS = frozenset({
     "APP_PASSWORD", "NC_PASS", "PRIVATE_KEY",
 })
 
+_bwrap_checked: bool | None = None
+
+
+def _bwrap_available() -> bool:
+    """Check if bwrap can create namespaces (cached after first call).
+
+    Returns False on non-Linux, when bwrap is not installed, or inside
+    containers without CAP_SYS_ADMIN / user namespace support.
+    """
+    global _bwrap_checked
+    if _bwrap_checked is not None:
+        return _bwrap_checked
+
+    import shutil
+    import subprocess
+    import sys
+
+    if sys.platform != "linux":
+        _bwrap_checked = False
+        return False
+
+    if shutil.which("bwrap") is None:
+        _bwrap_checked = False
+        return False
+
+    try:
+        result = subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--", "true"],
+            capture_output=True, timeout=5,
+        )
+        _bwrap_checked = result.returncode == 0
+        if not _bwrap_checked:
+            logger.warning(
+                "Sandbox skipped: bwrap namespace creation failed "
+                "(container without CAP_SYS_ADMIN?): %s",
+                result.stderr.decode(errors="replace").strip(),
+            )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("Sandbox skipped: bwrap probe failed: %s", exc)
+        _bwrap_checked = False
+    return _bwrap_checked
+
 
 def build_clean_env(config: Config) -> dict[str, str]:
     """Build minimal environment for Claude subprocess.
@@ -171,10 +213,13 @@ def build_clean_env(config: Config) -> dict[str, str]:
         if val is not None:
             env[key] = val
     # Pass through Claude Code auth token if present.
-    # When sandbox is enabled, the token is also readable from
-    # ~/.claude/.credentials.json (written by install script or `claude login`).
-    # With sandbox disabled (e.g. Docker), env var passthrough is simpler.
-    if not config.security.sandbox_enabled:
+    # When sandbox is enabled AND bwrap is functional, the token is readable
+    # from ~/.claude/.credentials.json (bind-mounted into the sandbox) and
+    # should NOT be in the env (security: limits exfiltration surface).
+    # When sandbox is disabled or bwrap degrades (e.g. Docker without
+    # CAP_SYS_ADMIN), pass through via env since .credentials.json won't
+    # be bind-mounted.
+    if not (config.security.sandbox_enabled and _bwrap_available()):
         oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
         if oauth_token:
             env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
@@ -321,17 +366,9 @@ def build_bwrap_cmd(
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
     Returns the original cmd unchanged if sandbox is not available
-    (non-Linux, bwrap not installed).
+    (non-Linux, bwrap not installed, or namespace creation denied).
     """
-    import shutil
-    import sys
-
-    if sys.platform != "linux":
-        logger.debug("Sandbox skipped: not Linux (platform=%s)", sys.platform)
-        return cmd
-
-    if shutil.which("bwrap") is None:
-        logger.warning("Sandbox skipped: bwrap binary not found in PATH")
+    if not _bwrap_available():
         return cmd
 
     args: list[str] = ["bwrap"]

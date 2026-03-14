@@ -266,8 +266,12 @@
 - [x] Automatic Nextcloud provisioning (users, apps, external storage, Talk rooms)
 - [x] Shared volume file access with external storage mounts
 - [x] Talk attachment fallback to NC data directory
+- [x] Full env-based configuration (~170 vars, parity with Ansible role)
+- [x] All Python extras installed (accounting, whisper, garmin, memory-search)
+- [x] Browser container via Compose profile (`--profile browser`)
+- [x] GPS webhook receiver via Compose profile (`--profile location`)
+- [x] Bubblewrap sandbox + skill credential proxy (graceful degradation)
 - [ ] Caddy service for automatic TLS (production domains)
-- [ ] `istota:full` image tag with memory-search/whisper/accounting extras
 - [ ] Health checks on istota container
 - [ ] Backup/restore commands
 - [ ] Multi-user provisioning (add users after initial setup)
