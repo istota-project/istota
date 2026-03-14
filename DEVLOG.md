@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-15: Live text message during task execution
+
+Added a second live-updating Talk message that progressively shows Claude's intermediate text responses during execution, then gets edited in place with the final result. Requires `progress_show_text = true` and an edit-capable progress style (`replace` or `full`).
+
+**Key changes:**
+- Text events from Claude now post/edit a second Talk message (alongside the existing tool call message).
+- Intermediate text is shown italicized (`*text*`), accumulating as more text events arrive.
+- On completion, the text message is edited with the final result (un-italicized), avoiding a separate result post.
+- Long results (>4000 chars) are split: first part edited in, overflow posted as new messages.
+- Error messages skip the edit and are posted as new messages.
+- New `text_msg_id` and `accumulated_texts` attributes on the progress callback, propagated through composite callbacks.
+
+**Files modified:**
+- `src/istota/scheduler.py` — Text event handling in `_make_talk_progress_callback()`, result delivery via edit in `process_one_task()`
+- `tests/test_progress_callback.py` — `TestLiveTextMessage` class (8 tests), updated existing edit-mode text event tests
+
 ## 2026-03-15: FinViz fetch retry logic
 
 Evening briefing on Mar 14 had no FinViz market data due to a transient browser API failure with no retry. The fetch function silently returned None and the briefing went out without market headlines, movers, futures, or economic data.

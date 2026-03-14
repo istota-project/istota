@@ -328,6 +328,11 @@ def _make_talk_progress_callback(
     # Backward compat: use_edit is True for "full" and "replace" (both edit ack)
     use_edit = style in ("replace", "full")
 
+    # Live text message — progressively updated with intermediate text events,
+    # then edited one final time with the completed result.
+    text_msg_id: list[int | None] = [None]  # mutable container
+    accumulated_texts: list[str] = []
+
     def callback(message: str, *, italicize: bool = True):
         nonlocal last_send, send_count
 
@@ -337,10 +342,30 @@ def _make_talk_progress_callback(
         if max_chars:
             msg = msg[:max_chars]
 
-        # Skip text events — posting the full assistant response as progress
-        # causes duplicate messages (the result is posted again as the final
-        # delivery). Only tool-use descriptions should appear as progress.
+        # Text events: post/edit a second live message (only in edit modes)
         if not italicize:
+            if not use_edit:
+                return
+            # Use original message for text events (not truncated/collapsed)
+            accumulated_texts.append(message.strip())
+            body = "\n\n".join(f"*{t}*" for t in accumulated_texts)
+            # Truncate to Talk limit (leave room for formatting)
+            if len(body) > 3900:
+                body = body[:3900] + "…"
+            try:
+                if text_msg_id[0] is None:
+                    # Post the first text message
+                    mid = asyncio.run(post_result_to_talk(
+                        config, task, body,
+                        reference_id=f"istota:task:{task.id}:text",
+                    ))
+                    text_msg_id[0] = mid
+                else:
+                    asyncio.run(edit_talk_message(
+                        config, task, text_msg_id[0], body,
+                    ))
+            except Exception as e:
+                logger.debug("Text progress update failed: %s", e)
             return
 
         if style == "replace":
@@ -420,6 +445,8 @@ def _make_talk_progress_callback(
     callback.use_edit = use_edit
     callback.style = style
     callback.start_time = start_time
+    callback.text_msg_id = text_msg_id
+    callback.accumulated_texts = accumulated_texts
     return callback
 
 
@@ -1041,6 +1068,8 @@ def process_one_task(
                 _composite_callback.use_edit = talk_cb.use_edit
                 _composite_callback.style = talk_cb.style
                 _composite_callback.start_time = talk_cb.start_time
+                _composite_callback.text_msg_id = talk_cb.text_msg_id
+                _composite_callback.accumulated_texts = talk_cb.accumulated_texts
                 progress_callback = _composite_callback
             else:
                 progress_callback = log_callback
@@ -1279,18 +1308,46 @@ def process_one_task(
 
     # Deliver results outside DB context to avoid lock conflicts
     response_msg_id = None
-    if post_talk_message:
+    text_mid = (
+        progress_callback
+        and getattr(progress_callback, "text_msg_id", None)
+        and progress_callback.text_msg_id[0]
+    )
+    if post_talk_message and text_mid and not is_failure_notify:
+        # Edit the live text message with the final result instead of posting new.
+        # If the result fits in one message (<=4000 chars), edit in place.
+        # If longer, edit the first part and post the rest as new messages.
+        from .talk import split_message
+        parts = split_message(post_talk_message)
+        try:
+            asyncio.run(edit_talk_message(config, task, text_mid, parts[0]))
+            response_msg_id = text_mid
+        except Exception as e:
+            logger.debug("Failed to edit text message with result: %s", e)
+            # Fall back to posting as new message
+            response_msg_id = asyncio.run(post_result_to_talk(
+                config, task, post_talk_message, use_reply_threading=True,
+                reference_id=f"istota:task:{task.id}:result",
+            ))
+            parts = []  # skip overflow posting
+        # Post any overflow parts as new messages
+        for part in parts[1:]:
+            asyncio.run(post_result_to_talk(
+                config, task, part,
+                reference_id=f"istota:task:{task.id}:result",
+            ))
+    elif post_talk_message:
         response_msg_id = asyncio.run(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
             reference_id=f"istota:task:{task.id}:result",
         ))
-        # Store bot's response message ID for reply tracking
-        if response_msg_id and not is_failure_notify:
-            try:
-                with db.get_db(config.db_path) as conn:
-                    db.update_talk_response_id(conn, task_id, response_msg_id)
-            except Exception as e:
-                logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
+    # Store bot's response message ID for reply tracking
+    if response_msg_id and not is_failure_notify:
+        try:
+            with db.get_db(config.db_path) as conn:
+                db.update_talk_response_id(conn, task_id, response_msg_id)
+        except Exception as e:
+            logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
 
     # Cache the result so it's immediately available for context building.
     # Two cases: (1) result was posted to Talk → cache with its real msg ID,
