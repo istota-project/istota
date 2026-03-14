@@ -2,21 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
-## 2026-03-15: Live text message during task execution
+## 2026-03-15: Progress message fixes and self-contained responses
 
-Added a second live-updating Talk message that progressively shows Claude's intermediate text responses during execution, then gets edited in place with the final result. Requires `progress_show_text = true` and an edit-capable progress style (`replace` or `full`).
+Fixed several progress message edge cases and added a prompt-level fix for incomplete final responses. Also added an opt-in live text message feature for intermediate progress text (off by default).
 
 **Key changes:**
-- Text events from Claude now post/edit a second Talk message (alongside the existing tool call message).
-- Intermediate text is shown italicized (`*text*`), accumulating as more text events arrive.
-- On completion, the text message is edited with the final result (un-italicized), avoiding a separate result post.
-- Long results (>4000 chars) are split: first part edited in, overflow posted as new messages.
-- Error messages skip the edit and are posted as new messages.
-- New `text_msg_id` and `accumulated_texts` attributes on the progress callback, propagated through composite callbacks.
+- Fixed ack message stuck on "Riffing..." when task has zero tool calls (`all_descriptions` empty list was falsy).
+- Fixed progress falling back to legacy mode after scheduler restart — reruns now always post an ack ("*Retrying…*") so edit-in-place works.
+- Added opt-in live text message (`progress_show_text = true`, off by default): posts/edits a second Talk message with intermediate text events, then edits it with the final result on completion.
+- Added Talk and email guidelines telling the model its final response is the only text shown, so it should be self-contained and not reference earlier status updates.
+- Intermediate text prepending in executor (safety net) still active alongside the prompt-level approach.
 
 **Files modified:**
-- `src/istota/scheduler.py` — Text event handling in `_make_talk_progress_callback()`, result delivery via edit in `process_one_task()`
-- `tests/test_progress_callback.py` — `TestLiveTextMessage` class (8 tests), updated existing edit-mode text event tests
+- `src/istota/scheduler.py` — Ack on rerun, empty `all_descriptions` fix, live text message callback, result edit-in-place
+- `config/guidelines/talk.md` — Self-contained response instruction
+- `config/guidelines/email.md` — Self-contained response instruction
+- `tests/test_progress_callback.py` — `TestLiveTextMessage` class (8 tests), updated edit-mode text event tests
+- `tests/test_scheduler.py` — Updated rerun test
 
 ## 2026-03-15: FinViz fetch retry logic
 
