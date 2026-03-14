@@ -986,8 +986,8 @@ class TestProcessOneTask:
 
     @patch("istota.scheduler.execute_task", return_value=(True, "Confirmed result", None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
-    def test_talk_rerun_skips_ack(self, mock_arun, mock_exec, db_path, tmp_path):
-        """A task being rerun after confirmation should not send another ack."""
+    def test_talk_rerun_sends_retry_ack(self, mock_arun, mock_exec, db_path, tmp_path):
+        """A task being rerun after confirmation should send a 'Retrying' ack."""
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
             task_id = db.create_task(
@@ -1002,8 +1002,8 @@ class TestProcessOneTask:
 
         process_one_task(config)
 
-        # Should be called only once for the result (no ack for rerun)
-        assert mock_arun.call_count == 1
+        # Should be called for both the retry ack and the result
+        assert mock_arun.call_count >= 2
 
     @patch("istota.scheduler.execute_task", return_value=(True, '{"body": "reply", "format": "plain"}', None))
     @patch("istota.scheduler.post_result_to_email", new_callable=AsyncMock, return_value=False)
