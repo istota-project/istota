@@ -384,8 +384,8 @@ class TestEditModeCallback:
         callback = _make_talk_progress_callback(config, task, ack_msg_id=None)
         assert callback.use_edit is False
 
-    def test_edit_mode_skips_text_events(self, tmp_path):
-        """Text events (italicize=False) should not be accumulated in edit mode."""
+    def test_edit_mode_text_events_update_text_message(self, tmp_path):
+        """Text events (italicize=False) post/edit a separate text message."""
         config = _make_config(tmp_path, progress_style="full")
         task = _make_task()
 
@@ -399,14 +399,15 @@ class TestEditModeCallback:
 
             callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
             callback("📄 Reading file.txt")  # tool use (italicize=True default)
-            callback("Some intermediate text", italicize=False)  # text event — skip
+            callback("Some intermediate text", italicize=False)  # text event — posts text msg
             callback("✏️ Editing config.py")  # tool use
 
         assert callback.all_descriptions == [
             "📄 Reading file.txt", "✏️ Editing config.py",
         ]
-        # Only 2 edits (text event was skipped entirely)
-        assert mock_run.call_count == 2
+        assert callback.accumulated_texts == ["Some intermediate text"]
+        # 3 calls: 2 tool edits + 1 text post
+        assert mock_run.call_count == 3
 
     def test_edit_mode_exception_swallowed(self, tmp_path):
         config = _make_config(tmp_path, progress_style="full")
@@ -475,18 +476,20 @@ class TestReplaceModeCallback:
         assert callback.all_descriptions == ["📄 Reading config.py"]
         assert callback.style == "replace"
 
-    def test_replace_skips_text_events(self, tmp_path):
+    def test_replace_text_events_post_text_message(self, tmp_path):
         config = _make_config(tmp_path, progress_style="replace")
         task = _make_task()
 
         with patch("istota.scheduler.asyncio.run", return_value=True) as mock_run:
             callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
             callback("📄 Reading file.txt")
-            callback("Some intermediate text", italicize=False)  # should be skipped
+            callback("Some intermediate text", italicize=False)  # posts text msg
             callback("⚙️ Running test")
 
         assert callback.all_descriptions == ["📄 Reading file.txt", "⚙️ Running test"]
-        assert mock_run.call_count == 2
+        assert callback.accumulated_texts == ["Some intermediate text"]
+        # 3 calls: 2 tool edits + 1 text post
+        assert mock_run.call_count == 3
 
     def test_replace_accumulates_all_descriptions(self, tmp_path):
         config = _make_config(tmp_path, progress_style="replace")
@@ -532,6 +535,124 @@ class TestReplaceModeCallback:
 
         assert "\n" not in callback.all_descriptions[0]
         assert callback.all_descriptions[0].startswith("⚙️ python3 -c")
+
+
+class TestLiveTextMessage:
+    """Tests for the live text message that progressively shows intermediate text."""
+
+    def test_first_text_event_posts_new_message(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run", return_value=42) as mock_run:
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("Looking at the code...", italicize=False)
+
+        assert callback.text_msg_id[0] == 42
+        assert callback.accumulated_texts == ["Looking at the code..."]
+
+    def test_subsequent_text_events_edit_message(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        call_count = 0
+
+        def mock_run_fn(coro):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 42  # first call returns msg ID (post)
+            return True  # subsequent calls are edits
+
+        with patch("istota.scheduler.asyncio.run", side_effect=mock_run_fn):
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("First update...", italicize=False)
+            callback("Second update...", italicize=False)
+
+        assert callback.text_msg_id[0] == 42
+        assert callback.accumulated_texts == ["First update...", "Second update..."]
+        assert call_count == 2
+
+    def test_text_message_body_is_italicized(self, tmp_path):
+        """Text message body uses markdown italic for intermediate text."""
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        posted_bodies = []
+
+        def capture_run(coro):
+            # We can't easily inspect the coro args, so just track calls
+            return 42
+
+        with patch("istota.scheduler.asyncio.run", side_effect=capture_run):
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("Reading the config...", italicize=False)
+            callback("Analyzing the code...", italicize=False)
+
+        # accumulated_texts should contain both
+        assert callback.accumulated_texts == [
+            "Reading the config...", "Analyzing the code...",
+        ]
+
+    def test_text_events_skipped_in_legacy_mode(self, tmp_path):
+        """Legacy mode (no edit) should skip text events entirely."""
+        config = _make_config(tmp_path, progress_style="legacy")
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run") as mock_run:
+            callback = _make_talk_progress_callback(config, task)
+            callback("Some text event", italicize=False)
+
+        # No calls — text events skipped in legacy mode
+        assert not mock_run.called
+        assert callback.accumulated_texts == []
+
+    def test_text_events_skipped_in_none_mode(self, tmp_path):
+        """None mode should skip text events entirely."""
+        config = _make_config(tmp_path, progress_style="none")
+        task = _make_task()
+
+        callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+        callback("Some text event", italicize=False)
+
+        assert callback.accumulated_texts == []
+
+    def test_text_message_preserves_original_text(self, tmp_path):
+        """Text events should NOT be truncated or newline-collapsed."""
+        config = _make_config(tmp_path, progress_style="replace", progress_text_max_chars=20)
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run", return_value=42):
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("This is a long intermediate text that exceeds the truncation limit", italicize=False)
+
+        # Should use the full original text, not the truncated msg
+        assert callback.accumulated_texts == [
+            "This is a long intermediate text that exceeds the truncation limit",
+        ]
+
+    def test_text_message_exception_swallowed(self, tmp_path):
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+
+        with patch("istota.scheduler.asyncio.run", side_effect=Exception("fail")):
+            callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+            callback("Some text", italicize=False)  # should not raise
+
+        assert callback.accumulated_texts == ["Some text"]
+        assert callback.text_msg_id[0] is None  # failed to post
+
+    def test_text_msg_id_propagated_through_composite(self, tmp_path):
+        """Composite callback should propagate text_msg_id attribute."""
+        config = _make_config(tmp_path, progress_style="replace")
+        task = _make_task()
+        db_p = tmp_path / "test.db"
+        db.init_db(db_p)
+        config.db_path = db_p
+
+        callback = _make_talk_progress_callback(config, task, ack_msg_id=100)
+        assert hasattr(callback, "text_msg_id")
+        assert hasattr(callback, "accumulated_texts")
 
 
 class TestNoneModeCallback:
