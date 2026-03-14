@@ -445,7 +445,7 @@ def build_bwrap_cmd(
         _tmpfs(claude_dir)
         creds = claude_dir / ".credentials.json"
         if creds.exists():
-            _ro_bind(creds)  # RO: prevents token persistence attacks
+            _bind(creds)  # RW: Claude Code needs to refresh expired OAuth tokens
         settings = claude_dir / "settings.json"
         if settings.exists():
             _ro_bind(settings)
