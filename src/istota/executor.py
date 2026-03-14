@@ -475,6 +475,10 @@ def build_bwrap_cmd(
         user_dir = mount / "Users" / task.user_id
         if user_dir.exists():
             _bind(user_dir)
+        # Talk attachments directory (flat, shared across conversations)
+        talk_dir = mount / "Talk"
+        if talk_dir.exists():
+            _ro_bind(talk_dir)
         if task.conversation_token:
             channel_dir = mount / "Channels" / task.conversation_token
             if channel_dir.exists():
