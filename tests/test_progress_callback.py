@@ -573,8 +573,8 @@ class TestLiveTextMessage:
         assert callback.accumulated_texts == ["First update...", "Second update..."]
         assert call_count == 2
 
-    def test_text_message_body_is_italicized(self, tmp_path):
-        """Text message body uses markdown italic for intermediate text."""
+    def test_text_message_body_is_plain(self, tmp_path):
+        """Text message body uses plain text (no markdown italic)."""
         config = _make_config(tmp_path, progress_style="replace")
         task = _make_task()
 
