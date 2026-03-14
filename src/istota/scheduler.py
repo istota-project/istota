@@ -348,7 +348,7 @@ def _make_talk_progress_callback(
                 return
             # Use original message for text events (not truncated/collapsed)
             accumulated_texts.append(message.strip())
-            body = "\n\n".join(f"*{t}*" for t in accumulated_texts)
+            body = "\n\n".join(accumulated_texts)
             # Truncate to Talk limit (leave room for formatting)
             if len(body) > 3900:
                 body = body[:3900] + "…"
