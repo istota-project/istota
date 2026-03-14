@@ -1029,17 +1029,17 @@ def process_one_task(
         ack_msg_id = None
         is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
         if task.source_type == "talk" and task.conversation_token and not dry_run:
-            if not is_rerun:
-                ack_msg_id = asyncio.run(post_result_to_talk(
-                    config, task, random.choice(PROGRESS_MESSAGES),
-                    reference_id=f"istota:task:{task.id}:ack",
-                ))
-                if ack_msg_id is None:
-                    logger.warning(
-                        "Ack message posted but no message ID returned for task %d "
-                        "(progress will fall back to legacy mode)",
-                        task.id,
-                    )
+            ack_text = "*Retrying…*" if is_rerun else random.choice(PROGRESS_MESSAGES)
+            ack_msg_id = asyncio.run(post_result_to_talk(
+                config, task, ack_text,
+                reference_id=f"istota:task:{task.id}:ack",
+            ))
+            if ack_msg_id is None:
+                logger.warning(
+                    "Ack message posted but no message ID returned for task %d "
+                    "(progress will fall back to legacy mode)",
+                    task.id,
+                )
 
             # Build streaming progress callback if enabled
             if config.scheduler.progress_updates:
