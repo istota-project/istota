@@ -213,16 +213,9 @@ def build_clean_env(config: Config) -> dict[str, str]:
         if val is not None:
             env[key] = val
     # Pass through Claude Code auth token if present.
-    # When sandbox is enabled AND bwrap is functional, the token is readable
-    # from ~/.claude/.credentials.json (bind-mounted into the sandbox) and
-    # should NOT be in the env (security: limits exfiltration surface).
-    # When sandbox is disabled or bwrap degrades (e.g. Docker without
-    # CAP_SYS_ADMIN), pass through via env since .credentials.json won't
-    # be bind-mounted.
-    if not (config.security.sandbox_enabled and _bwrap_available()):
-        oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-        if oauth_token:
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
+    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if oauth_token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
     return env
 
 
@@ -445,7 +438,7 @@ def build_bwrap_cmd(
         _tmpfs(claude_dir)
         creds = claude_dir / ".credentials.json"
         if creds.exists():
-            _bind(creds)  # RW: Claude Code needs to refresh expired OAuth tokens
+            _ro_bind(creds)  # RO: prevents token persistence attacks
         settings = claude_dir / "settings.json"
         if settings.exists():
             _ro_bind(settings)

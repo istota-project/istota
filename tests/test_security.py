@@ -83,8 +83,8 @@ class TestBuildCleanEnv:
         assert venv_bin in env["PATH"]
 
 
-    def test_does_not_include_oauth_token(self):
-        """CLAUDE_CODE_OAUTH_TOKEN must not leak into Claude's env."""
+    def test_includes_oauth_token(self):
+        """CLAUDE_CODE_OAUTH_TOKEN is passed through for auth."""
         config = Config()
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",
@@ -92,7 +92,7 @@ class TestBuildCleanEnv:
             "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-secret",
         }, clear=True):
             env = build_clean_env(config)
-        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-secret"
 
 
 class TestBuildStrippedEnv:
