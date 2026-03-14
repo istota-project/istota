@@ -170,10 +170,14 @@ def build_clean_env(config: Config) -> dict[str, str]:
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
-    # NOTE: CLAUDE_CODE_OAUTH_TOKEN is intentionally NOT passed through.
-    # Claude Code reads auth from ~/.claude/.credentials.json directly.
-    # Exposing the token as an env var makes it trivially extractable via
-    # `env` or /proc/*/environ inside the sandbox.
+    # Pass through Claude Code auth token if present.
+    # When sandbox is enabled, the token is also readable from
+    # ~/.claude/.credentials.json (written by install script or `claude login`).
+    # With sandbox disabled (e.g. Docker), env var passthrough is simpler.
+    if not config.security.sandbox_enabled:
+        oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        if oauth_token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
     return env
 
 
