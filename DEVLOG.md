@@ -2,6 +2,34 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-14: Docker Compose deployment
+
+Full Docker Compose stack that takes a new user from zero to a working Istota instance with a single `docker compose up`. Bundles Nextcloud, PostgreSQL, Redis, and the Istota scheduler in four containers with automatic provisioning.
+
+**Key changes:**
+- Docker Compose stack with postgres, redis, nextcloud, and istota services plus an init container for volume permissions.
+- Istota Dockerfile: Python 3.12 + Node.js 20 + Claude Code + uv, builds at ~795MB.
+- Nextcloud post-install provisioning script creates bot/user accounts, enables Talk/Calendar/External Storage apps, configures per-user external storage mounts on a shared Docker volume.
+- Istota entrypoint handles API-based provisioning (Talk room creation), config.toml generation, DB init, and scheduler startup.
+- Dual-mount file access: shared Docker volume (`/mnt/shared`) as the bot workspace (read-write), Nextcloud data volume (`/mnt/nc-data`) for read-only access to users' native NC files (Talk attachments, etc.).
+- External Storage app presents the shared volume to users via the Nextcloud web UI, replacing the traditional NC share approach.
+- Talk attachment fallback: when mount path lookup fails, scans `/mnt/nc-data/*/files/Talk/` for the file across all user directories.
+- Pass `CLAUDE_CODE_OAUTH_TOKEN` through to Claude subprocess when sandbox is disabled (Docker deployments).
+- Fixed vestigial `workspace/` directory creation in storage migration code.
+
+**Files added:**
+- `docker/docker-compose.yml` — Full compose stack definition
+- `docker/istota/Dockerfile` — Istota container image
+- `docker/istota/entrypoint.sh` — Container entrypoint with provisioning and config generation
+- `docker/istota/provision-nc.sh` — Nextcloud post-install hook (user/app/storage setup)
+- `docker/.env.example` — Documented environment variables
+- `.dockerignore` — Build context exclusions
+
+**Files modified:**
+- `src/istota/executor.py` — Pass OAuth token when sandbox disabled
+- `src/istota/scheduler.py` — Talk attachment fallback to NC data directory
+- `src/istota/storage.py` — Don't create vestigial `workspace/` directory
+
 ## 2026-03-13: Fix network proxy killing streaming API connections
 
 The CONNECT proxy's 30-second request-parsing timeout was persisting into the tunnel phase, causing streaming API responses to die mid-generation when Claude Code didn't send data for >30 seconds (normal during response streaming — the client is just receiving).

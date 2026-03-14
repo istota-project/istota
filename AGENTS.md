@@ -80,7 +80,11 @@ istota/
 │   ├── render_config.py     # Python config generator for install.sh
 │   ├── install.sh           # Main deployment script
 │   └── README.md            # Deployment documentation
-├── docker/browser/          # Playwright browser container (Flask API)
+├── docker/
+│   ├── docker-compose.yml   # Full stack: postgres + redis + nextcloud + istota
+│   ├── istota/              # Dockerfile, entrypoint, provisioning scripts
+│   ├── browser/             # Playwright browser container (Flask API)
+│   └── .env.example         # Environment variables template
 ├── scripts/                 # setup.sh, scheduler.sh
 ├── tests/                   # pytest + pytest-asyncio (~2400 tests, 51 files)
 ├── schema.sql
@@ -256,6 +260,19 @@ Config searched: `config/config.toml` → `~/src/config/config.toml` → `~/.con
 Per-user config: `config/users/{user_id}.toml` — takes precedence over `[users]` in main config.
 
 CalDAV derived from Nextcloud settings. Logging via `[logging]` section; CLI `-v` overrides to DEBUG.
+
+## Docker Deployment
+
+Full stack in `docker/docker-compose.yml`: postgres (Nextcloud DB), redis (NC session cache), nextcloud (with auto-provisioning), istota (scheduler + Claude Code).
+
+```bash
+cd docker && cp .env.example .env  # Edit: set CLAUDE_CODE_OAUTH_TOKEN + passwords
+docker compose up -d
+```
+
+File access uses a shared Docker volume (`shared_files`) mounted RW in both containers. Nextcloud External Storage app presents it to users. NC's native data volume is mounted RO in istota at `/mnt/nc-data` for Talk attachment fallback. Sandbox, skill proxy, and network proxy are disabled (container provides isolation).
+
+Key env vars: `CLAUDE_CODE_OAUTH_TOKEN`, `ADMIN_PASSWORD`, `USER_NAME`, `USER_PASSWORD`, `BOT_PASSWORD`, `POSTGRES_PASSWORD`.
 
 ## Ansible Deployment
 

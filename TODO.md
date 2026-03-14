@@ -261,6 +261,18 @@
 - [x] Nextcloud client refactor: shared `nextcloud_client.py` module (OCS + WebDAV) + nextcloud skill CLI
 - [ ] Migrate server from old `src/` to `istota/` repo dir (remove `/srv/app/zorg/src` after deploy)
 
+### Docker Compose Deployment
+- [x] Docker Compose stack (postgres, redis, nextcloud, istota)
+- [x] Automatic Nextcloud provisioning (users, apps, external storage, Talk rooms)
+- [x] Shared volume file access with external storage mounts
+- [x] Talk attachment fallback to NC data directory
+- [ ] Caddy service for automatic TLS (production domains)
+- [ ] `istota:full` image tag with memory-search/whisper/accounting extras
+- [ ] Health checks on istota container
+- [ ] Backup/restore commands
+- [ ] Multi-user provisioning (add users after initial setup)
+- [ ] Suppress "Failed to share folder" warning when using external storage
+
 ### Security
 - [x] Review Claude Code sandbox restrictions
 - [x] Audit resource permission model (admin/non-admin isolation with /etc/istota/admins)

@@ -200,8 +200,22 @@ def download_talk_attachments(config: Config, attachments: list[str]) -> list[st
                     local_paths.append(str(mount_path))
                     logger.debug(f"Talk attachment via mount: {att} -> {mount_path}")
                 else:
-                    logger.warning(f"Talk attachment not found at mount path: {mount_path}")
-                    local_paths.append(att)  # Fall back to original path
+                    # File may be in a user's Talk folder (NC stores shared files
+                    # in the sender's data dir). Check NC data dir if available.
+                    nc_data = Path("/mnt/nc-data")
+                    found = False
+                    if nc_data.is_dir():
+                        filename = att.split("/", 1)[1] if "/" in att else att
+                        for user_dir in nc_data.iterdir():
+                            candidate = user_dir / "files" / "Talk" / filename
+                            if candidate.exists():
+                                local_paths.append(str(candidate))
+                                logger.debug(f"Talk attachment via nc-data: {att} -> {candidate}")
+                                found = True
+                                break
+                    if not found:
+                        logger.warning(f"Talk attachment not found at mount path: {mount_path}")
+                        local_paths.append(att)  # Fall back to original path
             else:
                 # Download via rclone to temp directory
                 config.temp_dir.mkdir(parents=True, exist_ok=True)

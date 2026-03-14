@@ -2,40 +2,33 @@
 
 A self-hosted AI agent that lives in your Nextcloud instance. Powered by Claude Code. ([istota.xyz](https://istota.xyz))
 
-## Requirements
+## Quick start (Docker)
 
-- A Nextcloud instance with a dedicated user account for the bot (if you don't have one yet, [Nextcloud All-in-One](https://github.com/nextcloud/all-in-one) is the easiest way to get started, with Nextcloud Talk enabled)
-- A Debian/Ubuntu VM (separate from your Nextcloud server)
-- A [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) API key or OAuth token
+```bash
+cd docker
+cp .env.example .env
+# Edit .env: set CLAUDE_CODE_OAUTH_TOKEN and passwords
+docker compose up -d
+```
 
-## Quick start
+Nextcloud at `http://localhost:8080`. Log in with the credentials you set in `.env`, open Talk, and start chatting. Everything is provisioned automatically: Nextcloud users, Talk rooms, shared folders, and the Istota scheduler.
+
+## Quick start (bare metal)
+
+Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a Claude Code OAuth token.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/stefankubicki/istota/main/deploy/install.sh -o install.sh
 sudo bash install.sh
 ```
 
-The installer walks you through connecting to Nextcloud, setting up users, and choosing optional features (email, memory search, scheduled briefings, etc.). It handles system packages, Python dependencies, rclone mount, database initialization, and systemd services.
-
-After installation, authenticate the Claude CLI and invite the bot to a Talk conversation:
+The installer walks you through connecting to Nextcloud, setting up users, and choosing optional features. After installation:
 
 ```bash
 sudo -u istota HOME=/srv/app/istota claude login
 ```
 
-To update an existing installation (pull latest code, regenerate config, restart):
-
-```bash
-sudo bash install.sh --update
-```
-
-Preview what the installer would generate without making changes:
-
-```bash
-bash deploy/install.sh --dry-run
-```
-
-An Ansible role is also available at `deploy/ansible/` for infrastructure-as-code deployments.
+To update: `sudo bash install.sh --update`. An Ansible role is also available at `deploy/ansible/`.
 
 ## How it works
 

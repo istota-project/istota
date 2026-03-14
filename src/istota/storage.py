@@ -1148,11 +1148,12 @@ def _migrate_workspace_files(user_base: Path) -> None:
     """
     Migrate USER.md and TASKS.md from user root into workspace/.
 
-    Only moves files if the source exists and the destination doesn't.
-    Safe to call repeatedly.
+    Only runs if workspace/ already exists (from a previous migration).
+    Does not create workspace/ — the bot_dir layout supersedes it.
     """
     workspace_dir = user_base / "workspace"
-    workspace_dir.mkdir(parents=True, exist_ok=True)
+    if not workspace_dir.is_dir():
+        return
 
     for filename in ("USER.md", "TASKS.md"):
         src = user_base / filename

@@ -1,0 +1,101 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nextcloud"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # One-shot init: make shared volume writable by www-data (uid 33)
+  init-shared:
+    image: alpine:3
+    volumes:
+      - shared_files:/mnt/shared
+    command: ["sh", "-c", "chown 33:33 /mnt/shared && chmod 775 /mnt/shared"]
+
+  nextcloud:
+    image: nextcloud:30-apache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      init-shared:
+        condition: service_completed_successfully
+    volumes:
+      - nextcloud_html:/var/www/html
+      - nextcloud_data:/var/www/html/data
+      - shared_files:/mnt/shared
+      - ./istota/provision-nc.sh:/docker-entrypoint-hooks.d/post-installation/provision.sh:ro
+    ports:
+      - "${NC_PORT:-8080}:80"
+    environment:
+      NEXTCLOUD_ADMIN_USER: admin
+      NEXTCLOUD_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      NEXTCLOUD_TRUSTED_DOMAINS: "localhost nextcloud ${DOMAIN:-}"
+      # Passed to provision-nc.sh
+      BOT_USER: istota
+      BOT_PASSWORD: ${BOT_PASSWORD:?Set BOT_PASSWORD in .env}
+      USER_NAME: ${USER_NAME:?Set USER_NAME in .env}
+      USER_PASSWORD: ${USER_PASSWORD:?Set USER_PASSWORD in .env}
+      USER_DISPLAY_NAME: ${USER_DISPLAY_NAME:-}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/status.php | grep -q '\"installed\":true'"]
+      interval: 15s
+      timeout: 10s
+      start_period: 300s
+      retries: 20
+    restart: unless-stopped
+
+  istota:
+    build:
+      context: ..
+      dockerfile: docker/istota/Dockerfile
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    volumes:
+      - shared_files:/mnt/shared
+      - nextcloud_data:/mnt/nc-data:ro
+      - istota_data:/data
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      BOT_PASSWORD: ${BOT_PASSWORD}
+      USER_NAME: ${USER_NAME}
+      USER_DISPLAY_NAME: ${USER_DISPLAY_NAME:-}
+      USER_TIMEZONE: ${USER_TIMEZONE:-UTC}
+      NC_INTERNAL_URL: http://nextcloud
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  nextcloud_html:
+  nextcloud_data:
+  shared_files:
+  istota_data:
