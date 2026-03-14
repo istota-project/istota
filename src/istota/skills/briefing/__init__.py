@@ -198,6 +198,8 @@ def build_briefing_prompt(
     # FinViz market data - enrich evening briefings with headlines, movers, etc.
     if _component_enabled(components, "markets") and not is_morning and not is_weekend:
         finviz_content = _fetch_finviz_market_data()
+        if not finviz_content:
+            logger.warning("Evening briefing for %s will have no FinViz data", user_id)
         if finviz_content:
             prompt_parts.append("")
             prompt_parts.append(finviz_content)

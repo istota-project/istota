@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-15: FinViz fetch retry logic
+
+Evening briefing on Mar 14 had no FinViz market data due to a transient browser API failure with no retry. The fetch function silently returned None and the briefing went out without market headlines, movers, futures, or economic data.
+
+**Key changes:**
+- `fetch_finviz_data()` now retries up to 2 times (3 total attempts) with increasing delays (5s, 10s) before giving up.
+- Added warning log when FinViz data is missing from an evening briefing (`Evening briefing for {user_id} will have no FinViz data`).
+- New tests for retry-then-succeed and retry-exhausted scenarios.
+
+**Files modified:**
+- `src/istota/skills/markets/finviz.py` — Retry loop with configurable `retries` parameter
+- `src/istota/skills/briefing/__init__.py` — Warning log on missing FinViz data
+- `tests/test_skills_finviz.py` — Retry tests, `retries=0` on failure tests to avoid slow sleeps
+
 ## 2026-03-14: Docker deployment expansion
 
 Expanded the Docker deployment from a minimal quickstart to a fully configurable stack approaching parity with the Ansible role. All skills are now available, security layers are preserved, and optional services (browser, GPS webhooks) are integrated via Compose profiles.
