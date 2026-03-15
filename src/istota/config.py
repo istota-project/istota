@@ -461,6 +461,23 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             permissions="read",
         ))
 
+    # Parse credential sections as resources (server-side only, not synced to Nextcloud)
+    garmin_data = user_data.get("garmin", {})
+    if garmin_data.get("email"):
+        resources.append(ResourceConfig(
+            type="garmin",
+            name="Garmin Connect",
+            extra={k: v for k, v in garmin_data.items()},
+        ))
+
+    monarch_data = user_data.get("monarch", {})
+    if monarch_data.get("session_token"):
+        resources.append(ResourceConfig(
+            type="monarch",
+            name="Monarch Money",
+            extra={k: v for k, v in monarch_data.items()},
+        ))
+
     return UserConfig(
         display_name=user_data.get("display_name", user_id),
         email_addresses=user_data.get("email_addresses", []),

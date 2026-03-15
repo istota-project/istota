@@ -238,6 +238,9 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "KARAKEEP_API_KEY",
     "GITLAB_TOKEN",
     "GITHUB_TOKEN",
+    "GARMIN_EMAIL",
+    "GARMIN_PASSWORD",
+    "MONARCH_SESSION_TOKEN",
 })
 
 
@@ -251,6 +254,9 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "KARAKEEP_API_KEY": frozenset({"bookmarks"}),
     "GITLAB_TOKEN": frozenset({"developer"}),
     "GITHUB_TOKEN": frozenset({"developer"}),
+    "GARMIN_EMAIL": frozenset({"garmin"}),
+    "GARMIN_PASSWORD": frozenset({"garmin"}),
+    "MONARCH_SESSION_TOKEN": frozenset({"accounting"}),
 }
 
 
@@ -1476,7 +1482,7 @@ def execute_task(
     )
     if skills_doc:
         # Resolve per-user scripts directory
-        scripts_nc_path = get_user_scripts_path(task.user_id)
+        scripts_nc_path = get_user_scripts_path(task.user_id, config.bot_dir_name)
         if config.use_mount:
             scripts_dir = str(config.nextcloud_mount_path / scripts_nc_path.lstrip("/"))
         else:
@@ -1771,12 +1777,29 @@ def execute_task(
                 accounting_path.write_text(ACCOUNTING_TEMPLATE)
             env["ACCOUNTING_CONFIG"] = str(accounting_path)
 
+            # Monarch session token (from resource config)
+            if user_config:
+                monarch_resources = [
+                    rc for rc in user_config.resources
+                    if rc.type == "monarch" and rc.extra.get("session_token")
+                ]
+                if monarch_resources:
+                    env["MONARCH_SESSION_TOKEN"] = monarch_resources[0].extra["session_token"]
+
             # Also pass user ID and DB path for deduplication tracking
             env["ISTOTA_USER_ID"] = task.user_id
             if is_admin:
                 env["ISTOTA_DB_PATH"] = str(config.db_path)
 
-        # Garmin config path (in user's bot config folder, only set if file exists)
+        # Garmin credentials (from resource config, fall back to GARMIN.md)
+        if user_config:
+            garmin_resources = [
+                rc for rc in user_config.resources
+                if rc.type == "garmin" and rc.extra.get("email")
+            ]
+            if garmin_resources:
+                env["GARMIN_EMAIL"] = garmin_resources[0].extra["email"]
+                env["GARMIN_PASSWORD"] = garmin_resources[0].extra.get("password", "")
         if config.nextcloud_mount_path and task:
             from .storage import get_user_config_path
             garmin_path = config.nextcloud_mount_path / get_user_config_path(task.user_id, config.bot_dir_name).lstrip("/") / "GARMIN.md"

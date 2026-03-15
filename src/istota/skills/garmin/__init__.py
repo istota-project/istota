@@ -10,7 +10,10 @@ CLI:
     python -m istota.skills.garmin health [--date YYYY-MM-DD]
 
 Config:
-    Credentials are read from a GARMIN.md file containing a TOML block:
+    Credentials can be set via env vars (from per-user TOML config):
+        GARMIN_EMAIL, GARMIN_PASSWORD
+
+    Or via a GARMIN.md file containing a TOML block:
 
         ```toml
         [garmin]
@@ -19,8 +22,8 @@ Config:
         token_dir = "/optional/path/to/token/cache"
         ```
 
-    The config file path is taken from the GARMIN_CONFIG env var
-    (set by executor.py) or the --config CLI flag.
+    Env vars take precedence. The config file path is taken from the
+    GARMIN_CONFIG env var (set by executor.py) or the --config CLI flag.
 """
 
 from __future__ import annotations
@@ -45,13 +48,38 @@ except ImportError:
 
 
 def load_config(config_path: str | None = None) -> dict:
-    """Parse GARMIN.md and return the [garmin] config block as a dict.
+    """Load Garmin config from env vars or GARMIN.md file.
 
-    Raises ValueError if the file has no TOML block or missing email.
+    Env vars GARMIN_EMAIL/GARMIN_PASSWORD take precedence over the config file.
+    Raises ValueError if no credentials are available.
     """
+    # Prefer credentials from env vars (set from per-user TOML config)
+    env_email = os.environ.get("GARMIN_EMAIL", "")
+    env_password = os.environ.get("GARMIN_PASSWORD", "")
+    if env_email:
+        garmin: dict = {"email": env_email, "password": env_password}
+        # Merge non-secret settings from config file if available
+        path = config_path or os.environ.get("GARMIN_CONFIG", "")
+        if path:
+            try:
+                with open(path) as f:
+                    content = f.read()
+                match = re.search(r"```toml\n(.*?)```", content, re.DOTALL)
+                if match:
+                    cfg = tomllib.loads(match.group(1))
+                    file_garmin = cfg.get("garmin", {})
+                    # Only merge non-credential keys
+                    for k, v in file_garmin.items():
+                        if k not in ("email", "password"):
+                            garmin[k] = v
+            except (OSError, ValueError):
+                pass
+        return garmin
+
+    # Fall back to config file
     path = config_path or os.environ.get("GARMIN_CONFIG", "")
     if not path:
-        raise ValueError("GARMIN_CONFIG env var not set and no --config provided")
+        raise ValueError("GARMIN_EMAIL env var not set and no GARMIN_CONFIG provided")
 
     with open(path) as f:
         content = f.read()

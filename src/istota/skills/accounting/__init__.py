@@ -110,10 +110,12 @@ def parse_accounting_config(config_path: Path) -> MonarchConfig:
     # Parse monarch section
     monarch = data.get("monarch", {})
 
+    # Env var takes precedence over config file (set from per-user TOML)
+    env_token = os.environ.get("MONARCH_SESSION_TOKEN", "")
     credentials = MonarchCredentials(
         email=monarch.get("email"),
         password=monarch.get("password"),
-        session_token=monarch.get("session_token"),
+        session_token=env_token or monarch.get("session_token"),
     )
 
     sync_data = monarch.get("sync", {})

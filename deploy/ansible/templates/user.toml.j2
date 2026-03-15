@@ -40,6 +40,23 @@ base_url = "{{ resource.base_url }}"
 api_key = "{{ resource.api_key }}"
 
 {% endif %}
+{% elif resource.type == 'garmin' %}
+{% if resource.email is defined %}
+[[resources]]
+type = "garmin"
+name = "{{ resource.name | default('Garmin Connect') }}"
+email = "{{ resource.email }}"
+password = "{{ resource.password | default('') }}"
+
+{% endif %}
+{% elif resource.type == 'monarch' %}
+{% if resource.session_token is defined %}
+[[resources]]
+type = "monarch"
+name = "{{ resource.name | default('Monarch Money') }}"
+session_token = "{{ resource.session_token }}"
+
+{% endif %}
 {% else %}
 [[resources]]
 type = "{{ resource.type }}"
