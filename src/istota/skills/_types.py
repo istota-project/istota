@@ -43,5 +43,6 @@ class SkillMeta:
     exclude_memory: bool = False
     exclude_persona: bool = False
     exclude_resources: list[str] = field(default_factory=list)
+    cli: bool = False  # skill has a CLI (istota-skill <name>)
     # Where the skill was loaded from (for doc/code resolution)
     skill_dir: str = ""

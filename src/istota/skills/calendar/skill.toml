@@ -2,3 +2,4 @@ description = "Calendar operations with CalDAV"
 keywords = ["calendar", " cal ", "event", "meeting", "schedule", "appointment", "caldav"]
 dependencies = ["caldav", "icalendar"]
 source_types = ["briefing"]
+cli = true

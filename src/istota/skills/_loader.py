@@ -68,6 +68,7 @@ def _load_skill_toml(skill_dir: Path) -> SkillMeta | None:
         exclude_memory=data.get("exclude_memory", False),
         exclude_persona=data.get("exclude_persona", False),
         exclude_resources=data.get("exclude_resources", []),
+        cli=data.get("cli", False),
         skill_dir=str(skill_dir),
     )
 
@@ -120,6 +121,7 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
             exclude_memory=meta.get("exclude_memory", False),
             exclude_persona=meta.get("exclude_persona", False),
             exclude_resources=meta.get("exclude_resources", []),
+            cli=meta.get("cli", False),
         )
         for name, meta in data.items()
         if isinstance(meta, dict)
@@ -280,6 +282,29 @@ def select_skills(
     if result:
         logger.debug("Selected skills: %s", ", ".join(result))
     return result
+
+
+def format_cli_skills(skill_index: dict[str, SkillMeta]) -> str:
+    """Generate a prompt-ready list of skills that have CLI tools.
+
+    Returns a formatted string listing each CLI skill with its command
+    and description, suitable for inclusion in the tools section of a prompt.
+    Returns empty string if no CLI skills exist.
+    """
+    lines = []
+    for name in sorted(skill_index):
+        meta = skill_index[name]
+        if meta.cli:
+            lines.append(f"  - `istota-skill {name}` — {meta.description}")
+    if not lines:
+        return ""
+    header = (
+        "- Skill CLI tools (run `--help` for subcommands). "
+        "Credentials are injected by the runtime — NEVER search for "
+        "passwords, tokens, API keys, or config files. "
+        "If a command fails with an auth error, report it to the user."
+    )
+    return header + "\n" + "\n".join(lines)
 
 
 def _resolve_skill_doc_path(

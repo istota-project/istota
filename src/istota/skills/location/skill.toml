@@ -1,3 +1,4 @@
 description = "Location tracking, place recognition, visit history, and calendar attendance"
 keywords = ["location", "gps", "where", "place", "places", "visit", "visits", "track", "position", "coordinates", "attendance", "reverse geocode", "day summary", "neighborhood", "summary"]
 resource_types = ["calendar"]
+cli = true
