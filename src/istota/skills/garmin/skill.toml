@@ -1,3 +1,4 @@
 description = "Garmin Connect data access — activities, stats, and health metrics"
 keywords = ["garmin", "run", "running", "workout", "activity", "fitness", "strava", "steps", "heart rate", "sleep", "body battery"]
+resource_types = ["garmin"]
 dependencies = ["garminconnect"]

@@ -74,6 +74,21 @@ invoicing_conversation_token = "room123"  # Talk room for invoice notifications
 # Per-user disabled skills (excluded from keyword matching and loading)
 # disabled_skills = ["browse", "whisper"]
 
+# Garmin Connect credentials (server-side only, not synced to Nextcloud)
+# Can also use [garmin] section syntax (auto-converted to resource)
+# [[resources]]
+# type = "garmin"
+# name = "Garmin Connect"
+# email = "your@email.com"
+# password = "yourpassword"
+
+# Monarch Money session token (server-side only, not synced to Nextcloud)
+# Can also use [monarch] section syntax (auto-converted to resource)
+# [[resources]]
+# type = "monarch"
+# name = "Monarch Money"
+# session_token = "your-session-token"
+
 # Briefings (can also be configured in workspace/BRIEFINGS.md, which takes precedence)
 [[briefings]]
 name = "morning"
