@@ -1391,7 +1391,7 @@ Output target: {output_target or 'text'}
 
 You have access to:
 {file_tools}{browser_tool}
-- caldav via curl or the caldav Python library for calendar operations{db_tool_line}
+- All external service operations (calendar, email, bookmarks, markets, accounting, etc.) MUST go through `istota-skill <skill_name>` CLI commands or `python -m istota.skills.<skill_name>`. Run `istota-skill <name> --help` to discover available subcommands. Credentials are injected by the runtime into these commands — NEVER search for passwords, tokens, API keys, or config files. If a command fails with an auth error, report the failure to the user.{db_tool_line}
 - Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
 
 {rules_section}
