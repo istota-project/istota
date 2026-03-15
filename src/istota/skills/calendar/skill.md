@@ -25,13 +25,22 @@ istota-skill calendar list --calendar "https://..." --date today
 # List events for the next 7 days
 istota-skill calendar list --week --tz "America/Los_Angeles"
 
-# Create an event
+# Create an event (floating time — use when the time is local regardless of timezone)
 istota-skill calendar create \
   --calendar "https://..." \
   --summary "Team Meeting" \
   --start "2026-02-15 14:00" \
   --end "2026-02-15 15:00" \
   --location "Conference Room A"
+
+# Create an event with explicit timezone (use for travel/flights)
+istota-skill calendar create \
+  --calendar "https://..." \
+  --summary "Flight LAX→WAW" \
+  --start "2026-04-26 19:10" \
+  --end "2026-04-27 19:05" \
+  --tz "America/Los_Angeles" \
+  --description "SAS SK932"
 
 # Update an event
 istota-skill calendar update \
@@ -53,6 +62,8 @@ istota-skill calendar delete --calendar "https://..." --uid "event-uid-here"
 
 **Always pass `--tz` with the user's timezone** (from prompt metadata) to ensure correct date boundaries.
 
+**Always pass `--tz` when creating events with specific timezone semantics** (flights, meetings across timezones). Omit `--tz` for local events where the wall-clock time is what matters.
+
 Output is JSON:
 ```json
 {
@@ -68,11 +79,14 @@ Output is JSON:
       "end": "2026-02-15T15:00:00",
       "location": "Conference Room A",
       "description": null,
-      "all_day": false
+      "all_day": false,
+      "timezone": "America/Los_Angeles"
     }
   ]
 }
 ```
+
+The `timezone` field shows the original TZID from the iCalendar data. `"floating"` means the event has no timezone — the time is interpreted as-is regardless of the viewer's timezone.
 
 ## Python API
 
@@ -106,6 +120,7 @@ class CalendarEvent:
     location: str | None
     description: str | None
     all_day: bool
+    timezone: str | None  # Original TZID, None = floating
 ```
 
 ### Permissions

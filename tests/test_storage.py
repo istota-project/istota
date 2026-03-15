@@ -869,18 +869,21 @@ class TestMigrateWorkspaceFiles:
     """Tests for _migrate_workspace_files (USER.md/TASKS.md from root → workspace/)."""
 
     def test_moves_user_md_to_workspace(self, tmp_path):
+        (tmp_path / "workspace").mkdir()
         (tmp_path / "USER.md").write_text("my memory")
         _migrate_workspace_files(tmp_path)
         assert not (tmp_path / "USER.md").exists()
         assert (tmp_path / "workspace" / "USER.md").read_text() == "my memory"
 
     def test_moves_tasks_md_to_workspace(self, tmp_path):
+        (tmp_path / "workspace").mkdir()
         (tmp_path / "TASKS.md").write_text("- [ ] do thing")
         _migrate_workspace_files(tmp_path)
         assert not (tmp_path / "TASKS.md").exists()
         assert (tmp_path / "workspace" / "TASKS.md").read_text() == "- [ ] do thing"
 
     def test_moves_both_files(self, tmp_path):
+        (tmp_path / "workspace").mkdir()
         (tmp_path / "USER.md").write_text("memory")
         (tmp_path / "TASKS.md").write_text("tasks")
         _migrate_workspace_files(tmp_path)
@@ -897,19 +900,28 @@ class TestMigrateWorkspaceFiles:
         assert (tmp_path / "USER.md").exists()
         assert (workspace / "USER.md").read_text() == "new"
 
-    def test_noop_if_no_files(self, tmp_path):
+    def test_noop_if_no_workspace_dir(self, tmp_path):
+        """No-op if workspace/ doesn't exist (deprecated layout)."""
+        (tmp_path / "USER.md").write_text("stays put")
         _migrate_workspace_files(tmp_path)
-        assert (tmp_path / "workspace").is_dir()
+        assert not (tmp_path / "workspace").exists()
+        assert (tmp_path / "USER.md").exists()
 
     def test_runs_in_ensure_user_directories(self, tmp_path):
-        """Migration runs as part of ensure_user_directories_v2."""
+        """Migration runs as part of ensure_user_directories_v2.
+
+        Full chain: root files + workspace/ → workspace_files moves them into
+        workspace/, then workspace_to_bot_dir renames workspace/ → istota/ and
+        moves config files into istota/config/.
+        """
         mount = tmp_path / "mount"
         mount.mkdir()
         config = Config(nextcloud_mount_path=mount)
 
-        # Place files at old location (user root)
+        # Place files at old location (user root) with workspace/ present
         base = mount / "Users" / "alice"
         base.mkdir(parents=True)
+        (base / "workspace").mkdir()
         (base / "USER.md").write_text("old memory")
         (base / "TASKS.md").write_text("old tasks")
 

@@ -1,7 +1,8 @@
 For these actions, output a clear confirmation request instead of executing immediately:
 - Sending emails to **external addresses** (addresses not in the user's configured email_addresses list)
 - Deleting files
-- Modifying calendar events
+- Deleting calendar events
+- Modifying calendar events created by the user (not by you in the current task)
 - Sharing files externally
 
 **Exception**: Sending emails to the user's own email addresses (configured in their profile) does NOT require confirmation. This allows briefings and self-notifications to be sent automatically.

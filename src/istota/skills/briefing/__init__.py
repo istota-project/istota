@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import tomli
 
 from ...config import BriefingConfig, BriefingDefaultsConfig, Config
-from ...storage import get_user_briefings_path
+from ...storage import get_channel_base_path, get_user_briefings_path
 
 logger = logging.getLogger("istota.briefing")
 
@@ -138,6 +138,53 @@ def _strip_html(text: str) -> str:
 # Prompt builder (from briefing.py)
 # ---------------------------------------------------------------------------
 
+def _get_briefing_digest_path(
+    user_id: str, config: Config,
+    conversation_token: str | None = None,
+) -> str:
+    """Return the Nextcloud-relative path for the briefing digest file."""
+    if conversation_token:
+        base = get_channel_base_path(conversation_token)
+    else:
+        from ...storage import get_user_config_path
+        base = get_user_config_path(user_id, config.bot_dir_name)
+    return f"{base}/.briefing_digest.md"
+
+
+def load_previous_briefing_digest(
+    user_id: str, config: Config,
+    conversation_token: str | None = None,
+) -> str | None:
+    """Load the previous briefing digest, if it exists."""
+    from ..files import read_text
+
+    path = _get_briefing_digest_path(user_id, config, conversation_token)
+    try:
+        return read_text(config, path)
+    except Exception:
+        return None
+
+
+def save_briefing_digest(
+    user_id: str, config: Config, briefing_result: str,
+    conversation_token: str | None = None,
+) -> None:
+    """Save a digest of the briefing result for deduplication in the next run.
+
+    Stores the full briefing text with a timestamp so the next briefing can
+    avoid repeating the same stories.
+    """
+    from ..files import write_text
+
+    path = _get_briefing_digest_path(user_id, config, conversation_token)
+    now = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+    content = f"Generated: {now}\n\n{briefing_result}"
+    try:
+        write_text(config, path, content)
+    except Exception as e:
+        logger.warning("Failed to save briefing digest for %s: %s", user_id, e)
+
+
 def build_briefing_prompt(
     briefing: BriefingConfig,
     user_id: str,
@@ -177,6 +224,22 @@ def build_briefing_prompt(
         "",
         "Include the following components:",
     ]
+
+    # Load previous briefing digest for deduplication
+    previous_digest = load_previous_briefing_digest(
+        user_id, config, briefing.conversation_token or None,
+    )
+    if previous_digest:
+        prompt_parts.append("")
+        prompt_parts.append("## Previous briefing (for reference)")
+        prompt_parts.append(previous_digest)
+        prompt_parts.append("")
+        prompt_parts.append(
+            "The above was covered in the previous briefing. "
+            "Focus on new stories and developments. "
+            "Only revisit a story if there is a material update — "
+            "and if so, lead with what changed, not the full recap."
+        )
 
     # Market data - pre-fetch and include (skip quotes on weekends)
     has_market_quotes = False

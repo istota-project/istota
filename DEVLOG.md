@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-16: Briefing deduplication and calendar timezone support
+
+Two improvements to reduce repetition in briefings and give the bot visibility into calendar event timezones.
+
+**Key changes:**
+- Briefing digest: after each briefing, the result is saved to `.briefing_digest.md`. The next briefing prompt includes the previous digest with instructions to focus on new stories and only revisit a story if there's a material update.
+- Calendar `timezone` field: `CalendarEvent` dataclass now captures the original TZID from iCalendar data. The CLI JSON output includes a `timezone` field (`"floating"` when no timezone is set), so the bot can answer questions about timezone handling without diving into source code.
+- Calendar `--tz` flag on `create` and `update` CLI commands: events can now be created with proper timezone-aware datetimes (e.g., `--tz America/Los_Angeles` for flight bookings).
+- Sensitive actions: calendar event deletion now explicitly requires confirmation.
+- Fixed pre-existing test failures in `TestMigrateWorkspaceFiles` (tests didn't pre-create `workspace/` dir).
+
+**Files modified:**
+- `src/istota/skills/briefing/__init__.py` — Added `save_briefing_digest()`, `load_previous_briefing_digest()`, injected previous digest into prompt
+- `src/istota/scheduler.py` — Save briefing digest after successful completion
+- `src/istota/skills/calendar/__init__.py` — `timezone` field on `CalendarEvent`, TZID extraction, `--tz` CLI flag
+- `src/istota/skills/calendar/skill.md` — Documented timezone field, `--tz` flag, floating vs tz-aware guidance
+- `src/istota/skills/sensitive_actions/skill.md` — Explicit calendar deletion confirmation
+- `tests/test_briefing.py` — `TestBriefingDigest` class (7 tests)
+- `tests/test_storage.py` — Fixed workspace migration tests to pre-create `workspace/` dir
+
 ## 2026-03-15: Scripts directory and credential resources
 
 Moved user scripts directory from `/Users/{user_id}/scripts/` into the bot directory at `/Users/{user_id}/{bot_dir}/scripts/`, consistent with exports/ and config/. Existing scripts auto-migrate on directory init.

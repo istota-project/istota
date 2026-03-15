@@ -39,6 +39,7 @@ class CalendarEvent:
     location: str | None = None
     description: str | None = None
     all_day: bool = False
+    timezone: str | None = None  # Original TZID, None = floating
 
 
 def _require_caldav():
@@ -136,6 +137,22 @@ def get_events(
                 end_dt = dtend.dt if dtend else start_dt
 
                 all_day = not isinstance(start_dt, datetime)
+
+                # Extract original timezone from DTSTART
+                event_tz = None
+                if not all_day and dtstart:
+                    if hasattr(start_dt, "tzinfo") and start_dt.tzinfo is not None:
+                        # Try TZID parameter first, then tzinfo name
+                        tzid = dtstart.params.get("TZID") if hasattr(dtstart, "params") else None
+                        if tzid:
+                            event_tz = str(tzid)
+                        elif hasattr(start_dt.tzinfo, "key"):
+                            event_tz = start_dt.tzinfo.key
+                        elif str(start_dt.tzinfo) == "UTC" or str(start_dt.tzinfo) == "utc":
+                            event_tz = "UTC"
+                        else:
+                            event_tz = str(start_dt.tzinfo)
+
                 if all_day:
                     # Filter out all-day events that leaked in due to
                     # UTC offset extending the CalDAV query window.
@@ -165,6 +182,7 @@ def get_events(
                         location=str(component.get("location", "")) or None,
                         description=str(component.get("description", "")) or None,
                         all_day=all_day,
+                        timezone=event_tz,
                     )
                 )
 
@@ -279,6 +297,21 @@ def get_event_by_uid(
                 end_dt = dtend.dt if dtend else start_dt
 
                 all_day = not isinstance(start_dt, datetime)
+
+                # Extract original timezone
+                event_tz = None
+                if not all_day and dtstart:
+                    if hasattr(start_dt, "tzinfo") and start_dt.tzinfo is not None:
+                        tzid = dtstart.params.get("TZID") if hasattr(dtstart, "params") else None
+                        if tzid:
+                            event_tz = str(tzid)
+                        elif hasattr(start_dt.tzinfo, "key"):
+                            event_tz = start_dt.tzinfo.key
+                        elif str(start_dt.tzinfo) in ("UTC", "utc"):
+                            event_tz = "UTC"
+                        else:
+                            event_tz = str(start_dt.tzinfo)
+
                 if all_day:
                     start_dt = datetime.combine(start_dt, datetime.min.time())
                     end_dt = datetime.combine(end_dt, datetime.min.time())
@@ -291,6 +324,7 @@ def get_event_by_uid(
                     location=str(component.get("location", "")) or None,
                     description=str(component.get("description", "")) or None,
                     all_day=all_day,
+                    timezone=event_tz,
                 )
         return None
     except caldav.error.NotFoundError:
@@ -394,7 +428,7 @@ def _get_client_from_env() -> caldav.DAVClient:
 
 def _event_to_dict(event: CalendarEvent) -> dict:
     """Convert CalendarEvent to JSON-serializable dict."""
-    return {
+    d = {
         "uid": event.uid,
         "summary": event.summary,
         "start": event.start.isoformat(),
@@ -403,6 +437,11 @@ def _event_to_dict(event: CalendarEvent) -> dict:
         "description": event.description,
         "all_day": event.all_day,
     }
+    if event.timezone:
+        d["timezone"] = event.timezone
+    else:
+        d["timezone"] = "floating"
+    return d
 
 
 def _parse_date(date_str: str, tz: str | None = None) -> datetime:
@@ -507,6 +546,11 @@ def cmd_create(args) -> dict:
     start = _parse_datetime(args.start)
     end = _parse_datetime(args.end)
 
+    if args.tz:
+        tz = ZoneInfo(args.tz)
+        start = start.replace(tzinfo=tz)
+        end = end.replace(tzinfo=tz)
+
     uid = create_event(
         client,
         args.calendar,
@@ -546,9 +590,15 @@ def cmd_update(args) -> dict:
     if args.summary is not None:
         kwargs["summary"] = args.summary
     if args.start is not None:
-        kwargs["start"] = _parse_datetime(args.start)
+        dt = _parse_datetime(args.start)
+        if hasattr(args, "tz") and args.tz:
+            dt = dt.replace(tzinfo=ZoneInfo(args.tz))
+        kwargs["start"] = dt
     if args.end is not None:
-        kwargs["end"] = _parse_datetime(args.end)
+        dt = _parse_datetime(args.end)
+        if hasattr(args, "tz") and args.tz:
+            dt = dt.replace(tzinfo=ZoneInfo(args.tz))
+        kwargs["end"] = dt
 
     # --clear-location passes "" to delete the property; --location sets it
     if args.clear_location:
@@ -607,6 +657,7 @@ def build_parser():
     )
     p_create.add_argument("--location", "-l", help="Event location")
     p_create.add_argument("--description", help="Event description")
+    p_create.add_argument("--tz", help="Timezone for start/end times (e.g., America/Los_Angeles)")
 
     # delete
     p_delete = sub.add_parser("delete", help="Delete a calendar event")
@@ -622,6 +673,7 @@ def build_parser():
     p_update.add_argument("--end", help="New end time (YYYY-MM-DD HH:MM)")
     p_update.add_argument("--location", "-l", help="New event location")
     p_update.add_argument("--description", help="New event description")
+    p_update.add_argument("--tz", help="Timezone for start/end times (e.g., America/Los_Angeles)")
     p_update.add_argument("--clear-location", action="store_true", default=False, help="Remove location")
     p_update.add_argument("--clear-description", action="store_true", default=False, help="Remove description")
 

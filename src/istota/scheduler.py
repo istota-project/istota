@@ -1244,6 +1244,15 @@ def process_one_task(
         _process_deferred_tracking(config, task, user_temp_dir)
         _warn_orphaned_email_output(task, user_temp_dir)
 
+    # Save briefing digest for deduplication in the next run
+    if success and task.source_type == "briefing":
+        from .skills.briefing import save_briefing_digest
+        digest_text = strip_briefing_preamble(result)
+        save_briefing_digest(
+            task.user_id, config, digest_text,
+            conversation_token=task.conversation_token,
+        )
+
     # Restart Fava if accounting skill was used (runs outside sandbox)
     if success and actions_taken and "istota.skills.accounting" in actions_taken:
         _restart_fava_service(task.user_id)

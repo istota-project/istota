@@ -10,6 +10,9 @@ from istota.skills.briefing import (
     _fetch_random_reminder,
     _fetch_todo_items,
     _fetch_calendar_events,
+    _get_briefing_digest_path,
+    load_previous_briefing_digest,
+    save_briefing_digest,
     build_briefing_prompt,
 )
 from istota.config import Config, BriefingConfig, NextcloudConfig, ResourceConfig, UserConfig
@@ -914,3 +917,83 @@ class TestFinvizInBriefingPrompt:
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
 
         mock_finviz.assert_not_called()
+
+
+class TestBriefingDigest:
+    def _make_config(self, tmp_path):
+        cfg = Config()
+        cfg.nextcloud = NextcloudConfig(url="https://nc.example.com", username="bot", app_password="pw")
+        cfg.nextcloud_mount_path = tmp_path / "mount"
+        cfg.nextcloud_mount_path.mkdir()
+        return cfg
+
+    def test_digest_path_with_channel(self):
+        cfg = Config()
+        path = _get_briefing_digest_path("alice", cfg, conversation_token="room1")
+        assert path.endswith("Channels/room1/.briefing_digest.md")
+
+    def test_digest_path_without_channel(self):
+        cfg = Config()
+        path = _get_briefing_digest_path("alice", cfg)
+        assert "alice" in path
+        assert ".briefing_digest.md" in path
+
+    def test_load_returns_none_when_no_file(self, tmp_path):
+        cfg = self._make_config(tmp_path)
+        result = load_previous_briefing_digest("alice", cfg, conversation_token="room1")
+        assert result is None
+
+    def test_save_and_load_roundtrip(self, tmp_path):
+        cfg = self._make_config(tmp_path)
+        channel_dir = cfg.nextcloud_mount_path / "Channels" / "room1"
+        channel_dir.mkdir(parents=True)
+
+        save_briefing_digest("alice", cfg, "📰 NEWS\n- Story A\n- Story B", conversation_token="room1")
+
+        result = load_previous_briefing_digest("alice", cfg, conversation_token="room1")
+        assert result is not None
+        assert "Story A" in result
+        assert "Story B" in result
+        assert "Generated:" in result
+
+    def test_save_overwrites_previous(self, tmp_path):
+        cfg = self._make_config(tmp_path)
+        channel_dir = cfg.nextcloud_mount_path / "Channels" / "room1"
+        channel_dir.mkdir(parents=True)
+
+        save_briefing_digest("alice", cfg, "📰 First briefing", conversation_token="room1")
+        save_briefing_digest("alice", cfg, "📰 Second briefing", conversation_token="room1")
+
+        result = load_previous_briefing_digest("alice", cfg, conversation_token="room1")
+        assert "Second briefing" in result
+        assert "First briefing" not in result
+
+    @patch("istota.skills.briefing.load_previous_briefing_digest")
+    def test_prompt_includes_previous_digest(self, mock_load):
+        mock_load.return_value = "Generated: 2025-01-15T06:00:00Z\n\n📰 NEWS\n- Old story"
+
+        briefing = BriefingConfig(
+            name="evening", cron="0 18 * * *",
+            conversation_token="room1",
+            components={"calendar": True},
+        )
+        config = Config()
+        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
+
+        assert "Previous briefing" in result
+        assert "Old story" in result
+        assert "Focus on new stories" in result
+
+    @patch("istota.skills.briefing.load_previous_briefing_digest")
+    def test_prompt_without_previous_digest(self, mock_load):
+        mock_load.return_value = None
+
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *",
+            conversation_token="room1",
+            components={"calendar": True},
+        )
+        config = Config()
+        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
+
+        assert "Previous briefing" not in result
