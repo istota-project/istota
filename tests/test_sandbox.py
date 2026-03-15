@@ -1,8 +1,6 @@
 """Tests for bubblewrap sandbox (build_bwrap_cmd)."""
 
 import os
-import shutil
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,11 +54,8 @@ def make_sandbox_task():
 
 
 def _patch_linux():
-    """Patch sys.platform to linux and shutil.which to find bwrap."""
-    return (
-        patch.object(sys, "platform", "linux"),
-        patch.object(shutil, "which", return_value="/usr/bin/bwrap"),
-    )
+    """Patch _bwrap_available to return True (skips real subprocess probe)."""
+    return patch("istota.executor._bwrap_available", return_value=True)
 
 
 def _run_bwrap(config, task, is_admin, resources=None, user_temp=None):
@@ -70,8 +65,7 @@ def _run_bwrap(config, task, is_admin, resources=None, user_temp=None):
         user_temp.mkdir(parents=True, exist_ok=True)
     if resources is None:
         resources = []
-    p1, p2 = _patch_linux()
-    with p1, p2:
+    with _patch_linux():
         return build_bwrap_cmd(
             ["claude", "-p", "test"],
             config, task, is_admin, resources, user_temp,
@@ -100,7 +94,7 @@ class TestBuildBwrapCmdDisabled:
         user_temp = sandbox_config.temp_dir / "alice"
         user_temp.mkdir(parents=True)
 
-        with patch.object(sys, "platform", "darwin"):
+        with patch("istota.executor._bwrap_available", return_value=False):
             result = build_bwrap_cmd(cmd, sandbox_config, task, False, [], user_temp)
 
         assert result == cmd
@@ -111,8 +105,7 @@ class TestBuildBwrapCmdDisabled:
         user_temp = sandbox_config.temp_dir / "alice"
         user_temp.mkdir(parents=True)
 
-        with patch.object(sys, "platform", "linux"), \
-             patch.object(shutil, "which", return_value=None):
+        with patch("istota.executor._bwrap_available", return_value=False):
             result = build_bwrap_cmd(cmd, sandbox_config, task, False, [], user_temp)
 
         assert result == cmd
@@ -459,8 +452,7 @@ class TestNetworkProxyBwrapIntegration:
         user_temp.mkdir(parents=True)
         sock = sandbox_config.temp_dir / "net.sock"
         sock.touch()
-        p1, p2 = _patch_linux()
-        with p1, p2:
+        with _patch_linux():
             result = build_bwrap_cmd(
                 ["claude", "-p", "-"], sandbox_config, task, False,
                 [], user_temp, net_proxy_sock=sock,
@@ -478,8 +470,7 @@ class TestNetworkProxyBwrapIntegration:
         user_temp.mkdir(parents=True)
         sock = sandbox_config.temp_dir / "net.sock"
         sock.touch()
-        p1, p2 = _patch_linux()
-        with p1, p2:
+        with _patch_linux():
             result = build_bwrap_cmd(
                 ["claude", "-p", "-"], sandbox_config, task, False,
                 [], user_temp, net_proxy_sock=sock,
@@ -493,8 +484,7 @@ class TestNetworkProxyBwrapIntegration:
         user_temp.mkdir(parents=True)
         sock = sandbox_config.temp_dir / "net.sock"
         sock.touch()
-        p1, p2 = _patch_linux()
-        with p1, p2:
+        with _patch_linux():
             result = build_bwrap_cmd(
                 ["claude", "-p", "-"], sandbox_config, task, False,
                 [], user_temp, net_proxy_sock=sock,
@@ -520,8 +510,7 @@ class TestNetworkProxyBwrapIntegration:
         user_temp.mkdir(parents=True)
         sock = sandbox_config.temp_dir / "net.sock"
         sock.touch()
-        p1, p2 = _patch_linux()
-        with p1, p2:
+        with _patch_linux():
             result = build_bwrap_cmd(
                 ["claude", "-p", "-", "--allowedTools", "Read"],
                 sandbox_config, task, False, [], user_temp,
