@@ -92,7 +92,7 @@ class TestPathHelpers:
         assert get_user_shared_path("alice") == "/Users/alice/shared"
 
     def test_user_scripts_path(self):
-        assert get_user_scripts_path("alice") == "/Users/alice/scripts"
+        assert get_user_scripts_path("alice", "istota") == "/Users/alice/istota/scripts"
 
     def test_user_briefings_path(self):
         assert get_user_briefings_path("alice", "istota") == "/Users/alice/istota/config/BRIEFINGS.md"
@@ -118,11 +118,12 @@ class TestMountOperations:
         assert result is True
 
         base = mount_config.nextcloud_mount_path / "Users" / "alice"
-        for subdir in ["inbox", "memories", "istota", "shared", "scripts"]:
+        for subdir in ["inbox", "memories", "istota", "shared"]:
             assert (base / subdir).is_dir()
         # istota subdirectories
         assert (base / "istota" / "config").is_dir()
         assert (base / "istota" / "exports").is_dir()
+        assert (base / "istota" / "scripts").is_dir()
 
     def test_ensure_dirs_idempotent(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
@@ -130,17 +131,17 @@ class TestMountOperations:
         assert result is True
 
         base = mount_config.nextcloud_mount_path / "Users" / "alice"
-        for subdir in ["inbox", "memories", "istota", "shared", "scripts"]:
+        for subdir in ["inbox", "memories", "istota", "shared"]:
             assert (base / subdir).is_dir()
 
     def test_user_dirs_exist_all(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
         result = user_directories_exist_v2(mount_config, "alice")
-        assert result == {"inbox": True, "memories": True, "istota": True, "shared": True, "scripts": True}
+        assert result == {"inbox": True, "memories": True, "istota": True, "shared": True}
 
     def test_user_dirs_exist_none(self, mount_config):
         result = user_directories_exist_v2(mount_config, "alice")
-        assert result == {"inbox": False, "memories": False, "istota": False, "shared": False, "scripts": False}
+        assert result == {"inbox": False, "memories": False, "istota": False, "shared": False}
 
     def test_read_memory_not_exists(self, mount_config):
         result = read_user_memory_v2(mount_config, "alice")
@@ -433,7 +434,7 @@ class TestRcloneOperations:
 
         result = ensure_user_directories("nc", "alice", "istota")
         assert result is True
-        # 5 top-level subdirs + 1 istota/exports = 6 mkdir calls
+        # 4 top-level subdirs + 2 bot subdirs (exports, scripts) = 6 mkdir calls
         assert mock_run.call_count == 6
 
     @patch("istota.storage.subprocess.run")

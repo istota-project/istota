@@ -532,9 +532,9 @@ def get_user_shared_path(user_id: str) -> str:
     return f"{get_user_base_path(user_id)}/shared"
 
 
-def get_user_scripts_path(user_id: str) -> str:
-    """Get the path to a user's scripts directory."""
-    return f"{get_user_base_path(user_id)}/scripts"
+def get_user_scripts_path(user_id: str, bot_dir: str) -> str:
+    """Get the path to a user's scripts directory (inside bot dir)."""
+    return f"{get_user_base_path(user_id)}/{bot_dir}/scripts"
 
 
 def get_user_briefings_path(user_id: str, bot_dir: str) -> str:
@@ -972,7 +972,7 @@ def ensure_user_directories(remote: str, user_id: str, bot_dir: str) -> bool:
     Returns True if all directories were created or already exist.
     """
     base = get_user_base_path(user_id)
-    subdirs = ["inbox", "memories", bot_dir, "shared", "scripts"]
+    subdirs = ["inbox", "memories", bot_dir, "shared"]
 
     success = True
     for subdir in subdirs:
@@ -982,11 +982,12 @@ def ensure_user_directories(remote: str, user_id: str, bot_dir: str) -> bool:
             if not _rclone_path_exists(remote, path):
                 success = False
 
-    # Create bot_dir/exports/
-    exports_path = f"{base}/{bot_dir}/exports"
-    if not _rclone_mkdir(remote, exports_path):
-        if not _rclone_path_exists(remote, exports_path):
-            success = False
+    # Create bot_dir subdirectories
+    for sub in ["exports", "scripts"]:
+        sub_path = f"{base}/{bot_dir}/{sub}"
+        if not _rclone_mkdir(remote, sub_path):
+            if not _rclone_path_exists(remote, sub_path):
+                success = False
 
     return success
 
@@ -998,7 +999,7 @@ def user_directories_exist(remote: str, user_id: str, bot_dir: str) -> dict[str,
     Returns dict mapping directory name to existence status.
     """
     base = get_user_base_path(user_id)
-    subdirs = ["inbox", "memories", bot_dir, "shared", "scripts"]
+    subdirs = ["inbox", "memories", bot_dir, "shared"]
 
     result = {}
     for subdir in subdirs:
@@ -1216,7 +1217,7 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         _migrate_workspace_files(base)
         _migrate_workspace_to_bot_dir(base, bot_dir)
 
-        subdirs = ["inbox", "memories", bot_dir, "shared", "scripts"]
+        subdirs = ["inbox", "memories", bot_dir, "shared"]
         for subdir in subdirs:
             path = base / subdir
             path.mkdir(parents=True, exist_ok=True)
@@ -1228,6 +1229,17 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         config_dir.mkdir(exist_ok=True)
         exports_dir = bot_dir_path / "exports"
         exports_dir.mkdir(exist_ok=True)
+        scripts_dir = bot_dir_path / "scripts"
+        scripts_dir.mkdir(exist_ok=True)
+
+        # Migrate scripts/ from user root into bot dir
+        old_scripts = base / "scripts"
+        if old_scripts.is_dir() and any(old_scripts.iterdir()):
+            for item in old_scripts.iterdir():
+                dst = scripts_dir / item.name
+                if not dst.exists():
+                    shutil.move(str(item), str(dst))
+                    logger.info("Migrated %s → %s", item, dst)
 
         # Migrate old exports/ to bot_dir/exports/
         old_exports = base / "exports"
@@ -1331,7 +1343,7 @@ def user_directories_exist_v2(config: "Config", user_id: str) -> dict[str, bool]
     """
     if config.use_mount:
         base = _get_mount_path(config, get_user_base_path(user_id))
-        subdirs = ["inbox", "memories", config.bot_dir_name, "shared", "scripts"]
+        subdirs = ["inbox", "memories", config.bot_dir_name, "shared"]
         return {subdir: (base / subdir).exists() for subdir in subdirs}
     else:
         return user_directories_exist(config.rclone_remote, user_id, config.bot_dir_name)
