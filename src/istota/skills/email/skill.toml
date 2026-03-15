@@ -2,3 +2,4 @@ description = "Email sending and response formatting"
 keywords = ["email", "mail", "send", "inbox", "reply", "message"]
 dependencies = ["imap_tools"]
 source_types = ["email"]
+cli = true

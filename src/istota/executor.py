@@ -1151,6 +1151,7 @@ def build_prompt(
     recalled_memories: str | None = None,
     excluded_resource_types: set[str] | None = None,
     skip_persona: bool = False,
+    cli_skills_text: str | None = None,
 ) -> str:
     """Build the full prompt for Claude Code execution."""
     # Group resources by type
@@ -1327,6 +1328,9 @@ The following are relevant previous messages from this conversation:
     if config.browser.enabled:
         browser_tool = "\n- Web browser for JS-rendered pages: istota-skill browse (see browse skill for details)"
 
+    # CLI skills list (generated from skill index metadata)
+    cli_skills_section = cli_skills_text or ""
+
     # Compute user's local time
     user_config = config.get_user(task.user_id)
     user_tz_str = user_config.timezone if user_config else "UTC"
@@ -1391,7 +1395,7 @@ Output target: {output_target or 'text'}
 
 You have access to:
 {file_tools}{browser_tool}
-- All external service operations (calendar, email, bookmarks, markets, accounting, etc.) MUST go through `istota-skill <skill_name>` CLI commands or `python -m istota.skills.<skill_name>`. Run `istota-skill <name> --help` to discover available subcommands. Credentials are injected by the runtime into these commands — NEVER search for passwords, tokens, API keys, or config files. If a command fails with an auth error, report the failure to the user.{db_tool_line}
+{cli_skills_section}{db_tool_line}
 - Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
 
 {rules_section}
@@ -1647,6 +1651,10 @@ def execute_task(
         elif task.source_type == "istota_file":
             effective_output_target = "istota_file"
 
+    # Build CLI skills list from skill index
+    from .skills._loader import format_cli_skills
+    cli_skills_text = format_cli_skills(skill_index)
+
     # Build prompt
     prompt = build_prompt(
         task, user_resources, config, skills_doc, conversation_context, user_memory,
@@ -1657,6 +1665,7 @@ def execute_task(
         recalled_memories=recalled_memories,
         excluded_resource_types=_excluded_resource_types or None,
         skip_persona=_skip_persona,
+        cli_skills_text=cli_skills_text,
     )
 
     # Log prompt size breakdown

@@ -13,3 +13,4 @@ var = "KARAKEEP_API_KEY"
 from = "user_resource_config"
 resource_type = "karakeep"
 field = "api_key"
+cli = true
