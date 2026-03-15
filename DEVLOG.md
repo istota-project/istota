@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-15: Scripts directory and credential resources
+
+Moved user scripts directory from `/Users/{user_id}/scripts/` into the bot directory at `/Users/{user_id}/{bot_dir}/scripts/`, consistent with exports/ and config/. Existing scripts auto-migrate on directory init.
+
+Also added per-user Garmin Connect and Monarch Money credentials as resource entries (`type = "garmin"`, `type = "monarch"`) following the same pattern as Karakeep. Credentials land in `ResourceConfig.extra` dict and the executor reads them to set env vars. The `[garmin]`/`[monarch]` TOML section syntax is also supported and auto-converted to resources during config parsing. Garmin skill now declares `resource_types = ["garmin"]` for automatic skill selection when the user has credentials configured.
+
+**Key changes:**
+- Scripts directory moved under bot dir with auto-migration from old location
+- Garmin/Monarch credentials use `[[resources]]` pattern instead of dedicated `UserConfig` fields
+- Removed `garmin_email`, `garmin_password`, `monarch_session_token` from `UserConfig`
+- Executor reads credentials from `resource.extra` dict (same pattern as Karakeep's `base_url`/`api_key`)
+- Garmin skill.toml gets `resource_types = ["garmin"]`
+- Ansible role updated: `user.toml.j2` renders garmin/monarch as resources, `defaults/main.yml` shows examples
+
+**Files modified:**
+- `src/istota/storage.py` — Scripts path under bot dir, migration logic, directory structure
+- `src/istota/config.py` — Remove UserConfig credential fields, parse `[garmin]`/`[monarch]` sections as resources
+- `src/istota/executor.py` — Read garmin/monarch from resource.extra instead of UserConfig fields
+- `src/istota/skills/garmin/__init__.py` — Env var precedence for credentials
+- `src/istota/skills/garmin/skill.toml` — Add `resource_types = ["garmin"]`
+- `src/istota/skills/accounting/__init__.py` — Env var precedence for Monarch token
+- `config/users/alice.example.toml` — Resource-based credential examples
+- `deploy/ansible/defaults/main.yml` — Garmin/Monarch resource examples
+- `deploy/ansible/templates/user.toml.j2` — Render garmin/monarch as resources
+- `tests/test_storage.py` — Updated for scripts path and directory structure changes
+
 ## 2026-03-16: External prompt files for CRON.md jobs
 
 Added `prompt_file` field to CRON.md scheduled jobs so long prompts can live in separate files instead of being inlined in the TOML block.

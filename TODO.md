@@ -296,7 +296,7 @@
 - [x] OAuth token hardening (removed env var passthrough, RO .credentials.json mount)
 - [x] .developer/ scripts mounted read-only (prevent credential-fetch script replacement)
 - [x] Admin Nextcloud mount scoped to user dir (was full content tree)
-- [ ] Skill proxy phase 3: GARMIN_CONFIG file path exclusion via bwrap
+- [x] Skill proxy phase 3: Garmin/Monarch credentials as resources (env vars via skill proxy, no file path needed)
 - [x] Network proxy for agent subprocesses (domain allowlist)
 
 ## Priority 4: Future Ideas
@@ -319,6 +319,7 @@
 - [x] Location tracking via Overland GPS (FastAPI receiver, place resolution, visit state machine, CLI skill)
 - [x] Calendar attendance correlation via GPS pings (geocoding, place matching, proximity check)
 - [x] Dependency isolation: optional deps in extras groups, import guards, `!skills` availability display
+- [x] Service credentials as resources (garmin, monarch follow karakeep pattern with ResourceConfig.extra)
 - [ ] Config validation / "unconfigured" skill status (declarative credential requirements)
 
 ## Priority 5: Location Awareness (Phase 2+)

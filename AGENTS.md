@@ -119,7 +119,7 @@ Admin users listed in `/etc/istota/admins`. Empty file = all users are admin (ba
 Non-admin restrictions: scoped mount path, no DB access, no subtask creation, `admin_only` skills filtered out.
 
 ### Multi-user Resources
-Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`. CalDAV calendars auto-discovered from Nextcloud.
+Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`, `karakeep`, `garmin`, `monarch`. CalDAV calendars auto-discovered from Nextcloud. Service credentials (Garmin, Monarch, Karakeep) are configured as `[[resources]]` entries with type-specific fields in `extra`.
 
 ### Nextcloud Directory Structure
 
@@ -128,11 +128,11 @@ Resources defined in per-user config or DB, merged at task time. Types: `calenda
 ├── {bot_name}/      # Shared with user via OCS
 │   ├── config/      # USER.md, TASKS.md, BRIEFINGS.md, PERSONA.md, etc.
 │   ├── exports/     # Bot-generated files
+│   ├── scripts/     # User's reusable Python scripts
 │   └── examples/    # Documentation and config reference
 ├── inbox/           # Files user wants bot to process
 ├── memories/        # Dated memories (sleep cycle): YYYY-MM-DD.md
-├── shared/          # Auto-organized files shared by user
-└── scripts/         # User's reusable Python scripts
+└── shared/          # Auto-organized files shared by user
 
 /Channels/{conversation_token}/
 ├── CHANNEL.md       # Persistent channel memory
