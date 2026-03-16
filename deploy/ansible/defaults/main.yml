@@ -205,6 +205,15 @@ istota_briefing_defaults:
         value: "nytimes.com"
       - type: "domain"
         value: "economist.com"
+  headlines:
+    sources:
+      - "ap"
+      - "reuters"
+      - "guardian"
+      - "ft"
+      - "aljazeera"
+      - "lemonde"
+      - "spiegel"
 
 # rclone remote name for Nextcloud
 istota_rclone_remote: "nextcloud"

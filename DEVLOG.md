@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-16: Headlines briefing component
+
+Added a `headlines` component to the briefing system that pre-fetches frontpages from major news sources via the browser container API. This replaces the standalone news cron jobs (news-morning/news-evening) with a proper briefing component that gets dedup, scheduling, and multi-component merging for free.
+
+**Key changes:**
+- `HEADLINE_SOURCES` registry with 7 built-in sources: AP, Reuters, Guardian, FT, Al Jazeera, Le Monde, Der Spiegel
+- `_fetch_headlines()` pre-fetches frontpage text via the browse skill's browser container API, with per-source error handling and text truncation
+- `headlines` component in `build_briefing_prompt()` injects raw frontpage text with synthesis instructions (group by theme, cross-source attribution, 10-15 stories)
+- `headlines: dict` field on `BriefingDefaultsConfig` enables `headlines = true` boolean expansion from admin defaults
+- Coexists with existing `news` component (email newsletters) — both can be enabled, Claude merges stories from both sources
+- Briefing skill.md updated with cross-source attribution rules for frontpage sources
+
+**Files added/modified:**
+- `src/istota/skills/briefing/__init__.py` — Added `HEADLINE_SOURCES`, `_fetch_headlines()`, headlines component in prompt builder
+- `src/istota/skills/briefing/skill.md` — Cross-source attribution, headline+newsletter merge instructions
+- `src/istota/config.py` — `headlines` field on `BriefingDefaultsConfig`
+- `config/config.example.toml` — `[briefing_defaults.headlines]` with default source list
+- `deploy/ansible/defaults/main.yml` — Headlines defaults
+- `deploy/ansible/templates/config.toml.j2` — Headlines section rendering
+- `deploy/render_config.py` — Headlines section generation
+- `tests/test_briefing.py` — 29 new tests (source registry, fetch function, prompt integration)
+
 ## 2026-03-16: Briefing deduplication and calendar timezone support
 
 Two improvements to reduce repetition in briefings and give the bot visibility into calendar event timezones.

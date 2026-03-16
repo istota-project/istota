@@ -30,6 +30,8 @@ Newsletters often mix general and market news. Place each story in the right sec
 **IRAN-US TENSIONS ESCALATE:** Iran's foreign minister warned that Tehran's forces have their "fingers on the trigger" as Trump threatened a "massive Armada" heading toward Iran, saying "time is running out" for a nuclear deal. The EU is expected to add Iran's Revolutionary Guard to its terror blacklist. [Semafor, NYT]
 </news_example>
 
+When both headlines (web frontpages) and news (email newsletters) are present, merge stories from both sources. A story that appears in both AP frontpage and a Semafor newsletter should be one entry with combined attribution: `[AP, Semafor]`.
+
 **📈 MARKETS**
 
 One line per quote with 🟢/🔴 indicator based on change direction, bold the name:
@@ -59,11 +61,14 @@ Copy FinViz data as-is — it is pre-formatted with 🟢/🔴 indicators and bol
 
 ## Source Attribution
 
-Derive source names from the newsletter sender in the "### From:" headers:
+For **newsletters** (news component), derive source names from the "### From:" headers:
 - Domain senders: use capitalized domain name (e.g., `semafor.com` → `Semafor`)
 - Email senders: use recognizable short name (e.g., `briefing@nytimes.com` → `NYT`, `markets@wsj.com` → `WSJ Markets`)
-- If a story appears in multiple newsletters, list all: `[Semafor, NYT]`
-- Format: `[Source]` or `[Source, Source]` at the end of the paragraph
+
+For **frontpages** (headlines component), use the source name from the "### Source Name" headers (e.g., `AP News` → `AP`, `The Guardian` → `Guardian`, `Financial Times` → `FT`, `Der Spiegel` → `Spiegel`).
+
+If a story appears across both newsletters and frontpages, combine: `[AP, Semafor]`
+Format: `[Source]` or `[Source, Source]` at the end of the paragraph
 
 **📅 CALENDAR**
 

@@ -191,6 +191,11 @@ def render_config_toml(s: dict) -> str:
                 for src in sources:
                     lines.append(f'    {{ type = "{src["type"]}", value = "{src["value"]}" }},')
                 lines.append(']')
+        if "headlines" in bd:
+            lines.append('[briefing_defaults.headlines]')
+            hl_sources = bd["headlines"].get("sources", [])
+            if hl_sources:
+                lines.append(f'sources = {json.dumps(hl_sources)}')
 
     # [ntfy]
     if get(s, "ntfy.enabled", False):

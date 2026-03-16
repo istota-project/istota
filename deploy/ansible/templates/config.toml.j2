@@ -154,6 +154,11 @@ sources = [
 {% endfor %}
 ]
 {% endif %}
+{% if istota_briefing_defaults.headlines is defined %}
+[briefing_defaults.headlines]
+{% if istota_briefing_defaults.headlines.sources is defined and istota_briefing_defaults.headlines.sources | length > 0 %}
+sources = {{ istota_briefing_defaults.headlines.sources | to_json }}
+{% endif %}
 {% endif %}
 {% endif %}
 

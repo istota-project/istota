@@ -110,9 +110,9 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 
 **Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Configurable memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
 
-**Scheduling** — Cron jobs via CRON.md (AI prompts or shell commands), natural-language reminders as one-shot cron entries, scheduled briefings with calendar/markets/news/todos components, invoice generation schedules.
+**Scheduling** — Cron jobs via CRON.md (AI prompts or shell commands), natural-language reminders as one-shot cron entries, scheduled briefings with calendar/markets/headlines/news/todos components, invoice generation schedules.
 
-**Briefings** — Configurable morning/evening summaries. Components include calendar events, market data (futures, indices via yfinance + FinViz), news from RSS feeds, todos, email summaries, and reminders. Output to Talk, email, or both.
+**Briefings** — Configurable morning/evening summaries. Components include calendar events, market data (futures, indices via yfinance + FinViz), headlines (pre-fetched frontpages from AP, Reuters, Guardian, FT, Al Jazeera, Le Monde, Der Spiegel), email newsletter digests, todos, and reminders. Output to Talk, email, or both.
 
 **Heartbeat monitoring** — User-defined health checks: file age, shell commands, URL health, calendar conflicts, task deadlines, and system self-checks. Cooldowns, quiet hours, and per-check intervals.
 
