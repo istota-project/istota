@@ -40,6 +40,7 @@ from istota.config import (
     UserConfig,
     BriefingConfig,
     EmailConfig,
+    ResourceConfig,
 )
 from istota import db
 
@@ -1846,6 +1847,16 @@ class TestExecuteCommandTask:
         success, result = _execute_command_task(task, config)
         assert success is True
         assert str(garmin_file) in result
+
+    def test_garmin_credentials_from_user_config_resource(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(
+            resources=[ResourceConfig(type="garmin", extra={"email": "g@example.com", "password": "gpass"})],
+        )
+        task = self._make_task(command="echo $GARMIN_EMAIL:$GARMIN_PASSWORD")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert result == "g@example.com:gpass"
 
     def test_garmin_config_not_set_when_file_missing(self, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)

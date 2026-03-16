@@ -938,7 +938,16 @@ def _execute_command_task(
         env["NC_USER"] = config.nextcloud.username
     if config.nextcloud.app_password:
         env["NC_PASS"] = config.nextcloud.app_password
-    # Garmin config path (in user's bot config folder, only set if file exists)
+    # Garmin credentials (from resource config, fall back to GARMIN.md)
+    user_config = config.get_user(task.user_id)
+    if user_config:
+        garmin_resources = [
+            rc for rc in user_config.resources
+            if rc.type == "garmin" and rc.extra.get("email")
+        ]
+        if garmin_resources:
+            env["GARMIN_EMAIL"] = garmin_resources[0].extra["email"]
+            env["GARMIN_PASSWORD"] = garmin_resources[0].extra.get("password", "")
     if config.nextcloud_mount_path:
         from .storage import get_user_config_path
         garmin_path = config.nextcloud_mount_path / get_user_config_path(task.user_id, config.bot_dir_name).lstrip("/") / "GARMIN.md"
