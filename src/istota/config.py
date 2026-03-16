@@ -292,6 +292,7 @@ class BriefingDefaultsConfig:
     """Admin-level defaults for briefing components (expanded when user sets boolean)."""
     markets: dict = field(default_factory=dict)
     news: dict = field(default_factory=dict)
+    headlines: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -10,12 +10,14 @@ from istota.skills.briefing import (
     _fetch_random_reminder,
     _fetch_todo_items,
     _fetch_calendar_events,
+    _fetch_headlines,
     _get_briefing_digest_path,
     load_previous_briefing_digest,
     save_briefing_digest,
     build_briefing_prompt,
+    HEADLINE_SOURCES,
 )
-from istota.config import Config, BriefingConfig, NextcloudConfig, ResourceConfig, UserConfig
+from istota.config import Config, BriefingConfig, BrowserConfig, NextcloudConfig, ResourceConfig, UserConfig
 
 
 class TestStripHtml:
@@ -997,3 +999,250 @@ class TestBriefingDigest:
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
 
         assert "Previous briefing" not in result
+
+
+class TestHeadlineSources:
+    """Test the HEADLINE_SOURCES registry."""
+
+    def test_all_expected_sources_present(self):
+        expected = {"ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"}
+        assert expected <= set(HEADLINE_SOURCES.keys())
+
+    def test_sources_have_required_fields(self):
+        for key, source in HEADLINE_SOURCES.items():
+            assert "url" in source, f"{key} missing url"
+            assert "name" in source, f"{key} missing name"
+            assert source["url"].startswith("http"), f"{key} url invalid"
+
+
+class TestFetchHeadlines:
+    """Tests for _fetch_headlines."""
+
+    def _make_config(self, browser_enabled=True):
+        return Config(
+            browser=BrowserConfig(
+                enabled=browser_enabled,
+                api_url="http://localhost:9223",
+            ),
+        )
+
+    def test_browser_disabled_returns_none(self):
+        config = self._make_config(browser_enabled=False)
+        result = _fetch_headlines({"sources": ["ap"]}, config)
+        assert result is None
+
+    def test_empty_sources_returns_none(self):
+        config = self._make_config()
+        result = _fetch_headlines({"sources": []}, config)
+        assert result is None
+
+    def test_no_sources_key_returns_none(self):
+        config = self._make_config()
+        result = _fetch_headlines({}, config)
+        assert result is None
+
+    def test_unknown_source_skipped(self):
+        config = self._make_config()
+        with patch("istota.skills.briefing.httpx") as mock_httpx:
+            result = _fetch_headlines({"sources": ["nonexistent"]}, config)
+        assert result is None
+
+    @patch("istota.skills.briefing.httpx")
+    def test_successful_fetch(self, mock_httpx):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "status": "ok",
+            "text": "Breaking: Major event happens. More details follow.",
+        }
+        mock_httpx.post.return_value = mock_response
+
+        config = self._make_config()
+        result = _fetch_headlines({"sources": ["ap"]}, config)
+
+        assert result is not None
+        assert "AP News" in result
+        assert "Major event happens" in result
+        assert "pre-fetched" in result.lower()
+
+    @patch("istota.skills.briefing.httpx")
+    def test_multiple_sources(self, mock_httpx):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "status": "ok",
+            "text": "Some headlines here.",
+        }
+        mock_httpx.post.return_value = mock_response
+
+        config = self._make_config()
+        result = _fetch_headlines({"sources": ["ap", "reuters"]}, config)
+
+        assert result is not None
+        assert "AP News" in result
+        assert "Reuters" in result
+
+    @patch("istota.skills.briefing.httpx")
+    def test_truncates_long_pages(self, mock_httpx):
+        long_text = "x" * 10000
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "ok", "text": long_text}
+        mock_httpx.post.return_value = mock_response
+
+        config = self._make_config()
+        result = _fetch_headlines({"sources": ["ap"]}, config)
+
+        assert result is not None
+        assert "[truncated]" in result
+
+    @patch("istota.skills.briefing.httpx")
+    def test_fetch_error_skips_source(self, mock_httpx):
+        mock_httpx.post.side_effect = Exception("connection refused")
+
+        config = self._make_config()
+        result = _fetch_headlines({"sources": ["ap"]}, config)
+        assert result is None
+
+    @patch("istota.skills.briefing.httpx")
+    def test_non_ok_status_skips_source(self, mock_httpx):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "error", "error": "captcha"}
+        mock_httpx.post.return_value = mock_response
+
+        config = self._make_config()
+        result = _fetch_headlines({"sources": ["ap"]}, config)
+        assert result is None
+
+    @patch("istota.skills.briefing.httpx")
+    def test_empty_text_skips_source(self, mock_httpx):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "ok", "text": ""}
+        mock_httpx.post.return_value = mock_response
+
+        config = self._make_config()
+        result = _fetch_headlines({"sources": ["ap"]}, config)
+        assert result is None
+
+    @patch("istota.skills.briefing.httpx")
+    def test_partial_failure_still_returns_successful(self, mock_httpx):
+        """If one source fails but another succeeds, return the successful one."""
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise Exception("timeout")
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"status": "ok", "text": "Reuters headlines"}
+            return mock_resp
+
+        mock_httpx.post.side_effect = side_effect
+
+        config = self._make_config()
+        result = _fetch_headlines({"sources": ["ap", "reuters"]}, config)
+
+        assert result is not None
+        assert "Reuters" in result
+        assert "AP" not in result
+
+
+class TestHeadlinesInBriefingPrompt:
+    """Test headlines integration in build_briefing_prompt."""
+
+    @patch("istota.skills.briefing._fetch_headlines")
+    @patch("istota.skills.briefing.datetime")
+    def test_headlines_included_in_prompt(self, mock_dt, mock_headlines):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
+        mock_dt.now.return_value = mock_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        mock_headlines.return_value = (
+            "## News Frontpages (pre-fetched)\n\n"
+            "### AP News\nBig story happening today."
+        )
+
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *",
+            conversation_token="room1",
+            components={"headlines": {"enabled": True, "sources": ["ap"]}},
+        )
+        config = Config()
+        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
+
+        assert "Big story happening today" in result
+        assert "Group stories by theme" in result
+        mock_headlines.assert_called_once()
+
+    @patch("istota.skills.briefing._fetch_headlines")
+    @patch("istota.skills.briefing.datetime")
+    def test_headlines_disabled_not_fetched(self, mock_dt, mock_headlines):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
+        mock_dt.now.return_value = mock_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *",
+            conversation_token="room1",
+            components={"calendar": True},
+        )
+        config = Config()
+        build_briefing_prompt(briefing, "testuser", config, "UTC")
+
+        mock_headlines.assert_not_called()
+
+    @patch("istota.skills.briefing._fetch_headlines")
+    @patch("istota.skills.briefing.datetime")
+    def test_headlines_fetch_failure_graceful(self, mock_dt, mock_headlines):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
+        mock_dt.now.return_value = mock_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        mock_headlines.return_value = None
+
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *",
+            conversation_token="room1",
+            components={"headlines": {"enabled": True, "sources": ["ap"]}},
+        )
+        config = Config()
+        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
+
+        # Should still produce a valid prompt without headlines
+        assert "briefing" in result.lower()
+        assert "Frontpages" not in result
+
+    @patch("istota.skills.briefing._fetch_headlines")
+    @patch("istota.skills.briefing._fetch_newsletter_content")
+    @patch("istota.skills.briefing.datetime")
+    def test_headlines_and_news_coexist(self, mock_dt, mock_news, mock_headlines):
+        """Headlines (web) and news (newsletters) can both be enabled."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
+        mock_dt.now.return_value = mock_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        mock_headlines.return_value = "## News Frontpages (pre-fetched)\n\nAP headlines"
+        mock_news.return_value = "## Newsletter content\n\nNewsletter stories"
+
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *",
+            conversation_token="room1",
+            components={
+                "headlines": {"enabled": True, "sources": ["ap"]},
+                "news": {"enabled": True, "lookback_hours": 12, "sources": [{"type": "domain", "value": "semafor.com"}]},
+            },
+        )
+        config = Config()
+        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
+
+        assert "AP headlines" in result
+        assert "Newsletter stories" in result

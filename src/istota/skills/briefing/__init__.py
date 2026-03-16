@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 import tomli
 
 from ...config import BriefingConfig, BriefingDefaultsConfig, Config
@@ -294,6 +295,22 @@ def build_briefing_prompt(
                 f"See the briefing skill for section format and story count targets.{quote_note}"
             )
 
+    # Headlines - pre-fetch frontpages from news sources
+    if _component_enabled(components, "headlines"):
+        headlines_config = components["headlines"] if isinstance(components.get("headlines"), dict) else {}
+        headlines_content = _fetch_headlines(headlines_config, config)
+        if headlines_content:
+            prompt_parts.append("")
+            prompt_parts.append(headlines_content)
+            prompt_parts.append("")
+            prompt_parts.append(
+                "These are frontpage headlines from major news sources. "
+                "Group stories by theme, with cross-source attribution. "
+                "Target 10-15 stories. Flag angles that only appear in one source. "
+                "Place stories in the appropriate section (NEWS for general, MARKETS for economic/financial)."
+            )
+            logger.debug("Fetched headlines for briefing")
+
     # Calendar events - pre-fetch with correct timezone
     if components.get("calendar"):
         calendar_content = _fetch_calendar_events(config, user_id, is_morning, user_timezone)
@@ -484,6 +501,82 @@ def _fetch_newsletter_content(news_config: dict, app_config: Config) -> str | No
     except Exception as e:
         logger.warning("Newsletter fetch failed: %s", e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Headlines fetcher (news frontpages via browse skill)
+# ---------------------------------------------------------------------------
+
+HEADLINE_SOURCES = {
+    "ap": {"url": "https://apnews.com", "name": "AP News"},
+    "reuters": {"url": "https://www.reuters.com", "name": "Reuters"},
+    "guardian": {"url": "https://www.theguardian.com/world", "name": "The Guardian"},
+    "ft": {"url": "https://www.ft.com", "name": "Financial Times"},
+    "aljazeera": {"url": "https://www.aljazeera.com", "name": "Al Jazeera"},
+    "lemonde": {"url": "https://www.lemonde.fr/en/", "name": "Le Monde"},
+    "spiegel": {"url": "https://www.spiegel.de/international/", "name": "Der Spiegel"},
+}
+
+_HEADLINE_PAGE_MAX_CHARS = 5000
+_HEADLINE_FETCH_TIMEOUT = 60.0
+
+
+def _fetch_headlines(headlines_config: dict, app_config: "Config") -> str | None:
+    """Pre-fetch frontpage headlines from configured news sources via the browse API.
+
+    Args:
+        headlines_config: Headlines component config with 'sources' list of source keys.
+        app_config: Application config (for browser API URL).
+
+    Returns:
+        Formatted string with frontpage text from each source, or None if unavailable.
+    """
+    if not app_config.browser.enabled:
+        return None
+
+    sources = headlines_config.get("sources", [])
+    if not sources:
+        return None
+
+    api_url = app_config.browser.api_url
+    results = []
+
+    for source_key in sources:
+        source = HEADLINE_SOURCES.get(source_key)
+        if not source:
+            logger.warning("Unknown headline source: %s", source_key)
+            continue
+
+        try:
+            resp = httpx.post(
+                f"{api_url}/browse",
+                json={"url": source["url"], "timeout": 30, "keep_session": False},
+                timeout=_HEADLINE_FETCH_TIMEOUT,
+            )
+            data = resp.json()
+
+            if data.get("status") != "ok":
+                logger.warning(
+                    "Headlines fetch from %s returned status %s",
+                    source_key, data.get("status"),
+                )
+                continue
+
+            text = data.get("text", "")
+            if not text:
+                continue
+
+            if len(text) > _HEADLINE_PAGE_MAX_CHARS:
+                text = text[:_HEADLINE_PAGE_MAX_CHARS] + "\n[truncated]"
+
+            results.append(f"### {source['name']} ({source['url']})\n{text}")
+        except Exception as e:
+            logger.warning("Failed to fetch headlines from %s: %s", source_key, e)
+
+    if not results:
+        return None
+
+    return "## News Frontpages (pre-fetched)\n\n" + "\n\n---\n\n".join(results)
 
 
 def _fetch_random_reminder(config: Config, user_id: str) -> str | None:

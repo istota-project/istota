@@ -209,6 +209,9 @@ sources = [
     { type = "email", value = "briefing@nytimes.com" },
 ]
 
+[briefing_defaults.headlines]
+sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
+
 # ============================================================================
 # Sleep Cycle (nightly memory extraction)
 # ============================================================================
