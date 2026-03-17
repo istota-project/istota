@@ -785,6 +785,118 @@ class TestLocationCLI:
             assert len(output) == 1
             assert output[0]["lat"] == 34.0
 
+    def test_history_date_uses_timezone_aware_boundaries(self, tmp_path):
+        """history --date should convert local day boundaries to UTC."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            # 2026-03-16 in Pacific = 2026-03-16T07:00:00Z to 2026-03-17T07:00:00Z (PDT)
+            # Ping at 2026-03-16T02:00:00Z = Mar 15 7pm Pacific — outside Mar 16 local
+            db.insert_location_ping(
+                conn, "alice", "2026-03-16T02:00:00Z", 34.0, -118.0,
+                accuracy=5.0, activity_type="stationary",
+            )
+            # Ping at 2026-03-16T20:00:00Z = Mar 16 1pm Pacific — inside Mar 16 local
+            db.insert_location_ping(
+                conn, "alice", "2026-03-16T20:00:00Z", 34.1, -118.1,
+                accuracy=5.0, activity_type="walking",
+            )
+            # Ping at 2026-03-17T03:00:00Z = Mar 16 8pm Pacific — inside Mar 16 local
+            db.insert_location_ping(
+                conn, "alice", "2026-03-17T03:00:00Z", 34.2, -118.2,
+                accuracy=5.0, activity_type="walking",
+            )
+            # Ping at 2026-03-17T10:00:00Z = Mar 17 3am Pacific — outside Mar 16 local
+            db.insert_location_ping(
+                conn, "alice", "2026-03-17T10:00:00Z", 34.3, -118.3,
+                accuracy=5.0, activity_type="stationary",
+            )
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_history
+
+            args = MagicMock()
+            args.limit = 0
+            args.date = "2026-03-16"
+            args.tz = "America/Los_Angeles"
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_history(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            # Should only include the two pings within Mar 16 Pacific
+            assert len(output) == 2
+            lats = {p["lat"] for p in output}
+            assert lats == {34.1, 34.2}
+
+    def test_history_date_returns_all_pings_by_default(self, tmp_path):
+        """history --date with no --limit should return all pings, not just 20."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            # Insert 30 pings spread across Mar 16 Pacific
+            for i in range(30):
+                ts = f"2026-03-16T{15 + (i // 6):02d}:{(i % 6) * 10:02d}:00Z"
+                db.insert_location_ping(
+                    conn, "alice", ts, 34.0 + i * 0.001, -118.0,
+                    accuracy=5.0, activity_type="stationary",
+                )
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_history
+
+            args = MagicMock()
+            args.limit = 0
+            args.date = "2026-03-16"
+            args.tz = "America/Los_Angeles"
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_history(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert len(output) == 30
+
+    def test_history_date_respects_explicit_limit(self, tmp_path):
+        """history --date --limit N should cap results."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            for i in range(10):
+                ts = f"2026-03-16T{15 + i}:00:00Z"
+                db.insert_location_ping(
+                    conn, "alice", ts, 34.0, -118.0,
+                    accuracy=5.0, activity_type="stationary",
+                )
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_history
+
+            args = MagicMock()
+            args.limit = 5
+            args.date = "2026-03-16"
+            args.tz = "America/Los_Angeles"
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_history(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert len(output) == 5
+
 
 # ===========================================================================
 # Geocode cache DB tests

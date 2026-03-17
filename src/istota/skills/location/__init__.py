@@ -2,7 +2,7 @@
 
 CLI:
     python -m istota.skills.location current
-    python -m istota.skills.location history [--limit N] [--date YYYY-MM-DD]
+    python -m istota.skills.location history [--limit N] [--date YYYY-MM-DD] [--tz TZ]
     python -m istota.skills.location places
     python -m istota.skills.location learn NAME [--category CAT] [--radius N]
     python -m istota.skills.location reverse-geocode --lat N --lon N
@@ -107,24 +107,38 @@ def cmd_current(args):
 def cmd_history(args):
     conn = _get_conn()
     user_id = _get_user_id()
-    limit = args.limit or 20
 
     if args.date:
-        since = f"{args.date}T00:00:00"
-        until = f"{args.date}T23:59:59"
-        cursor = conn.execute(
-            """
+        tz_name = getattr(args, "tz", None) or os.environ.get("TZ", "America/Los_Angeles")
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("America/Los_Angeles")
+
+        day_start_local = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=tz)
+        day_end_local = day_start_local + timedelta(days=1)
+        since = day_start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        until = day_end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        limit = args.limit or 0
+        query = """
             SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
                    lp.activity_type, lp.speed, lp.battery,
                    p.name as place_name
             FROM location_pings lp
             LEFT JOIN places p ON lp.place_id = p.id
-            WHERE lp.user_id = ? AND lp.timestamp >= ? AND lp.timestamp <= ?
-            ORDER BY lp.timestamp DESC LIMIT ?
-            """,
-            (user_id, since, until, limit),
-        )
+            WHERE lp.user_id = ? AND lp.timestamp >= ? AND lp.timestamp < ?
+            ORDER BY lp.timestamp DESC
+        """
+        params = [user_id, since, until]
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        cursor = conn.execute(query, params)
     else:
+        limit = args.limit or 20
         cursor = conn.execute(
             """
             SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
@@ -637,8 +651,9 @@ def build_parser():
     sub.add_parser("current", help="Current location and visit")
 
     hist = sub.add_parser("history", help="Recent location pings")
-    hist.add_argument("--limit", type=int, default=20)
+    hist.add_argument("--limit", type=int, default=0)
     hist.add_argument("--date", help="Filter by date (YYYY-MM-DD)")
+    hist.add_argument("--tz", help="Timezone (default: TZ env var or America/Los_Angeles)")
 
     sub.add_parser("places", help="List known places")
 

@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-16: Fix location history timezone and ping limit
+
+The `location history --date` command had two bugs: it filtered by naive UTC timestamps (so a PST user asking for March 16 got midnight-to-midnight UTC, missing the evening), and it capped results at 20 pings regardless of `--date` (a typical day has 100+ pings, so most data was silently dropped). The daily log nightly task was already switched to use `day-summary` which doesn't have these problems, but `history` itself still needed fixing.
+
+**Key changes:**
+- `history --date` now converts local day boundaries to UTC using ZoneInfo, matching the pattern already used by `day-summary` and `attendance`
+- Added `--tz` parameter (defaults to `TZ` env var or `America/Los_Angeles`)
+- `--date` without `--limit` returns all pings for that day; explicit `--limit N` still caps results
+- No-date path unchanged (still defaults to 20 most recent pings)
+
+**Files modified:**
+- `src/istota/skills/location/__init__.py` — Timezone-aware date filtering, no-limit default for `--date`, `--tz` arg
+- `src/istota/skills/location/skill.md` — Updated docs with `--tz` flag
+- `tests/test_location.py` — 3 new tests: timezone boundaries, all-pings default, explicit limit
+
 ## 2026-03-16: Headlines briefing component
 
 Added a `headlines` component to the briefing system that pre-fetches frontpages from major news sources via the browser container API. This replaces the standalone news cron jobs (news-morning/news-evening) with a proper briefing component that gets dedup, scheduling, and multi-component merging for free.

@@ -14,10 +14,11 @@ All commands output JSON. The `ISTOTA_DB_PATH` and `ISTOTA_USER_ID` environment 
 # Current location + place/visit info
 istota-skill location current
 
-# Recent pings (default: last 20)
+# Recent pings (default: last 20; --date returns all pings for that day)
 istota-skill location history
 istota-skill location history --limit 50
 istota-skill location history --date 2026-02-15
+istota-skill location history --date 2026-02-15 --tz America/New_York
 
 # List known places
 istota-skill location places
