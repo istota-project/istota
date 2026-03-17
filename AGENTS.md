@@ -225,7 +225,7 @@ With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR
 
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2572 tests across 53 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2690 tests across 53 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests

@@ -146,7 +146,6 @@ class TestBuildBriefingPrompt:
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
         assert "testuser" in result
         assert "briefing" in result.lower()
-        assert "calendar" in result.lower()
         assert "TODO" in result
 
     @patch("istota.skills.briefing.datetime")
@@ -163,7 +162,7 @@ class TestBuildBriefingPrompt:
         config = self._make_config()
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
         assert "morning" in result.lower()
-        assert "Today's calendar" in result
+        # Calendar skipped when no CalDAV configured (no unscoped fallback)
 
     @patch("istota.skills.briefing.datetime")
     def test_evening_mode(self, mock_dt):
@@ -179,13 +178,16 @@ class TestBuildBriefingPrompt:
         config = self._make_config()
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
         assert "evening" in result.lower()
-        assert "Tomorrow's calendar" in result
+        # Calendar skipped when no CalDAV configured (no unscoped fallback)
 
-    def test_calendar_component(self):
+    @patch("istota.skills.briefing._fetch_calendar_events")
+    def test_calendar_component(self, mock_cal):
+        mock_cal.return_value = "## Today's Calendar (pre-fetched)\n- 09:00 Standup"
         briefing = self._make_briefing(components={"calendar": True})
         config = self._make_config()
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
         assert "calendar" in result.lower()
+        assert "Standup" in result
 
     def test_todos_component(self):
         briefing = self._make_briefing(components={"todos": True})
@@ -764,7 +766,7 @@ class TestCalendarPreFetchInPrompt:
 
     @patch("istota.skills.briefing._fetch_calendar_events")
     @patch("istota.skills.briefing.datetime")
-    def test_calendar_fallback_when_prefetch_fails(self, mock_dt, mock_cal):
+    def test_calendar_skipped_when_prefetch_fails(self, mock_dt, mock_cal):
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
@@ -772,7 +774,7 @@ class TestCalendarPreFetchInPrompt:
         mock_dt.now.return_value = mock_now
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
 
-        mock_cal.return_value = None  # Pre-fetch failed
+        mock_cal.return_value = None  # No calendars for this user
 
         briefing = BriefingConfig(
             name="morning", cron="0 6 * * *",
@@ -782,8 +784,9 @@ class TestCalendarPreFetchInPrompt:
         config = Config()
         result = build_briefing_prompt(briefing, "testuser", config, "UTC")
 
-        # Should fall back to agent-fetched instruction
-        assert "Today's calendar events" in result
+        # Should NOT emit unscoped calendar instruction (ISSUE-015)
+        assert "Today's calendar events" not in result
+        assert "Tomorrow's calendar events" not in result
 
 
 class TestFetchFinvizMarketData:

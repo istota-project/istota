@@ -1492,6 +1492,7 @@ def execute_task(
         else:
             scripts_dir = f"{config.rclone_remote}:{scripts_nc_path}"
         skills_doc = skills_doc.replace("{scripts_dir}", scripts_dir)
+        skills_doc = skills_doc.replace("{user_id}", task.user_id)
     if selected_skills:
         logger.debug("Selected skills: %s", ", ".join(selected_skills))
 
@@ -1707,10 +1708,6 @@ def execute_task(
         env.update({
             "ISTOTA_TASK_ID": str(task.id),
             "ISTOTA_USER_ID": task.user_id,
-            # CalDAV credentials for calendar access
-            "CALDAV_URL": config.caldav_url or "",
-            "CALDAV_USERNAME": config.caldav_username or "",
-            "CALDAV_PASSWORD": config.caldav_password or "",
             # Nextcloud OCS API credentials
             "NC_URL": config.nextcloud.url or "",
             "NC_USER": config.nextcloud.username or "",
@@ -1718,6 +1715,13 @@ def execute_task(
             "ISTOTA_CONVERSATION_TOKEN": task.conversation_token or "",
             "ISTOTA_DEFERRED_DIR": str(user_temp_dir),
         })
+
+        # CalDAV credentials — only for users with discovered calendars
+        # to prevent leaking other users' calendar data (see ISSUE-015)
+        if discovered_calendars:
+            env["CALDAV_URL"] = config.caldav_url or ""
+            env["CALDAV_USERNAME"] = config.caldav_username or ""
+            env["CALDAV_PASSWORD"] = config.caldav_password or ""
 
         # Admin users get full DB and mount access; non-admin users get scoped paths
         if is_admin:

@@ -23,7 +23,7 @@ from istota.executor import (
 )
 from pathlib import Path
 
-from istota.config import Config, DeveloperConfig, ResourceConfig, SchedulerConfig, SecurityConfig, SiteConfig, UserConfig
+from istota.config import Config, DeveloperConfig, NextcloudConfig, ResourceConfig, SchedulerConfig, SecurityConfig, SiteConfig, UserConfig
 from istota import db
 
 
@@ -1663,6 +1663,156 @@ class TestDeferredDirEnvVar:
 
         env = mock_run.call_args[1]["env"]
         assert env["ISTOTA_DEFERRED_DIR"] == str(tmp_path / "temp" / "alice")
+
+
+# ---------------------------------------------------------------------------
+# TestCalDAVCredentialScoping
+# ---------------------------------------------------------------------------
+
+
+class TestCalDAVCredentialScoping:
+    """CalDAV credentials should only be injected when user has calendars."""
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "_index.toml").write_text(
+            '[files]\ndescription = "File ops"\nalways_include = true\n'
+        )
+        (skills_dir / "files.md").write_text("File operations guide.")
+        mount_path = tmp_path / "mount"
+        mount_path.mkdir(parents=True)
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=mount_path,
+            nextcloud=NextcloudConfig(
+                url="https://nc.example.com",
+                username="bot",
+                app_password="secret",
+            ),
+        )
+
+    def _make_task(self, conn):
+        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
+        return db.get_task(conn, task_id)
+
+    @patch("istota.executor.get_calendars_for_user")
+    @patch("istota.executor.get_caldav_client")
+    @patch("istota.executor.subprocess.run")
+    def test_caldav_creds_present_when_user_has_calendars(
+        self, mock_run, mock_client, mock_cals, tmp_path,
+    ):
+        mock_cals.return_value = [("Personal", "https://cal/personal", True)]
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        assert "CALDAV_URL" in env
+        assert "CALDAV_USERNAME" in env
+
+    @patch("istota.executor.get_calendars_for_user")
+    @patch("istota.executor.get_caldav_client")
+    @patch("istota.executor.subprocess.run")
+    def test_caldav_creds_absent_when_no_calendars(
+        self, mock_run, mock_client, mock_cals, tmp_path,
+    ):
+        mock_cals.return_value = []  # No calendars for this user
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        assert "CALDAV_URL" not in env
+        assert "CALDAV_USERNAME" not in env
+
+    @patch("istota.executor.subprocess.run")
+    def test_caldav_creds_absent_when_no_caldav_config(self, mock_run, tmp_path):
+        """No CalDAV configured at all — creds should not appear."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        config = self._make_config(tmp_path)
+        config.nextcloud = NextcloudConfig()  # No URL = no CalDAV
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        assert "CALDAV_URL" not in env
+        assert "CALDAV_USERNAME" not in env
+
+
+# ---------------------------------------------------------------------------
+# TestUserIdSubstitution
+# ---------------------------------------------------------------------------
+
+
+class TestUserIdSubstitution:
+    """Skill docs should have {user_id} replaced with actual user ID."""
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "_index.toml").write_text(
+            '[memory]\ndescription = "Memory"\nalways_include = true\n'
+        )
+        skill_dir = skills_dir / "memory"
+        skill_dir.mkdir()
+        (skill_dir / "skill.toml").write_text(
+            'description = "Memory"\nalways_include = true\n'
+        )
+        (skill_dir / "skill.md").write_text(
+            "Memory file at /Users/{user_id}/bot/config/USER.md"
+        )
+        mount_path = tmp_path / "mount"
+        mount_path.mkdir(parents=True)
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=mount_path,
+        )
+
+    def _make_task(self, conn, user_id="alice"):
+        task_id = db.create_task(conn, prompt="test", user_id=user_id, source_type="talk")
+        return db.get_task(conn, task_id)
+
+    @patch("istota.executor.subprocess.run")
+    def test_user_id_substituted_in_skills_doc(self, mock_run, tmp_path):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn, user_id="alice")
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        # The prompt is passed via stdin — check it contains the substituted user_id
+        call_kwargs = mock_run.call_args[1]
+        prompt_input = call_kwargs.get("input", "")
+        assert "/Users/alice/bot/config/USER.md" in prompt_input
+        assert "{user_id}" not in prompt_input
 
 
 # ---------------------------------------------------------------------------

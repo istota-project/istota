@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-17: Fix cross-user calendar data leak in briefings (ISSUE-015)
+
+The briefing pipeline could leak one user's calendar events into another user's briefing. When `_fetch_calendar_events()` returned `None` for a user with no calendars (e.g. max), the fallback emitted an unscoped "Today's calendar events" instruction. The agent then discovered alice's calendars via CalDAV and included his events in max's output. The sleep cycle then faithfully extracted these contaminated events into max's memory files.
+
+**Key changes:**
+- Removed unscoped calendar fallback — if a user has no calendars, the calendar component is skipped entirely instead of emitting a bare instruction the agent tries to fulfill with whatever calendars it finds
+- CalDAV credentials (`CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`) now only injected into subprocess env when the user has discovered calendars (defense-in-depth)
+- `{user_id}` placeholder in skill templates now programmatically substituted (was left for LLM interpretation, which is fragile when context mentions other users)
+
+**Files modified:**
+- `src/istota/skills/briefing/__init__.py` — Replaced calendar fallback with skip + debug log
+- `src/istota/executor.py` — Conditional CalDAV credential injection, `{user_id}` substitution in skills_doc
+- `tests/test_briefing.py` — Updated 5 tests for new behavior (no unscoped fallback)
+- `tests/test_executor.py` — Added 4 new tests: CalDAV credential scoping (3), `{user_id}` substitution (1)
+
 ## 2026-03-16: Fix location history timezone and ping limit
 
 The `location history --date` command had two bugs: it filtered by naive UTC timestamps (so a PST user asking for March 16 got midnight-to-midnight UTC, missing the evening), and it capped results at 20 pings regardless of `--date` (a typical day has 100+ pings, so most data was silently dropped). The daily log nightly task was already switched to use `day-summary` which doesn't have these problems, but `history` itself still needed fixing.

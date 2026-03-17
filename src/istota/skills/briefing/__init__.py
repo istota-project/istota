@@ -318,11 +318,13 @@ def build_briefing_prompt(
             prompt_parts.append("")
             prompt_parts.append(calendar_content)
         else:
-            # Fallback to agent-fetched if pre-fetch fails
-            if is_morning:
-                prompt_parts.append("- Today's calendar events")
-            else:
-                prompt_parts.append("- Tomorrow's calendar events")
+            # No calendars available for this user — skip calendar component
+            # rather than emitting an unscoped instruction that could leak
+            # another user's data (see ISSUE-015)
+            logger.debug(
+                "No calendars found for user %s, skipping calendar component",
+                user_id,
+            )
 
     # TODO items - pre-fetch content
     if components.get("todos"):
