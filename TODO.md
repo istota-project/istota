@@ -205,14 +205,19 @@
 - [x] Deferred email output file (`task_{id}_email_output.json`) with scheduler pickup
 - [x] Smart-quote normalization fallback for legacy inline JSON path
 
-### Emissary Email Threads
+### Emissary Email Threads (Phase 1-2) ✅
 - [x] Outbound email tracking (`sent_emails` table, Message-ID capture)
 - [x] Thread-matched inbound routing (References header → `sent_emails` lookup)
 - [x] Emissary replies routed to originating user via Talk (`output_target="talk"`)
 - [x] Deferred sent email recording (sandbox-safe via JSON file)
 - [x] Draft + approval flow for emissary responses (confirmation context injection + stale confirmation cancellation)
 - [x] Multi-turn thread continuity (Phase 1 routing + Talk conversation context handles repeat replies naturally)
-- [ ] Delegated autonomy levels (notify-only / draft-and-wait / full autonomy)
+
+### Emissary Email Threads (Phase 3 — deferred)
+- [ ] Delegated autonomy levels: per-user `emissary_mode` config (`notify` = just surface reply, `draft` = draft + confirm, `auto` = send autonomously). Requires config schema change, prompt branching in emissary reply prompt, per-user override in user config
+- [ ] Structured email draft storage: `istota-skill email draft` command writes `task_{id}_email_draft.json` instead of relying on confirmation_prompt text. Useful if the prompt-based approach proves unreliable for preserving exact draft content across re-execution
+- [ ] Threading headers on confirmed replies: ensure the bot uses `reply_to_email()` with proper In-Reply-To/References when sending confirmed drafts (currently relies on the bot figuring this out from context — monitor for correctness)
+- [ ] Thread summary in prompt: when multiple exchanges have occurred in an emissary thread, compile the full email chain from `sent_emails` + `processed_emails` tables rather than relying on quoted text in email bodies
 
 ### Agent-Task Heartbeat Check (Removed)
 - [x] ~~Queue natural language prompts as heartbeat tasks~~ — Removed in favor of CRON.md with `silent_unless_action`
