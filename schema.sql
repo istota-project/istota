@@ -382,6 +382,25 @@ CREATE TABLE IF NOT EXISTS istota_kv (
 
 CREATE INDEX IF NOT EXISTS idx_istota_kv_ns ON istota_kv(user_id, namespace);
 
+-- Sent emails (outbound email tracking for emissary thread matching)
+CREATE TABLE IF NOT EXISTS sent_emails (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    task_id INTEGER,
+    message_id TEXT NOT NULL,          -- Generated RFC 5322 Message-ID
+    to_addr TEXT NOT NULL,
+    subject TEXT,
+    thread_id TEXT,                    -- Computed thread ID (same algo as email_poller)
+    in_reply_to TEXT,                  -- If this was a reply to another message
+    "references" TEXT,                 -- RFC 5322 References thread chain
+    conversation_token TEXT,           -- Talk conversation where send was requested
+    sent_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sent_emails_message_id ON sent_emails(message_id);
+CREATE INDEX IF NOT EXISTS idx_sent_emails_user ON sent_emails(user_id);
+
 -- Location pings (GPS data from Overland iOS app)
 CREATE TABLE IF NOT EXISTS location_pings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

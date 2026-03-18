@@ -2470,6 +2470,157 @@ class TestDeferredOperations:
         _warn_orphaned_email_output(task, user_temp)
         assert deferred.exists()
 
+    def test_process_deferred_sent_emails(self, db_path, tmp_path):
+        """Deferred sent_emails file should record outbound emails in DB."""
+        from istota.scheduler import _process_deferred_sent_emails
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Send email", user_id="alice", source_type="talk",
+                conversation_token="room1",
+            )
+            task = db.get_task(conn, task_id)
+
+        # Write deferred file
+        data = [
+            {
+                "message_id": "<abc@example.com>",
+                "to_addr": "bob@example.com",
+                "subject": "Meeting",
+                "conversation_token": "room1",
+                "user_id": "alice",
+            },
+        ]
+        (user_temp / f"task_{task_id}_sent_emails.json").write_text(json.dumps(data))
+
+        count = _process_deferred_sent_emails(config, task, user_temp)
+        assert count == 1
+
+        # Verify recorded in DB
+        with db.get_db(db_path) as conn:
+            found = db.find_sent_email_by_message_id(conn, "<abc@example.com>")
+            assert found is not None
+            assert found.user_id == "alice"
+            assert found.to_addr == "bob@example.com"
+            assert found.conversation_token == "room1"
+            assert found.task_id == task_id
+
+        # File should be cleaned up
+        assert not (user_temp / f"task_{task_id}_sent_emails.json").exists()
+
+    def test_process_deferred_sent_emails_no_file(self, db_path, tmp_path):
+        from istota.scheduler import _process_deferred_sent_emails
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Noop", user_id="alice", source_type="talk",
+            )
+            task = db.get_task(conn, task_id)
+
+        assert _process_deferred_sent_emails(config, task, user_temp) == 0
+
+    def test_process_deferred_sent_emails_bad_json(self, db_path, tmp_path):
+        from istota.scheduler import _process_deferred_sent_emails
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Bad", user_id="alice", source_type="talk",
+            )
+            task = db.get_task(conn, task_id)
+
+        (user_temp / f"task_{task_id}_sent_emails.json").write_text("not json")
+        assert _process_deferred_sent_emails(config, task, user_temp) == 0
+        # File should be cleaned up even on bad JSON
+        assert not (user_temp / f"task_{task_id}_sent_emails.json").exists()
+
+    def test_process_deferred_sent_emails_multiple(self, db_path, tmp_path):
+        """Multiple sends in one task should all be recorded."""
+        from istota.scheduler import _process_deferred_sent_emails
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Multi-send", user_id="alice", source_type="talk",
+            )
+            task = db.get_task(conn, task_id)
+
+        data = [
+            {"message_id": "<m1@x.com>", "to_addr": "a@x.com", "subject": "One"},
+            {"message_id": "<m2@x.com>", "to_addr": "b@x.com", "subject": "Two"},
+        ]
+        (user_temp / f"task_{task_id}_sent_emails.json").write_text(json.dumps(data))
+
+        count = _process_deferred_sent_emails(config, task, user_temp)
+        assert count == 2
+
+        with db.get_db(db_path) as conn:
+            assert db.find_sent_email_by_message_id(conn, "<m1@x.com>") is not None
+            assert db.find_sent_email_by_message_id(conn, "<m2@x.com>") is not None
+
+
+# ---------------------------------------------------------------------------
+# TestRecordSentEmail
+# ---------------------------------------------------------------------------
+
+
+class TestRecordSentEmail:
+    """Tests for _record_sent_email helper used by post_result_to_email."""
+
+    def test_records_sent_email(self, db_path):
+        from istota.scheduler import _record_sent_email
+
+        config = Config(
+            db_path=db_path,
+            email=EmailConfig(enabled=True),
+        )
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="reply", user_id="alice", source_type="email",
+                conversation_token="room5",
+            )
+            task = db.get_task(conn, task_id)
+
+        _record_sent_email(
+            config, task, "<reply@example.com>",
+            to_addr="bob@example.com",
+            subject="Re: Hello",
+            in_reply_to="<orig@example.com>",
+        )
+
+        with db.get_db(db_path) as conn:
+            found = db.find_sent_email_by_message_id(conn, "<reply@example.com>")
+            assert found is not None
+            assert found.user_id == "alice"
+            assert found.task_id == task_id
+            assert found.conversation_token == "room5"
+            assert found.in_reply_to == "<orig@example.com>"
+
+    def test_record_sent_email_failure_is_non_fatal(self, db_path):
+        """DB errors in _record_sent_email should not propagate."""
+        from istota.scheduler import _record_sent_email
+
+        config = Config(db_path=Path("/nonexistent/db.sqlite"))
+
+        task = db.Task(
+            id=1, status="completed", prompt="test",
+            user_id="alice", source_type="email",
+        )
+
+        # Should not raise
+        _record_sent_email(config, task, "<msg@x.com>", to_addr="a@b.com")
+
 
 # ---------------------------------------------------------------------------
 # TestRestartFavaService

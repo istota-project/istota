@@ -205,6 +205,15 @@
 - [x] Deferred email output file (`task_{id}_email_output.json`) with scheduler pickup
 - [x] Smart-quote normalization fallback for legacy inline JSON path
 
+### Emissary Email Threads
+- [x] Outbound email tracking (`sent_emails` table, Message-ID capture)
+- [x] Thread-matched inbound routing (References header → `sent_emails` lookup)
+- [x] Emissary replies routed to originating user via Talk (`output_target="talk"`)
+- [x] Deferred sent email recording (sandbox-safe via JSON file)
+- [ ] Draft + approval flow for emissary responses
+- [ ] Multi-turn thread continuity (full thread history in context)
+- [ ] Delegated autonomy levels (notify-only / draft-and-wait / full autonomy)
+
 ### Agent-Task Heartbeat Check (Removed)
 - [x] ~~Queue natural language prompts as heartbeat tasks~~ — Removed in favor of CRON.md with `silent_unless_action`
 - [x] ~~Silent unless action mode~~ — Now handled by CRON.md scheduled jobs

@@ -423,3 +423,123 @@ class TestTalkMessageCache:
             ])
             result = db.get_cached_talk_messages(conn, "room1")
             assert "parent" not in result[0]
+
+
+# =============================================================================
+# TestSentEmails
+# =============================================================================
+
+
+class TestSentEmails:
+    def test_record_and_find_by_message_id(self, db_path):
+        with db.get_db(db_path) as conn:
+            rid = db.record_sent_email(
+                conn,
+                user_id="alice",
+                message_id="<abc123@example.com>",
+                to_addr="bob@example.com",
+                subject="Meeting request",
+                task_id=None,
+                conversation_token="room42",
+            )
+            assert rid > 0
+
+            found = db.find_sent_email_by_message_id(conn, "<abc123@example.com>")
+            assert found is not None
+            assert found.user_id == "alice"
+            assert found.to_addr == "bob@example.com"
+            assert found.subject == "Meeting request"
+            assert found.conversation_token == "room42"
+
+    def test_find_by_message_id_not_found(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.find_sent_email_by_message_id(conn, "<nope@nope>") is None
+
+    def test_find_by_references(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="alice",
+                message_id="<msg1@example.com>",
+                to_addr="alice@example.com",
+                subject="Hello",
+                conversation_token="room1",
+            )
+            db.record_sent_email(
+                conn,
+                user_id="alice",
+                message_id="<msg2@example.com>",
+                to_addr="bob@example.com",
+                subject="Other",
+                conversation_token="room2",
+            )
+
+            # References list containing one of our sent message IDs
+            found = db.find_sent_email_by_references(
+                conn, ["<unknown@x.com>", "<msg1@example.com>"]
+            )
+            assert found is not None
+            assert found.message_id == "<msg1@example.com>"
+
+    def test_find_by_references_empty_list(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.find_sent_email_by_references(conn, []) is None
+
+    def test_find_by_references_no_match(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="alice",
+                message_id="<msg1@example.com>",
+                to_addr="alice@example.com",
+                subject="Hello",
+            )
+            assert db.find_sent_email_by_references(conn, ["<other@x.com>"]) is None
+
+    def test_find_by_references_returns_most_recent(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="alice",
+                message_id="<old@example.com>",
+                to_addr="alice@example.com",
+                subject="Old",
+                conversation_token="room1",
+            )
+            db.record_sent_email(
+                conn,
+                user_id="alice",
+                message_id="<new@example.com>",
+                to_addr="alice@example.com",
+                subject="New",
+                conversation_token="room2",
+            )
+
+            # Both match — should return the more recent one
+            found = db.find_sent_email_by_references(
+                conn, ["<old@example.com>", "<new@example.com>"]
+            )
+            assert found is not None
+            assert found.message_id == "<new@example.com>"
+
+    def test_record_with_all_fields(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="send email", user_id="alice")
+            rid = db.record_sent_email(
+                conn,
+                user_id="alice",
+                message_id="<full@example.com>",
+                to_addr="bob@example.com",
+                subject="Re: Meeting",
+                task_id=task_id,
+                thread_id="abc123",
+                in_reply_to="<original@example.com>",
+                references="<original@example.com>",
+                conversation_token="room5",
+            )
+
+            found = db.find_sent_email_by_message_id(conn, "<full@example.com>")
+            assert found.task_id == task_id
+            assert found.thread_id == "abc123"
+            assert found.in_reply_to == "<original@example.com>"
+            assert found.references == "<original@example.com>"

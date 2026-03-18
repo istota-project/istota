@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-17: Emissary email thread tracking (ISSUE-016, Phase 1)
+
+When the bot sends an email on a user's behalf and the recipient replies, the reply was silently dropped because the email poller only creates tasks for known senders. Phase 1 adds outbound email tracking and thread-matched inbound routing so replies from external contacts are surfaced in Talk.
+
+**Key changes:**
+- New `sent_emails` table tracks outbound emails (Message-ID, recipient, subject, originating user and Talk conversation)
+- `send_email()` and `reply_to_email()` now return the generated Message-ID
+- `cmd_send()` writes a deferred JSON file (`task_{id}_sent_emails.json`) for scheduler pickup (sandbox-safe)
+- Scheduler records sent emails from both deferred files and direct `post_result_to_email()` calls
+- Email poller checks References header of unknown-sender emails against `sent_emails` before discarding
+- Thread-matched replies create tasks with `output_target="talk"` routed to the originating Talk conversation
+- Emissary reply prompt instructs the bot to notify the user and draft a response
+
+**Files added/modified:**
+- `schema.sql` — New `sent_emails` table with message_id and user indexes
+- `src/istota/db.py` — `SentEmail` dataclass, `record_sent_email()`, `find_sent_email_by_message_id()`, `find_sent_email_by_references()`
+- `src/istota/skills/email/__init__.py` — Return Message-ID from send functions, `_write_deferred_sent_email()`
+- `src/istota/scheduler.py` — `_process_deferred_sent_emails()`, `_record_sent_email()` helper, recording in `post_result_to_email()`
+- `src/istota/email_poller.py` — `_match_thread()`, thread matching before unknown-sender discard, emissary reply prompt and routing
+- `tests/test_db.py` — 7 new tests for sent email DB functions
+- `tests/test_email_poller.py` — 14 new tests for send return values, deferred files, thread matching, and poller routing
+- `tests/test_scheduler.py` — 6 new tests for deferred processing and sent email recording
+
 ## 2026-03-17: Fix cross-user calendar data leak in briefings (ISSUE-015)
 
 The briefing pipeline could leak one user's calendar events into another user's briefing. When `_fetch_calendar_events()` returned `None` for a user with no calendars (e.g. max), the fallback emitted an unscoped "Today's calendar events" instruction. The agent then discovered alice's calendars via CalDAV and included his events in max's output. The sleep cycle then faithfully extracted these contaminated events into max's memory files.

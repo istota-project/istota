@@ -20,6 +20,38 @@ from .storage import ensure_user_directories_v2, upload_file_to_inbox_v2
 logger = logging.getLogger("istota.email_poller")
 
 
+def _match_thread(conn, email) -> db.SentEmail | None:
+    """Check if an inbound email is a reply to one of our sent emails.
+
+    Checks In-Reply-To first (direct reply), then References (thread chain).
+    Returns the matching SentEmail or None.
+    """
+    # In-Reply-To is typically a single Message-ID
+    in_reply_to = None
+    if hasattr(email, "message_id"):
+        # email object from read_email — check for In-Reply-To in references
+        pass
+
+    # For imap-tools Email objects, In-Reply-To isn't directly exposed.
+    # But References header contains the full thread chain including
+    # In-Reply-To. We parse both from the email's headers.
+
+    # Check references: split by whitespace to get individual Message-IDs
+    if email.references:
+        ref_ids = email.references.split()
+        if ref_ids:
+            # Check the last reference first (most likely the direct parent)
+            match = db.find_sent_email_by_message_id(conn, ref_ids[-1])
+            if match:
+                return match
+            # Fall back to checking all references
+            match = db.find_sent_email_by_references(conn, ref_ids)
+            if match:
+                return match
+
+    return None
+
+
 def get_email_config(config: Config) -> EmailConfig:
     """Convert app config to email skill config."""
     return EmailConfig(
@@ -99,27 +131,49 @@ def poll_emails(config: Config) -> list[int]:
             # Find user by sender email
             user_id = config.find_user_by_email(envelope.sender)
 
+            # For unknown senders, check if this is a reply to a thread we initiated
+            sent_email_match = None
             if not user_id:
-                # Unknown sender - mark as processed but don't create task
-                db.mark_email_processed(
-                    conn,
-                    email_id=envelope.id,
-                    sender_email=envelope.sender,
-                    subject=envelope.subject,
-                )
-                continue
+                try:
+                    email = read_email(
+                        envelope.id,
+                        folder=config.email.poll_folder,
+                        config=email_config,
+                        envelope=envelope,
+                    )
+                    sent_email_match = _match_thread(conn, email)
+                except Exception as e:
+                    logger.error("Error reading email %s for thread matching: %s", envelope.id, e)
 
-            # Read full email content
-            try:
-                email = read_email(
-                    envelope.id,
-                    folder=config.email.poll_folder,
-                    config=email_config,
-                    envelope=envelope,
-                )
-            except Exception as e:
-                logger.error("Error reading email %s: %s", envelope.id, e)
-                continue
+                if sent_email_match:
+                    # Route to the user who initiated the thread
+                    user_id = sent_email_match.user_id
+                    logger.info(
+                        "Thread match: email from %s is a reply to sent email %s (user %s)",
+                        envelope.sender, sent_email_match.message_id, user_id,
+                    )
+                else:
+                    # Unknown sender, not a reply to our thread — discard
+                    db.mark_email_processed(
+                        conn,
+                        email_id=envelope.id,
+                        sender_email=envelope.sender,
+                        subject=envelope.subject,
+                    )
+                    continue
+
+            # Read full email content (if not already read during thread matching)
+            if sent_email_match is None:
+                try:
+                    email = read_email(
+                        envelope.id,
+                        folder=config.email.poll_folder,
+                        config=email_config,
+                        envelope=envelope,
+                    )
+                except Exception as e:
+                    logger.error("Error reading email %s: %s", envelope.id, e)
+                    continue
 
             # Download attachments directly to target directory
             attachment_id = uuid.uuid4().hex[:8]
@@ -163,12 +217,35 @@ def poll_emails(config: Config) -> list[int]:
                     f"  - {p}" for p in attachment_paths
                 )
 
-            prompt = f"""Email from: {email.sender}
+            # For emissary thread replies, include routing context in the prompt
+            if sent_email_match:
+                prompt = f"""Emissary email reply — an external contact has replied to an email you sent on behalf of this user.
+
+From: {email.sender}
+Subject: {email.subject}
+Date: {email.date}
+Original thread initiated by you (sent to: {sent_email_match.to_addr})
+{attachments_text}
+
+{email.body}
+
+Notify the user about this reply and summarize its content. If the conversation requires a response, draft one for the user's approval."""
+            else:
+                prompt = f"""Email from: {email.sender}
 Subject: {email.subject}
 Date: {email.date}
 {attachments_text}
 
 {email.body}"""
+
+            # Determine output target — emissary replies go to Talk
+            output_target = None
+            conversation_token = thread_id
+            if sent_email_match:
+                output_target = "talk"
+                # Route to the Talk conversation where the original send was requested
+                if sent_email_match.conversation_token:
+                    conversation_token = sent_email_match.conversation_token
 
             # Create task with attachment paths (already strings from Nextcloud upload)
             attachment_strs = attachment_paths if attachment_paths else None
@@ -177,8 +254,9 @@ Date: {email.date}
                 prompt=prompt,
                 user_id=user_id,
                 source_type="email",
-                conversation_token=thread_id,
+                conversation_token=conversation_token,
                 attachments=attachment_strs,
+                output_target=output_target,
             )
 
             # Mark email as processed with task link

@@ -207,23 +207,25 @@ def send_email(
     config: EmailConfig | None = None,
     from_addr: str | None = None,
     content_type: str = "plain",
-) -> None:
-    """Send an email."""
+) -> str:
+    """Send an email. Returns the generated Message-ID."""
     if config is None:
         raise ValueError("config is required")
 
     from_address = from_addr or config.bot_email
     domain = from_address.split("@")[-1] if "@" in from_address else "localhost"
 
+    message_id = _generate_message_id(domain)
     msg = EmailMessage()
     msg["To"] = to
     msg["Subject"] = _sanitize_header(subject)
     msg["From"] = from_address
     msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = _generate_message_id(domain)
+    msg["Message-ID"] = message_id
     msg.set_content(body, subtype=content_type)
 
     _send_smtp(msg, config)
+    return message_id
 
 
 def reply_to_email(
@@ -235,19 +237,10 @@ def reply_to_email(
     in_reply_to: str | None = None,
     references: str | None = None,
     content_type: str = "plain",
-) -> None:
-    """
-    Send a reply email with proper threading headers.
+) -> str:
+    """Send a reply email with proper threading headers.
 
-    Args:
-        to_addr: Recipient address (original sender)
-        subject: Original subject (will add Re: if needed)
-        body: Reply body text
-        config: Email configuration
-        from_addr: Sender address
-        in_reply_to: Message-ID of the email being replied to (for threading)
-        references: References header (Message-IDs of thread, for threading)
-        content_type: Email content type - "plain" or "html"
+    Returns the generated Message-ID.
     """
     if config is None:
         raise ValueError("config is required")
@@ -261,12 +254,13 @@ def reply_to_email(
     from_address = from_addr or config.bot_email
     domain = from_address.split("@")[-1] if "@" in from_address else "localhost"
 
+    message_id = _generate_message_id(domain)
     msg = EmailMessage()
     msg["To"] = to_addr
     msg["Subject"] = reply_subject
     msg["From"] = from_address
     msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = _generate_message_id(domain)
+    msg["Message-ID"] = message_id
 
     # Threading headers (sanitize to strip folded newlines from original email)
     if in_reply_to:
@@ -280,6 +274,7 @@ def reply_to_email(
     msg.set_content(body, subtype=content_type)
 
     _send_smtp(msg, config)
+    return message_id
 
 
 def _send_smtp(msg: EmailMessage, config: EmailConfig) -> None:
@@ -585,6 +580,37 @@ def cmd_output(args):
     return {"status": "ok", "file": str(out_path)}
 
 
+def _write_deferred_sent_email(message_id: str, to_addr: str, subject: str) -> None:
+    """Write a deferred file so the scheduler can record the sent email."""
+    task_id = os.environ.get("ISTOTA_TASK_ID", "")
+    deferred_dir = os.environ.get("ISTOTA_DEFERRED_DIR", "")
+    if not task_id or not deferred_dir:
+        return  # Not running inside a task — skip tracking
+
+    conversation_token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "") or None
+    user_id = os.environ.get("ISTOTA_USER_ID", "") or None
+
+    entry = {
+        "message_id": message_id,
+        "to_addr": to_addr,
+        "subject": subject,
+        "conversation_token": conversation_token,
+        "user_id": user_id,
+    }
+
+    path = Path(deferred_dir) / f"task_{task_id}_sent_emails.json"
+    # Append to existing file if multiple sends in one task
+    existing = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            existing = []
+    existing.append(entry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(existing, ensure_ascii=False))
+
+
 def cmd_send(args):
     """Send an email via CLI."""
     config = _config_from_env()
@@ -600,13 +626,15 @@ def cmd_send(args):
 
     content_type = "html" if args.html else "plain"
 
-    send_email(
+    message_id = send_email(
         to=args.to,
         subject=args.subject,
         body=body,
         config=config,
         content_type=content_type,
     )
+
+    _write_deferred_sent_email(message_id, args.to, args.subject)
 
     return {"status": "ok", "to": args.to, "subject": args.subject}
 

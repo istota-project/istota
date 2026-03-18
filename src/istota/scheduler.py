@@ -857,6 +857,62 @@ def _process_deferred_tracking(
     return count
 
 
+def _process_deferred_sent_emails(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> int:
+    """Process deferred sent email records from JSON file.
+
+    When Claude sends emails via `email send` inside the sandbox, the skill
+    writes a deferred file with message metadata. The scheduler processes it
+    here to record outbound emails for emissary thread matching.
+
+    Returns count of sent emails recorded.
+    """
+    path = user_temp_dir / f"task_{task.id}_sent_emails.json"
+    if not path.exists():
+        return 0
+
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Bad deferred sent_emails file for task %d: %s", task.id, e)
+        path.unlink(missing_ok=True)
+        return 0
+
+    if not isinstance(data, list):
+        logger.warning("Deferred sent_emails for task %d is not a list", task.id)
+        path.unlink(missing_ok=True)
+        return 0
+
+    count = 0
+    with db.get_db(config.db_path) as conn:
+        for entry in data:
+            message_id = entry.get("message_id", "")
+            to_addr = entry.get("to_addr", "")
+            if not message_id or not to_addr:
+                continue
+            try:
+                db.record_sent_email(
+                    conn,
+                    user_id=entry.get("user_id") or task.user_id,
+                    message_id=message_id,
+                    to_addr=to_addr,
+                    subject=entry.get("subject"),
+                    task_id=task.id,
+                    conversation_token=entry.get("conversation_token") or task.conversation_token,
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(
+                    "Failed to record sent email for task %d: %s", task.id, e,
+                )
+
+    if count:
+        logger.info("Recorded %d deferred sent emails for task %d", count, task.id)
+    path.unlink(missing_ok=True)
+    return count
+
+
 def _warn_orphaned_email_output(task: db.Task, user_temp_dir: Path) -> None:
     """Warn and clean up deferred email output files that won't be delivered.
 
@@ -1251,6 +1307,7 @@ def process_one_task(
         user_temp_dir = get_user_temp_dir(config, task.user_id)
         _process_deferred_subtasks(config, task, user_temp_dir)
         _process_deferred_tracking(config, task, user_temp_dir)
+        _process_deferred_sent_emails(config, task, user_temp_dir)
         _warn_orphaned_email_output(task, user_temp_dir)
 
     # Save briefing digest for deduplication in the next run
@@ -1578,6 +1635,33 @@ def _load_deferred_email_output(config: Config, task: db.Task) -> dict | None:
     }
 
 
+def _record_sent_email(
+    config: Config,
+    task: db.Task,
+    message_id: str,
+    to_addr: str,
+    subject: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+) -> None:
+    """Record an outbound email for emissary thread matching (non-critical)."""
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id=task.user_id,
+                message_id=message_id,
+                to_addr=to_addr,
+                subject=subject,
+                task_id=task.id,
+                in_reply_to=in_reply_to,
+                references=references,
+                conversation_token=task.conversation_token,
+            )
+    except Exception as e:
+        logger.warning("Failed to record sent email for task %d: %s", task.id, e)
+
+
 async def post_result_to_email(config: Config, task: db.Task, message: str) -> bool:
     """Send task result as email reply, or fresh email for scheduled/briefing jobs.
 
@@ -1646,7 +1730,7 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
             # Use parsed subject if provided, otherwise keep original
             subject = parsed["subject"] if parsed["subject"] else (processed_email.subject or "")
 
-            reply_to_email(
+            sent_message_id = reply_to_email(
                 to_addr=processed_email.sender_email,
                 subject=subject,
                 body=parsed["body"],
@@ -1655,6 +1739,13 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
                 in_reply_to=processed_email.message_id,
                 references=references,
                 content_type=parsed["format"],
+            )
+            _record_sent_email(
+                config, task, sent_message_id,
+                to_addr=processed_email.sender_email,
+                subject=subject,
+                in_reply_to=processed_email.message_id,
+                references=references,
             )
             return True
         except Exception as e:
@@ -1672,13 +1763,18 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
 
         try:
             email_config = get_email_config(config)
-            send_email(
+            sent_message_id = send_email(
                 to=user_config.email_addresses[0],
                 subject=subject,
                 body=parsed["body"],
                 config=email_config,
                 from_addr=config.email.bot_email,
                 content_type=parsed["format"],
+            )
+            _record_sent_email(
+                config, task, sent_message_id,
+                to_addr=user_config.email_addresses[0],
+                subject=subject,
             )
             return True
         except Exception as e:

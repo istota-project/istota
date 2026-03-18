@@ -69,6 +69,22 @@ class ProcessedEmail:
 
 
 @dataclass
+class SentEmail:
+    """Outbound email tracked for emissary thread matching."""
+    id: int
+    user_id: str
+    task_id: int | None
+    message_id: str
+    to_addr: str
+    subject: str | None
+    thread_id: str | None
+    in_reply_to: str | None
+    references: str | None
+    conversation_token: str | None
+    sent_at: str
+
+
+@dataclass
 class IstotaFileTask:
     """Task tracked from a user's TASKS.md file."""
     id: int
@@ -934,6 +950,111 @@ def get_email_for_task(conn: sqlite3.Connection, task_id: int) -> ProcessedEmail
         user_id=row["user_id"],
         task_id=row["task_id"],
         processed_at=row["processed_at"],
+    )
+
+
+# ============================================================================
+# Sent email tracking (outbound emails for emissary thread matching)
+# ============================================================================
+
+
+def record_sent_email(
+    conn: sqlite3.Connection,
+    user_id: str,
+    message_id: str,
+    to_addr: str,
+    subject: str | None = None,
+    task_id: int | None = None,
+    thread_id: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+    conversation_token: str | None = None,
+) -> int:
+    """Record an outbound email for thread matching."""
+    cursor = conn.execute(
+        """
+        INSERT INTO sent_emails
+            (user_id, task_id, message_id, to_addr, subject, thread_id,
+             in_reply_to, "references", conversation_token)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+        """,
+        (user_id, task_id, message_id, to_addr, subject, thread_id,
+         in_reply_to, references, conversation_token),
+    )
+    return cursor.fetchone()[0]
+
+
+def find_sent_email_by_message_id(
+    conn: sqlite3.Connection,
+    message_id: str,
+) -> SentEmail | None:
+    """Look up a sent email by its Message-ID (for In-Reply-To matching)."""
+    cursor = conn.execute(
+        """
+        SELECT id, user_id, task_id, message_id, to_addr, subject, thread_id,
+               in_reply_to, "references", conversation_token, sent_at
+        FROM sent_emails
+        WHERE message_id = ?
+        """,
+        (message_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return SentEmail(
+        id=row["id"],
+        user_id=row["user_id"],
+        task_id=row["task_id"],
+        message_id=row["message_id"],
+        to_addr=row["to_addr"],
+        subject=row["subject"],
+        thread_id=row["thread_id"],
+        in_reply_to=row["in_reply_to"],
+        references=row["references"],
+        conversation_token=row["conversation_token"],
+        sent_at=row["sent_at"],
+    )
+
+
+def find_sent_email_by_references(
+    conn: sqlite3.Connection,
+    references: list[str],
+) -> SentEmail | None:
+    """Find a sent email matching any of the given Message-IDs.
+
+    Used to match inbound emails whose References header contains one of our
+    sent Message-IDs. Returns the most recent match.
+    """
+    if not references:
+        return None
+    placeholders = ", ".join("?" for _ in references)
+    cursor = conn.execute(
+        f"""
+        SELECT id, user_id, task_id, message_id, to_addr, subject, thread_id,
+               in_reply_to, "references", conversation_token, sent_at
+        FROM sent_emails
+        WHERE message_id IN ({placeholders})
+        ORDER BY sent_at DESC
+        LIMIT 1
+        """,
+        references,
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return SentEmail(
+        id=row["id"],
+        user_id=row["user_id"],
+        task_id=row["task_id"],
+        message_id=row["message_id"],
+        to_addr=row["to_addr"],
+        subject=row["subject"],
+        thread_id=row["thread_id"],
+        in_reply_to=row["in_reply_to"],
+        references=row["references"],
+        conversation_token=row["conversation_token"],
+        sent_at=row["sent_at"],
     )
 
 

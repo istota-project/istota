@@ -104,7 +104,7 @@ GPS Webhook ──► Location DB → Place detection → Notifications (ntfy/Ta
 ```
 
 - **Talk poller**: Background daemon thread, long-polling per conversation, WAL mode for concurrent DB access
-- **Email poller**: Polls INBOX via imap-tools, creates tasks from known senders
+- **Email poller**: Polls INBOX via imap-tools, creates tasks from known senders. Unknown senders are thread-matched against `sent_emails` — replies to bot-initiated threads route to the originating user via Talk.
 - **Task queue** (`db.py`): Atomic locking with `user_id` filter, retry logic (exponential backoff: 1, 4, 16 min)
 - **Scheduler**: Per-user threaded worker pool. Three-tier concurrency: instance-level fg/bg caps, per-user limits. Workers keyed by `(user_id, queue_type, slot)`.
 - **Executor**: Builds prompts (resources + skills + context + memory), invokes Claude Code via `Popen` with `--output-format stream-json`. Auto-retries transient API errors (5xx, 429) up to 3 times.
@@ -216,7 +216,7 @@ Default allowlist: `api.anthropic.com:443`, `mcp-proxy.anthropic.com:443` (Claud
 When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY) are stripped from Claude's env. Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread, which injects credentials server-side. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled. Config: `[security]` section, `skill_proxy_enabled`, `skill_proxy_timeout`.
 
 ### Deferred DB Operations
-With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR`). Scheduler processes after successful completion. Patterns: `task_{id}_subtasks.json`, `task_{id}_tracked_transactions.json`, `task_{id}_email_output.json`.
+With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR`). Scheduler processes after successful completion. Patterns: `task_{id}_subtasks.json`, `task_{id}_tracked_transactions.json`, `task_{id}_email_output.json`, `task_{id}_sent_emails.json`.
 
 ### Scheduler Robustness
 - Stale confirmations auto-cancelled after 120 min
