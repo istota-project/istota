@@ -1,6 +1,6 @@
 # Executor Internals
 
-## `execute_task()` (L383-749)
+## `execute_task()`
 ```python
 def execute_task(
     task: db.Task, config: Config, user_resources: list[db.UserResource],
@@ -12,26 +12,27 @@ def execute_task(
 Returns `(success, result_text, actions_taken_json)`. `actions_taken` is a JSON array of tool use descriptions from streaming execution, or `None` for simple/dry-run/error paths.
 
 ### Flow
-1. **Setup temp dir** (L401-403): `config.temp_dir / task.user_id`
-2. **Merge resources** (L405-415): DB resources + config resources → `db.UserResource` list
-3. **Load skills** (L417-442): `load_skill_index()` → `select_skills()` → `load_skills()`
-4. **Skills changelog** (L443-464): fingerprint compare, interactive only
-5. **Context loading** (L466-549): skip for scheduled/briefing
-6. **User memory** (L551-564): `read_user_memory_v2()`, skip for briefings
-7. **Channel memory** (L566-574): `read_channel_memory()`, only if `conversation_token`
-8. **CalDAV discovery** (L576-588): `get_calendars_for_user()`
-8b. **Dated memories** (L1410-1421): `read_dated_memories()`, skip for briefings, controlled by `auto_load_dated_days`
-8c. **Memory recall** (L1424-1425): `_recall_memories()`, BM25 search using task prompt, skip for briefings
-8d. **Memory cap** (L1427-1430): `_apply_memory_cap()`, truncates recalled → dated if `max_memory_chars` exceeded
-9. **Build prompt** (L600-605)
-10. **Dry run check** (L618-619): return prompt text
-11. **Write prompt file** (L621-623): `task_{id}_prompt.txt`
-12. **Build command**: `--allowedTools` whitelist
-13. **Build env** (L643-725): see env var table below
-14. **Execute** (L726-729): streaming or simple
-15. **Update fingerprint** (L731-742): on success, interactive only
+1. **Setup temp dir**: `config.temp_dir / task.user_id`
+2. **Merge resources**: DB resources + config resources → `db.UserResource` list
+3. **Load skills**: `load_skill_index()` → `select_skills()` → `load_skills()`
+4. **Skills changelog**: fingerprint compare, interactive only
+5. **Context loading**: skip for scheduled/briefing
+6. **User memory**: `read_user_memory_v2()`, skip for briefings
+7. **Channel memory**: `read_channel_memory()`, only if `conversation_token`
+8. **CalDAV discovery**: `get_calendars_for_user()`
+8b. **Dated memories**: `read_dated_memories()`, skip for briefings, controlled by `auto_load_dated_days`
+8c. **Memory recall**: `_recall_memories()`, BM25 search using task prompt, skip for briefings
+8d. **Memory cap**: `_apply_memory_cap()`, truncates recalled → dated if `max_memory_chars` exceeded
+9. **Confirmation context**: load from `task.confirmation_prompt` if confirmed task
+10. **Build prompt**: includes `confirmation_context` when set
+11. **Dry run check**: return prompt text
+12. **Write prompt file**: `task_{id}_prompt.txt`
+13. **Build command**: `--allowedTools` whitelist, optional `--model` override
+14. **Build env**: see env var table below; credential vars split via `_split_credential_env()` when proxy enabled
+15. **Execute**: streaming or simple
+16. **Update fingerprint**: on success, interactive only
 
-## `build_prompt()` (L166-380)
+## `build_prompt()`
 ```python
 def build_prompt(
     task: db.Task, user_resources: list[db.UserResource], config: Config,
@@ -42,27 +43,32 @@ def build_prompt(
     is_admin: bool = True, emissaries: str | None = None,
     source_type: str | None = None, output_target: str | None = None,
     recalled_memories: str | None = None,
+    excluded_resource_types: set[str] | None = None,
+    skip_persona: bool = False,
+    cli_skills_text: str | None = None,
+    confirmation_context: str | None = None,
 ) -> str:
 ```
 
 ### Prompt Section Order
-1. Header: role, user_id, datetime, task_id, conversation_token, db_path (L341-346)
-2. Emissaries: `config/emissaries.md` constitutional principles (global only, not user-overridable)
-3. Persona: user workspace `PERSONA.md` overrides `config/persona.md` (L244-248)
-3. Resources: calendars, folders, todos, email_folders, notes, reminders (L180-242)
-4. User memory: USER.md (L267-276)
-5. Channel memory: CHANNEL.md (L278-288)
-6. Dated memories: auto-loaded from `memories/YYYY-MM-DD.md` (configurable via `auto_load_dated_days`)
-6b. Recalled memories: BM25 search results (when `auto_recall` enabled)
-7. Tools: file access, browser, CalDAV, sqlite3, email (L312-357)
-8. Rules: resource restrictions, confirmation, subtasks, output (L359-367)
-9. Context: previous messages (L300-310)
-10. Request: prompt + attachments (L369-371)
-11. Guidelines: `config/guidelines/{source_type}.md` (L250-254)
-12. Skills changelog (L374-375)
-13. Skills doc (L377-378)
+1. Header: role, user_id, datetime, task_id, conversation_token, db_path
+2. Emissaries: `config/emissaries.md` constitutional principles (skipped for briefings)
+3. Persona: user workspace `PERSONA.md` overrides `config/persona.md` (skipped for briefings or `skip_persona`)
+4. Resources: calendars, folders, todos, email_folders, notes, reminders
+5. User memory: USER.md (skipped for briefings)
+6. Channel memory: CHANNEL.md
+7. Dated memories: auto-loaded from `memories/YYYY-MM-DD.md` (configurable via `auto_load_dated_days`)
+7b. Recalled memories: BM25 search results (when `auto_recall` enabled)
+8. Confirmation context: previous bot output for confirmed actions
+9. Tools: file access, browser, CalDAV, sqlite3, email
+10. Rules: resource restrictions, confirmation, subtasks, output
+11. Context: previous messages
+12. Request: prompt + attachments
+13. Guidelines: `config/guidelines/{source_type}.md`
+14. Skills changelog
+15. Skills doc
 
-## Environment Variable Mapping (L643-725)
+## Environment Variable Mapping
 
 | Resource/System | Env Var | Source |
 |---|---|---|
@@ -71,6 +77,7 @@ def build_prompt(
 | Core | `ISTOTA_DB_PATH` | `str(config.db_path)` |
 | Core | `ISTOTA_CONVERSATION_TOKEN` | `task.conversation_token` |
 | Core | `ISTOTA_DEFERRED_DIR` | `str(user_temp_dir)` — always set, for deferred DB writes |
+| Core | `ISTOTA_SKILL_PROXY_SOCK` | Skill proxy socket path (if proxy enabled) |
 | Nextcloud | `NC_URL`, `NC_USER`, `NC_PASS` | `config.nextcloud.*` |
 | Nextcloud | `NEXTCLOUD_MOUNT_PATH` | `str(config.nextcloud_mount_path)` |
 | CalDAV | `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD` | `config.caldav_*` |
@@ -81,6 +88,10 @@ def build_prompt(
 | Ledger | `LEDGER_PATH` | First ledger path (backward compat) |
 | Invoicing | `INVOICING_CONFIG` | Path to INVOICING.md (auto-created from template) |
 | Accounting | `ACCOUNTING_CONFIG` | Path to ACCOUNTING.md (auto-created from template) |
+| Karakeep | `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY` | From resource config `extra` |
+| Garmin | `GARMIN_EMAIL`, `GARMIN_PASSWORD`, `GARMIN_CONFIG` | From resource config `extra` or GARMIN.md |
+| Monarch | `MONARCH_SESSION_TOKEN` | From resource config `extra` |
+| Website | `WEBSITE_PATH`, `WEBSITE_URL` | `config.site.*` (if enabled + user site_enabled) |
 | Developer | `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` (if enabled) |
 | Developer | `GITLAB_URL` | `config.developer.gitlab_url` (if enabled) |
 | Developer | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` (if enabled + set) |
@@ -101,21 +112,21 @@ cmd += ["--output-format", "stream-json", "--verbose"]
 - Timeout: `config.scheduler.task_timeout_minutes * 60`
 - Env: `build_clean_env(config)` + task-specific vars (always minimal env)
 
-## API Retry Logic (L915-952)
+## API Retry Logic
 - `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` + `429`
 - `API_RETRY_MAX_ATTEMPTS = 3`
 - `API_RETRY_DELAY_SECONDS = 5` (fixed, not exponential)
-- Pattern: `API Error: (\d{3}) (\{.*\})` (L32)
+- Pattern: `API Error: (\d{3}) (\{.*\})`
 - Retries do NOT count against task attempts
 
-## Stream Parsing (`_execute_streaming_once`, L786-913)
+## Stream Parsing (`_execute_streaming_once`)
 - Line-by-line from stdout via `parse_stream_line()`
 - Events: `ResultEvent` → final result, `ToolUseEvent` → progress, `TextEvent` → progress
 - Cancellation checked on each event via `db.is_task_cancelled()`
 - Result priority: ResultEvent > result file > stderr > fallback error
 
 ## Key Constants
-- Background task types excluded from context: `["scheduled", "briefing"]` (L483)
+- Background task types excluded from context: `["scheduled", "briefing"]`
 - Prompt file: `{user_temp_dir}/task_{task_id}_prompt.txt`
 - Result file: `{user_temp_dir}/task_{task_id}_result.txt`
 
@@ -125,18 +136,22 @@ cmd += ["--output-format", "stream-json", "--verbose"]
 | `build_clean_env(config)` | Minimal env for Claude subprocess (PATH, HOME, PYTHONUNBUFFERED + passthrough vars) |
 | `build_stripped_env()` | os.environ minus credential vars (PASSWORD/TOKEN/SECRET/API_KEY/NC_PASS/PRIVATE_KEY/APP_PASSWORD). For heartbeat/cron commands. Always-on. |
 | `build_allowed_tools(is_admin, skill_names)` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash"]`. All Bash allowed — clean env is the boundary. |
-| `_CREDENTIAL_ENV_PATTERNS` | Frozenset of credential substrings to strip |
+| `_PROXY_CREDENTIAL_VARS` | Frozenset of specific env vars stripped when proxy enabled (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, GARMIN_EMAIL, GARMIN_PASSWORD, MONARCH_SESSION_TOKEN) |
+| `_CREDENTIAL_SKILL_MAP` | Maps each credential env var to the set of skills that need it (scopes proxy responses) |
 
 ## Other Functions
-| Function | Lines | Purpose |
-|---|---|---|
-| `parse_api_error()` | 42-60 | Extract status_code/message from error text |
-| `is_transient_api_error()` | 63-68 | Check if error is retryable |
-| `get_user_temp_dir()` | 71-73 | `config.temp_dir / user_id` |
-| `_ensure_reply_parent_in_history()` | 76-145 | Force-include reply parent in context |
-| `load_emissaries()` | ~478 | Load constitutional principles (global only, not user-overridable) |
-| `load_persona()` | ~490 | Load persona (user workspace > global) |
-| `load_channel_guidelines()` | 157-163 | Load guidelines/{source_type}.md |
-| `_execute_simple()` | 752-783 | subprocess.run mode |
-| `_execute_streaming()` | 915-952 | Retry wrapper for streaming |
-| `execute_task_interactive()` | 955-988 | CLI interactive mode |
+| Function | Purpose |
+|---|---|
+| `parse_api_error()` | Extract status_code/message from error text |
+| `is_transient_api_error()` | Check if error is retryable |
+| `get_user_temp_dir()` | `config.temp_dir / user_id` |
+| `_ensure_reply_parent_in_history()` | Force-include reply parent in context |
+| `load_emissaries()` | Load constitutional principles (global only, not user-overridable) |
+| `load_persona()` | Load persona (user workspace > global) |
+| `load_channel_guidelines()` | Load guidelines/{source_type}.md |
+| `_split_credential_env()` | Split env dict into credential vars and clean vars (for proxy) |
+| `_build_network_allowlist()` | Build host:port allowlist for CONNECT proxy |
+| `build_bwrap_cmd()` | Build bubblewrap sandbox command wrapper |
+| `_execute_simple()` | subprocess.run mode |
+| `_execute_streaming()` | Retry wrapper for streaming |
+| `execute_task_interactive()` | CLI interactive mode |

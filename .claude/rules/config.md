@@ -2,30 +2,30 @@
 
 ## Dataclass Definitions
 
-### `LoggingConfig` (L12-20)
+### `LoggingConfig`
 ```
 level: str = "INFO"          output: str = "console"     file: str = ""
 rotate: bool = True          max_size_mb: int = 10       backup_count: int = 5
 ```
 
-### `NextcloudConfig` (L23-27)
+### `NextcloudConfig`
 ```
 url: str = ""                username: str = ""          app_password: str = ""
 ```
 
-### `TalkConfig` (L30-33)
+### `TalkConfig`
 ```
 enabled: bool = True         bot_username: str = "istota"
 ```
 
-### `EmailConfig` (L36-60)
+### `EmailConfig`
 ```
 enabled: bool = False        imap_host/port/user/password    poll_folder: str = "INBOX"
 smtp_host/port/user/password                                 bot_email: str = ""
 ```
 Properties: `effective_smtp_user` (L53), `effective_smtp_password` (L57) — fall back to imap creds
 
-### `NtfyConfig` (L62-72)
+### `NtfyConfig`
 ```
 enabled: bool = False        server_url: str = "https://ntfy.sh"
 topic: str = ""              token: str = ""
@@ -33,12 +33,12 @@ username: str = ""           password: str = ""
 priority: int = 3
 ```
 
-### `BrowserConfig` (L74-79)
+### `BrowserConfig`
 ```
 enabled: bool = False        api_url: str = "http://localhost:9223"    vnc_url: str = ""
 ```
 
-### `ConversationConfig` (L70-79)
+### `ConversationConfig`
 ```
 enabled: bool = True                lookback_count: int = 25
 selection_model: str = "haiku"      selection_timeout: float = 30.0
@@ -48,20 +48,35 @@ context_recency_hours: float = 0    context_min_messages: int = 10
 previous_tasks_count: int = 3       talk_context_limit: int = 100
 ```
 
-### `SchedulerConfig` (L82-111)
+### `SchedulerConfig`
 See `memory/scheduler.md` for full table of fields and defaults.
 
-### `SleepCycleConfig` (L114-121)
+### `SleepCycleConfig`
 ```
 enabled: bool = True         cron: str = "0 2 * * *"
 memory_retention_days: int = 0     lookback_hours: int = 24
 auto_load_dated_days: int = 3      curate_user_memory: bool = False
 ```
 
-### `ChannelSleepCycleConfig` (L124-130)
+### `ChannelSleepCycleConfig`
 ```
 enabled: bool = True         cron: str = "0 3 * * *"
 lookback_hours: int = 24     memory_retention_days: int = 0
+```
+
+### `LocationReceiverConfig`
+```
+enabled: bool = False        webhooks_port: int = 8765
+```
+
+### `SiteConfig`
+```
+enabled: bool = False        hostname: str = ""           base_path: str = ""
+```
+
+### `NetworkConfig`
+```
+enabled: bool = True         allow_pypi: bool = True      extra_hosts: list[str] = []
 ```
 
 ### `SecurityConfig`
@@ -69,31 +84,34 @@ lookback_hours: int = 24     memory_retention_days: int = 0
 sandbox_enabled: bool = True         skill_proxy_enabled: bool = True
 sandbox_admin_db_write: bool = False skill_proxy_timeout: int = 300
 passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
+network: NetworkConfig = NetworkConfig()
 ```
 
-### `BriefingConfig` (L133-140)
+### `BriefingConfig`
 ```
 name: str                    cron: str                   conversation_token: str = ""
 output: str = "talk"         components: dict = {}
 ```
 
-### `ResourceConfig` (L143-149)
+### `ResourceConfig`
 ```
 type: str                    path: str                   name: str = ""
-permissions: str = "read"
+permissions: str = "read"    extra: dict = {}            # unrecognized TOML keys (credentials, etc.)
 ```
 
-### `UserConfig` (L155-167)
+### `UserConfig`
 ```
 display_name: str = ""                    email_addresses: list[str] = []
 timezone: str = "UTC"                     briefings: list[BriefingConfig] = []
 resources: list[ResourceConfig] = []
 invoicing_notifications: str = ""         invoicing_conversation_token: str = ""
-ntfy_topic: str = ""
+ntfy_topic: str = ""                      log_channel: str = ""
+site_enabled: bool = False
 max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 = use global default
+disabled_skills: list[str] = []           # per-user skills to exclude
 ```
 
-### `MemorySearchConfig` (L165-170)
+### `MemorySearchConfig`
 ```
 enabled: bool = True         auto_index_conversations: bool = True
 auto_index_memory_files: bool = True
@@ -115,14 +133,16 @@ github_reviewer: str = ""
 github_api_allowlist: list[str] = [default safe set]  # Endpoint allowlist for API wrapper
 ```
 
-### `BriefingDefaultsConfig` (L173-177)
+### `BriefingDefaultsConfig`
 ```
-markets: dict = {}           news: dict = {}
+markets: dict = {}           news: dict = {}              headlines: dict = {}
 ```
 
-### `Config` (L180-234)
+### `Config`
 ```
 db_path: Path = Path("data/istota.db")
+bot_name: str = "Istota"            emissaries_enabled: bool = True
+model: str = ""                     # Claude model override (empty = CLI default)
 nextcloud: NextcloudConfig          talk: TalkConfig
 email: EmailConfig                  conversation: ConversationConfig
 scheduler: SchedulerConfig          browser: BrowserConfig
@@ -130,7 +150,8 @@ ntfy: NtfyConfig                    logging: LoggingConfig
 briefing_defaults: BriefingDefaultsConfig   security: SecurityConfig
 memory_search: MemorySearchConfig   sleep_cycle: SleepCycleConfig
 channel_sleep_cycle: ChannelSleepCycleConfig
-developer: DeveloperConfig
+developer: DeveloperConfig          site: SiteConfig
+location: LocationReceiverConfig
 users: dict[str, UserConfig] = {}
 admin_users: set[str] = set()      # from /etc/istota/admins (empty = all admin)
 rclone_remote: str = "nextcloud"
@@ -139,24 +160,27 @@ skills_dir: Path = Path("config/skills")
 temp_dir: Path = Path("/tmp/istota")
 users_dir: Path | None = None
 max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
+disabled_skills: list[str] = []    # instance-wide skills to exclude
+bundled_skills_dir: Path | None = None  # override for testing
 ```
 Properties:
-- `use_mount` (L200): `bool` — True if `nextcloud_mount_path` set
-- `caldav_url` (L217): derived from `nextcloud.url + /remote.php/dav`
-- `caldav_username` (L225): `nextcloud.username`
-- `caldav_password` (L229): `nextcloud.app_password`
+- `use_mount`: `bool` — True if `nextcloud_mount_path` set
+- `bot_dir_name`: `str` — sanitized `bot_name` for filesystem use (ASCII lowercase, spaces→underscores)
+- `caldav_url`: derived from `nextcloud.url + /remote.php/dav`
+- `caldav_username`: `nextcloud.username`
+- `caldav_password`: `nextcloud.app_password`
 Methods:
-- `get_user(nc_username) -> UserConfig | None` (L205)
+- `get_user(nc_username) -> UserConfig | None`
 - `is_admin(user_id) -> bool` — True if `admin_users` empty or user in set
-- `find_user_by_email(email_address) -> str | None` (L209)
+- `find_user_by_email(email_address) -> str | None`
 
 ## Config Loading
 
-### `load_config()` (L320-488)
+### `load_config()`
 Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`
 
 1. Parse TOML file
-2. Build each sub-config from sections: `[logging]`, `[nextcloud]`, `[talk]`, `[email]`, `[browser]`, `[conversation]`, `[scheduler]`, `[memory_search]`, `[channel_sleep_cycle]`, `[briefing_defaults]`
+2. Build each sub-config from sections: `[logging]`, `[nextcloud]`, `[talk]`, `[email]`, `[browser]`, `[conversation]`, `[scheduler]`, `[memory_search]`, `[channel_sleep_cycle]`, `[briefing_defaults]`, `[location]`, `[site]`, `[developer]`
 3. Parse `[users.*]` section → `_parse_user_data()` for each
 4. Set `users_dir = config_dir / "users"` if exists
 5. Load per-user configs via `load_user_configs()`
@@ -182,27 +206,27 @@ Loads admin user IDs from plain text file (one per line, `#` comments, blank lin
 - Check `ISTOTA_ADMINS_FILE` env var, then default `/etc/istota/admins`
 - Returns empty set if file missing (all users = admin for backward compat)
 
-### `_parse_user_data()` (L236-290)
+### `_parse_user_data()`
 Parses user dict → `UserConfig`:
 - Parses `[[briefings]]` → `BriefingConfig` list
 - Parses `[sleep_cycle]` → `SleepCycleConfig`
 - Parses `[[resources]]` → `ResourceConfig` list
 - Backward compat: migrates `reminders_file` string to `ResourceConfig(type="reminders_file")`
 
-### `load_user_configs()` (L293-317)
+### `load_user_configs()`
 Loads `config/users/*.toml` (skips `*.example.toml`):
 - Filename = user_id (without `.toml`)
 - Returns `dict[user_id, UserConfig]`
 
-## UserResource (DB Model, in db.py L44-52)
+## UserResource (DB Model, in db.py)
 ```python
 @dataclass
 class UserResource:
     id: int
     user_id: str
     resource_type: str      # "calendar", "folder", "todo_file", "email_folder",
-                            # "reminders_file", "shared_file",
-                            # "ledger", "invoicing"
+                            # "reminders_file", "shared_file", "ledger",
+                            # "invoicing", "karakeep", "garmin", "monarch"
     resource_path: str
     display_name: str | None
     permissions: str        # "read" or "readwrite"

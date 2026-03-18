@@ -86,7 +86,7 @@ istota/
 │   ├── browser/             # Playwright browser container (Flask API)
 │   └── .env.example         # Environment variables template
 ├── scripts/                 # setup.sh, scheduler.sh
-├── tests/                   # pytest + pytest-asyncio (~2400 tests, 51 files)
+├── tests/                   # pytest + pytest-asyncio (~2725 tests, 53 files)
 ├── schema.sql
 └── pyproject.toml
 ```
@@ -151,7 +151,7 @@ Resources defined in per-user config or DB, merged at task time. Types: `calenda
 Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 
 - Long-polling per conversation, message cache in `talk_messages` table
-- Progress updates: random ack before execution, streaming progress (rate-limited: min 8s, max 5/task). `progress_style`: `replace` (edit ack in-place, default), `full` (append), `none` (silent)
+- Progress updates: random ack before execution, streaming progress (rate-limited: min 8s, max 5/task). `progress_style`: `replace` (edit ack in-place with elapsed time, default), `full` (accumulated tool descriptions), `legacy` (post individual progress messages), `none` (silent). Optional `progress_show_text` for intermediate assistant text.
 - Per-user log channel (`log_channel` config): verbose tool-by-tool execution logs posted to a dedicated Talk room
 - Multi-user rooms: only responds when @mentioned; 2-person rooms behave like DMs
 - `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`, `!export` (conversation history export), `!skills` (list available skills)
@@ -176,7 +176,7 @@ Talk tasks use a poller-fed local cache (`talk_messages` table, bounded by `talk
 Outbound emails tracked in `sent_emails` table (Message-ID, recipient, user, conversation_token). When external contacts reply, the email poller matches References headers against sent emails and creates tasks with `output_target="talk"` routed to the originating Talk conversation. The bot drafts a response and asks for confirmation. On approval, the task re-executes with `confirmation_context` injected (the bot's previous output), instructing it to send the draft rather than re-draft. Pending confirmations are auto-cancelled when the user sends a new message in the same conversation.
 
 ### Briefings
-Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user's timezone. Components: `calendar`, `todos`, `email`, `markets`, `news`, `reminders`. Market data pre-fetched. Memory isolated from briefing prompts.
+Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user's timezone. Components: `calendar`, `todos`, `email`, `markets`, `news`, `headlines`, `notes`, `reminders`. Market data pre-fetched. Memory isolated from briefing prompts.
 
 ### Scheduled Jobs
 Defined in user's `CRON.md` (markdown with TOML `[[jobs]]`). Job types: `prompt` (Claude Code), `prompt_file` (prompt loaded from external file), or `command` (shell). `prompt_file` paths are relative to the Nextcloud mount root and resolved at load time. One-time jobs (`once = true`) auto-deleted after success. Auto-disable after 5 consecutive failures. Results excluded from interactive context. Per-job `skip_log_channel = true` suppresses log channel output for frequent jobs.
@@ -216,7 +216,7 @@ When `[security.network] enabled`, each task's sandbox gets `--unshare-net` (own
 Default allowlist: `api.anthropic.com:443`, `mcp-proxy.anthropic.com:443` (Claude API), `pypi.org:443`, `files.pythonhosted.org:443` (package installs, configurable via `allow_pypi`). Git remote hosts added from `[developer]` config when the developer skill is selected. Operator extras via `extra_hosts`. No MITM — TLS is end-to-end. Config: `[security.network]` section.
 
 ### Credential Isolation (Skill Proxy)
-When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY) are stripped from Claude's env. Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread, which injects credentials server-side. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled. Config: `[security]` section, `skill_proxy_enabled`, `skill_proxy_timeout`.
+When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, GARMIN_EMAIL, GARMIN_PASSWORD, MONARCH_SESSION_TOKEN) are stripped from Claude's env. Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread, which injects credentials server-side. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled. Config: `[security]` section, `skill_proxy_enabled`, `skill_proxy_timeout`.
 
 ### Deferred DB Operations
 With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR`). Scheduler processes after successful completion. Patterns: `task_{id}_subtasks.json`, `task_{id}_tracked_transactions.json`, `task_{id}_email_output.json`, `task_{id}_sent_emails.json`.
@@ -228,7 +228,7 @@ With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR
 
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2690 tests across 53 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2725 tests across 53 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests

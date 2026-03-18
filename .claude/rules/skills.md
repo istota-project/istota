@@ -1,8 +1,8 @@
 # Skills System
 
-## Skills Loader (`src/istota/skills_loader.py`)
+## Skills Loader (`src/istota/skills/_loader.py`)
 
-### `SkillMeta` Dataclass (L12-21)
+### `SkillMeta` Dataclass (`src/istota/skills/_types.py`)
 ```python
 @dataclass
 class SkillMeta:
@@ -13,6 +13,15 @@ class SkillMeta:
     keywords: list[str] = field(default_factory=list)
     resource_types: list[str] = field(default_factory=list)
     source_types: list[str] = field(default_factory=list)
+    file_types: list[str] = field(default_factory=list)
+    companion_skills: list[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
+    env_specs: list[EnvSpec] = field(default_factory=list)
+    cli: bool = False
+    exclude_memory: bool = False
+    exclude_persona: bool = False
+    exclude_resources: list[str] = field(default_factory=list)
+    skill_dir: str = ""
 ```
 
 ### Functions
@@ -24,8 +33,10 @@ load_skills_changelog(skills_dir: Path) -> str | None             # L108-114: CH
 load_skills(skills_dir: Path, skill_names: list[str]) -> str      # L117-130: Concatenate skill docs
 ```
 
-### Selection Logic (`select_skills`, L46-89)
+### Selection Logic (`select_skills`)
 Skills with `admin_only=True` are skipped when `is_admin=False`.
+Skills with unmet `dependencies` (missing Python packages) are skipped via `_check_dependencies()`.
+Skills listed in `disabled_skills` (instance-level or per-user) are excluded.
 A skill is selected if ANY of these match:
 1. `meta.always_include == True`
 2. `source_type in meta.source_types`
@@ -38,15 +49,20 @@ A skill is selected if ANY of these match:
 
 Returns sorted list of skill names.
 
-## Skill Index (`config/skills/_index.toml`)
+### Skill Discovery (three layers, merged)
+1. Bundled `skill.toml` directories in `src/istota/skills/*/`
+2. Operator override `skill.toml` directories in `config/skills/*/`
+3. Legacy `_index.toml` (lowest priority, deprecated)
+
+## Skill Index (from `skill.toml` manifests)
 
 | Skill | always_include | keywords | resource_types | source_types |
 |---|---|---|---|---|
 | `files` | yes | — | — | — |
-| `sensitive-actions` | yes | — | — | — |
+| `sensitive_actions` | yes | — | — | — |
 | `memory` | yes | — | — | — |
 | `scripts` | yes | — | — | — |
-| `memory-search` | yes | — | — | — |
+| `memory_search` | yes | — | — | — |
 | `email` | — | email, mail, send, inbox, reply, message | email_folder | email |
 | `calendar` | — | calendar, event, meeting, schedule, appointment, caldav | calendar | briefing |
 | `todos` | — | todo, task, checklist, reminder, done, complete | todo_file | — |
@@ -57,12 +73,17 @@ Returns sorted list of skill names.
 | `nextcloud` | — | share, sharing, nextcloud, permission, access | — | — |
 | `browse` | — | browse, website, scrape, screenshot, url, http, ... | — | — |
 | `briefing` | — | — | — | briefing |
-| `briefings-config` | — | briefing config, briefing schedule, ... | — | — |
+| `briefings_config` | — | briefing config, briefing schedule, ... | — | — |
 | `heartbeat` | — | heartbeat, monitoring, health check, alert, ... | — | — |
 | `accounting` | — | accounting, ledger, invoice, expense, tax, ... | ledger, invoicing | — |
 | `transcribe` | — | transcribe, ocr, screenshot, scan, ... | — | — |
-| `whisper` | — | transcribe, whisper, audio, voice, speech, dictation, recording, voice memo | — | — |
+| `whisper` | — | transcribe, whisper, audio, voice, speech, dictation, ... | — | — |
 | `developer` | — | git, gitlab, repo, repository, commit, branch, MR, ... | — | — |
+| `garmin` | — | garmin, run, workout, activity, fitness, steps, ... | garmin | — |
+| `location` | — | location, gps, where, place, tracking, ... | — | — |
+| `bookmarks` | — | bookmark, karakeep, save, read later, ... | karakeep | — |
+| `website` | — | website, site, publish, blog, ... | — | — |
+| `feeds_config` | — | feed, rss, subscribe, ... | — | — |
 
 ## Skill CLI Modules (`src/istota/skills/`)
 
@@ -110,27 +131,51 @@ Returns sorted list of skill names.
 **Env vars**: `NC_URL`, `NC_USER`, `NC_PASS`
 **Key fns**: Uses `nextcloud_client.py` (OCS + WebDAV)
 
+### `garmin/` - Garmin Connect Data
+**Subcommands**: `connect`, `user`, `activities`, `stats`, `health`
+**Env vars**: `GARMIN_EMAIL`, `GARMIN_PASSWORD`, `GARMIN_CONFIG`
+**Optional deps**: `garminconnect` (in `garmin` extra group)
+
+### `location/` - GPS Location + Calendar Attendance
+**Subcommands**: `current`, `history`, `places`, `learn`, `attendance`, `reverse-geocode`, `day-summary`
+**Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`
+**Optional deps**: `caldav` (in `calendar` extra group)
+
+### `bookmarks/` - Karakeep Bookmark Management
+**Subcommands**: `search`, `list`, `get`, `add`, `tags`, `tag`, `untag`, `lists`, `list-bookmarks`, `summarize`, `stats`
+**Env vars**: `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY`
+
 ### Library-Only Modules (no CLI)
 - `files.py` - Nextcloud file ops (mount-aware, rclone fallback)
 - `invoicing.py` - Invoice generation, PDF export, cash-basis income
+- `finviz.py` - FinViz scraping for market data
 
 ## How to Add a New Skill
 
-### 1. Create the skill doc
-Create `config/skills/<name>.md` with reference documentation for Claude.
+### 1. Create the skill directory
+Create `src/istota/skills/<name>/` with:
+- `skill.toml` — manifest (required)
+- `skill.md` — reference documentation for Claude (required)
 
-### 2. Register in `_index.toml`
+### 2. Define the manifest (`skill.toml`)
 ```toml
-[my-skill]
+[skill]
 description = "What it does"
 keywords = ["trigger", "words"]        # Optional
 resource_types = ["my_resource"]       # Optional
 source_types = ["briefing"]            # Optional
 always_include = false                 # Default
+dependencies = ["some-package"]       # Optional: skip if missing
+
+[[env]]                                # Optional: declarative env vars
+name = "MY_VAR"
+source = "resource"
+resource_type = "my_resource"
+field = "path"
 ```
 
 ### 3. (Optional) Create CLI module
-Create `src/istota/skills/<name>.py`:
+Create `src/istota/skills/<name>/__init__.py` (plus `__main__.py` for `python -m` support):
 ```python
 import argparse, json, sys
 
