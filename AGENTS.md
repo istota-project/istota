@@ -169,8 +169,11 @@ Talk tasks use a poller-fed local cache (`talk_messages` table, bounded by `talk
 
 ### Input Channels
 - **Talk**: Long-polling, message cache, referenceId tagging for ack/progress/result messages
-- **Email**: IMAP polling, attachments to `/Users/{user_id}/inbox/`, threaded replies. Output via `istota-skill email output` (deferred file pattern)
+- **Email**: IMAP polling, attachments to `/Users/{user_id}/inbox/`, threaded replies. Output via `istota-skill email output` (deferred file pattern). Emissary thread matching: unknown sender emails checked against `sent_emails` table via References header — replies to bot-initiated threads route to originating user via Talk.
 - **TASKS.md**: Polls user config file (30s). Status markers: `[ ]` `[~]` `[x]` `[!]`. Identity via SHA-256 hash.
+
+### Emissary Email Threads
+Outbound emails tracked in `sent_emails` table (Message-ID, recipient, user, conversation_token). When external contacts reply, the email poller matches References headers against sent emails and creates tasks with `output_target="talk"` routed to the originating Talk conversation. The bot drafts a response and asks for confirmation. On approval, the task re-executes with `confirmation_context` injected (the bot's previous output), instructing it to send the draft rather than re-draft. Pending confirmations are auto-cancelled when the user sends a new message in the same conversation.
 
 ### Briefings
 Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user's timezone. Components: `calendar`, `todos`, `email`, `markets`, `news`, `reminders`. Market data pre-fetched. Memory isolated from briefing prompts.
