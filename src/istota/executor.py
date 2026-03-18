@@ -1152,6 +1152,7 @@ def build_prompt(
     excluded_resource_types: set[str] | None = None,
     skip_persona: bool = False,
     cli_skills_text: str | None = None,
+    confirmation_context: str | None = None,
 ) -> str:
     """Build the full prompt for Claude Code execution."""
     # Group resources by type
@@ -1305,6 +1306,19 @@ The following are relevant previous messages from this conversation:
 
 """
 
+    # Build confirmation context section (for re-executed confirmed tasks)
+    confirmation_section = ""
+    if confirmation_context:
+        confirmation_section = f"""## Confirmed action
+
+The user reviewed and approved your previous response. Your previous output:
+
+{confirmation_context}
+
+Execute the action you proposed. If you drafted an email, send it now via `istota-skill email send`. Do not re-draft or ask for confirmation again.
+
+"""
+
     # Build file access tools section based on mount mode
     # Non-admin users get a scoped mount path restricted to their own directory
     if config.use_mount:
@@ -1400,7 +1414,7 @@ You have access to:
 
 {rules_section}
 {context_section}
-## User's request
+{confirmation_section}## User's request
 
 {task.prompt}{attachments_text}
 {channel_section}"""
@@ -1657,6 +1671,11 @@ def execute_task(
     cli_skills_text = format_cli_skills(skill_index)
 
     # Build prompt
+    # Detect confirmed tasks — pass their previous output as confirmation context
+    _confirmation_context = None
+    if task.confirmed_at and task.confirmation_prompt:
+        _confirmation_context = task.confirmation_prompt
+
     prompt = build_prompt(
         task, user_resources, config, skills_doc, conversation_context, user_memory,
         discovered_calendars, user_email_addresses, dated_memories, channel_memory,
@@ -1667,6 +1686,7 @@ def execute_task(
         excluded_resource_types=_excluded_resource_types or None,
         skip_persona=_skip_persona,
         cli_skills_text=cli_skills_text,
+        confirmation_context=_confirmation_context,
     )
 
     # Log prompt size breakdown

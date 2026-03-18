@@ -210,8 +210,8 @@
 - [x] Thread-matched inbound routing (References header → `sent_emails` lookup)
 - [x] Emissary replies routed to originating user via Talk (`output_target="talk"`)
 - [x] Deferred sent email recording (sandbox-safe via JSON file)
-- [ ] Draft + approval flow for emissary responses
-- [ ] Multi-turn thread continuity (full thread history in context)
+- [x] Draft + approval flow for emissary responses (confirmation context injection + stale confirmation cancellation)
+- [x] Multi-turn thread continuity (Phase 1 routing + Talk conversation context handles repeat replies naturally)
 - [ ] Delegated autonomy levels (notify-only / draft-and-wait / full autonomy)
 
 ### Agent-Task Heartbeat Check (Removed)

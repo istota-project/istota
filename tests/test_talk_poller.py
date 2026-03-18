@@ -1197,3 +1197,81 @@ class TestConversationListCache:
 
             result = await poll_talk_conversations(config)
             assert result == []
+
+
+# =============================================================================
+# TestCancelPendingConfirmationsOnNewMessage
+# =============================================================================
+
+
+class TestCancelPendingConfirmationsOnNewMessage:
+    @pytest.mark.asyncio
+    async def test_new_message_cancels_pending_confirmation(self, make_config):
+        """When a user sends a new message, pending confirmations are cancelled."""
+        config = make_config()
+
+        # Create a pending confirmation task in room1
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Draft email", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Should I send this?")
+
+        # User sends a new message (not yes/no)
+        msg = _msg(id=101, actor_id="alice", message="Actually, change the subject")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        # New task created
+        assert len(result) == 1
+
+        # Old confirmation cancelled
+        with db.get_db(config.db_path) as conn:
+            old_task = db.get_task(conn, task_id)
+            assert old_task.status == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_yes_reply_does_not_cancel_confirmation(self, make_config):
+        """A 'yes' reply confirms (not cancels) the pending task."""
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Draft email", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Should I send this?")
+
+        msg = _msg(id=101, actor_id="alice", message="yes")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        # No new task created (confirmation handled it)
+        assert result == []
+
+        # Task should be confirmed (pending), not cancelled
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+            assert task.status == "pending"
+            assert task.confirmed_at is not None

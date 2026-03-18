@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-17: Emissary draft-approve-send flow (ISSUE-016, Phase 2)
+
+When a confirmed task is re-executed (user said "yes" to a confirmation prompt), the bot previously got the same original prompt with no awareness that it was confirmed. It would re-draft instead of executing the confirmed action. Now the bot's previous output is injected into the re-execution prompt so it knows to proceed.
+
+**Key changes:**
+- `confirmed_at` field added to Task dataclass and loaded from DB (column existed but was never read back)
+- `confirmation_context` parameter in `build_prompt()` injects a "Confirmed action" section with the bot's previous output and instructions to execute, not re-draft
+- `execute_task()` detects confirmed tasks and passes `confirmation_prompt` as confirmation context
+- New `cancel_pending_confirmations()` DB function cancels stale confirmations per-conversation per-user
+- Talk poller cancels pending confirmations when the user sends a new message (instead of yes/no), preventing stale confirmations from lingering
+
+**Files modified:**
+- `src/istota/db.py` — `confirmed_at` on Task, `cancel_pending_confirmations()`, `confirmed_at` in SELECT queries
+- `src/istota/executor.py` — `confirmation_context` parameter in `build_prompt()`, detection in `execute_task()`
+- `src/istota/talk_poller.py` — Cancel pending confirmations before creating new tasks
+- `tests/test_db.py` — 6 new tests for confirmed_at roundtrip and cancel_pending_confirmations
+- `tests/test_executor.py` — 3 new tests for confirmation context in prompts
+- `tests/test_talk_poller.py` — 2 new tests for stale confirmation cancellation
+
 ## 2026-03-17: Emissary email thread tracking (ISSUE-016, Phase 1)
 
 When the bot sends an email on a user's behalf and the recipient replies, the reply was silently dropped because the email poller only creates tasks for known senders. Phase 1 adds outbound email tracking and thread-matched inbound routing so replies from external contacts are surfaced in Talk.

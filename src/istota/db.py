@@ -42,6 +42,7 @@ class Task:
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
     queue: str = "foreground"
+    confirmed_at: str | None = None
 
 
 @dataclass
@@ -304,6 +305,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         skip_log_channel=bool(row["skip_log_channel"]) if "skip_log_channel" in row.keys() else False,
         scheduled_job_id=row["scheduled_job_id"] if "scheduled_job_id" in row.keys() else None,
         queue=row["queue"] if "queue" in row.keys() else "foreground",
+        confirmed_at=row["confirmed_at"] if "confirmed_at" in row.keys() else None,
     )
 
 
@@ -411,7 +413,8 @@ def claim_task(
                   attempt_count, max_attempts, created_at, scheduled_for,
                   output_target, talk_message_id, talk_response_id,
                   reply_to_talk_id, reply_to_content,
-                  heartbeat_silent, skip_log_channel, scheduled_job_id, queue
+                  heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
+                  confirmed_at, confirmation_prompt
         """,
         params,
     )
@@ -444,7 +447,8 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Task | None:
                confirmation_prompt, priority, attempt_count, max_attempts,
                created_at, scheduled_for, output_target,
                talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent, skip_log_channel, scheduled_job_id, queue
+               heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
+               confirmed_at
         FROM tasks WHERE id = ?
         """,
         (task_id,),
@@ -554,6 +558,30 @@ def cancel_task(conn: sqlite3.Connection, task_id: int) -> None:
         """,
         (task_id,),
     )
+
+
+def cancel_pending_confirmations(
+    conn: sqlite3.Connection,
+    conversation_token: str,
+    user_id: str,
+) -> int:
+    """Cancel all pending_confirmation tasks for a user in a conversation.
+
+    Called when a new task is created in the same conversation, indicating the
+    user has moved on from the pending confirmation.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'cancelled',
+            updated_at = datetime('now')
+        WHERE conversation_token = ?
+          AND user_id = ?
+          AND status = 'pending_confirmation'
+        """,
+        (conversation_token, user_id),
+    )
+    return cursor.rowcount
 
 
 def get_pending_confirmation(

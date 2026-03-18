@@ -2825,3 +2825,65 @@ class TestDatedMemoriesAutoLoad:
 
         prompt_text = mock_run.call_args.kwargs["input"]
         assert "Recent context (from previous days)" not in prompt_text
+
+
+# =============================================================================
+# TestConfirmationContext
+# =============================================================================
+
+
+class TestConfirmationContext:
+    def _make_task(self, **kwargs):
+        defaults = dict(
+            id=1, status="running", source_type="email",
+            user_id="alice", prompt="Emissary reply from bob@ext.com",
+            conversation_token="room1",
+        )
+        defaults.update(kwargs)
+        return db.Task(**defaults)
+
+    def _make_config(self, tmp_path):
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        return Config(
+            db_path=tmp_path / "test.db",
+            skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+        )
+
+    def test_confirmation_context_included_in_prompt(self, tmp_path):
+        config = self._make_config(tmp_path)
+        task = self._make_task()
+        previous_output = "I drafted a reply: 'How about Tuesday at 3pm?' Should I send this?"
+
+        prompt = build_prompt(
+            task, [], config,
+            confirmation_context=previous_output,
+        )
+
+        assert "## Confirmed action" in prompt
+        assert "How about Tuesday at 3pm?" in prompt
+        assert "Do not re-draft" in prompt
+        assert "`istota-skill email send`" in prompt
+
+    def test_no_confirmation_context_when_none(self, tmp_path):
+        config = self._make_config(tmp_path)
+        task = self._make_task()
+
+        prompt = build_prompt(task, [], config, confirmation_context=None)
+
+        assert "## Confirmed action" not in prompt
+
+    def test_confirmation_context_appears_before_user_request(self, tmp_path):
+        config = self._make_config(tmp_path)
+        task = self._make_task()
+
+        prompt = build_prompt(
+            task, [], config,
+            confirmation_context="Previous draft here",
+        )
+
+        confirmed_pos = prompt.index("## Confirmed action")
+        request_pos = prompt.index("## User's request")
+        assert confirmed_pos < request_pos

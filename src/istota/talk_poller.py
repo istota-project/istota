@@ -400,6 +400,17 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     if parent_content:
                         reply_to_content = parent_content[:1000]
 
+                # Cancel any pending confirmations in this conversation —
+                # the user has moved on by sending a new message
+                cancelled = db.cancel_pending_confirmations(
+                    conn, conversation_token, actor_id,
+                )
+                if cancelled:
+                    logger.info(
+                        "Cancelled %d pending confirmation(s) in %s for %s (new message)",
+                        cancelled, conversation_token, actor_id,
+                    )
+
                 # Create task
                 task_id = db.create_task(
                     conn,

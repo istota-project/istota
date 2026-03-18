@@ -543,3 +543,102 @@ class TestSentEmails:
             assert found.thread_id == "abc123"
             assert found.in_reply_to == "<original@example.com>"
             assert found.references == "<original@example.com>"
+
+
+# =============================================================================
+# TestConfirmedAt
+# =============================================================================
+
+
+class TestConfirmedAt:
+    def test_confirmed_at_roundtrip(self, db_path):
+        """confirm_task sets confirmed_at, get_task reads it back."""
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something", user_id="alice",
+                conversation_token="room1",
+            )
+            # Set to pending_confirmation first (confirm_task requires this status)
+            db.set_task_confirmation(conn, task_id, "Should I proceed?")
+            task = db.get_task(conn, task_id)
+            assert task.confirmed_at is None
+            assert task.confirmation_prompt == "Should I proceed?"
+
+            # Confirm it
+            db.confirm_task(conn, task_id)
+            task = db.get_task(conn, task_id)
+            assert task.confirmed_at is not None
+            assert task.status == "pending"
+
+    def test_unconfirmed_task_has_none(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Normal", user_id="alice")
+            task = db.get_task(conn, task_id)
+            assert task.confirmed_at is None
+
+
+# =============================================================================
+# TestCancelPendingConfirmations
+# =============================================================================
+
+
+class TestCancelPendingConfirmations:
+    def test_cancels_pending_confirmation_in_conversation(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Draft email", user_id="alice",
+                conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Send this?")
+
+            count = db.cancel_pending_confirmations(conn, "room1", "alice")
+            assert count == 1
+
+            task = db.get_task(conn, task_id)
+            assert task.status == "cancelled"
+
+    def test_does_not_cancel_other_users(self, db_path):
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="Alice draft", user_id="alice",
+                conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, t1, "Send?")
+
+            t2 = db.create_task(
+                conn, prompt="Bob draft", user_id="bob",
+                conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, t2, "Send?")
+
+            count = db.cancel_pending_confirmations(conn, "room1", "alice")
+            assert count == 1
+
+            # Alice's cancelled, Bob's still pending
+            assert db.get_task(conn, t1).status == "cancelled"
+            assert db.get_task(conn, t2).status == "pending_confirmation"
+
+    def test_does_not_cancel_other_conversations(self, db_path):
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="Draft", user_id="alice",
+                conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, t1, "Send?")
+
+            t2 = db.create_task(
+                conn, prompt="Other draft", user_id="alice",
+                conversation_token="room2",
+            )
+            db.set_task_confirmation(conn, t2, "Send?")
+
+            count = db.cancel_pending_confirmations(conn, "room1", "alice")
+            assert count == 1
+
+            assert db.get_task(conn, t1).status == "cancelled"
+            assert db.get_task(conn, t2).status == "pending_confirmation"
+
+    def test_returns_zero_when_nothing_to_cancel(self, db_path):
+        with db.get_db(db_path) as conn:
+            count = db.cancel_pending_confirmations(conn, "room1", "alice")
+            assert count == 0
