@@ -271,6 +271,81 @@ class TestSelectSkills:
         assert "whisper" in result
         assert "reminders" not in result
 
+    def test_exclude_skills_removes_keyword_matched(self):
+        """A skill with exclude_skills removes those skills from the result."""
+        index = {
+            "briefing": SkillMeta(
+                name="briefing",
+                description="Briefing formatting",
+                source_types=["briefing"],
+                exclude_skills=["email"],
+            ),
+            "email": SkillMeta(
+                name="email",
+                description="Email",
+                keywords=["email", "send"],
+            ),
+            "files": SkillMeta(
+                name="files",
+                description="File ops",
+                always_include=True,
+            ),
+        }
+        # "email" keyword appears in prompt, but briefing excludes it
+        result = select_skills(
+            "generate briefing with email summary",
+            "briefing",
+            set(),
+            index,
+        )
+        assert "briefing" in result
+        assert "files" in result
+        assert "email" not in result
+
+    def test_exclude_skills_only_applies_when_excluder_selected(self):
+        """exclude_skills has no effect if the excluding skill isn't selected."""
+        index = {
+            "briefing": SkillMeta(
+                name="briefing",
+                description="Briefing formatting",
+                source_types=["briefing"],
+                exclude_skills=["email"],
+            ),
+            "email": SkillMeta(
+                name="email",
+                description="Email",
+                keywords=["email", "send"],
+            ),
+        }
+        # Not a briefing task, so briefing skill not selected, email should be included
+        result = select_skills(
+            "send an email to bob",
+            "talk",
+            set(),
+            index,
+        )
+        assert "email" in result
+        assert "briefing" not in result
+
+    def test_exclude_skills_removes_always_include(self):
+        """exclude_skills can remove always_include skills."""
+        index = {
+            "briefing": SkillMeta(
+                name="briefing",
+                description="Briefing",
+                source_types=["briefing"],
+                exclude_skills=["memory"],
+            ),
+            "memory": SkillMeta(
+                name="memory",
+                description="Memory",
+                always_include=True,
+            ),
+        }
+        result = select_skills("briefing", "briefing", set(), index)
+        assert "briefing" in result
+        assert "memory" not in result
+
 
 class TestLoadSkills:
     def test_load_existing_skills(self, tmp_path):

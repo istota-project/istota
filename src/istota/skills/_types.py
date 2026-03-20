@@ -38,6 +38,7 @@ class SkillMeta:
     source_types: list[str] = field(default_factory=list)
     file_types: list[str] = field(default_factory=list)
     companion_skills: list[str] = field(default_factory=list)
+    exclude_skills: list[str] = field(default_factory=list)
     env_specs: list[EnvSpec] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
     exclude_memory: bool = False

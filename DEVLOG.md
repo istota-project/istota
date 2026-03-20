@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-20: Deterministic briefing delivery
+
+Briefing tasks were unreliable because Claude had access to the email skill and would sometimes send emails directly (HTML-formatted, double-delivery). Fixed by making Claude return structured JSON and having the scheduler handle delivery deterministically.
+
+**Key changes:**
+- Briefing prompt now requires JSON output: `{"subject": "Morning Briefing", "body": "..."}`
+- Scheduler parses JSON from briefing results and delivers the extracted body (Talk, email, ntfy, digest)
+- Falls back to `strip_briefing_preamble()` if result isn't valid JSON (backward compat)
+- Added `exclude_skills` field to `SkillMeta` — skills can declare other skills to exclude from selection
+- Briefing skill declares `exclude_skills = ["email"]` so the email skill is never loaded for briefing tasks
+- Added `parse_briefing_json()` with robust parsing (code fences, preamble, smart quotes)
+
+**Files modified:**
+- `src/istota/skills/_types.py` — Added `exclude_skills` field to `SkillMeta`
+- `src/istota/skills/_loader.py` — Parse `exclude_skills` from skill.toml, apply exclusion after selection
+- `src/istota/skills/briefing/skill.toml` — Added `exclude_skills = ["email"]`
+- `src/istota/skills/briefing/skill.md` — Added JSON output format requirement
+- `src/istota/skills/briefing/__init__.py` — Added `parse_briefing_json()`, updated `build_briefing_prompt()` for JSON output
+- `src/istota/scheduler.py` — All briefing delivery paths use parsed JSON body
+- `tests/test_skills_loader.py` — 3 tests for exclude_skills behavior
+- `tests/test_briefing.py` — 8 tests for parse_briefing_json
+- `tests/test_scheduler.py` — 3 tests for briefing JSON delivery
+
 ## 2026-03-17: Emissary draft-approve-send flow (ISSUE-016, Phase 2)
 
 When a confirmed task is re-executed (user said "yes" to a confirmation prompt), the bot previously got the same original prompt with no awareness that it was confirmed. It would re-draft instead of executing the confirmed action. Now the bot's previous output is injected into the re-execution prompt so it knows to proceed.

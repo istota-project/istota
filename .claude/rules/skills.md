@@ -15,6 +15,7 @@ class SkillMeta:
     source_types: list[str] = field(default_factory=list)
     file_types: list[str] = field(default_factory=list)
     companion_skills: list[str] = field(default_factory=list)
+    exclude_skills: list[str] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
     env_specs: list[EnvSpec] = field(default_factory=list)
     cli: bool = False
@@ -44,6 +45,7 @@ A skill is selected if ANY of these match:
 4. Any `meta.keywords` found in `prompt.lower()`
 5. Any `meta.file_types` match attachment extensions
 6. `meta.companion_skills` of already-selected skills are pulled in (respects admin_only + dependency checks)
+7. `meta.exclude_skills` of selected skills are removed from the final set (e.g., briefing excludes email)
 
 **Pre-transcription**: Before skill selection, `_pre_transcribe_attachments()` in executor.py transcribes audio attachments and enriches `task.prompt` with the spoken text. This allows keyword-based skills to match on voice memo content.
 

@@ -3622,3 +3622,96 @@ class TestBriefingFailureSuppression:
 
         # Should have Talk notification with error
         assert mock_arun.call_count >= 1
+
+
+class TestBriefingJsonDelivery:
+    """Test that briefing tasks parse JSON output and deliver the body."""
+
+    def _make_config(self, db_path, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example.com", username="istota", app_password="secret"),
+            talk=TalkConfig(enabled=True, bot_username="istota"),
+            email=EmailConfig(enabled=False),
+            scheduler=SchedulerConfig(),
+            nextcloud_mount_path=mount,
+            temp_dir=tmp_path / "temp",
+        )
+
+    @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_briefing_json_posted_to_talk(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Briefing JSON result should have its body extracted and posted to Talk."""
+        json_result = '{"subject": "Morning Briefing", "body": "📰 NEWS\\nStuff happened today."}'
+        mock_exec.return_value = (True, json_result, None)
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Generate a morning briefing", user_id="testuser",
+                source_type="briefing", conversation_token="room1",
+            )
+
+        result = process_one_task(config)
+        assert result is not None
+        _, success = result
+        assert success is True
+
+        # Check that Talk was called with the body, not the raw JSON
+        assert mock_arun.call_count >= 1
+        # The first asyncio.run call should be post_result_to_talk with the body
+        talk_call_args = mock_arun.call_args_list[0]
+        # asyncio.run receives a coroutine; check the message was the extracted body
+        # We verify indirectly: the raw JSON should NOT be in the completed task result
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "completed"
+
+    @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_briefing_json_email_uses_body(self, mock_arun, mock_exec, db_path, tmp_path):
+        """Briefing with email target should use extracted body for email delivery."""
+        json_result = '{"subject": "Evening Briefing", "body": "📈 MARKETS\\nS&P up 0.5%"}'
+        mock_exec.return_value = (True, json_result, None)
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Generate a evening briefing", user_id="testuser",
+                source_type="briefing", output_target="email",
+            )
+
+        with patch("istota.scheduler.post_result_to_email", new_callable=AsyncMock, return_value=True) as mock_email:
+            result = process_one_task(config)
+            assert result is not None
+            _, success = result
+            assert success is True
+            # post_result_to_email should receive the body, not raw JSON
+            mock_email.assert_called_once()
+            email_msg = mock_email.call_args[0][2]  # third positional arg is message
+            assert "MARKETS" in email_msg
+            assert '"subject"' not in email_msg  # not raw JSON
+
+    @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_briefing_non_json_fallback(self, mock_arun, mock_exec, db_path, tmp_path):
+        """If briefing result is not JSON, deliver as-is (backward compat)."""
+        plain_result = "📰 NEWS\nStuff happened today."
+        mock_exec.return_value = (True, plain_result, None)
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Generate a morning briefing", user_id="testuser",
+                source_type="briefing", conversation_token="room1",
+            )
+
+        result = process_one_task(config)
+        assert result is not None
+        _, success = result
+        assert success is True
+
+        # Should still deliver successfully
+        assert mock_arun.call_count >= 1

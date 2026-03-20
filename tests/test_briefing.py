@@ -1249,3 +1249,63 @@ class TestHeadlinesInBriefingPrompt:
 
         assert "AP headlines" in result
         assert "Newsletter stories" in result
+
+
+class TestParseBriefingJson:
+    """Tests for parse_briefing_json() — extracts structured output from briefing results."""
+
+    def test_valid_json(self):
+        from istota.skills.briefing import parse_briefing_json
+        msg = '{"subject": "Morning Briefing", "body": "📰 NEWS\\nStuff happened"}'
+        result = parse_briefing_json(msg)
+        assert result is not None
+        assert result["subject"] == "Morning Briefing"
+        assert "NEWS" in result["body"]
+
+    def test_json_in_code_fence(self):
+        from istota.skills.briefing import parse_briefing_json
+        msg = 'Here is the briefing:\n```json\n{"subject": "Evening Briefing", "body": "📈 MARKETS\\nS&P up"}\n```'
+        result = parse_briefing_json(msg)
+        assert result is not None
+        assert result["subject"] == "Evening Briefing"
+        assert "MARKETS" in result["body"]
+
+    def test_json_with_preamble(self):
+        from istota.skills.briefing import parse_briefing_json
+        msg = 'I composed the briefing:\n{"subject": "Morning Briefing", "body": "Content here"}'
+        result = parse_briefing_json(msg)
+        assert result is not None
+        assert result["body"] == "Content here"
+
+    def test_plain_text_returns_none(self):
+        from istota.skills.briefing import parse_briefing_json
+        msg = "📰 NEWS\nJust plain briefing text with no JSON"
+        result = parse_briefing_json(msg)
+        assert result is None
+
+    def test_missing_body_returns_none(self):
+        from istota.skills.briefing import parse_briefing_json
+        msg = '{"subject": "Briefing"}'
+        result = parse_briefing_json(msg)
+        assert result is None
+
+    def test_subject_defaults_when_missing(self):
+        from istota.skills.briefing import parse_briefing_json
+        msg = '{"body": "Content here"}'
+        result = parse_briefing_json(msg)
+        assert result is not None
+        assert result["subject"] is None
+        assert result["body"] == "Content here"
+
+    def test_smart_quotes_normalized(self):
+        from istota.skills.briefing import parse_briefing_json
+        msg = '{"subject": "Morning Briefing", "body": "He said \u201chello\u201d today"}'
+        result = parse_briefing_json(msg)
+        assert result is not None
+        assert "hello" in result["body"]
+
+    def test_invalid_json_returns_none(self):
+        from istota.skills.briefing import parse_briefing_json
+        msg = '{"broken json'
+        result = parse_briefing_json(msg)
+        assert result is None

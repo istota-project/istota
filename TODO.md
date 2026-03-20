@@ -37,6 +37,7 @@
 - [ ] Custom briefing templates
 - [x] Briefing format skill (document expected output style for Claude)
 - [x] Random reminders from REMINDERS notes_file
+- [x] Deterministic delivery: JSON output format, email skill excluded, scheduler handles delivery
 
 ### Email Input Channel ✅
 - [x] Poll INBOX for new emails from known senders

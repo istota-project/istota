@@ -8,6 +8,7 @@ Consolidates briefing logic that was previously split across:
 
 import hashlib
 import html
+import json
 import logging
 import random
 import re
@@ -59,6 +60,72 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r"==(.+?)==", r"\1", text)         # ==highlight==
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [text](url)
     return text
+
+
+def parse_briefing_json(text: str) -> dict | None:
+    """Parse structured JSON output from a briefing task.
+
+    Expected format: {"subject": "...", "body": "..."}
+
+    Handles common model quirks: markdown code fences, preamble text,
+    and Unicode smart quotes. Returns None if no valid JSON found.
+    """
+    _SMART_QUOTE_MAP = {
+        "\u201c": '"', "\u201d": '"',
+        "\u2018": "'", "\u2019": "'",
+    }
+
+    def _try_parse(s: str) -> dict | None:
+        try:
+            data = json.loads(s)
+            if isinstance(data, dict) and "body" in data:
+                return {
+                    "subject": data.get("subject"),
+                    "body": data["body"],
+                }
+        except (json.JSONDecodeError, TypeError, KeyError):
+            return None
+
+    text = text.strip()
+
+    # Try as-is
+    result = _try_parse(text)
+    if result:
+        return result
+
+    # Try stripping code fences
+    if "```" in text:
+        lines = text.split("\n")
+        start = end = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("```") and start is None:
+                start = i
+            elif line.strip() == "```" and start is not None:
+                end = i
+                break
+        if start is not None and end is not None:
+            fenced = "\n".join(lines[start + 1:end]).strip()
+            result = _try_parse(fenced)
+            if result:
+                return result
+
+    # Try finding outermost { ... }
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        candidate = text[first_brace:last_brace + 1]
+        result = _try_parse(candidate)
+        if result:
+            return result
+
+        # Try with smart quote normalization
+        for smart, ascii_char in _SMART_QUOTE_MAP.items():
+            candidate = candidate.replace(smart, ascii_char)
+        result = _try_parse(candidate)
+        if result:
+            return result
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -363,10 +430,19 @@ def build_briefing_prompt(
         "Format the briefing following the section format in the briefing skill reference. "
         "Use emoji-prefixed labels as section headers (not markdown headings). "
         "Output sections in the exact order shown in the briefing skill. "
-        "Only include sections that have data. NO tables. "
-        "CRITICAL: Your response must start with the first emoji section header (e.g. 📰 or 📈). "
-        "Do NOT output any preamble, reasoning, thoughts, or commentary before or after the briefing sections. "
-        "Do NOT use email commands (email send, email output). Delivery is handled automatically by the scheduler."
+        "Only include sections that have data. NO tables."
+    )
+
+    # Determine subject
+    briefing_type = mode.title()
+    prompt_parts.append("")
+    prompt_parts.append(
+        "CRITICAL: Your entire response must be a single JSON object with this exact format:\n"
+        '{"subject": "' + briefing_type + ' Briefing", "body": "<briefing content here>"}\n\n'
+        "The body field contains the full briefing text with emoji section headers. "
+        "Use \\n for newlines within the body string. "
+        "Do NOT output anything outside the JSON object — no preamble, no commentary, no code fences. "
+        "Do NOT send emails or use any email commands. Delivery is handled by the scheduler."
     )
 
     return "\n".join(prompt_parts)

@@ -63,6 +63,7 @@ def _load_skill_toml(skill_dir: Path) -> SkillMeta | None:
         source_types=data.get("source_types", []),
         file_types=data.get("file_types", []),
         companion_skills=data.get("companion_skills", []),
+        exclude_skills=data.get("exclude_skills", []),
         env_specs=_parse_env_specs(data.get("env", [])),
         dependencies=data.get("dependencies", []),
         exclude_memory=data.get("exclude_memory", False),
@@ -277,6 +278,15 @@ def select_skills(
                 if _check_dependencies(cmeta):
                     companions.add(companion)
     selected |= companions
+
+    # Apply exclude_skills: selected skills can exclude others
+    excluded = set()
+    for name in list(selected):
+        meta = skill_index[name]
+        for ex in meta.exclude_skills:
+            if ex in selected:
+                excluded.add(ex)
+    selected -= excluded
 
     result = sorted(selected)
     if result:

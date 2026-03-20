@@ -158,7 +158,7 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 - Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no
 
 ### Skills
-Self-contained directories under `src/istota/skills/`, each with `skill.toml` manifest and `skill.md` doc. Selection based on: `always_include`, `source_types`, `keywords` (if skill also has `resource_types`, requires both keyword match + user has resource), `file_types`, `companion_skills`. Skills can be excluded via `disabled_skills` at instance level (top-level config) and per-user level (user config), both merged at selection time.
+Self-contained directories under `src/istota/skills/`, each with `skill.toml` manifest and `skill.md` doc. Selection based on: `always_include`, `source_types`, `keywords` (if skill also has `resource_types`, requires both keyword match + user has resource), `file_types`, `companion_skills`. Skills can exclude other skills via `exclude_skills` (e.g., briefing excludes email to prevent delivery interference). Skills can also be excluded via `disabled_skills` at instance level (top-level config) and per-user level (user config), both merged at selection time.
 
 Audio attachments pre-transcribed before skill selection so keyword matching works on voice memos.
 
@@ -176,7 +176,7 @@ Talk tasks use a poller-fed local cache (`talk_messages` table, bounded by `talk
 Outbound emails tracked in `sent_emails` table (Message-ID, recipient, user, conversation_token). When external contacts reply, the email poller matches References headers against sent emails and creates tasks with `output_target="talk"` routed to the originating Talk conversation. The bot drafts a response and asks for confirmation. On approval, the task re-executes with `confirmation_context` injected (the bot's previous output), instructing it to send the draft rather than re-draft. Pending confirmations are auto-cancelled when the user sends a new message in the same conversation.
 
 ### Briefings
-Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user's timezone. Components: `calendar`, `todos`, `email`, `markets`, `news`, `headlines`, `notes`, `reminders`. Market data pre-fetched. Memory isolated from briefing prompts.
+Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user's timezone. Components: `calendar`, `todos`, `email`, `markets`, `news`, `headlines`, `notes`, `reminders`. Market data pre-fetched. Memory isolated from briefing prompts. Claude returns structured JSON (`{"subject": "...", "body": "..."}`); the scheduler parses it and handles delivery deterministically. The email skill is excluded from briefing tasks via `exclude_skills` to prevent the model from sending emails directly.
 
 ### Scheduled Jobs
 Defined in user's `CRON.md` (markdown with TOML `[[jobs]]`). Job types: `prompt` (Claude Code), `prompt_file` (prompt loaded from external file), or `command` (shell). `prompt_file` paths are relative to the Nextcloud mount root and resolved at load time. One-time jobs (`once = true`) auto-deleted after success. Auto-disable after 5 consecutive failures. Results excluded from interactive context. Per-job `skip_log_channel = true` suppresses log channel output for frequent jobs.

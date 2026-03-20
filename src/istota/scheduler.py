@@ -25,6 +25,7 @@ from . import db
 from .skills.briefing import (
     build_briefing_prompt,
     get_briefings_for_user,
+    parse_briefing_json,
     strip_briefing_preamble,
     strip_markdown as _strip_markdown,
 )
@@ -1221,8 +1222,15 @@ def process_one_task(
 
                 else:
                     # Non-heartbeat, non-silent task: normal delivery logic
-                    # Strip preamble from briefing results (model sometimes adds reasoning)
-                    delivery_result = strip_briefing_preamble(result) if task.source_type == "briefing" else result
+                    if task.source_type == "briefing":
+                        # Parse structured JSON output; fall back to raw text
+                        parsed_briefing = parse_briefing_json(result)
+                        if parsed_briefing:
+                            delivery_result = parsed_briefing["body"]
+                        else:
+                            delivery_result = strip_briefing_preamble(result)
+                    else:
+                        delivery_result = result
                     if target in ("talk", "both", "all") and task.conversation_token:
                         post_talk_message = delivery_result
                     if target in ("email", "both", "all"):
@@ -1313,7 +1321,8 @@ def process_one_task(
     # Save briefing digest for deduplication in the next run
     if success and task.source_type == "briefing":
         from .skills.briefing import save_briefing_digest
-        digest_text = strip_briefing_preamble(result)
+        parsed_briefing = parse_briefing_json(result)
+        digest_text = parsed_briefing["body"] if parsed_briefing else strip_briefing_preamble(result)
         save_briefing_digest(
             task.user_id, config, digest_text,
             conversation_token=task.conversation_token,
@@ -1455,7 +1464,11 @@ def process_one_task(
         except Exception as e:
             logger.warning("Failed to cache result message for task %d: %s", task_id, e)
     if post_email:
-        email_result = strip_briefing_preamble(result) if task.source_type == "briefing" else result
+        if task.source_type == "briefing":
+            pb = parse_briefing_json(result)
+            email_result = pb["body"] if pb else strip_briefing_preamble(result)
+        else:
+            email_result = result
         email_ok = asyncio.run(post_result_to_email(config, task, email_result))
         if not email_ok:
             with db.get_db(config.db_path) as conn:
@@ -1463,7 +1476,11 @@ def process_one_task(
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
     if post_ntfy:
         from .notifications import _send_ntfy
-        ntfy_result = strip_briefing_preamble(result) if task.source_type == "briefing" else result
+        if task.source_type == "briefing":
+            pb = parse_briefing_json(result)
+            ntfy_result = pb["body"] if pb else strip_briefing_preamble(result)
+        else:
+            ntfy_result = result
         _send_ntfy(config, task.user_id, ntfy_result, title=f"Task {task_id}")
     if call_file_handler:
         handle_tasks_file_completion(config, task, file_handler_success, result)
