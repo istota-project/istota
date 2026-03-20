@@ -940,13 +940,13 @@ def _warn_orphaned_email_output(task: db.Task, user_temp_dir: Path) -> None:
     path.unlink(missing_ok=True)
 
 
-def _restart_fava_service(user_id: str) -> None:
+def _restart_fava_service(user_id: str, config: Config) -> None:
     """Restart the user's Fava service to pick up ledger changes.
 
     Runs outside the sandbox (in the scheduler process) so it has access
     to sudo/systemctl. Silently ignored if fava is not installed.
     """
-    service = f"istota-fava-{user_id}.service"
+    service = f"{config.bot_dir_name}-fava-{user_id}.service"
     try:
         result = subprocess.run(
             ["sudo", "--non-interactive", "systemctl", "restart", service],
@@ -1321,7 +1321,7 @@ def process_one_task(
 
     # Restart Fava if accounting skill was used (runs outside sandbox)
     if success and actions_taken and "istota.skills.accounting" in actions_taken:
-        _restart_fava_service(task.user_id)
+        _restart_fava_service(task.user_id, config)
 
     # Final cleanup edit: update the ack message with a summary of all actions taken
     if (
