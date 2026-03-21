@@ -2,6 +2,17 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-21: Fix false captcha detection on passive reCAPTCHA
+
+The browse skill's captcha detection was triggering on sites using passive reCAPTCHA (v2 invisible / v3). These load a small visible badge iframe (e.g. 256x60) that matched the `google.com/recaptcha` iframe URL check, causing the API to return `{"status": "captcha"}` even though the page was fully accessible.
+
+**Key changes:**
+- Added bounding box size check to the iframe captcha detector — iframes smaller than 400x200 are treated as passive badges and ignored
+- Only large captcha iframes (blocking challenges) now trigger detection
+
+**Files modified:**
+- `docker/browser/browsing.py` — Added size threshold after visibility check in `detect_captcha()`
+
 ## 2026-03-21: Malformed model output detection (ISSUE-019, partial)
 
 Added validation layer between Claude Code's result and task completion. Under heavy context pressure (23 tool calls, 187K chars), the model can emit raw XML fragments instead of a response. Previously this was accepted as a successful completion and delivered to the user.
