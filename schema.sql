@@ -302,38 +302,6 @@ CREATE TABLE IF NOT EXISTS user_skills_fingerprint (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
--- Feed polling state (tracks per-feed polling progress)
-CREATE TABLE IF NOT EXISTS feed_state (
-    user_id TEXT NOT NULL,
-    feed_name TEXT NOT NULL,
-    last_poll_at TEXT,
-    last_item_id TEXT,
-    etag TEXT,
-    last_modified TEXT,
-    consecutive_errors INTEGER DEFAULT 0,
-    last_error TEXT,
-    PRIMARY KEY (user_id, feed_name)
-);
-
--- Feed items (aggregated content from RSS, Tumblr, Are.na feeds)
-CREATE TABLE IF NOT EXISTS feed_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    feed_name TEXT NOT NULL,
-    item_id TEXT NOT NULL,
-    title TEXT,
-    url TEXT,
-    content_text TEXT,
-    content_html TEXT,
-    image_url TEXT,
-    author TEXT,
-    published_at TEXT,
-    fetched_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(user_id, feed_name, item_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_feed_items_user ON feed_items(user_id, feed_name);
-
 -- FTS5 external content table (synced via triggers, no content duplication)
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts USING fts5(
     content, content='memory_chunks', content_rowid='id'

@@ -2009,12 +2009,8 @@ async def run_cleanup_checks(config: Config) -> None:
         except Exception as e:
             logger.error(f"Error cleaning up old emails: {e}")
 
-    # 6. Clean up old feed items and talk message cache
+    # 6. Clean up talk message cache
     with db.get_db(config.db_path) as conn:
-        deleted_feeds = db.cleanup_old_feed_items(conn, config.scheduler.feed_item_retention_days)
-        if deleted_feeds > 0:
-            logger.info(f"Cleaned up {deleted_feeds} old feed item(s)")
-
         deleted_msgs = db.cleanup_old_talk_messages(conn, sched.talk_cache_max_per_conversation)
         if deleted_msgs > 0:
             logger.info(f"Cleaned up {deleted_msgs} old talk message(s)")
@@ -2378,7 +2374,7 @@ def run_daemon(config: Config) -> None:
     logger.info("STARTUP Heartbeat check interval: %ds", config.scheduler.heartbeat_check_interval)
     logger.info("STARTUP Scheduled job check interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Cleanup interval: %ds", config.scheduler.briefing_check_interval)
-    logger.info("STARTUP Feed check interval: %ds", config.scheduler.feed_check_interval)
+    logger.info("STARTUP Feed page regen interval: %ds", config.scheduler.feed_page_regen_interval)
     logger.info("STARTUP Confirmation timeout: %d min", config.scheduler.confirmation_timeout_minutes)
     logger.info("STARTUP Task retention: %d days", config.scheduler.task_retention_days)
     logger.info("STARTUP Email retention: %d days", config.scheduler.email_retention_days)
@@ -2543,13 +2539,13 @@ def run_daemon(config: Config) -> None:
                 logger.error("Error checking scheduled invoices: %s", e)
             last_invoice_schedule_check = now
 
-        # Poll feeds periodically
-        if config.site.enabled and now - last_feed_check >= config.scheduler.feed_check_interval:
+        # Regenerate feed pages from Miniflux periodically
+        if config.site.enabled and now - last_feed_check >= config.scheduler.feed_page_regen_interval:
             try:
-                from .feed_poller import check_feeds
-                check_feeds(config)
+                from .feeds import regenerate_feed_pages
+                regenerate_feed_pages(config)
             except Exception as e:
-                logger.error("Error checking feeds: %s", e)
+                logger.error("Error regenerating feed pages: %s", e)
             last_feed_check = now
 
         # Sleep before next poll cycle

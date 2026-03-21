@@ -562,10 +562,6 @@ def get_user_cron_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_config_path(user_id, bot_dir)}/CRON.md"
 
 
-def get_user_feeds_path(user_id: str, bot_dir: str) -> str:
-    """Get the path to a user's FEEDS.md file."""
-    return f"{get_user_config_path(user_id, bot_dir)}/FEEDS.md"
-
 
 def get_user_persona_path(user_id: str, bot_dir: str) -> str:
     """Get the path to a user's PERSONA.md file."""

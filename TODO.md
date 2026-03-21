@@ -339,6 +339,7 @@
 - [x] Calendar attendance correlation via GPS pings (geocoding, place matching, proximity check)
 - [x] Dependency isolation: optional deps in extras groups, import guards, `!skills` availability display
 - [x] Service credentials as resources (garmin, monarch follow karakeep pattern with ResourceConfig.extra)
+- [x] Miniflux migration: feeds skill with CLI, miniflux resource type, bridger app for Tumblr/Are.na
 - [ ] Config validation / "unconfigured" skill status (declarative credential requirements)
 
 ## Priority 5: Location Awareness (Phase 2+)

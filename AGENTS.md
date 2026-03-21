@@ -48,7 +48,7 @@ istota/
 │       ├── browse/          # Web browsing CLI (Docker container API)
 │       ├── calendar/        # CalDAV operations CLI
 │       ├── developer/       # Git/GitLab/GitHub workflows (doc-only)
-│       ├── feeds_config/    # Feed subscription config (doc-only)
+│       ├── feeds/           # Miniflux RSS feed management CLI
 │       ├── email/           # Native IMAP/SMTP operations
 │       ├── files/           # Nextcloud file ops (mount-aware, rclone fallback)
 │       ├── heartbeat/       # Heartbeat monitoring reference (doc-only)
