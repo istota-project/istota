@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from istota.executor import (
+    _compose_full_result,
     detect_malformed_result,
     parse_api_error,
     is_transient_api_error,
@@ -3000,3 +3001,88 @@ class TestDetectMalformedResult:
             "This is a known issue when context pressure causes problems."
         )
         assert detect_malformed_result(text, output_target="email") is None
+
+
+# ---------------------------------------------------------------------------
+# TestComposeFullResult
+# ---------------------------------------------------------------------------
+
+
+class TestComposeFullResult:
+    """Test recovery of substantial text blocks from execution trace."""
+
+    def _substantial_text(self):
+        return ("Here are the top findings from the search. " * 10).strip()  # ~450 chars
+
+    def test_no_trace_returns_result_as_is(self):
+        assert _compose_full_result("Done.", []) == "Done."
+
+    def test_no_substantial_blocks_returns_result(self):
+        trace = [
+            {"type": "text", "text": "Let me check."},
+            {"type": "tool", "text": "Read file.py"},
+            {"type": "text", "text": "Running the search."},
+        ]
+        assert _compose_full_result("Done.", trace) == "Done."
+
+    def test_substantial_block_prepended_to_result(self):
+        findings = self._substantial_text()
+        trace = [
+            {"type": "text", "text": "Let me search."},
+            {"type": "tool", "text": "Browse OLX"},
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write tracking file"},
+        ]
+        result = _compose_full_result("All results posted above.", trace)
+        assert findings in result
+        assert result.startswith(findings)
+
+    def test_result_already_contains_substantial_content(self):
+        findings = self._substantial_text()
+        trace = [
+            {"type": "tool", "text": "Read file"},
+            {"type": "text", "text": findings},
+        ]
+        # ResultEvent.text IS the substantial content
+        result = _compose_full_result(findings, trace)
+        assert result == findings  # no duplication
+
+    def test_multiple_substantial_blocks_all_included(self):
+        block1 = ("First batch of results. " * 15).strip()
+        block2 = ("Second batch of results. " * 15).strip()
+        trace = [
+            {"type": "text", "text": block1},
+            {"type": "tool", "text": "More browsing"},
+            {"type": "text", "text": block2},
+        ]
+        result = _compose_full_result("See above.", trace)
+        assert block1 in result
+        assert block2 in result
+
+    def test_terse_result_dropped_when_dwarfed_by_substantial(self):
+        findings = self._substantial_text()
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result("See above.", trace)
+        # The terse closing should be dropped since it's just a reference
+        assert result == findings
+
+    def test_substantial_result_kept_alongside_blocks(self):
+        block = self._substantial_text()
+        long_result = ("Here is a detailed conclusion. " * 10).strip()
+        trace = [
+            {"type": "text", "text": block},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result(long_result, trace)
+        assert block in result
+        assert long_result in result
+
+    def test_empty_trace_entries_ignored(self):
+        trace = [
+            {"type": "text", "text": ""},
+            {"type": "text", "text": "   "},
+        ]
+        assert _compose_full_result("Done.", trace) == "Done."

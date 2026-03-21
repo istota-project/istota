@@ -96,6 +96,53 @@ def detect_malformed_result(
     return None
 
 
+# Minimum length for a text block to be considered "substantial" content
+# rather than a short progress note ("Let me check...", "Running the search...")
+_SUBSTANTIAL_TEXT_MIN_CHARS = 200
+
+
+def _compose_full_result(result_text: str, execution_trace: list[dict]) -> str:
+    """Compose full result by recovering substantial text blocks from the trace.
+
+    When the model emits a long response as intermediate text, then does more
+    tool calls, the ResultEvent only captures the final (often terse) text.
+    This function detects that pattern and prepends the substantial earlier
+    text blocks to form the complete response.
+    """
+    if not execution_trace:
+        return result_text
+
+    # Collect substantial text blocks from the trace
+    substantial_blocks = []
+    for entry in execution_trace:
+        if entry.get("type") == "text":
+            text = entry["text"].strip()
+            if len(text) >= _SUBSTANTIAL_TEXT_MIN_CHARS:
+                substantial_blocks.append(text)
+
+    if not substantial_blocks:
+        return result_text
+
+    # Check if the result already contains the substantial content
+    # (this happens when the last text block IS the result)
+    blocks_not_in_result = [
+        b for b in substantial_blocks if b not in result_text
+    ]
+
+    if not blocks_not_in_result:
+        return result_text
+
+    # Compose: substantial blocks first, then the result text
+    # Skip the result text if it's just a terse reference like "see above"
+    parts = blocks_not_in_result
+    if len(result_text) >= _SUBSTANTIAL_TEXT_MIN_CHARS or not any(
+        len(b) > len(result_text) * 3 for b in blocks_not_in_result
+    ):
+        parts.append(result_text)
+
+    return "\n\n".join(parts)
+
+
 def _pre_transcribe_attachments(
     attachments: list[str] | None,
     prompt: str,
@@ -2414,6 +2461,11 @@ def _execute_streaming_once(
     if final_result is not None:
         result_text = final_result.text.strip()
         if final_result.success:
+            # Check for substantial text blocks in the trace that were emitted
+            # before more tool calls — the model may have produced the real
+            # response as intermediate text and the ResultEvent only captured
+            # a terse closing line.
+            result_text = _compose_full_result(result_text, execution_trace)
             return True, result_text, actions_json, trace_json
         else:
             return False, result_text or stderr_output or "Unknown error", None, trace_json
