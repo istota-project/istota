@@ -175,6 +175,16 @@ def detect_captcha(page):
                             "Captcha iframe hidden, ignoring: %r", frame.url,
                         )
                         continue
+                    # Passive reCAPTCHA (v2 invisible, v3) loads a small badge
+                    # iframe that is visible but not blocking. Only treat large
+                    # iframes as actual captcha challenges.
+                    box = el.bounding_box()
+                    if box and box["width"] < 400 and box["height"] < 200:
+                        log.debug(
+                            "Captcha iframe too small (%dx%d), likely passive badge: %r",
+                            box["width"], box["height"], frame.url,
+                        )
+                        continue
                 except Exception:
                     pass
                 log.info("Captcha detected: iframe=%r", frame.url)
