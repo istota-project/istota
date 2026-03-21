@@ -100,7 +100,7 @@ class TestSimpleExecution:
             patch("istota.executor.subprocess.run", return_value=mock_result),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is True
         assert result == "The answer is 42."
@@ -119,7 +119,7 @@ class TestSimpleExecution:
             patch("istota.executor.subprocess.run", return_value=mock_result),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is False
         assert result == "Something went wrong"
@@ -138,7 +138,7 @@ class TestSimpleExecution:
             patch("istota.executor.subprocess.run", return_value=mock_result),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is False
         assert "no output" in result.lower()
@@ -157,7 +157,7 @@ class TestSimpleExecution:
             patch("istota.executor.subprocess.run", return_value=mock_result),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is False
         assert "API key expired" in result
@@ -184,7 +184,7 @@ class TestSimpleExecution:
             patch("istota.executor.subprocess.run", side_effect=fake_run),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is True
         assert result == "Result from file"
@@ -222,7 +222,7 @@ class TestSimpleExecution:
             patch("istota.executor.subprocess.run", side_effect=FileNotFoundError),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is False
         assert "not found" in result.lower()
@@ -263,7 +263,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 task, config, [], on_progress=lambda m: progress.append(m),
             )
 
@@ -289,7 +289,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 task, config, [], on_progress=lambda m: progress.append(m),
             )
 
@@ -337,7 +337,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 task, config, [], on_progress=lambda msg: progress_calls.append(msg),
             )
 
@@ -373,7 +373,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 task, config, [], on_progress=lambda msg, **kw: progress_calls.append(msg),
             )
 
@@ -409,7 +409,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [], on_progress=exploding_callback)
+            success, result, _actions, _trace = execute_task(task, config, [], on_progress=exploding_callback)
 
         assert success is True
         assert result == "All good."
@@ -465,7 +465,7 @@ class TestStreamingExecution:
             patch("istota.executor.threading.Timer", InstantTimer),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 task, config, [], on_progress=lambda m: None,
             )
 
@@ -499,7 +499,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", side_effect=fake_popen),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 task, config, [], on_progress=lambda m: None,
             )
 
@@ -521,7 +521,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 task, config, [], on_progress=lambda m: None,
             )
 
@@ -567,7 +567,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 task, config, [], on_progress=lambda m, **kw: None,
             )
 
@@ -586,7 +586,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 task, config, [], on_progress=lambda m: None,
             )
 
@@ -614,7 +614,7 @@ class TestDryRun:
             patch("istota.skills._loader.select_skills", return_value=[]),
             patch("istota.skills._loader.load_skills", return_value=None),
         ):
-            success, result, _actions = execute_task(task, config, [], dry_run=True)
+            success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)
 
         assert success is True
         assert "[DRY RUN]" in result
@@ -672,7 +672,7 @@ class TestDatedMemoriesInPrompt:
 
         with ExitStack() as stack:
             _apply_executor_patches(stack)
-            success, result, _actions = execute_task(task, config, [], dry_run=True)
+            success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)
 
         assert "Recent context (from previous days)" not in result
 
@@ -689,7 +689,7 @@ class TestDatedMemoriesInPrompt:
                 "istota.skills._loader.load_skill_index": {"briefing": briefing_meta},
                 "istota.skills._loader.select_skills": ["briefing"],
             })
-            success, result, _actions = execute_task(task, config, [], dry_run=True)
+            success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)
 
         assert "SGOL" not in result
         assert "User memory" not in result
@@ -703,7 +703,7 @@ class TestDatedMemoriesInPrompt:
             _apply_executor_patches(stack, {
                 "istota.executor.read_user_memory_v2": "Portfolio: 5% SGOL position",
             })
-            success, result, _actions = execute_task(task, config, [], dry_run=True)
+            success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)
 
         assert "SGOL" in result
 
@@ -762,7 +762,7 @@ class TestChannelMemoryInPrompt:
             mocks = _apply_executor_patches(stack, {
                 "istota.executor.read_channel_memory": "- Channel note",
             })
-            success, result, _actions = execute_task(task, config, [], dry_run=True)
+            success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)
 
         assert "## Channel memory" in result
         assert "Channel note" in result
@@ -775,7 +775,7 @@ class TestChannelMemoryInPrompt:
 
         with ExitStack() as stack:
             mocks = _apply_executor_patches(stack)
-            success, result, _actions = execute_task(task, config, [], dry_run=True)
+            success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)
 
         assert "## Channel memory" not in result
         mocks["istota.executor.read_channel_memory"].assert_not_called()
@@ -812,7 +812,7 @@ class TestSimpleExecutionRetry:
             patch("istota.executor.time.sleep"),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is True
         assert result == "Success on retry"
@@ -839,7 +839,7 @@ class TestSimpleExecutionRetry:
             patch("istota.executor.time.sleep"),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is False
         assert call_count == 1  # No retry
@@ -865,7 +865,7 @@ class TestSimpleExecutionRetry:
             patch("istota.executor.time.sleep"),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is False
         assert "API Error" in result
@@ -896,7 +896,7 @@ class TestSimpleExecutionRetry:
             patch("istota.executor.time.sleep"),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions = execute_task(task, config, [])
+            success, result, _actions, _trace = execute_task(task, config, [])
 
         assert success is True
         assert result == "Finally succeeded"

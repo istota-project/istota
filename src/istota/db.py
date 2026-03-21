@@ -26,6 +26,7 @@ class Task:
     attachments: list[str] | None = None
     result: str | None = None
     actions_taken: str | None = None
+    execution_trace: str | None = None
     error: str | None = None
     confirmation_prompt: str | None = None
     priority: int = 5
@@ -142,6 +143,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("command", "TEXT"),
         ("queue", "TEXT DEFAULT 'foreground'"),
         ("actions_taken", "TEXT"),
+        ("execution_trace", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
@@ -289,6 +291,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         attachments=json.loads(row["attachments"]) if row["attachments"] else None,
         result=row["result"] if "result" in row.keys() else None,
         actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
+        execution_trace=row["execution_trace"] if "execution_trace" in row.keys() else None,
         error=row["error"] if "error" in row.keys() else None,
         confirmation_prompt=row["confirmation_prompt"] if "confirmation_prompt" in row.keys() else None,
         priority=row["priority"],
@@ -443,7 +446,7 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Task | None:
         """
         SELECT id, status, source_type, user_id, prompt, command,
                conversation_token,
-               parent_task_id, is_group_chat, attachments, result, actions_taken, error,
+               parent_task_id, is_group_chat, attachments, result, actions_taken, execution_trace, error,
                confirmation_prompt, priority, attempt_count, max_attempts,
                created_at, scheduled_for, output_target,
                talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
@@ -467,6 +470,7 @@ def update_task_status(
     result: str | None = None,
     error: str | None = None,
     actions_taken: str | None = None,
+    execution_trace: str | None = None,
 ) -> None:
     """Update task status and optionally result/error."""
     now = datetime.now().isoformat()
@@ -477,8 +481,8 @@ def update_task_status(
         )
     elif status == "completed":
         conn.execute(
-            "UPDATE tasks SET status = ?, completed_at = ?, result = ?, actions_taken = ?, updated_at = ? WHERE id = ?",
-            (status, now, result, actions_taken, now, task_id),
+            "UPDATE tasks SET status = ?, completed_at = ?, result = ?, actions_taken = ?, execution_trace = ?, updated_at = ? WHERE id = ?",
+            (status, now, result, actions_taken, execution_trace, now, task_id),
         )
     elif status == "failed":
         conn.execute(

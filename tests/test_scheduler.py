@@ -848,7 +848,7 @@ class TestProcessOneTask:
         result = process_one_task(config)
         assert result is None
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "All done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "All done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_success_completes_task(self, mock_arun, mock_exec, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
@@ -865,7 +865,7 @@ class TestProcessOneTask:
         assert task.status == "completed"
         assert task.result == "All done"
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "All done", '["📄 Reading file"]'))
+    @patch("istota.scheduler.execute_task", return_value=(True, "All done", '["📄 Reading file"]', None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_actions_taken_stored_on_success(self, mock_arun, mock_exec, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
@@ -881,7 +881,7 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.actions_taken == '["📄 Reading file"]'
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_actions_taken_none_when_not_streaming(self, mock_arun, mock_exec, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
@@ -896,7 +896,7 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.actions_taken is None
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Something broke", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Something broke", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_failure_retries_task(self, mock_arun, mock_exec, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
@@ -914,7 +914,7 @@ class TestProcessOneTask:
         assert task.status == "pending"
         assert task.attempt_count == 1
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_failure_after_max_retries(self, mock_arun, mock_exec, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
@@ -932,7 +932,7 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.status == "failed"
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Process killed (likely out of memory)", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Process killed (likely out of memory)", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_oom_skips_retry(self, mock_arun, mock_exec, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
@@ -952,7 +952,7 @@ class TestProcessOneTask:
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_confirmation_detected(self, mock_arun, mock_exec, db_path, tmp_path):
-        mock_exec.return_value = (True, "I need your confirmation before deleting the file. Reply yes or no.", None)
+        mock_exec.return_value = (True, "I need your confirmation before deleting the file. Reply yes or no.", None, None)
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
             db.create_task(
@@ -970,7 +970,7 @@ class TestProcessOneTask:
         assert task.status == "pending_confirmation"
         assert task.confirmation_prompt is not None
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_talk_sends_ack_message(self, mock_arun, mock_exec, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
@@ -985,7 +985,7 @@ class TestProcessOneTask:
         # asyncio.run should be called at least for the ack message and the result
         assert mock_arun.call_count >= 2
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Confirmed result", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Confirmed result", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_talk_rerun_sends_retry_ack(self, mock_arun, mock_exec, db_path, tmp_path):
         """A task being rerun after confirmation should send a 'Retrying' ack."""
@@ -1006,7 +1006,7 @@ class TestProcessOneTask:
         # Should be called for both the retry ack and the result
         assert mock_arun.call_count >= 2
 
-    @patch("istota.scheduler.execute_task", return_value=(True, '{"body": "reply", "format": "plain"}', None))
+    @patch("istota.scheduler.execute_task", return_value=(True, '{"body": "reply", "format": "plain"}', None, None))
     @patch("istota.scheduler.post_result_to_email", new_callable=AsyncMock, return_value=False)
     def test_email_send_failure_marks_task_failed(self, mock_post_email, mock_exec, db_path, tmp_path):
         """When email delivery fails, the task should be marked as failed."""
@@ -1354,7 +1354,7 @@ class TestSilentScheduledJob:
             **kwargs,
         )
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "ACTION: Found something important", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "ACTION: Found something important", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_silent_scheduled_action_posts(self, mock_arun, mock_exec, db_path, tmp_path):
         """Silent scheduled job with ACTION: should post result."""
@@ -1377,7 +1377,7 @@ class TestSilentScheduledJob:
         # Should post (ACTION: found)
         assert mock_arun.call_count >= 1
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "NO_ACTION: Nothing to report", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "NO_ACTION: Nothing to report", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_silent_scheduled_no_action_suppressed(self, mock_arun, mock_exec, db_path, tmp_path):
         """Silent scheduled job with NO_ACTION: should suppress output."""
@@ -1400,7 +1400,7 @@ class TestSilentScheduledJob:
         # Should NOT post (NO_ACTION)
         assert mock_arun.call_count == 0
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Just a result", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Just a result", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_silent_scheduled_no_prefix_posts(self, mock_arun, mock_exec, db_path, tmp_path):
         """Silent scheduled job without prefix should post as fail-safe."""
@@ -1439,7 +1439,7 @@ class TestScheduledJobFailureTracking:
             temp_dir=tmp_path / "temp",
         )
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_success_resets_failures(self, mock_arun, mock_exec, db_path, tmp_path):
         """Successful task should reset scheduled job failure count."""
@@ -1471,7 +1471,7 @@ class TestScheduledJobFailureTracking:
             assert job.last_error is None
             assert job.last_success_at is not None
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Task failed", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Task failed", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_failure_increments_count(self, mock_arun, mock_exec, db_path, tmp_path):
         """Failed task should increment scheduled job failure count."""
@@ -1502,7 +1502,7 @@ class TestScheduledJobFailureTracking:
             assert job.consecutive_failures == 1
             assert "Task failed" in job.last_error
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "boom", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "boom", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_auto_disable_after_max_failures(self, mock_arun, mock_exec, db_path, tmp_path):
         """Job should be auto-disabled after max consecutive failures."""
@@ -1532,7 +1532,7 @@ class TestScheduledJobFailureTracking:
             assert job.enabled is False
             assert job.consecutive_failures == 2
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "boom", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "boom", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_auto_disable_disabled_when_zero(self, mock_arun, mock_exec, db_path, tmp_path):
         """Auto-disable should not trigger when max_failures=0."""
@@ -1764,7 +1764,7 @@ class TestExecuteCommandTask:
         assert task.status == "completed"
         assert "from-command" in task.result
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_prompt_task_still_uses_execute_task(self, mock_arun, mock_exec, db_path, tmp_path):
         """Non-command task should still use execute_task."""
@@ -2038,7 +2038,7 @@ class TestDualWorkerQueue:
         assert result is None
 
         # Trying to process a background task should find the task
-        with patch("istota.scheduler.execute_task", return_value=(True, "done", None)):
+        with patch("istota.scheduler.execute_task", return_value=(True, "done", None, None)):
             with patch("istota.scheduler.post_result_to_talk", new_callable=AsyncMock):
                 result = process_one_task(config, user_id="alice", queue="background")
         assert result is not None
@@ -2354,7 +2354,7 @@ class TestDeferredOperations:
         count = _process_deferred_tracking(config, task, user_temp)
         assert count == 0
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Something broke", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Something broke", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_deferred_ops_skipped_on_failure(self, mock_arun, mock_exec, db_path, tmp_path):
         """Deferred files should NOT be processed when task fails."""
@@ -2697,7 +2697,7 @@ class TestOnceJobAutoRemoval:
             temp_dir=tmp_path / "temp",
         )
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_once_job_removed_on_success(self, mock_arun, mock_exec, db_path, tmp_path):
         """Successful once job should be removed from DB."""
@@ -2727,7 +2727,7 @@ class TestOnceJobAutoRemoval:
             job = db.get_scheduled_job_by_name(conn, "alice", "reminder-123")
             assert job is None, "Once job should be deleted from DB after success"
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Task failed", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Task failed", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_once_job_not_removed_on_failure(self, mock_arun, mock_exec, db_path, tmp_path):
         """Failed once job should NOT be removed (stays for retry)."""
@@ -2758,7 +2758,7 @@ class TestOnceJobAutoRemoval:
             job = db.get_scheduled_job_by_name(conn, "alice", "reminder-456")
             assert job is not None, "Once job should NOT be deleted on failure"
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_once_job_also_removed_from_cron_md(self, mock_arun, mock_exec, db_path, tmp_path):
         """Successful once job should also be removed from CRON.md file."""
@@ -2813,7 +2813,7 @@ once = true
         assert len(jobs) == 1
         assert jobs[0].name == "keep-this"
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Regular success", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Regular success", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_non_once_job_not_removed(self, mock_arun, mock_exec, db_path, tmp_path):
         """Regular (non-once) job should NOT be removed on success."""
@@ -3490,7 +3490,7 @@ class TestApiErrorInSuccessResult:
     def test_api_error_in_result_flips_to_failure(self, mock_arun, mock_exec, db_path, tmp_path):
         """When execute_task returns success=True but result contains API error, treat as failure."""
         api_error = 'API Error: 500 {"error": {"message": "Internal server error"}, "request_id": "req_abc"}'
-        mock_exec.return_value = (True, api_error, None)
+        mock_exec.return_value = (True, api_error, None, None)
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
@@ -3507,7 +3507,7 @@ class TestApiErrorInSuccessResult:
         assert task.status == "pending"
         assert task.attempt_count == 1
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Here is your morning briefing...", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Here is your morning briefing...", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_normal_result_not_affected(self, mock_arun, mock_exec, db_path, tmp_path):
         """Normal successful results are not falsely detected as API errors."""
@@ -3547,7 +3547,7 @@ class TestBriefingFailureSuppression:
             temp_dir=tmp_path / "temp",
         )
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_briefing_failure_no_talk_notification(self, mock_arun, mock_exec, db_path, tmp_path):
         """Failed briefing tasks should not send error messages to Talk."""
@@ -3573,7 +3573,7 @@ class TestBriefingFailureSuppression:
         # asyncio.run should NOT be called for Talk error notification
         assert mock_arun.call_count == 0
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_scheduled_failure_no_talk_notification(self, mock_arun, mock_exec, db_path, tmp_path):
         """Failed scheduled tasks should not send error messages to Talk."""
@@ -3598,7 +3598,7 @@ class TestBriefingFailureSuppression:
         # No Talk notification for scheduled failures
         assert mock_arun.call_count == 0
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_interactive_failure_still_notifies(self, mock_arun, mock_exec, db_path, tmp_path):
         """Interactive (Talk) task failures should still send error messages."""
@@ -3645,7 +3645,7 @@ class TestBriefingJsonDelivery:
     def test_briefing_json_posted_to_talk(self, mock_arun, mock_exec, db_path, tmp_path):
         """Briefing JSON result should have its body extracted and posted to Talk."""
         json_result = '{"subject": "Morning Briefing", "body": "📰 NEWS\\nStuff happened today."}'
-        mock_exec.return_value = (True, json_result, None)
+        mock_exec.return_value = (True, json_result, None, None)
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
@@ -3674,7 +3674,7 @@ class TestBriefingJsonDelivery:
     def test_briefing_json_email_uses_body(self, mock_arun, mock_exec, db_path, tmp_path):
         """Briefing with email target should use extracted body for email delivery."""
         json_result = '{"subject": "Evening Briefing", "body": "📈 MARKETS\\nS&P up 0.5%"}'
-        mock_exec.return_value = (True, json_result, None)
+        mock_exec.return_value = (True, json_result, None, None)
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
@@ -3699,7 +3699,7 @@ class TestBriefingJsonDelivery:
     def test_briefing_non_json_fallback(self, mock_arun, mock_exec, db_path, tmp_path):
         """If briefing result is not JSON, deliver as-is (backward compat)."""
         plain_result = "📰 NEWS\nStuff happened today."
-        mock_exec.return_value = (True, plain_result, None)
+        mock_exec.return_value = (True, plain_result, None, None)
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
@@ -3742,7 +3742,7 @@ class TestMalformedResultGuard:
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_leaked_xml_flips_to_failure(self, mock_arun, mock_exec, db_path, tmp_path):
         """Leaked tool-call XML in result should be treated as failure."""
-        mock_exec.return_value = (True, "</parameter>\n</invoke>", None)
+        mock_exec.return_value = (True, "</parameter>\n</invoke>", None, None)
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
@@ -3759,7 +3759,7 @@ class TestMalformedResultGuard:
         assert task.status == "pending"
         assert task.attempt_count == 1
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Here is your morning briefing with details...", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Here is your morning briefing with details...", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_normal_result_not_affected(self, mock_arun, mock_exec, db_path, tmp_path):
         """Normal successful results are not falsely flagged as malformed."""
@@ -3782,7 +3782,7 @@ class TestMalformedResultGuard:
     def test_talk_strict_xml_in_prose_flips_to_failure(self, mock_arun, mock_exec, db_path, tmp_path):
         """XML patterns in prose should be caught for Talk output (strict mode)."""
         text = "The error was </parameter> and it broke things."
-        mock_exec.return_value = (True, text, None)
+        mock_exec.return_value = (True, text, None, None)
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
@@ -3798,7 +3798,7 @@ class TestMalformedResultGuard:
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_malformed_result_retries_then_fails(self, mock_arun, mock_exec, db_path, tmp_path):
         """Malformed results exhaust retries and eventually fail permanently."""
-        mock_exec.return_value = (True, "</invoke>", None)
+        mock_exec.return_value = (True, "</invoke>", None, None)
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
@@ -3867,7 +3867,7 @@ class TestTaskIdInProgress:
             temp_dir=tmp_path / "temp",
         )
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Here is the answer to your question.", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Here is the answer to your question.", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_ack_message_contains_task_id(self, mock_arun, mock_exec, db_path, tmp_path):
         """Ack message posted to Talk should contain the task ID."""
@@ -3899,7 +3899,7 @@ class TestTaskIdInProgress:
         # Since post_result_to_talk is called via asyncio.run, check mock_exec received task with correct id
         assert task_id is not None  # Sanity check
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done with the research.", '["Read file", "Write file"]'))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done with the research.", '["Read file", "Write file"]', None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     @patch("istota.scheduler.edit_talk_message")
     def test_done_summary_contains_task_id(self, mock_edit, mock_arun, mock_exec, db_path, tmp_path):

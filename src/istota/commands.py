@@ -848,3 +848,58 @@ async def cmd_export(config, conn, user_id, conversation_token, args, client):
 
         rel_path = f"/{export_path.relative_to(mount)}"
         return f"Exported {len(user_messages)} messages to `{rel_path}`"
+
+
+@command("more", "Show execution trace for a task: `!more #31875` or `!more 31875`")
+async def cmd_more(config, conn, user_id, conversation_token, args, client):
+    # Parse task ID from args (strip # prefix if present)
+    task_id_str = args.strip().lstrip("#")
+    if not task_id_str.isdigit():
+        return "Usage: `!more #<task_id>` — show the execution trace for a completed task."
+
+    task_id = int(task_id_str)
+    task = db.get_task(conn, task_id)
+    if not task:
+        return f"Task #{task_id} not found."
+
+    # Only allow viewing your own tasks (unless admin)
+    if task.user_id != user_id and not config.is_admin(user_id):
+        return f"Task #{task_id} belongs to another user."
+
+    if not task.execution_trace:
+        if task.status in ("pending", "locked", "running"):
+            return f"Task #{task_id} is still {task.status} — trace available after completion."
+        return f"Task #{task_id} has no execution trace (pre-trace task or non-streaming execution)."
+
+    try:
+        trace = json.loads(task.execution_trace)
+    except (json.JSONDecodeError, TypeError):
+        return f"Task #{task_id} has a corrupted execution trace."
+
+    # Format the trace
+    prompt_preview = task.prompt[:80] + "..." if len(task.prompt) > 80 else task.prompt
+    lines = [
+        f"**Task #{task_id}** ({task.status}) — {prompt_preview}",
+        "",
+    ]
+
+    for entry in trace:
+        if entry.get("type") == "tool":
+            lines.append(f"🔧 {entry['text']}")
+        elif entry.get("type") == "text":
+            # Indent assistant text to distinguish from tool calls
+            text = entry["text"].strip()
+            if text:
+                lines.append(f"> {text}")
+
+    # Add result summary
+    if task.result:
+        result_preview = task.result[:200] + "..." if len(task.result) > 200 else task.result
+        lines.append("")
+        lines.append(f"**Result:** {result_preview}")
+    elif task.error:
+        error_preview = task.error[:200] + "..." if len(task.error) > 200 else task.error
+        lines.append("")
+        lines.append(f"**Error:** {error_preview}")
+
+    return "\n".join(lines)

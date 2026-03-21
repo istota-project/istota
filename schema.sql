@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Results
     result TEXT,
     actions_taken TEXT,             -- JSON array of tool use descriptions from execution
+    execution_trace TEXT,           -- JSON array of interleaved tool/text events from execution
     error TEXT,
 
     -- Confirmation flow

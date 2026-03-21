@@ -1,5 +1,7 @@
 """Tests for !command dispatch system."""
 
+import json
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,7 +10,7 @@ from istota.commands import (
     _build_export_metadata, _filter_user_messages, _format_messages_markdown,
     _format_messages_text, _format_utilization, _parse_export_metadata,
     _read_claude_oauth_token,
-    cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_skills,
+    cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_more, cmd_skills,
     cmd_status, cmd_stop, cmd_usage,
     dispatch, parse_command,
 )
@@ -1497,3 +1499,107 @@ class TestCmdExport:
         assert "Exported 1 messages" in result
         assert (export_dir / "room1.txt").exists()
         assert (export_dir / "room1.md").exists()  # original still there
+
+
+# ---------------------------------------------------------------------------
+# TestCmdMore
+# ---------------------------------------------------------------------------
+
+
+class TestCmdMore:
+    """Test !more command for viewing execution traces."""
+
+    @pytest.mark.asyncio
+    async def test_shows_execution_trace(self, make_config, db_path):
+        config = make_config()
+        trace = json.dumps([
+            {"type": "text", "text": "Let me look into that."},
+            {"type": "tool", "text": "Read config.py"},
+            {"type": "text", "text": "I see the issue. Let me fix it."},
+            {"type": "tool", "text": "Edit config.py"},
+        ])
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Fix the config", user_id="alice")
+            db.update_task_status(conn, task_id, "completed", result="Fixed it.", execution_trace=trace)
+
+        client = MagicMock()
+        with db.get_db(db_path) as conn:
+            result = await cmd_more(config, conn, "alice", "room1", str(task_id), client)
+
+        assert f"Task #{task_id}" in result
+        assert "Let me look into that." in result
+        assert "Read config.py" in result
+        assert "Edit config.py" in result
+        assert "Fixed it." in result
+
+    @pytest.mark.asyncio
+    async def test_accepts_hash_prefix(self, make_config, db_path):
+        config = make_config()
+        trace = json.dumps([{"type": "tool", "text": "Read file"}])
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Test", user_id="alice")
+            db.update_task_status(conn, task_id, "completed", result="Done", execution_trace=trace)
+
+        client = MagicMock()
+        with db.get_db(db_path) as conn:
+            result = await cmd_more(config, conn, "alice", "room1", f"#{task_id}", client)
+
+        assert f"Task #{task_id}" in result
+
+    @pytest.mark.asyncio
+    async def test_no_trace_available(self, make_config, db_path):
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Old task", user_id="alice")
+            db.update_task_status(conn, task_id, "completed", result="Done")
+
+        client = MagicMock()
+        with db.get_db(db_path) as conn:
+            result = await cmd_more(config, conn, "alice", "room1", str(task_id), client)
+
+        assert "no execution trace" in result
+
+    @pytest.mark.asyncio
+    async def test_task_not_found(self, make_config, db_path):
+        config = make_config()
+        client = MagicMock()
+        with db.get_db(db_path) as conn:
+            result = await cmd_more(config, conn, "alice", "room1", "99999", client)
+
+        assert "not found" in result
+
+    @pytest.mark.asyncio
+    async def test_other_users_task_blocked(self, make_config, db_path):
+        config = make_config()
+        config.admin_users = {"bob"}  # alice is NOT admin
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Secret", user_id="bob")
+            db.update_task_status(conn, task_id, "completed", result="Done")
+
+        client = MagicMock()
+        with db.get_db(db_path) as conn:
+            result = await cmd_more(config, conn, "alice", "room1", str(task_id), client)
+
+        assert "another user" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_task_id(self, make_config, db_path):
+        config = make_config()
+        client = MagicMock()
+        with db.get_db(db_path) as conn:
+            result = await cmd_more(config, conn, "alice", "room1", "notanumber", client)
+
+        assert "Usage" in result
+
+    @pytest.mark.asyncio
+    async def test_running_task_shows_status(self, make_config, db_path):
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="In progress", user_id="alice")
+            db.update_task_status(conn, task_id, "running")
+
+        client = MagicMock()
+        with db.get_db(db_path) as conn:
+            result = await cmd_more(config, conn, "alice", "room1", str(task_id), client)
+
+        assert "still running" in result

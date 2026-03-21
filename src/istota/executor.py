@@ -1495,9 +1495,11 @@ def execute_task(
     use_context: bool = True,
     conn: "db.sqlite3.Connection | None" = None,
     on_progress: Callable[[str], None] | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str | None, str | None]:
     """
     Execute a task using Claude Code.
+
+    Returns (success, result_text, actions_taken_json, execution_trace_json).
 
     Args:
         on_progress: Optional callback for progress updates. Called with
@@ -1760,7 +1762,7 @@ def execute_task(
     )
 
     if dry_run:
-        return True, f"[DRY RUN] Would execute with prompt:\n\n{prompt}", None
+        return True, f"[DRY RUN] Would execute with prompt:\n\n{prompt}", None, None
 
     # Write prompt to temp file for debugging
     prompt_file = user_temp_dir / f"task_{task.id}_prompt.txt"
@@ -2170,14 +2172,15 @@ def execute_task(
             if use_streaming:
                 return _execute_streaming(cmd, env, config, task, on_progress, result_file, prompt)
             else:
-                return _execute_simple(cmd, env, config, task, result_file, prompt)
+                s, r, a = _execute_simple(cmd, env, config, task, result_file, prompt)
+                return s, r, a, None
 
         with contextlib.ExitStack() as stack:
             if _proxy_ctx is not None:
                 stack.enter_context(_proxy_ctx)
             if _net_proxy_ctx is not None:
                 stack.enter_context(_net_proxy_ctx)
-            success, result, actions = _build_and_run()
+            success, result, actions, trace = _build_and_run()
 
         # Update skills fingerprint after successful interactive execution
         if success and _is_interactive:
@@ -2192,12 +2195,12 @@ def execute_task(
             except Exception:
                 pass  # Non-critical
 
-        return success, result, actions
+        return success, result, actions, trace
 
     except FileNotFoundError:
-        return False, "Claude Code CLI not found. Is it installed and in PATH?", None
+        return False, "Claude Code CLI not found. Is it installed and in PATH?", None, None
     except Exception as e:
-        return False, f"Execution error: {e}", None
+        return False, f"Execution error: {e}", None, None
 
 
 def _execute_simple_once(
@@ -2287,17 +2290,19 @@ def _execute_streaming_once(
     on_progress: Callable[[str], None] | None,
     result_file: Path,
     prompt: str = "",
-) -> tuple[bool, str, str | None]:
+) -> tuple[bool, str, str | None, str | None]:
     """Execute Claude Code once with Popen + stream-json parsing for progress updates.
 
     Prompt is passed via stdin to avoid E2BIG errors from large CLI arguments.
-    Returns (success, result_text, actions_taken_json).
+    Returns (success, result_text, actions_taken_json, execution_trace_json).
     """
     show_tool_use = config.scheduler.progress_show_tool_use
     show_text = config.scheduler.progress_show_text
 
     # Accumulate tool use descriptions for actions_taken
     actions_descriptions: list[str] = []
+    # Interleaved execution trace (tool calls + assistant text)
+    execution_trace: list[dict] = []
 
     # Capture stderr in a thread to avoid deadlock when both pipes are full
     stderr_lines = []
@@ -2359,6 +2364,9 @@ def _execute_streaming_once(
                 final_result = event
             elif isinstance(event, ToolUseEvent):
                 actions_descriptions.append(event.description)
+                execution_trace.append({"type": "tool", "text": event.description})
+            elif isinstance(event, TextEvent):
+                execution_trace.append({"type": "text", "text": event.text})
             if isinstance(event, ToolUseEvent) and show_tool_use and on_progress:
                 try:
                     on_progress(event.description)
@@ -2389,15 +2397,16 @@ def _execute_streaming_once(
 
     # Build actions JSON from collected descriptions
     actions_json = json.dumps(actions_descriptions) if actions_descriptions else None
+    trace_json = json.dumps(execution_trace) if execution_trace else None
 
     if cancelled:
-        return False, "Cancelled by user", None
+        return False, "Cancelled by user", None, None
 
     if timed_out.is_set():
-        return False, f"Task execution timed out after {config.scheduler.task_timeout_minutes} minutes", None
+        return False, f"Task execution timed out after {config.scheduler.task_timeout_minutes} minutes", None, None
 
     if process.returncode == -9:
-        return False, "Claude Code was killed (likely out of memory)", None
+        return False, "Claude Code was killed (likely out of memory)", None, None
 
     stderr_output = "".join(stderr_lines).strip()
 
@@ -2405,16 +2414,16 @@ def _execute_streaming_once(
     if final_result is not None:
         result_text = final_result.text.strip()
         if final_result.success:
-            return True, result_text, actions_json
+            return True, result_text, actions_json, trace_json
         else:
-            return False, result_text or stderr_output or "Unknown error", None
+            return False, result_text or stderr_output or "Unknown error", None, trace_json
 
     # Fallback: result file
     if result_file.exists():
         output = result_file.read_text()
         if process.returncode == 0:
-            return True, output.strip(), actions_json
-        return False, output.strip(), None
+            return True, output.strip(), actions_json, trace_json
+        return False, output.strip(), None, trace_json
 
     # No ResultEvent and no result file — Claude Code likely errored
     logger.warning(
@@ -2423,11 +2432,11 @@ def _execute_streaming_once(
     )
 
     if stderr_output:
-        return False, stderr_output, None
+        return False, stderr_output, None, trace_json
     elif raw_stdout_lines:
-        return False, f"Stream parsing failed (rc={process.returncode}, {len(raw_stdout_lines)} lines)", None
+        return False, f"Stream parsing failed (rc={process.returncode}, {len(raw_stdout_lines)} lines)", None, trace_json
     else:
-        return False, f"Claude Code produced no output (rc={process.returncode})", None
+        return False, f"Claude Code produced no output (rc={process.returncode})", None, None
 
 
 def _execute_streaming(
@@ -2438,19 +2447,22 @@ def _execute_streaming(
     on_progress: Callable[[str], None],
     result_file: Path,
     prompt: str = "",
-) -> tuple[bool, str, str | None]:
+) -> tuple[bool, str, str | None, str | None]:
     """Execute Claude Code with Popen + stream-json parsing, with auto-retry for transient API errors."""
     last_error = ""
+    last_trace = None
 
     for attempt in range(API_RETRY_MAX_ATTEMPTS):
-        success, result, actions = _execute_streaming_once(cmd, env, config, task, on_progress, result_file, prompt)
+        success, result, actions, trace = _execute_streaming_once(cmd, env, config, task, on_progress, result_file, prompt)
 
         if success:
-            return True, result, actions
+            return True, result, actions, trace
+
+        last_trace = trace
 
         # Check if this is a transient API error worth retrying
         if not is_transient_api_error(result):
-            return False, result, None
+            return False, result, None, trace
 
         last_error = result
         parsed = parse_api_error(result)
@@ -2468,7 +2480,7 @@ def _execute_streaming(
                 task.id, API_RETRY_MAX_ATTEMPTS, request_id,
             )
 
-    return False, last_error, None
+    return False, last_error, None, last_trace
 
 
 def execute_task_interactive(
@@ -2496,11 +2508,11 @@ def execute_task_interactive(
         user_resources = db.get_user_resources(conn, user_id)
 
         # Execute (config resources are merged internally by execute_task)
-        success, result, actions = execute_task(task, config, user_resources)
+        success, result, actions, trace = execute_task(task, config, user_resources)
 
         # Update task status
         if success:
-            db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions)
+            db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions, execution_trace=trace)
         else:
             db.update_task_status(conn, task_id, "failed", error=result)
 

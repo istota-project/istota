@@ -1090,6 +1090,7 @@ def process_one_task(
     if task.command:
         success, result = _execute_command_task(task, config)
         actions_taken = None
+        execution_trace = None
     else:
         # Send progress update for Talk tasks
         ack_msg_id = None
@@ -1147,7 +1148,7 @@ def process_one_task(
             task = replace(task, attachments=local_attachments)
 
         # Execute the task (outside the db context to avoid long locks)
-        success, result, actions_taken = execute_task(
+        success, result, actions_taken, execution_trace = execute_task(
             task, config, user_resources, dry_run=dry_run, on_progress=progress_callback,
         )
 
@@ -1219,7 +1220,7 @@ def process_one_task(
                 db.log_task(conn, task_id, "info", "Task awaiting user confirmation")
                 post_talk_message = result
             else:
-                db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken)
+                db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")
 
                 # Index conversation for memory search (non-critical)

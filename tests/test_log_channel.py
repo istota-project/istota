@@ -310,7 +310,7 @@ class TestProcessOneTaskLogChannel:
             users=users or {},
         )
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     @patch("istota.scheduler._finalize_log_channel")
     def test_log_channel_finalized_on_success(
@@ -329,7 +329,7 @@ class TestProcessOneTaskLogChannel:
         # Verify success=True in the finalize call (config, task, log_channel, prefix, log_callback, success)
         assert mock_finalize.call_args[0][5] is True
 
-    @patch("istota.scheduler.execute_task", return_value=(False, "Boom", None))
+    @patch("istota.scheduler.execute_task", return_value=(False, "Boom", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     @patch("istota.scheduler._finalize_log_channel")
     def test_log_channel_finalized_on_failure(
@@ -350,7 +350,7 @@ class TestProcessOneTaskLogChannel:
         # Verify success=False and error passed (config, task, log_channel, prefix, log_callback, success)
         assert mock_finalize.call_args[0][5] is False
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     @patch("istota.scheduler._finalize_log_channel")
     def test_skip_log_channel_suppresses_logging(
@@ -370,7 +370,7 @@ class TestProcessOneTaskLogChannel:
         assert success is True
         mock_finalize.assert_not_called()
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     @patch("istota.scheduler._finalize_log_channel")
     def test_no_log_channel_when_unconfigured(
@@ -383,7 +383,7 @@ class TestProcessOneTaskLogChannel:
         process_one_task(config)
         mock_finalize.assert_not_called()
 
-    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None))
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     @patch("istota.scheduler._resolve_channel_name")
     @patch("istota.scheduler._finalize_log_channel")
@@ -420,7 +420,7 @@ class TestProcessOneTaskLogChannel:
         mock_arun, mock_exec, db_path, tmp_path,
     ):
         """When both Talk progress and log channel are active, a composite callback is used."""
-        mock_exec.return_value = (True, "Done", None)
+        mock_exec.return_value = (True, "Done", None, None)
 
         # Mock Talk progress callback with required attributes
         talk_cb = MagicMock()

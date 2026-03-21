@@ -215,11 +215,11 @@ class TestExecuteStreamingRetry:
         # First call fails with 500, second succeeds
         error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_123"}'
         mock_exec_once.side_effect = [
-            (False, error_500, None),
-            (True, "Success after retry", None),
+            (False, error_500, None, None),
+            (True, "Success after retry", None, None),
         ]
 
-        success, result, actions = _execute_streaming(
+        success, result, actions, trace = _execute_streaming(
             ["claude", "-p", "test"],
             {},
             config,
@@ -245,9 +245,9 @@ class TestExecuteStreamingRetry:
             task = self._make_task(conn)
 
         error_401 = 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid API key"}}'
-        mock_exec_once.return_value = (False, error_401, None)
+        mock_exec_once.return_value = (False, error_401, None, None)
 
-        success, result, actions = _execute_streaming(
+        success, result, actions, trace = _execute_streaming(
             ["claude", "-p", "test"],
             {},
             config,
@@ -272,9 +272,9 @@ class TestExecuteStreamingRetry:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
 
-        mock_exec_once.return_value = (False, "Claude Code was killed (likely out of memory)", None)
+        mock_exec_once.return_value = (False, "Claude Code was killed (likely out of memory)", None, None)
 
-        success, result, actions = _execute_streaming(
+        success, result, actions, trace = _execute_streaming(
             ["claude", "-p", "test"],
             {},
             config,
@@ -300,9 +300,9 @@ class TestExecuteStreamingRetry:
             task = self._make_task(conn)
 
         error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}'
-        mock_exec_once.return_value = (False, error_500, None)
+        mock_exec_once.return_value = (False, error_500, None, None)
 
-        success, result, actions = _execute_streaming(
+        success, result, actions, trace = _execute_streaming(
             ["claude", "-p", "test"],
             {},
             config,
@@ -326,9 +326,9 @@ class TestExecuteStreamingRetry:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
 
-        mock_exec_once.return_value = (True, "Immediate success", None)
+        mock_exec_once.return_value = (True, "Immediate success", None, None)
 
-        success, result, actions = _execute_streaming(
+        success, result, actions, trace = _execute_streaming(
             ["claude", "-p", "test"],
             {},
             config,
@@ -352,9 +352,9 @@ class TestExecuteStreamingRetry:
             task = self._make_task(conn)
 
         actions = '["📄 Reading file.py", "✏️ Editing file.py"]'
-        mock_exec_once.return_value = (True, "Done", actions)
+        mock_exec_once.return_value = (True, "Done", actions, '[]')
 
-        success, result, actions_taken = _execute_streaming(
+        success, result, actions_taken, trace = _execute_streaming(
             ["claude", "-p", "test"],
             {},
             config,
@@ -381,11 +381,11 @@ class TestExecuteStreamingRetry:
         error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"err"},"request_id":"req_1"}'
         actions = '["📄 Reading config"]'
         mock_exec_once.side_effect = [
-            (False, error_500, None),
-            (True, "ok", actions),
+            (False, error_500, None, None),
+            (True, "ok", actions, None),
         ]
 
-        success, result, actions_taken = _execute_streaming(
+        success, result, actions_taken, trace = _execute_streaming(
             ["claude", "-p", "test"], {}, config, task, None, result_file,
         )
 
@@ -482,7 +482,7 @@ class TestSkillsFingerprintIntegration:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn, source_type="talk")
             from istota.executor import execute_task
-            success, result, _actions = execute_task(task, config, [], conn=conn)
+            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
         # Verify changelog was in the prompt
         call_args = mock_run.call_args
@@ -504,7 +504,7 @@ class TestSkillsFingerprintIntegration:
             db.set_user_skills_fingerprint(conn, "alice", fp)
             task = self._make_task(conn, source_type="talk")
             from istota.executor import execute_task
-            success, result, _actions = execute_task(task, config, [], conn=conn)
+            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
         call_args = mock_run.call_args
         prompt_text = call_args.kwargs["input"]
@@ -520,7 +520,7 @@ class TestSkillsFingerprintIntegration:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn, source_type="briefing")
             from istota.executor import execute_task
-            success, result, _actions = execute_task(task, config, [], conn=conn)
+            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
         call_args = mock_run.call_args
         prompt_text = call_args.kwargs["input"]
@@ -536,7 +536,7 @@ class TestSkillsFingerprintIntegration:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn, source_type="scheduled")
             from istota.executor import execute_task
-            success, result, _actions = execute_task(task, config, [], conn=conn)
+            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
         call_args = mock_run.call_args
         prompt_text = call_args.kwargs["input"]
@@ -554,7 +554,7 @@ class TestSkillsFingerprintIntegration:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn, source_type="talk")
             from istota.executor import execute_task
-            success, result, _actions = execute_task(task, config, [], conn=conn)
+            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
             assert success is True
             stored_fp = db.get_user_skills_fingerprint(conn, "alice")
             assert stored_fp == expected_fp
@@ -568,7 +568,7 @@ class TestSkillsFingerprintIntegration:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn, source_type="scheduled")
             from istota.executor import execute_task
-            success, result, _actions = execute_task(task, config, [], conn=conn)
+            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
             assert success is True
             stored_fp = db.get_user_skills_fingerprint(conn, "alice")
             assert stored_fp is None
@@ -582,7 +582,7 @@ class TestSkillsFingerprintIntegration:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn, source_type="talk")
             from istota.executor import execute_task
-            success, result, _actions = execute_task(task, config, [], conn=conn)
+            success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
             assert success is False
             stored_fp = db.get_user_skills_fingerprint(conn, "alice")
             assert stored_fp is None
@@ -2270,7 +2270,7 @@ class TestNotificationReplyContextScoping:
             reply_task = db.get_task(conn, reply_id)
 
             from istota.executor import execute_task
-            success, result, _actions = execute_task(
+            success, result, _actions, _trace = execute_task(
                 reply_task, config, [], conn=conn,
             )
 
