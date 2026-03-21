@@ -5,6 +5,14 @@
 
 **Common mistake:** If a user in Talk says "email me a report," use `send` (you are originating a new email). Do NOT use `output` — that writes a file the scheduler will ignore because the task didn't come from email.
 
+## Sender identity
+
+When emailing external contacts (people outside the user's organization), default to sending **as {BOT_NAME}** — the user's assistant. Write in your own voice, identify yourself as the user's assistant, and sign with your name. The recipient should know they're communicating with an agent, not with the user directly.
+
+Only send as the user (first person, signed with the user's name) when they explicitly ask: "email them as me", "send from my address", "write it as if it's from me."
+
+This applies to `send` only. The `output` command (email replies) inherits the thread's existing sender identity.
+
 ## Sending email (`send`)
 
 ```bash

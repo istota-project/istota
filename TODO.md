@@ -147,6 +147,10 @@
 - [x] Deletes processed /tmp job prompts for the user after extraction
 - [x] At task time, the bot searches dated memory files for relevant context
 - [x] Configurable retention policy for dated memory files
+- [x] Tail-biased truncation preserves conclusions (head 40% + tail 60%)
+- [x] Dynamic per-task budget allocation (proportional from 50K total)
+- [x] Conversation grouping by token for threading context
+- [x] Improved extraction prompt with depth guidance and examples
 
 ### Invoicing System ✅
 - [x] Config-driven invoice generation from INVOICING.md (markdown + TOML)

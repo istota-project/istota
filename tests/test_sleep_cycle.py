@@ -10,6 +10,7 @@ import pytest
 from istota import db
 from istota.config import Config, SleepCycleConfig, UserConfig
 from istota.sleep_cycle import (
+    _excerpt,
     gather_day_data,
     build_memory_extraction_prompt,
     process_user_sleep_cycle,
@@ -38,6 +39,34 @@ def mount_config(tmp_path):
             lookback_hours=24,
         ),
     )
+
+
+class TestExcerpt:
+    def test_short_text_unchanged(self):
+        assert _excerpt("hello world", 100) == "hello world"
+
+    def test_empty_string_unchanged(self):
+        assert _excerpt("", 100) == ""
+
+    def test_none_returns_empty(self):
+        assert _excerpt(None, 100) == ""
+
+    def test_long_text_returns_head_and_tail(self):
+        text = "A" * 200 + "MIDDLE" + "Z" * 200
+        result = _excerpt(text, 100)
+        assert result.startswith("A")
+        assert result.endswith("Z" * 10)  # tail preserved
+        assert "truncated" in result.lower() or "trimmed" in result.lower()
+
+    def test_within_budget(self):
+        text = "x" * 10000
+        result = _excerpt(text, 500)
+        assert len(result) <= 520  # small margin for marker
+
+    def test_tail_content_preserved(self):
+        text = "x" * 5000 + "FINAL_CONCLUSION"
+        result = _excerpt(text, 500)
+        assert "FINAL_CONCLUSION" in result
 
 
 class TestGatherDayData:
@@ -101,6 +130,71 @@ class TestGatherDayData:
         assert len(result) <= MAX_DAY_DATA_CHARS + 100  # some margin for truncation marker
         assert "truncated" in result
 
+    def test_small_tasks_not_truncated(self, mount_config, db_path):
+        """Two small tasks should appear in full with no trimming."""
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(conn, prompt="Short prompt", user_id="alice")
+            db.update_task_status(conn, t1, "running")
+            db.update_task_status(conn, t1, "completed", result="Short result")
+
+            t2 = db.create_task(conn, prompt="Another prompt", user_id="alice")
+            db.update_task_status(conn, t2, "running")
+            db.update_task_status(conn, t2, "completed", result="Another result")
+
+            result = gather_day_data(mount_config, conn, "alice", 24, None)
+
+        assert "Short prompt" in result
+        assert "Short result" in result
+        assert "Another prompt" in result
+        assert "Another result" in result
+        assert "truncated" not in result
+
+    def test_tail_preserved_in_long_results(self, mount_config, db_path):
+        """A task with a long result should preserve content near the end."""
+        with db.get_db(db_path) as conn:
+            long_result = "x" * 10000 + "FINAL_CONCLUSION_HERE"
+            t = db.create_task(conn, prompt="Analyze project", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result=long_result)
+
+            # Add many more tasks to force per-task budget below result length
+            for i in range(20):
+                t2 = db.create_task(conn, prompt=f"task {i}", user_id="alice")
+                db.update_task_status(conn, t2, "running")
+                db.update_task_status(conn, t2, "completed", result=f"result {i}")
+
+            result = gather_day_data(mount_config, conn, "alice", 24, None)
+
+        assert "FINAL_CONCLUSION_HERE" in result
+
+    def test_conversation_grouping(self, mount_config, db_path):
+        """Tasks sharing a conversation_token should be grouped together."""
+        with db.get_db(db_path) as conn:
+            for i in range(3):
+                t = db.create_task(
+                    conn, prompt=f"Message {i}", user_id="alice",
+                    conversation_token="conv123",
+                )
+                db.update_task_status(conn, t, "running")
+                db.update_task_status(conn, t, "completed", result=f"Reply {i}")
+
+            result = gather_day_data(mount_config, conn, "alice", 24, None)
+
+        assert "Conversation" in result
+        assert "conv123" in result
+        assert "3 messages" in result
+
+    def test_standalone_tasks_no_group_header(self, mount_config, db_path):
+        """Tasks without conversation_token should not get a group header."""
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="CLI task", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Done")
+
+            result = gather_day_data(mount_config, conn, "alice", 24, None)
+
+        assert "Conversation" not in result
+
 
 class TestBuildMemoryExtractionPrompt:
     def test_includes_user_id(self):
@@ -129,6 +223,25 @@ class TestBuildMemoryExtractionPrompt:
     def test_includes_no_new_memories_sentinel(self):
         prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
         assert NO_NEW_MEMORIES in prompt
+
+    def test_prompt_includes_depth_guidance(self):
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "months" in prompt.lower()
+
+    def test_prompt_includes_self_contained_guidance(self):
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "self-contained" in prompt.lower()
+
+    def test_prompt_discourages_thin_bullets(self):
+        """Prompt should include a good/bad example to guide extraction depth."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        # Should have a concrete example, not just "concise bullet points"
+        assert "Bad:" in prompt or "Good:" in prompt
+
+    def test_prompt_encourages_light_day_extraction(self):
+        """Prompt should say it's OK to extract from days with few interactions."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "few interactions" in prompt.lower() or "single" in prompt.lower()
 
 
 class TestProcessUserSleepCycle:

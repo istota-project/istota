@@ -26,8 +26,28 @@ logger = logging.getLogger("istota.sleep_cycle")
 # Maximum chars of day data to include in extraction prompt
 MAX_DAY_DATA_CHARS = 50000
 
+# Minimum per-task budget to avoid tiny fragments
+_MIN_TASK_BUDGET = 500
+
 # Sentinel output from Claude indicating nothing worth saving
 NO_NEW_MEMORIES = "NO_NEW_MEMORIES"
+
+
+def _excerpt(text: str, budget: int) -> str:
+    """Return head+tail excerpt of text within budget chars.
+
+    Keeps the first 40% and last 60% when truncation is needed,
+    since conclusions and outcomes tend to appear at the end.
+    """
+    if not text or len(text) <= budget:
+        return text or ""
+    marker = "\n...[truncated]...\n"
+    usable = budget - len(marker)
+    if usable < 40:
+        return text[:budget]
+    head_size = int(usable * 0.4)
+    tail_size = usable - head_size
+    return text[:head_size] + marker + text[-tail_size:]
 
 
 def gather_day_data(
@@ -40,11 +60,12 @@ def gather_day_data(
     """
     Gather the day's interaction data for memory extraction.
 
-    Reads completed task prompts/results from the DB and prompt files
-    from the user's temp directory.
-
-    Returns concatenated day data string.
+    Uses dynamic per-task budget allocation and tail-biased truncation
+    to preserve conclusions and decisions. Groups tasks by conversation
+    for threading context.
     """
+    from collections import defaultdict
+
     since = datetime.now(tz=ZoneInfo("UTC")) - timedelta(hours=lookback_hours)
     # DB stores naive UTC timestamps, so strip tzinfo for comparison
     since_str = since.replace(tzinfo=None).isoformat()
@@ -54,19 +75,34 @@ def gather_day_data(
     if not tasks:
         return ""
 
-    parts = []
+    # Dynamic budget: distribute proportionally with per-task minimum
+    per_task_budget = max(_MIN_TASK_BUDGET, MAX_DAY_DATA_CHARS // len(tasks))
+
+    # Group tasks by conversation_token for threading context
+    groups: dict[str | None, list] = defaultdict(list)
     for task in tasks:
-        prompt_excerpt = task.prompt[:2000] if task.prompt else ""
-        result_excerpt = (task.result or "")[:3000]
-        parts.append(
-            f"--- Task {task.id} ({task.source_type}, {task.created_at or 'unknown'}) ---\n"
-            f"User: {prompt_excerpt}\n"
-            f"Bot: {result_excerpt}\n"
-        )
+        groups[task.conversation_token].append(task)
+
+    parts = []
+    for conv_token, conv_tasks in groups.items():
+        if conv_token and len(conv_tasks) > 1:
+            parts.append(
+                f"=== Conversation {conv_token} ({len(conv_tasks)} messages) ==="
+            )
+        for task in conv_tasks:
+            prompt_budget = int(per_task_budget * 0.4)
+            result_budget = per_task_budget - prompt_budget
+            prompt_text = _excerpt(task.prompt or "", prompt_budget)
+            result_text = _excerpt(task.result or "", result_budget)
+            parts.append(
+                f"--- Task {task.id} ({task.source_type}, {task.created_at or 'unknown'}) ---\n"
+                f"User: {prompt_text}\n"
+                f"Bot: {result_text}\n"
+            )
 
     combined = "\n".join(parts)
     if len(combined) > MAX_DAY_DATA_CHARS:
-        combined = combined[:MAX_DAY_DATA_CHARS] + "\n...[truncated]"
+        combined = _excerpt(combined, MAX_DAY_DATA_CHARS)
 
     return combined
 
@@ -107,25 +143,37 @@ Date: {date_str}
 
 ## Instructions
 
-Review the interactions above and extract information worth remembering for future conversations.
-Focus on:
-- New facts about the user (preferences, projects, people, habits)
-- Decisions made or plans discussed
-- Corrections the user made
-- Important context that would help in future interactions
-- Key outcomes of tasks (e.g., "sent email to X about Y", "created report Z")
+Review the interactions above and extract information worth remembering long-term.
+Write each item with enough context to be self-contained and useful months from now
+without access to the original conversation.
 
-Do NOT include:
+What to extract:
+- Facts about the user: preferences, projects, people they work with, habits, goals
+- Decisions made or plans discussed, including the reasoning when given
+- Corrections the user made to the bot's understanding
+- Outcomes of tasks: what was sent, created, configured, or changed
+- Recurring patterns or workflows observed across conversations
+
+What to skip:
 - Information already in the existing memory above
-- Trivial exchanges (greetings, acknowledgments)
-- Temporary states that are no longer relevant
-- Raw data or lengthy outputs
+- Greetings, acknowledgments, and small talk
+- Temporary states no longer relevant (e.g., "waiting for a response" when the response already came)
+- Raw data dumps or lengthy command output
 
-Format your output as concise bullet points with dates and task references, like:
-- Decided to switch project Alpha to Python 3.12 (2026-01-28, ref:1234)
-- Prefers email summaries over detailed reports (2026-01-28, ref:1235)
+Write bullet points that are self-contained.
+Bad: "Discussed project Alpha."
+Good: "Project Alpha is migrating from Django to FastAPI; target completion is Q2 (ref:1234)."
 
-If there is genuinely nothing new worth remembering, respond with exactly: {NO_NEW_MEMORIES}
+Format: dated bullet points with task references.
+- Project Alpha migrating from Django to FastAPI, targeting Q2 completion ({date_str}, ref:1234)
+- Prefers email summaries limited to 5 bullet points, not full reports ({date_str}, ref:1235)
+- Sent introduction email to Dana (dana@example.com) about consulting engagement ({date_str}, ref:1236)
+
+When the day had few interactions, still extract what is there. A single substantive
+memory is better than {NO_NEW_MEMORIES}.
+
+If there is genuinely nothing new worth remembering (e.g., only greetings or repeated
+questions with no new information), respond with exactly: {NO_NEW_MEMORIES}
 
 Output ONLY the bullet points (or {NO_NEW_MEMORIES}). No preamble, no explanation."""
 
@@ -480,19 +528,23 @@ def gather_channel_data(
     if not tasks:
         return ""
 
+    per_task_budget = max(_MIN_TASK_BUDGET, MAX_DAY_DATA_CHARS // len(tasks))
+
     parts = []
     for task in tasks:
-        prompt_excerpt = task.prompt[:2000] if task.prompt else ""
-        result_excerpt = (task.result or "")[:3000]
+        prompt_budget = int(per_task_budget * 0.4)
+        result_budget = per_task_budget - prompt_budget
+        prompt_text = _excerpt(task.prompt or "", prompt_budget)
+        result_text = _excerpt(task.result or "", result_budget)
         parts.append(
             f"--- Task {task.id} (user: {task.user_id}, {task.source_type}, {task.created_at or 'unknown'}) ---\n"
-            f"User: {prompt_excerpt}\n"
-            f"Bot: {result_excerpt}\n"
+            f"User: {prompt_text}\n"
+            f"Bot: {result_text}\n"
         )
 
     combined = "\n".join(parts)
     if len(combined) > MAX_DAY_DATA_CHARS:
-        combined = combined[:MAX_DAY_DATA_CHARS] + "\n...[truncated]"
+        combined = _excerpt(combined, MAX_DAY_DATA_CHARS)
 
     return combined
 

@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-20: Sleep cycle memory extraction quality (ISSUE-018)
+
+The nightly sleep cycle was producing thin, lossy memories. Five compounding problems: fixed 2K/3K per-task truncation cut off conclusions, no conversation threading, no significance weighting, conservative extraction prompt, and Sonnet's aggressive compression.
+
+**Key changes:**
+- Tail-biased excerpts: new `_excerpt()` helper keeps first 40% + last 60% of text, preserving conclusions and decisions that appear at the end of conversations
+- Dynamic budget allocation: per-task budget distributed proportionally from the 50K char total instead of fixed 2K prompt + 3K result. A single long conversation now gets the full budget
+- Conversation grouping: tasks sharing a `conversation_token` are grouped with thread headers so the extraction model sees conversational structure
+- Prompt tuning: extraction prompt now asks for self-contained bullets with reasoning, includes good/bad examples, and encourages extraction on light days
+- Same truncation fixes applied to `gather_channel_data()`
+
+**Files modified:**
+- `src/istota/sleep_cycle.py` — `_excerpt()`, refactored `gather_day_data()` and `gather_channel_data()`, improved `build_memory_extraction_prompt()`
+- `tests/test_sleep_cycle.py` — 11 new tests (excerpt helper, dynamic budget, conversation grouping, prompt quality)
+
+## 2026-03-20: Default sender policy for external emails (ISSUE-017)
+
+When asked to email external contacts, the bot was composing as the user (first person, signed with the user's name). Added instruction-level fix: bot defaults to sending as itself (assistant identity) for external contacts, only sends as the user when explicitly asked.
+
+**Files modified:**
+- `src/istota/skills/email/skill.md` — Added "Sender identity" section with default policy
+- `config/guidelines/email.md` — Added matching etiquette rule
+
 ## 2026-03-20: Deterministic briefing delivery
 
 Briefing tasks were unreliable because Claude had access to the email skill and would sometimes send emails directly (HTML-formatted, double-delivery). Fixed by making Claude return structured JSON and having the scheduler handle delivery deterministically.
