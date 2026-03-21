@@ -30,7 +30,7 @@ from .skills.briefing import (
     strip_markdown as _strip_markdown,
 )
 from .config import Config, load_config
-from .executor import execute_task, is_transient_api_error, parse_api_error
+from .executor import detect_malformed_result, execute_task, is_transient_api_error, parse_api_error
 from .nextcloud_api import hydrate_user_configs
 from .talk import TalkClient, split_message
 from .email_poller import get_email_config
@@ -1095,7 +1095,7 @@ def process_one_task(
         ack_msg_id = None
         is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
         if task.source_type == "talk" and task.conversation_token and not dry_run:
-            ack_text = "*Retrying…*" if is_rerun else random.choice(PROGRESS_MESSAGES)
+            ack_text = f"*Retrying…* `#{task.id}`" if is_rerun else f"{random.choice(PROGRESS_MESSAGES)} `#{task.id}`"
             ack_msg_id = asyncio.run(post_result_to_talk(
                 config, task, ack_text,
                 reference_id=f"istota:task:{task.id}:ack",
@@ -1179,6 +1179,36 @@ def process_one_task(
             task_id,
         )
         success = False
+
+    # Guard: detect malformed model output (leaked XML syntax, disproportionately short)
+    if success:
+        tool_count = 0
+        if actions_taken:
+            try:
+                tool_count = len(json.loads(actions_taken))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        malformed_reason = detect_malformed_result(result, tool_count=tool_count, output_target=target)
+        if malformed_reason:
+            logger.warning(
+                "Task %d: malformed result detected (%s), treating as failure",
+                task_id, malformed_reason,
+            )
+            success = False
+            result = f"Malformed output: {malformed_reason}"
+
+    # Log result quality metrics
+    if result:
+        _qm_tool_count = 0
+        if actions_taken:
+            try:
+                _qm_tool_count = len(json.loads(actions_taken))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        logger.info(
+            "Task %d result metrics: success=%s, chars=%d, tools=%d",
+            task_id, success, len(result), _qm_tool_count,
+        )
 
     with db.get_db(config.db_path) as conn:
         if success:
@@ -1344,9 +1374,9 @@ def process_one_task(
             total = len(progress_callback.all_descriptions)
             elapsed = int(time.time() - progress_callback.start_time)
             if total == 0:
-                body = f"Done ({elapsed}s)"
+                body = f"Done ({elapsed}s) `#{task.id}`"
             else:
-                body = f"Done — {total} action{'s' if total != 1 else ''} ({elapsed}s)"
+                body = f"Done — {total} action{'s' if total != 1 else ''} ({elapsed}s) `#{task.id}`"
         else:
             body = _format_progress_body(
                 progress_callback.all_descriptions,

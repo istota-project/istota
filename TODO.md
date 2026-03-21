@@ -252,6 +252,15 @@
 - [x] Suppress error emails to users (log only)
 - [x] Preserve debugging info (request_id) in logs
 
+### Malformed Output Detection (ISSUE-019)
+- [x] Result content validation guard (leaked tool-call XML, strict mode for Talk)
+- [x] Proportionality heuristic (short result vs tool call count)
+- [x] Automatic retry on malformed output (existing retry logic)
+- [x] Result quality metrics logging
+- [x] Task ID in ack messages and done summaries
+- [ ] Stream-level detection in parser (MalformedOutputEvent)
+- [ ] Model-based result validation gate (Sonnet/Haiku for high-tool-count tasks)
+
 ### Integration Tests ✅
 - [x] Comprehensive unit test suite (~842 tests across 26 files)
 - [x] Talk API integration tests (22 tests against real Nextcloud)

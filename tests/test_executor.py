@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from istota.executor import (
+    detect_malformed_result,
     parse_api_error,
     is_transient_api_error,
     build_prompt,
@@ -2887,3 +2888,143 @@ class TestConfirmationContext:
         confirmed_pos = prompt.index("## Confirmed action")
         request_pos = prompt.index("## User's request")
         assert confirmed_pos < request_pos
+
+
+# ---------------------------------------------------------------------------
+# TestDetectMalformedResult
+# ---------------------------------------------------------------------------
+
+
+class TestDetectMalformedResult:
+    """Test detection of malformed model output (leaked XML, disproportionately short)."""
+
+    def test_normal_text_passes(self):
+        assert detect_malformed_result("Here are three painting studios in Lisbon...") is None
+
+    def test_short_normal_text_passes(self):
+        assert detect_malformed_result("Done.") is None
+
+    def test_empty_string_passes(self):
+        assert detect_malformed_result("") is None
+
+    def test_none_passes(self):
+        assert detect_malformed_result(None) is None
+
+    def test_whitespace_only_passes(self):
+        assert detect_malformed_result("   \n  ") is None
+
+    def test_xml_parameter_close_detected(self):
+        result = detect_malformed_result("</parameter>\n</invoke>")
+        assert result is not None
+        assert "leaked tool-call XML" in result
+
+    def test_xml_invoke_close_detected(self):
+        result = detect_malformed_result("</invoke>")
+        assert result is not None
+        assert "leaked tool-call XML" in result
+
+    def test_xml_invoke_open_detected(self):
+        result = detect_malformed_result("<invoke name='foo'>")
+        assert result is not None
+        assert "leaked tool-call XML" in result
+
+    def test_antml_prefix_detected(self):
+        result = detect_malformed_result("</thinking>")
+        assert result is not None
+        assert "leaked tool-call XML" in result
+
+    def test_parameter_open_detected(self):
+        result = detect_malformed_result("<parameter name='path'>")
+        assert result is not None
+        assert "leaked tool-call XML" in result
+
+    def test_xml_in_long_response_passes(self):
+        """XML patterns embedded in a substantive response should not trigger detection."""
+        text = (
+            "The model produced an error with </parameter> tags. "
+            "This is a known issue when context pressure causes the model to emit "
+            "raw XML fragments instead of coherent responses. Here is the analysis..."
+        )
+        assert detect_malformed_result(text) is None
+
+    def test_proportionality_many_tools_short_result(self):
+        result = detect_malformed_result("Ok", tool_count=15)
+        assert result is not None
+        assert "too short for tool count" in result
+
+    def test_proportionality_many_tools_long_result_passes(self):
+        text = "Here are the results of my research. " * 10
+        assert detect_malformed_result(text, tool_count=15) is None
+
+    def test_proportionality_few_tools_short_result_passes(self):
+        assert detect_malformed_result("Ok", tool_count=3) is None
+
+    def test_proportionality_zero_tools_passes(self):
+        assert detect_malformed_result("Ok", tool_count=0) is None
+
+    def test_proportionality_at_threshold(self):
+        # 10 tools, threshold=10, min_chars_per_tool=5 → need 50 chars
+        assert detect_malformed_result("x" * 49, tool_count=10) is not None
+        assert detect_malformed_result("x" * 50, tool_count=10) is None
+
+    def test_custom_thresholds(self):
+        result = detect_malformed_result(
+            "short", tool_count=5,
+            tool_count_threshold=5, min_chars_per_tool=10,
+        )
+        assert result is not None
+        assert "too short" in result
+
+    # --- Strict mode (output_target="talk") ---
+
+    def test_talk_xml_in_prose_detected(self):
+        """XML patterns embedded in prose should be caught in strict Talk mode."""
+        text = (
+            "The model produced an error with </parameter> tags. "
+            "This is a known issue when context pressure causes problems."
+        )
+        # Non-strict: passes (enough non-syntax content)
+        assert detect_malformed_result(text) is None
+        # Strict (Talk): flagged
+        result = detect_malformed_result(text, output_target="talk")
+        assert result is not None
+        assert "Talk output" in result
+
+    def test_talk_xml_in_code_fence_passes(self):
+        """XML patterns inside code fences should not trigger in strict mode."""
+        text = (
+            "Here's an example of the XML format:\n\n"
+            "```xml\n<parameter name='path'>/foo</parameter>\n```\n\n"
+            "This shows the structure."
+        )
+        assert detect_malformed_result(text, output_target="talk") is None
+
+    def test_talk_clean_markdown_passes(self):
+        """Normal markdown should not trigger strict mode."""
+        text = "## Results\n\n- Item one\n- Item two\n\nHere's a **bold** conclusion."
+        assert detect_malformed_result(text, output_target="talk") is None
+
+    def test_talk_xml_outside_fence_with_fenced_xml_detected(self):
+        """XML outside code fences should be caught even if fenced XML exists."""
+        text = (
+            "```xml\n<parameter>ok</parameter>\n```\n\n"
+            "And then </invoke> happened."
+        )
+        result = detect_malformed_result(text, output_target="talk")
+        assert result is not None
+
+    def test_both_target_uses_strict_mode(self):
+        text = "Something </invoke> happened"
+        assert detect_malformed_result(text, output_target="both") is not None
+
+    def test_all_target_uses_strict_mode(self):
+        text = "Something </invoke> happened"
+        assert detect_malformed_result(text, output_target="all") is not None
+
+    def test_email_target_uses_lenient_mode(self):
+        """Email target should use lenient mode (XML patterns allowed in longer text)."""
+        text = (
+            "The model produced an error with </parameter> tags. "
+            "This is a known issue when context pressure causes problems."
+        )
+        assert detect_malformed_result(text, output_target="email") is None

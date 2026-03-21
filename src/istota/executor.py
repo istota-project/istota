@@ -52,6 +52,61 @@ API_RETRY_DELAY_SECONDS = 5
 _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"})
 
 
+# Patterns that indicate leaked tool-call XML in model output.
+# These are Claude Code's internal framing and should never appear in user-facing text.
+_TOOL_SYNTAX_PATTERN = re.compile(
+    r"</parameter>|</invoke>|<invoke\s|<parameter\s|</?antml:|</?thinking>",
+)
+
+# Matches fenced code blocks (``` ... ```) to strip before strict checking
+_CODE_FENCE_PATTERN = re.compile(r"```[\s\S]*?```")
+
+
+def detect_malformed_result(
+    text: str,
+    tool_count: int = 0,
+    tool_count_threshold: int = 10,
+    min_chars_per_tool: int = 5,
+    output_target: str | None = None,
+) -> str | None:
+    """Detect model output that is leaked tool-call syntax or disproportionately short.
+
+    When output_target is "talk" (or "both"/"all"), applies stricter checking:
+    Talk output should be valid markdown, so any tool-call XML outside of code
+    fences is flagged regardless of how much other content surrounds it.
+
+    Returns a reason string if malformed, None if the result looks okay.
+    """
+    if not text or not text.strip():
+        return None
+
+    stripped = text.strip()
+    strict = output_target in ("talk", "both", "all")
+
+    # Check for leaked tool-call XML syntax
+    if strict:
+        # Strip code fences first — XML in code blocks is fine
+        outside_fences = _CODE_FENCE_PATTERN.sub("", stripped)
+        if _TOOL_SYNTAX_PATTERN.search(outside_fences):
+            return f"leaked tool-call XML in Talk output ({len(stripped)} chars)"
+    else:
+        if _TOOL_SYNTAX_PATTERN.search(stripped):
+            # Only flag if the entire content is syntax fragments
+            non_syntax = _TOOL_SYNTAX_PATTERN.sub("", stripped).strip()
+            if len(non_syntax) < 20:
+                return f"leaked tool-call XML ({len(stripped)} chars, {len(non_syntax)} chars of non-syntax content)"
+
+    # Proportionality: flag suspiciously short results relative to tool call count
+    if tool_count >= tool_count_threshold:
+        if len(stripped) < min_chars_per_tool * tool_count:
+            return (
+                f"result too short for tool count ({len(stripped)} chars, "
+                f"{tool_count} tool calls, threshold {min_chars_per_tool * tool_count})"
+            )
+
+    return None
+
+
 def _pre_transcribe_attachments(
     attachments: list[str] | None,
     prompt: str,

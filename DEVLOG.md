@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-21: Malformed model output detection (ISSUE-019, partial)
+
+Added validation layer between Claude Code's result and task completion. Under heavy context pressure (23 tool calls, 187K chars), the model can emit raw XML fragments instead of a response. Previously this was accepted as a successful completion and delivered to the user.
+
+**Key changes:**
+- `detect_malformed_result()` function with strict mode for Talk (any tool-call XML outside code fences) and lenient mode for other targets (only flags when entire output is fragments)
+- Proportionality heuristic flags results that are too short relative to tool call count (10+ tools threshold)
+- Scheduler guard after the existing API error guard; malformed results route through existing retry logic (exponential backoff, 3 attempts)
+- Result quality metrics logging (chars, tool count) for all completed tasks
+- Task ID (`#<id>`) appended to ack messages and "Done" summaries for traceability
+
+**Deferred:** stream-level detection in parser (E), model-based validation gate with Sonnet/Haiku (F)
+
+**Files modified:**
+- `src/istota/executor.py` — Added `detect_malformed_result()`, `_TOOL_SYNTAX_PATTERN`, `_CODE_FENCE_PATTERN`
+- `src/istota/scheduler.py` — Malformed result guard, quality logging, task ID in ack/done messages
+- `tests/test_executor.py` — 24 tests (`TestDetectMalformedResult`)
+- `tests/test_scheduler.py` — 7 tests (`TestMalformedResultGuard`, `TestTaskIdInProgress`)
+
 ## 2026-03-21: Miniflux migration — replace built-in feed polling with Miniflux
 
 Migrated the feed system from direct RSS/Tumblr/Are.na polling (feed_poller.py, SQLite storage) to Miniflux as the RSS aggregator. Non-RSS services (Tumblr, Are.na) are bridged via a standalone FastAPI app (rss-bridger) that converts API responses to standard Atom feeds Miniflux can subscribe to.
