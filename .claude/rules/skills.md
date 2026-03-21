@@ -85,7 +85,7 @@ Returns sorted list of skill names.
 | `location` | — | location, gps, where, place, tracking, ... | — | — |
 | `bookmarks` | — | bookmark, karakeep, save, read later, ... | karakeep | — |
 | `website` | — | website, site, publish, blog, ... | — | — |
-| `feeds_config` | — | feed, rss, subscribe, ... | — | — |
+| `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe | miniflux | — |
 
 ## Skill CLI Modules (`src/istota/skills/`)
 

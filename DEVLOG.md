@@ -2,6 +2,46 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-21: Miniflux migration — replace built-in feed polling with Miniflux
+
+Migrated the feed system from direct RSS/Tumblr/Are.na polling (feed_poller.py, SQLite storage) to Miniflux as the RSS aggregator. Non-RSS services (Tumblr, Are.na) are bridged via a standalone FastAPI app (rss-bridger) that converts API responses to standard Atom feeds Miniflux can subscribe to.
+
+**Key changes:**
+- New `feeds` skill with Miniflux API CLI (list, add, remove, categories, entries, refresh)
+- New `miniflux` resource type following the karakeep pattern (base_url + api_key per user)
+- Static HTML page generation now pulls from Miniflux API instead of local DB
+- Image extraction from HTML content as fallback when no enclosures present
+- Duplicate image stripping (content images matching card image removed from excerpt)
+- Title overlay bar for image cards (visible without clipping)
+- Meta date links to original item URL
+- Credential isolation: MINIFLUX_API_KEY routed through skill proxy
+- Network allowlist: Miniflux host added when feeds skill selected
+- Removed: feed_poller.py, FeedState/FeedItem DB models, feed_state/feed_items tables, feedparser/requests deps, feeds_config skill
+- Config: `feed_check_interval` renamed to `feed_page_regen_interval`, `feed_item_retention_days` removed
+
+**New project:** `~/Repos/rss-bridger` — FastAPI bridge app with Tumblr and Are.na providers, deployed via miniflux Ansible role.
+
+**Files added:**
+- `src/istota/feeds.py` — Miniflux API client + HTML page generation (preserved from feed_poller.py)
+- `src/istota/skills/feeds/` — skill.toml, skill.md, CLI (__init__.py, __main__.py)
+- `tests/test_feeds.py` — 36 tests (mapping, HTML generation, page regeneration)
+- `tests/test_feeds_skill.py` — 13 tests (CLI subcommands)
+
+**Files removed:**
+- `src/istota/feed_poller.py`, `tests/test_feed_poller.py`, `src/istota/skills/feeds_config/`
+
+**Files modified:**
+- `src/istota/executor.py` — Miniflux env vars, proxy credentials, network allowlist
+- `src/istota/scheduler.py` — Replaced feed poll with page regeneration, removed feed cleanup
+- `src/istota/config.py` — Renamed feed_check_interval, removed feed_item_retention_days
+- `src/istota/db.py` — Removed feed dataclasses and functions
+- `src/istota/storage.py` — Removed get_user_feeds_path
+- `src/istota/skill_proxy.py` — Added feeds to allowed skills
+- `schema.sql` — Removed feed_state and feed_items tables
+- `pyproject.toml` — Removed feedparser and requests from core deps
+- `deploy/ansible/` — Updated defaults, config template, user template (miniflux resource)
+- `deploy/render_config.py`, `docker/istota/entrypoint.sh` — Config field renames
+
 ## 2026-03-20: Sleep cycle memory extraction quality (ISSUE-018)
 
 The nightly sleep cycle was producing thin, lossy memories. Five compounding problems: fixed 2K/3K per-task truncation cut off conclusions, no conversation threading, no significance weighting, conservative extraction prompt, and Sonnet's aggressive compression.

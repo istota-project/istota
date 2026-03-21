@@ -236,6 +236,7 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "SMTP_PASSWORD",
     "IMAP_PASSWORD",
     "KARAKEEP_API_KEY",
+    "MINIFLUX_API_KEY",
     "GITLAB_TOKEN",
     "GITHUB_TOKEN",
     "GARMIN_EMAIL",
@@ -252,6 +253,7 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "SMTP_PASSWORD": frozenset({"email"}),
     "IMAP_PASSWORD": frozenset({"email"}),
     "KARAKEEP_API_KEY": frozenset({"bookmarks"}),
+    "MINIFLUX_API_KEY": frozenset({"feeds"}),
     "GITLAB_TOKEN": frozenset({"developer"}),
     "GITHUB_TOKEN": frozenset({"developer"}),
     "GARMIN_EMAIL": frozenset({"garmin"}),
@@ -281,6 +283,19 @@ def _build_network_allowlist(config: Config, selected_skills: list[str]) -> set[
         hosts |= _PYPI_HOSTS
 
     hosts.update(config.security.network.extra_hosts)
+
+    # Feeds skill: add Miniflux host
+    if "feeds" in selected_skills:
+        from urllib.parse import urlparse
+
+        for _uid, uc in config.users.items():
+            for rc in uc.resources:
+                if rc.type == "miniflux" and rc.base_url:
+                    parsed = urlparse(rc.base_url)
+                    host = parsed.hostname
+                    port = parsed.port or 443
+                    if host:
+                        hosts.add(f"{host}:{port}")
 
     # Developer skill: add git remote hosts from config
     if "developer" in selected_skills and config.developer.enabled:
@@ -1849,6 +1864,16 @@ def execute_task(
                 # Use the first karakeep resource entry
                 env["KARAKEEP_BASE_URL"] = karakeep_resources[0].base_url
                 env["KARAKEEP_API_KEY"] = karakeep_resources[0].api_key
+
+        # Miniflux feeds (per-user API credentials from resource config)
+        if user_config:
+            miniflux_resources = [
+                rc for rc in user_config.resources
+                if rc.type == "miniflux" and rc.base_url and rc.api_key
+            ]
+            if miniflux_resources:
+                env["MINIFLUX_BASE_URL"] = miniflux_resources[0].base_url
+                env["MINIFLUX_API_KEY"] = miniflux_resources[0].api_key
 
         # Developer skill (git + GitLab/GitHub workflows)
         # When the skill proxy is enabled, tokens are fetched at runtime via

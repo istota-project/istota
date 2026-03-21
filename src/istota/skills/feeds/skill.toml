@@ -1,0 +1,17 @@
+[skill]
+description = "RSS feed management via Miniflux"
+keywords = ["feed", "feeds", "rss", "subscribe", "subscription", "add feed", "remove feed", "unsubscribe"]
+resource_types = ["miniflux"]
+cli = true
+
+[[env]]
+var = "MINIFLUX_BASE_URL"
+from = "user_resource_config"
+resource_type = "miniflux"
+field = "base_url"
+
+[[env]]
+var = "MINIFLUX_API_KEY"
+from = "user_resource_config"
+resource_type = "miniflux"
+field = "api_key"
