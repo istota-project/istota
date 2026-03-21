@@ -64,12 +64,9 @@ _CODE_FENCE_PATTERN = re.compile(r"```[\s\S]*?```")
 
 def detect_malformed_result(
     text: str,
-    tool_count: int = 0,
-    tool_count_threshold: int = 10,
-    min_chars_per_tool: int = 5,
     output_target: str | None = None,
 ) -> str | None:
-    """Detect model output that is leaked tool-call syntax or disproportionately short.
+    """Detect model output that is leaked tool-call XML rather than a real response.
 
     When output_target is "talk" (or "both"/"all"), applies stricter checking:
     Talk output should be valid markdown, so any tool-call XML outside of code
@@ -95,14 +92,6 @@ def detect_malformed_result(
             non_syntax = _TOOL_SYNTAX_PATTERN.sub("", stripped).strip()
             if len(non_syntax) < 20:
                 return f"leaked tool-call XML ({len(stripped)} chars, {len(non_syntax)} chars of non-syntax content)"
-
-    # Proportionality: flag suspiciously short results relative to tool call count
-    if tool_count >= tool_count_threshold:
-        if len(stripped) < min_chars_per_tool * tool_count:
-            return (
-                f"result too short for tool count ({len(stripped)} chars, "
-                f"{tool_count} tool calls, threshold {min_chars_per_tool * tool_count})"
-            )
 
     return None
 

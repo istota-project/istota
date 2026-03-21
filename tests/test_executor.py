@@ -2947,34 +2947,6 @@ class TestDetectMalformedResult:
         )
         assert detect_malformed_result(text) is None
 
-    def test_proportionality_many_tools_short_result(self):
-        result = detect_malformed_result("Ok", tool_count=15)
-        assert result is not None
-        assert "too short for tool count" in result
-
-    def test_proportionality_many_tools_long_result_passes(self):
-        text = "Here are the results of my research. " * 10
-        assert detect_malformed_result(text, tool_count=15) is None
-
-    def test_proportionality_few_tools_short_result_passes(self):
-        assert detect_malformed_result("Ok", tool_count=3) is None
-
-    def test_proportionality_zero_tools_passes(self):
-        assert detect_malformed_result("Ok", tool_count=0) is None
-
-    def test_proportionality_at_threshold(self):
-        # 10 tools, threshold=10, min_chars_per_tool=5 → need 50 chars
-        assert detect_malformed_result("x" * 49, tool_count=10) is not None
-        assert detect_malformed_result("x" * 50, tool_count=10) is None
-
-    def test_custom_thresholds(self):
-        result = detect_malformed_result(
-            "short", tool_count=5,
-            tool_count_threshold=5, min_chars_per_tool=10,
-        )
-        assert result is not None
-        assert "too short" in result
-
     # --- Strict mode (output_target="talk") ---
 
     def test_talk_xml_in_prose_detected(self):

@@ -1180,15 +1180,9 @@ def process_one_task(
         )
         success = False
 
-    # Guard: detect malformed model output (leaked XML syntax, disproportionately short)
+    # Guard: detect malformed model output (leaked tool-call XML syntax)
     if success:
-        tool_count = 0
-        if actions_taken:
-            try:
-                tool_count = len(json.loads(actions_taken))
-            except (json.JSONDecodeError, TypeError):
-                pass
-        malformed_reason = detect_malformed_result(result, tool_count=tool_count, output_target=target)
+        malformed_reason = detect_malformed_result(result, output_target=target)
         if malformed_reason:
             logger.warning(
                 "Task %d: malformed result detected (%s), treating as failure",

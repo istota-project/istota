@@ -3759,22 +3759,6 @@ class TestMalformedResultGuard:
         assert task.status == "pending"
         assert task.attempt_count == 1
 
-    @patch("istota.scheduler.execute_task")
-    @patch("istota.scheduler.asyncio.run", return_value=None)
-    def test_disproportionate_result_flips_to_failure(self, mock_arun, mock_exec, db_path, tmp_path):
-        """Very short result with many tool calls should be treated as failure."""
-        actions = json.dumps(["action"] * 15)
-        mock_exec.return_value = (True, "Ok", actions)
-        config = self._make_config(db_path, tmp_path)
-
-        with db.get_db(db_path) as conn:
-            db.create_task(conn, prompt="Research topic", user_id="testuser", source_type="talk")
-
-        result = process_one_task(config)
-        assert result is not None
-        task_id, success = result
-        assert success is False
-
     @patch("istota.scheduler.execute_task", return_value=(True, "Here is your morning briefing with details...", None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_normal_result_not_affected(self, mock_arun, mock_exec, db_path, tmp_path):
