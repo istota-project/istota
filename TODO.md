@@ -254,10 +254,12 @@
 
 ### Malformed Output Detection (ISSUE-019)
 - [x] Result content validation guard (leaked tool-call XML, strict mode for Talk)
-- [x] Proportionality heuristic (short result vs tool call count)
+- [x] ~~Proportionality heuristic~~ (removed — false positives outweighed benefit)
 - [x] Automatic retry on malformed output (existing retry logic)
 - [x] Result quality metrics logging
 - [x] Task ID in ack messages and done summaries
+- [x] Execution trace collection and `!more #<task_id>` command for post-hoc inspection
+- [x] Result composition from streaming output (`_compose_full_result` recovers lost text blocks)
 - [ ] Stream-level detection in parser (MalformedOutputEvent)
 - [ ] Model-based result validation gate (Sonnet/Haiku for high-tool-count tasks)
 
@@ -320,7 +322,7 @@
 - [x] Credential isolation via skill proxy (Unix socket, strips secrets from Claude's env)
 - [x] Skill proxy phase 2: GITLAB_TOKEN, GITHUB_TOKEN (credential-fetch helper + proxy-aware shell scripts)
 - [x] Fix skill proxy socket visibility inside bwrap sandbox (bind-mount from /tmp)
-- [x] Per-skill credential scoping (credential-fetch and skill CLI env limited to selected skills' needs)
+- [x] Per-skill credential scoping (proxy injects per-skill, but all CLI skills get credentials regardless of selection)
 - [x] OAuth token hardening (removed env var passthrough, RO .credentials.json mount)
 - [x] .developer/ scripts mounted read-only (prevent credential-fetch script replacement)
 - [x] Admin Nextcloud mount scoped to user dir (was full content tree)
