@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-22: v0.5.0 release — documentation sweep
+
+Updated all architecture documentation to reflect the last week of changes. Bumped version to 0.5.0 and tagged the release.
+
+**Key changes:**
+- Updated AGENTS.md: `!more` command, `miniflux` resource type, execution traces, malformed output detection, credential proxy decoupling, sleep cycle improvements, `feeds.py` in project structure
+- Updated executor.md: 4-tuple return type (`execution_trace`), output validation section (`detect_malformed_result`, `_compose_full_result`), stream parsing changes
+- Updated scheduler.md: malformed output guard in task flow, `execution_trace` column, `feed_page_regen_interval`, feed page regen in daemon loop
+- Updated config.md: fixed stale scheduler reference, added `miniflux` resource type, fixed `_index.toml` → `skill.toml`
+- Updated skills.md: `feeds/` CLI docs, `select_skills()` signature with `disabled_skills`, `feeds.py` top-level library reference
+- Updated README.md: Miniflux feeds description, test count
+
+**Files modified:**
+- `AGENTS.md`, `README.md` — Architecture and feature descriptions
+- `.claude/rules/executor.md` — Executor internals
+- `.claude/rules/scheduler.md` — Scheduler and DB internals
+- `.claude/rules/config.md` — Config module docs
+- `.claude/rules/skills.md` — Skills system docs
+- `pyproject.toml` — Version bump to 0.5.0
+
 ## 2026-03-21: Fix false captcha detection on passive reCAPTCHA
 
 The browse skill's captcha detection was triggering on sites using passive reCAPTCHA (v2 invisible / v3). These load a small visible badge iframe (e.g. 256x60) that matched the `google.com/recaptcha` iframe URL check, causing the API to return `{"status": "captcha"}` even though the page was fully accessible.
