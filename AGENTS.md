@@ -27,12 +27,13 @@ istota/
 │   ├── nextcloud_api.py     # Nextcloud API user metadata hydration
 │   ├── nextcloud_client.py  # Shared Nextcloud HTTP plumbing (OCS + WebDAV)
 │   ├── notifications.py     # Central notification dispatcher (Talk, Email, ntfy)
+│   ├── feeds.py             # Miniflux API client + HTML feed page generation
 │   ├── scheduler.py         # Task processor, briefing scheduler, all polling
 │   ├── shared_file_organizer.py # Auto-organize files shared with bot
 │   ├── sleep_cycle.py       # Nightly memory extraction
 │   ├── storage.py           # Bot-managed Nextcloud storage
 │   ├── stream_parser.py     # Parse stream-json events
-│   ├── commands.py          # !command dispatch (help, stop, status, memory, cron, skills, usage, check, export)
+│   ├── commands.py          # !command dispatch (help, stop, status, memory, cron, skills, usage, check, export, more)
 │   ├── talk.py              # Nextcloud Talk API client (user API)
 │   ├── talk_poller.py       # Talk conversation polling
 │   ├── tasks_file_poller.py # TASKS.md file monitoring
@@ -107,7 +108,7 @@ GPS Webhook ──► Location DB → Place detection → Notifications (ntfy/Ta
 - **Email poller**: Polls INBOX via imap-tools, creates tasks from known senders. Unknown senders are thread-matched against `sent_emails` — replies to bot-initiated threads route to the originating user via Talk.
 - **Task queue** (`db.py`): Atomic locking with `user_id` filter, retry logic (exponential backoff: 1, 4, 16 min)
 - **Scheduler**: Per-user threaded worker pool. Three-tier concurrency: instance-level fg/bg caps, per-user limits. Workers keyed by `(user_id, queue_type, slot)`.
-- **Executor**: Builds prompts (resources + skills + context + memory), invokes Claude Code via `Popen` with `--output-format stream-json`. Auto-retries transient API errors (5xx, 429) up to 3 times.
+- **Executor**: Builds prompts (resources + skills + context + memory), invokes Claude Code via `Popen` with `--output-format stream-json`. Auto-retries transient API errors (5xx, 429) up to 3 times. Validates output for malformed model responses (leaked tool-call XML) and collects execution traces for post-hoc inspection.
 - **Context** (`context.py`): Hybrid triage — recent N messages always included, older messages selected by LLM
 - **Storage** (`storage.py`): Bot-owned Nextcloud directories and user memory files
 
@@ -119,7 +120,7 @@ Admin users listed in `/etc/istota/admins`. Empty file = all users are admin (ba
 Non-admin restrictions: scoped mount path, no DB access, no subtask creation, `admin_only` skills filtered out.
 
 ### Multi-user Resources
-Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`, `karakeep`, `garmin`, `monarch`. CalDAV calendars auto-discovered from Nextcloud. Service credentials (Garmin, Monarch, Karakeep) are configured as `[[resources]]` entries with type-specific fields in `extra`.
+Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`, `karakeep`, `garmin`, `monarch`, `miniflux`. CalDAV calendars auto-discovered from Nextcloud. Service credentials (Garmin, Monarch, Karakeep, Miniflux) are configured as `[[resources]]` entries with type-specific fields in `extra`.
 
 ### Nextcloud Directory Structure
 
@@ -154,7 +155,7 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 - Progress updates: random ack before execution, streaming progress (rate-limited: min 8s, max 5/task). `progress_style`: `replace` (edit ack in-place with elapsed time, default), `full` (accumulated tool descriptions), `legacy` (post individual progress messages), `none` (silent). Optional `progress_show_text` for intermediate assistant text.
 - Per-user log channel (`log_channel` config): verbose tool-by-tool execution logs posted to a dedicated Talk room
 - Multi-user rooms: only responds when @mentioned; 2-person rooms behave like DMs
-- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`, `!export` (conversation history export), `!skills` (list available skills)
+- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`, `!export` (conversation history export), `!skills` (list available skills), `!more #<task_id>` (show execution trace)
 - Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no
 
 ### Skills
@@ -182,7 +183,7 @@ Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user's tim
 Defined in user's `CRON.md` (markdown with TOML `[[jobs]]`). Job types: `prompt` (Claude Code), `prompt_file` (prompt loaded from external file), or `command` (shell). `prompt_file` paths are relative to the Nextcloud mount root and resolved at load time. One-time jobs (`once = true`) auto-deleted after success. Auto-disable after 5 consecutive failures. Results excluded from interactive context. Per-job `skip_log_channel = true` suppresses log channel output for frequent jobs.
 
 ### Sleep Cycle
-Nightly memory extraction (direct subprocess). Gathers completed tasks → Claude extracts memories → writes dated memory files with task provenance (`ref:TASK_ID`). Channel sleep cycle runs in parallel for shared context. Optional USER.md curation pass (`curate_user_memory`). Config: `[sleep_cycle]`, `[channel_sleep_cycle]`.
+Nightly memory extraction (direct subprocess). Gathers completed tasks → Claude extracts memories → writes dated memory files with task provenance (`ref:TASK_ID`). Channel sleep cycle runs in parallel for shared context. Optional USER.md curation pass (`curate_user_memory`). Task data uses tail-biased truncation (40% head + 60% tail) to preserve conclusions, with dynamic per-task budget allocation proportional to content length. Tasks sharing a conversation are grouped as threads. Config: `[sleep_cycle]`, `[channel_sleep_cycle]`.
 
 ### Heartbeat Monitoring
 User-defined health checks in `HEARTBEAT.md`. Types: `file-watch`, `shell-command`, `url-health`, `calendar-conflicts`, `task-deadline`, `self-check`. Cooldown, check intervals, and quiet hours supported.
@@ -216,7 +217,7 @@ When `[security.network] enabled`, each task's sandbox gets `--unshare-net` (own
 Default allowlist: `api.anthropic.com:443`, `mcp-proxy.anthropic.com:443` (Claude API), `pypi.org:443`, `files.pythonhosted.org:443` (package installs, configurable via `allow_pypi`). Git remote hosts added from `[developer]` config when the developer skill is selected. Operator extras via `extra_hosts`. No MITM — TLS is end-to-end. Config: `[security.network]` section.
 
 ### Credential Isolation (Skill Proxy)
-When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, GARMIN_EMAIL, GARMIN_PASSWORD, MONARCH_SESSION_TOKEN) are stripped from Claude's env. Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread, which injects credentials server-side. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled. Config: `[security]` section, `skill_proxy_enabled`, `skill_proxy_timeout`.
+When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, MINIFLUX_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, GARMIN_EMAIL, GARMIN_PASSWORD, MONARCH_SESSION_TOKEN) are stripped from Claude's env. Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread, which injects credentials server-side. All CLI-capable skills get their credentials through the proxy regardless of whether they were selected for the current task — skill selection controls which docs are loaded, not credential access. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled. Config: `[security]` section, `skill_proxy_enabled`, `skill_proxy_timeout`.
 
 ### Deferred DB Operations
 With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR`). Scheduler processes after successful completion. Patterns: `task_{id}_subtasks.json`, `task_{id}_tracked_transactions.json`, `task_{id}_email_output.json`, `task_{id}_sent_emails.json`.
@@ -228,7 +229,7 @@ With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR
 
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2725 tests across 53 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2720 tests across 53 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests

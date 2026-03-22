@@ -23,6 +23,7 @@ def run_daemon(config: Config) -> None
    - Run cleanup checks (every `briefing_check_interval`)
    - Check heartbeats (every `heartbeat_check_interval`)
    - Check invoice schedules (every `briefing_check_interval`)
+   - Regenerate feed pages from Miniflux (every `feed_page_regen_interval`)
    - `pool.dispatch()`
    - Sleep `poll_interval`
 8. Shutdown workers, release lock
@@ -40,10 +41,11 @@ def process_one_task(config: Config, dry_run: bool = False, user_id: str | None 
 1. `claim_task()` with user_id filter → None if nothing
 2. Update to `running`
 3. Get user resources, send Talk ack, download attachments
-4. `execute_task()` → (success, result, actions_taken)
+4. `execute_task()` → (success, result, actions_taken, execution_trace)
 5. **Success path**:
+   - Check malformed output (`detect_malformed_result()`) → reclassify as failure and retry
    - Check confirmation request (regex `CONFIRMATION_PATTERN`)
-   - Update to `completed` with `actions_taken`
+   - Update to `completed` with `actions_taken` and `execution_trace`
    - Index conversation for memory search
    - Handle heartbeat results / silent scheduled jobs
    - Deliver results
@@ -155,6 +157,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `max_retry_age_minutes` | 60 | Max age for retry |
 | `stale_pending_fail_hours` | 2 | Ancient task auto-fail |
 | `task_retention_days` | 7 | Task cleanup |
+| `feed_page_regen_interval` | 300s | Feed page regeneration from Miniflux |
 | `scheduled_job_max_consecutive_failures` | 5 | Auto-disable threshold |
 
 ## Other Scheduler Functions
@@ -180,7 +183,7 @@ After task completion, if enabled + `auto_index_conversations`:
 
 | Table | Dataclass | Key Columns |
 |---|---|---|
-| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, actions_taken |
+| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, actions_taken, execution_trace |
 | `user_resources` | `UserResource` | id, user_id, resource_type, resource_path, display_name, permissions |
 | `briefing_configs` | `BriefingConfig` | id, user_id, name, cron_expression, conversation_token, components (JSON), enabled |
 | `briefing_state` | — | user_id, briefing_name, last_run_at |
@@ -213,7 +216,7 @@ create_task(conn, prompt, user_id, source_type="cli", conversation_token=None,
 
 claim_task(conn, worker_id, max_retry_age_minutes=60, user_id=None) -> Task | None
 get_task(conn, task_id) -> Task | None
-update_task_status(conn, task_id, status, result=None, error=None, actions_taken=None) -> None
+update_task_status(conn, task_id, status, result=None, error=None, actions_taken=None, execution_trace=None) -> None
 set_task_pending_retry(conn, task_id, error, retry_delay_minutes) -> None
 set_task_confirmation(conn, task_id, confirmation_prompt) -> None
 confirm_task(conn, task_id) -> None

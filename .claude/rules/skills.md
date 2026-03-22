@@ -27,8 +27,8 @@ class SkillMeta:
 
 ### Functions
 ```python
-load_skill_index(skills_dir: Path) -> dict[str, SkillMeta]       # L24-43: Load _index.toml
-select_skills(prompt, source_type, user_resource_types, skill_index, is_admin=True) -> list[str]  # L46-89
+load_skill_index(skills_dir: Path) -> dict[str, SkillMeta]       # Load skill.toml manifests
+select_skills(prompt, source_type, user_resource_types, skill_index, is_admin=True, attachments=None, disabled_skills=None) -> list[str]
 compute_skills_fingerprint(skills_dir: Path) -> str               # L92-105: SHA-256, first 12 hex chars
 load_skills_changelog(skills_dir: Path) -> str | None             # L108-114: CHANGELOG.md
 load_skills(skills_dir: Path, skill_names: list[str]) -> str      # L117-130: Concatenate skill docs
@@ -147,10 +147,18 @@ Returns sorted list of skill names.
 **Subcommands**: `search`, `list`, `get`, `add`, `tags`, `tag`, `untag`, `lists`, `list-bookmarks`, `summarize`, `stats`
 **Env vars**: `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY`
 
+### `feeds/` - Miniflux RSS Feed Management
+**Subcommands**: `list`, `add`, `remove`, `categories`, `entries`, `refresh`
+**Env vars**: `MINIFLUX_BASE_URL`, `MINIFLUX_API_KEY`
+**Key fns**: `cmd_list()`, `cmd_add()`, `cmd_remove()`, `cmd_categories()`, `cmd_entries()`, `cmd_refresh()`
+
 ### Library-Only Modules (no CLI)
 - `files.py` - Nextcloud file ops (mount-aware, rclone fallback)
 - `invoicing.py` - Invoice generation, PDF export, cash-basis income
 - `finviz.py` - FinViz scraping for market data
+
+### Top-Level Library Modules (outside skills/)
+- `feeds.py` (`src/istota/feeds.py`) - Miniflux API client + HTML feed page generation (used by scheduler for periodic regen)
 
 ## How to Add a New Skill
 
