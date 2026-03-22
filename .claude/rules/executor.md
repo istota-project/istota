@@ -7,9 +7,9 @@ def execute_task(
     dry_run: bool = False, use_context: bool = True,
     conn: "db.sqlite3.Connection | None" = None,
     on_progress: Callable[[str], None] | None = None,
-) -> tuple[bool, str, str | None]:
+) -> tuple[bool, str, str | None, str | None]:
 ```
-Returns `(success, result_text, actions_taken_json)`. `actions_taken` is a JSON array of tool use descriptions from streaming execution, or `None` for simple/dry-run/error paths.
+Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `actions_taken` is a JSON array of tool use descriptions from streaming execution, or `None` for simple/dry-run/error paths. `execution_trace` is a JSON array of interleaved `{"type": "tool", "text": "..."}` and `{"type": "text", "text": "..."}` events, or `None`.
 
 ### Flow
 1. **Setup temp dir**: `config.temp_dir / task.user_id`
@@ -122,8 +122,9 @@ cmd += ["--output-format", "stream-json", "--verbose"]
 
 ## Stream Parsing (`_execute_streaming_once`)
 - Line-by-line from stdout via `parse_stream_line()`
-- Events: `ResultEvent` → final result, `ToolUseEvent` → progress, `TextEvent` → progress
+- Events: `ResultEvent` → final result, `ToolUseEvent` → progress + execution trace, `TextEvent` → progress + execution trace
 - Cancellation checked on each event via `db.is_task_cancelled()`
+- Result composition: `_compose_full_result()` detects when substantial text blocks (>= 200 chars) were emitted as intermediate text but not captured in the final `ResultEvent`, and prepends them to form the complete response
 - Result priority: ResultEvent > result file > stderr > fallback error
 
 ## Key Constants
@@ -139,6 +140,12 @@ cmd += ["--output-format", "stream-json", "--verbose"]
 | `build_allowed_tools(is_admin, skill_names)` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash"]`. All Bash allowed — clean env is the boundary. |
 | `_PROXY_CREDENTIAL_VARS` | Frozenset of specific env vars stripped when proxy enabled (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, MINIFLUX_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, GARMIN_EMAIL, GARMIN_PASSWORD, MONARCH_SESSION_TOKEN) |
 | `_CREDENTIAL_SKILL_MAP` | Maps each credential env var to the set of skills that need it (scopes proxy responses) |
+
+## Output Validation
+| Function | Purpose |
+|---|---|
+| `detect_malformed_result(text, tool_count, ...)` | Validates model output for leaked tool-call XML. Strict mode (Talk): any `</parameter>`, `</invoke>`, `<thinking>` outside code fences is flagged. Lenient mode (other targets): only flags when entire output is syntax fragments (< 20 chars of real content). Malformed results are reclassified as failures and retried. |
+| `_compose_full_result(result_text, execution_trace)` | Recovers substantial text blocks (>= 200 chars) emitted as intermediate assistant text but missing from the final `ResultEvent`. Deduplicates against existing result text. |
 
 ## Other Functions
 | Function | Purpose |

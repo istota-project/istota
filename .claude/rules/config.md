@@ -49,7 +49,7 @@ previous_tasks_count: int = 3       talk_context_limit: int = 100
 ```
 
 ### `SchedulerConfig`
-See `memory/scheduler.md` for full table of fields and defaults.
+See `.claude/rules/scheduler.md` for full table of fields and defaults.
 
 ### `SleepCycleConfig`
 ```
@@ -226,7 +226,7 @@ class UserResource:
     user_id: str
     resource_type: str      # "calendar", "folder", "todo_file", "email_folder",
                             # "reminders_file", "shared_file", "ledger",
-                            # "invoicing", "karakeep", "garmin", "monarch"
+                            # "invoicing", "karakeep", "garmin", "monarch", "miniflux"
     resource_path: str
     display_name: str | None
     permissions: str        # "read" or "readwrite"
@@ -264,5 +264,5 @@ Note: Uses `resource_name` field alias at executor.py L645 (historical quirk; fi
        env["MY_DATA_PATH"] = str(config.nextcloud_mount_path / my_data[0].resource_path.lstrip("/"))
    ```
 4. In `build_prompt()` (L180-242), add resource display section if user should see it
-5. In skill `_index.toml`, add `resource_types = ["my_data"]` to relevant skill
+5. In skill `skill.toml`, add `resource_types = ["my_data"]` to relevant skill
 6. Document in skill markdown file
