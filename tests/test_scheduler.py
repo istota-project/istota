@@ -2195,6 +2195,69 @@ class TestDeferredOperations:
         subtask = [t for t in tasks if t.source_type == "subtask"][0]
         assert subtask.queue == "background"
 
+    def test_process_deferred_subtasks_sets_output_target_from_conversation_token(self, db_path, tmp_path):
+        """Subtasks with conversation_token should default output_target to 'talk'."""
+        from istota.scheduler import _process_deferred_subtasks
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="Parent", user_id="alice", source_type="talk",
+                conversation_token="room1",
+            )
+            parent = db.get_task(conn, parent_id)
+
+        subtasks = [
+            # Explicit conversation_token → should get output_target="talk"
+            {"prompt": "Post to room", "conversation_token": "room2"},
+            # No conversation_token but parent has one → inherits, should get "talk"
+            {"prompt": "Inherit room"},
+            # Explicit output_target overrides default
+            {"prompt": "Email result", "conversation_token": "room1", "output_target": "email"},
+        ]
+        (user_temp / f"task_{parent_id}_subtasks.json").write_text(json.dumps(subtasks))
+
+        _process_deferred_subtasks(config, parent, user_temp)
+
+        with db.get_db(db_path) as conn:
+            tasks = db.list_tasks(conn, user_id="alice")
+        subtask_list = sorted(
+            [t for t in tasks if t.source_type == "subtask"],
+            key=lambda t: t.id,
+        )
+        assert len(subtask_list) == 3
+        assert subtask_list[0].output_target == "talk"
+        assert subtask_list[0].conversation_token == "room2"
+        assert subtask_list[1].output_target == "talk"
+        assert subtask_list[1].conversation_token == "room1"  # inherited from parent
+        assert subtask_list[2].output_target == "email"  # explicit override
+
+    def test_process_deferred_subtasks_no_output_target_without_conversation(self, db_path, tmp_path):
+        """Subtasks without conversation_token should not get output_target defaulted."""
+        from istota.scheduler import _process_deferred_subtasks
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="Parent", user_id="alice", source_type="cli",
+            )
+            parent = db.get_task(conn, parent_id)
+
+        subtasks = [{"prompt": "Silent work"}]
+        (user_temp / f"task_{parent_id}_subtasks.json").write_text(json.dumps(subtasks))
+
+        _process_deferred_subtasks(config, parent, user_temp)
+
+        with db.get_db(db_path) as conn:
+            tasks = db.list_tasks(conn, user_id="alice")
+        subtask = [t for t in tasks if t.source_type == "subtask"][0]
+        assert subtask.output_target is None
+        assert subtask.conversation_token is None
+
     def test_process_deferred_tracking_monarch(self, db_path, tmp_path):
         """Monarch synced entries should be tracked in DB."""
         from istota.scheduler import _process_deferred_tracking
