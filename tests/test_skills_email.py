@@ -94,8 +94,9 @@ class TestEmailOperations:
         result = list_emails(config=email_config)
         assert result[0].is_read is True
 
+    @patch("istota.skills.email.AND", create=True)
     @patch("istota.skills.email._get_mailbox")
-    def test_read_email(self, mock_get_mb, email_config):
+    def test_read_email(self, mock_get_mb, mock_and, email_config):
         mock_msg = _make_mock_message(
             uid="456",
             subject="Important",
