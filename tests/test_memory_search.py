@@ -131,7 +131,7 @@ class TestEmbedding:
 
     @patch("istota.memory_search._get_model")
     def test_embed_text_with_model(self, mock_model):
-        import numpy as np
+        np = pytest.importorskip("numpy")
         mock = MagicMock()
         mock.encode.return_value = np.array([0.1, 0.2, 0.3])
         mock_model.return_value = mock
@@ -151,7 +151,7 @@ class TestEmbedding:
 
     @patch("istota.memory_search._get_model")
     def test_embed_batch_with_model(self, mock_model):
-        import numpy as np
+        np = pytest.importorskip("numpy")
         mock = MagicMock()
         mock.encode.return_value = np.array([[0.1, 0.2], [0.3, 0.4]])
         mock_model.return_value = mock

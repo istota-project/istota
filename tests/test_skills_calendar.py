@@ -7,10 +7,13 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from istota.skills.calendar import (
+    Calendar,
     get_events, get_tomorrow_events, get_today_events,
     cmd_update, cmd_list, build_parser, main, _parse_datetime, _get_date_range,
     update_event,
 )
+
+_has_icalendar = Calendar is not None
 
 
 def _make_ical_allday(uid: str, summary: str, start_date: date, end_date: date) -> str:
@@ -51,6 +54,7 @@ def _mock_caldav_event(ical_str: str):
     return ev
 
 
+@pytest.mark.skipif(not _has_icalendar, reason="icalendar not installed")
 class TestAllDayEventFiltering:
     """Verify that all-day events outside the local date range are filtered out."""
 
