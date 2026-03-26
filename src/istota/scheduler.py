@@ -792,15 +792,20 @@ def _process_deferred_subtasks(
             prompt = entry.get("prompt", "")
             if not prompt:
                 continue
+            conv_token = entry.get("conversation_token", task.conversation_token)
+            output_target = entry.get("output_target")
+            if not output_target and conv_token:
+                output_target = "talk"
             db.create_task(
                 conn,
                 prompt=prompt,
                 user_id=task.user_id,
                 source_type="subtask",
                 parent_task_id=task.id,
-                conversation_token=entry.get("conversation_token", task.conversation_token),
+                conversation_token=conv_token,
                 priority=entry.get("priority", 5),
                 queue=task.queue,
+                output_target=output_target,
             )
             count += 1
 
