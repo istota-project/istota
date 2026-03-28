@@ -112,18 +112,22 @@ def garmin_login(email: str, password: str, token_dir: str) -> "garminconnect.Ga
     try:
         client = garminconnect.Garmin()
         client.login(token_dir)
+        print(f"[garmin] Token login succeeded from {token_dir}", file=sys.stderr)
         return client
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[garmin] Token login failed: {e}", file=sys.stderr)
 
     # Fall back to email/password
     client = garminconnect.Garmin(email, password)
     client.login()
+    print("[garmin] Password login succeeded", file=sys.stderr)
 
     try:
         client.garth.dump(token_dir)
-    except Exception:
-        pass  # Token caching is a best-effort optimisation
+        files = os.listdir(token_dir)
+        print(f"[garmin] Tokens dumped to {token_dir}: {files}", file=sys.stderr)
+    except Exception as e:
+        print(f"[garmin] Token dump failed: {e}", file=sys.stderr)
 
     return client
 
