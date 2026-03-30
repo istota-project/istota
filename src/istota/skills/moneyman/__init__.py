@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import subprocess
+from pathlib import Path
 import sys
 
 
@@ -26,6 +27,12 @@ def _run_cli(args: list[str]) -> dict:
     cli_path = os.environ["MONEYMAN_CLI_PATH"]
     user = os.environ.get("MONEYMAN_USER", "")
     config = os.environ.get("MONEYMAN_CONFIG", "")
+
+    # Default: config.toml next to the venv (cli_path/../../../config.toml)
+    if not config:
+        default_config = Path(cli_path).resolve().parent.parent.parent / "config.toml"
+        if default_config.exists():
+            config = str(default_config)
 
     cmd = [cli_path]
     if config:
