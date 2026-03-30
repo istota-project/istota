@@ -91,14 +91,6 @@ class TestMoneymanSkillManifest:
         assert "MONEYMAN_API_URL" in env_vars
         assert "MONEYMAN_API_KEY" in env_vars
 
-    def test_env_specs_no_socket(self, tmp_path):
-        from istota.skills._loader import load_skill_index
-
-        index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
-        meta = index["moneyman"]
-        env_vars = {spec.var for spec in meta.env_specs}
-        assert "MONEYMAN_API_SOCKET" not in env_vars
-
 
 class TestModeDetection:
     """Test _mode() transport selection."""

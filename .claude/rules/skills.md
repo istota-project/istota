@@ -157,8 +157,8 @@ Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skill
 
 ### `moneyman/` - Moneyman Accounting API Client
 **Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `add-transaction`, `sync-monarch`, `import-csv`, `invoice` (sub: `generate`, `list`, `paid`, `create`), `work` (sub: `list`, `add`, `update`, `remove`)
-**Env vars**: `MONEYMAN_API_URL`, `MONEYMAN_API_KEY`, `MONEYMAN_API_SOCKET` (Unix socket path, preferred over URL for sandbox access)
-**Note**: Thin httpx client wrapping the Moneyman REST API. Uses Unix socket transport when `MONEYMAN_API_SOCKET` is set (bypasses `--unshare-net` sandbox). Mutually exclusive with `accounting` skill.
+**Env vars**: `MONEYMAN_API_URL`, `MONEYMAN_API_KEY`
+**Note**: Dual-mode client — CLI subprocess (preferred, via `MONEYMAN_CLI_PATH`) or HTTP REST API. Mutually exclusive with `accounting` skill.
 
 ### Library-Only Modules (no CLI)
 - `files.py` - Nextcloud file ops (mount-aware, rclone fallback)
