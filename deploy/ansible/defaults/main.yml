@@ -231,6 +231,9 @@ istota_rclone_password_obscured: ""
 istota_use_nextcloud_mount: true
 istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 
+# Moneyman integration (local CLI access)
+istota_moneyman_group: ""  # set to "moneyman" to grant CLI + config read access
+
 # Browser container settings (for web browsing skill)
 istota_browser_enabled: false
 istota_browser_api_port: 9223
