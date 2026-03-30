@@ -95,8 +95,9 @@ output: str = "talk"         components: dict = {}
 
 ### `ResourceConfig`
 ```
-type: str                    path: str                   name: str = ""
-permissions: str = "read"    extra: dict = {}            # unrecognized TOML keys (credentials, etc.)
+type: str                    path: str = ""              name: str = ""
+permissions: str = "read"    base_url: str = ""          api_key: str = ""
+socket_path: str = ""        extra: dict = {}            # unrecognized TOML keys
 ```
 
 ### `UserConfig`

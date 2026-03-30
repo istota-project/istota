@@ -4,28 +4,36 @@
 
 ## 2026-03-30: Moneyman skill — API-based accounting
 
-Added a new `moneyman` skill that wraps the Moneyman REST API, replacing direct beancount file access with HTTP calls to a standalone accounting service. The old `accounting` skill remains available for users without a Moneyman instance. Also fixed a bug in the feeds skill.toml where a `[skill]` header prevented field loading.
+Added a new `moneyman` skill that wraps the Moneyman REST API (a standalone FastAPI service deployed separately), replacing direct beancount file access with HTTP calls. The old `accounting` skill remains available for users without a Moneyman instance. Also fixed a bug in the feeds skill.toml where a `[skill]` header prevented field loading.
+
+Production debugging revealed two issues: (1) skill keyword selection required adding `monarch`, `sync-monarch`, and `moneyman` as keywords since `select_skills` only picks resource-type skills when a keyword also matches, and (2) the bwrap sandbox's `--unshare-net` blocks localhost TCP connections, so the skill uses Unix domain socket transport (httpx `HTTPTransport(uds=...)`) with the socket bind-mounted into the sandbox.
 
 **Key changes:**
 - New `moneyman` skill: thin httpx client with CLI commands for ledger operations, transactions, invoicing, and work log management
-- Mutual exclusion with `accounting` skill via `exclude_skills` on both sides — users with a `moneyman` resource get the API skill, users with `ledger` resources keep the direct skill
-- Added `MONEYMAN_API_KEY` to credential proxy vars and skill credential map
-- Added moneyman host to network allowlist for sandbox isolation
-- Fixed feeds skill.toml: removed `[skill]` TOML header that caused keyword/resource_type fields to be ignored by the loader
+- Unix socket transport for sandbox-safe API access — socket bind-mounted RO into bwrap sandbox, bypasses network namespace
+- `ResourceConfig.socket_path` field for Unix socket paths on service resources
+- `build_bwrap_cmd` gains `extra_ro_binds` parameter for service sockets
+- Mutual exclusion with `accounting` skill via `exclude_skills` on both sides
+- `MONEYMAN_API_KEY` added to credential proxy vars and skill credential map
+- Moneyman Ansible role: API service (uvicorn on UDS), API key generation, socket group permissions
+- Fixed feeds skill.toml: removed `[skill]` TOML header that caused fields to be ignored by the loader
 
 **Files added:**
-- `src/istota/skills/moneyman/__init__.py` — httpx client with all CLI commands
+- `src/istota/skills/moneyman/__init__.py` — httpx client with UDS support
 - `src/istota/skills/moneyman/__main__.py` — entry point
 - `src/istota/skills/moneyman/skill.toml` — manifest with env var declarations
 - `src/istota/skills/moneyman/skill.md` — Claude documentation
-- `tests/test_skill_moneyman.py` — 34 tests
+- `tests/test_skill_moneyman.py` — 36 tests
 
 **Files modified:**
-- `src/istota/executor.py` — credential vars, skill map, network allowlist
+- `src/istota/executor.py` — credential vars, skill map, network allowlist, extra_ro_binds for UDS
+- `src/istota/config.py` — `socket_path` field on ResourceConfig
 - `src/istota/skill_proxy.py` — added moneyman to allowed skills
 - `src/istota/skills/accounting/skill.toml` — added `exclude_skills`
 - `src/istota/skills/feeds/skill.toml` — removed erroneous `[skill]` header
 - `config/users/alice.example.toml` — moneyman resource example
+- `deploy/ansible/defaults/main.yml` — moneyman resource with socket_path
+- `deploy/ansible/templates/user.toml.j2` — moneyman resource rendering
 
 ## 2026-03-22: v0.5.0 release — documentation sweep
 
