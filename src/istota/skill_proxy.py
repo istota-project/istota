@@ -29,6 +29,7 @@ _ALLOWED_SKILLS = frozenset({
     "location",
     "markets",
     "memory_search",
+    "moneyman",
     "nextcloud",
     "transcribe",
     "whisper",

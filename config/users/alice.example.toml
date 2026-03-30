@@ -74,6 +74,13 @@ invoicing_conversation_token = "room123"  # Talk room for invoice notifications
 # Per-user disabled skills (excluded from keyword matching and loading)
 # disabled_skills = ["browse", "whisper"]
 
+# Moneyman accounting service (replaces direct beancount access)
+# [[resources]]
+# type = "moneyman"
+# name = "Moneyman"
+# base_url = "http://127.0.0.1:8090"
+# api_key = "your-moneyman-api-key"
+
 # Garmin Connect credentials (server-side only, not synced to Nextcloud)
 # Can also use [garmin] section syntax (auto-converted to resource)
 # [[resources]]

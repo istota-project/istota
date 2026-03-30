@@ -351,6 +351,7 @@
 - [x] Dependency isolation: optional deps in extras groups, import guards, `!skills` availability display
 - [x] Service credentials as resources (garmin, monarch follow karakeep pattern with ResourceConfig.extra)
 - [x] Miniflux migration: feeds skill with CLI, miniflux resource type, bridger app for Tumblr/Are.na
+- [x] Moneyman skill: API-based accounting via standalone Moneyman service (mutual exclusion with direct beancount skill)
 - [ ] Config validation / "unconfigured" skill status (declarative credential requirements)
 
 ## Priority 5: Location Awareness (Phase 2+)

@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-30: Moneyman skill — API-based accounting
+
+Added a new `moneyman` skill that wraps the Moneyman REST API, replacing direct beancount file access with HTTP calls to a standalone accounting service. The old `accounting` skill remains available for users without a Moneyman instance. Also fixed a bug in the feeds skill.toml where a `[skill]` header prevented field loading.
+
+**Key changes:**
+- New `moneyman` skill: thin httpx client with CLI commands for ledger operations, transactions, invoicing, and work log management
+- Mutual exclusion with `accounting` skill via `exclude_skills` on both sides — users with a `moneyman` resource get the API skill, users with `ledger` resources keep the direct skill
+- Added `MONEYMAN_API_KEY` to credential proxy vars and skill credential map
+- Added moneyman host to network allowlist for sandbox isolation
+- Fixed feeds skill.toml: removed `[skill]` TOML header that caused keyword/resource_type fields to be ignored by the loader
+
+**Files added:**
+- `src/istota/skills/moneyman/__init__.py` — httpx client with all CLI commands
+- `src/istota/skills/moneyman/__main__.py` — entry point
+- `src/istota/skills/moneyman/skill.toml` — manifest with env var declarations
+- `src/istota/skills/moneyman/skill.md` — Claude documentation
+- `tests/test_skill_moneyman.py` — 34 tests
+
+**Files modified:**
+- `src/istota/executor.py` — credential vars, skill map, network allowlist
+- `src/istota/skill_proxy.py` — added moneyman to allowed skills
+- `src/istota/skills/accounting/skill.toml` — added `exclude_skills`
+- `src/istota/skills/feeds/skill.toml` — removed erroneous `[skill]` header
+- `config/users/alice.example.toml` — moneyman resource example
+
 ## 2026-03-22: v0.5.0 release — documentation sweep
 
 Updated all architecture documentation to reflect the last week of changes. Bumped version to 0.5.0 and tagged the release.

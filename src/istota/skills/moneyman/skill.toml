@@ -1,0 +1,17 @@
+description = "Accounting operations via Moneyman service (ledger, invoicing, transactions, work log)"
+keywords = ["accounting", "ledger", "beancount", "invoice", "invoicing", "expense", "transaction", "balance", "tax", "wash sale", "bookkeeping", "finances", "billing", "receivable", "work log", "work entry"]
+resource_types = ["moneyman"]
+exclude_skills = ["accounting"]
+cli = true
+
+[[env]]
+var = "MONEYMAN_API_URL"
+from = "user_resource_config"
+resource_type = "moneyman"
+field = "base_url"
+
+[[env]]
+var = "MONEYMAN_API_KEY"
+from = "user_resource_config"
+resource_type = "moneyman"
+field = "api_key"
