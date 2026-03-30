@@ -86,6 +86,9 @@ Returns sorted list of skill names.
 | `bookmarks` | — | bookmark, karakeep, save, read later, ... | karakeep | — |
 | `website` | — | website, site, publish, blog, ... | — | — |
 | `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe | miniflux | — |
+| `moneyman` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | moneyman | — |
+
+Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skills`. Users with a `moneyman` resource get the API-based skill; users with `ledger` resources get the direct beancount skill.
 
 ## Skill CLI Modules (`src/istota/skills/`)
 
@@ -151,6 +154,11 @@ Returns sorted list of skill names.
 **Subcommands**: `list`, `add`, `remove`, `categories`, `entries`, `refresh`
 **Env vars**: `MINIFLUX_BASE_URL`, `MINIFLUX_API_KEY`
 **Key fns**: `cmd_list()`, `cmd_add()`, `cmd_remove()`, `cmd_categories()`, `cmd_entries()`, `cmd_refresh()`
+
+### `moneyman/` - Moneyman Accounting API Client
+**Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `add-transaction`, `sync-monarch`, `import-csv`, `invoice` (sub: `generate`, `list`, `paid`, `create`), `work` (sub: `list`, `add`, `update`, `remove`)
+**Env vars**: `MONEYMAN_API_URL`, `MONEYMAN_API_KEY`
+**Note**: Thin httpx client wrapping the Moneyman REST API. Mutually exclusive with `accounting` skill.
 
 ### Library-Only Modules (no CLI)
 - `files.py` - Nextcloud file ops (mount-aware, rclone fallback)

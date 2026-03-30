@@ -226,7 +226,7 @@ class UserResource:
     user_id: str
     resource_type: str      # "calendar", "folder", "todo_file", "email_folder",
                             # "reminders_file", "shared_file", "ledger",
-                            # "invoicing", "karakeep", "garmin", "monarch", "miniflux"
+                            # "invoicing", "karakeep", "garmin", "monarch", "miniflux", "moneyman"
     resource_path: str
     display_name: str | None
     permissions: str        # "read" or "readwrite"

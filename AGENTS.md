@@ -67,6 +67,7 @@ istota/
 │       ├── website/         # Website management reference (doc-only)
 │       ├── garmin/          # Garmin Connect data access (activities, stats, health)
 │       ├── location/       # GPS location tracking + calendar attendance (Overland)
+│       ├── moneyman/       # Moneyman accounting API client (ledger, invoicing, work log)
 │       └── whisper/         # Audio transcription via faster-whisper
 ├── config/
 │   ├── config.toml          # Active configuration (gitignored)
@@ -87,7 +88,7 @@ istota/
 │   ├── browser/             # Playwright browser container (Flask API)
 │   └── .env.example         # Environment variables template
 ├── scripts/                 # setup.sh, scheduler.sh
-├── tests/                   # pytest + pytest-asyncio (~2725 tests, 53 files)
+├── tests/                   # pytest + pytest-asyncio (~2750 tests, 54 files)
 ├── schema.sql
 └── pyproject.toml
 ```
@@ -120,7 +121,7 @@ Admin users listed in `/etc/istota/admins`. Empty file = all users are admin (ba
 Non-admin restrictions: scoped mount path, no DB access, no subtask creation, `admin_only` skills filtered out.
 
 ### Multi-user Resources
-Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`, `karakeep`, `garmin`, `monarch`, `miniflux`. CalDAV calendars auto-discovered from Nextcloud. Service credentials (Garmin, Monarch, Karakeep, Miniflux) are configured as `[[resources]]` entries with type-specific fields in `extra`.
+Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`, `karakeep`, `garmin`, `monarch`, `miniflux`, `moneyman`. CalDAV calendars auto-discovered from Nextcloud. Service credentials (Garmin, Monarch, Karakeep, Miniflux, Moneyman) are configured as `[[resources]]` entries with type-specific fields in `extra`.
 
 ### Nextcloud Directory Structure
 
@@ -217,7 +218,7 @@ When `[security.network] enabled`, each task's sandbox gets `--unshare-net` (own
 Default allowlist: `api.anthropic.com:443`, `mcp-proxy.anthropic.com:443` (Claude API), `pypi.org:443`, `files.pythonhosted.org:443` (package installs, configurable via `allow_pypi`). Git remote hosts added from `[developer]` config when the developer skill is selected. Operator extras via `extra_hosts`. No MITM — TLS is end-to-end. Config: `[security.network]` section.
 
 ### Credential Isolation (Skill Proxy)
-When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, MINIFLUX_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, GARMIN_EMAIL, GARMIN_PASSWORD, MONARCH_SESSION_TOKEN) are stripped from Claude's env. Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread, which injects credentials server-side. All CLI-capable skills get their credentials through the proxy regardless of whether they were selected for the current task — skill selection controls which docs are loaded, not credential access. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled. Config: `[security]` section, `skill_proxy_enabled`, `skill_proxy_timeout`.
+When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, MINIFLUX_API_KEY, MONEYMAN_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, GARMIN_EMAIL, GARMIN_PASSWORD, MONARCH_SESSION_TOKEN) are stripped from Claude's env. Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread, which injects credentials server-side. All CLI-capable skills get their credentials through the proxy regardless of whether they were selected for the current task — skill selection controls which docs are loaded, not credential access. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled. Config: `[security]` section, `skill_proxy_enabled`, `skill_proxy_timeout`.
 
 ### Deferred DB Operations
 With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR`). Scheduler processes after successful completion. Patterns: `task_{id}_subtasks.json`, `task_{id}_tracked_transactions.json`, `task_{id}_email_output.json`, `task_{id}_sent_emails.json`.
@@ -229,7 +230,7 @@ With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR
 
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2720 tests across 53 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2750 tests across 54 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests

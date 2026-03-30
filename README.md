@@ -106,7 +106,7 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 
 **Messaging** — Nextcloud Talk (DMs and multi-user rooms with @mention support), email (IMAP/SMTP with threading), TASKS.md file polling, CLI.
 
-**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, beancount accounting with invoicing, GPS location tracking (Overland), Garmin Connect fitness data, Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), Miniflux RSS feed management, and more. Skills are a curated standard library, not a plugin marketplace.
+**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, beancount accounting with invoicing (direct or via Moneyman API), GPS location tracking (Overland), Garmin Connect fitness data, Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), Miniflux RSS feed management, and more. Skills are a curated standard library, not a plugin marketplace.
 
 **Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Configurable memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
 
@@ -183,7 +183,7 @@ Each user gets a shared Nextcloud folder:
 
 ```bash
 uv sync --extra all                        # Install all dependencies
-uv run pytest tests/ -v                    # Run tests (~2720 unit tests)
+uv run pytest tests/ -v                    # Run tests (~2750 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```

@@ -333,6 +333,7 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "GARMIN_EMAIL",
     "GARMIN_PASSWORD",
     "MONARCH_SESSION_TOKEN",
+    "MONEYMAN_API_KEY",
 })
 
 
@@ -350,6 +351,7 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "GARMIN_EMAIL": frozenset({"garmin"}),
     "GARMIN_PASSWORD": frozenset({"garmin"}),
     "MONARCH_SESSION_TOKEN": frozenset({"accounting"}),
+    "MONEYMAN_API_KEY": frozenset({"moneyman"}),
 }
 
 
@@ -385,6 +387,19 @@ def _build_network_allowlist(config: Config, selected_skills: list[str]) -> set[
                     parsed = urlparse(rc.base_url)
                     host = parsed.hostname
                     port = parsed.port or 443
+                    if host:
+                        hosts.add(f"{host}:{port}")
+
+    # Moneyman skill: add Moneyman API host
+    if "moneyman" in selected_skills:
+        from urllib.parse import urlparse
+
+        for _uid2, uc2 in config.users.items():
+            for rc in uc2.resources:
+                if rc.type == "moneyman" and rc.base_url:
+                    parsed = urlparse(rc.base_url)
+                    host = parsed.hostname
+                    port = parsed.port or (443 if parsed.scheme == "https" else 80)
                     if host:
                         hosts.add(f"{host}:{port}")
 
