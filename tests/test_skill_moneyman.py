@@ -112,6 +112,34 @@ class TestMoneymanClient:
             assert "X-API-Key" not in client.headers
             client.close()
 
+    def test_client_prefers_socket(self):
+        """_client() uses Unix socket transport when MONEYMAN_API_SOCKET is set."""
+        from istota.skills.moneyman import _client
+        import httpx
+
+        env = {
+            "MONEYMAN_API_SOCKET": "/tmp/test.sock",
+            "MONEYMAN_API_URL": "http://localhost:8090",
+            "MONEYMAN_API_KEY": "key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            client = _client()
+            # When using UDS, base_url is http://localhost
+            assert str(client.base_url) == "http://localhost"
+            transport = client._transport
+            assert isinstance(transport, httpx.HTTPTransport)
+            client.close()
+
+    def test_client_socket_without_url(self):
+        """_client() works with only socket path, no URL."""
+        from istota.skills.moneyman import _client
+
+        env = {"MONEYMAN_API_SOCKET": "/tmp/test.sock", "MONEYMAN_API_KEY": "key"}
+        with patch.dict(os.environ, env, clear=True):
+            client = _client()
+            assert str(client.base_url) == "http://localhost"
+            client.close()
+
     def test_handle_response_success(self):
         from istota.skills.moneyman import _handle_response
 

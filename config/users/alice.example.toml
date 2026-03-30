@@ -75,10 +75,11 @@ invoicing_conversation_token = "room123"  # Talk room for invoice notifications
 # disabled_skills = ["browse", "whisper"]
 
 # Moneyman accounting service (replaces direct beancount access)
+# Uses Unix socket for sandbox-safe access; base_url as fallback for non-sandboxed envs
 # [[resources]]
 # type = "moneyman"
 # name = "Moneyman"
-# base_url = "http://127.0.0.1:8090"
+# socket_path = "/run/moneyman/api.sock"
 # api_key = "your-moneyman-api-key"
 
 # Garmin Connect credentials (server-side only, not synced to Nextcloud)
