@@ -67,19 +67,25 @@ api_key = "{{ resource.api_key }}"
 
 {% endif %}
 {% elif resource.type == 'moneyman' %}
-{% if resource.api_key is defined %}
 [[resources]]
 type = "moneyman"
 name = "{{ resource.name | default('Moneyman') }}"
+{% if resource.cli_path is defined and resource.cli_path %}
+cli_path = "{{ resource.cli_path }}"
+{% endif %}
+{% if resource.user_key is defined and resource.user_key %}
+user_key = "{{ resource.user_key }}"
+{% endif %}
+{% if resource.config_path is defined and resource.config_path %}
+config_path = "{{ resource.config_path }}"
+{% endif %}
 {% if resource.base_url is defined and resource.base_url %}
 base_url = "{{ resource.base_url }}"
 {% endif %}
-{% if resource.socket_path is defined and resource.socket_path %}
-socket_path = "{{ resource.socket_path }}"
-{% endif %}
+{% if resource.api_key is defined and resource.api_key %}
 api_key = "{{ resource.api_key }}"
-
 {% endif %}
+
 {% else %}
 [[resources]]
 type = "{{ resource.type }}"

@@ -4,6 +4,26 @@ resource_types = ["moneyman"]
 exclude_skills = ["accounting"]
 cli = true
 
+# Local mode (same host): moneyman CLI path + user key
+[[env]]
+var = "MONEYMAN_CLI_PATH"
+from = "user_resource_config"
+resource_type = "moneyman"
+field = "cli_path"
+
+[[env]]
+var = "MONEYMAN_USER"
+from = "user_resource_config"
+resource_type = "moneyman"
+field = "user_key"
+
+[[env]]
+var = "MONEYMAN_CONFIG"
+from = "user_resource_config"
+resource_type = "moneyman"
+field = "config_path"
+
+# Remote mode (different host): HTTP URL + API key
 [[env]]
 var = "MONEYMAN_API_URL"
 from = "user_resource_config"
@@ -15,9 +35,3 @@ var = "MONEYMAN_API_KEY"
 from = "user_resource_config"
 resource_type = "moneyman"
 field = "api_key"
-
-[[env]]
-var = "MONEYMAN_API_SOCKET"
-from = "user_resource_config"
-resource_type = "moneyman"
-field = "socket_path"

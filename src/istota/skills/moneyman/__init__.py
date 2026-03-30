@@ -1,32 +1,74 @@
-"""Moneyman accounting operations -- thin HTTP client for the Moneyman API."""
+"""Moneyman accounting operations -- dual-mode client (CLI or HTTP).
+
+Local mode (MONEYMAN_CLI_PATH set): runs moneyman CLI as subprocess.
+Remote mode (MONEYMAN_API_URL set): HTTP client for the Moneyman REST API.
+"""
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 
-import httpx
+
+def _mode() -> str:
+    """Determine transport mode: 'cli' or 'http'."""
+    if os.environ.get("MONEYMAN_CLI_PATH"):
+        return "cli"
+    if os.environ.get("MONEYMAN_API_URL"):
+        return "http"
+    print(json.dumps({"error": "MONEYMAN_CLI_PATH or MONEYMAN_API_URL must be set"}))
+    sys.exit(1)
 
 
-def _client() -> httpx.Client:
-    socket_path = os.environ.get("MONEYMAN_API_SOCKET", "")
+def _run_cli(args: list[str]) -> dict:
+    """Run moneyman CLI command and return parsed JSON output."""
+    cli_path = os.environ["MONEYMAN_CLI_PATH"]
+    user = os.environ.get("MONEYMAN_USER", "")
+    config = os.environ.get("MONEYMAN_CONFIG", "")
+
+    cmd = [cli_path]
+    if config:
+        cmd += ["-c", config]
+    if user:
+        cmd += ["-u", user]
+    cmd += args
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+        )
+    except FileNotFoundError:
+        return {"status": "error", "error": f"moneyman CLI not found: {cli_path}"}
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": "moneyman CLI timed out"}
+
+    stdout = result.stdout.strip()
+    if not stdout:
+        if result.returncode != 0:
+            return {"status": "error", "error": result.stderr.strip() or f"Exit code {result.returncode}"}
+        return {"status": "error", "error": "No output from moneyman CLI"}
+
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        return {"status": "error", "error": f"Invalid JSON from CLI: {stdout[:200]}"}
+
+
+def _http_client():
+    """Create an httpx client for remote mode."""
+    import httpx
+
     base_url = os.environ.get("MONEYMAN_API_URL", "")
     api_key = os.environ.get("MONEYMAN_API_KEY", "")
-    if not socket_path and not base_url:
-        print(json.dumps({"error": "MONEYMAN_API_URL or MONEYMAN_API_SOCKET must be set"}))
-        sys.exit(1)
+    user = os.environ.get("MONEYMAN_USER", "")
+
     headers = {}
     if api_key:
         headers["X-API-Key"] = api_key
-    if socket_path:
-        transport = httpx.HTTPTransport(uds=socket_path)
-        return httpx.Client(
-            base_url="http://localhost",
-            transport=transport,
-            headers=headers,
-            timeout=60.0,
-            follow_redirects=True,
-        )
+    if user:
+        headers["X-User"] = user
+
     return httpx.Client(
         base_url=base_url.rstrip("/"),
         headers=headers,
@@ -40,7 +82,7 @@ def _output(data):
 
 
 def _handle_response(resp):
-    """Parse response, handle errors."""
+    """Parse HTTP response, handle errors."""
     if resp.status_code >= 400:
         try:
             body = resp.json()
@@ -57,69 +99,114 @@ def _handle_response(resp):
 
 
 def cmd_list(args):
-    with _client() as client:
-        resp = client.get("/api/ledgers")
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        _output(_run_cli(["list"]))
+    else:
+        with _http_client() as client:
+            resp = client.get("/api/ledgers")
+            _output(_handle_response(resp))
 
 
 def cmd_check(args):
-    params = {}
-    if args.ledger:
-        params["ledger"] = args.ledger
-    with _client() as client:
-        resp = client.get("/api/check", params=params)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["check"]
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        _output(_run_cli(cli_args))
+    else:
+        params = {}
+        if args.ledger:
+            params["ledger"] = args.ledger
+        with _http_client() as client:
+            resp = client.get("/api/check", params=params)
+            _output(_handle_response(resp))
 
 
 def cmd_balances(args):
-    params = {}
-    if args.ledger:
-        params["ledger"] = args.ledger
-    if args.account:
-        params["account"] = args.account
-    with _client() as client:
-        resp = client.get("/api/balances", params=params)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["balances"]
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        if args.account:
+            cli_args += ["--account", args.account]
+        _output(_run_cli(cli_args))
+    else:
+        params = {}
+        if args.ledger:
+            params["ledger"] = args.ledger
+        if args.account:
+            params["account"] = args.account
+        with _http_client() as client:
+            resp = client.get("/api/balances", params=params)
+            _output(_handle_response(resp))
 
 
 def cmd_query(args):
-    body = {"bql": args.bql}
-    if args.ledger:
-        body["ledger"] = args.ledger
-    with _client() as client:
-        resp = client.post("/api/query", json=body)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["query", args.bql]
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        _output(_run_cli(cli_args))
+    else:
+        body = {"bql": args.bql}
+        if args.ledger:
+            body["ledger"] = args.ledger
+        with _http_client() as client:
+            resp = client.post("/api/query", json=body)
+            _output(_handle_response(resp))
 
 
 def cmd_report(args):
-    params = {}
-    if args.year:
-        params["year"] = args.year
-    if args.ledger:
-        params["ledger"] = args.ledger
-    with _client() as client:
-        resp = client.get(f"/api/reports/{args.report_type}", params=params)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["report", args.report_type]
+        if args.year:
+            cli_args += ["--year", str(args.year)]
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        _output(_run_cli(cli_args))
+    else:
+        params = {}
+        if args.year:
+            params["year"] = args.year
+        if args.ledger:
+            params["ledger"] = args.ledger
+        with _http_client() as client:
+            resp = client.get(f"/api/reports/{args.report_type}", params=params)
+            _output(_handle_response(resp))
 
 
 def cmd_lots(args):
-    params = {}
-    if args.ledger:
-        params["ledger"] = args.ledger
-    with _client() as client:
-        resp = client.get(f"/api/lots/{args.symbol}", params=params)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["lots", args.symbol]
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        _output(_run_cli(cli_args))
+    else:
+        params = {}
+        if args.ledger:
+            params["ledger"] = args.ledger
+        with _http_client() as client:
+            resp = client.get(f"/api/lots/{args.symbol}", params=params)
+            _output(_handle_response(resp))
 
 
 def cmd_wash_sales(args):
-    params = {}
-    if args.year:
-        params["year"] = args.year
-    if args.ledger:
-        params["ledger"] = args.ledger
-    with _client() as client:
-        resp = client.get("/api/wash-sales", params=params)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["wash-sales"]
+        if args.year:
+            cli_args += ["--year", str(args.year)]
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        _output(_run_cli(cli_args))
+    else:
+        params = {}
+        if args.year:
+            params["year"] = args.year
+        if args.ledger:
+            params["ledger"] = args.ledger
+        with _http_client() as client:
+            resp = client.get("/api/wash-sales", params=params)
+            _output(_handle_response(resp))
 
 
 # ---------------------------------------------------------------------------
@@ -128,45 +215,80 @@ def cmd_wash_sales(args):
 
 
 def cmd_add_transaction(args):
-    body = {
-        "date": args.txn_date,
-        "payee": args.payee,
-        "narration": args.narration,
-        "debit": args.debit,
-        "credit": args.credit,
-        "amount": args.amount,
-        "currency": args.currency,
-    }
-    if args.ledger:
-        body["ledger"] = args.ledger
-    with _client() as client:
-        resp = client.post("/api/transactions", json=body)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = [
+            "add-transaction",
+            "--date", args.txn_date,
+            "--payee", args.payee,
+            "--narration", args.narration,
+            "--debit", args.debit,
+            "--credit", args.credit,
+            "--amount", str(args.amount),
+            "--currency", args.currency,
+        ]
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        _output(_run_cli(cli_args))
+    else:
+        body = {
+            "date": args.txn_date,
+            "payee": args.payee,
+            "narration": args.narration,
+            "debit": args.debit,
+            "credit": args.credit,
+            "amount": args.amount,
+            "currency": args.currency,
+        }
+        if args.ledger:
+            body["ledger"] = args.ledger
+        with _http_client() as client:
+            resp = client.post("/api/transactions", json=body)
+            _output(_handle_response(resp))
 
 
 def cmd_sync_monarch(args):
-    body = {"dry_run": args.dry_run}
-    if args.ledger:
-        body["ledger"] = args.ledger
-    with _client() as client:
-        resp = client.post("/api/transactions/sync-monarch", json=body)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["sync-monarch"]
+        if args.dry_run:
+            cli_args.append("--dry-run")
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        _output(_run_cli(cli_args))
+    else:
+        body = {"dry_run": args.dry_run}
+        if args.ledger:
+            body["ledger"] = args.ledger
+        with _http_client() as client:
+            resp = client.post("/api/transactions/sync-monarch", json=body)
+            _output(_handle_response(resp))
 
 
 def cmd_import_csv(args):
-    body = {
-        "file": args.file,
-        "account": args.account,
-    }
-    if args.ledger:
-        body["ledger"] = args.ledger
-    if args.tag:
-        body["include_tags"] = list(args.tag)
-    if args.exclude_tag:
-        body["exclude_tags"] = list(args.exclude_tag)
-    with _client() as client:
-        resp = client.post("/api/transactions/import-csv", json=body)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["import-csv", args.file, "--account", args.account]
+        if args.tag:
+            for t in args.tag:
+                cli_args += ["--tag", t]
+        if args.exclude_tag:
+            for t in args.exclude_tag:
+                cli_args += ["--exclude-tag", t]
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        _output(_run_cli(cli_args))
+    else:
+        body = {
+            "file": args.file,
+            "account": args.account,
+        }
+        if args.ledger:
+            body["ledger"] = args.ledger
+        if args.tag:
+            body["include_tags"] = list(args.tag)
+        if args.exclude_tag:
+            body["exclude_tags"] = list(args.exclude_tag)
+        with _http_client() as client:
+            resp = client.post("/api/transactions/import-csv", json=body)
+            _output(_handle_response(resp))
 
 
 # ---------------------------------------------------------------------------
@@ -175,59 +297,123 @@ def cmd_import_csv(args):
 
 
 def cmd_invoice_generate(args):
-    body = {"dry_run": args.dry_run}
-    if args.period:
-        body["period"] = args.period
-    if args.client:
-        body["client"] = args.client
-    if args.entity:
-        body["entity"] = args.entity
-    with _client() as client:
-        resp = client.post("/api/invoices/generate", json=body)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["invoice", "generate"]
+        if args.period:
+            cli_args += ["--period", args.period]
+        if args.client:
+            cli_args += ["--client", args.client]
+        if args.entity:
+            cli_args += ["--entity", args.entity]
+        if args.dry_run:
+            cli_args.append("--dry-run")
+        _output(_run_cli(cli_args))
+    else:
+        body = {"dry_run": args.dry_run}
+        if args.period:
+            body["period"] = args.period
+        if args.client:
+            body["client"] = args.client
+        if args.entity:
+            body["entity"] = args.entity
+        with _http_client() as client:
+            resp = client.post("/api/invoices/generate", json=body)
+            _output(_handle_response(resp))
 
 
 def cmd_invoice_list(args):
-    params = {}
-    if args.client:
-        params["client"] = args.client
-    if args.show_all:
-        params["all"] = True
-    with _client() as client:
-        resp = client.get("/api/invoices", params=params)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["invoice", "list"]
+        if args.client:
+            cli_args += ["--client", args.client]
+        if args.show_all:
+            cli_args.append("--all")
+        _output(_run_cli(cli_args))
+    else:
+        params = {}
+        if args.client:
+            params["client"] = args.client
+        if args.show_all:
+            params["all"] = True
+        with _http_client() as client:
+            resp = client.get("/api/invoices", params=params)
+            _output(_handle_response(resp))
 
 
 def cmd_invoice_paid(args):
-    body = {
-        "invoice_number": args.invoice_number,
-        "date": args.payment_date,
-        "no_post": args.no_post,
-    }
-    if args.bank:
-        body["bank"] = args.bank
-    if args.ledger:
-        body["ledger"] = args.ledger
-    with _client() as client:
-        resp = client.post("/api/invoices/paid", json=body)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["invoice", "paid", args.invoice_number, "--date", args.payment_date]
+        if args.bank:
+            cli_args += ["--bank", args.bank]
+        if args.no_post:
+            cli_args.append("--no-post")
+        if args.ledger:
+            cli_args += ["--ledger", args.ledger]
+        _output(_run_cli(cli_args))
+    else:
+        body = {
+            "invoice_number": args.invoice_number,
+            "date": args.payment_date,
+            "no_post": args.no_post,
+        }
+        if args.bank:
+            body["bank"] = args.bank
+        if args.ledger:
+            body["ledger"] = args.ledger
+        with _http_client() as client:
+            resp = client.post("/api/invoices/paid", json=body)
+            _output(_handle_response(resp))
 
 
 def cmd_invoice_create(args):
-    body = {"client_key": args.client_key}
-    if args.service:
-        body["service"] = args.service
-    if args.qty is not None:
-        body["qty"] = args.qty
-    if args.description:
-        body["description"] = args.description
-    if args.entity:
-        body["entity"] = args.entity
-    if args.item:
-        body["items"] = list(args.item)
-    with _client() as client:
-        resp = client.post("/api/invoices/create", json=body)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["invoice", "create", args.client_key]
+        if args.service:
+            cli_args += ["--service", args.service]
+        if args.qty is not None:
+            cli_args += ["--qty", str(args.qty)]
+        if args.description:
+            cli_args += ["--description", args.description]
+        if args.entity:
+            cli_args += ["--entity", args.entity]
+        if args.item:
+            for i in args.item:
+                cli_args += ["--item", i]
+        _output(_run_cli(cli_args))
+    else:
+        body = {"client_key": args.client_key}
+        if args.service:
+            body["service"] = args.service
+        if args.qty is not None:
+            body["qty"] = args.qty
+        if args.description:
+            body["description"] = args.description
+        if args.entity:
+            body["entity"] = args.entity
+        if args.item:
+            body["items"] = list(args.item)
+        with _http_client() as client:
+            resp = client.post("/api/invoices/create", json=body)
+            _output(_handle_response(resp))
+
+
+def cmd_invoice_void(args):
+    if _mode() == "cli":
+        cli_args = ["invoice", "void", args.invoice_number]
+        if args.force:
+            cli_args.append("--force")
+        if args.delete_pdf:
+            cli_args.append("--delete-pdf")
+        _output(_run_cli(cli_args))
+    else:
+        body = {
+            "invoice_number": args.invoice_number,
+            "force": args.force,
+            "delete_pdf": args.delete_pdf,
+        }
+        with _http_client() as client:
+            resp = client.post("/api/invoices/void", json=body)
+            _output(_handle_response(resp))
 
 
 # ---------------------------------------------------------------------------
@@ -236,71 +422,125 @@ def cmd_invoice_create(args):
 
 
 def cmd_work_list(args):
-    params = {}
-    if args.client:
-        params["client"] = args.client
-    if args.period:
-        params["period"] = args.period
-    if args.uninvoiced:
-        params["uninvoiced"] = True
-    if args.invoiced:
-        params["invoiced"] = True
-    with _client() as client:
-        resp = client.get("/api/work", params=params)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["work", "list"]
+        if args.client:
+            cli_args += ["--client", args.client]
+        if args.period:
+            cli_args += ["--period", args.period]
+        if args.uninvoiced:
+            cli_args.append("--uninvoiced")
+        if args.invoiced:
+            cli_args.append("--invoiced")
+        _output(_run_cli(cli_args))
+    else:
+        params = {}
+        if args.client:
+            params["client"] = args.client
+        if args.period:
+            params["period"] = args.period
+        if args.uninvoiced:
+            params["uninvoiced"] = True
+        if args.invoiced:
+            params["invoiced"] = True
+        with _http_client() as client:
+            resp = client.get("/api/work/", params=params)
+            _output(_handle_response(resp))
 
 
 def cmd_work_add(args):
-    body = {
-        "date": args.entry_date,
-        "client": args.client,
-        "service": args.service,
-    }
-    if args.qty is not None:
-        body["qty"] = args.qty
-    if args.amount is not None:
-        body["amount"] = args.amount
-    if args.discount is not None:
-        body["discount"] = args.discount
-    if args.description:
-        body["description"] = args.description
-    if args.entity:
-        body["entity"] = args.entity
-    with _client() as client:
-        resp = client.post("/api/work", json=body)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = [
+            "work", "add",
+            "--date", args.entry_date,
+            "--client", args.client,
+            "--service", args.service,
+        ]
+        if args.qty is not None:
+            cli_args += ["--qty", str(args.qty)]
+        if args.amount is not None:
+            cli_args += ["--amount", str(args.amount)]
+        if args.discount is not None:
+            cli_args += ["--discount", str(args.discount)]
+        if args.description:
+            cli_args += ["--description", args.description]
+        if args.entity:
+            cli_args += ["--entity", args.entity]
+        _output(_run_cli(cli_args))
+    else:
+        body = {
+            "date": args.entry_date,
+            "client": args.client,
+            "service": args.service,
+        }
+        if args.qty is not None:
+            body["qty"] = args.qty
+        if args.amount is not None:
+            body["amount"] = args.amount
+        if args.discount is not None:
+            body["discount"] = args.discount
+        if args.description:
+            body["description"] = args.description
+        if args.entity:
+            body["entity"] = args.entity
+        with _http_client() as client:
+            resp = client.post("/api/work/", json=body)
+            _output(_handle_response(resp))
 
 
 def cmd_work_update(args):
-    body = {}
-    if args.entry_date is not None:
-        body["date"] = args.entry_date
-    if args.client is not None:
-        body["client"] = args.client
-    if args.service is not None:
-        body["service"] = args.service
-    if args.qty is not None:
-        body["qty"] = args.qty
-    if args.amount is not None:
-        body["amount"] = args.amount
-    if args.discount is not None:
-        body["discount"] = args.discount
-    if args.description is not None:
-        body["description"] = args.description
-    if args.entity is not None:
-        body["entity"] = args.entity
-    if not body:
-        _output({"status": "error", "error": "No fields to update"})
-        sys.exit(1)
-    with _client() as client:
-        resp = client.put(f"/api/work/{args.entry_id}", json=body)
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        cli_args = ["work", "update", str(args.entry_id)]
+        if args.entry_date is not None:
+            cli_args += ["--date", args.entry_date]
+        if args.client is not None:
+            cli_args += ["--client", args.client]
+        if args.service is not None:
+            cli_args += ["--service", args.service]
+        if args.qty is not None:
+            cli_args += ["--qty", str(args.qty)]
+        if args.amount is not None:
+            cli_args += ["--amount", str(args.amount)]
+        if args.discount is not None:
+            cli_args += ["--discount", str(args.discount)]
+        if args.description is not None:
+            cli_args += ["--description", args.description]
+        if args.entity is not None:
+            cli_args += ["--entity", args.entity]
+        _output(_run_cli(cli_args))
+    else:
+        body = {}
+        if args.entry_date is not None:
+            body["date"] = args.entry_date
+        if args.client is not None:
+            body["client"] = args.client
+        if args.service is not None:
+            body["service"] = args.service
+        if args.qty is not None:
+            body["qty"] = args.qty
+        if args.amount is not None:
+            body["amount"] = args.amount
+        if args.discount is not None:
+            body["discount"] = args.discount
+        if args.description is not None:
+            body["description"] = args.description
+        if args.entity is not None:
+            body["entity"] = args.entity
+        if not body:
+            _output({"status": "error", "error": "No fields to update"})
+            sys.exit(1)
+        with _http_client() as client:
+            resp = client.put(f"/api/work/{args.entry_id}", json=body)
+            _output(_handle_response(resp))
 
 
 def cmd_work_remove(args):
-    with _client() as client:
-        resp = client.delete(f"/api/work/{args.entry_id}")
-        _output(_handle_response(resp))
+    if _mode() == "cli":
+        _output(_run_cli(["work", "remove", str(args.entry_id)]))
+    else:
+        with _http_client() as client:
+            resp = client.delete(f"/api/work/{args.entry_id}")
+            _output(_handle_response(resp))
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +633,11 @@ def build_parser():
     p_inv_create.add_argument("--entity", "-e", help="Entity key")
     p_inv_create.add_argument("--item", action="append", help="Manual item: \"description\" amount")
 
+    p_inv_void = inv_sub.add_parser("void", help="Void an invoice")
+    p_inv_void.add_argument("invoice_number", help="Invoice number")
+    p_inv_void.add_argument("--force", action="store_true", help="Void even if paid")
+    p_inv_void.add_argument("--delete-pdf", action="store_true", help="Delete PDF file")
+
     # --- Work commands (nested subparser) ---
     p_work = sub.add_parser("work", help="Work log management")
     work_sub = p_work.add_subparsers(dest="work_command")
@@ -453,6 +698,7 @@ def main(argv=None):
             "list": cmd_invoice_list,
             "paid": cmd_invoice_paid,
             "create": cmd_invoice_create,
+            "void": cmd_invoice_void,
         }
         fn = invoice_commands.get(getattr(args, "invoice_command", None))
         if fn:

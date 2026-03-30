@@ -1,8 +1,10 @@
 # Moneyman Accounting Operations
 
-Accounting operations via the Moneyman API service. Supports ledger queries, transaction management, invoicing, and work log tracking.
+Accounting operations via the Moneyman service. Supports ledger queries, transaction management, invoicing, and work log tracking.
 
-Multiple ledgers can be configured on the server. Use `--ledger NAME` to select which ledger to operate on. Without the flag, the server uses its default ledger.
+Two transport modes: **local** (CLI subprocess, preferred) and **remote** (HTTP API). Local mode runs the `moneyman` CLI directly — no network needed. Remote mode calls the Moneyman REST API over HTTPS.
+
+Multiple ledgers can be configured. Use `--ledger NAME` to select which ledger to operate on. Without the flag, the default ledger is used.
 
 ## CLI commands
 
@@ -64,6 +66,9 @@ istota-skill moneyman invoice paid INV-000001 --date 2026-02-15 [--bank Assets:B
 # Create a manual single invoice
 istota-skill moneyman invoice create acme --service consulting --qty 40
 istota-skill moneyman invoice create acme --item "Travel expenses 340.50"
+
+# Void an invoice (clears work entries, optionally deletes PDF)
+istota-skill moneyman invoice void INV-000001 [--force] [--delete-pdf]
 ```
 
 Cash-basis accounting: no ledger entries at invoice time; income recognized when payment is recorded via `invoice paid`. Use `--no-post` when the bank transaction was already imported.
@@ -108,20 +113,31 @@ A wash sale occurs when you sell a security at a loss and buy substantially iden
 
 | Variable | Description |
 |---|---|
-| `MONEYMAN_API_URL` | Moneyman service URL (HTTP fallback) |
-| `MONEYMAN_API_SOCKET` | Unix socket path (preferred, used when set) |
-| `MONEYMAN_API_KEY` | API key for authentication |
+| `MONEYMAN_CLI_PATH` | Path to moneyman CLI binary (local mode) |
+| `MONEYMAN_USER` | User key for multi-user moneyman config |
+| `MONEYMAN_CONFIG` | Path to moneyman config file |
+| `MONEYMAN_API_URL` | Moneyman service URL (remote mode) |
+| `MONEYMAN_API_KEY` | API key for authentication (remote mode) |
 
-Connection priority: `MONEYMAN_API_SOCKET` (Unix socket) is used when set, otherwise falls back to `MONEYMAN_API_URL` (HTTP).
+Connection priority: `MONEYMAN_CLI_PATH` (local CLI) is used when set, otherwise falls back to `MONEYMAN_API_URL` (HTTP).
 
 ## Adding the moneyman resource
 
 Add to user config (`config/users/{user}.toml`):
 
 ```toml
+# Local mode (same host as moneyman)
 [[resources]]
 type = "moneyman"
 name = "Moneyman"
-socket_path = "/run/moneyman/api.sock"
+cli_path = "/srv/app/moneyman/app/.venv/bin/moneyman"
+user_key = "stefan"
+
+# Remote mode (moneyman on different host)
+[[resources]]
+type = "moneyman"
+name = "Moneyman"
+base_url = "https://moneyman.example.com"
 api_key = "your-api-key"
+user_key = "stefan"
 ```

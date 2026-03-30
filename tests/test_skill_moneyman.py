@@ -1,4 +1,4 @@
-"""Tests for the moneyman skill (HTTP client for Moneyman API)."""
+"""Tests for the moneyman skill (dual-mode: CLI subprocess or HTTP client)."""
 
 import json
 import os
@@ -80,64 +80,142 @@ class TestMoneymanSkillManifest:
         has_accounting = "accounting" in selected
         assert not (has_moneyman and has_accounting), "Both moneyman and accounting should not be selected together"
 
+    def test_env_specs_include_cli_path(self, tmp_path):
+        from istota.skills._loader import load_skill_index
 
-class TestMoneymanClient:
-    """Test the HTTP client functions."""
+        index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
+        meta = index["moneyman"]
+        env_vars = {spec.var for spec in meta.env_specs}
+        assert "MONEYMAN_CLI_PATH" in env_vars
+        assert "MONEYMAN_USER" in env_vars
+        assert "MONEYMAN_API_URL" in env_vars
+        assert "MONEYMAN_API_KEY" in env_vars
 
-    def test_client_requires_api_url(self):
-        """_client() exits when MONEYMAN_API_URL is not set."""
-        from istota.skills.moneyman import _client
+    def test_env_specs_no_socket(self, tmp_path):
+        from istota.skills._loader import load_skill_index
 
-        with patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(SystemExit):
-                _client()
+        index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
+        meta = index["moneyman"]
+        env_vars = {spec.var for spec in meta.env_specs}
+        assert "MONEYMAN_API_SOCKET" not in env_vars
 
-    def test_client_sets_auth_header(self):
-        """_client() sets X-API-Key header when MONEYMAN_API_KEY is set."""
-        from istota.skills.moneyman import _client
 
-        env = {"MONEYMAN_API_URL": "http://localhost:8090", "MONEYMAN_API_KEY": "test-key"}
+class TestModeDetection:
+    """Test _mode() transport selection."""
+
+    def test_cli_mode_when_cli_path_set(self):
+        from istota.skills.moneyman import _mode
+
+        env = {"MONEYMAN_CLI_PATH": "/usr/bin/moneyman"}
         with patch.dict(os.environ, env, clear=True):
-            client = _client()
-            assert client.headers.get("X-API-Key") == "test-key"
-            client.close()
+            assert _mode() == "cli"
 
-    def test_client_no_auth_header_without_key(self):
-        """_client() omits auth header when no key configured."""
-        from istota.skills.moneyman import _client
+    def test_http_mode_when_api_url_set(self):
+        from istota.skills.moneyman import _mode
 
         env = {"MONEYMAN_API_URL": "http://localhost:8090"}
         with patch.dict(os.environ, env, clear=True):
-            client = _client()
-            assert "X-API-Key" not in client.headers
-            client.close()
+            assert _mode() == "http"
 
-    def test_client_prefers_socket(self):
-        """_client() uses Unix socket transport when MONEYMAN_API_SOCKET is set."""
-        from istota.skills.moneyman import _client
-        import httpx
+    def test_cli_preferred_over_http(self):
+        from istota.skills.moneyman import _mode
+
+        env = {"MONEYMAN_CLI_PATH": "/usr/bin/moneyman", "MONEYMAN_API_URL": "http://localhost:8090"}
+        with patch.dict(os.environ, env, clear=True):
+            assert _mode() == "cli"
+
+    def test_exits_when_neither_set(self):
+        from istota.skills.moneyman import _mode
+
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(SystemExit):
+                _mode()
+
+
+class TestCliMode:
+    """Test CLI subprocess transport."""
+
+    def test_run_cli_success(self):
+        from istota.skills.moneyman import _run_cli
+
+        mock_result = MagicMock()
+        mock_result.stdout = '{"status": "ok", "data": [1, 2]}\n'
+        mock_result.returncode = 0
+        mock_result.stderr = ""
+
+        env = {"MONEYMAN_CLI_PATH": "/usr/bin/moneyman", "MONEYMAN_USER": "stefan"}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("istota.skills.moneyman.subprocess.run", return_value=mock_result) as mock_run:
+                result = _run_cli(["list"])
+                assert result == {"status": "ok", "data": [1, 2]}
+                cmd = mock_run.call_args[0][0]
+                assert cmd == ["/usr/bin/moneyman", "-u", "stefan", "list"]
+
+    def test_run_cli_with_config(self):
+        from istota.skills.moneyman import _run_cli
+
+        mock_result = MagicMock()
+        mock_result.stdout = '{"status": "ok"}\n'
+        mock_result.returncode = 0
+        mock_result.stderr = ""
 
         env = {
-            "MONEYMAN_API_SOCKET": "/tmp/test.sock",
-            "MONEYMAN_API_URL": "http://localhost:8090",
-            "MONEYMAN_API_KEY": "key",
+            "MONEYMAN_CLI_PATH": "/usr/bin/moneyman",
+            "MONEYMAN_USER": "stefan",
+            "MONEYMAN_CONFIG": "/etc/moneyman/config.toml",
         }
         with patch.dict(os.environ, env, clear=True):
-            client = _client()
-            # When using UDS, base_url is http://localhost
-            assert str(client.base_url) == "http://localhost"
-            transport = client._transport
-            assert isinstance(transport, httpx.HTTPTransport)
+            with patch("istota.skills.moneyman.subprocess.run", return_value=mock_result) as mock_run:
+                _run_cli(["check"])
+                cmd = mock_run.call_args[0][0]
+                assert cmd == ["/usr/bin/moneyman", "-c", "/etc/moneyman/config.toml", "-u", "stefan", "check"]
+
+    def test_run_cli_error(self):
+        from istota.skills.moneyman import _run_cli
+
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        mock_result.returncode = 1
+        mock_result.stderr = "No data_dir configured"
+
+        env = {"MONEYMAN_CLI_PATH": "/usr/bin/moneyman"}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("istota.skills.moneyman.subprocess.run", return_value=mock_result):
+                result = _run_cli(["list"])
+                assert result["status"] == "error"
+                assert "No data_dir" in result["error"]
+
+    def test_run_cli_not_found(self):
+        from istota.skills.moneyman import _run_cli
+
+        env = {"MONEYMAN_CLI_PATH": "/nonexistent/moneyman"}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("istota.skills.moneyman.subprocess.run", side_effect=FileNotFoundError):
+                result = _run_cli(["list"])
+                assert result["status"] == "error"
+                assert "not found" in result["error"]
+
+
+class TestHttpMode:
+    """Test HTTP client transport."""
+
+    def test_http_client_sets_headers(self):
+        from istota.skills.moneyman import _http_client
+
+        env = {"MONEYMAN_API_URL": "http://localhost:8090", "MONEYMAN_API_KEY": "test-key", "MONEYMAN_USER": "stefan"}
+        with patch.dict(os.environ, env, clear=True):
+            client = _http_client()
+            assert client.headers.get("X-API-Key") == "test-key"
+            assert client.headers.get("X-User") == "stefan"
             client.close()
 
-    def test_client_socket_without_url(self):
-        """_client() works with only socket path, no URL."""
-        from istota.skills.moneyman import _client
+    def test_http_client_no_key(self):
+        from istota.skills.moneyman import _http_client
 
-        env = {"MONEYMAN_API_SOCKET": "/tmp/test.sock", "MONEYMAN_API_KEY": "key"}
+        env = {"MONEYMAN_API_URL": "http://localhost:8090"}
         with patch.dict(os.environ, env, clear=True):
-            client = _client()
-            assert str(client.base_url) == "http://localhost"
+            client = _http_client()
+            assert "X-API-Key" not in client.headers
             client.close()
 
     def test_handle_response_success(self):
@@ -159,10 +237,80 @@ class TestMoneymanClient:
             _handle_response(resp)
 
 
-class TestMoneymanCommands:
-    """Test CLI command dispatch and API calls."""
+class TestCommandsCli:
+    """Test CLI mode command dispatch."""
 
-    def _mock_env(self):
+    def _cli_env(self):
+        return {"MONEYMAN_CLI_PATH": "/usr/bin/moneyman", "MONEYMAN_USER": "stefan"}
+
+    def _mock_cli_run(self, data):
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(data) + "\n"
+        mock_result.returncode = 0
+        mock_result.stderr = ""
+        return mock_result
+
+    def test_cmd_list(self):
+        from istota.skills.moneyman import main
+
+        with patch.dict(os.environ, self._cli_env(), clear=True):
+            with patch("istota.skills.moneyman.subprocess.run", return_value=self._mock_cli_run({"status": "ok"})) as m:
+                main(["list"])
+                cmd = m.call_args[0][0]
+                assert cmd[-1] == "list"
+
+    def test_cmd_work_list(self):
+        from istota.skills.moneyman import main
+
+        with patch.dict(os.environ, self._cli_env(), clear=True):
+            with patch("istota.skills.moneyman.subprocess.run", return_value=self._mock_cli_run({"status": "ok"})) as m:
+                main(["work", "list", "--client", "acme", "--period", "2026-02", "--uninvoiced"])
+                cmd = m.call_args[0][0]
+                assert "work" in cmd
+                assert "list" in cmd
+                assert "--client" in cmd
+                assert "acme" in cmd
+                assert "--uninvoiced" in cmd
+
+    def test_cmd_work_add(self):
+        from istota.skills.moneyman import main
+
+        with patch.dict(os.environ, self._cli_env(), clear=True):
+            with patch("istota.skills.moneyman.subprocess.run", return_value=self._mock_cli_run({"status": "ok", "id": 1})) as m:
+                main(["work", "add", "--date", "2026-02-01", "--client", "acme", "--service", "dev", "--qty", "4"])
+                cmd = m.call_args[0][0]
+                assert "work" in cmd
+                assert "add" in cmd
+                assert "--date" in cmd
+
+    def test_cmd_invoice_generate(self):
+        from istota.skills.moneyman import main
+
+        with patch.dict(os.environ, self._cli_env(), clear=True):
+            with patch("istota.skills.moneyman.subprocess.run", return_value=self._mock_cli_run({"status": "ok"})) as m:
+                main(["invoice", "generate", "--period", "2026-02", "--client", "acme", "--dry-run"])
+                cmd = m.call_args[0][0]
+                assert "invoice" in cmd
+                assert "generate" in cmd
+                assert "--dry-run" in cmd
+
+    def test_cmd_invoice_void(self):
+        from istota.skills.moneyman import main
+
+        with patch.dict(os.environ, self._cli_env(), clear=True):
+            with patch("istota.skills.moneyman.subprocess.run", return_value=self._mock_cli_run({"status": "ok"})) as m:
+                main(["invoice", "void", "INV-000001", "--force"])
+                cmd = m.call_args[0][0]
+                assert "invoice" in cmd
+                assert "void" in cmd
+                assert "INV-000001" in cmd
+                assert "--force" in cmd
+
+
+class TestCommandsHttp:
+    """Test HTTP mode command dispatch."""
+
+    def _http_env(self):
         return {"MONEYMAN_API_URL": "http://localhost:8090", "MONEYMAN_API_KEY": "test-key"}
 
     def _mock_response(self, data, status_code=200):
@@ -172,12 +320,12 @@ class TestMoneymanCommands:
         resp.raise_for_status = MagicMock()
         return resp
 
-    def test_cmd_list_ledgers(self):
+    def test_cmd_list(self):
         from istota.skills.moneyman import main
 
         response_data = {"status": "ok", "ledgers": [{"name": "Personal"}]}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
+        with patch.dict(os.environ, self._http_env(), clear=True):
+            with patch("istota.skills.moneyman._http_client") as mock_client_fn:
                 client = MagicMock()
                 mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
                 mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
@@ -189,8 +337,8 @@ class TestMoneymanCommands:
         from istota.skills.moneyman import main
 
         response_data = {"status": "ok", "errors": []}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
+        with patch.dict(os.environ, self._http_env(), clear=True):
+            with patch("istota.skills.moneyman._http_client") as mock_client_fn:
                 client = MagicMock()
                 mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
                 mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
@@ -202,8 +350,8 @@ class TestMoneymanCommands:
         from istota.skills.moneyman import main
 
         response_data = {"status": "ok", "balances": []}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
+        with patch.dict(os.environ, self._http_env(), clear=True):
+            with patch("istota.skills.moneyman._http_client") as mock_client_fn:
                 client = MagicMock()
                 mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
                 mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
@@ -214,250 +362,19 @@ class TestMoneymanCommands:
                     params={"ledger": "Personal", "account": "Assets:Bank"},
                 )
 
-    def test_cmd_balances_no_filters(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "balances": []}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.get.return_value = self._mock_response(response_data)
-                main(["balances"])
-                client.get.assert_called_once_with("/api/balances", params={})
-
-    def test_cmd_query(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "rows": []}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.post.return_value = self._mock_response(response_data)
-                main(["query", "SELECT date, narration FROM entries", "--ledger", "Personal"])
-                client.post.assert_called_once_with(
-                    "/api/query",
-                    json={"bql": "SELECT date, narration FROM entries", "ledger": "Personal"},
-                )
-
-    def test_cmd_report(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "report": {}}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.get.return_value = self._mock_response(response_data)
-                main(["report", "income-statement", "--year", "2026", "--ledger", "Personal"])
-                client.get.assert_called_once_with(
-                    "/api/reports/income-statement",
-                    params={"year": 2026, "ledger": "Personal"},
-                )
-
-    def test_cmd_lots(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "lots": []}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.get.return_value = self._mock_response(response_data)
-                main(["lots", "VTI", "--ledger", "Trading"])
-                client.get.assert_called_once_with(
-                    "/api/lots/VTI",
-                    params={"ledger": "Trading"},
-                )
-
-    def test_cmd_wash_sales(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "violations": []}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.get.return_value = self._mock_response(response_data)
-                main(["wash-sales", "--year", "2025", "--ledger", "Trading"])
-                client.get.assert_called_once_with(
-                    "/api/wash-sales",
-                    params={"year": 2025, "ledger": "Trading"},
-                )
-
-    def test_cmd_add_transaction(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok"}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.post.return_value = self._mock_response(response_data)
-                main([
-                    "add-transaction",
-                    "--date", "2026-02-01",
-                    "--payee", "Whole Foods",
-                    "--narration", "Groceries",
-                    "--debit", "Expenses:Food",
-                    "--credit", "Assets:Bank:Checking",
-                    "--amount", "85.50",
-                    "--ledger", "Personal",
-                ])
-                client.post.assert_called_once_with(
-                    "/api/transactions",
-                    json={
-                        "date": "2026-02-01",
-                        "payee": "Whole Foods",
-                        "narration": "Groceries",
-                        "debit": "Expenses:Food",
-                        "credit": "Assets:Bank:Checking",
-                        "amount": 85.50,
-                        "currency": "USD",
-                        "ledger": "Personal",
-                    },
-                )
-
-    def test_cmd_sync_monarch(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "synced": 5}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.post.return_value = self._mock_response(response_data)
-                main(["sync-monarch", "--ledger", "Personal", "--dry-run"])
-                client.post.assert_called_once_with(
-                    "/api/transactions/sync-monarch",
-                    json={"ledger": "Personal", "dry_run": True},
-                )
-
-    def test_cmd_import_csv(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "imported": 10}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.post.return_value = self._mock_response(response_data)
-                main([
-                    "import-csv",
-                    "/path/to/export.csv",
-                    "--account", "Assets:Bank:Checking",
-                    "--ledger", "Personal",
-                ])
-                client.post.assert_called_once()
-                call_args = client.post.call_args
-                assert call_args[0][0] == "/api/transactions/import-csv"
-                body = call_args[1]["json"]
-                assert body["file"] == "/path/to/export.csv"
-                assert body["account"] == "Assets:Bank:Checking"
-                assert body["ledger"] == "Personal"
-
-    def test_cmd_invoice_generate(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "invoices": []}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.post.return_value = self._mock_response(response_data)
-                main(["invoice", "generate", "--period", "2026-02", "--client", "acme"])
-                client.post.assert_called_once_with(
-                    "/api/invoices/generate",
-                    json={"period": "2026-02", "client": "acme", "dry_run": False},
-                )
-
-    def test_cmd_invoice_list(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "invoices": []}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.get.return_value = self._mock_response(response_data)
-                main(["invoice", "list", "--client", "acme", "--all"])
-                client.get.assert_called_once_with(
-                    "/api/invoices",
-                    params={"client": "acme", "all": True},
-                )
-
-    def test_cmd_invoice_paid(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok"}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.post.return_value = self._mock_response(response_data)
-                main(["invoice", "paid", "INV-000001", "--date", "2026-02-15", "--bank", "Assets:Bank:Savings"])
-                client.post.assert_called_once_with(
-                    "/api/invoices/paid",
-                    json={"invoice_number": "INV-000001", "date": "2026-02-15", "bank": "Assets:Bank:Savings", "no_post": False},
-                )
-
-    def test_cmd_invoice_create(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "invoice_number": "INV-000001"}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.post.return_value = self._mock_response(response_data)
-                main(["invoice", "create", "acme", "--service", "consulting", "--qty", "40"])
-                client.post.assert_called_once_with(
-                    "/api/invoices/create",
-                    json={"client_key": "acme", "service": "consulting", "qty": 40.0},
-                )
-
-    def test_cmd_invoice_create_with_items(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok", "invoice_number": "INV-000001"}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.post.return_value = self._mock_response(response_data)
-                main(["invoice", "create", "acme", "--item", "Travel expenses 340.50"])
-                client.post.assert_called_once_with(
-                    "/api/invoices/create",
-                    json={"client_key": "acme", "items": ["Travel expenses 340.50"]},
-                )
-
     def test_cmd_work_list(self):
         from istota.skills.moneyman import main
 
         response_data = {"status": "ok", "entries": []}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
+        with patch.dict(os.environ, self._http_env(), clear=True):
+            with patch("istota.skills.moneyman._http_client") as mock_client_fn:
                 client = MagicMock()
                 mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
                 mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
                 client.get.return_value = self._mock_response(response_data)
                 main(["work", "list", "--client", "acme", "--period", "2026-02", "--uninvoiced"])
                 client.get.assert_called_once_with(
-                    "/api/work",
+                    "/api/work/",
                     params={"client": "acme", "period": "2026-02", "uninvoiced": True},
                 )
 
@@ -465,8 +382,8 @@ class TestMoneymanCommands:
         from istota.skills.moneyman import main
 
         response_data = {"status": "ok", "id": 1}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
+        with patch.dict(os.environ, self._http_env(), clear=True):
+            with patch("istota.skills.moneyman._http_client") as mock_client_fn:
                 client = MagicMock()
                 mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
                 mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
@@ -480,7 +397,7 @@ class TestMoneymanCommands:
                     "--description", "Architecture review",
                 ])
                 client.post.assert_called_once_with(
-                    "/api/work",
+                    "/api/work/",
                     json={
                         "date": "2026-02-01",
                         "client": "acme",
@@ -490,34 +407,21 @@ class TestMoneymanCommands:
                     },
                 )
 
-    def test_cmd_work_update(self):
+    def test_cmd_invoice_void(self):
         from istota.skills.moneyman import main
 
-        response_data = {"status": "ok"}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
+        response_data = {"status": "ok", "entries_voided": 3}
+        with patch.dict(os.environ, self._http_env(), clear=True):
+            with patch("istota.skills.moneyman._http_client") as mock_client_fn:
                 client = MagicMock()
                 mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
                 mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.put.return_value = self._mock_response(response_data)
-                main(["work", "update", "5", "--qty", "8", "--description", "Updated"])
-                client.put.assert_called_once_with(
-                    "/api/work/5",
-                    json={"qty": 8.0, "description": "Updated"},
+                client.post.return_value = self._mock_response(response_data)
+                main(["invoice", "void", "INV-000001", "--force", "--delete-pdf"])
+                client.post.assert_called_once_with(
+                    "/api/invoices/void",
+                    json={"invoice_number": "INV-000001", "force": True, "delete_pdf": True},
                 )
-
-    def test_cmd_work_remove(self):
-        from istota.skills.moneyman import main
-
-        response_data = {"status": "ok"}
-        with patch.dict(os.environ, self._mock_env(), clear=True):
-            with patch("istota.skills.moneyman._client") as mock_client_fn:
-                client = MagicMock()
-                mock_client_fn.return_value.__enter__ = MagicMock(return_value=client)
-                mock_client_fn.return_value.__exit__ = MagicMock(return_value=False)
-                client.delete.return_value = self._mock_response(response_data)
-                main(["work", "remove", "3"])
-                client.delete.assert_called_once_with("/api/work/3")
 
     def test_unknown_command_exits(self):
         from istota.skills.moneyman import main

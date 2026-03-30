@@ -2229,11 +2229,14 @@ def execute_task(
             )
 
         # Collect extra paths to RO bind-mount into the sandbox
-        # (e.g. Unix sockets for same-host services like Moneyman)
+        # (e.g. moneyman venv for CLI access)
         _extra_ro_binds: list[Path] = []
-        moneyman_sock = env.get("MONEYMAN_API_SOCKET")
-        if moneyman_sock:
-            _extra_ro_binds.append(Path(moneyman_sock))
+        moneyman_cli = env.get("MONEYMAN_CLI_PATH")
+        if moneyman_cli:
+            # Bind the entire venv (parent of parent of bin/moneyman)
+            venv_dir = Path(moneyman_cli).resolve().parent.parent
+            if venv_dir.is_dir():
+                _extra_ro_binds.append(venv_dir)
 
         def _build_and_run():
             nonlocal cmd
