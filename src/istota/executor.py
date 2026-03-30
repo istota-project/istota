@@ -536,6 +536,11 @@ def build_bwrap_cmd(
     # --- Namespaces ---
     args.extend(["--unshare-pid", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
 
+    # --- Application installs (RO) ---
+    # Bind extra RO paths from config (e.g. /srv/app for co-located services)
+    for ro_path in config.security.sandbox_ro_paths:
+        _ro_bind(Path(ro_path))
+
     # --- Python venv + source tree (RO) ---
     # Resolve istota_home from the source tree (src/istota/ -> parent -> parent)
     istota_src = Path(__file__).resolve().parent.parent  # src/
@@ -2229,16 +2234,10 @@ def execute_task(
             )
 
         # Collect extra paths to RO bind-mount into the sandbox
-        # (e.g. moneyman venv for CLI access)
         _extra_ro_binds: list[Path] = []
+        # Moneyman CLI needs /etc/moneyman for secrets.toml
         moneyman_cli = env.get("MONEYMAN_CLI_PATH")
         if moneyman_cli:
-            # Bind the app dir (venv + config.toml + src for editable installs)
-            # cli_path = .../app/.venv/bin/moneyman → app_dir = .../app
-            app_dir = Path(moneyman_cli).resolve().parent.parent.parent
-            if app_dir.is_dir():
-                _extra_ro_binds.append(app_dir)
-            # Bind /etc/moneyman for secrets.toml (read by moneyman CLI)
             moneyman_etc = Path("/etc/moneyman")
             if moneyman_etc.is_dir():
                 _extra_ro_binds.append(moneyman_etc)

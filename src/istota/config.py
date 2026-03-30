@@ -284,6 +284,7 @@ class SecurityConfig:
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     ])
+    sandbox_ro_paths: list[str] = field(default_factory=lambda: ["/srv/app"])
     network: NetworkConfig = field(default_factory=NetworkConfig)
 
 
