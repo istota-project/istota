@@ -121,6 +121,14 @@
     state: present
   when: not istota_update_only and istota_browser_enabled
 
+- name: Add istota user to moneyman group (for CLI access)
+  user:
+    name: "{{ istota_user }}"
+    groups: "{{ istota_moneyman_group }}"
+    append: yes
+  when: not istota_update_only and istota_moneyman_group
+  notify: Restart istota
+
 - name: Add istota user to docker group
   user:
     name: "{{ istota_user }}"
