@@ -172,8 +172,8 @@ istota_disabled_skills: []
 #         session_token: "monarch-token"
 #       - type: "moneyman"
 #         name: "Moneyman"
-#         socket_path: "/run/moneyman/api.sock"
-#         api_key: "moneyman-api-key"
+#         cli_path: "/srv/app/moneyman/app/.venv/bin/moneyman"
+#         user_key: "username"
 #     briefings:
 #       - name: "morning"
 #         cron: "0 6 * * *"
