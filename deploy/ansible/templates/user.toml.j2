@@ -66,6 +66,15 @@ base_url = "{{ resource.base_url }}"
 api_key = "{{ resource.api_key }}"
 
 {% endif %}
+{% elif resource.type == 'moneyman' %}
+{% if resource.base_url is defined and resource.api_key is defined %}
+[[resources]]
+type = "moneyman"
+name = "{{ resource.name | default('Moneyman') }}"
+base_url = "{{ resource.base_url }}"
+api_key = "{{ resource.api_key }}"
+
+{% endif %}
 {% else %}
 [[resources]]
 type = "{{ resource.type }}"

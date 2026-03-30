@@ -170,6 +170,10 @@ istota_disabled_skills: []
 #       - type: "monarch"
 #         name: "Monarch Money"
 #         session_token: "monarch-token"
+#       - type: "moneyman"
+#         name: "Moneyman"
+#         base_url: "http://127.0.0.1:8090"
+#         api_key: "moneyman-api-key"
 #     briefings:
 #       - name: "morning"
 #         cron: "0 6 * * *"
