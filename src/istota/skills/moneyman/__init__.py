@@ -25,11 +25,13 @@ def _client() -> httpx.Client:
             transport=transport,
             headers=headers,
             timeout=60.0,
+            follow_redirects=True,
         )
     return httpx.Client(
         base_url=base_url.rstrip("/"),
         headers=headers,
         timeout=60.0,
+        follow_redirects=True,
     )
 
 
