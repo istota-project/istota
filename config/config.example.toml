@@ -51,6 +51,7 @@ temp_dir = "/tmp/istota"
 # skill_proxy_enabled = true       # proxy skill CLI calls via Unix socket (credential isolation)
 # skill_proxy_timeout = 300        # timeout for proxied skill commands (seconds)
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
+# sandbox_ro_paths = ["/srv/app"]  # extra RO bind-mounts in sandbox
 
 # [security.network]
 # enabled = true                   # --unshare-net + CONNECT proxy (requires sandbox)

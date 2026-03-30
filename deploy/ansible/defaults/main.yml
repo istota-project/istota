@@ -375,6 +375,8 @@ istota_security_sandbox_enabled: true             # bwrap filesystem isolation p
 istota_security_sandbox_admin_db_write: false     # allow admin DB writes inside sandbox
 istota_security_skill_proxy_enabled: true         # proxy skill CLI calls via Unix socket (credential isolation)
 istota_security_skill_proxy_timeout: 300          # timeout for proxied skill commands (seconds)
+istota_security_sandbox_ro_paths:                  # extra RO bind-mounts in sandbox (co-located services)
+  - /srv/app
 istota_security_network_enabled: true              # --unshare-net + CONNECT proxy (requires sandbox)
 istota_security_network_allow_pypi: true           # add pypi.org + files.pythonhosted.org to allowlist
 istota_security_network_extra_hosts: []            # operator-specific additions
