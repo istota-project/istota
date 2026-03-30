@@ -108,8 +108,11 @@ A wash sale occurs when you sell a security at a loss and buy substantially iden
 
 | Variable | Description |
 |---|---|
-| `MONEYMAN_API_URL` | Moneyman service URL (e.g. `http://127.0.0.1:8090`) |
-| `MONEYMAN_API_KEY` | API key for authentication (optional) |
+| `MONEYMAN_API_URL` | Moneyman service URL (HTTP fallback) |
+| `MONEYMAN_API_SOCKET` | Unix socket path (preferred, used when set) |
+| `MONEYMAN_API_KEY` | API key for authentication |
+
+Connection priority: `MONEYMAN_API_SOCKET` (Unix socket) is used when set, otherwise falls back to `MONEYMAN_API_URL` (HTTP).
 
 ## Adding the moneyman resource
 
@@ -119,6 +122,6 @@ Add to user config (`config/users/{user}.toml`):
 [[resources]]
 type = "moneyman"
 name = "Moneyman"
-base_url = "http://127.0.0.1:8090"
+socket_path = "/run/moneyman/api.sock"
 api_key = "your-api-key"
 ```
