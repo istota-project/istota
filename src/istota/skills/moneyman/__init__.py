@@ -9,14 +9,23 @@ import httpx
 
 
 def _client() -> httpx.Client:
+    socket_path = os.environ.get("MONEYMAN_API_SOCKET", "")
     base_url = os.environ.get("MONEYMAN_API_URL", "")
     api_key = os.environ.get("MONEYMAN_API_KEY", "")
-    if not base_url:
-        print(json.dumps({"error": "MONEYMAN_API_URL must be set"}))
+    if not socket_path and not base_url:
+        print(json.dumps({"error": "MONEYMAN_API_URL or MONEYMAN_API_SOCKET must be set"}))
         sys.exit(1)
     headers = {}
     if api_key:
         headers["X-API-Key"] = api_key
+    if socket_path:
+        transport = httpx.HTTPTransport(uds=socket_path)
+        return httpx.Client(
+            base_url="http://localhost",
+            transport=transport,
+            headers=headers,
+            timeout=60.0,
+        )
     return httpx.Client(
         base_url=base_url.rstrip("/"),
         headers=headers,

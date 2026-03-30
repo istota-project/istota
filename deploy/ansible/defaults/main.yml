@@ -172,7 +172,7 @@ istota_disabled_skills: []
 #         session_token: "monarch-token"
 #       - type: "moneyman"
 #         name: "Moneyman"
-#         base_url: "http://127.0.0.1:8090"
+#         socket_path: "/run/moneyman/api.sock"
 #         api_key: "moneyman-api-key"
 #     briefings:
 #       - name: "morning"

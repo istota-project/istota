@@ -173,9 +173,10 @@ class ResourceConfig:
     path: str = ""
     name: str = ""
     permissions: str = "read"
-    # Service-specific credentials (e.g. karakeep)
+    # Service-specific credentials (e.g. karakeep, moneyman)
     base_url: str = ""
     api_key: str = ""
+    socket_path: str = ""
     # Arbitrary extra fields for plugin skills (unrecognized keys go here)
     extra: dict = field(default_factory=dict)
 
@@ -437,7 +438,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         ))
 
     # Parse resources
-    _resource_known_keys = {"type", "path", "name", "permissions", "base_url", "api_key"}
+    _resource_known_keys = {"type", "path", "name", "permissions", "base_url", "api_key", "socket_path"}
     resources = []
     for r in user_data.get("resources", []):
         extra = {k: v for k, v in r.items() if k not in _resource_known_keys}
@@ -448,6 +449,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             permissions=r.get("permissions", "read"),
             base_url=r.get("base_url", ""),
             api_key=r.get("api_key", ""),
+            socket_path=r.get("socket_path", ""),
             extra=extra,
         ))
 

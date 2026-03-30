@@ -15,3 +15,9 @@ var = "MONEYMAN_API_KEY"
 from = "user_resource_config"
 resource_type = "moneyman"
 field = "api_key"
+
+[[env]]
+var = "MONEYMAN_API_SOCKET"
+from = "user_resource_config"
+resource_type = "moneyman"
+field = "socket_path"

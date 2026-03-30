@@ -482,6 +482,7 @@ def build_bwrap_cmd(
     user_temp_dir: Path,
     proxy_sock: Path | None = None,
     net_proxy_sock: Path | None = None,
+    extra_ro_binds: list[Path] | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -594,6 +595,11 @@ def build_bwrap_cmd(
         args.append("--unshare-net")
         if net_proxy_sock.exists():
             _ro_bind(net_proxy_sock)
+
+    # --- Extra RO binds (e.g. service sockets for same-host APIs) ---
+    for path in (extra_ro_binds or []):
+        if path.exists():
+            _ro_bind(path)
 
     # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
     mount = config.nextcloud_mount_path
@@ -2222,6 +2228,13 @@ def execute_task(
                 _net_proxy_sock, allowed_hosts,
             )
 
+        # Collect extra paths to RO bind-mount into the sandbox
+        # (e.g. Unix sockets for same-host services like Moneyman)
+        _extra_ro_binds: list[Path] = []
+        moneyman_sock = env.get("MONEYMAN_API_SOCKET")
+        if moneyman_sock:
+            _extra_ro_binds.append(Path(moneyman_sock))
+
         def _build_and_run():
             nonlocal cmd
             # Wrap in bwrap sandbox if enabled (after proxy start so socket exists)
@@ -2230,6 +2243,7 @@ def execute_task(
                     cmd, config, task, is_admin, user_resources,
                     Path(user_temp_dir), proxy_sock=_proxy_sock,
                     net_proxy_sock=_net_proxy_sock,
+                    extra_ro_binds=_extra_ro_binds,
                 )
             if use_streaming:
                 return _execute_streaming(cmd, env, config, task, on_progress, result_file, prompt)
