@@ -337,7 +337,7 @@ class TestMoneymanCommands:
                 client.post.return_value = self._mock_response(response_data)
                 main(["sync-monarch", "--ledger", "Personal", "--dry-run"])
                 client.post.assert_called_once_with(
-                    "/api/sync/monarch",
+                    "/api/transactions/sync-monarch",
                     json={"ledger": "Personal", "dry_run": True},
                 )
 
@@ -359,9 +359,9 @@ class TestMoneymanCommands:
                 ])
                 client.post.assert_called_once()
                 call_args = client.post.call_args
-                assert call_args[0][0] == "/api/import/csv"
+                assert call_args[0][0] == "/api/transactions/import-csv"
                 body = call_args[1]["json"]
-                assert body["file_path"] == "/path/to/export.csv"
+                assert body["file"] == "/path/to/export.csv"
                 assert body["account"] == "Assets:Bank:Checking"
                 assert body["ledger"] == "Personal"
 
@@ -409,8 +409,8 @@ class TestMoneymanCommands:
                 client.post.return_value = self._mock_response(response_data)
                 main(["invoice", "paid", "INV-000001", "--date", "2026-02-15", "--bank", "Assets:Bank:Savings"])
                 client.post.assert_called_once_with(
-                    "/api/invoices/INV-000001/paid",
-                    json={"date": "2026-02-15", "bank": "Assets:Bank:Savings", "no_post": False},
+                    "/api/invoices/paid",
+                    json={"invoice_number": "INV-000001", "date": "2026-02-15", "bank": "Assets:Bank:Savings", "no_post": False},
                 )
 
     def test_cmd_invoice_create(self):
@@ -425,8 +425,8 @@ class TestMoneymanCommands:
                 client.post.return_value = self._mock_response(response_data)
                 main(["invoice", "create", "acme", "--service", "consulting", "--qty", "40"])
                 client.post.assert_called_once_with(
-                    "/api/invoices",
-                    json={"client": "acme", "service": "consulting", "qty": 40.0},
+                    "/api/invoices/create",
+                    json={"client_key": "acme", "service": "consulting", "qty": 40.0},
                 )
 
     def test_cmd_invoice_create_with_items(self):
@@ -441,8 +441,8 @@ class TestMoneymanCommands:
                 client.post.return_value = self._mock_response(response_data)
                 main(["invoice", "create", "acme", "--item", "Travel expenses 340.50"])
                 client.post.assert_called_once_with(
-                    "/api/invoices",
-                    json={"client": "acme", "items": [{"description": "Travel expenses", "amount": 340.50}]},
+                    "/api/invoices/create",
+                    json={"client_key": "acme", "items": ["Travel expenses 340.50"]},
                 )
 
     def test_cmd_work_list(self):

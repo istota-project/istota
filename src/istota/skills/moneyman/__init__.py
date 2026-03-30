@@ -147,13 +147,13 @@ def cmd_sync_monarch(args):
     if args.ledger:
         body["ledger"] = args.ledger
     with _client() as client:
-        resp = client.post("/api/sync/monarch", json=body)
+        resp = client.post("/api/transactions/sync-monarch", json=body)
         _output(_handle_response(resp))
 
 
 def cmd_import_csv(args):
     body = {
-        "file_path": args.file,
+        "file": args.file,
         "account": args.account,
     }
     if args.ledger:
@@ -163,7 +163,7 @@ def cmd_import_csv(args):
     if args.exclude_tag:
         body["exclude_tags"] = list(args.exclude_tag)
     with _client() as client:
-        resp = client.post("/api/import/csv", json=body)
+        resp = client.post("/api/transactions/import-csv", json=body)
         _output(_handle_response(resp))
 
 
@@ -198,6 +198,7 @@ def cmd_invoice_list(args):
 
 def cmd_invoice_paid(args):
     body = {
+        "invoice_number": args.invoice_number,
         "date": args.payment_date,
         "no_post": args.no_post,
     }
@@ -206,12 +207,12 @@ def cmd_invoice_paid(args):
     if args.ledger:
         body["ledger"] = args.ledger
     with _client() as client:
-        resp = client.post(f"/api/invoices/{args.invoice_number}/paid", json=body)
+        resp = client.post("/api/invoices/paid", json=body)
         _output(_handle_response(resp))
 
 
 def cmd_invoice_create(args):
-    body = {"client": args.client_key}
+    body = {"client_key": args.client_key}
     if args.service:
         body["service"] = args.service
     if args.qty is not None:
@@ -221,23 +222,9 @@ def cmd_invoice_create(args):
     if args.entity:
         body["entity"] = args.entity
     if args.item:
-        items = []
-        for item_str in args.item:
-            parts = item_str.rsplit(" ", 1)
-            if len(parts) == 2:
-                desc = parts[0].strip('"').strip("'")
-                try:
-                    amt = float(parts[1])
-                    items.append({"description": desc, "amount": amt})
-                except ValueError:
-                    _output({"status": "error", "error": f"Invalid amount in item: {parts[1]}"})
-                    sys.exit(1)
-            else:
-                _output({"status": "error", "error": f"Invalid item format: {item_str}. Use: \"description\" amount"})
-                sys.exit(1)
-        body["items"] = items
+        body["items"] = list(args.item)
     with _client() as client:
-        resp = client.post("/api/invoices", json=body)
+        resp = client.post("/api/invoices/create", json=body)
         _output(_handle_response(resp))
 
 
