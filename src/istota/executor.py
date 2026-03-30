@@ -2233,12 +2233,11 @@ def execute_task(
         _extra_ro_binds: list[Path] = []
         moneyman_cli = env.get("MONEYMAN_CLI_PATH")
         if moneyman_cli:
-            # Bind the entire app dir (venv + src) since editable installs
-            # use .pth files pointing to the src/ directory.
-            # cli_path = .../app/.venv/bin/moneyman → app_dir = .../app
-            app_dir = Path(moneyman_cli).resolve().parent.parent.parent
-            if app_dir.is_dir():
-                _extra_ro_binds.append(app_dir)
+            # Bind the venv containing the moneyman package
+            # cli_path = .../app/.venv/bin/moneyman → venv_dir = .../app/.venv
+            venv_dir = Path(moneyman_cli).resolve().parent.parent
+            if venv_dir.is_dir():
+                _extra_ro_binds.append(venv_dir)
             # Bind /etc/moneyman for secrets.toml (read by moneyman CLI)
             moneyman_etc = Path("/etc/moneyman")
             if moneyman_etc.is_dir():
