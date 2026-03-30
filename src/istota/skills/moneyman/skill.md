@@ -32,7 +32,7 @@ istota-skill moneyman wash-sales [--year YYYY] [--ledger NAME]
 # Add a transaction
 istota-skill moneyman add-transaction --date 2026-02-01 --payee "Whole Foods" --narration "Groceries" --debit Expenses:Food --credit Assets:Bank:Checking --amount 85.50 [--currency USD] [--ledger NAME]
 
-# Sync from Monarch Money
+# Sync from Monarch Money (syncs all configured profiles by default)
 istota-skill moneyman sync-monarch [--dry-run] [--ledger NAME]
 
 # Import from CSV
@@ -46,7 +46,7 @@ All output is JSON with `status: ok|error`.
 Never manually type amounts into ledger files. Use CLI commands:
 
 - **User tells you a specific amount**: use `add-transaction` with exact amount
-- **Import from bank/Monarch export**: use `import-csv` or `sync-monarch`
+- **Import from bank/Monarch export**: use `import-csv` or `sync-monarch` (syncs all profiles when no `--ledger` specified)
 - **Check balances/transactions**: use `query` or `balances`
 
 ## Invoice commands
