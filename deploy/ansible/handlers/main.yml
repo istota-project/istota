@@ -2,17 +2,19 @@
 - name: reload systemd
   systemd:
     daemon_reload: yes
+  when: not istota_web_only
 
 - name: "restart istota-scheduler"
   systemd:
     name: "{{ istota_namespace }}-scheduler"
     state: restarted
+  when: not istota_web_only
 
 - name: "restart istota-browser"
   shell: docker compose -f docker-compose.browser.yml build && docker compose -f docker-compose.browser.yml up -d --force-recreate
   args:
     chdir: "{{ istota_home }}"
-  when: istota_browser_enabled
+  when: istota_browser_enabled and not istota_web_only
 
 - name: "restart istota-web"
   systemd:
