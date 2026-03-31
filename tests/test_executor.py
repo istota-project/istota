@@ -3080,16 +3080,29 @@ class TestComposeFullResult:
         # The terse closing should be dropped since it's just a reference
         assert result == findings
 
-    def test_substantial_result_kept_alongside_blocks(self):
-        block = self._substantial_text()
-        long_result = ("Here is a detailed conclusion. " * 10).strip()
+    def test_substantial_result_not_augmented_with_comparable_blocks(self):
+        """When the result is comparable length to trace blocks, no recovery."""
+        block = self._substantial_text()  # ~450 chars
+        long_result = ("Here is a detailed conclusion. " * 10).strip()  # ~300 chars
         trace = [
             {"type": "text", "text": block},
             {"type": "tool", "text": "Write file"},
         ]
         result = _compose_full_result(long_result, trace)
-        assert block in result
-        assert long_result in result
+        # Block is only ~1.5x the result — not recovered
+        assert result == long_result
+
+    def test_short_result_with_slightly_longer_block_no_recovery(self):
+        """When trace block is only slightly longer than result, no recovery."""
+        block = "A" * 250
+        short_result = "B" * 200
+        trace = [
+            {"type": "text", "text": block},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result(short_result, trace)
+        # 250 <= 200 * 2 = 400, so no recovery
+        assert result == short_result
 
     def test_empty_trace_entries_ignored(self):
         trace = [

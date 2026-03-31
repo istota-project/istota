@@ -147,6 +147,14 @@ def _compose_full_result(result_text: str, execution_trace: list[dict]) -> str:
     if not substantial_blocks:
         return result_text
 
+    # Only recover blocks if the longest one is meaningfully longer than
+    # the result — this indicates the real answer was in intermediate text
+    # and the final result is just a terse summary/reference.
+    max_block_len = max(len(b) for b in substantial_blocks)
+    result_len = len(result_text.strip())
+    if max_block_len <= result_len * 2:
+        return result_text
+
     # Deduplicate: keep only blocks that aren't near-duplicates of an
     # earlier block or of the result text (exact substring OR fuzzy match)
     unique_blocks: list[str] = []
