@@ -382,8 +382,6 @@ With the sandbox, the DB is read-only inside the subprocess. Skills write JSON r
 - `task_{id}_subtasks.json` → subtask creation (admin-only)
 - `task_{id}_tracked_transactions.json` → transaction dedup tracking
 
-Post-completion hooks also run unsandboxed: the scheduler restarts per-user Fava services after accounting skill tasks (since `systemctl` is unavailable inside the sandbox).
-
 ---
 
 ## Nextcloud integration
@@ -521,7 +519,7 @@ Target: Debian 13+ VM. Two paths:
 
 **Standalone** (`install.sh`): Interactive wizard. `render_config.py` generates all config files from a settings TOML.
 
-**Ansible role** (`deploy/ansible/`): Full automation. 14 Jinja2 templates generate config, systemd services, nginx, logrotate, backups, per-user Fava instances. The `~/Repos/ansible-server/roles/istota/` path is a symlink to `deploy/ansible/`.
+**Ansible role** (`deploy/ansible/`): Full automation. Jinja2 templates generate config, systemd services, nginx, logrotate, backups. The `~/Repos/ansible-server/roles/istota/` path is a symlink to `deploy/ansible/`.
 
 Nextcloud mount via rclone: full VFS cache, 1h max age, 5s dir cache, 10s poll interval. Set up by Ansible with `istota_use_nextcloud_mount: true`.
 
@@ -545,7 +543,7 @@ uv run pytest tests/ --cov=istota --cov-report=term-missing  # Coverage
 
 ## Dependencies
 
-Core: `httpx` (HTTP), `caldav` + `icalendar` (CalDAV), `croniter` (cron), `tomli` (TOML), `yfinance` (markets), `imap-tools` (email), `beancount` + `beanquery` + `fava` (accounting), `weasyprint` (PDF), `feedparser` (RSS), `pytesseract` (OCR), `garminconnect` (Garmin data).
+Core: `httpx` (HTTP), `caldav` + `icalendar` (CalDAV), `croniter` (cron), `tomli` (TOML), `yfinance` (markets), `imap-tools` (email), `beancount` + `beanquery` (accounting), `weasyprint` (PDF), `feedparser` (RSS), `pytesseract` (OCR), `garminconnect` (Garmin data).
 
 Optional extras: `memory-search` (sqlite-vec, sentence-transformers), `whisper` (faster-whisper), `dev` (pytest).
 

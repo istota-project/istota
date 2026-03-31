@@ -90,7 +90,7 @@ journalctl -u istota-scheduler -f
 
 ## Optional features
 
-The core install covers Talk integration, email, scheduling, and Claude Code execution. The install wizard (`--interactive`) prompts for the features below and sets them up automatically: memory search, sleep cycle, channel sleep cycle, whisper transcription, ntfy notifications, automated backups, and the browser container (including Docker installation). Fava and nginx site hosting are not covered by the wizard and require manual setup. For manual setup or customization, the reference instructions are provided here. All settings go in `/etc/istota/settings.toml`, then re-run `install.sh --update` to regenerate config.
+The core install covers Talk integration, email, scheduling, and Claude Code execution. The install wizard (`--interactive`) prompts for the features below and sets them up automatically: memory search, sleep cycle, channel sleep cycle, whisper transcription, ntfy notifications, automated backups, and the browser container (including Docker installation). Nginx site hosting is not covered by the wizard and requires manual setup. For manual setup or customization, the reference instructions are provided here. All settings go in `/etc/istota/settings.toml`, then re-run `install.sh --update` to regenerate config.
 
 Throughout this section, `$HOME` refers to the istota home directory (default `/srv/app/istota`) and commands are run as root unless noted otherwise.
 
@@ -259,68 +259,6 @@ EOF
 ```
 
 **Verify:** `sudo -u istota /usr/local/bin/istota-backup.sh db` should create a gzipped backup in `$HOME/data/backups/daily/`.
-
-### Fava ledger viewer
-
-Per-user web UI for browsing beancount ledger files. Each user with a ledger resource and a configured port gets a systemd service.
-
-**Prerequisites:** User must have a `ledger` resource configured.
-
-**Settings (per-user):**
-
-```toml
-[users.alice]
-fava_port = 5010
-```
-
-**Setup (per-user):**
-
-```bash
-USER_ID=alice
-FAVA_PORT=5010
-MOUNT=/srv/mount/nextcloud/content
-# Adjust this path to match the user's ledger resource path
-LEDGER_PATH="$MOUNT/Users/$USER_ID/beancount/main.beancount"
-
-cat > /etc/systemd/system/istota-fava-${USER_ID}.service <<EOF
-[Unit]
-Description=Istota Fava Ledger Viewer ($USER_ID)
-After=network.target mount-nextcloud.service
-Wants=mount-nextcloud.service
-
-[Service]
-Type=simple
-User=istota
-Group=istota
-ExecStart=/srv/app/istota/.venv/bin/fava --host 0.0.0.0 --port $FAVA_PORT $LEDGER_PATH
-Restart=always
-RestartSec=5
-Environment=HOME=/srv/app/istota
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=istota-fava-$USER_ID
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-ReadWritePaths=/srv/app/istota/tmp
-ReadWritePaths=/var/log/istota
-ReadOnlyPaths=$MOUNT
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable --now istota-fava-${USER_ID}
-
-# Optional: allow istota user to restart fava (for auto-reload after ledger changes)
-echo "istota ALL=(root) NOPASSWD: /bin/systemctl restart istota-fava-*" > /etc/sudoers.d/istota-fava
-chmod 440 /etc/sudoers.d/istota-fava
-visudo -cf /etc/sudoers.d/istota-fava
-```
-
-**Verify:** `curl -s http://localhost:5010/` should return the Fava web interface. Restrict access to private networks (VPN/wireguard) — Fava has no authentication.
 
 ### Nginx site hosting
 
