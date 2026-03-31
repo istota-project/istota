@@ -169,7 +169,7 @@
       apt:
         name: nodejs
         state: present
-  when: not istota_update_only and istota_nodejs_enabled
+  when: not istota_update_only and (istota_nodejs_enabled or istota_web_enabled | default(false))
 
 - name: Check if uv is installed
   command: which uv
@@ -383,6 +383,7 @@
   notify:
     - "restart istota-scheduler"
     - "restart istota-browser"
+    - "restart istota-web"
 
 - name: Resolve and checkout tag
   block:
@@ -414,6 +415,7 @@
       notify:
         - "restart istota-scheduler"
         - "restart istota-browser"
+        - "restart istota-web"
 
     - name: Warn if no tags found
       debug:
@@ -450,6 +452,30 @@
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
     recurse: yes
+
+- name: Install web UI dependencies
+  command: npm ci
+  args:
+    chdir: "{{ istota_repo_dir }}/web"
+  when: istota_web_enabled | default(false)
+  changed_when: false
+
+- name: Build web UI
+  command: npm run build
+  args:
+    chdir: "{{ istota_repo_dir }}/web"
+  when: istota_web_enabled | default(false)
+  changed_when: false
+  notify:
+    - "restart istota-web"
+
+- name: Set ownership of web build directory
+  file:
+    path: "{{ istota_repo_dir }}/web"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    recurse: yes
+  when: istota_web_enabled | default(false)
 
 - name: Pre-download Whisper model
   shell: >
