@@ -2,34 +2,35 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
-## 2026-03-31: Authenticated web interface with Nextcloud OIDC
+## 2026-03-31: Authenticated web interface with SvelteKit + Nextcloud OIDC
 
-Added a login-protected web UI using Nextcloud as an OpenID Connect identity provider. Follows the existing `webhook_receiver.py` standalone-service pattern (FastAPI + uvicorn + systemd). The first protected page serves the existing static feed HTML behind auth. Users must exist in `config.users` to log in.
+Added a login-protected web UI with a SvelteKit frontend and FastAPI backend. Nextcloud serves as the OpenID Connect identity provider. The feeds page reads directly from the Miniflux API (no static file generation), with a masonry card grid matching the existing static feed page design.
 
 **Key changes:**
 - `WebConfig` dataclass with OIDC issuer, client ID/secret, session secret key
-- FastAPI app with authlib OIDC flow: `/istota/login`, `/istota/callback`, `/istota/logout`
-- Dashboard at `/istota/` showing available features per user (e.g. feeds link for miniflux users)
-- Feeds route serves existing static HTML from the Nextcloud mount
+- FastAPI backend: OIDC auth flow, `/istota/api/me` (user info), `/istota/api/feeds` (Miniflux proxy with HTML sanitization and image extraction), `/istota/api/feeds/entries/{id}` (mark as read)
+- SvelteKit frontend (`web/`): adapter-static with `/istota` base path, dark theme, dashboard with feature cards, feeds page with masonry grid, image/text filters, sort toggles, grid/list view, image lightbox
+- Login page shows landing with "Log in with Nextcloud" link (prevents auto-re-auth on logout)
 - `web` extras group in pyproject.toml (authlib, itsdangerous, python-multipart)
-- Env var overrides: `ISTOTA_OIDC_CLIENT_SECRET`, `ISTOTA_WEB_SECRET_KEY`
-- Full Ansible deployment: systemd service, nginx proxy, secrets.env, config template
+- Ansible: Node.js build step (`npm ci` + `npm run build`), systemd service, nginx proxy, secrets.env, restart triggers on code/config changes
 
 **Files added:**
-- `src/istota/web_app.py` — FastAPI app with OIDC auth
-- `tests/test_web_app.py` — 15 tests covering all routes, auth, config parsing
+- `src/istota/web_app.py` — FastAPI backend (auth + API + static file serving)
+- `tests/test_web_app.py` — 20 tests (auth flow, API endpoints, image extraction, sanitization)
+- `web/` — SvelteKit project (routes, components, API client, CSS)
 - `deploy/ansible/templates/istota-web.service.j2` — systemd service template
 
 **Files modified:**
 - `src/istota/config.py` — WebConfig dataclass, [web] parsing, env var overrides
 - `pyproject.toml` — web extras group, added to all
 - `config/config.example.toml` — documented [web] section
+- `.gitignore` — node_modules, .svelte-kit, web/src/lib exception
 - `deploy/ansible/defaults/main.yml` — web defaults
 - `deploy/ansible/templates/config.toml.j2` — [web] block
 - `deploy/ansible/templates/secrets.env.j2` — OIDC and session secrets
 - `deploy/ansible/templates/istota.conf.j2` — nginx /istota/ proxy block
 - `deploy/ansible/handlers/main.yml` — restart istota-web handler
-- `deploy/ansible/tasks/main.yml` — web service deploy/remove, uv sync --extra web, nginx conditions
+- `deploy/ansible/tasks/main.yml` — Node.js build, web service deploy/remove, restart triggers
 
 ## 2026-03-31: Remove !usage command
 
