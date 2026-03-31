@@ -60,14 +60,6 @@ name = "Reminders"
 # api_key = "your-moneyman-api-key"
 # user_key = "alice"
 
-# Garmin Connect credentials (server-side only, not synced to Nextcloud)
-# Can also use [garmin] section syntax (auto-converted to resource)
-# [[resources]]
-# type = "garmin"
-# name = "Garmin Connect"
-# email = "your@email.com"
-# password = "yourpassword"
-
 # Monarch Money session token (server-side only, not synced to Nextcloud)
 # Can also use [monarch] section syntax (auto-converted to resource)
 # [[resources]]

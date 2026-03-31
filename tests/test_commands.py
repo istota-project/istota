@@ -774,14 +774,14 @@ class TestCmdSkills:
             with patch("istota.skills._loader.get_skill_availability") as mock_avail:
                 # Make one skill unavailable
                 def side_effect(meta):
-                    if meta.name == "garmin":
-                        return ("unavailable", "garminconnect")
+                    if meta.name == "whisper":
+                        return ("unavailable", "faster-whisper")
                     return ("available", None)
                 mock_avail.side_effect = side_effect
                 result = await cmd_skills(config, conn, "alice", "room1", "", client)
 
         assert "Unavailable" in result
-        assert "garminconnect" in result
+        assert "faster-whisper" in result
 
     @pytest.mark.asyncio
     async def test_shows_disabled_skills(self, make_config):

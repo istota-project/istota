@@ -1826,45 +1826,6 @@ class TestExecuteCommandTask:
         assert "https://nc.example.com/remote.php/dav" in result
         assert "ncuser" in result
 
-    def test_garmin_config_env_var(self, db_path, tmp_path):
-        mount = tmp_path / "mount"
-        mount.mkdir(exist_ok=True)
-        temp = tmp_path / "temp"
-        temp.mkdir(exist_ok=True)
-        config = Config(
-            db_path=db_path,
-            nextcloud_mount_path=mount,
-            temp_dir=temp,
-            scheduler=SchedulerConfig(task_timeout_minutes=1),
-        )
-        # Create GARMIN.md in the expected user config path
-        from istota.storage import get_user_config_path
-        garmin_dir = mount / get_user_config_path("alice", config.bot_dir_name).lstrip("/")
-        garmin_dir.mkdir(parents=True, exist_ok=True)
-        garmin_file = garmin_dir / "GARMIN.md"
-        garmin_file.write_text("garmin config")
-        task = self._make_task(command="echo $GARMIN_CONFIG")
-        success, result = _execute_command_task(task, config)
-        assert success is True
-        assert str(garmin_file) in result
-
-    def test_garmin_credentials_from_user_config_resource(self, db_path, tmp_path):
-        config = self._make_config(db_path, tmp_path)
-        config.users["alice"] = UserConfig(
-            resources=[ResourceConfig(type="garmin", extra={"email": "g@example.com", "password": "gpass"})],
-        )
-        task = self._make_task(command="echo $GARMIN_EMAIL:$GARMIN_PASSWORD")
-        success, result = _execute_command_task(task, config)
-        assert success is True
-        assert result == "g@example.com:gpass"
-
-    def test_garmin_config_not_set_when_file_missing(self, db_path, tmp_path):
-        config = self._make_config(db_path, tmp_path)
-        task = self._make_task(command="echo ${GARMIN_CONFIG:-unset}")
-        success, result = _execute_command_task(task, config)
-        assert success is True
-        assert result == "unset"
-
 
 # ---------------------------------------------------------------------------
 # TestDualWorkerQueue

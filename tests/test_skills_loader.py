@@ -1115,15 +1115,15 @@ class TestDependencyBasedSkillExclusion:
     def test_skill_with_missing_dep_excluded_from_selection(self):
         index = {
             "files": SkillMeta(name="files", description="File ops", always_include=True),
-            "garmin": SkillMeta(
-                name="garmin", description="Garmin",
-                keywords=["garmin"],
-                dependencies=["nonexistent_garminconnect_xyz"],
+            "missing_dep_skill": SkillMeta(
+                name="missing_dep_skill", description="Skill with missing dep",
+                keywords=["missingdep"],
+                dependencies=["nonexistent_package_xyz"],
             ),
         }
-        selected = select_skills("check my garmin data", "talk", set(), index)
+        selected = select_skills("check my missingdep data", "talk", set(), index)
         assert "files" in selected
-        assert "garmin" not in selected
+        assert "missing_dep_skill" not in selected
 
     def test_always_include_skill_with_missing_dep_excluded(self):
         index = {
