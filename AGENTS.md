@@ -153,7 +153,7 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 - Progress updates: random ack before execution, streaming progress (rate-limited: min 8s, max 5/task). `progress_style`: `replace` (edit ack in-place with elapsed time, default), `full` (accumulated tool descriptions), `legacy` (post individual progress messages), `none` (silent). Optional `progress_show_text` for intermediate assistant text.
 - Per-user log channel (`log_channel` config): verbose tool-by-tool execution logs posted to a dedicated Talk room
 - Multi-user rooms: only responds when @mentioned; 2-person rooms behave like DMs
-- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!usage`, `!check`, `!export` (conversation history export), `!skills` (list available skills), `!more #<task_id>` (show execution trace)
+- `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!check`, `!export` (conversation history export), `!skills` (list available skills), `!more #<task_id>` (show execution trace)
 - Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no
 
 ### Skills

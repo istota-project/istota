@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-31: Remove !usage command
+
+Anthropic now blocks non-official clients from using the `/api/oauth/usage` endpoint (403). This is a policy change enforced via client fingerprinting — subscription OAuth tokens are restricted to the official Claude Code binary. The `!usage` command cannot work under these restrictions, so it's removed entirely.
+
+**Key changes:**
+- Removed `cmd_usage`, `_read_claude_oauth_token`, `_format_utilization` from commands.py
+- Removed `httpx` import (only used by usage command)
+- Removed `TestReadClaudeOauthToken`, `TestFormatUtilization`, `TestCmdUsage` test classes
+- Updated AGENTS.md and ARCHITECTURE.md command references
+
+**Files modified:**
+- `src/istota/commands.py` — removed usage command and helpers
+- `tests/test_commands.py` — removed ~25 usage-related tests
+- `AGENTS.md` — removed `!usage` from commands list
+- `ARCHITECTURE.md` — removed `!usage` row from commands table
+
 ## 2026-03-30: Remove garmin skill
 
 Garmin changed their SSO auth flow in March 2026, breaking the `garth` library that `garminconnect` depends on. The SSO endpoint returns 429/errors permanently for programmatic logins. Rather than chasing the moving target of Garmin's auth, the garmin skill is removed entirely. Garmin data access will be handled through the browse skill with cron prompts (real browser session avoids SSO issues).
