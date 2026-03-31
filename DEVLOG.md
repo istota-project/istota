@@ -2,6 +2,35 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-31: Authenticated web interface with Nextcloud OIDC
+
+Added a login-protected web UI using Nextcloud as an OpenID Connect identity provider. Follows the existing `webhook_receiver.py` standalone-service pattern (FastAPI + uvicorn + systemd). The first protected page serves the existing static feed HTML behind auth. Users must exist in `config.users` to log in.
+
+**Key changes:**
+- `WebConfig` dataclass with OIDC issuer, client ID/secret, session secret key
+- FastAPI app with authlib OIDC flow: `/istota/login`, `/istota/callback`, `/istota/logout`
+- Dashboard at `/istota/` showing available features per user (e.g. feeds link for miniflux users)
+- Feeds route serves existing static HTML from the Nextcloud mount
+- `web` extras group in pyproject.toml (authlib, itsdangerous, python-multipart)
+- Env var overrides: `ISTOTA_OIDC_CLIENT_SECRET`, `ISTOTA_WEB_SECRET_KEY`
+- Full Ansible deployment: systemd service, nginx proxy, secrets.env, config template
+
+**Files added:**
+- `src/istota/web_app.py` — FastAPI app with OIDC auth
+- `tests/test_web_app.py` — 15 tests covering all routes, auth, config parsing
+- `deploy/ansible/templates/istota-web.service.j2` — systemd service template
+
+**Files modified:**
+- `src/istota/config.py` — WebConfig dataclass, [web] parsing, env var overrides
+- `pyproject.toml` — web extras group, added to all
+- `config/config.example.toml` — documented [web] section
+- `deploy/ansible/defaults/main.yml` — web defaults
+- `deploy/ansible/templates/config.toml.j2` — [web] block
+- `deploy/ansible/templates/secrets.env.j2` — OIDC and session secrets
+- `deploy/ansible/templates/istota.conf.j2` — nginx /istota/ proxy block
+- `deploy/ansible/handlers/main.yml` — restart istota-web handler
+- `deploy/ansible/tasks/main.yml` — web service deploy/remove, uv sync --extra web, nginx conditions
+
 ## 2026-03-31: Remove !usage command
 
 Anthropic now blocks non-official clients from using the `/api/oauth/usage` endpoint (403). This is a policy change enforced via client fingerprinting — subscription OAuth tokens are restricted to the official Claude Code binary. The `!usage` command cannot work under these restrictions, so it's removed entirely.

@@ -21,6 +21,7 @@ istota/
 │   ├── network_proxy.py     # CONNECT proxy for network isolation (domain allowlist)
 │   ├── heartbeat.py         # Heartbeat monitoring system
 │   ├── location_loader.py   # LOCATION.md parser + place sync
+│   ├── web_app.py            # Authenticated web interface (Nextcloud OIDC)
 │   ├── webhook_receiver.py   # FastAPI webhook receiver (Overland GPS, etc.)
 │   ├── logging_setup.py     # Central logging configuration
 │   ├── nextcloud_api.py     # Nextcloud API user metadata hydration
@@ -100,6 +101,7 @@ CLI ─────────►┘
 
 GPS Webhook ──► Location DB → Place detection → Notifications (ntfy/Talk)
 
+Web App ──► Nextcloud OIDC → Session → Dashboard / Feed pages
 ```
 
 - **Talk poller**: Background daemon thread, long-polling per conversation, WAL mode for concurrent DB access
@@ -202,6 +204,13 @@ Per-user config via `LOCATION.md` in the user's bot config folder (TOML format):
 Place detection uses hysteresis (2 consecutive pings required) to avoid flapping. LOCATION.md is reloaded on every ping batch — changes take effect without restart.
 
 DB tables: `location_pings`, `location_places`, `location_visits`, `location_state`. Old pings cleaned after `location_ping_retention_days` (365).
+
+### Authenticated Web Interface
+OIDC-authenticated web UI (`web_app.py`) using Nextcloud as the identity provider. Runs as a separate FastAPI service (`uvicorn istota.web_app:app`). Session-based auth with `SessionMiddleware`, 7-day cookie max age.
+
+Routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange, user verification), `/istota/logout`, `/istota/` (dashboard), `/istota/feeds` (serves static feed HTML from Nextcloud mount).
+
+User verification: `preferred_username` from OIDC must exist in `config.users`. Config: `[web]` section — `enabled`, `port`, `oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `session_secret_key`. Secrets via env vars: `ISTOTA_OIDC_CLIENT_SECRET`, `ISTOTA_WEB_SECRET_KEY`.
 
 ### Filesystem Sandbox (bubblewrap)
 Per-user filesystem isolation via `bwrap`. Non-admins see only their Nextcloud subtree + system libs. Admins see full mount + DB (RO by default). Graceful degradation if not Linux or bwrap not found.
