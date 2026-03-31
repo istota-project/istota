@@ -77,8 +77,10 @@ istota/
 │   └── skills/              # Operator override directory (empty by default)
 ├── deploy/
 │   ├── ansible/             # Ansible role (defaults, tasks, handlers, templates)
-│   ├── render_config.py     # Python config generator for install.sh
-│   ├── install.sh           # Main deployment script
+│   ├── install.sh           # Bootstrap: ensures Ansible, runs wizard, delegates to role
+│   ├── wizard.sh            # Interactive setup wizard (writes settings.toml)
+│   ├── settings_to_vars.py  # Converts settings.toml to Ansible vars YAML
+│   ├── local-playbook.yml   # Playbook for local-mode deployment
 │   └── README.md            # Deployment documentation
 ├── docker/
 │   ├── docker-compose.yml   # Full stack: postgres + redis + nextcloud + istota

@@ -59,6 +59,29 @@
         2. (Manual) sudo -u {{ istota_user }} HOME={{ istota_home }} claude login
   when: not istota_update_only and not istota_web_only and not (claude_check.stat.exists | default(true))
 
+- name: Create Claude config directory
+  file:
+    path: "{{ istota_home }}/.claude"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0700"
+  when: >
+    not istota_web_only
+    and (istota_claude_code_oauth_token | default('') | length > 0)
+
+- name: Deploy Claude OAuth credentials file
+  copy:
+    dest: "{{ istota_home }}/.claude/.credentials.json"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0600"
+    content: '{"claudeAiOauth":{"accessToken":"{{ istota_claude_code_oauth_token }}","expiresAt":"9999-12-31T23:59:59.999Z"}}'
+  no_log: true
+  when: >
+    not istota_web_only
+    and (istota_claude_code_oauth_token | default('') | length > 0)
+
 - name: Install system dependencies
   apt:
     name:
@@ -255,6 +278,22 @@
     group: "{{ istota_group }}"
     mode: "0700"
   when: not istota_update_only and not istota_web_only and istota_configure_rclone
+
+- name: Auto-obscure rclone password from app password
+  shell: rclone obscure "{{ istota_nextcloud_app_password }}"
+  register: _istota_rclone_obscured
+  changed_when: false
+  no_log: true
+  when: >
+    not istota_update_only and not istota_web_only and istota_configure_rclone
+    and (istota_rclone_password_obscured | default('') | length == 0)
+    and (istota_nextcloud_app_password | default('') | length > 0)
+
+- name: Set rclone obscured password fact
+  set_fact:
+    istota_rclone_password_obscured: "{{ _istota_rclone_obscured.stdout }}"
+  when: _istota_rclone_obscured is defined and _istota_rclone_obscured is not skipped
+  no_log: true
 
 - name: Deploy rclone configuration
   copy:

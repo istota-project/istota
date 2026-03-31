@@ -263,7 +263,8 @@
 ### Production Setup ✅
 - [x] Ansible role for deployment (ported to `deploy/ansible/`)
 - [x] Standalone `install.sh` with interactive wizard
-- [x] Config generator (`deploy/render_config.py`)
+- [x] Config generator (`deploy/render_config.py`) — replaced by Ansible bootstrap
+- [x] Ansible bootstrap: `install.sh` delegates to bundled Ansible role via `settings_to_vars.py`
 - [x] Systemd service templating
 - [x] Log rotation configuration
 - [x] Ansible repo dir cleanup (`istota_repo_dir` variable, no more `src/src/` nesting)

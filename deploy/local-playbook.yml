@@ -1,0 +1,14 @@
+---
+# Local deployment playbook for install.sh bootstrap
+# Applies the bundled Ansible role on the local machine.
+#
+# Usage (called by install.sh, not directly):
+#   ansible-playbook deploy/local-playbook.yml \
+#     --connection local --inventory localhost, \
+#     --extra-vars @/etc/istota/vars.yml
+#
+- hosts: localhost
+  connection: local
+  become: yes
+  roles:
+    - role: "{{ playbook_dir }}/ansible"
