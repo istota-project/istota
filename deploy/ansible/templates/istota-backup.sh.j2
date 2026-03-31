@@ -2,7 +2,7 @@
 # {{ istota_namespace | capitalize }} backup script - managed by Ansible
 set -euo pipefail
 
-DB="{{ istota_home }}/data/tasks.db"
+DB="{{ istota_home }}/data/{{ istota_namespace }}.db"
 LOCAL_DIR="{{ istota_backup_local_dir }}"
 REMOTE_DIR="{{ istota_backup_remote_dir }}"
 MOUNT_PATH="{{ istota_nextcloud_mount_path }}"
@@ -28,7 +28,7 @@ backup_db() {
     log "Starting database backup"
 
     local tmp_file
-    tmp_file=$(mktemp "${LOCAL_DIR}/tasks-backup-XXXXXX.db")
+    tmp_file=$(mktemp "${LOCAL_DIR}/{{ istota_namespace }}-backup-XXXXXX.db")
     trap 'rm -f "$tmp_file"' RETURN
 
     # Safe WAL-aware backup
@@ -42,7 +42,7 @@ backup_db() {
         return 1
     fi
 
-    local backup_name="tasks-${TIMESTAMP}.db.gz"
+    local backup_name="{{ istota_namespace }}-${TIMESTAMP}.db.gz"
 
     # Daily backup (local)
     gzip -c "$tmp_file" > "${LOCAL_DIR}/daily/${backup_name}"
@@ -68,14 +68,14 @@ backup_db() {
     fi
 
     # Rotate local daily
-    find "${LOCAL_DIR}/daily" -name "tasks-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
+    find "${LOCAL_DIR}/daily" -name "{{ istota_namespace }}-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
     # Rotate local weekly
-    find "${LOCAL_DIR}/weekly" -name "tasks-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
+    find "${LOCAL_DIR}/weekly" -name "{{ istota_namespace }}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
 
     # Rotate remote
     if mount_available; then
-        find "${REMOTE_DIR}/db/daily" -name "tasks-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
-        find "${REMOTE_DIR}/db/weekly" -name "tasks-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
+        find "${REMOTE_DIR}/db/daily" -name "{{ istota_namespace }}-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
+        find "${REMOTE_DIR}/db/weekly" -name "{{ istota_namespace }}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
     fi
 
     log "Database backup complete"
