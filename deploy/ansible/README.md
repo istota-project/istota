@@ -65,7 +65,6 @@ All variables with defaults are documented in `defaults/main.yml`. Key groups:
 | Sleep cycle | `istota_sleep_cycle_enabled` | `false` |
 | Channel sleep cycle | `istota_channel_sleep_cycle_enabled` | `false` |
 | Whisper transcription | `istota_whisper_enabled` | `false` |
-| Fava ledger viewer | `istota_fava_enabled` | `false` |
 | Nginx site hosting | `istota_site_enabled` | `false` |
 | Node.js | `istota_nodejs_enabled` | `false` |
 | Developer/GitLab | `istota_developer_enabled` | `false` |

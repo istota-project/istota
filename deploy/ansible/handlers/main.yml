@@ -20,11 +20,6 @@
     state: restarted
   when: istota_location_enabled | default(false)
 
-- name: restart fava services
-  shell: "systemctl restart {{ istota_namespace }}-fava-*.service"
-  failed_when: false
-  when: istota_fava_enabled
-
 - name: reload nginx
   systemd:
     name: nginx

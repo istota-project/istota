@@ -1586,7 +1586,6 @@ if users:
     echo
 
     echo -e "${_BOLD}Optional features${_RESET} (not set up by this script):"
-    echo "  - Fava ledger viewer   Per-user beancount web UI"
     echo "  - Nginx site hosting   Per-user static sites from Nextcloud"
     echo
     echo "  See deploy/README.md for setup instructions."

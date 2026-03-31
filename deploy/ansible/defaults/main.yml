@@ -335,10 +335,6 @@ istota_site_base_path: "{{ istota_home }}/html"
 # istota_site_hostname is accepted as a backward-compatible alias
 istota_hostname: "{{ istota_site_hostname | default(istota_namespace + '.example.com') }}"
 
-# Fava web UI settings (beancount ledger viewer)
-istota_fava_enabled: false
-istota_fava_host: "0.0.0.0"
-
 # Backup settings
 istota_backup_enabled: true
 istota_backup_local_dir: "{{ istota_home }}/data/backups"

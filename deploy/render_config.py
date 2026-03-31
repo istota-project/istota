@@ -9,7 +9,7 @@ without the istota_ prefix) and generates:
   - /etc/istota/secrets.env (if use_environment_file)
   - istota-scheduler.service systemd unit
   - logrotate config
-  - Optional: backup script/cron, docker-compose, fava services
+  - Optional: backup script/cron, docker-compose
 """
 from __future__ import annotations
 
