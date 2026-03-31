@@ -29,9 +29,6 @@ markets = [
 transcribe = [
     "pytesseract>=0.3.10",
 ]
-garmin = [
-    "garminconnect>=0.2.0",
-]
 memory-search = [
     "sqlite-vec>=0.1.6",
     "sentence-transformers>=3.0.0",
@@ -51,7 +48,6 @@ all = [
     "istota[email]",
     "istota[markets]",
     "istota[transcribe]",
-    "istota[garmin]",
     "istota[memory-search]",
     "istota[whisper]",
     "istota[location]",

@@ -81,7 +81,6 @@ Returns sorted list of skill names.
 | `transcribe` | — | transcribe, ocr, screenshot, scan, ... | — | — |
 | `whisper` | — | transcribe, whisper, audio, voice, speech, dictation, ... | — | — |
 | `developer` | — | git, gitlab, repo, repository, commit, branch, MR, ... | — | — |
-| `garmin` | — | garmin, run, workout, activity, fitness, steps, ... | garmin | — |
 | `location` | — | location, gps, where, place, tracking, ... | — | — |
 | `bookmarks` | — | bookmark, karakeep, save, read later, ... | karakeep | — |
 | `website` | — | website, site, publish, blog, ... | — | — |
@@ -135,11 +134,6 @@ Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skill
 **Subcommands**: `share list` (`--path`), `share create` (`--path`, `--type user|link|email`, `--permissions`), `share delete SHARE_ID`, `share search QUERY`
 **Env vars**: `NC_URL`, `NC_USER`, `NC_PASS`
 **Key fns**: Uses `nextcloud_client.py` (OCS + WebDAV)
-
-### `garmin/` - Garmin Connect Data
-**Subcommands**: `connect`, `user`, `activities`, `stats`, `health`
-**Env vars**: `GARMIN_EMAIL`, `GARMIN_PASSWORD`, `GARMIN_CONFIG`
-**Optional deps**: `garminconnect` (in `garmin` extra group)
 
 ### `location/` - GPS Location + Calendar Attendance
 **Subcommands**: `current`, `history`, `places`, `learn`, `attendance`, `reverse-geocode`, `day-summary`

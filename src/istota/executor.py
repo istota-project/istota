@@ -373,8 +373,6 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "MINIFLUX_API_KEY",
     "GITLAB_TOKEN",
     "GITHUB_TOKEN",
-    "GARMIN_EMAIL",
-    "GARMIN_PASSWORD",
     "MONEYMAN_API_KEY",
 })
 
@@ -390,8 +388,6 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "MINIFLUX_API_KEY": frozenset({"feeds"}),
     "GITLAB_TOKEN": frozenset({"developer"}),
     "GITHUB_TOKEN": frozenset({"developer"}),
-    "GARMIN_EMAIL": frozenset({"garmin"}),
-    "GARMIN_PASSWORD": frozenset({"garmin"}),
     "MONEYMAN_API_KEY": frozenset({"moneyman"}),
 }
 
@@ -1944,21 +1940,6 @@ def execute_task(
             env["IMAP_PORT"] = str(config.email.imap_port)
             env["IMAP_USER"] = config.email.imap_user
             env["IMAP_PASSWORD"] = config.email.imap_password
-
-        # Garmin credentials (from resource config, fall back to GARMIN.md)
-        if user_config:
-            garmin_resources = [
-                rc for rc in user_config.resources
-                if rc.type == "garmin" and rc.extra.get("email")
-            ]
-            if garmin_resources:
-                env["GARMIN_EMAIL"] = garmin_resources[0].extra["email"]
-                env["GARMIN_PASSWORD"] = garmin_resources[0].extra.get("password", "")
-        if config.nextcloud_mount_path and task:
-            from .storage import get_user_config_path
-            garmin_path = config.nextcloud_mount_path / get_user_config_path(task.user_id, config.bot_dir_name).lstrip("/") / "GARMIN.md"
-            if garmin_path.exists():
-                env["GARMIN_CONFIG"] = str(garmin_path)
 
         # Karakeep bookmarks (per-user API credentials from resource config)
         if user_config:

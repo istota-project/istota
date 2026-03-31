@@ -454,32 +454,6 @@ wheels = [
 ]
 
 [[package]]
-name = "garminconnect"
-version = "0.2.38"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "garth" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/04/b5/c2d3c7fb53c98f74ef208b44b686e48f01cb6434d091f66593e29fd4d2ed/garminconnect-0.2.38.tar.gz", hash = "sha256:53f0d73e821dfa9e93731a6a1c81c34e689ce157c2751edd22dd462d4e4f9e04", size = 37502, upload-time = "2026-01-04T12:08:57.563Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/91/dc/9e0b1eee113fedfefd6577de45205e33505fcdc1520d4d28ee4c339e9862/garminconnect-0.2.38-py3-none-any.whl", hash = "sha256:801f64834d8d2ff41f10679e4111fc157312550980b0e29b0c2f263fd628a604", size = 32733, upload-time = "2026-01-04T12:08:55.45Z" },
-]
-
-[[package]]
-name = "garth"
-version = "0.5.21"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pydantic" },
-    { name = "requests" },
-    { name = "requests-oauthlib" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/14/1a/e559feb5efd53e9a5d15c28007a714e240a51363c79a306727977fe1999b/garth-0.5.21.tar.gz", hash = "sha256:8d979595d1d4ea23a1b466ab4a60955d139b71f886f46490be140fcee584dab4", size = 1840358, upload-time = "2026-01-07T23:12:33.828Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c5/14/b7c77f363ff04cc0c57991277b8c3564df5210b0879894e2033f90f55ff5/garth-0.5.21-py3-none-any.whl", hash = "sha256:24b8c517ef24ef030bca14cf4e8d7ad7a191d9bc60ece6077fec6ea743a5d039", size = 33265, upload-time = "2026-01-07T23:12:32.069Z" },
-]
-
-[[package]]
 name = "geographiclib"
 version = "2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -655,7 +629,6 @@ all = [
     { name = "caldav" },
     { name = "fastapi" },
     { name = "faster-whisper" },
-    { name = "garminconnect" },
     { name = "geopy" },
     { name = "icalendar" },
     { name = "imap-tools" },
@@ -678,9 +651,6 @@ dev = [
 ]
 email = [
     { name = "imap-tools" },
-]
-garmin = [
-    { name = "garminconnect" },
 ]
 location = [
     { name = "fastapi" },
@@ -716,14 +686,12 @@ requires-dist = [
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "fastapi", marker = "extra == 'location'", specifier = ">=0.100.0" },
     { name = "faster-whisper", marker = "extra == 'whisper'", specifier = ">=1.1.0" },
-    { name = "garminconnect", marker = "extra == 'garmin'", specifier = ">=0.2.0" },
     { name = "geopy", marker = "extra == 'location'", specifier = ">=2.4" },
     { name = "httpx", specifier = ">=0.26.0" },
     { name = "icalendar", marker = "extra == 'calendar'", specifier = ">=5.0.0" },
     { name = "imap-tools", marker = "extra == 'email'", specifier = ">=1.0.0" },
     { name = "istota", extras = ["calendar"], marker = "extra == 'all'" },
     { name = "istota", extras = ["email"], marker = "extra == 'all'" },
-    { name = "istota", extras = ["garmin"], marker = "extra == 'all'" },
     { name = "istota", extras = ["location"], marker = "extra == 'all'" },
     { name = "istota", extras = ["markets"], marker = "extra == 'all'" },
     { name = "istota", extras = ["memory-search"], marker = "extra == 'all'" },
@@ -740,7 +708,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'location'", specifier = ">=0.20.0" },
     { name = "yfinance", marker = "extra == 'markets'", specifier = ">=0.2.0" },
 ]
-provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "garmin", "memory-search", "whisper", "location", "all"]
+provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-search", "whisper", "location", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1148,15 +1116,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/91/da/643aad274e29ccbdf42ecd94dafe524b81c87bcb56b83872d54827f10543/numpy-2.4.2-pp311-pypy311_pp73-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e04ae107ac591763a47398bb45b568fc38f02dbc4aa44c063f67a131f99346cb", size = 15797142, upload-time = "2026-01-31T23:13:02.219Z" },
     { url = "https://files.pythonhosted.org/packages/66/27/965b8525e9cb5dc16481b30a1b3c21e50c7ebf6e9dbd48d0c4d0d5089c7e/numpy-2.4.2-pp311-pypy311_pp73-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:602f65afdef699cda27ec0b9224ae5dc43e328f4c24c689deaf77133dbee74d0", size = 16727979, upload-time = "2026-01-31T23:13:04.62Z" },
     { url = "https://files.pythonhosted.org/packages/de/e5/b7d20451657664b07986c2f6e3be564433f5dcaf3482d68eaecd79afaf03/numpy-2.4.2-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:be71bf1edb48ebbbf7f6337b5bfd2f895d1902f6335a5830b20141fc126ffba0", size = 12502577, upload-time = "2026-01-31T23:13:07.08Z" },
-]
-
-[[package]]
-name = "oauthlib"
-version = "3.3.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0b/5f/19930f824ffeb0ad4372da4812c50edbd1434f678c90c2733e1188edfc63/oauthlib-3.3.1.tar.gz", hash = "sha256:0f0f8aa759826a193cf66c12ea1af1637f87b9b4622d46e866952bb022e538c9", size = 185918, upload-time = "2025-06-19T22:48:08.269Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/be/9c/92789c596b8df838baa98fa71844d84283302f7604ed565dafe5a6b5041a/oauthlib-3.3.1-py3-none-any.whl", hash = "sha256:88119c938d2b8fb88561af5f6ee0eec8cc8d552b7bb1f712743136eb7523b7a1", size = 160065, upload-time = "2025-06-19T22:48:06.508Z" },
 ]
 
 [[package]]
@@ -1866,19 +1825,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c9/74/b3ff8e6c8446842c3f5c837e9c3dfcfe2018ea6ecef224c710c85ef728f4/requests-2.32.5.tar.gz", hash = "sha256:dbba0bac56e100853db0ea71b82b4dfd5fe2bf6d3754a8893c3af500cec7d7cf", size = 134517, upload-time = "2025-08-18T20:46:02.573Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/db/4254e3eabe8020b458f1a747140d32277ec7a271daf1d235b70dc0b4e6e3/requests-2.32.5-py3-none-any.whl", hash = "sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6", size = 64738, upload-time = "2025-08-18T20:46:00.542Z" },
-]
-
-[[package]]
-name = "requests-oauthlib"
-version = "2.0.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "oauthlib" },
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/42/f2/05f29bc3913aea15eb670be136045bf5c5bbf4b99ecb839da9b422bb2c85/requests-oauthlib-2.0.0.tar.gz", hash = "sha256:b3dffaebd884d8cd778494369603a9e7b58d29111bf6b41bdc2dcd87203af4e9", size = 55650, upload-time = "2024-03-22T20:32:29.939Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/5d/63d4ae3b9daea098d5d6f5da83984853c1bbacd5dc826764b249fe119d24/requests_oauthlib-2.0.0-py2.py3-none-any.whl", hash = "sha256:7dd8a5c40426b779b0868c404bdef9768deccf22749cde15852df527e6269b36", size = 24179, upload-time = "2024-03-22T20:32:28.055Z" },
 ]
 
 [[package]]

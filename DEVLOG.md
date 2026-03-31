@@ -2,6 +2,17 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-30: Remove garmin skill
+
+Garmin changed their SSO auth flow in March 2026, breaking the `garth` library that `garminconnect` depends on. The SSO endpoint returns 429/errors permanently for programmatic logins. Rather than chasing the moving target of Garmin's auth, the garmin skill is removed entirely. Garmin data access will be handled through the browse skill with cron prompts (real browser session avoids SSO issues).
+
+**Key changes:**
+- Removed `src/istota/skills/garmin/` directory and `tests/test_garmin.py`
+- Removed `garmin` extras group from `pyproject.toml` (drops `garminconnect` dependency)
+- Removed Garmin credential env vars (`GARMIN_EMAIL`, `GARMIN_PASSWORD`, `GARMIN_CONFIG`) from executor, scheduler, skill proxy, and config parser
+- Removed garmin resource type from config parsing, Ansible templates, and example configs
+- Updated AGENTS.md and `.claude/rules/` docs
+
 ## 2026-03-30: Fix !usage 401 and briefing digest path
 
 Two minor bug fixes from the issues tracker.

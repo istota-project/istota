@@ -24,7 +24,6 @@ _ALLOWED_SKILLS = frozenset({
     "calendar",
     "email",
     "feeds",
-    "garmin",
     "location",
     "markets",
     "memory_search",
