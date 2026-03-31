@@ -7,6 +7,7 @@ import pytest
 
 from istota.executor import (
     _compose_full_result,
+    _text_similarity,
     detect_malformed_result,
     parse_api_error,
     is_transient_api_error,
@@ -3048,8 +3049,18 @@ class TestComposeFullResult:
         assert result == findings  # no duplication
 
     def test_multiple_substantial_blocks_all_included(self):
-        block1 = ("First batch of results. " * 15).strip()
-        block2 = ("Second batch of results. " * 15).strip()
+        block1 = (
+            "The calendar shows three meetings today: a standup at 9am, "
+            "a design review at 11am, and a planning session at 2pm. "
+            "All meetings are in the main conference room on the second floor. "
+            "The standup has seven attendees and typically runs 15 minutes."
+        )
+        block2 = (
+            "Market summary: the S&P 500 gained 1.2% on strong earnings reports "
+            "from tech companies. European markets closed mixed, with the DAX up "
+            "0.3% while the FTSE declined 0.1% on weaker consumer data. "
+            "Asian markets were mostly higher overnight with the Nikkei up 0.8%."
+        )
         trace = [
             {"type": "text", "text": block1},
             {"type": "tool", "text": "More browsing"},
@@ -3086,3 +3097,71 @@ class TestComposeFullResult:
             {"type": "text", "text": "   "},
         ]
         assert _compose_full_result("Done.", trace) == "Done."
+
+    def test_near_duplicate_blocks_deduplicated(self):
+        """When the model restates itself with minor edits, only keep one copy."""
+        block_v1 = (
+            "That's the only feedback memory I have saved. One file: "
+            "feedback_no_parallel_mutations.md — Never run mutation commands "
+            "in parallel subagents. Learned the hard way during yesterday's "
+            "moneyman pipeline test when I fired two subagents for every step, "
+            "doubled all the writes, and then blamed moneyman for the chaos."
+        )
+        block_v2 = (
+            "That's the only feedback memory I have. One file: "
+            "feedback_no_parallel_mutations.md — Never run mutation commands "
+            "in parallel subagents. Learned the hard way during the moneyman "
+            "pipeline test when I fired two subagents at every step, "
+            "duplicated entries, and then blamed moneyman for bugs that were "
+            "entirely self-inflicted."
+        )
+        trace = [
+            {"type": "text", "text": block_v1},
+            {"type": "tool", "text": "Read memory file"},
+            {"type": "text", "text": block_v2},
+        ]
+        result = _compose_full_result("See above.", trace)
+        # Should contain only one version, not both
+        assert block_v1 in result
+        assert block_v2 not in result
+
+    def test_near_duplicate_of_result_text_dropped(self):
+        """A trace block that's a near-duplicate of result_text is skipped."""
+        result_text = (
+            "Here are the findings from the analysis. The data shows a clear "
+            "trend toward increased usage over the past quarter. " * 5
+        ).strip()
+        # Slightly different version in trace
+        trace_block = (
+            "Here are the findings from my analysis. The data shows a clear "
+            "trend towards increased usage over the last quarter. " * 5
+        ).strip()
+        trace = [
+            {"type": "text", "text": trace_block},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result(result_text, trace)
+        assert result == result_text
+
+    def test_distinct_blocks_not_deduplicated(self):
+        """Blocks with genuinely different content are both kept."""
+        block1 = (
+            "The calendar shows three meetings today: a standup at 9am, "
+            "a design review at 11am, and a planning session at 2pm. "
+            "All meetings are in the main conference room on the second floor. "
+            "The standup has seven attendees and typically runs 15 minutes."
+        )
+        block2 = (
+            "Market summary: the S&P 500 gained 1.2% on strong earnings reports "
+            "from tech companies. European markets closed mixed, with the DAX up "
+            "0.3% while the FTSE declined 0.1% on weaker consumer data. "
+            "Asian markets were mostly higher overnight with the Nikkei up 0.8%."
+        )
+        trace = [
+            {"type": "text", "text": block1},
+            {"type": "tool", "text": "Check markets"},
+            {"type": "text", "text": block2},
+        ]
+        result = _compose_full_result("Done.", trace)
+        assert block1 in result
+        assert block2 in result

@@ -146,7 +146,8 @@ cmd += ["--output-format", "stream-json", "--verbose"]
 | Function | Purpose |
 |---|---|
 | `detect_malformed_result(text, tool_count, ...)` | Validates model output for leaked tool-call XML. Strict mode (Talk): any `</parameter>`, `</invoke>`, `<thinking>` outside code fences is flagged. Lenient mode (other targets): only flags when entire output is syntax fragments (< 20 chars of real content). Malformed results are reclassified as failures and retried. |
-| `_compose_full_result(result_text, execution_trace)` | Recovers substantial text blocks (>= 200 chars) emitted as intermediate assistant text but missing from the final `ResultEvent`. Deduplicates against existing result text. |
+| `_compose_full_result(result_text, execution_trace)` | Recovers substantial text blocks (>= 200 chars) emitted as intermediate assistant text but missing from the final `ResultEvent`. Deduplicates via exact substring check and fuzzy matching (word-bigram Jaccard >= 0.5) against result text and previously accepted blocks. |
+| `_text_similarity(a, b)` | Word-bigram Jaccard similarity (0.0–1.0). Compares first 2000 chars. Used by `_compose_full_result` for near-duplicate detection. |
 
 ## Other Functions
 | Function | Purpose |
