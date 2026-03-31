@@ -510,7 +510,6 @@ Commands prefixed with `!` are intercepted in the talk poller before task creati
 | `!status` | Show running/pending tasks + system stats |
 | `!memory user/channel` | Show memory file contents |
 | `!cron` | List/enable/disable scheduled jobs |
-| `!usage` | Claude API usage and billing stats |
 | `!check` | Run system health check (self-check heartbeat) |
 | `!export [markdown\|text]` | Export conversation history to a file. First run exports all messages; subsequent runs incrementally append new messages. Exports to `{bot_dir}/exports/conversations/`. |
 

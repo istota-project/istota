@@ -11,7 +11,6 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
 
 from . import db
 from .config import Config
@@ -513,114 +512,6 @@ async def cmd_check(config, conn, user_id, conversation_token, args, client):
         lines.append(f"- Claude + Bash: **FAIL** ({e})")
 
     return "\n".join(lines)
-
-
-def _read_claude_oauth_token() -> str | None:
-    """Read the OAuth access token from env var or Claude's credentials file."""
-    env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if env_token:
-        return env_token
-
-    creds_path = Path.home() / ".claude" / ".credentials.json"
-    if not creds_path.exists():
-        return None
-    try:
-        with open(creds_path) as f:
-            creds = json.load(f)
-        oauth = creds.get("claudeAiOauth", {})
-        return oauth.get("accessToken")
-    except Exception:
-        logger.exception("Failed to read Claude credentials from %s", creds_path)
-        return None
-
-
-def _format_utilization(label: str, bucket: dict, tz=None) -> str:
-    """Format a usage bucket (five_hour, seven_day, etc.) into a readable line."""
-    from datetime import datetime
-
-    pct = bucket.get("utilization", 0)  # API returns 0-100 percentage
-    resets_at = bucket.get("resets_at")
-
-    bar_len = 20
-    filled = min(round(pct / 100 * bar_len), bar_len)
-    bar = "#" * filled + "-" * (bar_len - filled)
-
-    line = f"- {label}: [{bar}] {pct:.0f}%"
-    if resets_at:
-        try:
-            dt = datetime.fromisoformat(resets_at)
-            if tz:
-                dt = dt.astimezone(tz)
-            line += f" (resets {dt.strftime('%b %-d %-H:%M')})"
-        except Exception:
-            line += f" (resets {resets_at})"
-    return line
-
-
-@command("usage", "Show Claude API usage limits")
-async def cmd_usage(config, conn, user_id, conversation_token, args, client):
-    """Query Anthropic OAuth usage endpoint for current utilization."""
-    token = _read_claude_oauth_token()
-    if not token:
-        creds_path = Path.home() / ".claude" / ".credentials.json"
-        return f"**Error:** Could not read OAuth token from {creds_path}"
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "anthropic-beta": "oauth-2025-04-20",
-        "Content-Type": "application/json",
-    }
-
-    # Resolve user timezone
-    from zoneinfo import ZoneInfo
-
-    user_config = config.get_user(user_id)
-    tz_str = user_config.timezone if user_config else "UTC"
-    try:
-        tz = ZoneInfo(tz_str)
-    except Exception:
-        tz = None
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            response = await http.get(
-                "https://api.anthropic.com/api/oauth/usage",
-                headers=headers,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-        lines = ["**Claude Code Usage**", ""]
-
-        # Rate-limit buckets (have utilization + resets_at)
-        for key, value in data.items():
-            if key == "extra_usage" or not isinstance(value, dict):
-                continue
-            if "utilization" not in value:
-                continue
-            label = key.replace("_", " ").replace("seven day", "7-day").replace("five hour", "5-hour")
-            lines.append(_format_utilization(label, value, tz=tz))
-
-        # Extra usage (pay-as-you-go overflow)
-        extra = data.get("extra_usage")
-        if isinstance(extra, dict) and extra.get("is_enabled"):
-            used = extra.get("used_credits", 0) / 100
-            limit = extra.get("monthly_limit", 0) / 100
-            pct = extra.get("utilization", 0)
-            lines.append("")
-            lines.append(f"**Extra usage:** ${used:.2f} / ${limit:.2f} ({pct:.0f}%)")
-
-        if len(lines) == 2:
-            lines.append("No usage data returned.")
-
-        return "\n".join(lines)
-
-    except httpx.HTTPStatusError as e:
-        logger.error("Usage API request failed: %s", e)
-        return f"**Error:** API request failed ({e.response.status_code})"
-    except Exception as e:
-        logger.error("Failed to fetch usage: %s", e, exc_info=True)
-        return f"**Error:** {e}"
 
 
 # =============================================================================
