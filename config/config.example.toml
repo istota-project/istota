@@ -294,7 +294,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # ntfy Push Notifications
 # ============================================================================
 # Send one-way broadcast notifications via ntfy (https://ntfy.sh).
-# Used by heartbeat alerts, invoice notifications, and scheduled job output.
+# Used by heartbeat alerts and scheduled job output.
 # Per-user topic overrides via ntfy_topic in user config.
 
 # [ntfy]

@@ -255,23 +255,6 @@ CREATE TABLE IF NOT EXISTS csv_imported_transactions (
 
 CREATE INDEX IF NOT EXISTS idx_csv_imported_user ON csv_imported_transactions(user_id);
 
--- Invoice overdue notification tracking (prevents duplicate notifications)
-CREATE TABLE IF NOT EXISTS invoice_overdue_notified (
-    user_id TEXT NOT NULL,
-    invoice_number TEXT NOT NULL,
-    notified_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (user_id, invoice_number)
-);
-
--- Invoice schedule state (tracks automated invoice generation/reminder timing)
-CREATE TABLE IF NOT EXISTS invoice_schedule_state (
-    user_id TEXT NOT NULL,
-    client_key TEXT NOT NULL,
-    last_reminder_at TEXT,     -- When reminder was last sent
-    last_generation_at TEXT,   -- When invoices were last generated
-    PRIMARY KEY (user_id, client_key)
-);
-
 -- Channel sleep cycle state (tracks last run for channel-level memory extraction)
 CREATE TABLE IF NOT EXISTS channel_sleep_cycle_state (
     conversation_token TEXT PRIMARY KEY,

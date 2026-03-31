@@ -5,12 +5,6 @@ display_name = "{{ user_config.display_name | default(user_id) }}"
 email_addresses = {{ user_config.email_addresses | to_json }}
 {% endif %}
 timezone = "{{ user_config.timezone | default('UTC') }}"
-{% if user_config.invoicing_notifications is defined and user_config.invoicing_notifications %}
-invoicing_notifications = "{{ user_config.invoicing_notifications }}"
-{% endif %}
-{% if user_config.invoicing_conversation_token is defined and user_config.invoicing_conversation_token %}
-invoicing_conversation_token = "{{ user_config.invoicing_conversation_token }}"
-{% endif %}
 {% if user_config.log_channel is defined and user_config.log_channel %}
 log_channel = "{{ user_config.log_channel }}"
 {% endif %}

@@ -152,30 +152,10 @@
 - [x] Conversation grouping by token for threading context
 - [x] Improved extraction prompt with depth guidance and examples
 
-### Invoicing System ✅
-- [x] Config-driven invoice generation from INVOICING.md (markdown + TOML)
-- [x] Work log tracking via _INVOICES.md with TOML entries
-- [x] PDF generation via WeasyPrint with professional layout
-- [x] Beancount A/R integration (generate + paid postings)
-- [x] Service types: hours, days, flat, other
-- [x] Per-item discount field with conditional display
-- [x] Client bundle rules (group or separate services)
-- [x] Configurable account names (income_account, ar_account, defaults)
-- [x] String payment terms ("On receipt") alongside numeric days
-- [x] Auto-create INVOICING.md and work log from templates
-- [x] CLI: invoice generate/list/paid/create
-- [x] Multi-entity support (multiple companies per config, per-entity accounts/currency/logo)
-- [x] Uninvoiced entry selection with invoice stamping (prevents duplicate invoicing)
-- [x] Optional `--period` flag (upper date bound instead of exact month match)
-
-### Monarch Money Integration ✅
-- [x] Config file (ACCOUNTING.md) with TOML block for credentials, account mappings, tag filters
-- [x] `sync-monarch` CLI command with API-based transaction sync
-- [x] Fixed CSV import column order (Date,Merchant,Category,Account,Original Statement,Notes,Amount,Tags,Owner)
-- [x] Tag filtering for both CSV import and API sync
-- [x] Deduplication via SQLite tables (monarch_synced_transactions, csv_imported_transactions)
-- [x] Using monarchmoneycommunity fork with correct API endpoint
-- [x] Tag reconciliation: auto-recategorize when business tag removed (creates reversal entries)
+### Invoicing & Accounting (removed — moved to Moneyman)
+- [x] Direct beancount accounting skill removed in favor of Moneyman API service
+- [x] Invoice scheduler removed (monthly auto-generation, reminders, overdue detection)
+- [x] INVOICING.md, ACCOUNTING.md, FEEDS.md config file seeding removed
 
 ### Semantic Memory Search ✅
 - [x] Hybrid BM25 + vector search over conversations and memory files
@@ -298,7 +278,7 @@
 - [x] Shared volume file access with external storage mounts
 - [x] Talk attachment fallback to NC data directory
 - [x] Full env-based configuration (~170 vars, parity with Ansible role)
-- [x] All Python extras installed (accounting, whisper, garmin, memory-search)
+- [x] All Python extras installed (whisper, garmin, memory-search)
 - [x] Browser container via Compose profile (`--profile browser`)
 - [x] GPS webhook receiver via Compose profile (`--profile location`)
 - [x] Bubblewrap sandbox + skill credential proxy (graceful degradation)

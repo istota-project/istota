@@ -188,8 +188,6 @@ class UserConfig:
     timezone: str = "UTC"  # user's timezone for briefing scheduling
     briefings: list[BriefingConfig] = field(default_factory=list)
     resources: list[ResourceConfig] = field(default_factory=list)
-    invoicing_notifications: str = ""  # default surface for invoice notifications
-    invoicing_conversation_token: str = ""  # Talk room for invoice notifications
     ntfy_topic: str = ""  # per-user ntfy topic override
     log_channel: str = ""  # Talk room token for verbose task execution logs
     site_enabled: bool = False  # static website hosting at /~user/
@@ -485,8 +483,6 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         timezone=user_data.get("timezone", "UTC"),
         briefings=briefings,
         resources=resources,
-        invoicing_notifications=user_data.get("invoicing_notifications", ""),
-        invoicing_conversation_token=user_data.get("invoicing_conversation_token", ""),
         ntfy_topic=user_data.get("ntfy_topic", ""),
         log_channel=user_data.get("log_channel", ""),
         site_enabled=user_data.get("site_enabled", False),

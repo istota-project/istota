@@ -375,7 +375,6 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "GITHUB_TOKEN",
     "GARMIN_EMAIL",
     "GARMIN_PASSWORD",
-    "MONARCH_SESSION_TOKEN",
     "MONEYMAN_API_KEY",
 })
 
@@ -393,7 +392,6 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "GITHUB_TOKEN": frozenset({"developer"}),
     "GARMIN_EMAIL": frozenset({"garmin"}),
     "GARMIN_PASSWORD": frozenset({"garmin"}),
-    "MONARCH_SESSION_TOKEN": frozenset({"accounting"}),
     "MONEYMAN_API_KEY": frozenset({"moneyman"}),
 }
 
@@ -1545,7 +1543,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
    - Emails to external addresses DO need confirmation
    - Modifying calendars, deleting files, sharing externally need confirmation
 3. To create subtasks, write a JSON file to $ISTOTA_DEFERRED_DIR/task_{task.id}_subtasks.json with format: [{{"prompt": "...", "conversation_token": "...", "priority": 5}}]. They will be queued after this task completes.
-4. Do NOT write to the SQLite database directly (e.g. via sqlite3 CLI or Python sqlite3 module). The database is read-only in your environment. All database modifications are handled by the skill CLI commands (e.g. `istota-skill accounting`, `istota-skill memory_search`) or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
+4. Do NOT write to the SQLite database directly (e.g. via sqlite3 CLI or Python sqlite3 module). The database is read-only in your environment. All database modifications are handled by the skill CLI commands (e.g. `istota-skill memory_search`) or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
 5. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
 6. Never edit or create files in your own source directory.
 7. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
@@ -1946,60 +1944,6 @@ def execute_task(
             env["IMAP_PORT"] = str(config.email.imap_port)
             env["IMAP_USER"] = config.email.imap_user
             env["IMAP_PASSWORD"] = config.email.imap_password
-
-        # Accounting ledger paths (from user resources)
-        ledger_resources = [r for r in user_resources if r.resource_type == "ledger"]
-        if ledger_resources and config.nextcloud_mount_path:
-            # Pass all ledgers as JSON for multi-ledger support
-            ledgers = []
-            for r in ledger_resources:
-                ledgers.append({
-                    "name": r.display_name or "default",
-                    "path": str(config.nextcloud_mount_path / r.resource_path.lstrip("/")),
-                })
-            env["LEDGER_PATHS"] = json.dumps(ledgers)
-            # Also set LEDGER_PATH to first ledger for simple single-ledger usage
-            env["LEDGER_PATH"] = ledgers[0]["path"]
-
-        # Invoicing config path (always in user's bot config folder)
-        if config.nextcloud_mount_path and task:
-            from .storage import get_user_invoicing_path
-            invoicing_path = config.nextcloud_mount_path / get_user_invoicing_path(task.user_id, config.bot_dir_name).lstrip("/")
-            if not invoicing_path.exists():
-                from .storage import INVOICING_TEMPLATE
-                invoicing_path.parent.mkdir(parents=True, exist_ok=True)
-                invoicing_path.write_text(
-                    INVOICING_TEMPLATE.format(user_id=task.user_id)
-                )
-            env["INVOICING_CONFIG"] = str(invoicing_path)
-
-        # Accounting config path (from user resource or default bot config location)
-        if config.nextcloud_mount_path and task:
-            accounting_resources = [r for r in user_resources if r.resource_type == "accounting"]
-            if accounting_resources:
-                accounting_path = config.nextcloud_mount_path / accounting_resources[0].resource_path.lstrip("/")
-            else:
-                from .storage import get_user_accounting_path
-                accounting_path = config.nextcloud_mount_path / get_user_accounting_path(task.user_id, config.bot_dir_name).lstrip("/")
-            if not accounting_path.exists():
-                from .storage import ACCOUNTING_TEMPLATE
-                accounting_path.parent.mkdir(parents=True, exist_ok=True)
-                accounting_path.write_text(ACCOUNTING_TEMPLATE)
-            env["ACCOUNTING_CONFIG"] = str(accounting_path)
-
-            # Monarch session token (from resource config)
-            if user_config:
-                monarch_resources = [
-                    rc for rc in user_config.resources
-                    if rc.type == "monarch" and rc.extra.get("session_token")
-                ]
-                if monarch_resources:
-                    env["MONARCH_SESSION_TOKEN"] = monarch_resources[0].extra["session_token"]
-
-            # Also pass user ID and DB path for deduplication tracking
-            env["ISTOTA_USER_ID"] = task.user_id
-            if is_admin:
-                env["ISTOTA_DB_PATH"] = str(config.db_path)
 
         # Garmin credentials (from resource config, fall back to GARMIN.md)
         if user_config:

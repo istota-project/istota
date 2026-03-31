@@ -60,8 +60,6 @@ from istota.storage import (
     BRIEFINGS_TEMPLATE,
     BRIEFINGS_EXAMPLE,
     HEARTBEAT_EXAMPLE,
-    INVOICING_EXAMPLE,
-    ACCOUNTING_EXAMPLE,
 )
 from istota.config import Config, NextcloudConfig
 
@@ -271,7 +269,7 @@ class TestMountOperations:
         ensure_user_directories_v2(mount_config, "alice")
         examples_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
         assert examples_dir.is_dir()
-        for filename in ["README.md", "TASKS.md", "BRIEFINGS.md", "HEARTBEAT.md", "INVOICING.md", "ACCOUNTING.md"]:
+        for filename in ["README.md", "TASKS.md", "BRIEFINGS.md", "HEARTBEAT.md"]:
             assert (examples_dir / filename).exists()
 
     def test_examples_contain_documentation(self, mount_config):
@@ -281,8 +279,6 @@ class TestMountOperations:
         assert (examples_dir / "TASKS.md").read_text() == TASKS_FILE_EXAMPLE
         assert (examples_dir / "BRIEFINGS.md").read_text() == BRIEFINGS_EXAMPLE
         assert (examples_dir / "HEARTBEAT.md").read_text() == HEARTBEAT_EXAMPLE
-        assert (examples_dir / "INVOICING.md").read_text() == INVOICING_EXAMPLE
-        assert (examples_dir / "ACCOUNTING.md").read_text() == ACCOUNTING_EXAMPLE
 
     def test_examples_always_overwritten(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")

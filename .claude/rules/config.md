@@ -105,7 +105,6 @@ extra: dict = {}            # unrecognized TOML keys
 display_name: str = ""                    email_addresses: list[str] = []
 timezone: str = "UTC"                     briefings: list[BriefingConfig] = []
 resources: list[ResourceConfig] = []
-invoicing_notifications: str = ""         invoicing_conversation_token: str = ""
 ntfy_topic: str = ""                      log_channel: str = ""
 site_enabled: bool = False
 max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 = use global default

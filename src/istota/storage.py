@@ -30,10 +30,7 @@ Configuration files live in the `config/` subfolder:
 - **config/TASKS.md** — Task queue (`- [ ] do something`)
 - **config/BRIEFINGS.md** — Briefing schedule configuration
 - **config/HEARTBEAT.md** — Health monitoring configuration
-- **config/INVOICING.md** — Invoicing configuration
-- **config/ACCOUNTING.md** — Accounting / Monarch sync configuration
 - **config/CRON.md** — Scheduled recurring jobs
-- **config/FEEDS.md** — Feed subscriptions (RSS, Tumblr, Are.na)
 - **config/LOCATION.md** — Location tracking (GPS via Overland)
 - **config/PERSONA.md** — Bot personality (editable copy of global persona)
 
@@ -58,14 +55,8 @@ it up automatically. Status updates are written back to the file.
 Control your own briefing times, delivery channel, and components.
 - **config/HEARTBEAT.md** — (Optional) Health monitoring configuration. \
 Set up periodic checks that alert you when something needs attention.
-- **config/INVOICING.md** — (Optional) Invoicing configuration. \
-Define clients, services, and billing rules for invoice generation.
-- **config/ACCOUNTING.md** — (Optional) Accounting configuration. \
-Configure Monarch Money API integration for automated ledger syncing.
 - **config/CRON.md** — (Optional) Scheduled recurring jobs. \
 Configure tasks that run on a cron schedule with results delivered to Talk or email.
-- **config/FEEDS.md** — (Optional) Feed subscriptions. \
-Configure RSS, Tumblr, and Are.na feeds aggregated into a static web page.
 - **config/LOCATION.md** — (Optional) Location tracking. \
 Configure GPS tracking via the Overland iOS app with place recognition.
 - **config/PERSONA.md** — (Optional) Bot personality. \
@@ -306,154 +297,6 @@ def _build_heartbeat_seed(config: "Config", user_id: str) -> str:
     return HEARTBEAT_TEMPLATE.format(conversation_token=token, user_id=user_id)
 
 
-# Template for initial INVOICING.md file
-INVOICING_TEMPLATE = """\
-# Invoicing Configuration
-
-See `examples/INVOICING.md` for all options, service types, and CLI commands.
-
-```toml
-# accounting_path = "/Users/{user_id}/shared/Accounting"
-# work_log = "/Users/{user_id}/shared/Notes/_INVOICES.md"
-# invoice_output = "invoices/generated"
-# next_invoice_number = 1
-
-# [company]
-# name = "Your Company"
-# address = "123 Main St\\nCity, ST 12345"
-# email = "billing@example.com"
-# payment_instructions = "Wire transfer to: ..."
-
-# [clients.example]
-# name = "Example Corp"
-# address = "456 Oak Ave"
-# email = "billing@example.com"
-# terms = 30
-
-# [services.consulting]
-# display_name = "Consulting Services"
-# rate = 150
-# type = "hours"
-```
-"""
-
-INVOICING_EXAMPLE = """\
-# Invoicing Configuration
-
-Configure your company info, clients, services, and billing rules.
-The accounting skill reads this file for invoice generation.
-
-## Global Settings
-
-```ini
-accounting_path = "path/to/accounting"   # Base path for invoice output and logos
-work_log = "_INVOICES.md"               # Work log filename (relative to accounting_path)
-invoice_output = "invoices"             # Output directory for PDFs (relative to accounting_path)
-next_invoice_number = 1                 # Auto-incremented after each invoice
-currency = "USD"                        # Default currency (overridable per entity)
-default_ar_account = "Assets:Accounts-Receivable"
-default_bank_account = "Assets:Bank:Checking"
-default_entity = "default"              # Entity key when multiple companies defined
-notifications = ""                      # Default notification surface: "talk", "email", or "both"
-days_until_overdue = 0                  # Days after invoice date to flag overdue (0 = disabled)
-```
-
-## Company / Entity
-
-Single company (`[company]`) or multi-entity (`[companies.<key>]`):
-
-```ini
-[company]
-name = "My Company LLC"
-address = "123 Main St\\nCity, ST 12345"
-email = "billing@example.com"
-payment_instructions = "Wire to ..."    # Shown on invoice PDF
-logo = "logo.png"                       # Path relative to accounting_path
-ar_account = ""                         # Per-entity A/R account override
-bank_account = ""                       # Per-entity bank account override
-currency = ""                           # Per-entity currency override
-```
-
-## Clients
-
-```ini
-[clients.<key>]
-name = "Client Name"
-address = "456 Oak Ave\\nTown, ST 67890"
-email = "client@example.com"
-terms = 30                              # Payment terms in days (or string like "Net 30")
-ar_account = ""                         # Client-specific A/R account
-entity = ""                             # Default entity key for this client
-```
-
-### Client Invoicing Options
-
-```ini
-[clients.<key>.invoicing]
-schedule = "on-demand"                  # "on-demand" or "monthly"
-day = 1                                 # Day of month for scheduled generation
-reminder_days = 3                       # Days before schedule_day to send reminder
-notifications = ""                      # Per-client: "talk", "email", or "both"
-days_until_overdue = 0                  # Per-client override (0 = use global)
-bundles = []                            # Group services into single line items
-separate = []                           # Force separate invoices for these services
-```
-
-## Services
-
-```ini
-[services.<key>]
-display_name = "Consulting"
-rate = 150.0                            # Rate per unit (or flat amount)
-type = "hours"                          # "hours", "days", "flat", or "other"
-income_account = ""                     # e.g. "Income:Consulting" (auto-generated if empty)
-```
-
-### Service Types
-
-- **hours** — `qty x rate` (most common)
-- **days** — `qty x rate`
-- **flat** — Fixed rate per entry
-- **other** — Uses `amount` from work log (for expenses, reimbursements)
-
-## Work Log
-
-Create a separate work log file (configured as `work_log` above) with entries \
-inside a `toml` fenced block:
-
-```ini
-[[entries]]
-date = "2026-01-15"
-client = "client_key"
-service = "service_key"
-qty = 8.0            # For hours/days/flat
-# amount = 500.00    # For type = "other" or expenses (use instead of qty)
-# discount = 10      # Percentage discount
-# description = ""   # Optional line item description
-# entity = ""        # Override entity for this entry
-# invoice = ""       # Auto-set when invoiced (e.g. "INV-000042")
-# paid_date = ""     # Auto-set when payment recorded
-```
-
-## CLI Commands
-
-```bash
-# Generate invoices for a billing period
-python -m istota.skills.accounting invoice generate --period 2026-02
-
-# Preview without generating files
-python -m istota.skills.accounting invoice generate --period 2026-02 --dry-run
-
-# List outstanding receivables
-python -m istota.skills.accounting invoice list
-
-# Record payment
-python -m istota.skills.accounting invoice paid INV-000001 --date 2026-02-15
-
-# Create a manual invoice
-python -m istota.skills.accounting invoice create example --service consulting --hours 40
-```
-"""
 
 
 # Template for initial TASKS.md file
@@ -547,14 +390,6 @@ def get_user_heartbeat_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_config_path(user_id, bot_dir)}/HEARTBEAT.md"
 
 
-def get_user_invoicing_path(user_id: str, bot_dir: str) -> str:
-    """Get the path to a user's INVOICING.md file."""
-    return f"{get_user_config_path(user_id, bot_dir)}/INVOICING.md"
-
-
-def get_user_accounting_path(user_id: str, bot_dir: str) -> str:
-    """Get the path to a user's ACCOUNTING.md file."""
-    return f"{get_user_config_path(user_id, bot_dir)}/ACCOUNTING.md"
 
 
 def get_user_cron_path(user_id: str, bot_dir: str) -> str:
@@ -668,157 +503,6 @@ def _build_cron_seed(config: "Config", user_id: str) -> str:
                 break
     return CRON_TEMPLATE.format(conversation_token=token)
 
-
-FEEDS_TEMPLATE = """\
-# Feed Subscriptions
-
-See `examples/FEEDS.md` for all options and feed types.
-
-```toml
-# [tumblr]
-# api_key = "your-tumblr-api-key"
-
-# [[feeds]]
-# name = "hn-best"
-# type = "rss"
-# url = "https://hnrss.org/best"
-# interval_minutes = 30
-```
-"""
-
-FEEDS_EXAMPLE = """\
-# Feed Subscriptions
-
-Configure RSS, Tumblr, and Are.na feeds. Items are aggregated into a
-static web page at your site's `/feeds/` path.
-
-## Feed Types
-
-### RSS
-
-```toml
-[[feeds]]
-name = "hn-best"
-type = "rss"
-url = "https://hnrss.org/best"
-interval_minutes = 30        # Default: 30
-```
-
-### Tumblr
-
-Requires a Tumblr API key (register at api.tumblr.com).
-
-```toml
-[tumblr]
-api_key = "your-api-key"
-
-[[feeds]]
-name = "photoblog"
-type = "tumblr"
-url = "blogname"             # Just the blog name, not full URL
-interval_minutes = 180       # Default: 180
-```
-
-### Are.na
-
-```toml
-[[feeds]]
-name = "inspiration"
-type = "arena"
-url = "channel-slug"         # The channel slug from the URL
-interval_minutes = 60        # Default: 60
-```
-
-## Defaults
-
-- RSS: polls every 30 minutes
-- Tumblr: polls every 180 minutes
-- Are.na: polls every 60 minutes
-"""
-
-# Template for initial ACCOUNTING.md file
-ACCOUNTING_TEMPLATE = """\
-# Accounting Configuration
-
-See `examples/ACCOUNTING.md` for all options, mappings, and CLI commands.
-
-```toml
-# [monarch]
-# email = "your@email.com"
-# password = "your_password"
-
-# [monarch.sync]
-# lookback_days = 30
-# default_account = "Assets:Bank:Checking"
-
-# [monarch.accounts]
-# "Chase Checking" = "Assets:Bank:Chase:Checking"
-```
-"""
-
-ACCOUNTING_EXAMPLE = """\
-# Accounting Configuration
-
-Configure Monarch Money API integration for automated ledger syncing.
-
-## Settings
-
-```ini
-[monarch]
-email = "your@email.com"
-password = "your_password"
-# OR use session_token instead:
-# session_token = "..."
-
-[monarch.sync]
-lookback_days = 30
-default_account = "Assets:Bank:Checking"
-
-# Map Monarch account names to beancount accounts
-[monarch.accounts]
-"Chase Checking" = "Assets:Bank:Chase:Checking"
-"Amex Gold" = "Liabilities:CreditCard:Amex"
-
-# Map Monarch categories to beancount accounts (overrides defaults)
-[monarch.categories]
-"Custom Category" = "Expenses:Custom"
-
-# Filter transactions by tags
-[monarch.tags]
-include = ["business"]        # Only sync transactions with these tags
-exclude = ["personal"]        # Exclude transactions with these tags
-```
-
-## Account Mapping
-
-The `[monarch.accounts]` section maps Monarch account names (as shown in the app)
-to beancount account paths. Unmapped accounts use `default_account`.
-
-## Category Mapping
-
-Built-in mappings exist for common categories (Groceries > Expenses:Food:Groceries, etc.).
-Use `[monarch.categories]` to override or add custom mappings.
-
-## Tag Filtering
-
-Use tags to control which transactions sync:
-- `include = ["business"]` — Only transactions tagged "business"
-- `exclude = ["personal"]` — Skip transactions tagged "personal"
-- If both are set, include is applied first, then exclude
-
-## CLI Commands
-
-```bash
-# Import from CSV export (manual)
-python -m istota.skills.accounting import-monarch FILE --account ACCT
-
-# Sync via API (automated)
-python -m istota.skills.accounting sync-monarch
-
-# Preview sync without writing
-python -m istota.skills.accounting sync-monarch --dry-run
-```
-"""
 
 
 LOCATION_TEMPLATE = """\
@@ -1163,8 +847,7 @@ def _migrate_workspace_files(user_base: Path) -> None:
 # Config files that live in bot_name/config/
 _CONFIG_FILES = (
     "USER.md", "TASKS.md", "BRIEFINGS.md", "HEARTBEAT.md",
-    "INVOICING.md", "ACCOUNTING.md", "CRON.md", "FEEDS.md",
-    "LOCATION.md",
+    "CRON.md", "LOCATION.md",
 )
 
 
@@ -1268,25 +951,10 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             heartbeat_file.write_text(_build_heartbeat_seed(config, user_id))
             logger.debug("Created %s/config/HEARTBEAT.md for %s", bot_dir, user_id)
 
-        invoicing_file = config_dir / "INVOICING.md"
-        if not invoicing_file.exists():
-            invoicing_file.write_text(INVOICING_TEMPLATE.format(user_id=user_id))
-            logger.debug("Created %s/config/INVOICING.md for %s", bot_dir, user_id)
-
-        accounting_file = config_dir / "ACCOUNTING.md"
-        if not accounting_file.exists():
-            accounting_file.write_text(ACCOUNTING_TEMPLATE)
-            logger.debug("Created %s/config/ACCOUNTING.md for %s", bot_dir, user_id)
-
         cron_file = config_dir / "CRON.md"
         if not cron_file.exists():
             cron_file.write_text(_build_cron_seed(config, user_id))
             logger.debug("Created %s/config/CRON.md for %s", bot_dir, user_id)
-
-        feeds_file = config_dir / "FEEDS.md"
-        if not feeds_file.exists():
-            feeds_file.write_text(FEEDS_TEMPLATE)
-            logger.debug("Created %s/config/FEEDS.md for %s", bot_dir, user_id)
 
         location_file = config_dir / "LOCATION.md"
         if not location_file.exists():
@@ -1309,10 +977,7 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             "TASKS.md": TASKS_FILE_EXAMPLE,
             "BRIEFINGS.md": BRIEFINGS_EXAMPLE,
             "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
-            "INVOICING.md": INVOICING_EXAMPLE,
-            "ACCOUNTING.md": ACCOUNTING_EXAMPLE,
             "CRON.md": CRON_EXAMPLE,
-            "FEEDS.md": FEEDS_EXAMPLE,
             "LOCATION.md": LOCATION_EXAMPLE,
         }
         for filename, content in examples.items():

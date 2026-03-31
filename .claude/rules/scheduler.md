@@ -120,7 +120,6 @@ class UserWorker(threading.Thread):
 | Scheduled jobs | `check_scheduled_jobs()` | `briefing_check_interval` | `scheduled_jobs` |
 | Sleep cycle | `check_sleep_cycles()` (sleep_cycle.py) | `briefing_check_interval` | `sleep_cycle_state` |
 | Channel sleep | `check_channel_sleep_cycles()` (sleep_cycle.py) | `briefing_check_interval` | `channel_sleep_cycle_state` |
-| Invoice sched | `check_scheduled_invoices()` (invoice_scheduler.py) | `briefing_check_interval` | `invoice_schedule_state` |
 
 ## Cleanup (`run_cleanup_checks`)
 1. Expire stale confirmations → notify user via Talk
@@ -197,8 +196,6 @@ After task completion, if enabled + `auto_index_conversations`:
 | `reminder_state` | `ReminderState` | user_id, queue (JSON), content_hash |
 | `monarch_synced_transactions` | — | id, user_id, monarch_transaction_id, amount, merchant, content_hash |
 | `csv_imported_transactions` | — | id, user_id, content_hash, source_file |
-| `invoice_schedule_state` | `InvoiceScheduleState` | user_id, client_key, last_reminder_at, last_generation_at |
-| `invoice_overdue_notified` | — | user_id, invoice_number, notified_at |
 | `user_skills_fingerprint` | — | user_id, fingerprint, updated_at |
 | `sent_emails` | — | id, user_id, task_id, message_id, to_addr, subject, thread_id, in_reply_to, references, conversation_token, sent_at |
 | `task_logs` | — | task_id, level, message, timestamp |
@@ -281,10 +278,6 @@ update_heartbeat_state(conn, user_id, check_name, **kwargs) -> None
 # Sent emails (emissary thread tracking)
 record_sent_email(conn, user_id, message_id, to_addr, subject=None, task_id=None, thread_id=None, in_reply_to=None, references=None, conversation_token=None) -> int
 find_sent_email_by_references(conn, references: list[str]) -> SentEmail | None
-
-# Invoice
-get_invoice_schedule_state(conn, user_id, client_key) -> InvoiceScheduleState | None
-get_notified_overdue_invoices(conn, user_id) -> set[str]
 
 # Skills fingerprint
 get_user_skills_fingerprint(conn, user_id) -> str | None

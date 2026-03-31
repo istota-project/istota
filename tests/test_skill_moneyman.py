@@ -27,20 +27,6 @@ class TestMoneymanSkillManifest:
         assert "moneyman" in meta.resource_types
         assert "accounting" in meta.keywords
 
-    def test_excludes_accounting(self, tmp_path):
-        from istota.skills._loader import load_skill_index
-
-        index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
-        meta = index["moneyman"]
-        assert "accounting" in meta.exclude_skills
-
-    def test_accounting_excludes_moneyman(self, tmp_path):
-        from istota.skills._loader import load_skill_index
-
-        index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
-        meta = index["accounting"]
-        assert "moneyman" in meta.exclude_skills
-
     def test_selected_with_moneyman_resource(self, tmp_path):
         from istota.skills._loader import load_skill_index, select_skills
 

@@ -2,6 +2,42 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-30: Remove invoice scheduler and accounting skill
+
+Invoice scheduling (monthly auto-generation, pre-generation reminders, overdue detection) and the direct beancount accounting skill have been removed. All accounting functionality now goes through the Moneyman API service. The config files INVOICING.md, ACCOUNTING.md, and FEEDS.md are no longer auto-created or seeded for new users.
+
+**Key changes:**
+- Removed `invoice_scheduler.py` module (379 lines) and all supporting DB functions/tables
+- Removed `skills/accounting/` directory (beancount CLI, invoicing engine, Monarch sync)
+- Removed `invoicing_notifications` and `invoicing_conversation_token` from user config
+- Removed INVOICING.md, ACCOUNTING.md, and FEEDS.md template constants and auto-seeding from storage.py
+- Removed `LEDGER_PATH(S)`, `INVOICING_CONFIG`, `ACCOUNTING_CONFIG`, `MONARCH_SESSION_TOKEN` env var setup from executor
+- Removed `_restart_fava_service()` from scheduler (was triggered after accounting tasks)
+- Removed `accounting` extras group from pyproject.toml (beancount, fava, weasyprint, monarchmoney)
+- Removed mutual `exclude_skills` between accounting and moneyman
+- Updated notifications to resolve conversation token from briefing config only
+
+**Files deleted:**
+- `src/istota/invoice_scheduler.py`
+- `src/istota/skills/accounting/` (entire directory)
+- `tests/test_invoice_scheduler.py`, `tests/test_skills_accounting.py`, `tests/test_skills_invoicing.py`
+
+**Files modified:**
+- `src/istota/scheduler.py` — removed invoice check calls, Fava restart function
+- `src/istota/executor.py` — removed ledger/invoicing/accounting env vars, MONARCH_SESSION_TOKEN from proxy
+- `src/istota/db.py` — removed InvoiceScheduleState and 6 related functions
+- `src/istota/config.py` — removed invoicing user config fields
+- `src/istota/notifications.py` — simplified token resolution
+- `src/istota/storage.py` — removed templates, examples, path helpers, file seeding
+- `src/istota/skill_proxy.py` — removed accounting from allowed skills
+- `src/istota/skills/moneyman/skill.toml` — removed exclude_skills
+- `schema.sql` — removed invoice_schedule_state and invoice_overdue_notified tables
+- `pyproject.toml` — removed accounting extras group
+- `tests/test_storage.py`, `tests/test_notifications.py`, `tests/test_scheduler.py`, `tests/test_security.py`, `tests/test_skill_moneyman.py`
+- `config/config.example.toml`, `config/users/alice.example.toml`
+- `deploy/render_config.py`, `deploy/ansible/templates/user.toml.j2`
+- `AGENTS.md`, `.claude/rules/` docs
+
 ## 2026-03-30: Fix near-duplicate text blocks in compose_full_result
 
 `_compose_full_result` was duplicating near-identical text blocks when the model restated itself with minor wording changes. The existing deduplication used exact substring matching, which missed blocks that differed by a few words.

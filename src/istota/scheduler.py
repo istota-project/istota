@@ -946,27 +946,6 @@ def _warn_orphaned_email_output(task: db.Task, user_temp_dir: Path) -> None:
     path.unlink(missing_ok=True)
 
 
-def _restart_fava_service(user_id: str, config: Config) -> None:
-    """Restart the user's Fava service to pick up ledger changes.
-
-    Runs outside the sandbox (in the scheduler process) so it has access
-    to sudo/systemctl. Silently ignored if fava is not installed.
-    """
-    service = f"{config.bot_dir_name}-fava-{user_id}.service"
-    try:
-        result = subprocess.run(
-            ["sudo", "--non-interactive", "systemctl", "restart", service],
-            capture_output=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            logger.info("Restarted %s after accounting task", service)
-        else:
-            logger.debug("Fava restart skipped (rc=%d): %s", result.returncode, result.stderr.decode().strip())
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        logger.debug("Fava restart skipped: %s", e)
-
-
 def _execute_command_task(
     task: db.Task, config: Config,
 ) -> tuple[bool, str]:
@@ -1357,10 +1336,6 @@ def process_one_task(
             task.user_id, config, digest_text,
             conversation_token=task.conversation_token,
         )
-
-    # Restart Fava if accounting skill was used (runs outside sandbox)
-    if success and actions_taken and "istota.skills.accounting" in actions_taken:
-        _restart_fava_service(task.user_id, config)
 
     # Final cleanup edit: update the ack message with a summary of all actions taken
     if (
@@ -2323,20 +2298,6 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     except Exception as e:
         logger.error("Error checking heartbeats: %s", e)
 
-    # Check scheduled invoices
-    try:
-        from .invoice_scheduler import check_scheduled_invoices
-        with db.get_db(config.db_path) as conn:
-            invoice_results = check_scheduled_invoices(conn, config)
-            if invoice_results["reminders_sent"] or invoice_results["invoices_generated"] or invoice_results.get("overdue_detected"):
-                logger.info(
-                    "Invoice scheduler: %d reminder(s), %d invoice(s) generated, %d overdue detected",
-                    invoice_results["reminders_sent"], invoice_results["invoices_generated"],
-                    invoice_results.get("overdue_detected", 0),
-                )
-    except Exception as e:
-        logger.error("Error checking scheduled invoices: %s", e)
-
     # Process tasks
     while True:
         result = process_one_task(config, dry_run=dry_run)
@@ -2443,7 +2404,6 @@ def run_daemon(config: Config) -> None:
     last_sleep_cycle_check = 0.0
     last_channel_sleep_cycle_check = 0.0
     last_heartbeat_check = 0.0
-    last_invoice_schedule_check = 0.0
     last_feed_check = 0.0
 
     while not _shutdown_requested:
@@ -2553,21 +2513,6 @@ def run_daemon(config: Config) -> None:
             except Exception as e:
                 logger.error("Error checking heartbeats: %s", e)
             last_heartbeat_check = now
-
-        # Check scheduled invoices periodically (same interval as briefings)
-        if now - last_invoice_schedule_check >= config.scheduler.briefing_check_interval:
-            try:
-                from .invoice_scheduler import check_scheduled_invoices
-                with db.get_db(config.db_path) as conn:
-                    invoice_results = check_scheduled_invoices(conn, config)
-                    if invoice_results["reminders_sent"] or invoice_results["invoices_generated"]:
-                        logger.info(
-                            "Invoice scheduler: %d reminder(s), %d invoice(s) generated",
-                            invoice_results["reminders_sent"], invoice_results["invoices_generated"],
-                        )
-            except Exception as e:
-                logger.error("Error checking scheduled invoices: %s", e)
-            last_invoice_schedule_check = now
 
         # Regenerate feed pages from Miniflux periodically
         if config.site.enabled and now - last_feed_check >= config.scheduler.feed_page_regen_interval:

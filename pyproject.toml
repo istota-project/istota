@@ -26,13 +26,6 @@ email = [
 markets = [
     "yfinance>=0.2.0",
 ]
-accounting = [
-    "beancount>=3.0.0",
-    "beanquery>=0.1.0",
-    "fava>=1.29",
-    "weasyprint>=62.0",
-    "monarchmoneycommunity @ git+https://github.com/bradleyseanf/monarchmoney@main",
-]
 transcribe = [
     "pytesseract>=0.3.10",
 ]
@@ -57,7 +50,6 @@ all = [
     "istota[calendar]",
     "istota[email]",
     "istota[markets]",
-    "istota[accounting]",
     "istota[transcribe]",
     "istota[garmin]",
     "istota[memory-search]",
