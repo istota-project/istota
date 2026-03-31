@@ -101,6 +101,19 @@ async def _handle_login_redirect(request: Request, exc: _LoginRedirectException)
 async def login(request: Request):
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
         return Response("OIDC not configured", status_code=500)
+    # If no "go" param, show a landing page instead of auto-redirecting.
+    # This prevents logout from immediately re-authenticating via OIDC
+    # (Nextcloud session is still active, so the flow auto-completes).
+    if not request.query_params.get("go"):
+        bot_name = escape(_config.bot_name) if _config else "Istota"
+        return HTMLResponse(f"""<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>{bot_name}</title></head>
+<body>
+<h1>{bot_name}</h1>
+<p><a href="/istota/login?go=1">Log in with Nextcloud</a></p>
+</body>
+</html>""")
     hostname = _config.site.hostname if _config and _config.site.hostname else request.headers.get("host", "localhost")
     scheme = request.headers.get("x-forwarded-proto", "https")
     redirect_uri = f"{scheme}://{hostname}/istota/callback"
