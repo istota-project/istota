@@ -14,6 +14,10 @@ istota_package: "istota"
 # Usage: ansible-playbook playbook.yml -e "istota_update_only=true"
 istota_update_only: false
 
+# Web-only mode - just pull code, rebuild web UI, restart web service
+# Usage: ansible-playbook playbook.yml -e "istota_web_only=true"
+istota_web_only: false
+
 # Application paths
 istota_home: "/srv/app/{{ istota_namespace }}"
 istota_user: "{{ istota_namespace }}"
