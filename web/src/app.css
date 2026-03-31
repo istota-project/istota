@@ -1,0 +1,80 @@
+*,*::before,*::after { box-sizing: border-box; }
+
+body {
+	margin: 0;
+	font-family: system-ui, -apple-system, sans-serif;
+	background: #111;
+	color: #e0e0e0;
+	line-height: 1.5;
+}
+
+a { color: #e0e0e0; }
+a:hover { color: #fff; }
+
+/* App shell */
+.app-nav {
+	display: flex;
+	align-items: center;
+	gap: 1rem;
+	padding: 0.75rem 1.5rem;
+	border-bottom: 1px solid #222;
+	font-size: 0.85rem;
+}
+
+.app-nav .app-name {
+	font-weight: 600;
+	font-size: 0.9rem;
+	text-decoration: none;
+	color: #e0e0e0;
+}
+
+.app-nav .nav-links {
+	display: flex;
+	gap: 0.75rem;
+}
+
+.app-nav .nav-links a {
+	color: #888;
+	text-decoration: none;
+	padding: 0.15rem 0;
+}
+
+.app-nav .nav-links a:hover,
+.app-nav .nav-links a.active {
+	color: #e0e0e0;
+}
+
+.app-nav .nav-right {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
+	color: #666;
+	font-size: 0.8rem;
+}
+
+.app-nav .nav-right a {
+	color: #666;
+	text-decoration: none;
+}
+
+.app-nav .nav-right a:hover { color: #aaa; }
+
+.app-content {
+	padding: 1.5rem;
+}
+
+/* Loading / error states */
+.loading, .error-msg {
+	text-align: center;
+	padding: 3rem 1rem;
+	color: #666;
+	font-size: 0.85rem;
+}
+
+.error-msg { color: #c66; }
+
+@media (max-width: 640px) {
+	.app-nav { padding: 0.5rem 0.75rem; gap: 0.5rem; }
+	.app-content { padding: 1rem 0.75rem; }
+}
