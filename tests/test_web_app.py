@@ -72,15 +72,20 @@ async def client(app):
 
 
 class TestLoginRoute:
-    async def test_login_redirects_to_oidc(self, client, app):
+    async def test_login_shows_landing_page(self, client, app):
+        resp = await client.get("/istota/login")
+        assert resp.status_code == 200
+        assert "Log in with Nextcloud" in resp.text
+        assert "?go=1" in resp.text
+
+    async def test_login_with_go_redirects_to_oidc(self, client, app):
         import istota.web_app as mod
 
-        # Mock authorize_redirect to return a redirect response
         from fastapi.responses import RedirectResponse
         mock_redirect = RedirectResponse(url="https://cloud.example.com/authorize?client_id=istota-web")
         mod._oauth.nextcloud.authorize_redirect = AsyncMock(return_value=mock_redirect)
 
-        resp = await client.get("/istota/login", follow_redirects=False)
+        resp = await client.get("/istota/login?go=1", follow_redirects=False)
         assert resp.status_code in (302, 307)
         mod._oauth.nextcloud.authorize_redirect.assert_called_once()
 
