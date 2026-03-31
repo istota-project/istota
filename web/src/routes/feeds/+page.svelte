@@ -11,7 +11,6 @@
 	// Filters
 	let showImages = $state(true);
 	let showText = $state(true);
-	let feedFilters: Record<number, boolean> = $state({});
 	let sortBy: 'published' | 'added' = $state('published');
 	let viewMode: 'grid' | 'list' = $state('grid');
 
@@ -21,9 +20,6 @@
 	onMount(async () => {
 		try {
 			data = await getFeeds({ limit: '500', order: 'published_at', direction: 'desc' });
-			for (const f of data.feeds) {
-				feedFilters[f.id] = true;
-			}
 		} catch (e) {
 			error = 'Failed to load feeds';
 		} finally {
@@ -37,7 +33,6 @@
 			const isImage = e.images.length > 0;
 			if (isImage && !showImages) return false;
 			if (!isImage && !showText) return false;
-			if (!feedFilters[e.feed.id]) return false;
 			return true;
 		});
 		entries.sort((a, b) => {
@@ -55,7 +50,7 @@
 	<div class="error-msg">{error}</div>
 {:else if data}
 	<nav class="filters">
-		<div class="filter-feeds">
+		<div class="filter-type">
 			<label class="filter-chip" class:checked={showImages}>
 				<input type="checkbox" bind:checked={showImages} />
 				<span>images</span>
@@ -64,12 +59,6 @@
 				<input type="checkbox" bind:checked={showText} />
 				<span>text</span>
 			</label>
-			{#each data.feeds as feed (feed.id)}
-				<label class="filter-chip" class:checked={feedFilters[feed.id]}>
-					<input type="checkbox" bind:checked={feedFilters[feed.id]} />
-					<span>{feed.title}</span>
-				</label>
-			{/each}
 		</div>
 
 		<div class="sort-toggle">
@@ -120,11 +109,9 @@
 		padding: 0.75rem 0;
 		align-items: center;
 	}
-	.filter-feeds {
+	.filter-type {
 		display: flex;
-		flex-wrap: wrap;
 		gap: 0.5rem;
-		flex: 1;
 	}
 	.sort-toggle, .view-toggle {
 		display: flex;
@@ -332,7 +319,7 @@
 
 	@media (max-width: 640px) {
 		.filters { gap: 0.35rem; padding: 0.5rem 0; }
-		.filter-feeds { gap: 0.35rem; }
+		.filter-type { gap: 0.35rem; }
 		.sort-toggle, .view-toggle { gap: 0.15rem; }
 		.filter-chip { font-size: 0.65rem; padding: 0.15rem 0.5rem; }
 	}
