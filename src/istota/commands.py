@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -515,7 +516,11 @@ async def cmd_check(config, conn, user_id, conversation_token, args, client):
 
 
 def _read_claude_oauth_token() -> str | None:
-    """Read the OAuth access token from Claude's credentials file (~/.claude/.credentials.json)."""
+    """Read the OAuth access token from env var or Claude's credentials file."""
+    env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if env_token:
+        return env_token
+
     creds_path = Path.home() / ".claude" / ".credentials.json"
     if not creds_path.exists():
         return None

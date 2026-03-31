@@ -941,7 +941,7 @@ class TestBriefingDigest:
         cfg = Config()
         path = _get_briefing_digest_path("alice", cfg)
         assert "alice" in path
-        assert ".briefing_digest.md" in path
+        assert "/data/.briefing_digest.md" in path
 
     def test_load_returns_none_when_no_file(self, tmp_path):
         cfg = self._make_config(tmp_path)
