@@ -14,14 +14,11 @@ logger = logging.getLogger("istota.notifications")
 def resolve_conversation_token(config: "Config", user_id: str) -> str | None:
     """Resolve Talk conversation token for a user.
 
-    Priority: user invoicing_conversation_token > first briefing's token.
+    Returns the first briefing's conversation token, or None.
     """
     user_config = config.users.get(user_id)
     if not user_config:
         return None
-
-    if user_config.invoicing_conversation_token:
-        return user_config.invoicing_conversation_token
 
     for briefing in user_config.briefings:
         if briefing.conversation_token:

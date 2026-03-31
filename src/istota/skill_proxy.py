@@ -19,7 +19,6 @@ logger = logging.getLogger("istota.skill_proxy")
 # Skills that have __main__.py and can be invoked via the proxy.
 # Maintained manually — must match src/istota/skills/*/__main__.py.
 _ALLOWED_SKILLS = frozenset({
-    "accounting",
     "bookmarks",
     "browse",
     "calendar",

@@ -20,7 +20,6 @@ istota/
 │   ├── skill_client.py      # istota-skill console script (proxy client + direct fallback)
 │   ├── network_proxy.py     # CONNECT proxy for network isolation (domain allowlist)
 │   ├── heartbeat.py         # Heartbeat monitoring system
-│   ├── invoice_scheduler.py # Scheduled invoice generation + reminders
 │   ├── location_loader.py   # LOCATION.md parser + place sync
 │   ├── webhook_receiver.py   # FastAPI webhook receiver (Overland GPS, etc.)
 │   ├── logging_setup.py     # Central logging configuration
@@ -42,7 +41,6 @@ istota/
 │       ├── _types.py        # SkillMeta, EnvSpec dataclasses
 │       ├── _loader.py       # Skill discovery, manifest loading, doc resolution
 │       ├── _env.py          # Declarative env var resolver + setup_env() hook dispatch
-│       ├── accounting/      # Beancount ledger ops + Monarch Money sync + invoicing
 │       ├── bookmarks/       # Karakeep bookmark management
 │       ├── briefing/        # Briefing prompt builder, config loader, post-processing
 │       ├── briefings_config/ # User briefing schedule config (doc-only)
@@ -192,9 +190,6 @@ User-defined health checks in `HEARTBEAT.md`. Types: `file-watch`, `shell-comman
 ### Memory Search
 Hybrid BM25 + vector search using sqlite-vec and sentence-transformers. Auto-indexes conversations and memory files. Channel support via `channel:{token}` namespace. Degrades to BM25-only if deps unavailable. Optional: `uv sync --extra memory-search`.
 
-### Invoicing System
-Config-driven invoice generation (`INVOICING.md`) with PDF export via WeasyPrint. Cash-basis accounting — income recognized at payment time. Multi-entity support. Work log in `_INVOICES.md`. Scheduled generation for `schedule = "monthly"` clients. Overdue detection with notifications.
-
 ### GPS Location Tracking
 Overland GPS webhook receiver (`webhook_receiver.py`) ingests location pings and detects place transitions. Runs as a separate FastAPI service (`uvicorn istota.webhook_receiver:app`).
 
@@ -282,8 +277,6 @@ Key env vars: `CLAUDE_CODE_OAUTH_TOKEN`, `ADMIN_PASSWORD`, `USER_NAME`, `USER_PA
 ## Ansible Deployment
 
 Role at `deploy/ansible/` (symlinked from `~/Repos/ansible-server/roles/istota/`). When adding config fields, update `defaults/main.yml` and `templates/config.toml.j2`.
-
-Fava: per-user systemd services for Beancount ledger viewing. Controlled by `istota_fava_enabled`.
 
 ## Nextcloud File Access
 

@@ -70,7 +70,7 @@ The Docker deployment differs from a bare metal / Ansible installation in a few 
 - **Single user.** The Docker setup provisions one human user. Additional users can be added by editing `config.toml` directly and creating them in Nextcloud.
 - **Bundled Nextcloud.** The Compose file creates a new Nextcloud instance. If you already run Nextcloud, use the bare metal installer or Ansible role instead — they connect to your existing instance without creating a second one.
 - **No backups or auto-update.** The Ansible role sets up cron-based DB backups and optional auto-update. In Docker, volume backups are your responsibility.
-- **All Python extras installed.** The Docker image includes every optional dependency (accounting, whisper, garmin, memory-search, etc.) so all skills are available without rebuilding.
+- **All Python extras installed.** The Docker image includes every optional dependency (whisper, garmin, memory-search, etc.) so all skills are available without rebuilding.
 
 ## Quick start (bare metal)
 
@@ -106,11 +106,11 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 
 **Messaging** — Nextcloud Talk (DMs and multi-user rooms with @mention support), email (IMAP/SMTP with threading), TASKS.md file polling, CLI.
 
-**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, beancount accounting with invoicing (direct or via Moneyman API), GPS location tracking (Overland), Garmin Connect fitness data, Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), Miniflux RSS feed management, and more. Skills are a curated standard library, not a plugin marketplace.
+**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, accounting via Moneyman API (ledger, invoicing, transactions), GPS location tracking (Overland), Garmin Connect fitness data, Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), Miniflux RSS feed management, and more. Skills are a curated standard library, not a plugin marketplace.
 
 **Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Configurable memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
 
-**Scheduling** — Cron jobs via CRON.md (AI prompts or shell commands), natural-language reminders as one-shot cron entries, scheduled briefings with calendar/markets/headlines/news/todos components, invoice generation schedules.
+**Scheduling** — Cron jobs via CRON.md (AI prompts or shell commands), natural-language reminders as one-shot cron entries, scheduled briefings with calendar/markets/headlines/news/todos components.
 
 **Briefings** — Configurable morning/evening summaries. Components include calendar events, market data (futures, indices via yfinance + FinViz), headlines (pre-fetched frontpages from AP, Reuters, Guardian, FT, Al Jazeera, Le Monde, Der Spiegel), email newsletter digests, todos, and reminders. Output to Talk, email, or both.
 
@@ -150,7 +150,7 @@ Istota is built around Nextcloud — it uses your files, calendars, contacts, an
 | Multi-user | Native: per-user config, resources, sandboxing, worker isolation | Single-user per instance; run multiple containers for multiple users |
 | Storage | Nextcloud (WebDAV/rclone mount), includes files, calendars, contacts | Local filesystem |
 | Memory | USER.md + dated memories + channel memory + nightly curation + BM25/vector search + memory cap | Daily logs + MEMORY.md + hybrid search + pre-compaction flush |
-| Scheduling | CRON.md + briefings + heartbeats + invoice schedules | Built-in cron + webhooks + Gmail Pub/Sub |
+| Scheduling | CRON.md + briefings + heartbeats | Built-in cron + webhooks + Gmail Pub/Sub |
 | Skills | ~23 built-in Python CLIs with TOML manifests, keyword-based selection | 5,700+ community skills via ClawHub registry, three tiers |
 | Security | Bubblewrap filesystem sandbox, credential stripping, admin/non-admin isolation, deferred DB writes | DM pairing policy; community skills are an acknowledged risk vector |
 | Voice | Whisper transcription (input only) | ElevenLabs TTS + always-on speech wake |
@@ -183,7 +183,7 @@ Each user gets a shared Nextcloud folder:
 
 ```bash
 uv sync --extra all                        # Install all dependencies
-uv run pytest tests/ -v                    # Run tests (~2750 unit tests)
+uv run pytest tests/ -v                    # Run tests (~2370 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
@@ -194,7 +194,6 @@ Most skill dependencies are optional. Install everything with `--extra all`, or 
 uv sync --extra calendar         # caldav + icalendar
 uv sync --extra email            # imap-tools
 uv sync --extra markets          # yfinance
-uv sync --extra accounting       # beancount + fava + weasyprint + monarchmoney
 uv sync --extra transcribe       # pytesseract (OCR)
 uv sync --extra garmin           # garminconnect
 uv sync --extra memory-search    # sqlite-vec + sentence-transformers for semantic search

@@ -23,42 +23,12 @@ type = "reminders_file"
 path = "/Users/alice/workspace/REMINDERS.md"
 name = "Reminders"
 
-# Multiple ledgers can be configured for different purposes
-[[resources]]
-type = "ledger"
-path = "/Users/alice/beancount/personal/main.beancount"
-name = "Personal"
-permissions = "write"
-
-[[resources]]
-type = "ledger"
-path = "/Users/alice/beancount/business/main.beancount"
-name = "Business"
-permissions = "write"
-
-[[resources]]
-type = "ledger"
-path = "/Users/alice/beancount/trading/main.beancount"
-name = "Trading"
-permissions = "write"
-
-# Invoicing config (INVOICING.md with client/service/company definitions)
-[[resources]]
-type = "invoicing"
-path = "/Users/alice/workspace/INVOICING.md"
-name = "Invoicing"
-permissions = "write"
-
 # Karakeep bookmarks (per-user API credentials)
 # [[resources]]
 # type = "karakeep"
 # name = "Bookmarks"
 # base_url = "https://keep.example.com/api/v1"
 # api_key = "your-karakeep-api-key"
-
-# Invoice notification defaults
-invoicing_notifications = "talk"        # default surface: "talk", "email", "ntfy", "both", or "all"
-invoicing_conversation_token = "room123"  # Talk room for invoice notifications
 
 # Log channel: dedicated Talk room for verbose task execution logs
 # Shows real-time tool calls, timing, and task summaries without cluttering working channels

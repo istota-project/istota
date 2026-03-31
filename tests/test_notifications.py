@@ -22,13 +22,7 @@ from istota.notifications import (
 
 
 class TestResolveConversationToken:
-    def test_returns_invoicing_token(self):
-        config = Config(users={
-            "alice": UserConfig(invoicing_conversation_token="room1"),
-        })
-        assert resolve_conversation_token(config, "alice") == "room1"
-
-    def test_falls_back_to_briefing_token(self):
+    def test_returns_briefing_token(self):
         config = Config(users={
             "alice": UserConfig(
                 briefings=[BriefingConfig(name="morning", cron="0 6 * * *", conversation_token="room2")],
@@ -63,7 +57,9 @@ class TestSendTalk:
     async def test_resolves_token_from_user(self):
         config = Config(
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
-            users={"alice": UserConfig(invoicing_conversation_token="room2")},
+            users={"alice": UserConfig(
+                briefings=[BriefingConfig(name="morning", cron="0 6 * * *", conversation_token="room2")],
+            )},
         )
         with patch("istota.talk.TalkClient") as MockClient:
             mock_client = AsyncMock()
@@ -83,7 +79,9 @@ class TestSendTalk:
 
     @pytest.mark.asyncio
     async def test_returns_false_without_nextcloud(self):
-        config = Config(users={"alice": UserConfig(invoicing_conversation_token="room1")})
+        config = Config(users={"alice": UserConfig(
+            briefings=[BriefingConfig(name="morning", cron="0 6 * * *", conversation_token="room1")],
+        )})
         result = await _send_talk(config, "alice", "hello")
         assert result is False
 
