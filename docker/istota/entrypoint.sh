@@ -198,7 +198,6 @@ max_background_workers = ${ISTOTA_SCHEDULER_MAX_BACKGROUND_WORKERS:-2}
 user_max_foreground_workers = ${ISTOTA_SCHEDULER_USER_MAX_FOREGROUND_WORKERS:-2}
 user_max_background_workers = ${ISTOTA_SCHEDULER_USER_MAX_BACKGROUND_WORKERS:-1}
 scheduled_job_max_consecutive_failures = ${ISTOTA_SCHEDULER_SCHEDULED_JOB_MAX_CONSECUTIVE_FAILURES:-5}
-feed_page_regen_interval = ${ISTOTA_SCHEDULER_FEED_PAGE_REGEN_INTERVAL:-300}
 talk_cache_max_per_conversation = ${ISTOTA_SCHEDULER_TALK_CACHE_MAX_PER_CONVERSATION:-200}
 temp_file_retention_days = ${ISTOTA_SCHEDULER_TEMP_FILE_RETENTION_DAYS:-7}
 location_ping_retention_days = ${ISTOTA_SCHEDULER_LOCATION_PING_RETENTION_DAYS:-365}

@@ -2349,7 +2349,6 @@ def run_daemon(config: Config) -> None:
     logger.info("STARTUP Heartbeat check interval: %ds", config.scheduler.heartbeat_check_interval)
     logger.info("STARTUP Scheduled job check interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Cleanup interval: %ds", config.scheduler.briefing_check_interval)
-    logger.info("STARTUP Feed page regen interval: %ds", config.scheduler.feed_page_regen_interval)
     logger.info("STARTUP Confirmation timeout: %d min", config.scheduler.confirmation_timeout_minutes)
     logger.info("STARTUP Task retention: %d days", config.scheduler.task_retention_days)
     logger.info("STARTUP Email retention: %d days", config.scheduler.email_retention_days)
@@ -2388,7 +2387,6 @@ def run_daemon(config: Config) -> None:
     last_sleep_cycle_check = 0.0
     last_channel_sleep_cycle_check = 0.0
     last_heartbeat_check = 0.0
-    last_feed_check = 0.0
 
     while not _shutdown_requested:
         # Dispatch worker threads first — minimizes latency for pending tasks
@@ -2497,15 +2495,6 @@ def run_daemon(config: Config) -> None:
             except Exception as e:
                 logger.error("Error checking heartbeats: %s", e)
             last_heartbeat_check = now
-
-        # Regenerate feed pages from Miniflux periodically
-        if config.site.enabled and now - last_feed_check >= config.scheduler.feed_page_regen_interval:
-            try:
-                from .feeds import regenerate_feed_pages
-                regenerate_feed_pages(config)
-            except Exception as e:
-                logger.error("Error regenerating feed pages: %s", e)
-            last_feed_check = now
 
         # Sleep before next poll cycle
         time.sleep(config.scheduler.poll_interval)

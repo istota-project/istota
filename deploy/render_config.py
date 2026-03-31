@@ -158,7 +158,6 @@ def render_config_toml(s: dict) -> str:
         ("max_background_workers", 3), ("worker_idle_timeout", 30),
         ("user_max_foreground_workers", 2), ("user_max_background_workers", 1),
         ("scheduled_job_max_consecutive_failures", 5),
-        ("feed_page_regen_interval", 300),
         ("talk_cache_max_per_conversation", 200), ("temp_file_retention_days", 7),
         ("location_ping_retention_days", 365),
     ]
