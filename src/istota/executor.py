@@ -105,9 +105,9 @@ def _text_similarity(a: str, b: str) -> float:
     """Return 0.0–1.0 Jaccard similarity between two strings using word bigrams.
 
     More robust than SequenceMatcher for repetitive text patterns.
-    For very long strings, compare just the first 2000 chars to stay fast.
+    For very long strings, compare just the first 8000 chars to stay fast.
     """
-    limit = 2000
+    limit = 8000
     a_words = a[:limit].lower().split()
     b_words = b[:limit].lower().split()
     if len(a_words) < 2 or len(b_words) < 2:

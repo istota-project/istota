@@ -1309,3 +1309,17 @@ class TestParseBriefingJson:
         msg = '{"broken json'
         result = parse_briefing_json(msg)
         assert result is None
+
+    def test_duplicate_json_objects_returns_first(self):
+        """When _compose_full_result prepends a near-duplicate block, parse the first JSON."""
+        from istota.skills.briefing import parse_briefing_json
+        msg = (
+            'Now let me compose the briefing.\n\n'
+            '{"subject": "Evening Briefing", "body": "First version content"}\n\n'
+            'Now let me compose the briefing.\n\n'
+            '{"subject": "Evening Briefing", "body": "Second version content"}'
+        )
+        result = parse_briefing_json(msg)
+        assert result is not None
+        assert result["subject"] == "Evening Briefing"
+        assert result["body"] == "First version content"
