@@ -309,6 +309,20 @@
 - [x] Skill proxy phase 3: Monarch credentials as resources (env vars via skill proxy, no file path needed)
 - [x] Network proxy for agent subprocesses (domain allowlist)
 
+### Authenticated Web Interface
+- [x] Nextcloud OIDC login/callback/logout (authlib + SessionMiddleware)
+- [x] SvelteKit frontend with adapter-static, dark theme, `/istota` base path
+- [x] Dashboard with feature cards
+- [x] Feeds page: masonry card grid, image/text filter, sort, grid/list view, lightbox
+- [x] Miniflux API proxy (entries, feeds, mark as read)
+- [x] Ansible deployment (Node.js build, systemd service, nginx proxy)
+- [ ] Mark as read on scroll/click
+- [ ] Feed category filtering
+- [ ] Pagination / infinite scroll
+- [ ] Task history page
+- [ ] Memory viewer page
+- [ ] Remove static feed page generation (once web UI is primary)
+
 ## Priority 4: Future Ideas
 
 ### Architecture

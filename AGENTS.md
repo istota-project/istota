@@ -85,6 +85,12 @@ istota/
 │   ├── istota/              # Dockerfile, entrypoint, provisioning scripts
 │   ├── browser/             # Playwright browser container (Flask API)
 │   └── .env.example         # Environment variables template
+├── web/                     # SvelteKit frontend (adapter-static, base /istota)
+│   ├── src/
+│   │   ├── routes/          # Pages: dashboard, feeds
+│   │   └── lib/             # API client, components (FeedCard, Lightbox)
+│   ├── svelte.config.js     # adapter-static, base path /istota
+│   └── vite.config.ts       # Dev proxy to FastAPI
 ├── scripts/                 # setup.sh, scheduler.sh
 ├── tests/                   # pytest + pytest-asyncio (~2750 tests, 54 files)
 ├── schema.sql
@@ -206,11 +212,15 @@ Place detection uses hysteresis (2 consecutive pings required) to avoid flapping
 DB tables: `location_pings`, `location_places`, `location_visits`, `location_state`. Old pings cleaned after `location_ping_retention_days` (365).
 
 ### Authenticated Web Interface
-OIDC-authenticated web UI (`web_app.py`) using Nextcloud as the identity provider. Runs as a separate FastAPI service (`uvicorn istota.web_app:app`). Session-based auth with `SessionMiddleware`, 7-day cookie max age.
+SvelteKit frontend (`web/`) with FastAPI backend (`web_app.py`). Nextcloud OIDC for authentication. Runs as a separate service (`uvicorn istota.web_app:app`). Session-based auth via `SessionMiddleware`, 7-day cookie.
 
-Routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange, user verification), `/istota/logout`, `/istota/` (dashboard), `/istota/feeds` (serves static feed HTML from Nextcloud mount).
+Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark as read). SvelteKit build served as static files for all other `/istota/*` paths.
+
+Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design). Dashboard shows available features. Feeds page has masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox. Reads directly from Miniflux API via the backend proxy (no static file generation).
 
 User verification: `preferred_username` from OIDC must exist in `config.users`. Config: `[web]` section — `enabled`, `port`, `oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `session_secret_key`. Secrets via env vars: `ISTOTA_OIDC_CLIENT_SECRET`, `ISTOTA_WEB_SECRET_KEY`.
+
+Deploy requires Node.js for `npm run build`. Ansible handles this when `istota_web_enabled` is set.
 
 ### Filesystem Sandbox (bubblewrap)
 Per-user filesystem isolation via `bwrap`. Non-admins see only their Nextcloud subtree + system libs. Admins see full mount + DB (RO by default). Graceful degradation if not Linux or bwrap not found.
