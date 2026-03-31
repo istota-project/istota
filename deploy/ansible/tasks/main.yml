@@ -436,6 +436,7 @@
     {% if istota_memory_search_enabled %}--extra memory-search{% endif %}
     {% if istota_whisper_enabled %}--extra whisper{% endif %}
     {% if istota_location_enabled | default(false) %}--extra location{% endif %}
+    {% if istota_web_enabled | default(false) %}--extra web{% endif %}
     {% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"
@@ -507,6 +508,7 @@
   when: istota_use_environment_file | default(false)
   notify:
     - "restart istota-scheduler"
+    - "restart istota-web"
 
 - name: Remove secrets environment file when not using environment file
   file:
@@ -523,6 +525,7 @@
     mode: '0600'
   notify:
     - "restart istota-scheduler"
+    - "restart istota-web"
 
 - name: Deploy per-user config files
   template:
@@ -716,6 +719,50 @@
     - reload systemd
 
 # ============================================================
+# WEB INTERFACE (authenticated OIDC)
+# ============================================================
+
+- name: Deploy web interface service
+  template:
+    src: istota-web.service.j2
+    dest: "/etc/systemd/system/{{ istota_namespace }}-web.service"
+    mode: '0644'
+  when: istota_web_enabled | default(false)
+  notify:
+    - reload systemd
+    - "restart istota-web"
+
+- name: Enable and start web interface
+  systemd:
+    name: "{{ istota_namespace }}-web"
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: istota_web_enabled | default(false)
+
+- name: Find existing web service
+  stat:
+    path: "/etc/systemd/system/{{ istota_namespace }}-web.service"
+  register: web_service_file
+  when: not (istota_web_enabled | default(false))
+
+- name: Stop and disable web interface when disabled
+  systemd:
+    name: "{{ istota_namespace }}-web"
+    enabled: no
+    state: stopped
+  when: not (istota_web_enabled | default(false)) and (web_service_file.stat.exists | default(false))
+  failed_when: false
+
+- name: Remove web service file when disabled
+  file:
+    path: "/etc/systemd/system/{{ istota_namespace }}-web.service"
+    state: absent
+  when: not (istota_web_enabled | default(false)) and (web_service_file.stat.exists | default(false))
+  notify:
+    - reload systemd
+
+# ============================================================
 # BACKUP TASKS
 # ============================================================
 
@@ -840,7 +887,7 @@
   apt:
     name: nginx
     state: present
-  when: (istota_site_enabled or istota_location_enabled | default(false)) and not istota_update_only
+  when: (istota_site_enabled or istota_location_enabled | default(false) or istota_web_enabled | default(false)) and not istota_update_only
 
 - name: Build list of site users
   set_fact:
@@ -901,7 +948,7 @@
     owner: root
     group: root
     mode: "0644"
-  when: istota_site_enabled or istota_location_enabled | default(false)
+  when: istota_site_enabled or istota_location_enabled | default(false) or istota_web_enabled | default(false)
   notify:
     - reload nginx
 
@@ -909,7 +956,7 @@
   file:
     path: "/etc/nginx/conf.d/{{ istota_hostname }}.conf"
     state: absent
-  when: not istota_site_enabled and not (istota_location_enabled | default(false))
+  when: not istota_site_enabled and not (istota_location_enabled | default(false)) and not (istota_web_enabled | default(false))
   notify:
     - reload nginx
 

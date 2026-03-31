@@ -233,6 +233,18 @@ hostname = "{{ istota_hostname }}"
 enabled = true
 webhooks_port = {{ istota_webhooks_port }}
 {% endif %}
+{% if istota_web_enabled %}
+
+[web]
+enabled = true
+port = {{ istota_web_port }}
+oidc_issuer = "{{ istota_web_oidc_issuer }}"
+oidc_client_id = "{{ istota_web_oidc_client_id }}"
+{% if not istota_use_environment_file %}
+oidc_client_secret = "{{ istota_web_oidc_client_secret }}"
+session_secret_key = "{{ istota_web_secret_key }}"
+{% endif %}
+{% endif %}
 {% if istota_developer_enabled %}
 
 [developer]

@@ -255,6 +255,14 @@ istota_ntfy_priority: 3                    # default priority (1=min, 3=default,
 istota_location_enabled: false
 istota_webhooks_port: 8765
 
+# Authenticated web interface (Nextcloud OIDC)
+istota_web_enabled: false
+istota_web_port: 8766
+istota_web_oidc_issuer: ""
+istota_web_oidc_client_id: ""
+istota_web_oidc_client_secret: ""
+istota_web_secret_key: ""
+
 # Install all optional Python dependencies (--extra all)
 # Set to false to use per-feature flags for fine-grained control
 istota_install_all_extras: true

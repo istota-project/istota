@@ -256,6 +256,17 @@ class LocationReceiverConfig:
 
 
 @dataclass
+class WebConfig:
+    """Authenticated web interface configuration (Nextcloud OIDC)."""
+    enabled: bool = False
+    port: int = 8766
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    session_secret_key: str = ""
+
+
+@dataclass
 class SiteConfig:
     """Static website hosting configuration."""
     enabled: bool = False
@@ -316,6 +327,7 @@ class Config:
     security: SecurityConfig = field(default_factory=SecurityConfig)
     site: SiteConfig = field(default_factory=SiteConfig)
     location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
+    web: WebConfig = field(default_factory=WebConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     rclone_remote: str = "nextcloud"  # rclone remote name
@@ -748,6 +760,17 @@ def load_config(config_path: Path | None = None) -> Config:
             webhooks_port=loc.get("webhooks_port", 8765),
         )
 
+    if "web" in data:
+        w = data["web"]
+        config.web = WebConfig(
+            enabled=w.get("enabled", False),
+            port=w.get("port", 8766),
+            oidc_issuer=w.get("oidc_issuer", ""),
+            oidc_client_id=w.get("oidc_client_id", ""),
+            oidc_client_secret=w.get("oidc_client_secret", ""),
+            session_secret_key=w.get("session_secret_key", ""),
+        )
+
     if "developer" in data:
         dev = data["developer"]
         extra = {}
@@ -801,6 +824,8 @@ def load_config(config_path: Path | None = None) -> Config:
         ("ISTOTA_GITHUB_TOKEN", "developer", "github_token"),
         ("ISTOTA_NTFY_TOKEN", "ntfy", "token"),
         ("ISTOTA_NTFY_PASSWORD", "ntfy", "password"),
+        ("ISTOTA_OIDC_CLIENT_SECRET", "web", "oidc_client_secret"),
+        ("ISTOTA_WEB_SECRET_KEY", "web", "session_secret_key"),
     ]
     for env_var, section, field_name in _env_secret_overrides:
         val = os.environ.get(env_var)
