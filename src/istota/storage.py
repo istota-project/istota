@@ -365,6 +365,11 @@ def get_user_config_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_bot_path(user_id, bot_dir)}/config"
 
 
+def get_user_data_path(user_id: str, bot_dir: str) -> str:
+    """Get the path to a user's bot data/ directory (runtime state, not config)."""
+    return f"{get_user_bot_path(user_id, bot_dir)}/data"
+
+
 def get_user_tasks_file_path(user_id: str, bot_dir: str) -> str:
     """Get the path to a user's TASKS.md file."""
     return f"{get_user_config_path(user_id, bot_dir)}/TASKS.md"

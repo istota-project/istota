@@ -221,8 +221,8 @@ def _get_briefing_digest_path(
     if conversation_token:
         base = get_channel_base_path(conversation_token)
     else:
-        from ...storage import get_user_config_path
-        base = get_user_config_path(user_id, config.bot_dir_name)
+        from ...storage import get_user_data_path
+        base = get_user_data_path(user_id, config.bot_dir_name)
     return f"{base}/.briefing_digest.md"
 
 

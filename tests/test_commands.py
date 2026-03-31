@@ -1019,6 +1019,38 @@ class TestReadClaudeOauthToken:
         with patch("istota.commands.Path.home", return_value=fake_home):
             assert _read_claude_oauth_token() == "sk-ant-oat01-test123"
 
+    def test_env_var_takes_precedence(self, tmp_path):
+        import json as json_mod
+        fake_home = tmp_path / "fake_home"
+        creds_dir = fake_home / ".claude"
+        creds_dir.mkdir(parents=True)
+        creds = {"claudeAiOauth": {"accessToken": "file-token"}}
+        (creds_dir / ".credentials.json").write_text(json_mod.dumps(creds))
+        with patch("istota.commands.Path.home", return_value=fake_home):
+            with patch.dict("os.environ", {"CLAUDE_CODE_OAUTH_TOKEN": "env-token"}):
+                assert _read_claude_oauth_token() == "env-token"
+
+    def test_env_var_without_file(self, tmp_path):
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        with patch("istota.commands.Path.home", return_value=fake_home):
+            with patch.dict("os.environ", {"CLAUDE_CODE_OAUTH_TOKEN": "env-token"}):
+                assert _read_claude_oauth_token() == "env-token"
+
+    def test_falls_back_to_file_when_no_env_var(self, tmp_path):
+        import json as json_mod
+        fake_home = tmp_path / "fake_home"
+        creds_dir = fake_home / ".claude"
+        creds_dir.mkdir(parents=True)
+        creds = {"claudeAiOauth": {"accessToken": "file-token"}}
+        (creds_dir / ".credentials.json").write_text(json_mod.dumps(creds))
+        with patch("istota.commands.Path.home", return_value=fake_home):
+            with patch.dict("os.environ", {}, clear=False):
+                # Ensure env var is not set
+                import os
+                os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+                assert _read_claude_oauth_token() == "file-token"
+
 
 class TestFormatUtilization:
     def test_zero_utilization(self):

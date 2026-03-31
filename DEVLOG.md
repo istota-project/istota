@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-30: Fix !usage 401 and briefing digest path
+
+Two minor bug fixes from the issues tracker.
+
+**Key changes:**
+- `_read_claude_oauth_token()` now checks `CLAUDE_CODE_OAUTH_TOKEN` env var first, falling back to `~/.claude/.credentials.json`. Production uses the env var; the credentials file token expires.
+- Added `get_user_data_path()` to `storage.py` for runtime state files (parallel to `get_user_config_path()` for config).
+- Briefing digest (`.briefing_digest.md`) moved from user's `config/` dir to `data/` dir where runtime state belongs.
+
+**Files modified:**
+- `src/istota/commands.py` — env var check in `_read_claude_oauth_token()`, added `import os`
+- `src/istota/storage.py` — added `get_user_data_path()`
+- `src/istota/skills/briefing/__init__.py` — `_get_briefing_digest_path()` uses `get_user_data_path()`
+- `tests/test_commands.py` — 3 new tests for env var token precedence
+- `tests/test_storage.py` — test for `get_user_data_path()`
+- `tests/test_briefing.py` — updated digest path assertion
+
 ## 2026-03-30: Remove invoice scheduler and accounting skill
 
 Invoice scheduling (monthly auto-generation, pre-generation reminders, overdue detection) and the direct beancount accounting skill have been removed. All accounting functionality now goes through the Moneyman API service. The config files INVOICING.md, ACCOUNTING.md, and FEEDS.md are no longer auto-created or seeded for new users.
