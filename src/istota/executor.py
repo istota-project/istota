@@ -101,6 +101,27 @@ def detect_malformed_result(
 _SUBSTANTIAL_TEXT_MIN_CHARS = 200
 
 
+def _text_similarity(a: str, b: str) -> float:
+    """Return 0.0–1.0 Jaccard similarity between two strings using word bigrams.
+
+    More robust than SequenceMatcher for repetitive text patterns.
+    For very long strings, compare just the first 2000 chars to stay fast.
+    """
+    limit = 2000
+    a_words = a[:limit].lower().split()
+    b_words = b[:limit].lower().split()
+    if len(a_words) < 2 or len(b_words) < 2:
+        return 1.0 if a[:limit] == b[:limit] else 0.0
+    shingles_a = {(a_words[i], a_words[i + 1]) for i in range(len(a_words) - 1)}
+    shingles_b = {(b_words[i], b_words[i + 1]) for i in range(len(b_words) - 1)}
+    intersection = len(shingles_a & shingles_b)
+    union = len(shingles_a | shingles_b)
+    return intersection / union if union else 0.0
+
+
+_SIMILARITY_THRESHOLD = 0.5
+
+
 def _compose_full_result(result_text: str, execution_trace: list[dict]) -> str:
     """Compose full result by recovering substantial text blocks from the trace.
 
@@ -108,6 +129,9 @@ def _compose_full_result(result_text: str, execution_trace: list[dict]) -> str:
     tool calls, the ResultEvent only captures the final (often terse) text.
     This function detects that pattern and prepends the substantial earlier
     text blocks to form the complete response.
+
+    Near-duplicate blocks (>50% similar by word-bigram Jaccard) are
+    deduplicated so the model restating itself doesn't produce repeated output.
     """
     if not execution_trace:
         return result_text
@@ -123,20 +147,31 @@ def _compose_full_result(result_text: str, execution_trace: list[dict]) -> str:
     if not substantial_blocks:
         return result_text
 
-    # Check if the result already contains the substantial content
-    # (this happens when the last text block IS the result)
-    blocks_not_in_result = [
-        b for b in substantial_blocks if b not in result_text
-    ]
+    # Deduplicate: keep only blocks that aren't near-duplicates of an
+    # earlier block or of the result text (exact substring OR fuzzy match)
+    unique_blocks: list[str] = []
+    for block in substantial_blocks:
+        if block in result_text:
+            continue
+        if _text_similarity(block, result_text) >= _SIMILARITY_THRESHOLD:
+            continue
+        if any(
+            block in prev
+            or prev in block
+            or _text_similarity(block, prev) >= _SIMILARITY_THRESHOLD
+            for prev in unique_blocks
+        ):
+            continue
+        unique_blocks.append(block)
 
-    if not blocks_not_in_result:
+    if not unique_blocks:
         return result_text
 
-    # Compose: substantial blocks first, then the result text
+    # Compose: unique blocks first, then the result text
     # Skip the result text if it's just a terse reference like "see above"
-    parts = blocks_not_in_result
+    parts = unique_blocks
     if len(result_text) >= _SUBSTANTIAL_TEXT_MIN_CHARS or not any(
-        len(b) > len(result_text) * 3 for b in blocks_not_in_result
+        len(b) > len(result_text) * 3 for b in unique_blocks
     ):
         parts.append(result_text)
 

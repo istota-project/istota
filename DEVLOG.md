@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-30: Fix near-duplicate text blocks in compose_full_result
+
+`_compose_full_result` was duplicating near-identical text blocks when the model restated itself with minor wording changes. The existing deduplication used exact substring matching, which missed blocks that differed by a few words.
+
+**Key changes:**
+- Added `_text_similarity()` using word-bigram Jaccard similarity for fuzzy matching
+- `_compose_full_result` now deduplicates blocks that are >= 50% similar (by bigram overlap) to the result text or to previously accepted blocks
+- Chose bigram Jaccard over `difflib.SequenceMatcher` because SequenceMatcher's autojunk heuristic produces unreliable results for repetitive text
+
+**Files modified:**
+- `src/istota/executor.py` — Added `_text_similarity()`, rewrote dedup logic in `_compose_full_result`
+- `tests/test_executor.py` — Added 3 new tests (near-duplicate blocks, near-duplicate of result, distinct blocks), updated existing test data to use realistic non-repetitive strings
+- `.claude/rules/executor.md` — Updated output validation docs
+
 ## 2026-03-30: Moneyman skill — API-based accounting
 
 Added a new `moneyman` skill that wraps the Moneyman REST API (a standalone FastAPI service deployed separately), replacing direct beancount file access with HTTP calls. The old `accounting` skill remains available for users without a Moneyman instance. Also fixed a bug in the feeds skill.toml where a `[skill]` header prevented field loading.
