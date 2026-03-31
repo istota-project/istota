@@ -109,21 +109,28 @@ def parse_briefing_json(text: str) -> dict | None:
             if result:
                 return result
 
-    # Try finding outermost { ... }
+    # Try finding first valid JSON object using raw_decode (handles
+    # cases where multiple JSON objects appear in the text, e.g. from
+    # _compose_full_result prepending near-duplicate blocks).
     first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if first_brace != -1 and last_brace > first_brace:
-        candidate = text[first_brace:last_brace + 1]
-        result = _try_parse(candidate)
-        if result:
-            return result
+    if first_brace != -1:
+        try:
+            decoder = json.JSONDecoder()
+            data, _ = decoder.raw_decode(text, first_brace)
+            if isinstance(data, dict) and "body" in data:
+                return {"subject": data.get("subject"), "body": data["body"]}
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
 
-        # Try with smart quote normalization
-        for smart, ascii_char in _SMART_QUOTE_MAP.items():
-            candidate = candidate.replace(smart, ascii_char)
-        result = _try_parse(candidate)
-        if result:
-            return result
+        # Fallback: outermost braces with smart quote normalization
+        last_brace = text.rfind("}")
+        if last_brace > first_brace:
+            candidate = text[first_brace:last_brace + 1]
+            for smart, ascii_char in _SMART_QUOTE_MAP.items():
+                candidate = candidate.replace(smart, ascii_char)
+            result = _try_parse(candidate)
+            if result:
+                return result
 
     return None
 
