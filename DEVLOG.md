@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-03-31: Replace install.sh with Ansible bootstrap
+
+Replaced the monolithic 1765-line `install.sh` with a thin ~375-line bootstrap that installs Ansible and delegates all provisioning to the existing Ansible role. This eliminates the maintenance burden of two parallel install paths (bash script vs Ansible role). The settings.toml format is preserved for backward compatibility with existing installations.
+
+**Key changes:**
+- `install.sh` rewritten as bootstrap: ensures Python/pipx/ansible-core, runs wizard, converts settings, calls `ansible-playbook` in local mode
+- Interactive wizard extracted to standalone `wizard.sh` (unchanged behavior)
+- New `settings_to_vars.py` converts settings.toml (without `istota_` prefix) to Ansible vars YAML (with prefix)
+- New `local-playbook.yml` applies the bundled role with `connection: local`
+- Ansible role gains rclone password auto-obscure (runs `rclone obscure` when password not pre-provided)
+- Ansible role gains Claude OAuth credentials file deployment (writes `.claude/.credentials.json`)
+- `render_config.py` deleted (600 lines of duplicated config generation, replaced by Ansible templates)
+
+**Files added:**
+- `deploy/wizard.sh` — extracted interactive setup wizard
+- `deploy/settings_to_vars.py` — settings.toml to Ansible vars YAML converter
+- `deploy/local-playbook.yml` — local-mode Ansible playbook
+
+**Files modified:**
+- `deploy/install.sh` — rewritten as bootstrap (1765 → 375 lines)
+- `deploy/ansible/tasks/main.yml` — rclone auto-obscure + Claude credentials tasks
+- `deploy/README.md` — rewritten for single Ansible-based deployment path
+- `AGENTS.md` — updated project structure
+
+**Files deleted:**
+- `deploy/render_config.py` — replaced by Ansible templates
+
 ## 2026-03-31: Authenticated web interface with SvelteKit + Nextcloud OIDC
 
 Added a login-protected web UI with a SvelteKit frontend and FastAPI backend. Nextcloud serves as the OpenID Connect identity provider. The feeds page reads directly from the Miniflux API (no static file generation), with a masonry card grid matching the existing static feed page design.

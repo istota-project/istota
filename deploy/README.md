@@ -1,10 +1,8 @@
 # Deployment
 
-Two deployment paths are available:
+A single deployment path using Ansible as the canonical provisioning tool. The `install.sh` script is a thin bootstrap that ensures Ansible is installed, then runs the bundled Ansible role locally.
 
-## Option 1: install.sh (standalone)
-
-Single-script deployment for Debian 13+ servers. No Ansible required.
+## Quick start
 
 ```bash
 # Interactive setup wizard (recommended for first install)
@@ -13,15 +11,31 @@ sudo ./install.sh --interactive
 # Update existing installation
 sudo ./install.sh --update
 
+# Preview changes without applying
+sudo ./install.sh --dry-run
+
 # Use a custom settings file
 sudo ./install.sh --settings /path/to/settings.toml
 ```
 
-### Settings file
+## How it works
 
-The interactive wizard writes a settings file to `/etc/istota/settings.toml`. This file drives all subsequent `--update` runs. Settings can also be overridden via environment variables with `ISTOTA_` prefix.
+`install.sh` is a ~250-line bootstrap that:
 
-Example minimal settings:
+1. Ensures Python 3.11+, pipx, and ansible-core are installed
+2. Installs required Ansible collections (`community.general`, `ansible.posix`)
+3. Gets the Ansible role (from local repo or cloned copy)
+4. Runs the setup wizard if `--interactive` (writes `/etc/istota/settings.toml`)
+5. Converts `settings.toml` to Ansible vars via `settings_to_vars.py`
+6. Runs `ansible-playbook` in local connection mode
+
+The Ansible role (`deploy/ansible/`) is the single source of truth for provisioning.
+
+## Settings file
+
+The interactive wizard writes a settings file to `/etc/istota/settings.toml`. This file drives all subsequent `--update` runs. Settings mirror Ansible variable names without the `istota_` prefix.
+
+Minimal example:
 
 ```toml
 home = "/srv/app/istota"
@@ -31,7 +45,6 @@ nextcloud_username = "istota"
 nextcloud_app_password = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
 use_nextcloud_mount = true
 nextcloud_mount_path = "/srv/mount/nextcloud/content"
-rclone_password_obscured = "xxxxxxx"
 use_environment_file = true
 
 [users.alice]
@@ -40,20 +53,13 @@ timezone = "America/New_York"
 email_addresses = ["alice@example.com"]
 ```
 
-See `deploy/ansible/defaults/main.yml` for the full list of available settings (use names without the `istota_` prefix).
+See `deploy/ansible/defaults/main.yml` for the full list of available settings.
 
-### Config generator
+The rclone obscured password is auto-generated from the app password during installation. You don't need to set `rclone_password_obscured` manually.
 
-`deploy/render_config.py` converts a settings file into all the config files istota needs:
+## Using Ansible directly
 
-```bash
-python3 deploy/render_config.py --settings /etc/istota/settings.toml --output-dir /
-python3 deploy/render_config.py --settings settings.toml --dry-run  # preview
-```
-
-## Option 2: Ansible
-
-Full infrastructure-as-code deployment. See `deploy/ansible/README.md`.
+For infrastructure-as-code workflows (multiple servers, CI/CD), use the Ansible role directly without `install.sh`:
 
 ```yaml
 # In your playbook:
@@ -67,18 +73,27 @@ Full infrastructure-as-code deployment. See `deploy/ansible/README.md`.
 
 Point your Ansible `roles_path` at the `deploy/ansible/` directory, or symlink it into your roles directory.
 
+## File reference
+
+| File | Purpose |
+|---|---|
+| `install.sh` | Bootstrap: ensures Ansible, runs wizard, delegates to role |
+| `wizard.sh` | Interactive setup wizard (writes settings.toml) |
+| `settings_to_vars.py` | Converts settings.toml to Ansible vars YAML |
+| `local-playbook.yml` | Playbook for local-mode deployment |
+| `ansible/` | Ansible role (tasks, templates, defaults, handlers) |
+
 ## Prerequisites
 
-- Debian 13+ (Trixie) server
-- Nextcloud instance with an app password for the bot user (no Nextcloud yet? [Nextcloud All-in-One](https://github.com/nextcloud/all-in-one) is the quickest path — enable Nextcloud Talk during setup)
+- Debian 12+ or Ubuntu server
+- Nextcloud instance with an app password for the bot user
 - Claude Code CLI subscription (authenticate after install with `sudo -u istota claude login`)
 
 ## Post-install
 
 1. Authenticate Claude CLI: `sudo -u istota HOME=/srv/app/istota claude login`
-2. Create the bot user in Nextcloud and generate an app password
-3. Add users to the config and restart: `systemctl restart istota-scheduler`
-4. Invite the bot user to Nextcloud Talk conversations
+2. Invite the bot user to Nextcloud Talk conversations
+3. Test: `sudo -u istota HOME=/srv/app/istota /srv/app/istota/.venv/bin/istota task "Hello" -u USER -x`
 
 ## Service management
 
@@ -90,292 +105,25 @@ journalctl -u istota-scheduler -f
 
 ## Optional features
 
-The core install covers Talk integration, email, scheduling, and Claude Code execution. The install wizard (`--interactive`) prompts for the features below and sets them up automatically: memory search, sleep cycle, channel sleep cycle, whisper transcription, ntfy notifications, automated backups, and the browser container (including Docker installation). Nginx site hosting is not covered by the wizard and requires manual setup. For manual setup or customization, the reference instructions are provided here. All settings go in `/etc/istota/settings.toml`, then re-run `install.sh --update` to regenerate config.
+The core install covers Talk integration, email, scheduling, and Claude Code execution. The wizard prompts for these features and configures them automatically:
 
-Throughout this section, `$HOME` refers to the istota home directory (default `/srv/app/istota`) and commands are run as root unless noted otherwise.
+- Memory search (semantic search over conversations)
+- Sleep cycle (nightly memory extraction)
+- Whisper (audio transcription)
+- ntfy (push notifications)
+- GPS location tracking
+- Automated backups
+- Browser container (web browsing via Docker)
 
-### Browser container
+Features not covered by the wizard (requires manual Ansible vars):
 
-Dockerized Playwright container for the web browsing skill. Provides headless browsing with optional VNC for CAPTCHA fallback.
+- Nginx site hosting
+- Web interface (OIDC)
+- Developer skill (Git/GitLab/GitHub)
+- Auto-update
 
-**Settings:**
+All settings go in `/etc/istota/settings.toml`, then re-run `install.sh --update` to apply changes.
 
-```toml
-[browser]
-enabled = true
-api_port = 9223
-vnc_port = 6080
-vnc_password = "changeme"
-vnc_external_url = "https://vnc.example.com:6080"  # optional, for CAPTCHA access
-```
+## Migration from old install.sh
 
-**Setup:**
-
-```bash
-# Install Docker (official convenience script, works across Debian/Ubuntu)
-curl -fsSL https://get.docker.com | sh
-
-# Add istota to docker group
-usermod -aG docker istota
-
-# Deploy the container
-cat > $HOME/browser.env <<EOF
-VNC_PASSWORD=changeme
-BROWSER_VNC_URL=https://vnc.example.com:6080
-MAX_BROWSER_SESSIONS=3
-EOF
-chown istota:istota $HOME/browser.env
-chmod 600 $HOME/browser.env
-
-cat > $HOME/docker-compose.browser.yml <<EOF
-services:
-  browser:
-    build:
-      context: $HOME/src/docker/browser/
-      dockerfile: Dockerfile
-    container_name: istota-browser
-    ports:
-      - "127.0.0.1:9223:9223"
-      - "0.0.0.0:6080:6080"
-    shm_size: 2gb
-    volumes:
-      - $HOME/data/browser-profile:/data/browser-profile
-    env_file:
-      - $HOME/browser.env
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-    restart: unless-stopped
-EOF
-chown istota:istota $HOME/docker-compose.browser.yml
-
-cd $HOME && docker compose -f docker-compose.browser.yml up -d --build
-
-# Allow Docker containers to reach host (if using UFW)
-ufw allow from 172.18.0.0/16 comment "Docker containers (istota)"
-```
-
-**Verify:** `curl -s http://localhost:9223/health` should return OK.
-
-### Automated backups
-
-SQLite database backups (every 6h) and Nextcloud file backups (nightly) with local + remote rotation.
-
-**Setup:**
-
-```bash
-# Create backup directories
-mkdir -p $HOME/data/backups/{daily,weekly}
-chown -R istota:istota $HOME/data/backups
-
-# Create remote backup dirs (requires active mount)
-MOUNT=/srv/mount/nextcloud/content
-mkdir -p $MOUNT/Backups/db/{daily,weekly}
-chown -R istota:istota $MOUNT/Backups
-
-# Deploy backup script
-cat > /usr/local/bin/istota-backup.sh <<'SCRIPT'
-#!/bin/bash
-set -euo pipefail
-
-DB="/srv/app/istota/data/istota.db"
-LOCAL_DIR="/srv/app/istota/data/backups"
-REMOTE_DIR="/srv/mount/nextcloud/content/Backups"
-MOUNT_PATH="/srv/mount/nextcloud/content"
-DAILY_RETENTION=7
-WEEKLY_RETENTION=4
-RCLONE_CONFIG="/srv/app/istota/.config/rclone/rclone.conf"
-RCLONE_REMOTE="nextcloud"
-RCLONE_BACKUP_PATH="Backups"
-
-TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
-DAY_OF_WEEK=$(date +%u)
-
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
-
-mount_available() { mountpoint -q "$MOUNT_PATH" 2>/dev/null; }
-
-backup_db() {
-    log "Starting database backup"
-    local tmp_file
-    tmp_file=$(mktemp "${LOCAL_DIR}/backup-XXXXXX.db")
-    trap 'rm -f "$tmp_file"' RETURN
-
-    sqlite3 "$DB" ".backup '$tmp_file'"
-    local check
-    check=$(sqlite3 "$tmp_file" "PRAGMA integrity_check;")
-    if [ "$check" != "ok" ]; then
-        log "ERROR: Backup integrity check failed: $check"
-        return 1
-    fi
-
-    local backup_name="istota-${TIMESTAMP}.db.gz"
-    gzip -c "$tmp_file" > "${LOCAL_DIR}/daily/${backup_name}"
-    log "Local daily backup: ${LOCAL_DIR}/daily/${backup_name}"
-
-    if [ "$DAY_OF_WEEK" -eq 7 ]; then
-        cp "${LOCAL_DIR}/daily/${backup_name}" "${LOCAL_DIR}/weekly/${backup_name}"
-        log "Local weekly backup saved"
-    fi
-
-    if mount_available; then
-        cp "${LOCAL_DIR}/daily/${backup_name}" "${REMOTE_DIR}/db/daily/${backup_name}"
-        [ "$DAY_OF_WEEK" -eq 7 ] && cp "${LOCAL_DIR}/weekly/${backup_name}" "${REMOTE_DIR}/db/weekly/${backup_name}"
-        log "Remote backup copied"
-    fi
-
-    find "${LOCAL_DIR}/daily" -name "istota-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
-    find "${LOCAL_DIR}/weekly" -name "istota-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
-    if mount_available; then
-        find "${REMOTE_DIR}/db/daily" -name "istota-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
-        find "${REMOTE_DIR}/db/weekly" -name "istota-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
-    fi
-    log "Database backup complete"
-}
-
-backup_files() {
-    log "Starting files backup"
-    rclone sync --config "$RCLONE_CONFIG" "${RCLONE_REMOTE}:Users" "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}/files/Users" --exclude "*/shared/**" --verbose 2>&1 | while IFS= read -r line; do log "  $line"; done
-    rclone sync --config "$RCLONE_CONFIG" "${RCLONE_REMOTE}:Channels" "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}/files/Channels" --verbose 2>&1 | while IFS= read -r line; do log "  $line"; done
-    log "Files backup complete"
-}
-
-case "${1:-}" in
-    db) backup_db ;;
-    files) backup_files ;;
-    all) backup_db; backup_files ;;
-    *) echo "Usage: $0 {db|files|all}" >&2; exit 1 ;;
-esac
-SCRIPT
-chmod 755 /usr/local/bin/istota-backup.sh
-
-# Deploy cron (DB every 6h, files nightly at 3am)
-cat > /etc/cron.d/istota-backup <<EOF
-MAILTO=""
-0 */6 * * * istota /usr/local/bin/istota-backup.sh db >> /var/log/istota/istota-backup.log 2>&1
-0 3 * * * istota /usr/local/bin/istota-backup.sh files >> /var/log/istota/istota-backup.log 2>&1
-EOF
-```
-
-**Verify:** `sudo -u istota /usr/local/bin/istota-backup.sh db` should create a gzipped backup in `$HOME/data/backups/daily/`.
-
-### Nginx site hosting
-
-Serve per-user static sites from Nextcloud-managed HTML directories. Users edit their site files in Nextcloud; nginx serves them.
-
-**Settings:**
-
-```toml
-[site]
-enabled = true
-hostname = "istota.example.com"
-```
-
-Per-user opt-in:
-
-```toml
-[users.alice]
-site_enabled = true
-```
-
-**Setup:**
-
-```bash
-HOSTNAME=istota.example.com
-MOUNT=/srv/mount/nextcloud/content
-
-apt-get install -y nginx
-usermod -aG www-data istota
-usermod -aG nextcloud-mount www-data
-
-# Create site root
-mkdir -p /srv/app/istota/html
-chown istota:www-data /srv/app/istota/html
-
-# Create per-user HTML directories (repeat for each user)
-mkdir -p $MOUNT/Users/alice/istota/html
-chown istota:www-data $MOUNT/Users/alice/istota/html
-
-# Deploy nginx config
-cat > /etc/nginx/conf.d/${HOSTNAME}.conf <<'EOF'
-server {
-    listen 80;
-    server_name istota.example.com;
-    root /srv/app/istota/html;
-    index index.html;
-
-    # Per-user sites at /~username/
-    location ~ ^/~([^/]+)(/.*)?$ {
-        alias /srv/mount/nextcloud/content/Users/$1/istota/html$2;
-        index index.html;
-    }
-}
-EOF
-
-systemctl reload nginx
-```
-
-**Verify:** `curl -s http://istota.example.com/` should return the site root. User sites at `http://istota.example.com/~alice/`. Add TLS via certbot or a reverse proxy.
-
-### Whisper audio transcription
-
-Transcribe audio attachments using faster-whisper (CPU, int8 quantization). Pre-downloads the model at install time.
-
-**Settings:**
-
-```toml
-[whisper]
-enabled = true
-model = "small"         # Model to pre-download: tiny/base/small/medium/large-v3
-max_model = "small"     # Max model for auto-selection at runtime
-```
-
-**Setup:**
-
-```bash
-# Install the optional dependency group
-cd /srv/app/istota/src && uv sync --extra whisper
-chown -R istota:istota /srv/app/istota/src/.venv
-
-# Pre-download the model
-sudo -u istota HOME=/srv/app/istota \
-  /srv/app/istota/.venv/bin/python -m istota.skills.whisper download small
-
-# Add WHISPER_MAX_MODEL to the systemd service environment
-# Edit /etc/systemd/system/istota-scheduler.service and add:
-#   Environment=WHISPER_MAX_MODEL=small
-# Then reload:
-systemctl daemon-reload && systemctl restart istota-scheduler
-```
-
-**Verify:** Send a voice memo to the bot in Talk — it should transcribe before processing.
-
-### ntfy push notifications
-
-One-way push notifications via ntfy.sh (or self-hosted ntfy). Used for heartbeat alerts, scheduled job failures, and other system events.
-
-**Settings:**
-
-```toml
-[ntfy]
-enabled = true
-server_url = "https://ntfy.sh"
-topic = "istota-alerts"
-token = "tk_xxxxxxxxxx"     # bearer token (preferred)
-# Or use basic auth:
-# username = "user"
-# password = "pass"
-priority = 3                 # 1=min, 3=default, 5=max
-```
-
-Per-user topic override:
-
-```toml
-[users.alice]
-ntfy_topic = "alice-alerts"
-```
-
-**Setup:** Add the settings above and re-run `install.sh --update`. No additional system setup needed — ntfy is a remote service.
-
-**Verify:** `curl -d "test" https://ntfy.sh/istota-alerts` should send a notification to your subscribed device.
+If you have an existing installation deployed with the previous monolithic `install.sh`, the new bootstrap works with your existing `/etc/istota/settings.toml` unchanged. Run `sudo bash install.sh --update` and it will install Ansible, convert your settings, and re-deploy via the Ansible role.
