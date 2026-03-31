@@ -131,7 +131,6 @@ class SchedulerConfig:
     user_max_foreground_workers: int = 2  # global per-user fg worker default
     user_max_background_workers: int = 1  # global per-user bg worker default
     scheduled_job_max_consecutive_failures: int = 5  # auto-disable after N failures (0 = never)
-    feed_page_regen_interval: int = 300  # seconds between feed page regeneration
     talk_cache_max_per_conversation: int = 200  # max cached talk messages per conversation
     location_ping_retention_days: int = 365  # delete location pings older than this (0 = unlimited)
 
@@ -670,7 +669,6 @@ def load_config(config_path: Path | None = None) -> Config:
             temp_file_retention_days=sched.get("temp_file_retention_days", 7),
             worker_idle_timeout=sched.get("worker_idle_timeout", 30),
             scheduled_job_max_consecutive_failures=sched.get("scheduled_job_max_consecutive_failures", 5),
-            feed_page_regen_interval=sched.get("feed_page_regen_interval", sched.get("feed_check_interval", 300)),
             max_foreground_workers=sched.get("max_foreground_workers", 5),
             max_background_workers=sched.get("max_background_workers", 3),
             user_max_foreground_workers=sched.get("user_max_foreground_workers", 2),

@@ -23,7 +23,6 @@ def run_daemon(config: Config) -> None
    - Run cleanup checks (every `briefing_check_interval`)
    - Check heartbeats (every `heartbeat_check_interval`)
    - Check invoice schedules (every `briefing_check_interval`)
-   - Regenerate feed pages from Miniflux (every `feed_page_regen_interval`)
    - `pool.dispatch()`
    - Sleep `poll_interval`
 8. Shutdown workers, release lock
@@ -156,7 +155,6 @@ After task completion, if enabled + `auto_index_conversations`:
 | `max_retry_age_minutes` | 60 | Max age for retry |
 | `stale_pending_fail_hours` | 2 | Ancient task auto-fail |
 | `task_retention_days` | 7 | Task cleanup |
-| `feed_page_regen_interval` | 300s | Feed page regeneration from Miniflux |
 | `scheduled_job_max_consecutive_failures` | 5 | Auto-disable threshold |
 
 ## Other Scheduler Functions
