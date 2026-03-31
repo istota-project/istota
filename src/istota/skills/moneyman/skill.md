@@ -43,6 +43,8 @@ istota-skill moneyman import-csv /path/to/export.csv --account Assets:Bank:Check
 
 All output is JSON with `status: ok|error`.
 
+**Concurrency rule:** mutation commands (`add-transaction`, `sync-monarch`, `import-csv`, `work add/update/remove`, `invoice generate/paid/void/create`) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`) are safe to parallelize.
+
 ## Adding transactions
 
 Never manually type amounts into ledger files. Use CLI commands:
