@@ -70,7 +70,7 @@ The Docker deployment differs from a bare metal / Ansible installation in a few 
 - **Single user.** The Docker setup provisions one human user. Additional users can be added by editing `config.toml` directly and creating them in Nextcloud.
 - **Bundled Nextcloud.** The Compose file creates a new Nextcloud instance. If you already run Nextcloud, use the bare metal installer or Ansible role instead — they connect to your existing instance without creating a second one.
 - **No backups or auto-update.** The Ansible role sets up cron-based DB backups and optional auto-update. In Docker, volume backups are your responsibility.
-- **All Python extras installed.** The Docker image includes every optional dependency (whisper, garmin, memory-search, etc.) so all skills are available without rebuilding.
+- **All Python extras installed.** The Docker image includes every optional dependency (whisper, memory-search, etc.) so all skills are available without rebuilding.
 
 ## Quick start (bare metal)
 
@@ -106,7 +106,7 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 
 **Messaging** — Nextcloud Talk (DMs and multi-user rooms with @mention support), email (IMAP/SMTP with threading), TASKS.md file polling, CLI.
 
-**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, accounting via Moneyman API (ledger, invoicing, transactions), GPS location tracking (Overland), Garmin Connect fitness data, Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), Miniflux RSS feed management, and more. Skills are a curated standard library, not a plugin marketplace.
+**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, accounting via Moneyman API (ledger, invoicing, transactions), GPS location tracking (Overland), Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), Miniflux RSS feed management, and more. Skills are a curated standard library, not a plugin marketplace.
 
 **Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Configurable memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
 
@@ -195,7 +195,6 @@ uv sync --extra calendar         # caldav + icalendar
 uv sync --extra email            # imap-tools
 uv sync --extra markets          # yfinance
 uv sync --extra transcribe       # pytesseract (OCR)
-uv sync --extra garmin           # garminconnect
 uv sync --extra memory-search    # sqlite-vec + sentence-transformers for semantic search
 uv sync --extra whisper          # faster-whisper for audio transcription
 uv sync --extra location         # fastapi + uvicorn + geopy for GPS location receiver
