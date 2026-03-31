@@ -278,7 +278,7 @@
 - [x] Shared volume file access with external storage mounts
 - [x] Talk attachment fallback to NC data directory
 - [x] Full env-based configuration (~170 vars, parity with Ansible role)
-- [x] All Python extras installed (whisper, garmin, memory-search)
+- [x] All Python extras installed (whisper, memory-search)
 - [x] Browser container via Compose profile (`--profile browser`)
 - [x] GPS webhook receiver via Compose profile (`--profile location`)
 - [x] Bubblewrap sandbox + skill credential proxy (graceful degradation)
@@ -306,7 +306,7 @@
 - [x] OAuth token hardening (removed env var passthrough, RO .credentials.json mount)
 - [x] .developer/ scripts mounted read-only (prevent credential-fetch script replacement)
 - [x] Admin Nextcloud mount scoped to user dir (was full content tree)
-- [x] Skill proxy phase 3: Garmin/Monarch credentials as resources (env vars via skill proxy, no file path needed)
+- [x] Skill proxy phase 3: Monarch credentials as resources (env vars via skill proxy, no file path needed)
 - [x] Network proxy for agent subprocesses (domain allowlist)
 
 ## Priority 4: Future Ideas
@@ -329,7 +329,7 @@
 - [x] Location tracking via Overland GPS (FastAPI receiver, place resolution, visit state machine, CLI skill)
 - [x] Calendar attendance correlation via GPS pings (geocoding, place matching, proximity check)
 - [x] Dependency isolation: optional deps in extras groups, import guards, `!skills` availability display
-- [x] Service credentials as resources (garmin, monarch follow karakeep pattern with ResourceConfig.extra)
+- [x] Service credentials as resources (monarch follows karakeep pattern with ResourceConfig.extra)
 - [x] Miniflux migration: feeds skill with CLI, miniflux resource type, bridger app for Tumblr/Are.na
 - [x] Moneyman skill: API-based accounting via standalone Moneyman service (mutual exclusion with direct beancount skill)
 - [ ] Config validation / "unconfigured" skill status (declarative credential requirements)
