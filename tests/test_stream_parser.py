@@ -115,6 +115,7 @@ class TestParseStreamLine:
         line = self._make_line({
             "type": "assistant",
             "message": {
+                "stop_reason": "tool_use",
                 "content": [
                     {
                         "type": "tool_use",
@@ -134,6 +135,7 @@ class TestParseStreamLine:
         line = self._make_line({
             "type": "assistant",
             "message": {
+                "stop_reason": "end_turn",
                 "content": [
                     {"type": "text", "text": "Let me check your calendar."},
                 ]
@@ -148,6 +150,7 @@ class TestParseStreamLine:
         line = self._make_line({
             "type": "assistant",
             "message": {
+                "stop_reason": "tool_use",
                 "content": [
                     {"type": "text", "text": "I'll read the file now."},
                     {
@@ -166,7 +169,7 @@ class TestParseStreamLine:
     def test_assistant_empty_content(self):
         line = self._make_line({
             "type": "assistant",
-            "message": {"content": []},
+            "message": {"stop_reason": "end_turn", "content": []},
         })
         assert parse_stream_line(line) is None
 
@@ -174,6 +177,7 @@ class TestParseStreamLine:
         line = self._make_line({
             "type": "assistant",
             "message": {
+                "stop_reason": "end_turn",
                 "content": [{"type": "text", "text": "   \n  "}]
             },
         })
@@ -183,6 +187,7 @@ class TestParseStreamLine:
         line = self._make_line({
             "type": "assistant",
             "message": {
+                "stop_reason": "end_turn",
                 "content": [
                     {"type": "text", "text": "First part."},
                     {"type": "text", "text": "Second part."},
@@ -198,6 +203,7 @@ class TestParseStreamLine:
         line = self._make_line({
             "type": "assistant",
             "message": {
+                "stop_reason": "tool_use",
                 "content": [
                     {"type": "tool_use", "id": "a", "name": "Read", "input": {"file_path": "/tmp/a.txt"}},
                     {"type": "tool_use", "id": "b", "name": "Read", "input": {"file_path": "/tmp/b.txt"}},
@@ -216,6 +222,65 @@ class TestParseStreamLine:
         line = self._make_line({"type": "assistant"})
         assert parse_stream_line(line) is None
 
+    def test_assistant_partial_event_skipped(self):
+        """Partial streaming events (stop_reason=null) should be skipped."""
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": None,
+                "content": [
+                    {"type": "thinking", "thinking": "Let me think about this..."},
+                ],
+            },
+        })
+        assert parse_stream_line(line) is None
+
+    def test_assistant_context_management_replay_skipped(self):
+        """Context management replays should be skipped."""
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": "end_turn",
+                "context_management": {"applied_edits": ["truncate_conversation"]},
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": "/tmp/test.txt"}},
+                ],
+            },
+        })
+        assert parse_stream_line(line) is None
+
+    def test_assistant_completed_event_still_parsed(self):
+        """Completed events with stop_reason should still be parsed."""
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "text", "text": "Here is the answer."},
+                ],
+            },
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, TextEvent)
+        assert event.text == "Here is the answer."
+
+    def test_assistant_tool_use_with_stop_reason(self):
+        """Tool use events with stop_reason=tool_use should still be parsed."""
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash",
+                     "input": {"command": "ls", "description": "List files"}},
+                ],
+            },
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, ToolUseEvent)
+        assert event.description == "⚙️ List files"
+
 
 # --- Integration-style: simulate a full stream ---
 
@@ -230,6 +295,7 @@ class TestFullStream:
             json.dumps({
                 "type": "assistant",
                 "message": {
+                    "stop_reason": "tool_use",
                     "content": [
                         {"type": "tool_use", "id": "t1", "name": "Bash",
                          "input": {"command": "ls /tmp", "description": "List temp files"}},
@@ -242,6 +308,7 @@ class TestFullStream:
             json.dumps({
                 "type": "assistant",
                 "message": {
+                    "stop_reason": "tool_use",
                     "content": [
                         {"type": "text", "text": "Found some files. Let me read one."},
                         {"type": "tool_use", "id": "t2", "name": "Read",
@@ -255,6 +322,7 @@ class TestFullStream:
             json.dumps({
                 "type": "assistant",
                 "message": {
+                    "stop_reason": "end_turn",
                     "content": [{"type": "text", "text": "Here is the summary."}]
                 },
             }),
