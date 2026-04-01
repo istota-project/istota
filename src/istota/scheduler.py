@@ -470,7 +470,7 @@ async def _resolve_channel_name(config: Config, conversation_token: str) -> str:
 def _log_channel_source_label(task: db.Task, channel_name: str | None) -> tuple[str, str]:
     """Return (task_id_prefix, source_suffix) for log channel messages."""
     source = channel_name if task.conversation_token and channel_name else task.source_type
-    return f"*[#{task.id}]*", source
+    return f"**[#{task.id}]**", source
 
 
 def _deduplicate_descriptions(descriptions: list[str]) -> list[str]:
@@ -2044,6 +2044,18 @@ async def run_cleanup_checks(config: Config) -> None:
                     await client.send_message(task_info["conversation_token"], msg)
                 except Exception as e:
                     logger.error(f"Failed to notify user about expired confirmation: {e}")
+
+        # 1b. Recover stuck locked/running tasks (mirrors claim_task recovery
+        # but runs even when no tasks are being claimed)
+        stuck = db.fail_stuck_locked_running_tasks(
+            conn, sched.max_retry_age_minutes,
+        )
+        for task_info in stuck:
+            logger.warning(
+                "Recovered stuck task: task %d (user: %s, status: %s)",
+                task_info["id"], task_info["user_id"],
+                task_info.get("source_type", "unknown"),
+            )
 
         # 2. Log warnings for stale pending tasks
         stale_tasks = db.get_stale_pending_tasks(conn, sched.stale_pending_warn_minutes)

@@ -642,3 +642,96 @@ class TestCancelPendingConfirmations:
         with db.get_db(db_path) as conn:
             count = db.cancel_pending_confirmations(conn, "room1", "alice")
             assert count == 0
+
+
+class TestFailStuckLockedRunningTasks:
+    def test_fails_old_locked_task(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hello", user_id="alice",
+                conversation_token="room1", queue="foreground",
+            )
+            # Simulate a task locked 60+ minutes ago, created 90+ minutes ago
+            conn.execute(
+                """UPDATE tasks SET status = 'locked',
+                   locked_at = datetime('now', '-45 minutes'),
+                   created_at = datetime('now', '-90 minutes')
+                WHERE id = ?""",
+                (task_id,),
+            )
+            conn.commit()
+
+            failed = db.fail_stuck_locked_running_tasks(conn)
+            assert len(failed) == 1
+            assert failed[0]["id"] == task_id
+            assert db.get_task(conn, task_id).status == "failed"
+
+    def test_releases_recent_locked_task_for_retry(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hello", user_id="alice",
+                conversation_token="room1", queue="foreground",
+            )
+            # Locked 45 min ago but created recently (within max_retry_age)
+            conn.execute(
+                """UPDATE tasks SET status = 'locked',
+                   locked_at = datetime('now', '-45 minutes'),
+                   created_at = datetime('now', '-30 minutes')
+                WHERE id = ?""",
+                (task_id,),
+            )
+            conn.commit()
+
+            failed = db.fail_stuck_locked_running_tasks(conn)
+            assert len(failed) == 0  # released, not failed
+            assert db.get_task(conn, task_id).status == "pending"
+
+    def test_fails_old_running_task(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hello", user_id="alice",
+                conversation_token="room1", queue="foreground",
+            )
+            conn.execute(
+                """UPDATE tasks SET status = 'running',
+                   started_at = datetime('now', '-20 minutes'),
+                   created_at = datetime('now', '-90 minutes')
+                WHERE id = ?""",
+                (task_id,),
+            )
+            conn.commit()
+
+            failed = db.fail_stuck_locked_running_tasks(conn)
+            assert len(failed) == 1
+            task = db.get_task(conn, task_id)
+            assert task.status == "failed"
+
+    def test_no_stuck_tasks_returns_empty(self, db_path):
+        with db.get_db(db_path) as conn:
+            # Create a normal pending task
+            db.create_task(
+                conn, prompt="hello", user_id="alice",
+                conversation_token="room1", queue="foreground",
+            )
+            failed = db.fail_stuck_locked_running_tasks(conn)
+            assert failed == []
+
+    def test_unblocks_channel_gate(self, db_path):
+        """After recovering a stuck task, the channel gate should be clear."""
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hello", user_id="alice",
+                conversation_token="room1", queue="foreground",
+            )
+            conn.execute(
+                """UPDATE tasks SET status = 'running',
+                   started_at = datetime('now', '-20 minutes'),
+                   created_at = datetime('now', '-90 minutes')
+                WHERE id = ?""",
+                (task_id,),
+            )
+            conn.commit()
+
+            assert db.has_active_foreground_task_for_channel(conn, "room1") is True
+            db.fail_stuck_locked_running_tasks(conn)
+            assert db.has_active_foreground_task_for_channel(conn, "room1") is False
