@@ -249,7 +249,7 @@ class TestStreamingExecution:
             json.dumps({"type": "system", "subtype": "init", "cwd": "/tmp"}) + "\n",
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [{"type": "text", "text": "The answer is 42."}]},
+                "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "The answer is 42."}]},
             }) + "\n",
             json.dumps({
                 "type": "result", "subtype": "success", "result": "The answer is 42.",
@@ -307,7 +307,7 @@ class TestStreamingExecution:
             json.dumps({"type": "system", "subtype": "init", "cwd": "/tmp"}) + "\n",
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [
+                "message": {"stop_reason": "tool_use", "content": [
                     {"type": "tool_use", "id": "t1", "name": "Read",
                      "input": {"file_path": "/tmp/data.txt"}},
                 ]},
@@ -315,7 +315,7 @@ class TestStreamingExecution:
             json.dumps({"type": "user", "message": {"role": "user"}}) + "\n",
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [
+                "message": {"stop_reason": "tool_use", "content": [
                     {"type": "tool_use", "id": "t2", "name": "Bash",
                      "input": {"command": "wc -l /tmp/data.txt", "description": "Count lines"}},
                 ]},
@@ -323,7 +323,7 @@ class TestStreamingExecution:
             json.dumps({"type": "user", "message": {"role": "user"}}) + "\n",
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [{"type": "text", "text": "Done."}]},
+                "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Done."}]},
             }) + "\n",
             json.dumps({
                 "type": "result", "subtype": "success", "result": "File has 42 lines.",
@@ -359,7 +359,7 @@ class TestStreamingExecution:
             json.dumps({"type": "system", "subtype": "init", "cwd": "/tmp"}) + "\n",
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [{"type": "text", "text": "Checking things..."}]},
+                "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Checking things..."}]},
             }) + "\n",
             json.dumps({
                 "type": "result", "subtype": "success", "result": "Done.",
@@ -390,7 +390,7 @@ class TestStreamingExecution:
         stream_lines = [
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [
+                "message": {"stop_reason": "tool_use", "content": [
                     {"type": "tool_use", "id": "t1", "name": "Read",
                      "input": {"file_path": "/tmp/x.txt"}},
                 ]},
@@ -538,14 +538,14 @@ class TestStreamingExecution:
             # First assistant turn: diagnostic text
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [
+                "message": {"stop_reason": "end_turn", "content": [
                     {"type": "text", "text": "I found the root cause: the config is misconfigured."},
                 ]},
             }) + "\n",
             # Tool call
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [
+                "message": {"stop_reason": "tool_use", "content": [
                     {"type": "tool_use", "id": "t1", "name": "Read",
                      "input": {"file_path": "/tmp/config.toml"}},
                 ]},
@@ -554,7 +554,7 @@ class TestStreamingExecution:
             # Final turn: self-contained summary (this is what ResultEvent contains)
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [{"type": "text", "text": "Fixed it."}]},
+                "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Fixed it."}]},
             }) + "\n",
             json.dumps({
                 "type": "result", "subtype": "success", "result": "Fixed it.",

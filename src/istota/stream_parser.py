@@ -111,6 +111,15 @@ def parse_stream_line(line: str) -> StreamEvent | None:
 
     if event_type == "assistant":
         message = data.get("message", {})
+
+        # Skip context-management replay events (ISSUE-024)
+        if message.get("context_management") is not None:
+            return None
+
+        # Skip partial streaming events — wait for completed message
+        if message.get("stop_reason") is None:
+            return None
+
         content_blocks = message.get("content", [])
 
         tool_events = []
