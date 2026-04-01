@@ -60,20 +60,20 @@ class TestUserConfigLogChannelParsing:
 class TestLogChannelSourceLabel:
     def test_with_channel_name(self, make_task):
         task = make_task(id=42, conversation_token="abc123")
-        assert _log_channel_source_label(task, "Dev Room") == "[42 Dev Room]"
+        assert _log_channel_source_label(task, "Dev Room") == "`#42 Dev Room`"
 
     def test_without_channel_name(self, make_task):
         task = make_task(id=99, source_type="email")
-        assert _log_channel_source_label(task, None) == "[99 email]"
+        assert _log_channel_source_label(task, None) == "`#99 email`"
 
     def test_cli_source(self, make_task):
         task = make_task(id=7, source_type="cli")
-        assert _log_channel_source_label(task, None) == "[7 cli]"
+        assert _log_channel_source_label(task, None) == "`#7 cli`"
 
     def test_with_token_but_no_name(self, make_task):
         task = make_task(id=5, conversation_token="tok", source_type="talk")
         # When channel_name is None, falls back to source_type
-        assert _log_channel_source_label(task, None) == "[5 talk]"
+        assert _log_channel_source_label(task, None) == "`#5 talk`"
 
 
 # ---------------------------------------------------------------------------
@@ -83,34 +83,40 @@ class TestLogChannelSourceLabel:
 class TestFormatLogChannelBody:
     def test_running_with_descriptions(self):
         body = _format_log_channel_body(
-            "[42 #Dev]", ["📄 Reading file.txt", "⚙️ Running ls"],
+            "`#42 Dev`", ["📄 Reading file.txt", "⚙️ Running ls"],
         )
-        assert "⏳" in body
-        assert "running…" in body
+        assert "⏳ Running (2 actions)" in body
         assert "📄 Reading file.txt" in body
         assert "⚙️ Running ls" in body
 
     def test_done_success(self):
         body = _format_log_channel_body(
-            "[42 #Dev]", ["📄 Reading file.txt"],
+            "`#42 Dev`", ["📄 Reading file.txt"],
             done=True, success=True,
         )
-        assert "✓" in body
-        assert "done" in body
+        assert "✅ Done (1 action)" in body
 
     def test_done_failure(self):
         body = _format_log_channel_body(
-            "[42 #Dev]", ["📄 Reading file.txt"],
+            "`#42 Dev`", ["📄 Reading file.txt"],
             done=True, success=False, error="API Error: 500",
         )
-        assert "✗" in body
-        assert "failed" in body
+        assert "❌ Failed (1 action)" in body
         assert "API Error: 500" in body
 
     def test_empty_descriptions(self):
-        body = _format_log_channel_body("[42 cli]", [], done=True, success=True)
-        assert "✓" in body
-        assert "done" in body
+        body = _format_log_channel_body("`#42 cli`", [], done=True, success=True)
+        assert "✅ Done (no tool calls)" in body
+
+    def test_deduplicates_consecutive_descriptions(self):
+        body = _format_log_channel_body(
+            "`#42 Dev`",
+            ["📄 Reading _ISSUES.md", "📄 Reading _ISSUES.md", "✏️ Editing _ISSUES.md"],
+            done=True, success=True,
+        )
+        assert "📄 Reading _ISSUES.md ×2" in body
+        assert "✏️ Editing _ISSUES.md" in body
+        assert body.count("📄 Reading _ISSUES.md") == 1
 
 
 # ---------------------------------------------------------------------------
