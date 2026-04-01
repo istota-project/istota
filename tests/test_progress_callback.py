@@ -469,7 +469,7 @@ class TestReplaceModeCallback:
             callback("📄 Reading config.py")
 
         # Verify the format by checking the asyncio.run call
-        # The body should be: "⏳ `📄 Reading config.py` (Ns)"
+        # The body should be: "`📄 Reading config.py (Ns)`"
         assert callback.all_descriptions == ["📄 Reading config.py"]
         assert callback.style == "replace"
 

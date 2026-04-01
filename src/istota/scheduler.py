@@ -299,7 +299,7 @@ def _make_talk_progress_callback(
     Behaviour depends on ``progress_style``:
 
     - **"replace"** (default): Edit the ack message to show only the latest
-      tool call with elapsed time, e.g. ``⏳ Reading config.py… (4s)``.
+      tool call with elapsed time, e.g. ``Reading config.py… (4s)``
       No rate limiting — every tool call triggers an edit.
     - **"full"**: Edit the ack message with accumulated tool descriptions
       (append list). Rate-limited by ``progress_min_interval``.
@@ -372,7 +372,7 @@ def _make_talk_progress_callback(
         if style == "replace":
             all_descriptions.append(msg)
             elapsed = int(time.time() - start_time)
-            body = f"⏳ `{msg}` ({elapsed}s)"
+            body = f"`{msg} ({elapsed}s)`"
             try:
                 ok = asyncio.run(edit_talk_message(config, task, ack_msg_id, body))
                 if ok:
@@ -1053,7 +1053,7 @@ def process_one_task(
         ack_msg_id = None
         is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
         if task.source_type == "talk" and task.conversation_token and not dry_run:
-            ack_text = f"*Retrying…* `#{task.id}`" if is_rerun else f"{random.choice(PROGRESS_MESSAGES)} `#{task.id}`"
+            ack_text = f"`#{task.id}` *Retrying…*" if is_rerun else f"`#{task.id}` {random.choice(PROGRESS_MESSAGES)}"
             ack_msg_id = asyncio.run(post_result_to_talk(
                 config, task, ack_text,
                 reference_id=f"istota:task:{task.id}:ack",
@@ -1321,10 +1321,14 @@ def process_one_task(
         if cb_style == "replace":
             total = len(progress_callback.all_descriptions)
             elapsed = int(time.time() - progress_callback.start_time)
-            if total == 0:
-                body = f"Done ({elapsed}s) `#{task.id}`"
+            if success:
+                status = "✅ Done"
             else:
-                body = f"Done — {total} action{'s' if total != 1 else ''} ({elapsed}s) `#{task.id}`"
+                status = "❌ Failed"
+            if total == 0:
+                body = f"`#{task.id}` {status} ({elapsed}s)"
+            else:
+                body = f"`#{task.id}` {status} — {total} action{'s' if total != 1 else ''} ({elapsed}s)"
         else:
             body = _format_progress_body(
                 progress_callback.all_descriptions,

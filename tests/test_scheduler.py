@@ -3889,17 +3889,17 @@ class TestTaskIdInProgress:
         import random
 
         # Verify the ack format includes task ID
-        ack_normal = f"{random.choice(PROGRESS_MESSAGES)} `#{task_id}`"
+        ack_normal = f"`#{task_id}` {random.choice(PROGRESS_MESSAGES)}"
         assert f"`#{task_id}`" in ack_normal
 
-        ack_retry = f"*Retrying…* `#{task_id}`"
+        ack_retry = f"`#{task_id}` *Retrying…*"
         assert f"`#{task_id}`" in ack_retry
 
         # Verify the done format includes task ID
         elapsed = 52
         total = 8
-        done_body = f"Done — {total} action{'s' if total != 1 else ''} ({elapsed}s) `#{task_id}`"
+        done_body = f"`#{task_id}` ✅ Done — {total} action{'s' if total != 1 else ''} ({elapsed}s)"
         assert f"`#{task_id}`" in done_body
 
-        done_no_actions = f"Done ({elapsed}s) `#{task_id}`"
+        done_no_actions = f"`#{task_id}` ✅ Done ({elapsed}s)"
         assert f"`#{task_id}`" in done_no_actions
