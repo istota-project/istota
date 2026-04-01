@@ -468,10 +468,28 @@ async def _resolve_channel_name(config: Config, conversation_token: str) -> str:
 
 
 def _log_channel_source_label(task: db.Task, channel_name: str | None) -> str:
-    """Build the [task_id source] prefix for log channel messages."""
+    """Build the `#task_id source` prefix for log channel messages."""
     if task.conversation_token and channel_name:
-        return f"[{task.id} {channel_name}]"
-    return f"[{task.id} {task.source_type}]"
+        return f"`#{task.id} {channel_name}`"
+    return f"`#{task.id} {task.source_type}`"
+
+
+def _deduplicate_descriptions(descriptions: list[str]) -> list[str]:
+    """Collapse consecutive identical descriptions with a count suffix."""
+    if not descriptions:
+        return []
+    result = []
+    prev = descriptions[0]
+    count = 1
+    for desc in descriptions[1:]:
+        if desc == prev:
+            count += 1
+        else:
+            result.append(f"{prev} ×{count}" if count > 1 else prev)
+            prev = desc
+            count = 1
+    result.append(f"{prev} ×{count}" if count > 1 else prev)
+    return result
 
 
 def _format_log_channel_body(
@@ -479,12 +497,20 @@ def _format_log_channel_body(
     success: bool = True, error: str | None = None,
 ) -> str:
     """Format a log channel message with accumulated tool descriptions."""
-    lines = [f"{prefix} {'✓' if done and success else '⏳' if not done else '✗'} "
-             f"{'done' if done and success else 'running…' if not done else 'failed'}"]
-    for desc in descriptions:
-        lines.append(f"  `{desc}`")
+    total = len(descriptions)
+    count = f"({total} action{'s' if total != 1 else ''})" if total else "(no tool calls)"
+    if done:
+        if success:
+            header = f"{prefix} ✅ Done {count}"
+        else:
+            header = f"{prefix} ❌ Failed {count}"
+    else:
+        header = f"{prefix} ⏳ Running {count}"
+    lines = [header]
+    for desc in _deduplicate_descriptions(descriptions):
+        lines.append(desc)
     if done and error:
-        lines.append(f"  Error: {error[:200]}")
+        lines.append(f"Error: {error[:200]}")
     return "\n".join(lines)
 
 
