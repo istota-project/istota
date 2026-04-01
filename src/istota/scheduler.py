@@ -600,7 +600,7 @@ def _finalize_log_channel(
                 task_prefix, source = prefix
             else:
                 task_prefix, source = prefix, ""
-            status = "✓ done" if success else "✗ failed"
+            status = "✅ Done" if success else "❌ Failed"
             line = f"{task_prefix} {status} (no tool calls)"
             if source:
                 line += f" - {source}"
