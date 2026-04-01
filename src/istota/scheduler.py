@@ -282,11 +282,11 @@ def _format_progress_body(
         header = f"Working — {total} action{'s' if total != 1 else ''} so far…"
 
     if total <= max_display:
-        lines = [f"*{d}*" for d in descriptions]
+        lines = [f"`{d}`" for d in descriptions]
     else:
         skip = total - max_display
         lines = [f"[+{skip} earlier]"]
-        lines.extend(f"*{d}*" for d in descriptions[skip:])
+        lines.extend(f"`{d}`" for d in descriptions[skip:])
 
     return header + "\n" + "\n".join(lines)
 
@@ -372,7 +372,7 @@ def _make_talk_progress_callback(
         if style == "replace":
             all_descriptions.append(msg)
             elapsed = int(time.time() - start_time)
-            body = f"⏳ *{msg}…* ({elapsed}s)"
+            body = f"⏳ `{msg}` ({elapsed}s)"
             try:
                 ok = asyncio.run(edit_talk_message(config, task, ack_msg_id, body))
                 if ok:
@@ -412,19 +412,8 @@ def _make_talk_progress_callback(
                 return
             if not italicize:
                 formatted = msg
-            elif "\n" in msg:
-                formatted = "\n".join(
-                    f"*{line}*" if line.strip() else line
-                    for line in msg.split("\n")
-                )
-            elif msg and not msg[0].isascii():
-                parts = msg.split(" ", 1)
-                if len(parts) == 2:
-                    formatted = f"{parts[0]} *{parts[1]}*"
-                else:
-                    formatted = f"*{msg}*"
             else:
-                formatted = f"*{msg}*"
+                formatted = f"`{msg}`"
             try:
                 msg_id = asyncio.run(post_result_to_talk(
                     config, task, formatted,
@@ -493,7 +482,7 @@ def _format_log_channel_body(
     lines = [f"{prefix} {'✓' if done and success else '⏳' if not done else '✗'} "
              f"{'done' if done and success else 'running…' if not done else 'failed'}"]
     for desc in descriptions:
-        lines.append(f"  {desc}")
+        lines.append(f"  `{desc}`")
     if done and error:
         lines.append(f"  Error: {error[:200]}")
     return "\n".join(lines)
@@ -1887,6 +1876,77 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
     return created_tasks
 
 
+def check_briefing_triggers(db_path, config: Config) -> list[int]:
+    """Check for briefing trigger files from the NC app and create tasks.
+
+    Trigger files are written by the NC app to request an immediate briefing
+    run. Each file is ``{triggers_dir}/briefing_{user_id}_{briefing_name}.json``
+    containing ``{"user_id": "...", "briefing_name": "..."}``.
+
+    Returns list of created task IDs.
+    """
+    if config.users_dir is None:
+        return []
+
+    triggers_dir = config.users_dir.parent / "triggers"
+    if not triggers_dir.is_dir():
+        return []
+
+    created_tasks = []
+    for trigger_file in triggers_dir.glob("briefing_*.json"):
+        try:
+            trigger = json.loads(trigger_file.read_text())
+            user_id = trigger.get("user_id", "")
+            briefing_name = trigger.get("briefing_name", "")
+
+            if not user_id or not briefing_name:
+                logger.warning("Invalid trigger file %s: missing user_id or briefing_name", trigger_file)
+                trigger_file.unlink()
+                continue
+
+            user_config = config.get_user(user_id)
+            if not user_config:
+                logger.warning("Trigger for unknown user %s, skipping", user_id)
+                trigger_file.unlink()
+                continue
+
+            # Find the matching briefing
+            briefings = get_briefings_for_user(config, user_id)
+            briefing = next((b for b in briefings if b.name == briefing_name), None)
+            if not briefing:
+                logger.warning("Trigger for unknown briefing %s/%s, skipping", user_id, briefing_name)
+                trigger_file.unlink()
+                continue
+
+            user_tz_str = user_config.timezone
+
+            # Build and queue the briefing task
+            prompt = build_briefing_prompt(briefing, user_id, config, user_tz_str)
+            with db.get_db(db_path) as conn:
+                task_id = db.create_task(
+                    conn,
+                    prompt=prompt,
+                    user_id=user_id,
+                    source_type="briefing",
+                    conversation_token=briefing.conversation_token,
+                    output_target=briefing.output,
+                    priority=8,
+                    queue="background",
+                )
+            created_tasks.append(task_id)
+            logger.info("Triggered briefing %s for %s (task %d)", briefing_name, user_id, task_id)
+        except Exception as e:
+            logger.error("Error processing trigger %s: %s", trigger_file, e)
+        finally:
+            # Always delete the trigger file after processing
+            try:
+                trigger_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    return created_tasks
+
+
 def cleanup_old_temp_files(config: Config, retention_days: int) -> int:
     """
     Delete temp files older than retention_days.
@@ -2378,6 +2438,10 @@ def run_daemon(config: Config) -> None:
     # Create worker pool for per-user concurrent task processing
     pool = WorkerPool(config)
 
+    # Initialize status writer
+    from .status_writer import init_status_writer, write_status
+    init_status_writer()
+
     last_email_poll = 0.0
     last_briefing_check = 0.0
     last_tasks_file_poll = 0.0
@@ -2387,6 +2451,9 @@ def run_daemon(config: Config) -> None:
     last_sleep_cycle_check = 0.0
     last_channel_sleep_cycle_check = 0.0
     last_heartbeat_check = 0.0
+    last_config_reload = 0.0
+    last_status_write = 0.0
+    last_trigger_check = 0.0
 
     while not _shutdown_requested:
         # Dispatch worker threads first — minimizes latency for pending tasks
@@ -2407,6 +2474,16 @@ def run_daemon(config: Config) -> None:
             except Exception as e:
                 logger.error("Error checking briefings: %s", e)
             last_briefing_check = now
+
+        # Check briefing triggers from NC app (every 30s)
+        if now - last_trigger_check >= config.scheduler.tasks_file_poll_interval:
+            try:
+                triggered = check_briefing_triggers(config.db_path, config)
+                if triggered:
+                    logger.info("Processed %d briefing trigger(s)", len(triggered))
+            except Exception as e:
+                logger.error("Error checking briefing triggers: %s", e)
+            last_trigger_check = now
 
         # Check scheduled jobs periodically (same interval as briefings)
         if now - last_scheduled_job_check >= config.scheduler.briefing_check_interval:
@@ -2483,6 +2560,33 @@ def run_daemon(config: Config) -> None:
             except Exception as e:
                 logger.error("Error running cleanup checks: %s", e)
             last_cleanup_check = now
+
+        # Write status file periodically (every 60s)
+        if now - last_status_write >= 60:
+            try:
+                with db.get_db(config.db_path) as conn:
+                    fg_pending = sum(
+                        db.count_pending_tasks_for_user_queue(conn, uid, "foreground")
+                        for uid in db.get_users_with_pending_fg_queue_tasks(conn)
+                    )
+                    bg_pending = sum(
+                        db.count_pending_tasks_for_user_queue(conn, uid, "background")
+                        for uid in db.get_users_with_pending_bg_queue_tasks(conn)
+                    )
+                write_status(config, pool.active_count, fg_pending, bg_pending)
+            except Exception as e:
+                logger.error("Error writing status: %s", e)
+            last_status_write = now
+
+        # Reload user configs periodically
+        if (config.scheduler.config_reload_interval > 0
+                and now - last_config_reload >= config.scheduler.config_reload_interval):
+            try:
+                from .config import reload_user_configs
+                reload_user_configs(config)
+            except Exception as e:
+                logger.error("Error reloading user configs: %s", e)
+            last_config_reload = now
 
         # Check heartbeats periodically
         if now - last_heartbeat_check >= config.scheduler.heartbeat_check_interval:
