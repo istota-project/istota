@@ -156,7 +156,7 @@ ensure_pipx() {
     apt-get install -y -qq pipx 2>&1 | tail -3 \
         || python3 -m pip install --user pipx 2>&1 | tail -3
     # Ensure pipx is on PATH for the rest of this script
-    eval "$(pipx ensurepath --force 2>/dev/null)" || true
+    pipx ensurepath --force > /dev/null 2>&1 || true
     export PATH="$HOME/.local/bin:$PATH"
     ok "pipx installed"
 }
@@ -168,7 +168,7 @@ ensure_ansible() {
     fi
     info "Installing ansible-core via pipx"
     pipx install ansible-core 2>&1 | tail -3
-    eval "$(pipx ensurepath --force 2>/dev/null)" || true
+    pipx ensurepath --force > /dev/null 2>&1 || true
     export PATH="$HOME/.local/bin:$PATH"
     if command_exists ansible-playbook; then
         ok "Ansible installed"
@@ -253,6 +253,9 @@ run_ansible() {
     echo -e "  ${_BOLD}Vars:${_RESET}      $VARS_FILE"
     echo -e "  ${_BOLD}Mode:${_RESET}      $([ "$DRY_RUN" = true ] && echo "dry-run" || ([ "$UPDATE_ONLY" = true ] && echo "update" || echo "full install"))"
     echo
+
+    export ANSIBLE_STDOUT_CALLBACK=default
+    export ANSIBLE_CALLBACK_RESULT_FORMAT=yaml
 
     ansible-playbook "$playbook" \
         --connection local \

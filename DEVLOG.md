@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-01: Fix installer bugs found via Docker-based testing
+
+Tested install.sh in a Debian 13 amd64 Docker container (with systemd) on Mac M2. Found and fixed five bugs in the bootstrap and Ansible role.
+
+**Key changes:**
+- Fixed `pipx ensurepath` prose output being eval'd as shell commands (causing "Success!: command not found")
+- Added `unzip` to system deps (rclone installer requires it)
+- Added `cron` to system deps (backup cron needs `/etc/cron.d`)
+- Fixed Ansible yaml callback: `community.general.yaml` was removed in v12, switched to built-in `ANSIBLE_CALLBACK_RESULT_FORMAT=yaml`
+- Fixed rclone password always empty: `set_fact` can't override `--extra-vars` (highest Ansible precedence), so `settings_to_vars.py` now omits empty `istota_rclone_password_obscured` from vars file
+- Changed rclone obscure from `shell` to `command` with full path for reliability
+
+**Files modified:**
+- `deploy/install.sh` — pipx ensurepath fix, Ansible output formatting
+- `deploy/ansible/tasks/main.yml` — unzip/cron deps, rclone obscure via `command`
+- `deploy/settings_to_vars.py` — skip empty rclone_password_obscured in vars output
+
 ## 2026-04-01: Fix stream parser dropping tool calls and interrupted responses
 
 The ISSUE-024 fix for duplicate progress messages used a blanket `stop_reason is None → skip` filter, which silently dropped all tool call events (Claude Code emits tool_use exclusively with `stop_reason: null`). This also dropped text from interrupted turns when a background task notification arrived mid-response (ISSUE-025), causing complete response loss.

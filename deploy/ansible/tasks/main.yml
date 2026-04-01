@@ -94,6 +94,8 @@
       - libpango-1.0-0      # WeasyPrint PDF generation
       - libpangocairo-1.0-0
       - libgdk-pixbuf-2.0-0
+      - unzip               # rclone install script
+      - cron                # Scheduled backups
       - bubblewrap          # Per-user filesystem sandbox
       - fuse3               # FUSE mount support (fusermount3)
     state: present
@@ -108,6 +110,7 @@
     sysctl_file: "/etc/sysctl.d/99-{{ istota_namespace }}-sandbox.conf"
     reload: yes
   when: istota_security_sandbox_enabled
+  failed_when: false
 
 # Docker — inlined (replace with a dedicated role if you prefer)
 - name: Check if Docker CE apt repo is configured
@@ -280,7 +283,7 @@
   when: not istota_update_only and not istota_web_only and istota_configure_rclone
 
 - name: Auto-obscure rclone password from app password
-  shell: rclone obscure "{{ istota_nextcloud_app_password }}"
+  command: /usr/bin/rclone obscure "{{ istota_nextcloud_app_password }}"
   register: _istota_rclone_obscured
   changed_when: false
   no_log: true

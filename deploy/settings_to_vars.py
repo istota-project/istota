@@ -275,10 +275,17 @@ def convert(settings: dict) -> dict:
     """Convert a settings dict to Ansible vars dict."""
     result: dict = {}
 
+    # Keys that should only be emitted when non-empty (empty would block
+    # Ansible's auto-generation via set_fact, since extra-vars take precedence)
+    _SKIP_WHEN_EMPTY = {"istota_rclone_password_obscured"}
+
     # Direct top-level keys
     for settings_key, ansible_key in _DIRECT_KEYS.items():
         if settings_key in settings:
-            result[ansible_key] = settings[settings_key]
+            value = settings[settings_key]
+            if ansible_key in _SKIP_WHEN_EMPTY and not value:
+                continue
+            result[ansible_key] = value
 
     # Flat section keys
     for section_name, key_map in _SECTION_FLAT_KEYS.items():
