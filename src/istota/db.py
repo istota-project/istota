@@ -1244,6 +1244,96 @@ def fail_ancient_pending_tasks(conn: sqlite3.Connection, fail_hours: int) -> lis
     ]
 
 
+def fail_stuck_locked_running_tasks(
+    conn: sqlite3.Connection, max_retry_age_minutes: int = 60,
+) -> list[dict]:
+    """Fail or release tasks stuck in 'locked' or 'running' state.
+
+    This mirrors the recovery logic in claim_task() but runs independently
+    so stuck tasks are cleaned up even when no new tasks are being claimed.
+
+    Returns list of failed task info for logging.
+    """
+    failed = []
+
+    # Fail old stale locks (created too long ago to be worth retrying)
+    cursor = conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'failed', error = 'Task too old to retry (stale lock)',
+            locked_at = NULL, locked_by = NULL,
+            completed_at = datetime('now'), updated_at = datetime('now')
+        WHERE status = 'locked'
+        AND locked_at < datetime('now', '-30 minutes')
+        AND created_at < datetime('now', ? || ' minutes')
+        RETURNING id, user_id, conversation_token, source_type
+        """,
+        (f"-{max_retry_age_minutes}",),
+    )
+    for row in cursor.fetchall():
+        failed.append(dict(row))
+
+    # Release recent stale locks (younger tasks get retried)
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'pending', locked_at = NULL, locked_by = NULL
+        WHERE status = 'locked'
+        AND locked_at < datetime('now', '-30 minutes')
+        AND created_at >= datetime('now', ? || ' minutes')
+        """,
+        (f"-{max_retry_age_minutes}",),
+    )
+
+    # Fail old stuck 'running' tasks
+    cursor = conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'failed', error = 'Task too old to retry (stuck running)',
+            completed_at = datetime('now'), updated_at = datetime('now')
+        WHERE status = 'running'
+        AND started_at < datetime('now', '-15 minutes')
+        AND created_at < datetime('now', ? || ' minutes')
+        RETURNING id, user_id, conversation_token, source_type
+        """,
+        (f"-{max_retry_age_minutes}",),
+    )
+    for row in cursor.fetchall():
+        failed.append(dict(row))
+
+    # Release recent stuck 'running' tasks for retry
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'pending', started_at = NULL, locked_at = NULL, locked_by = NULL,
+            attempt_count = attempt_count + 1
+        WHERE status = 'running'
+        AND started_at < datetime('now', '-15 minutes')
+        AND created_at >= datetime('now', ? || ' minutes')
+        AND attempt_count < max_attempts
+        """,
+        (f"-{max_retry_age_minutes}",),
+    )
+
+    # Fail stuck 'running' tasks that have exhausted retries
+    cursor = conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'failed',
+            error = 'Task stuck in running state - worker may have crashed',
+            completed_at = datetime('now'), updated_at = datetime('now')
+        WHERE status = 'running'
+        AND started_at < datetime('now', '-15 minutes')
+        AND attempt_count >= max_attempts
+        RETURNING id, user_id, conversation_token, source_type
+        """,
+    )
+    for row in cursor.fetchall():
+        failed.append(dict(row))
+
+    return failed
+
+
 def cleanup_old_tasks(conn: sqlite3.Connection, retention_days: int) -> int:
     """
     Delete old completed/failed/cancelled tasks and their logs.
