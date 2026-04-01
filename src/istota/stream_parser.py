@@ -85,12 +85,35 @@ def _describe_tool_use(name: str, input_data: dict) -> str:
     return f"{emoji} Using {name}"
 
 
-def parse_stream_line(line: str) -> StreamEvent | None:
+def make_stream_parser() -> "Callable[[str], StreamEvent | None]":
+    """Create a stateful stream parser that deduplicates assistant events.
+
+    Claude Code's stream-json reuses the same message ID across multiple
+    emissions within a turn (each tool call gets its own line with the same
+    message.id). Dedup therefore tracks individual content block IDs
+    (tool_use id) and text content hashes to avoid duplicates from
+    context-management replays (ISSUE-024) while preserving distinct
+    tool calls within the same message.
+    """
+    seen_block_ids: set[str] = set()
+
+    def parse(line: str) -> StreamEvent | None:
+        return parse_stream_line(line, _seen=seen_block_ids)
+
+    return parse
+
+
+def parse_stream_line(
+    line: str, *, _seen: set[str] | None = None,
+) -> StreamEvent | None:
     """
     Parse a single line of stream-json output into a StreamEvent.
 
     Returns None for lines that don't map to a user-visible event
     (system init, user tool results, etc.).
+
+    Pass ``_seen`` (a set of block/content IDs) for deduplication across
+    calls.  Use ``make_stream_parser()`` for a convenient stateful wrapper.
     """
     line = line.strip()
     if not line:
@@ -112,12 +135,9 @@ def parse_stream_line(line: str) -> StreamEvent | None:
     if event_type == "assistant":
         message = data.get("message", {})
 
-        # Skip context-management replay events (ISSUE-024)
+        # Skip context-management replay events — these re-emit the most
+        # recent assistant response with a new message ID (ISSUE-024)
         if message.get("context_management") is not None:
-            return None
-
-        # Skip partial streaming events — wait for completed message
-        if message.get("stop_reason") is None:
             return None
 
         content_blocks = message.get("content", [])
@@ -127,15 +147,31 @@ def parse_stream_line(line: str) -> StreamEvent | None:
 
         for block in content_blocks:
             block_type = block.get("type")
+
             if block_type == "tool_use":
+                # Dedup by tool_use block ID (unique per invocation)
+                block_id = block.get("id", "")
+                if _seen is not None and block_id:
+                    if block_id in _seen:
+                        continue
+                    _seen.add(block_id)
                 name = block.get("name", "")
                 input_data = block.get("input", {})
                 desc = _describe_tool_use(name, input_data)
                 tool_events.append(ToolUseEvent(tool_name=name, description=desc))
+
             elif block_type == "text":
                 text = block.get("text", "").strip()
-                if text:
-                    text_parts.append(text)
+                if not text:
+                    continue
+                # Dedup text blocks by message_id + content hash
+                if _seen is not None:
+                    msg_id = message.get("id", "")
+                    text_key = f"text:{msg_id}:{hash(text)}"
+                    if text_key in _seen:
+                        continue
+                    _seen.add(text_key)
+                text_parts.append(text)
 
         # Prefer tool events (more informative for progress)
         if tool_events:

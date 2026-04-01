@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-01: Fix stream parser dropping tool calls and interrupted responses
+
+The ISSUE-024 fix for duplicate progress messages used a blanket `stop_reason is None → skip` filter, which silently dropped all tool call events (Claude Code emits tool_use exclusively with `stop_reason: null`). This also dropped text from interrupted turns when a background task notification arrived mid-response (ISSUE-025), causing complete response loss.
+
+Replaced the `stop_reason`-based filtering with block-level deduplication: tool_use blocks are deduplicated by their unique block ID, text blocks by message ID + content hash. Context management replays are still filtered by their `context_management` field. The executor now uses a stateful `make_stream_parser()` instead of the stateless `parse_stream_line()`.
+
+**Key changes:**
+- `stream_parser.py`: Added `make_stream_parser()` stateful wrapper with block-level dedup
+- `stream_parser.py`: Removed `stop_reason is None` blanket filter, all content types pass through
+- `executor.py`: Uses `make_stream_parser()` for per-task dedup state
+- Integration test with real Claude CLI `stream-json` output confirming tool calls are captured
+
+**Files modified:**
+- `src/istota/stream_parser.py` — Block-level dedup replacing message-level filtering
+- `src/istota/executor.py` — Import and use `make_stream_parser()`
+- `tests/test_stream_parser.py` — 46 tests (was 28): dedup tests, real CLI output integration test
+
 ## 2026-04-01: Add !search command for conversation history
 
 Added a synchronous `!search` command that searches Talk conversation history across three data sources: the semantic memory index (BM25 + vector), the Nextcloud Talk unified search API, and exported conversation files. Results are scoped to the current room by default, with `--all` and `--room <token>` flags for broader searches.

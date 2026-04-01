@@ -33,7 +33,7 @@ from .storage import (
     read_dated_memories,
     read_user_memory_v2,
 )
-from .stream_parser import ResultEvent, TextEvent, ToolUseEvent, parse_stream_line
+from .stream_parser import ResultEvent, TextEvent, ToolUseEvent, make_stream_parser
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 
 logger = logging.getLogger("istota.executor")
@@ -2403,11 +2403,12 @@ def _execute_streaming_once(
     final_result = None
     raw_stdout_lines = []
     cancelled = False
+    parse_line = make_stream_parser()
 
     try:
         for line in process.stdout:
             raw_stdout_lines.append(line)
-            event = parse_stream_line(line)
+            event = parse_line(line)
             if event is None:
                 continue
 
