@@ -1,5 +1,6 @@
 """Configuration loading for istota."""
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -133,6 +134,7 @@ class SchedulerConfig:
     scheduled_job_max_consecutive_failures: int = 5  # auto-disable after N failures (0 = never)
     talk_cache_max_per_conversation: int = 200  # max cached talk messages per conversation
     location_ping_retention_days: int = 365  # delete location pings older than this (0 = unlimited)
+    config_reload_interval: int = 300  # seconds between user config file re-reads (0 = disabled)
 
 
 @dataclass
@@ -495,12 +497,59 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     )
 
 
-def load_user_configs(users_dir: Path) -> dict[str, UserConfig]:
+# Resource types that contain credentials and must only come from TOML (Ansible-managed).
+_CREDENTIAL_RESOURCE_TYPES = frozenset({"karakeep", "miniflux", "monarch", "moneyman"})
+
+
+def _merge_user_configs(
+    base: UserConfig, override_data: dict, user_id: str
+) -> UserConfig:
+    """Merge a .user.json override dict onto a TOML-loaded UserConfig.
+
+    Merge rules:
+    - Scalar fields present in override_data replace the base value.
+    - ``briefings``: JSON list replaces TOML list entirely.
+    - ``resources``: credential resources from TOML are preserved; JSON
+      non-credential resources replace TOML non-credential resources.
+    - Credential resource types in JSON are silently dropped.
     """
-    Load per-user config files from a directory.
+    override = _parse_user_data(override_data, user_id)
+
+    # Start from base, selectively apply overrides for fields present in JSON.
+    merged = UserConfig(
+        display_name=override.display_name if "display_name" in override_data else base.display_name,
+        email_addresses=override.email_addresses if "email_addresses" in override_data else base.email_addresses,
+        timezone=override.timezone if "timezone" in override_data else base.timezone,
+        ntfy_topic=override.ntfy_topic if "ntfy_topic" in override_data else base.ntfy_topic,
+        log_channel=override.log_channel if "log_channel" in override_data else base.log_channel,
+        site_enabled=override.site_enabled if "site_enabled" in override_data else base.site_enabled,
+        max_foreground_workers=override.max_foreground_workers if "max_foreground_workers" in override_data else base.max_foreground_workers,
+        max_background_workers=override.max_background_workers if "max_background_workers" in override_data else base.max_background_workers,
+        disabled_skills=override.disabled_skills if "disabled_skills" in override_data else base.disabled_skills,
+        # Briefings: JSON replaces entirely, else keep TOML.
+        briefings=override.briefings if "briefings" in override_data else base.briefings,
+        # Resources: credential resources from TOML + non-credential from JSON (if provided).
+        resources=base.resources,  # placeholder, merged below
+    )
+
+    if "resources" in override_data:
+        # Keep credential resources from TOML, replace non-credential with JSON.
+        toml_credential = [r for r in base.resources if r.type in _CREDENTIAL_RESOURCE_TYPES]
+        json_non_credential = [r for r in override.resources if r.type not in _CREDENTIAL_RESOURCE_TYPES]
+        merged.resources = toml_credential + json_non_credential
+    # else: keep all base resources as-is (including non-credential ones from TOML).
+
+    return merged
+
+
+def load_user_configs(users_dir: Path) -> dict[str, UserConfig]:
+    """Load per-user config files from a directory.
 
     Each .toml file in the directory represents one user.
     Filename (without .toml) = user_id.
+
+    If a companion .user.json file exists, its values override the TOML
+    config according to the merge rules in ``_merge_user_configs``.
     """
     users = {}
     if not users_dir.is_dir():
@@ -514,12 +563,50 @@ def load_user_configs(users_dir: Path) -> dict[str, UserConfig]:
         try:
             with open(toml_file, "rb") as f:
                 user_data = tomli.load(f)
-            users[user_id] = _parse_user_data(user_data, user_id)
+            user_config = _parse_user_data(user_data, user_id)
+
+            # Check for companion .user.json override
+            json_file = users_dir / f"{user_id}.user.json"
+            if json_file.exists():
+                try:
+                    json_data = json.loads(json_file.read_text())
+                    user_config = _merge_user_configs(user_config, json_data, user_id)
+                    logger.debug("Applied .user.json override for %s", user_id)
+                except Exception as e:
+                    logger.error("Error loading user JSON override %s: %s", json_file, e)
+
+            users[user_id] = user_config
             logger.debug("Loaded per-user config for %s from %s", user_id, toml_file)
         except Exception as e:
             logger.error("Error loading user config %s: %s", toml_file, e)
 
     return users
+
+
+def reload_user_configs(config: "Config") -> bool:
+    """Re-read per-user config files and update config.users in place.
+
+    Only reloads file-based user configs (from users_dir). Users defined
+    in the main config's ``[users]`` section are not affected.
+
+    Returns True if any user configs changed.
+    """
+    if config.users_dir is None or not config.users_dir.is_dir():
+        return False
+
+    new_users = load_user_configs(config.users_dir)
+
+    # Check if anything actually changed
+    changed = False
+    for user_id, new_uc in new_users.items():
+        if user_id not in config.users or config.users[user_id] != new_uc:
+            config.users[user_id] = new_uc
+            changed = True
+
+    if changed:
+        logger.info("Reloaded user configs (%d users from files)", len(new_users))
+
+    return changed
 
 
 def load_config(config_path: Path | None = None) -> Config:

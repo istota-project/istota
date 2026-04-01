@@ -21,6 +21,7 @@ from istota.config import (
     load_admin_users,
     load_config,
     load_user_configs,
+    reload_user_configs,
 )
 
 
@@ -891,6 +892,242 @@ display_name = "Bob"
 """)
         cfg = load_config(config_file)
         assert cfg.users["bob"].site_enabled is False
+
+
+class TestUserJsonOverride:
+    """Tests for .user.json files that override .toml config."""
+
+    def test_json_overrides_scalar_fields(self, tmp_path):
+        """JSON scalar fields override TOML equivalents."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text(
+            'display_name = "Alice"\n'
+            'timezone = "UTC"\n'
+        )
+        import json
+        (users_dir / "alice.user.json").write_text(json.dumps({
+            "display_name": "Alice Updated",
+            "timezone": "America/New_York",
+        }))
+        result = load_user_configs(users_dir)
+        assert result["alice"].display_name == "Alice Updated"
+        assert result["alice"].timezone == "America/New_York"
+
+    def test_json_replaces_briefings(self, tmp_path):
+        """JSON briefings list completely replaces TOML briefings."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text("""
+display_name = "Alice"
+[[briefings]]
+name = "morning"
+cron = "0 6 * * *"
+""")
+        import json
+        (users_dir / "alice.user.json").write_text(json.dumps({
+            "briefings": [
+                {"name": "evening", "cron": "0 18 * * *", "output": "email"},
+            ],
+        }))
+        result = load_user_configs(users_dir)
+        assert len(result["alice"].briefings) == 1
+        assert result["alice"].briefings[0].name == "evening"
+        assert result["alice"].briefings[0].output == "email"
+
+    def test_json_appends_non_credential_resources(self, tmp_path):
+        """JSON resources are appended to TOML credential resources."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text("""
+display_name = "Alice"
+[[resources]]
+type = "karakeep"
+name = "Bookmarks"
+base_url = "https://keep.example.com"
+api_key = "secret-key"
+""")
+        import json
+        (users_dir / "alice.user.json").write_text(json.dumps({
+            "resources": [
+                {"type": "folder", "path": "/alice/Projects", "name": "Projects"},
+            ],
+        }))
+        result = load_user_configs(users_dir)
+        types = [r.type for r in result["alice"].resources]
+        assert "karakeep" in types
+        assert "folder" in types
+        assert len(result["alice"].resources) == 2
+
+    def test_json_credential_resources_ignored(self, tmp_path):
+        """Credential resource types in JSON are ignored."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
+        import json
+        (users_dir / "alice.user.json").write_text(json.dumps({
+            "resources": [
+                {"type": "karakeep", "name": "Hacked", "api_key": "evil"},
+                {"type": "monarch", "name": "Bad"},
+                {"type": "miniflux", "name": "Bad", "api_key": "evil"},
+                {"type": "moneyman", "name": "Bad", "api_key": "evil"},
+                {"type": "folder", "path": "/ok", "name": "Legit"},
+            ],
+        }))
+        result = load_user_configs(users_dir)
+        types = [r.type for r in result["alice"].resources]
+        assert types == ["folder"]
+
+    def test_json_without_toml_ignored(self, tmp_path):
+        """A .user.json without a matching .toml is ignored."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        import json
+        (users_dir / "ghost.user.json").write_text(json.dumps({
+            "display_name": "Ghost",
+        }))
+        result = load_user_configs(users_dir)
+        assert "ghost" not in result
+
+    def test_json_partial_override(self, tmp_path):
+        """JSON only overrides fields present in the JSON; others keep TOML values."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text(
+            'display_name = "Alice"\n'
+            'timezone = "UTC"\n'
+            'ntfy_topic = "alice-topic"\n'
+        )
+        import json
+        (users_dir / "alice.user.json").write_text(json.dumps({
+            "timezone": "Europe/Berlin",
+        }))
+        result = load_user_configs(users_dir)
+        assert result["alice"].display_name == "Alice"  # from TOML
+        assert result["alice"].timezone == "Europe/Berlin"  # from JSON
+        assert result["alice"].ntfy_topic == "alice-topic"  # from TOML
+
+    def test_json_disabled_skills_override(self, tmp_path):
+        """JSON disabled_skills replaces TOML disabled_skills."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text(
+            'display_name = "Alice"\n'
+            'disabled_skills = ["browse", "whisper"]\n'
+        )
+        import json
+        (users_dir / "alice.user.json").write_text(json.dumps({
+            "disabled_skills": ["markets"],
+        }))
+        result = load_user_configs(users_dir)
+        assert result["alice"].disabled_skills == ["markets"]
+
+    def test_malformed_json_logged_and_skipped(self, tmp_path):
+        """Malformed .user.json is logged and TOML config used as-is."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
+        (users_dir / "alice.user.json").write_text("{bad json")
+        result = load_user_configs(users_dir)
+        assert result["alice"].display_name == "Alice"
+
+    def test_toml_credential_resources_preserved_when_json_has_briefings(self, tmp_path):
+        """TOML credential resources are preserved even when JSON provides briefings."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text("""
+display_name = "Alice"
+
+[monarch]
+session_token = "secret-token"
+
+[[resources]]
+type = "miniflux"
+name = "Feeds"
+base_url = "https://feeds.example.com"
+api_key = "feed-key"
+
+[[briefings]]
+name = "old-briefing"
+cron = "0 6 * * *"
+""")
+        import json
+        (users_dir / "alice.user.json").write_text(json.dumps({
+            "briefings": [
+                {"name": "new-briefing", "cron": "0 7 * * *"},
+            ],
+        }))
+        result = load_user_configs(users_dir)
+        # Briefings from JSON
+        assert len(result["alice"].briefings) == 1
+        assert result["alice"].briefings[0].name == "new-briefing"
+        # Credential resources from TOML still present
+        types = [r.type for r in result["alice"].resources]
+        assert "monarch" in types
+        assert "miniflux" in types
+
+
+class TestReloadUserConfigs:
+    def test_reload_detects_changed_file(self, tmp_path):
+        """Reload returns True when a user config file changes."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
+        cfg = Config(users_dir=users_dir)
+        cfg.users = load_user_configs(users_dir)
+        assert cfg.users["alice"].display_name == "Alice"
+
+        # Modify the file
+        (users_dir / "alice.toml").write_text('display_name = "Alice Updated"\n')
+        changed = reload_user_configs(cfg)
+        assert changed is True
+        assert cfg.users["alice"].display_name == "Alice Updated"
+
+    def test_reload_returns_false_when_unchanged(self, tmp_path):
+        """Reload returns False when nothing changed."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
+        cfg = Config(users_dir=users_dir)
+        cfg.users = load_user_configs(users_dir)
+
+        changed = reload_user_configs(cfg)
+        assert changed is False
+
+    def test_reload_picks_up_new_json_override(self, tmp_path):
+        """Reload detects a new .user.json file appearing."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text('display_name = "Alice"\ntimezone = "UTC"\n')
+        cfg = Config(users_dir=users_dir)
+        cfg.users = load_user_configs(users_dir)
+        assert cfg.users["alice"].timezone == "UTC"
+
+        # Add a JSON override
+        import json
+        (users_dir / "alice.user.json").write_text(json.dumps({"timezone": "Europe/Berlin"}))
+        changed = reload_user_configs(cfg)
+        assert changed is True
+        assert cfg.users["alice"].timezone == "Europe/Berlin"
+
+    def test_reload_no_users_dir(self):
+        """Reload returns False when users_dir is None."""
+        cfg = Config()
+        assert reload_user_configs(cfg) is False
+
+    def test_reload_preserves_main_config_users(self, tmp_path):
+        """Users from [users] section in main config are not removed by reload."""
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
+        cfg = Config(users_dir=users_dir)
+        # Simulate a user from main config [users] section
+        cfg.users["bob"] = UserConfig(display_name="Bob")
+        cfg.users.update(load_user_configs(users_dir))
+
+        changed = reload_user_configs(cfg)
+        assert changed is False
+        assert "bob" in cfg.users  # bob preserved
 
 
 class TestLoadAdminUsers:
