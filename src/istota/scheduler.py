@@ -467,11 +467,10 @@ async def _resolve_channel_name(config: Config, conversation_token: str) -> str:
         return conversation_token
 
 
-def _log_channel_source_label(task: db.Task, channel_name: str | None) -> str:
-    """Build the `#task_id source` prefix for log channel messages."""
-    if task.conversation_token and channel_name:
-        return f"`#{task.id} {channel_name}`"
-    return f"`#{task.id} {task.source_type}`"
+def _log_channel_source_label(task: db.Task, channel_name: str | None) -> tuple[str, str]:
+    """Return (task_id_prefix, source_suffix) for log channel messages."""
+    source = channel_name if task.conversation_token and channel_name else task.source_type
+    return f"*[#{task.id}]*", source
 
 
 def _deduplicate_descriptions(descriptions: list[str]) -> list[str]:
@@ -493,19 +492,21 @@ def _deduplicate_descriptions(descriptions: list[str]) -> list[str]:
 
 
 def _format_log_channel_body(
-    prefix: str, descriptions: list[str], *, done: bool = False,
+    prefix: str | tuple[str, str], descriptions: list[str], *, done: bool = False,
     success: bool = True, error: str | None = None,
 ) -> str:
     """Format a log channel message with accumulated tool descriptions."""
+    if isinstance(prefix, tuple):
+        task_prefix, source = prefix
+    else:
+        task_prefix, source = prefix, ""
     total = len(descriptions)
     count = f"({total} action{'s' if total != 1 else ''})" if total else "(no tool calls)"
     if done:
-        if success:
-            header = f"{prefix} ✅ Done {count}"
-        else:
-            header = f"{prefix} ❌ Failed {count}"
+        status = "✅ Done" if success else "❌ Failed"
     else:
-        header = f"{prefix} ⏳ Running {count}"
+        status = "⏳ Running"
+    header = f"{task_prefix} {status} {count} - {source}" if source else f"{task_prefix} {status} {count}"
     lines = [header]
     for desc in _deduplicate_descriptions(descriptions):
         lines.append(desc)
