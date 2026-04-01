@@ -201,24 +201,21 @@ class TestFormatProgressBody:
     def test_basic_format(self):
         body = _format_progress_body(["📄 Reading file.txt", "⚙️ Running script"], 20)
         assert "Working — 2 actions so far…" in body
-        # Header should NOT be italic
-        assert "*Working" not in body
-        # Descriptions should be italic
-        assert "*📄 Reading file.txt*" in body
-        assert "*⚙️ Running script*" in body
+        # Descriptions should be in backticks (code), not italic
+        assert "`📄 Reading file.txt`" in body
+        assert "`⚙️ Running script`" in body
 
     def test_done_format(self):
         body = _format_progress_body(["📄 Reading file.txt"], 20, done=True)
         assert "Done — 1 action taken" in body
-        assert "*Done" not in body  # header not italic
-        assert "*📄 Reading file.txt*" in body
+        assert "`📄 Reading file.txt`" in body
 
     def test_truncation_with_earlier_prefix(self):
         items = [f"⚙️ Action {i}" for i in range(25)]
         body = _format_progress_body(items, 20)
         assert "[+5 earlier]" in body
-        assert "*⚙️ Action 5*" in body
-        assert "*⚙️ Action 24*" in body
+        assert "`⚙️ Action 5`" in body
+        assert "`⚙️ Action 24`" in body
         # Items 0-4 should NOT appear
         assert "Action 0" not in body
         assert "Action 4" not in body
@@ -472,7 +469,7 @@ class TestReplaceModeCallback:
             callback("📄 Reading config.py")
 
         # Verify the format by checking the asyncio.run call
-        # The body should be: "⏳ *📄 Reading config.py…* (Ns)"
+        # The body should be: "⏳ `📄 Reading config.py` (Ns)"
         assert callback.all_descriptions == ["📄 Reading config.py"]
         assert callback.style == "replace"
 
