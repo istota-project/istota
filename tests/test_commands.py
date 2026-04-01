@@ -9,8 +9,8 @@ from istota import db
 from istota.commands import (
     _build_export_metadata, _filter_user_messages, _format_messages_markdown,
     _format_messages_text, _parse_export_metadata,
-    cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_more, cmd_skills,
-    cmd_status, cmd_stop,
+    cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_more, cmd_search,
+    cmd_skills, cmd_status, cmd_stop,
     dispatch, parse_command,
 )
 from istota.config import Config, NextcloudConfig, SchedulerConfig, SecurityConfig, TalkConfig, UserConfig
@@ -1404,3 +1404,375 @@ class TestCmdMore:
             result = await cmd_more(config, conn, "alice", "room1", str(task_id), client)
 
         assert "still running" in result
+
+
+# =============================================================================
+# TestCmdSearch
+# =============================================================================
+
+
+class TestCmdSearch:
+    """Test !search command for conversation history search."""
+
+    @pytest.mark.asyncio
+    async def test_empty_query_returns_usage(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "", client)
+        assert "Usage" in result
+        assert "!search" in result
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_query_returns_usage(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "   ", client)
+        assert "Usage" in result
+
+    @pytest.mark.asyncio
+    async def test_search_current_room_no_results(self, make_config, db_path):
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "nonexistent query xyz", client)
+        assert "No results" in result
+
+    @pytest.mark.asyncio
+    async def test_search_current_room_filters_by_token(self, make_config, db_path):
+        """Results from other rooms should be excluded when searching current room."""
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            # Create tasks in different rooms
+            t1 = db.create_task(conn, prompt="parser bug discussion", user_id="alice",
+                                conversation_token="room1", source_type="talk")
+            db.update_task_status(conn, t1, "completed", result="Fixed the parser bug")
+            t2 = db.create_task(conn, prompt="parser bug in other room", user_id="alice",
+                                conversation_token="room2", source_type="talk")
+            db.update_task_status(conn, t2, "completed", result="Also about parser")
+
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+        ):
+            # Memory search returns results from both rooms
+            mock_mem.return_value = [
+                {"date": "Apr 1", "room": "room1", "summary": "Parser bug in room1",
+                 "task_id": t1, "conversation_token": "room1"},
+                {"date": "Mar 28", "room": "room2", "summary": "Parser bug in room2",
+                 "task_id": t2, "conversation_token": "room2"},
+            ]
+            mock_talk.return_value = []
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "parser bug", client)
+
+        # Only room1 result should appear
+        assert "room1" in result or "Parser bug in room1" in result
+        assert "room2" not in result
+
+    @pytest.mark.asyncio
+    async def test_search_all_rooms(self, make_config, db_path):
+        """--all flag should return results from all rooms."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+        ):
+            mock_mem.return_value = [
+                {"date": "Apr 1", "room": "room1", "summary": "Bug in room1",
+                 "task_id": 100, "conversation_token": "room1"},
+                {"date": "Mar 28", "room": "room2", "summary": "Bug in room2",
+                 "task_id": 200, "conversation_token": "room2"},
+            ]
+            mock_talk.return_value = []
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "--all parser bug", client)
+
+        assert "room1" in result
+        assert "room2" in result
+
+    @pytest.mark.asyncio
+    async def test_search_specific_room(self, make_config, db_path):
+        """--room flag should filter to a specific room."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+        ):
+            mock_mem.return_value = [
+                {"date": "Apr 1", "room": "room1", "summary": "Result in room1",
+                 "task_id": 100, "conversation_token": "room1"},
+                {"date": "Mar 28", "room": "otherroom", "summary": "Result in other",
+                 "task_id": 200, "conversation_token": "otherroom"},
+            ]
+            mock_talk.return_value = []
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "--room otherroom some query", client)
+
+        assert "otherroom" in result
+        assert "room1" not in result or "room1" == "room1"  # room1 shouldn't appear as a result room
+
+    @pytest.mark.asyncio
+    async def test_output_format_includes_task_reference(self, make_config, db_path):
+        """Results should include task ID references."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+        ):
+            mock_mem.return_value = [
+                {"date": "Apr 1", "room": "room1", "summary": "Fixed parser bug",
+                 "task_id": 46945, "conversation_token": "room1"},
+            ]
+            mock_talk.return_value = []
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "--all parser bug", client)
+
+        assert "#46945" in result
+
+    @pytest.mark.asyncio
+    async def test_output_format_header(self, make_config, db_path):
+        """Output should start with result count and query."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+        ):
+            mock_mem.return_value = [
+                {"date": "Apr 1", "room": "room1", "summary": "Found it",
+                 "task_id": 100, "conversation_token": "room1"},
+            ]
+            mock_talk.return_value = []
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "--all test query", client)
+
+        assert "1 result" in result
+        assert "test query" in result
+
+    @pytest.mark.asyncio
+    async def test_talk_api_results_included(self, make_config, db_path):
+        """Talk API results should be merged when memory search has no hits."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+        ):
+            mock_mem.return_value = []
+            mock_talk.return_value = [
+                {"date": "Apr 1", "room": "room1", "summary": "Recent chat message",
+                 "talk_link": "https://nc.test/apps/spreed/call/room1#message-123",
+                 "conversation_token": "room1"},
+            ]
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "--all recent chat", client)
+
+        assert "Recent chat message" in result
+        assert "https://nc.test/apps/spreed/call/room1#message-123" in result
+
+    @pytest.mark.asyncio
+    async def test_talk_api_results_filtered_by_room(self, make_config, db_path):
+        """Talk API results should respect room scoping."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+        ):
+            mock_mem.return_value = []
+            mock_talk.return_value = [
+                {"date": "Apr 1", "room": "room1", "summary": "In room1",
+                 "talk_link": "https://nc.test/apps/spreed/call/room1#message-1",
+                 "conversation_token": "room1"},
+                {"date": "Apr 1", "room": "room2", "summary": "In room2",
+                 "talk_link": "https://nc.test/apps/spreed/call/room2#message-2",
+                 "conversation_token": "room2"},
+            ]
+            client = MagicMock()
+            # Default: current room only
+            result = await cmd_search(config, conn, "alice", "room1", "some query", client)
+
+        assert "In room1" in result
+        assert "In room2" not in result
+
+    @pytest.mark.asyncio
+    async def test_max_results_capped(self, make_config, db_path):
+        """Should cap results at 8."""
+        config = make_config()
+        many_results = [
+            {"date": f"Apr {i}", "room": "room1", "summary": f"Result {i}",
+             "task_id": i, "conversation_token": "room1"}
+            for i in range(15)
+        ]
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+        ):
+            mock_mem.return_value = many_results
+            mock_talk.return_value = []
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "--all lots of results", client)
+
+        # Count numbered results (lines starting with "N. ")
+        import re
+        numbered = re.findall(r"^\d+\.", result, re.MULTILINE)
+        assert len(numbered) <= 8
+
+    @pytest.mark.asyncio
+    async def test_deduplication_between_sources(self, make_config, db_path):
+        """Same task_id from memory and Talk should not appear twice."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+        ):
+            mock_mem.return_value = [
+                {"date": "Apr 1", "room": "room1", "summary": "From memory",
+                 "task_id": 100, "conversation_token": "room1"},
+            ]
+            # Talk result with same task_id
+            mock_talk.return_value = [
+                {"date": "Apr 1", "room": "room1", "summary": "From talk",
+                 "task_id": 100, "conversation_token": "room1"},
+            ]
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "--all test", client)
+
+        assert "1 result" in result
+
+    @pytest.mark.asyncio
+    async def test_help_registered(self, make_config):
+        """!search should appear in !help output."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            client = MagicMock()
+            result = await cmd_help(config, conn, "alice", "room1", "", client)
+        assert "!search" in result
+
+
+class TestSearchMemory:
+    """Test the _search_memory helper that wraps memory_search."""
+
+    def test_maps_search_results_to_dicts(self, make_config, db_path):
+        from istota.commands import _search_memory
+        from istota.memory_search import SearchResult
+
+        config = make_config()
+        mock_results = [
+            SearchResult(
+                chunk_id=1, content="User: How do I fix the parser?\n\nBot: Check stream_parser.py",
+                score=0.8, source_type="conversation", source_id="500",
+                metadata={"task_id": "500"},
+            ),
+        ]
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands.memory_search_mod.search", return_value=mock_results),
+        ):
+            # Create the task so we can resolve its conversation_token
+            task_id = db.create_task(conn, prompt="Fix parser", user_id="alice",
+                                     conversation_token="room1", source_type="talk")
+            # Override source_id to match
+            mock_results[0].source_id = str(task_id)
+            mock_results[0].metadata["task_id"] = str(task_id)
+
+            results = _search_memory(config, conn, "alice", "fix parser")
+
+        assert len(results) == 1
+        assert results[0]["task_id"] == task_id
+        assert results[0]["conversation_token"] == "room1"
+        assert len(results[0]["summary"]) > 0
+
+    def test_returns_empty_when_no_results(self, make_config, db_path):
+        from istota.commands import _search_memory
+
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands.memory_search_mod.search", return_value=[]),
+        ):
+            results = _search_memory(config, conn, "alice", "nothing here")
+
+        assert results == []
+
+    def test_skips_results_without_task(self, make_config, db_path):
+        """Memory results whose source_id doesn't map to a task should still work."""
+        from istota.commands import _search_memory
+        from istota.memory_search import SearchResult
+
+        config = make_config()
+        mock_results = [
+            SearchResult(
+                chunk_id=1, content="Some memory file content",
+                score=0.5, source_type="memory_file", source_id="memories/2026-03-28.md",
+                metadata={},
+            ),
+        ]
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands.memory_search_mod.search", return_value=mock_results),
+        ):
+            results = _search_memory(config, conn, "alice", "memory content")
+
+        # memory_file results have no task_id — should still appear with no task ref
+        assert len(results) == 1
+        assert results[0].get("task_id") is None
+
+
+class TestSearchTalkApi:
+    """Test the _search_talk_api helper."""
+
+    @pytest.mark.asyncio
+    async def test_returns_formatted_results(self, make_config):
+        from istota.commands import _search_talk_api
+
+        config = make_config()
+        # Mock the OCS response from Nextcloud unified search
+        mock_ocs_data = {
+            "entries": [
+                {
+                    "title": "Recent message about deployment",
+                    "subline": "Let me check the deploy status",
+                    "resourceUrl": "https://nc.test/apps/spreed/call/room1#message-456",
+                    "attributes": {
+                        "conversation": "room1",
+                        "messageId": "456",
+                    },
+                },
+            ],
+        }
+        with patch("istota.commands.ocs_get", return_value=mock_ocs_data):
+            results = await _search_talk_api(config, "deploy")
+
+        assert len(results) == 1
+        assert "deployment" in results[0]["summary"]
+        assert results[0]["conversation_token"] == "room1"
+        assert "message-456" in results[0]["talk_link"]
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_api_failure(self, make_config):
+        from istota.commands import _search_talk_api
+
+        config = make_config()
+        with patch("istota.commands.ocs_get", return_value=None):
+            results = await _search_talk_api(config, "test")
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_no_entries(self, make_config):
+        from istota.commands import _search_talk_api
+
+        config = make_config()
+        with patch("istota.commands.ocs_get", return_value={"entries": []}):
+            results = await _search_talk_api(config, "test")
+
+        assert results == []

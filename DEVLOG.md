@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-01: Add !search command for conversation history
+
+Added a synchronous `!search` command that searches Talk conversation history across three data sources: the semantic memory index (BM25 + vector), the Nextcloud Talk unified search API, and exported conversation files. Results are scoped to the current room by default, with `--all` and `--room <token>` flags for broader searches.
+
+**Key changes:**
+- New `!search` command registered in command dispatch system
+- Memory search integration via `_search_memory()` — resolves task IDs to conversation tokens and dates
+- Nextcloud Talk API search via `_search_talk_api()` — queries unified search provider for recent unindexed messages
+- Argument parsing with `--all`, `--room <token>` scoping flags
+- Result deduplication across sources by task ID, capped at 8 results
+- Chunk summarization (`_summarize_chunk`) extracts 1-2 sentences from memory chunks
+- Output format with numbered results, room/date context, and task/link references
+
+**Files modified:**
+- `src/istota/commands.py` — Added `cmd_search`, `_search_memory`, `_search_talk_api`, `_parse_search_args`, `_summarize_chunk`, `_format_search_results`
+- `tests/test_commands.py` — Added 19 tests across 3 test classes (TestCmdSearch, TestSearchMemory, TestSearchTalkApi)
+
 ## 2026-03-31: Replace install.sh with Ansible bootstrap
 
 Replaced the monolithic 1765-line `install.sh` with a thin ~375-line bootstrap that installs Ansible and delegates all provisioning to the existing Ansible role. This eliminates the maintenance burden of two parallel install paths (bash script vs Ansible role). The settings.toml format is preserved for backward compatibility with existing installations.
