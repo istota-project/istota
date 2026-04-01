@@ -3,7 +3,8 @@
 import json
 import logging
 import time
-from pathlib import Path
+
+import httpx
 
 from . import __version__
 from .config import Config
@@ -20,15 +21,15 @@ def init_status_writer() -> None:
 
 
 def write_status(config: Config, active_workers: int, pending_fg: int, pending_bg: int) -> None:
-    """Write a JSON status file readable by the NC app.
+    """Write a JSON status file to the bot user's Nextcloud storage via WebDAV.
 
-    The file is written to ``{users_dir}/../status.json`` (i.e. the config
-    base directory, sibling to ``users/``).
+    The NC app reads ``config/status.json`` from the bot user's file tree
+    (via ``IRootFolder::getUserFolder``), so we PUT it there directly.
     """
-    if config.users_dir is None:
+    nc = config.nextcloud
+    if not nc.url or not nc.username:
         return
 
-    status_path = config.users_dir.parent / "status.json"
     now = time.time()
     status = {
         "bot_name": config.bot_name,
@@ -49,9 +50,22 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
         "updated_at": int(now),
     }
 
+    base_url = nc.url.rstrip("/")
+    auth = (nc.username, nc.app_password)
+    dav_base = f"{base_url}/remote.php/dav/files/{nc.username}"
+
     try:
-        tmp_path = status_path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(status, indent=2))
-        tmp_path.rename(status_path)
+        # Ensure config/ directory exists (MKCOL is a no-op if it already exists)
+        httpx.request("MKCOL", f"{dav_base}/config", auth=auth, timeout=10.0)
+
+        # PUT the status file
+        resp = httpx.put(
+            f"{dav_base}/config/status.json",
+            content=json.dumps(status, indent=2),
+            headers={"Content-Type": "application/json"},
+            auth=auth,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
     except Exception as e:
-        logger.error("Failed to write status file %s: %s", status_path, e)
+        logger.error("Failed to write status.json via WebDAV: %s", e)
