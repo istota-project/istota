@@ -13,7 +13,9 @@ from pathlib import Path
 
 
 from . import db
+from . import memory_search as memory_search_mod
 from .config import Config
+from .nextcloud_client import ocs_get
 from .talk import TalkClient, clean_message_content, split_message
 
 logger = logging.getLogger("istota.commands")
@@ -799,3 +801,227 @@ async def cmd_more(config, conn, user_id, conversation_token, args, client):
         lines.append(f"**Error:** {error_preview}")
 
     return "\n".join(lines)
+
+
+# =============================================================================
+# !search command
+# =============================================================================
+
+
+def _summarize_chunk(content: str) -> str:
+    """Extract a 1-2 sentence summary from a memory search chunk."""
+    lines = []
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for prefix in ("User: ", "Bot: ", "user: ", "bot: "):
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix):]
+                break
+        lines.append(stripped)
+
+    text = " ".join(lines)
+    if len(text) <= 200:
+        return text
+    for i in range(200, 80, -1):
+        if text[i] in ".!?":
+            return text[: i + 1]
+    return text[:200] + "..."
+
+
+def _search_memory(
+    config: Config,
+    conn: sqlite3.Connection,
+    user_id: str,
+    query: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Search the memory index and resolve task/room metadata."""
+    try:
+        results = memory_search_mod.search(
+            conn, user_id, query, limit=limit,
+            source_types=["conversation", "memory_file"],
+        )
+    except Exception as e:
+        logger.debug("Memory search failed: %s", e)
+        return []
+
+    out = []
+    for r in results:
+        entry: dict = {
+            "summary": _summarize_chunk(r.content),
+            "source_type": r.source_type,
+        }
+
+        if r.source_type == "conversation":
+            task_id_str = r.metadata.get("task_id") or r.source_id
+            try:
+                task_id = int(task_id_str)
+            except (ValueError, TypeError):
+                task_id = None
+
+            if task_id:
+                task = db.get_task(conn, task_id)
+                if task:
+                    entry["task_id"] = task_id
+                    entry["conversation_token"] = task.conversation_token
+                    created = task.created_at or ""
+                    entry["date"] = created[:10] if len(created) >= 10 else created
+                    entry["room"] = task.conversation_token or ""
+                else:
+                    entry["task_id"] = task_id
+                    entry["conversation_token"] = None
+                    entry["date"] = ""
+                    entry["room"] = ""
+            else:
+                entry["task_id"] = None
+                entry["conversation_token"] = None
+                entry["date"] = ""
+                entry["room"] = ""
+        else:
+            entry["task_id"] = None
+            entry["conversation_token"] = None
+            entry["date"] = ""
+            entry["room"] = ""
+
+        out.append(entry)
+
+    return out
+
+
+async def _search_talk_api(
+    config: Config,
+    query: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Search Nextcloud Talk messages via the unified search API."""
+    data = ocs_get(
+        config,
+        "/search/providers/talk-message/search",
+        params={"term": query, "limit": str(limit)},
+        timeout=10.0,
+    )
+    if not data:
+        return []
+
+    entries = data.get("entries", [])
+    if not entries:
+        return []
+
+    base_url = config.nextcloud.url.rstrip("/")
+    out = []
+    for entry in entries:
+        attrs = entry.get("attributes", {})
+        token = attrs.get("conversation", "")
+        message_id = attrs.get("messageId", "")
+        title = entry.get("title", "")
+        subline = entry.get("subline", "")
+
+        talk_link = f"{base_url}/apps/spreed/call/{token}#message-{message_id}"
+
+        out.append({
+            "date": "",
+            "room": token,
+            "summary": title or subline,
+            "talk_link": talk_link,
+            "conversation_token": token,
+        })
+
+    return out
+
+
+def _parse_search_args(args_str: str) -> tuple[str | None, str]:
+    """Parse search arguments. Returns (scope, query).
+
+    scope is None for current room, "all" for --all, or a token for --room <token>.
+    """
+    parts = args_str.strip().split()
+    if not parts:
+        return None, ""
+
+    if parts[0] == "--all":
+        return "all", " ".join(parts[1:])
+    if parts[0] == "--room" and len(parts) >= 2:
+        room = parts[1].lstrip("#")
+        return room, " ".join(parts[2:])
+
+    return None, args_str.strip()
+
+
+def _format_search_results(results: list[dict], query: str) -> str:
+    """Format search results for Talk output."""
+    count = len(results)
+    noun = "result" if count == 1 else "results"
+    lines = [f"**{count} {noun}** for \"{query}\"", ""]
+
+    for i, r in enumerate(results, 1):
+        date = r.get("date", "")
+        room = r.get("room", "")
+        summary = r.get("summary", "")
+
+        location_parts = []
+        if date:
+            location_parts.append(f"**{date}**")
+        if room:
+            location_parts.append(f"in #{room}")
+        location = " ".join(location_parts)
+
+        if location:
+            lines.append(f"{i}. {location} — {summary}")
+        else:
+            lines.append(f"{i}. {summary}")
+
+        if r.get("task_id"):
+            lines.append(f"   → task #{r['task_id']}")
+        elif r.get("talk_link"):
+            lines.append(f"   → {r['talk_link']}")
+
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+@command("search", "Search conversation history: `!search <query>`, `!search --all <query>`")
+async def cmd_search(config, conn, user_id, conversation_token, args, client):
+    scope, query = _parse_search_args(args)
+    if not query:
+        return "Usage: `!search <query>`, `!search --all <query>`, `!search --room <token> <query>`"
+
+    mem_results = _search_memory(config, conn, user_id, query)
+    talk_results = await _search_talk_api(config, query)
+
+    # Merge and deduplicate (memory results take priority)
+    seen_task_ids: set[int] = set()
+    all_results: list[dict] = []
+
+    for r in mem_results:
+        tid = r.get("task_id")
+        if tid:
+            seen_task_ids.add(tid)
+        all_results.append(r)
+
+    for r in talk_results:
+        tid = r.get("task_id")
+        if tid and tid in seen_task_ids:
+            continue
+        all_results.append(r)
+
+    # Apply room scoping
+    if scope is None:
+        all_results = [
+            r for r in all_results
+            if r.get("conversation_token") == conversation_token
+        ]
+    elif scope != "all":
+        all_results = [
+            r for r in all_results
+            if r.get("conversation_token") == scope
+        ]
+
+    all_results = all_results[:8]
+
+    if not all_results:
+        return f"No results for \"{query}\"."
+
+    return _format_search_results(all_results, query)
