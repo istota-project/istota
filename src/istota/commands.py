@@ -866,6 +866,7 @@ def _search_memory(
                 if task:
                     entry["task_id"] = task_id
                     entry["conversation_token"] = task.conversation_token
+                    entry["talk_message_id"] = task.talk_message_id
                     created = task.created_at or ""
                     entry["date"] = created[:10] if len(created) >= 10 else created
                     entry["room"] = task.conversation_token or ""
@@ -949,6 +950,27 @@ def _parse_search_args(args_str: str) -> tuple[str | None, str]:
     return None, args_str.strip()
 
 
+async def _resolve_room_names(
+    client: TalkClient,
+    tokens: set[str],
+) -> dict[str, str]:
+    """Resolve conversation tokens to display names. Returns token→name map."""
+    names: dict[str, str] = {}
+    for token in tokens:
+        try:
+            info = await client.get_conversation_info(token)
+            names[token] = info.get("displayName", token)
+        except Exception:
+            names[token] = token
+    return names
+
+
+def _build_message_link(config: Config, token: str, message_id: int) -> str:
+    """Build a Nextcloud Talk deep link to a specific message."""
+    base_url = config.nextcloud.url.rstrip("/")
+    return f"{base_url}/call/{token}#message_{message_id}"
+
+
 def _format_search_results(results: list[dict], query: str) -> str:
     """Format search results for Talk output."""
     count = len(results)
@@ -957,14 +979,14 @@ def _format_search_results(results: list[dict], query: str) -> str:
 
     for i, r in enumerate(results, 1):
         date = r.get("date", "")
-        room = r.get("room", "")
+        room_name = r.get("room_name", r.get("room", ""))
         summary = r.get("summary", "")
 
         location_parts = []
         if date:
             location_parts.append(f"**{date}**")
-        if room:
-            location_parts.append(f"in #{room}")
+        if room_name:
+            location_parts.append(f"in #{room_name}")
         location = " ".join(location_parts)
 
         if location:
@@ -972,10 +994,10 @@ def _format_search_results(results: list[dict], query: str) -> str:
         else:
             lines.append(f"{i}. {summary}")
 
-        if r.get("task_id"):
-            lines.append(f"   → task #{r['task_id']}")
-        elif r.get("talk_link"):
+        if r.get("talk_link"):
             lines.append(f"   → {r['talk_link']}")
+        elif r.get("task_id"):
+            lines.append(f"   → task #{r['task_id']}")
 
         lines.append("")
 
@@ -1023,5 +1045,20 @@ async def cmd_search(config, conn, user_id, conversation_token, args, client):
 
     if not all_results:
         return f"No results for \"{query}\"."
+
+    # Resolve room display names for all unique tokens
+    tokens = {r["conversation_token"] for r in all_results if r.get("conversation_token")}
+    room_names = await _resolve_room_names(client, tokens)
+
+    # Enrich results with room names and message links
+    base_url = config.nextcloud.url.rstrip("/")
+    for r in all_results:
+        token = r.get("conversation_token", "")
+        r["room_name"] = room_names.get(token, token)
+
+        # Build message deep link from task's talk_message_id
+        msg_id = r.get("talk_message_id")
+        if token and msg_id:
+            r["talk_link"] = _build_message_link(config, token, msg_id)
 
     return _format_search_results(all_results, query)
