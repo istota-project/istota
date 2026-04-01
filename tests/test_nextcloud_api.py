@@ -122,7 +122,7 @@ class TestHydrateUserConfigs:
 
     @patch("istota.nextcloud_api.fetch_user_timezone")
     @patch("istota.nextcloud_api.fetch_user_info")
-    def test_preserves_explicit_display_name(self, mock_info, mock_tz):
+    def test_nc_display_name_overrides_config(self, mock_info, mock_tz):
         mock_info.return_value = {"displayname": "Alice S.", "email": ""}
         mock_tz.return_value = None
         config = Config(
@@ -130,7 +130,7 @@ class TestHydrateUserConfigs:
             users={"alice": UserConfig(display_name="Custom Name")},
         )
         hydrate_user_configs(config)
-        assert config.users["alice"].display_name == "Custom Name"
+        assert config.users["alice"].display_name == "Alice S."
 
     @patch("istota.nextcloud_api.fetch_user_timezone")
     @patch("istota.nextcloud_api.fetch_user_info")
@@ -171,7 +171,7 @@ class TestHydrateUserConfigs:
 
     @patch("istota.nextcloud_api.fetch_user_timezone")
     @patch("istota.nextcloud_api.fetch_user_info")
-    def test_preserves_explicit_timezone(self, mock_info, mock_tz):
+    def test_nc_timezone_overrides_config(self, mock_info, mock_tz):
         mock_info.return_value = None
         mock_tz.return_value = "Europe/Berlin"
         config = Config(
@@ -179,7 +179,7 @@ class TestHydrateUserConfigs:
             users={"alice": UserConfig(timezone="America/New_York")},
         )
         hydrate_user_configs(config)
-        assert config.users["alice"].timezone == "America/New_York"
+        assert config.users["alice"].timezone == "Europe/Berlin"
 
     @patch("istota.nextcloud_api.fetch_user_timezone")
     @patch("istota.nextcloud_api.fetch_user_info")

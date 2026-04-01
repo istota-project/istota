@@ -44,9 +44,9 @@ def hydrate_user_configs(config: Config) -> None:
     Merge Nextcloud API metadata into config.users in place.
 
     Override logic:
-    - display_name: API used only if config value is empty or matches user_id
+    - display_name: always uses Nextcloud's value (canonical source)
     - email: API email appended to email_addresses if not already present (case-insensitive)
-    - timezone: API used only if config value is "UTC" (the default)
+    - timezone: always uses Nextcloud's value (canonical source)
 
     Graceful degradation: API failures are silently logged and skipped.
     """
@@ -58,11 +58,11 @@ def hydrate_user_configs(config: Config) -> None:
         # Fetch basic user info (display name, email)
         info = fetch_user_info(config, user_id)
         if info:
-            # display_name: only override if empty or matches user_id
+            # display_name: always use Nextcloud's value if available
             api_name = info.get("displayname", "")
-            if api_name and (not user_config.display_name or user_config.display_name == user_id):
+            if api_name:
                 user_config.display_name = api_name
-                logger.info("Hydrated display_name for %s: %s", user_id, api_name)
+                logger.debug("Set display_name for %s: %s", user_id, api_name)
 
             # email: append if not already present
             api_email = info.get("email", "")
@@ -72,9 +72,8 @@ def hydrate_user_configs(config: Config) -> None:
                     user_config.email_addresses.append(api_email)
                     logger.info("Hydrated email for %s: %s", user_id, api_email)
 
-        # Fetch timezone from preferences
-        if user_config.timezone == "UTC":
-            tz = fetch_user_timezone(config, user_id)
-            if tz:
-                user_config.timezone = tz
-                logger.info("Hydrated timezone for %s: %s", user_id, tz)
+        # Fetch timezone from Nextcloud preferences — always use if available
+        tz = fetch_user_timezone(config, user_id)
+        if tz:
+            user_config.timezone = tz
+            logger.debug("Set timezone for %s: %s", user_id, tz)
