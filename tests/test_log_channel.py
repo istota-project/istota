@@ -281,6 +281,23 @@ class TestFinalizeLogChannel:
         call_args = mock_arun.call_args
         assert call_args is not None
 
+    @patch("istota.scheduler.TalkClient")
+    def test_one_liner_unpacks_tuple_prefix(self, mock_talk_cls, tmp_path):
+        config = self._make_config(tmp_path)
+        task = self._make_task()
+        mock_client = MagicMock()
+        mock_talk_cls.return_value = mock_client
+        mock_client.send_message = AsyncMock(return_value=200)
+
+        _finalize_log_channel(
+            config, task, "logroom", ("**[#42]**", "#istota"), None, True,
+        )
+        mock_client.send_message.assert_called_once()
+        msg = mock_client.send_message.call_args[0][1]
+        assert "**[#42]**" in msg
+        assert "('#" not in msg  # no raw tuple
+        assert "#istota" in msg
+
     @patch("istota.scheduler.asyncio.run")
     def test_includes_error_on_failure(self, mock_arun, tmp_path):
         config = self._make_config(tmp_path)
