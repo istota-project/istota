@@ -1889,7 +1889,7 @@ def execute_task(
         # Build command
         use_streaming = on_progress is not None
         allowed = build_allowed_tools(is_admin, selected_skills)
-        cmd = ["claude", "--bare", "-p", "-", "--allowedTools"] + allowed
+        cmd = ["claude", "-p", "-", "--allowedTools"] + allowed
         if config.model:
             cmd += ["--model", config.model]
         if use_streaming:
