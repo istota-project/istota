@@ -215,7 +215,7 @@ def process_user_sleep_cycle(
     # Call Claude CLI (like context.py does)
     try:
         result = subprocess.run(
-            ["claude", "-p", "-", "--model", "sonnet"],
+            ["claude", "--bare", "-p", "-", "--model", "sonnet"],
             input=prompt,
             capture_output=True,
             text=True,
@@ -352,7 +352,7 @@ def curate_user_memory(config: Config, user_id: str) -> bool:
 
     try:
         result = subprocess.run(
-            ["claude", "-p", "-", "--model", "sonnet"],
+            ["claude", "--bare", "-p", "-", "--model", "sonnet"],
             input=prompt,
             capture_output=True,
             text=True,
@@ -650,7 +650,7 @@ def process_channel_sleep_cycle(
     # Call Claude CLI
     try:
         result = subprocess.run(
-            ["claude", "-p", "-", "--model", "sonnet"],
+            ["claude", "--bare", "-p", "-", "--model", "sonnet"],
             input=prompt,
             capture_output=True,
             text=True,
