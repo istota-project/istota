@@ -9,6 +9,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+try:
+    import geopy  # noqa: F401
+    _has_geopy = True
+except ImportError:
+    _has_geopy = False
+
+_needs_geopy = pytest.mark.skipif(not _has_geopy, reason="geopy not installed")
+
 from istota import db
 from istota.config import Config, UserConfig
 from istota.geo import haversine
@@ -1005,6 +1013,7 @@ class TestGeocodeLocation:
             result = _geocode_location("123 Main St", conn)
             assert result == (34.05, -118.4)
 
+    @_needs_geopy
     def test_nominatim_called_on_miss(self, tmp_path):
         from istota.skills.location import _geocode_location
         db_path = _init_db(tmp_path)
@@ -1025,6 +1034,7 @@ class TestGeocodeLocation:
                 cached = db.get_cached_geocode(conn, "San Francisco, CA")
                 assert cached == (37.7749, -122.4194)
 
+    @_needs_geopy
     def test_nominatim_failure_returns_none(self, tmp_path):
         from istota.skills.location import _geocode_location
         db_path = _init_db(tmp_path)
@@ -1037,6 +1047,7 @@ class TestGeocodeLocation:
                 result = _geocode_location("nonexistent place xyz", conn)
                 assert result is None
 
+    @_needs_geopy
     def test_nominatim_exception_returns_none(self, tmp_path):
         from istota.skills.location import _geocode_location
         db_path = _init_db(tmp_path)
@@ -1197,6 +1208,7 @@ class TestCmdAttendance:
         ev = result["events"][0]
         assert ev["attended"] is None
 
+    @_needs_geopy
     def test_ungeocoded_event(self, tmp_path):
         events = [_make_calendar_event(
             summary="Meeting",
@@ -1215,6 +1227,7 @@ class TestCmdAttendance:
         assert ev["location_resolved"] is False
         assert ev["attended"] is None
 
+    @_needs_geopy
     def test_geocoded_event_with_attendance(self, tmp_path):
         from zoneinfo import ZoneInfo
         tz = ZoneInfo("America/Los_Angeles")
@@ -1398,6 +1411,7 @@ class TestReverseGeocode:
             assert result["source"] == "cache"
             assert result["display_name"] == "Cached Place"
 
+    @_needs_geopy
     def test_nominatim_called_on_miss(self, tmp_path):
         from istota.geo import reverse_geocode
 
@@ -1430,6 +1444,7 @@ class TestReverseGeocode:
                 assert cached is not None
                 assert cached["display_name"] == "456 Oak Ave, Pasadena, CA"
 
+    @_needs_geopy
     def test_nominatim_returns_none(self, tmp_path):
         from istota.geo import reverse_geocode
 
@@ -1444,6 +1459,7 @@ class TestReverseGeocode:
                 assert result["source"] == "error"
                 assert "error" in result
 
+    @_needs_geopy
     def test_nominatim_exception(self, tmp_path):
         from istota.geo import reverse_geocode
 
@@ -1559,6 +1575,7 @@ class TestCmdReverseGeocode:
         assert result["source"] == "cache"
         assert result["display_name"] == "Test Place"
 
+    @_needs_geopy
     def test_nominatim_fallback(self, tmp_path):
         from istota.skills.location import cmd_reverse_geocode
 
@@ -1597,6 +1614,7 @@ class TestCmdReverseGeocode:
 # ===========================================================================
 
 
+@_needs_geopy
 class TestCmdDaySummary:
     def _run_day_summary(self, tmp_path, pings=None, places=None,
                          date="2026-03-08", tz="America/Los_Angeles",

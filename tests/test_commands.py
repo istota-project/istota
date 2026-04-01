@@ -1567,14 +1567,14 @@ class TestCmdSearch:
             mock_mem.return_value = []
             mock_talk.return_value = [
                 {"date": "Apr 1", "room": "room1", "summary": "Recent chat message",
-                 "talk_link": "https://nc.test/apps/spreed/call/room1#message-123",
+                 "talk_link": "https://nc.test/call/room1#message_123",
                  "conversation_token": "room1"},
             ]
             client = MagicMock()
             result = await cmd_search(config, conn, "alice", "room1", "--all recent chat", client)
 
         assert "Recent chat message" in result
-        assert "https://nc.test/apps/spreed/call/room1#message-123" in result
+        assert "https://nc.test/call/room1#message_123" in result
 
     @pytest.mark.asyncio
     async def test_talk_api_results_filtered_by_room(self, make_config, db_path):
@@ -1588,10 +1588,10 @@ class TestCmdSearch:
             mock_mem.return_value = []
             mock_talk.return_value = [
                 {"date": "Apr 1", "room": "room1", "summary": "In room1",
-                 "talk_link": "https://nc.test/apps/spreed/call/room1#message-1",
+                 "talk_link": "https://nc.test/call/room1#message_1",
                  "conversation_token": "room1"},
                 {"date": "Apr 1", "room": "room2", "summary": "In room2",
-                 "talk_link": "https://nc.test/apps/spreed/call/room2#message-2",
+                 "talk_link": "https://nc.test/call/room2#message_2",
                  "conversation_token": "room2"},
             ]
             client = MagicMock()
@@ -1741,7 +1741,7 @@ class TestSearchTalkApi:
                 {
                     "title": "Recent message about deployment",
                     "subline": "Let me check the deploy status",
-                    "resourceUrl": "https://nc.test/apps/spreed/call/room1#message-456",
+                    "resourceUrl": "https://nc.test/call/room1#message_456",
                     "attributes": {
                         "conversation": "room1",
                         "messageId": "456",
@@ -1755,7 +1755,7 @@ class TestSearchTalkApi:
         assert len(results) == 1
         assert "deployment" in results[0]["summary"]
         assert results[0]["conversation_token"] == "room1"
-        assert "message-456" in results[0]["talk_link"]
+        assert "message_456" in results[0]["talk_link"]
 
     @pytest.mark.asyncio
     async def test_returns_empty_on_api_failure(self, make_config):

@@ -918,7 +918,7 @@ async def _search_talk_api(
         title = entry.get("title", "")
         subline = entry.get("subline", "")
 
-        talk_link = f"{base_url}/apps/spreed/call/{token}#message-{message_id}"
+        talk_link = f"{base_url}/call/{token}#message_{message_id}"
 
         out.append({
             "date": "",
