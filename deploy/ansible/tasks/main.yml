@@ -154,7 +154,7 @@
     name: "{{ istota_user }}"
     groups: "{{ istota_moneyman_group }}"
     append: yes
-  when: not istota_update_only and not istota_web_only and istota_moneyman_group
+  when: not istota_update_only and not istota_web_only and istota_moneyman_group | length > 0
   notify: Restart istota
 
 - name: Add istota user to docker group

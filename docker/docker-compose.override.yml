@@ -1,0 +1,5 @@
+services:
+  nextcloud:
+    volumes:
+      # Mount the Istota NC app for development
+      - ../../nextcloud-istota:/var/www/html/custom_apps/istota:ro
