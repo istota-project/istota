@@ -596,8 +596,14 @@ def _finalize_log_channel(
             ))
         else:
             # No tool calls at all — post a one-liner
+            if isinstance(prefix, tuple):
+                task_prefix, source = prefix
+            else:
+                task_prefix, source = prefix, ""
             status = "✓ done" if success else "✗ failed"
-            line = f"{prefix} {status} (no tool calls)"
+            line = f"{task_prefix} {status} (no tool calls)"
+            if source:
+                line += f" - {source}"
             if error:
                 line += f" — {error[:200]}"
             client = TalkClient(config)
