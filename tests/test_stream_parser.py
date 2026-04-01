@@ -7,6 +7,7 @@ from istota.stream_parser import (
     TextEvent,
     ToolUseEvent,
     _describe_tool_use,
+    make_stream_parser,
     parse_stream_line,
 )
 
@@ -222,8 +223,8 @@ class TestParseStreamLine:
         line = self._make_line({"type": "assistant"})
         assert parse_stream_line(line) is None
 
-    def test_assistant_partial_event_skipped(self):
-        """Partial streaming events (stop_reason=null) should be skipped."""
+    def test_partial_event_thinking_only_skipped(self):
+        """Partial events with only thinking content should be skipped."""
         line = self._make_line({
             "type": "assistant",
             "message": {
@@ -234,6 +235,54 @@ class TestParseStreamLine:
             },
         })
         assert parse_stream_line(line) is None
+
+    def test_partial_event_text_captured(self):
+        """Text from interrupted turns (stop_reason=null) must be captured (ISSUE-025)."""
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": None,
+                "content": [
+                    {"type": "text", "text": "Here are the top 2 apartments I found."},
+                ],
+            },
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, TextEvent)
+        assert event.text == "Here are the top 2 apartments I found."
+
+    def test_partial_event_tool_use_captured(self):
+        """Tool use from partial events must be captured — dedup handles duplicates."""
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": None,
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": "/tmp/data.txt"}},
+                ],
+            },
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, ToolUseEvent)
+        assert event.description == "📄 Reading data.txt"
+
+    def test_partial_event_mixed_content_prefers_tool_use(self):
+        """Partial with both text and tool_use: tool_use takes priority (same as completed)."""
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": None,
+                "content": [
+                    {"type": "text", "text": "Let me check the file."},
+                    {"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": "/tmp/data.txt"}},
+                ],
+            },
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, ToolUseEvent)
+        assert event.description == "📄 Reading data.txt"
 
     def test_assistant_context_management_replay_skipped(self):
         """Context management replays should be skipped."""
@@ -347,3 +396,293 @@ class TestFullStream:
         assert isinstance(events[3], ResultEvent)
         assert events[3].success is True
         assert events[3].text == "Here is the summary of your files."
+
+
+class TestMessageDedup:
+    """Test stateful deduplication via make_stream_parser (ISSUE-024)."""
+
+    def _make_line(self, data: dict) -> str:
+        return json.dumps(data)
+
+    def test_duplicate_tool_use_block_skipped(self):
+        """Same tool_use block ID emitted twice (partial then completed) is deduplicated."""
+        parse = make_stream_parser()
+
+        # Partial (stop_reason=null) — first emission
+        partial = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_001",
+                "stop_reason": None,
+                "content": [
+                    {"type": "tool_use", "id": "toolu_001", "name": "Read",
+                     "input": {"file_path": "/tmp/data.txt"}},
+                ],
+            },
+        })
+        # Completed (stop_reason=tool_use) — same tool_use block ID
+        completed = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_001",
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_001", "name": "Read",
+                     "input": {"file_path": "/tmp/data.txt"}},
+                ],
+            },
+        })
+
+        event1 = parse(partial)
+        event2 = parse(completed)
+        assert isinstance(event1, ToolUseEvent)
+        assert event2 is None  # deduplicated by block ID
+
+    def test_same_message_id_different_tool_blocks_both_parsed(self):
+        """Claude Code reuses message ID across tool calls in a turn — both must be captured."""
+        parse = make_stream_parser()
+
+        line1 = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_001",
+                "stop_reason": None,
+                "content": [
+                    {"type": "tool_use", "id": "toolu_001", "name": "Read",
+                     "input": {"file_path": "/tmp/a.txt"}},
+                ],
+            },
+        })
+        line2 = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_001",
+                "stop_reason": None,
+                "content": [
+                    {"type": "tool_use", "id": "toolu_002", "name": "Bash",
+                     "input": {"command": "ls", "description": "List files"}},
+                ],
+            },
+        })
+
+        event1 = parse(line1)
+        event2 = parse(line2)
+        assert isinstance(event1, ToolUseEvent)
+        assert isinstance(event2, ToolUseEvent)
+        assert "a.txt" in event1.description
+        assert "List files" in event2.description
+
+    def test_duplicate_text_block_skipped(self):
+        """Same text emitted twice under the same message ID is deduplicated."""
+        parse = make_stream_parser()
+
+        line1 = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_002",
+                "stop_reason": None,
+                "content": [
+                    {"type": "text", "text": "Here is the answer."},
+                ],
+            },
+        })
+        line2 = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_002",
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "text", "text": "Here is the answer."},
+                ],
+            },
+        })
+
+        event1 = parse(line1)
+        event2 = parse(line2)
+        assert isinstance(event1, TextEvent)
+        assert event2 is None  # deduplicated
+
+    def test_context_management_replay_skipped(self):
+        """Context management replay (new ID, same content) is skipped."""
+        parse = make_stream_parser()
+
+        original = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_001",
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_001", "name": "Bash",
+                     "input": {"command": "ls", "description": "List files"}},
+                ],
+            },
+        })
+        replay = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_001_replay",
+                "stop_reason": "tool_use",
+                "context_management": {"applied_edits": ["truncate"]},
+                "content": [
+                    {"type": "tool_use", "id": "toolu_001", "name": "Bash",
+                     "input": {"command": "ls", "description": "List files"}},
+                ],
+            },
+        })
+
+        event1 = parse(original)
+        event2 = parse(replay)
+        assert isinstance(event1, ToolUseEvent)
+        assert event2 is None  # context_management filter
+
+    def test_result_events_not_affected_by_dedup(self):
+        """ResultEvents don't have message IDs, should always pass through."""
+        parse = make_stream_parser()
+
+        line = self._make_line({
+            "type": "result",
+            "subtype": "success",
+            "result": "Done.",
+        })
+        assert isinstance(parse(line), ResultEvent)
+
+
+class TestRealCLIOutput:
+    """Integration test using real Claude CLI stream-json output.
+
+    Captured from: claude -p --output-format stream-json --allowedTools Read Bash
+    Key observations from real output:
+    - All tool_use events come with stop_reason: null (never "tool_use")
+    - Same message ID is reused across different tool calls in a turn
+    - Final text response also has stop_reason: null
+    - Only the ResultEvent carries the final answer
+    """
+
+    # Real stream-json lines from a multi-tool task (message IDs and content
+    # simplified for clarity, structure preserved exactly as emitted).
+    STREAM_LINES = [
+        # 1. System init
+        json.dumps({
+            "type": "system", "subtype": "init",
+            "cwd": "/tmp", "model": "claude-opus-4-6[1m]",
+        }),
+        # 2. First tool call (Read) — stop_reason: null, message reused
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "id": "msg_01Abc", "stop_reason": None,
+                "content": [{
+                    "type": "tool_use", "id": "toolu_01Read",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/pyproject.toml", "limit": 20},
+                }],
+            },
+        }),
+        # 3. Tool result (user event — skipped)
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": [{
+                "tool_use_id": "toolu_01Read", "type": "tool_result",
+                "content": "name = \"istota\"\nversion = \"0.5.0\"",
+            }]},
+        }),
+        # 4. Second tool call (Bash) — same message ID, different tool block ID
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "id": "msg_01Abc", "stop_reason": None,
+                "content": [{
+                    "type": "tool_use", "id": "toolu_02Bash",
+                    "name": "Bash",
+                    "input": {
+                        "command": "test -f tests/test_stream_parser.py && echo EXISTS",
+                        "description": "Check if test file exists",
+                    },
+                }],
+            },
+        }),
+        # 5. Tool result
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": [{
+                "tool_use_id": "toolu_02Bash", "type": "tool_result",
+                "content": "EXISTS",
+            }]},
+        }),
+        # 6. Final text — new message ID, still stop_reason: null
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "id": "msg_02Xyz", "stop_reason": None,
+                "content": [{
+                    "type": "text",
+                    "text": "- **Project name:** istota\n- **Version:** 0.5.0\n- **test file:** exists",
+                }],
+            },
+        }),
+        # 7. Result event
+        json.dumps({
+            "type": "result", "subtype": "success",
+            "result": "- **Project name:** istota\n- **Version:** 0.5.0\n- **test file:** exists",
+        }),
+    ]
+
+    def test_all_tool_calls_captured(self):
+        """Both tool calls are captured despite same message ID and stop_reason=null."""
+        parse = make_stream_parser()
+        events = [parse(line) for line in self.STREAM_LINES]
+        events = [e for e in events if e is not None]
+
+        assert len(events) == 4  # Read + Bash + Text + Result
+        assert isinstance(events[0], ToolUseEvent)
+        assert "Reading pyproject.toml" in events[0].description
+        assert isinstance(events[1], ToolUseEvent)
+        assert "Check if test file exists" in events[1].description
+        assert isinstance(events[2], TextEvent)
+        assert "istota" in events[2].text
+        assert isinstance(events[3], ResultEvent)
+        assert events[3].success is True
+
+    def test_actions_taken_populated(self):
+        """Simulates the executor's actions_taken collection from real output."""
+        parse = make_stream_parser()
+        actions_descriptions = []
+        execution_trace = []
+
+        for line in self.STREAM_LINES:
+            event = parse(line)
+            if event is None:
+                continue
+            if isinstance(event, ToolUseEvent):
+                actions_descriptions.append(event.description)
+                execution_trace.append({"type": "tool", "text": event.description})
+            elif isinstance(event, TextEvent):
+                execution_trace.append({"type": "text", "text": event.text})
+
+        assert len(actions_descriptions) == 2
+        assert any("Reading" in d for d in actions_descriptions)
+        assert any("Check if test file exists" in d for d in actions_descriptions)
+        assert len(execution_trace) == 3  # 2 tools + 1 text
+
+    def test_context_management_replay_in_real_stream(self):
+        """Context management replays are filtered even with real stream patterns."""
+        parse = make_stream_parser()
+
+        # Process normal stream first
+        for line in self.STREAM_LINES:
+            parse(line)
+
+        # Then a context management replay arrives (as observed in real logs)
+        replay = json.dumps({
+            "type": "assistant",
+            "message": {
+                "id": "msg_03Replay", "stop_reason": None,
+                "context_management": {"applied_edits": ["truncate_conversation"]},
+                "content": [{
+                    "type": "tool_use", "id": "toolu_02Bash",
+                    "name": "Bash",
+                    "input": {"command": "ls", "description": "List files"},
+                }],
+            },
+        })
+        assert parse(replay) is None
