@@ -986,7 +986,7 @@ def _format_search_results(results: list[dict], query: str) -> str:
         if date:
             location_parts.append(f"**{date}**")
         if room_name:
-            location_parts.append(f"in #{room_name}")
+            location_parts.append(f"in {room_name}")
         location = " ".join(location_parts)
 
         if location:

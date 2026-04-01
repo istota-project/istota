@@ -1706,7 +1706,7 @@ class TestCmdSearch:
             client = MagicMock()
             result = await cmd_search(config, conn, "alice", "room1", "--all discussion", client)
 
-        assert "#General" in result
+        assert "in General" in result
         assert "room1" not in result  # token should not appear
 
     @pytest.mark.asyncio
