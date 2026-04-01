@@ -433,7 +433,7 @@ Rules:
 
     try:
         result = subprocess.run(
-            ["claude", "--bare", "-p", "-", "--model", config.conversation.selection_model],
+            ["claude", "-p", "-", "--model", config.conversation.selection_model],
             input=selection_prompt,
             capture_output=True,
             text=True,

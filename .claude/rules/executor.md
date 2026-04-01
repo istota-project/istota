@@ -105,7 +105,7 @@ def build_prompt(
 
 ## Popen Command
 ```python
-cmd = ["claude", "--bare", "-p", prompt, "--allowedTools", "Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+cmd = ["claude", "-p", prompt, "--allowedTools", "Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 # If streaming (on_progress provided):
 cmd += ["--output-format", "stream-json", "--verbose"]
 ```
