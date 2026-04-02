@@ -20,7 +20,7 @@ import httpx
 import tomli
 
 from ...config import BriefingConfig, BriefingDefaultsConfig, Config
-from ...storage import get_channel_base_path, get_user_briefings_path
+from ...storage import get_user_briefings_path
 
 logger = logging.getLogger("istota.briefing")
 
@@ -213,29 +213,28 @@ def _strip_html(text: str) -> str:
 # Prompt builder (from briefing.py)
 # ---------------------------------------------------------------------------
 
-def _get_briefing_digest_path(
-    user_id: str, config: Config,
-    conversation_token: str | None = None,
-) -> str:
-    """Return the Nextcloud-relative path for the briefing digest file."""
+def _briefing_digest_key(conversation_token: str | None = None) -> str:
+    """Return the KV key for a briefing digest."""
     if conversation_token:
-        base = get_channel_base_path(conversation_token)
-    else:
-        from ...storage import get_user_data_path
-        base = get_user_data_path(user_id, config.bot_dir_name)
-    return f"{base}/.briefing_digest.md"
+        return f"digest:{conversation_token}"
+    return "digest:default"
 
 
 def load_previous_briefing_digest(
     user_id: str, config: Config,
     conversation_token: str | None = None,
 ) -> str | None:
-    """Load the previous briefing digest, if it exists."""
-    from ..files import read_text
+    """Load the previous briefing digest from the KV store."""
+    from ... import db
 
-    path = _get_briefing_digest_path(user_id, config, conversation_token)
+    key = _briefing_digest_key(conversation_token)
     try:
-        return read_text(config, path)
+        with db.get_db(config.db_path) as conn:
+            result = db.kv_get(conn, user_id, "briefing", key)
+        if result is None:
+            return None
+        data = json.loads(result["value"])
+        return f"Generated: {data['generated_at']}\n\n{data['text']}"
     except Exception:
         return None
 
@@ -244,18 +243,15 @@ def save_briefing_digest(
     user_id: str, config: Config, briefing_result: str,
     conversation_token: str | None = None,
 ) -> None:
-    """Save a digest of the briefing result for deduplication in the next run.
+    """Save a digest of the briefing result to the KV store for deduplication."""
+    from ... import db
 
-    Stores the full briefing text with a timestamp so the next briefing can
-    avoid repeating the same stories.
-    """
-    from ..files import write_text
-
-    path = _get_briefing_digest_path(user_id, config, conversation_token)
+    key = _briefing_digest_key(conversation_token)
     now = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
-    content = f"Generated: {now}\n\n{briefing_result}"
+    value = json.dumps({"generated_at": now, "text": briefing_result})
     try:
-        write_text(config, path, content)
+        with db.get_db(config.db_path) as conn:
+            db.kv_set(conn, user_id, "briefing", key, value)
     except Exception as e:
         logger.warning("Failed to save briefing digest for %s: %s", user_id, e)
 
