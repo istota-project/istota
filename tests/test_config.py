@@ -113,6 +113,10 @@ class TestConfigDefaults:
         cfg = Config(bot_name="My-Bot 2")
         assert cfg.bot_dir_name == "my-bot_2"
 
+    def test_default_custom_system_prompt(self):
+        cfg = Config()
+        assert cfg.custom_system_prompt is False
+
 
 class TestConfigLoading:
     def test_load_missing_file_returns_defaults(self, tmp_path):
@@ -125,6 +129,18 @@ class TestConfigLoading:
         p.write_text('db_path = "mydb.sqlite"\n')
         cfg = load_config(p)
         assert cfg.db_path == Path("mydb.sqlite")
+
+    def test_load_custom_system_prompt_true(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text('custom_system_prompt = true\n')
+        cfg = load_config(p)
+        assert cfg.custom_system_prompt is True
+
+    def test_load_custom_system_prompt_default(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text('db_path = "test.db"\n')
+        cfg = load_config(p)
+        assert cfg.custom_system_prompt is False
 
     def test_load_nextcloud_section(self, tmp_path):
         p = tmp_path / "config.toml"

@@ -10,6 +10,10 @@ bot_name = "Istota"
 # Claude model to use (e.g. "sonnet", "opus"). Empty or omitted = CLI default.
 # model = "sonnet"
 
+# Use config/system-prompt.md instead of Claude Code's default system prompt.
+# The custom prompt is minimal, focused on tool usage and working practices.
+# custom_system_prompt = true
+
 # Database path (relative to working directory or absolute)
 db_path = "data/istota.db"
 

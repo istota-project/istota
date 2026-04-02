@@ -336,6 +336,7 @@ class Config:
     skills_dir: Path = field(default_factory=lambda: Path("config/skills"))
     bundled_skills_dir: Path | None = None  # Override bundled skills dir (for testing)
     disabled_skills: list[str] = field(default_factory=list)  # instance-wide skills to exclude
+    custom_system_prompt: bool = False  # Use config/system-prompt.md instead of Claude Code's default
     temp_dir: Path = field(default_factory=lambda: Path("/tmp/istota"))
     users_dir: Path | None = None  # config/users/ directory for per-user TOML files
 
@@ -662,6 +663,9 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "disabled_skills" in data:
         config.disabled_skills = data["disabled_skills"]
+
+    if "custom_system_prompt" in data:
+        config.custom_system_prompt = data["custom_system_prompt"]
 
     if "temp_dir" in data:
         config.temp_dir = Path(data["temp_dir"])

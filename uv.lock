@@ -705,6 +705,7 @@ all = [
     { name = "icalendar" },
     { name = "imap-tools" },
     { name = "itsdangerous" },
+    { name = "pillow" },
     { name = "psutil" },
     { name = "pytesseract" },
     { name = "python-multipart" },
@@ -741,6 +742,7 @@ memory-search = [
     { name = "torch", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
 ]
 transcribe = [
+    { name = "pillow" },
     { name = "pytesseract" },
 ]
 web = [
@@ -782,6 +784,7 @@ requires-dist = [
     { name = "istota", extras = ["web"], marker = "extra == 'all'" },
     { name = "istota", extras = ["whisper"], marker = "extra == 'all'" },
     { name = "itsdangerous", marker = "extra == 'web'", specifier = ">=2.1.0" },
+    { name = "pillow", marker = "extra == 'transcribe'", specifier = ">=10.0.0" },
     { name = "psutil", marker = "extra == 'whisper'", specifier = ">=5.9.0" },
     { name = "pytesseract", marker = "extra == 'transcribe'", specifier = ">=0.3.10" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },

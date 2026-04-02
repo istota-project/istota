@@ -213,6 +213,83 @@ class TestSimpleExecution:
         assert "--output-format" not in captured_cmd
         assert "--allowedTools" in captured_cmd
 
+    def test_custom_system_prompt_in_command(self, tmp_path):
+        """--system-prompt-file is added when custom_system_prompt is True."""
+        config = _make_config(tmp_path)
+        config.custom_system_prompt = True
+        # Create the system-prompt.md file where executor expects it
+        sp_path = config.skills_dir.parent / "system-prompt.md"
+        sp_path.write_text("# Test system prompt\n")
+        task = _make_task()
+
+        captured_cmd = []
+
+        def capture_run(cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            mock = MagicMock()
+            mock.stdout = "ok"
+            mock.stderr = ""
+            mock.returncode = 0
+            return mock
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.run", side_effect=capture_run),
+        ]
+        with contextmanager_chain(patches):
+            execute_task(task, config, [])
+
+        assert "--system-prompt-file" in captured_cmd
+        idx = captured_cmd.index("--system-prompt-file")
+        assert captured_cmd[idx + 1] == str(sp_path)
+
+    def test_no_custom_system_prompt_by_default(self, tmp_path):
+        """--system-prompt-file is NOT added when custom_system_prompt is False."""
+        config = _make_config(tmp_path)
+        task = _make_task()
+
+        captured_cmd = []
+
+        def capture_run(cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            mock = MagicMock()
+            mock.stdout = "ok"
+            mock.stderr = ""
+            mock.returncode = 0
+            return mock
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.run", side_effect=capture_run),
+        ]
+        with contextmanager_chain(patches):
+            execute_task(task, config, [])
+
+        assert "--system-prompt-file" not in captured_cmd
+
+    def test_custom_system_prompt_missing_file(self, tmp_path):
+        """--system-prompt-file is skipped when enabled but file doesn't exist."""
+        config = _make_config(tmp_path)
+        config.custom_system_prompt = True
+        # Don't create the file
+        task = _make_task()
+
+        captured_cmd = []
+
+        def capture_run(cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            mock = MagicMock()
+            mock.stdout = "ok"
+            mock.stderr = ""
+            mock.returncode = 0
+            return mock
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.run", side_effect=capture_run),
+        ]
+        with contextmanager_chain(patches):
+            execute_task(task, config, [])
+
+        assert "--system-prompt-file" not in captured_cmd
+
     def test_cli_not_found(self, tmp_path):
         """FileNotFoundError from subprocess.run is handled gracefully."""
         config = _make_config(tmp_path)
