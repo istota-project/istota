@@ -4,15 +4,31 @@
 	import FeedCard from '$lib/components/FeedCard.svelte';
 	import Lightbox from '$lib/components/Lightbox.svelte';
 
-	let data: FeedsResponse | null = $state(null);
+	const PAGE_SIZE = 50;
+
+	let entries: FeedEntry[] = $state([]);
+	let total = $state(0);
 	let loading = $state(true);
+	let loadingMore = $state(false);
 	let error = $state('');
+	let hasMore = $state(true);
 
 	// Filters
 	let showImages = $state(true);
 	let showText = $state(true);
+	let showNew = $state(false);
+	let newSnapshot: Set<number> | null = null;
 	let sortBy: 'published' | 'added' = $state('published');
 	let viewMode: 'grid' | 'list' = $state('grid');
+
+	function toggleNew() {
+		showNew = !showNew;
+		if (showNew) {
+			newSnapshot = new Set(entries.filter((e) => e.status !== 'read').map((e) => e.id));
+		} else {
+			newSnapshot = null;
+		}
+	}
 
 	// Lightbox
 	let lightboxSrc = $state('');
@@ -30,8 +46,7 @@
 	}
 
 	function handleViewed(id: number) {
-		if (!data) return;
-		const entry = data.entries.find((e) => e.id === id);
+		const entry = entries.find((e) => e.id === id);
 		if (entry && entry.status !== 'read') {
 			entry.status = 'read';
 		}
@@ -40,14 +55,61 @@
 		flushTimer = setTimeout(flushPending, 3000);
 	}
 
+	async function loadPage(offset: number) {
+		const params: Record<string, string> = {
+			limit: String(PAGE_SIZE),
+			offset: String(offset),
+			order: 'published_at',
+			direction: 'desc',
+		};
+		const data = await getFeeds(params);
+		return data;
+	}
+
+	async function loadMore() {
+		if (loadingMore || !hasMore) return;
+		loadingMore = true;
+		try {
+			const data = await loadPage(entries.length);
+			const seen = new Set(entries.map((e) => e.id));
+			const fresh = data.entries.filter((e) => !seen.has(e.id));
+			entries = [...entries, ...fresh];
+			total = data.total;
+			hasMore = entries.length < total;
+		} catch {
+			// Silently stop loading more on error
+			hasMore = false;
+		} finally {
+			loadingMore = false;
+		}
+	}
+
+	// Infinite scroll sentinel
+	let sentinel: HTMLDivElement;
+
 	onMount(async () => {
 		try {
-			data = await getFeeds({ limit: '500', order: 'published_at', direction: 'desc' });
+			const data = await loadPage(0);
+			entries = data.entries;
+			total = data.total;
+			hasMore = entries.length < total;
 		} catch (e) {
 			error = 'Failed to load feeds';
 		} finally {
 			loading = false;
 		}
+	});
+
+	$effect(() => {
+		if (!sentinel || loading) return;
+		const observer = new IntersectionObserver(
+			(observed) => {
+				if (observed[0].isIntersecting) loadMore();
+			},
+			{ rootMargin: '600px' },
+		);
+		observer.observe(sentinel);
+		return () => observer.disconnect();
 	});
 
 	onDestroy(() => {
@@ -56,28 +118,27 @@
 	});
 
 	let filteredEntries = $derived.by(() => {
-		if (!data) return [];
-		let entries = data.entries.filter((e) => {
+		let filtered = entries.filter((e) => {
 			const isImage = e.images.length > 0;
 			if (isImage && !showImages) return false;
 			if (!isImage && !showText) return false;
+			if (showNew && newSnapshot && !newSnapshot.has(e.id)) return false;
 			return true;
 		});
-		entries.sort((a, b) => {
+		filtered.sort((a, b) => {
 			const keyA = sortBy === 'published' ? a.published_at : a.created_at;
 			const keyB = sortBy === 'published' ? b.published_at : b.created_at;
 			return (keyB || '').localeCompare(keyA || '');
 		});
-		return entries;
+		return filtered;
 	});
-
 </script>
 
 {#if loading}
 	<div class="loading">Loading feeds...</div>
 {:else if error}
 	<div class="error-msg">{error}</div>
-{:else if data}
+{:else}
 	<nav class="filters">
 		<div class="filter-type">
 			<label class="filter-chip" class:checked={showImages}>
@@ -87,6 +148,10 @@
 			<label class="filter-chip" class:checked={showText}>
 				<input type="checkbox" bind:checked={showText} />
 				<span>text</span>
+			</label>
+			<label class="filter-chip" class:checked={showNew}>
+				<input type="checkbox" checked={showNew} onchange={toggleNew} />
+				<span>new</span>
 			</label>
 		</div>
 
@@ -119,7 +184,13 @@
 		{/each}
 	</div>
 
-	<div class="status-notice">{data.total} items</div>
+	<div bind:this={sentinel} class="sentinel">
+		{#if loadingMore}
+			<span class="loading-more">Loading more...</span>
+		{/if}
+	</div>
+
+	<div class="status-notice">{entries.length} / {total}</div>
 
 	<Lightbox src={lightboxSrc} onClose={() => lightboxSrc = ''} />
 {/if}
@@ -333,6 +404,17 @@
 		margin-left: auto;
 	}
 	.feed-grid :global(.meta-link:hover) { color: #aaa; }
+
+	/* Sentinel / loading */
+	.sentinel {
+		height: 1px;
+		text-align: center;
+		padding: 1rem 0;
+	}
+	.loading-more {
+		font-size: 0.75rem;
+		color: #555;
+	}
 
 	/* Status */
 	.status-notice {
