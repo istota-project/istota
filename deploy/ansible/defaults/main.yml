@@ -29,6 +29,8 @@ istota_bot_name: ""
 istota_emissaries_enabled: true
 # Claude model (e.g. "sonnet", "opus"); empty = CLI default
 istota_model: ""
+# Use config/system-prompt.md instead of Claude Code's default system prompt
+istota_custom_system_prompt: false
 
 # Claude CLI authentication
 # Preferred: generate a token locally with `claude setup-token`, store in vault

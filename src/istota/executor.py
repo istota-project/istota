@@ -1928,6 +1928,10 @@ def execute_task(
         cmd = ["claude", "-p", "-", "--allowedTools"] + allowed + ["--disallowedTools", "Agent"]
         if config.model:
             cmd += ["--model", config.model]
+        if config.custom_system_prompt:
+            sp_path = config.skills_dir.parent / "system-prompt.md"
+            if sp_path.exists():
+                cmd += ["--system-prompt-file", str(sp_path)]
         if use_streaming:
             cmd += ["--output-format", "stream-json", "--verbose"]
 
