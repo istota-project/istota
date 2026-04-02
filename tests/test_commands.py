@@ -1816,7 +1816,8 @@ class TestSearchTalkApi:
             results = await _search_talk_api(config, "deploy")
 
         assert len(results) == 1
-        assert "deployment" in results[0]["summary"]
+        # subline is preferred over title (title is "username in room")
+        assert "deploy status" in results[0]["summary"]
         assert results[0]["conversation_token"] == "room1"
         assert "message_456" in results[0]["talk_link"]
 

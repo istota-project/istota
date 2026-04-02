@@ -927,10 +927,11 @@ async def _search_talk_api(
 
         talk_link = f"{base_url}/call/{token}#message_{message_id}"
 
+        # subline has the message content; title is "username in roomname"
         out.append({
             "date": "",
             "room": token,
-            "summary": title or subline,
+            "summary": subline or title,
             "talk_link": talk_link,
             "conversation_token": token,
         })
