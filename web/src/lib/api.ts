@@ -31,7 +31,7 @@ export interface FeedEntry {
 	url: string;
 	content: string;
 	images: string[];
-	feed: { id: number; title: string };
+	feed: { id: number; title: string; site_url: string };
 	status: string;
 	published_at: string;
 	created_at: string;

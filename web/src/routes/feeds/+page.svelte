@@ -11,7 +11,6 @@
 	// Filters
 	let showImages = $state(true);
 	let showText = $state(true);
-	let showNew = $state(false);
 	let sortBy: 'published' | 'added' = $state('published');
 	let viewMode: 'grid' | 'list' = $state('grid');
 
@@ -62,7 +61,6 @@
 			const isImage = e.images.length > 0;
 			if (isImage && !showImages) return false;
 			if (!isImage && !showText) return false;
-			if (showNew && e.status === 'read') return false;
 			return true;
 		});
 		entries.sort((a, b) => {
@@ -73,9 +71,6 @@
 		return entries;
 	});
 
-	let unreadCount = $derived(
-		data ? data.entries.filter((e) => e.status !== 'read').length : 0,
-	);
 </script>
 
 {#if loading}
@@ -92,10 +87,6 @@
 			<label class="filter-chip" class:checked={showText}>
 				<input type="checkbox" bind:checked={showText} />
 				<span>text</span>
-			</label>
-			<label class="filter-chip" class:checked={showNew}>
-				<input type="checkbox" bind:checked={showNew} />
-				<span>new</span>
 			</label>
 		</div>
 
@@ -128,7 +119,7 @@
 		{/each}
 	</div>
 
-	<div class="status-notice">{unreadCount} new / {data.total} items</div>
+	<div class="status-notice">{data.total} items</div>
 
 	<Lightbox src={lightboxSrc} onClose={() => lightboxSrc = ''} />
 {/if}
@@ -190,6 +181,7 @@
 
 	/* Cards */
 	.feed-grid :global(.card) {
+		position: relative;
 		background: #1a1a1a;
 		border-radius: 0.5rem;
 		overflow: hidden;
@@ -197,18 +189,19 @@
 		display: flex;
 		flex-direction: column;
 	}
-	.feed-grid :global(.card.read) {
-		opacity: 0.85;
-		transition: opacity 0.3s;
-	}
-	.feed-grid :global(.card.read:hover) {
-		opacity: 1;
-	}
-	.feed-grid :global(.card.read .meta) {
-		border-top-color: transparent;
-	}
-	.feed-grid :global(.card.read .feed-name) {
-		background: #1e1e1e;
+	.feed-grid :global(.seen-pill) {
+		position: absolute;
+		top: 0.4rem;
+		right: 0.4rem;
+		font-size: 0.55rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		padding: 0.1rem 0.35rem;
+		background: rgba(0, 0, 0, 0.55);
+		color: #888;
+		border-radius: 0.2rem;
+		pointer-events: none;
+		z-index: 2;
 	}
 	.feed-grid.list-view :global(.card) {
 		max-height: none;
