@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-01: Feed viewed tracking
+
+Added viewport-based read tracking to the SvelteKit feed page. Entries are marked as read in Miniflux after being visible in the viewport for 1.5 seconds, using IntersectionObserver with a 0.5 threshold. API calls are batched and debounced (flush every 3s or on page leave).
+
+**Key changes:**
+- Batch endpoint for marking multiple entries as read in one API call.
+- IntersectionObserver action on FeedCard with 1.5s timer, skips already-read entries.
+- Read cards shown at 85% opacity (full on hover), lightbox unaffected.
+- "New" filter chip to show only unread entries.
+- Status badge shows unread count alongside total.
+
+**Files added/modified:**
+- `src/istota/web_app.py` - Added `PUT /api/feeds/entries/batch` endpoint
+- `web/src/lib/api.ts` - Added `updateEntriesStatus()` batch function
+- `web/src/lib/components/FeedCard.svelte` - Added `trackView` action, `onViewed` prop, read class
+- `web/src/routes/feeds/+page.svelte` - Batch queue, "new" filter chip, read card styling, unread count
+- `AGENTS.md` - Updated web interface docs with read tracking details
+
 ## 2026-04-01: Fix context management causing duplicate response delivery (ISSUE-026)
 
 When Claude Code's context management (CM) fires mid-response, the model restarts and produces a new response covering the same ground. Both pre-CM and post-CM text were delivered to the user, and the result text contained both versions concatenated. Jaccard-based deduplication couldn't catch this because the model rephrases when restarting (similarity ~0.04).

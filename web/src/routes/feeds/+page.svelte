@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { getFeeds, type FeedEntry, type FeedsResponse } from '$lib/api';
+	import { onMount, onDestroy } from 'svelte';
+	import { getFeeds, updateEntriesStatus, type FeedEntry, type FeedsResponse } from '$lib/api';
 	import FeedCard from '$lib/components/FeedCard.svelte';
 	import Lightbox from '$lib/components/Lightbox.svelte';
 
@@ -11,11 +11,35 @@
 	// Filters
 	let showImages = $state(true);
 	let showText = $state(true);
+	let showNew = $state(false);
 	let sortBy: 'published' | 'added' = $state('published');
 	let viewMode: 'grid' | 'list' = $state('grid');
 
 	// Lightbox
 	let lightboxSrc = $state('');
+
+	// Batch read queue
+	const pendingReadIds = new Set<number>();
+	let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function flushPending() {
+		if (pendingReadIds.size === 0) return;
+		const ids = [...pendingReadIds];
+		pendingReadIds.clear();
+		flushTimer = null;
+		updateEntriesStatus(ids, 'read').catch(() => {});
+	}
+
+	function handleViewed(id: number) {
+		if (!data) return;
+		const entry = data.entries.find((e) => e.id === id);
+		if (entry && entry.status !== 'read') {
+			entry.status = 'read';
+		}
+		pendingReadIds.add(id);
+		if (flushTimer) clearTimeout(flushTimer);
+		flushTimer = setTimeout(flushPending, 3000);
+	}
 
 	onMount(async () => {
 		try {
@@ -27,12 +51,18 @@
 		}
 	});
 
+	onDestroy(() => {
+		if (flushTimer) clearTimeout(flushTimer);
+		flushPending();
+	});
+
 	let filteredEntries = $derived.by(() => {
 		if (!data) return [];
 		let entries = data.entries.filter((e) => {
 			const isImage = e.images.length > 0;
 			if (isImage && !showImages) return false;
 			if (!isImage && !showText) return false;
+			if (showNew && e.status === 'read') return false;
 			return true;
 		});
 		entries.sort((a, b) => {
@@ -42,6 +72,10 @@
 		});
 		return entries;
 	});
+
+	let unreadCount = $derived(
+		data ? data.entries.filter((e) => e.status !== 'read').length : 0,
+	);
 </script>
 
 {#if loading}
@@ -58,6 +92,10 @@
 			<label class="filter-chip" class:checked={showText}>
 				<input type="checkbox" bind:checked={showText} />
 				<span>text</span>
+			</label>
+			<label class="filter-chip" class:checked={showNew}>
+				<input type="checkbox" bind:checked={showNew} />
+				<span>new</span>
 			</label>
 		</div>
 
@@ -86,11 +124,11 @@
 
 	<div class="feed-grid" class:list-view={viewMode === 'list'}>
 		{#each filteredEntries as entry (entry.id)}
-			<FeedCard {entry} onImageClick={(url) => lightboxSrc = url} />
+			<FeedCard {entry} onImageClick={(url) => lightboxSrc = url} onViewed={handleViewed} />
 		{/each}
 	</div>
 
-	<div class="status-notice">{data.total} items</div>
+	<div class="status-notice">{unreadCount} new / {data.total} items</div>
 
 	<Lightbox src={lightboxSrc} onClose={() => lightboxSrc = ''} />
 {/if}
@@ -158,6 +196,19 @@
 		max-height: 420px;
 		display: flex;
 		flex-direction: column;
+	}
+	.feed-grid :global(.card.read) {
+		opacity: 0.85;
+		transition: opacity 0.3s;
+	}
+	.feed-grid :global(.card.read:hover) {
+		opacity: 1;
+	}
+	.feed-grid :global(.card.read .meta) {
+		border-top-color: transparent;
+	}
+	.feed-grid :global(.card.read .feed-name) {
+		background: #1e1e1e;
 	}
 	.feed-grid.list-view :global(.card) {
 		max-height: none;

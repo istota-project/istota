@@ -345,6 +345,40 @@ async def api_feeds(
     }
 
 
+@api_router.put("/feeds/entries/batch")
+async def api_update_entries_batch(
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+):
+    username = user["username"]
+    creds = _get_miniflux_creds(username)
+    if not creds:
+        return JSONResponse({"error": "no miniflux resource configured"}, status_code=404)
+    base_url, api_key = creds
+
+    body = await request.json()
+    entry_ids = body.get("entry_ids", [])
+    if not entry_ids or not isinstance(entry_ids, list):
+        return JSONResponse({"error": "entry_ids must be a non-empty list"}, status_code=400)
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=base_url.rstrip("/"),
+            headers={"X-Auth-Token": api_key},
+            timeout=30.0,
+        ) as client:
+            resp = await client.put("/v1/entries", json={
+                "entry_ids": entry_ids,
+                "status": body.get("status", "read"),
+            })
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.error("Miniflux API error batch-updating entries: %s", e)
+        return JSONResponse({"error": "miniflux api error"}, status_code=502)
+
+    return {"status": "ok"}
+
+
 @api_router.put("/feeds/entries/{entry_id}")
 async def api_update_entry(
     entry_id: int,
@@ -365,7 +399,7 @@ async def api_update_entry(
             headers={"X-Auth-Token": api_key},
             timeout=30.0,
         ) as client:
-            resp = await client.put(f"/v1/entries", json={
+            resp = await client.put("/v1/entries", json={
                 "entry_ids": [entry_id],
                 "status": body.get("status", "read"),
             })
