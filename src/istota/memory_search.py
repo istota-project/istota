@@ -458,6 +458,7 @@ def _search_bm25(
     limit: int,
     source_types: list[str] | None = None,
     include_user_ids: list[str] | None = None,
+    since: str | None = None,
 ) -> list[SearchResult]:
     """Full-text BM25 search via FTS5."""
     escaped = _escape_fts5_query(query)
@@ -477,6 +478,10 @@ def _search_bm25(
         placeholders = ",".join("?" for _ in source_types)
         sql += f" AND mc.source_type IN ({placeholders})"
         params.extend(source_types)
+
+    if since:
+        sql += " AND mc.created_at >= ?"
+        params.append(since)
 
     sql += " ORDER BY rank LIMIT ?"
     params.append(limit)
@@ -506,6 +511,7 @@ def _search_vec(
     limit: int,
     source_types: list[str] | None = None,
     include_user_ids: list[str] | None = None,
+    since: str | None = None,
 ) -> list[SearchResult]:
     """Vector similarity search via sqlite-vec."""
     if not enable_vec_extension(conn):
@@ -535,6 +541,10 @@ def _search_vec(
         placeholders = ",".join("?" for _ in source_types)
         sql += f" AND mc.source_type IN ({placeholders})"
         params.extend(source_types)
+
+    if since:
+        sql += " AND mc.created_at >= ?"
+        params.append(since)
 
     sql += " LIMIT ?"
     params.append(limit)
@@ -601,6 +611,7 @@ def search(
     source_types: list[str] | None = None,
     rrf_k: int = 60,
     include_user_ids: list[str] | None = None,
+    since: str | None = None,
 ) -> list[SearchResult]:
     """Hybrid search: BM25 + vector with RRF fusion.
 
@@ -609,12 +620,13 @@ def search(
     Args:
         include_user_ids: Additional user_ids to include in search (e.g., channel IDs).
             The primary user_id is always included.
+        since: ISO date string (e.g., "2026-03-25"). Only return chunks created on or after this date.
     """
     # Fetch more from each source for fusion
     fetch_limit = limit * 3
 
-    bm25_results = _search_bm25(conn, user_id, query, fetch_limit, source_types, include_user_ids)
-    vec_results = _search_vec(conn, user_id, query, fetch_limit, source_types, include_user_ids)
+    bm25_results = _search_bm25(conn, user_id, query, fetch_limit, source_types, include_user_ids, since=since)
+    vec_results = _search_vec(conn, user_id, query, fetch_limit, source_types, include_user_ids, since=since)
 
     if vec_results:
         fused = _rrf_fusion(bm25_results, vec_results, k=rrf_k)

@@ -167,8 +167,8 @@
 - [x] Content-hash dedup, user isolation, source type filtering
 - [x] Channel sleep cycle with memory search integration (channel:{token} namespace)
 - [x] `!search` command for synchronous conversation history search (memory index + Talk API, room scoping)
-- [ ] `!search` date filtering (`--since`, `--week`)
-- [ ] `!search` source type filtering (`--memories`)
+- [x] `!search` date filtering (`--since`, `--week`)
+- [x] `!search` source type filtering (`--memories`)
 
 ### Git/GitLab/GitHub Developer Skill ✅
 - [x] Clone repos to persistent bare clones with worktree-based branch isolation
