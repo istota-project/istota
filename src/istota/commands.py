@@ -8,7 +8,8 @@ import shutil
 import sqlite3
 import subprocess
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -836,12 +837,17 @@ def _search_memory(
     user_id: str,
     query: str,
     limit: int = 20,
+    source_types: list[str] | None = None,
+    since: str | None = None,
 ) -> list[dict]:
     """Search the memory index and resolve task/room metadata."""
+    if source_types is None:
+        source_types = ["conversation", "memory_file"]
     try:
         results = memory_search_mod.search(
             conn, user_id, query, limit=limit,
-            source_types=["conversation", "memory_file"],
+            source_types=source_types,
+            since=since,
         )
     except Exception as e:
         logger.debug("Memory search failed: %s", e)
@@ -932,22 +938,60 @@ async def _search_talk_api(
     return out
 
 
-def _parse_search_args(args_str: str) -> tuple[str | None, str]:
-    """Parse search arguments. Returns (scope, query).
+@dataclass
+class SearchArgs:
+    scope: str | None  # None=current room, "all", or a conversation token
+    query: str
+    since: str | None = None  # ISO date, e.g. "2026-03-25"
+    memories_only: bool = False
 
-    scope is None for current room, "all" for --all, or a token for --room <token>.
+
+def _parse_search_args(args_str: str) -> SearchArgs:
+    """Parse search arguments into SearchArgs.
+
+    Flags (order-independent, combinable):
+        --all               Search all rooms
+        --room <token>      Search specific room
+        --since YYYY-MM-DD  Only results on or after date
+        --week              Shorthand for --since 7 days ago
+        --memories          Only search memory files (not conversations)
     """
     parts = args_str.strip().split()
     if not parts:
-        return None, ""
+        return SearchArgs(scope=None, query="")
 
-    if parts[0] == "--all":
-        return "all", " ".join(parts[1:])
-    if parts[0] == "--room" and len(parts) >= 2:
-        room = parts[1].lstrip("#")
-        return room, " ".join(parts[2:])
+    scope: str | None = None
+    since: str | None = None
+    memories_only = False
+    query_parts: list[str] = []
 
-    return None, args_str.strip()
+    i = 0
+    while i < len(parts):
+        token = parts[i]
+        if token == "--all":
+            scope = "all"
+        elif token == "--room" and i + 1 < len(parts):
+            i += 1
+            scope = parts[i].lstrip("#")
+        elif token == "--since" and i + 1 < len(parts):
+            i += 1
+            since = parts[i]
+        elif token == "--week":
+            since = (date.today() - timedelta(days=7)).isoformat()
+        elif token == "--memories":
+            memories_only = True
+        else:
+            query_parts.append(token)
+        i += 1
+
+    query = " ".join(query_parts)
+
+    # If no actual query was found (only flags with no value), treat the whole
+    # input as query text so backward compat is preserved for edge cases
+    if not query and not any(p.startswith("--") for p in parts if p in ("--all", "--week", "--memories")) and since is None:
+        query = args_str.strip()
+
+    return SearchArgs(scope=scope, query=query, since=since, memories_only=memories_only)
 
 
 async def _resolve_room_names(
@@ -1004,14 +1048,27 @@ def _format_search_results(results: list[dict], query: str) -> str:
     return "\n".join(lines).rstrip()
 
 
-@command("search", "Search conversation history: `!search <query>`, `!search --all <query>`")
+@command("search", "Search conversation history: `!search <query>`, `!search --all <query>`, `!search --since DATE <query>`, `!search --memories <query>`")
 async def cmd_search(config, conn, user_id, conversation_token, args, client):
-    scope, query = _parse_search_args(args)
-    if not query:
-        return "Usage: `!search <query>`, `!search --all <query>`, `!search --room <token> <query>`"
+    parsed = _parse_search_args(args)
+    if not parsed.query:
+        return (
+            "Usage: `!search <query>`, `!search --all <query>`, "
+            "`!search --room <token> <query>`\n"
+            "Filters: `--since YYYY-MM-DD`, `--week`, `--memories`"
+        )
 
-    mem_results = _search_memory(config, conn, user_id, query)
-    talk_results = await _search_talk_api(config, query)
+    source_types = ["memory_file"] if parsed.memories_only else None
+    mem_results = _search_memory(
+        config, conn, user_id, parsed.query,
+        source_types=source_types, since=parsed.since,
+    )
+
+    # Skip Talk API when filtering to memories only
+    if parsed.memories_only:
+        talk_results: list[dict] = []
+    else:
+        talk_results = await _search_talk_api(config, parsed.query)
 
     # Merge and deduplicate (memory results take priority)
     seen_task_ids: set[int] = set()
@@ -1029,29 +1086,35 @@ async def cmd_search(config, conn, user_id, conversation_token, args, client):
             continue
         all_results.append(r)
 
+    # Filter Talk results by date when --since is set
+    if parsed.since and talk_results:
+        all_results = [
+            r for r in all_results
+            if not r.get("date") or r["date"] >= parsed.since
+        ]
+
     # Apply room scoping
-    if scope is None:
+    if parsed.scope is None:
         all_results = [
             r for r in all_results
             if r.get("conversation_token") == conversation_token
         ]
-    elif scope != "all":
+    elif parsed.scope != "all":
         all_results = [
             r for r in all_results
-            if r.get("conversation_token") == scope
+            if r.get("conversation_token") == parsed.scope
         ]
 
     all_results = all_results[:8]
 
     if not all_results:
-        return f"No results for \"{query}\"."
+        return f"No results for \"{parsed.query}\"."
 
     # Resolve room display names for all unique tokens
     tokens = {r["conversation_token"] for r in all_results if r.get("conversation_token")}
     room_names = await _resolve_room_names(client, tokens)
 
     # Enrich results with room names and message links
-    base_url = config.nextcloud.url.rstrip("/")
     for r in all_results:
         token = r.get("conversation_token", "")
         r["room_name"] = room_names.get(token, token)
@@ -1061,4 +1124,4 @@ async def cmd_search(config, conn, user_id, conversation_token, args, client):
         if token and msg_id:
             r["talk_link"] = _build_message_link(config, token, msg_id)
 
-    return _format_search_results(all_results, query)
+    return _format_search_results(all_results, parsed.query)

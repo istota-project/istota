@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from istota import db
 from istota.commands import (
     _build_export_metadata, _filter_user_messages, _format_messages_markdown,
-    _format_messages_text, _parse_export_metadata,
+    _format_messages_text, _parse_export_metadata, _parse_search_args,
     cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_more, cmd_search,
     cmd_skills, cmd_status, cmd_stop,
     dispatch, parse_command,
@@ -1839,3 +1839,170 @@ class TestSearchTalkApi:
             results = await _search_talk_api(config, "test")
 
         assert results == []
+
+
+class TestParseSearchArgs:
+    """Test _parse_search_args with new --since, --week, --memories flags."""
+
+    def test_basic_query(self):
+        result = _parse_search_args("hello world")
+        assert result.scope is None
+        assert result.query == "hello world"
+        assert result.since is None
+        assert result.memories_only is False
+
+    def test_all_flag(self):
+        result = _parse_search_args("--all some query")
+        assert result.scope == "all"
+        assert result.query == "some query"
+
+    def test_room_flag(self):
+        result = _parse_search_args("--room abc123 some query")
+        assert result.scope == "abc123"
+        assert result.query == "some query"
+
+    def test_since_flag(self):
+        result = _parse_search_args("--since 2026-03-25 deployment")
+        assert result.since == "2026-03-25"
+        assert result.query == "deployment"
+
+    def test_week_flag(self):
+        from datetime import date, timedelta
+        result = _parse_search_args("--week deployment")
+        expected = (date.today() - timedelta(days=7)).isoformat()
+        assert result.since == expected
+        assert result.query == "deployment"
+
+    def test_memories_flag(self):
+        result = _parse_search_args("--memories something")
+        assert result.memories_only is True
+        assert result.query == "something"
+
+    def test_combined_flags(self):
+        result = _parse_search_args("--all --week --memories deployment")
+        assert result.scope == "all"
+        assert result.since is not None
+        assert result.memories_only is True
+        assert result.query == "deployment"
+
+    def test_since_and_all(self):
+        result = _parse_search_args("--all --since 2026-01-01 query here")
+        assert result.scope == "all"
+        assert result.since == "2026-01-01"
+        assert result.query == "query here"
+
+    def test_empty_returns_empty_query(self):
+        result = _parse_search_args("")
+        assert result.query == ""
+
+    def test_since_without_date_treats_as_query(self):
+        """--since at end with no date should be treated as query text."""
+        result = _parse_search_args("--since")
+        assert result.query == "--since"
+        assert result.since is None
+
+    def test_flags_order_independent(self):
+        r1 = _parse_search_args("--memories --all query")
+        r2 = _parse_search_args("--all --memories query")
+        assert r1.scope == r2.scope == "all"
+        assert r1.memories_only == r2.memories_only is True
+        assert r1.query == r2.query == "query"
+
+
+class TestCmdSearchFiltering:
+    """Test !search with --since, --week, --memories filtering."""
+
+    def _mock_resolve(self):
+        async def _identity_resolve(client, tokens):
+            return {t: t for t in tokens}
+        return patch("istota.commands._resolve_room_names", side_effect=_identity_resolve)
+
+    @pytest.mark.asyncio
+    async def test_memories_only_skips_talk_api(self, make_config, db_path):
+        """--memories should skip Talk API search entirely."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+            self._mock_resolve(),
+        ):
+            mock_mem.return_value = [
+                {"date": "Mar 28", "room": "room1", "summary": "Memory result",
+                 "task_id": None, "conversation_token": "room1", "source_type": "memory_file"},
+            ]
+            mock_talk.return_value = []
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "--all --memories test", client)
+
+        mock_talk.assert_not_called()
+        assert "Memory result" in result
+
+    @pytest.mark.asyncio
+    async def test_memories_only_passes_source_types(self, make_config, db_path):
+        """--memories should pass source_types=["memory_file"] to _search_memory."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+            self._mock_resolve(),
+        ):
+            mock_mem.return_value = []
+            mock_talk.return_value = []
+            client = MagicMock()
+            await cmd_search(config, conn, "alice", "room1", "--all --memories test", client)
+
+        call_kwargs = mock_mem.call_args
+        assert call_kwargs.kwargs.get("source_types") == ["memory_file"]
+
+    @pytest.mark.asyncio
+    async def test_since_passed_to_search_memory(self, make_config, db_path):
+        """--since should be forwarded to _search_memory."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+            self._mock_resolve(),
+        ):
+            mock_mem.return_value = []
+            mock_talk.return_value = []
+            client = MagicMock()
+            await cmd_search(config, conn, "alice", "room1", "--all --since 2026-03-01 test", client)
+
+        call_kwargs = mock_mem.call_args
+        assert call_kwargs.kwargs.get("since") == "2026-03-01"
+
+    @pytest.mark.asyncio
+    async def test_since_filters_talk_results(self, make_config, db_path):
+        """--since should filter out Talk API results older than the date."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+            self._mock_resolve(),
+        ):
+            mock_mem.return_value = []
+            mock_talk.return_value = [
+                {"date": "2026-03-15", "room": "room1", "summary": "Old result",
+                 "conversation_token": "room1"},
+                {"date": "2026-03-25", "room": "room1", "summary": "Recent result",
+                 "conversation_token": "room1"},
+            ]
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "--all --since 2026-03-20 test", client)
+
+        assert "Recent result" in result
+        assert "Old result" not in result
+
+    @pytest.mark.asyncio
+    async def test_updated_usage_string(self, make_config, db_path):
+        """Usage string should mention new flags."""
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            client = MagicMock()
+            result = await cmd_search(config, conn, "alice", "room1", "", client)
+        assert "--since" in result
+        assert "--memories" in result

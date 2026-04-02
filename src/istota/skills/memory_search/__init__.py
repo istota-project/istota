@@ -55,7 +55,10 @@ def cmd_search(args) -> dict:
 
     source_types = [args.source_type] if args.source_type else None
     include_user_ids = _get_channel_user_ids()
-    results = search(conn, user_id, args.query, limit=args.limit, source_types=source_types, include_user_ids=include_user_ids)
+    since = getattr(args, "since", None)
+    if not isinstance(since, str):
+        since = None
+    results = search(conn, user_id, args.query, limit=args.limit, source_types=source_types, include_user_ids=include_user_ids, since=since)
     conn.close()
 
     return {
@@ -162,6 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_p.add_argument("query", help="Search query")
     search_p.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     search_p.add_argument("--source-type", help="Filter by source type")
+    search_p.add_argument("--since", help="Only results on or after this date (YYYY-MM-DD)")
 
     # index command with subcommands
     index_p = sub.add_parser("index", help="Index content")

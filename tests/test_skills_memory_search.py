@@ -42,6 +42,16 @@ class TestBuildParser:
         assert args.limit == 5
         assert args.source_type == "conversation"
 
+    def test_search_with_since(self):
+        parser = build_parser()
+        args = parser.parse_args(["search", "test", "--since", "2026-03-25"])
+        assert args.since == "2026-03-25"
+
+    def test_search_without_since_defaults_none(self):
+        parser = build_parser()
+        args = parser.parse_args(["search", "test"])
+        assert args.since is None
+
     def test_index_conversation_command(self):
         parser = build_parser()
         args = parser.parse_args(["index", "conversation", "42"])
@@ -92,6 +102,28 @@ class TestCmdSearch:
         assert result["status"] == "ok"
         assert result["count"] >= 1
         assert result["results"][0]["content"] == "Python programming guide"
+
+    def test_search_passes_since_to_search(self, tmp_path, monkeypatch):
+        """--since flag should be forwarded to memory_search.search()."""
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.query = "test"
+        args.limit = 10
+        args.source_type = None
+        args.since = "2026-03-25"
+
+        with patch("istota.memory_search.search") as mock_search:
+            mock_search.return_value = []
+            result = cmd_search(args)
+
+        mock_search.assert_called_once()
+        assert mock_search.call_args.kwargs.get("since") == "2026-03-25"
+        assert result["status"] == "ok"
 
     def test_search_empty_results(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
