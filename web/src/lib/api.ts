@@ -60,4 +60,12 @@ export async function updateEntryStatus(id: number, status: string): Promise<voi
 	});
 }
 
+export async function updateEntriesStatus(ids: number[], status: string): Promise<void> {
+	await apiFetch('/feeds/entries/batch', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ entry_ids: ids, status }),
+	});
+}
+
 export { AuthError };

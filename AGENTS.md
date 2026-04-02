@@ -216,9 +216,11 @@ DB tables: `location_pings`, `location_places`, `location_visits`, `location_sta
 ### Authenticated Web Interface
 SvelteKit frontend (`web/`) with FastAPI backend (`web_app.py`). Nextcloud OIDC for authentication. Runs as a separate service (`uvicorn istota.web_app:app`). Session-based auth via `SessionMiddleware`, 7-day cookie.
 
-Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark as read). SvelteKit build served as static files for all other `/istota/*` paths.
+Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark single entry read), `/istota/api/feeds/entries/batch` (batch mark read). SvelteKit build served as static files for all other `/istota/*` paths.
 
-Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design). Dashboard shows available features. Feeds page has masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox. Reads directly from Miniflux API via the backend proxy (no static file generation).
+Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design). Dashboard shows available features. Feeds page has masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox, viewport-based read tracking. Reads directly from Miniflux API via the backend proxy (no static file generation).
+
+Read tracking: IntersectionObserver marks entries as read in Miniflux after 1.5s visible in viewport (half-visible threshold). Batch API calls debounced at 3s intervals. Read cards render at reduced opacity (85%, full on hover). "New" filter chip shows only unread entries. Status badge shows unread/total count.
 
 User verification: `preferred_username` from OIDC must exist in `config.users`. Config: `[web]` section — `enabled`, `port`, `oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `session_secret_key`. Secrets via env vars: `ISTOTA_OIDC_CLIENT_SECRET`, `ISTOTA_WEB_SECRET_KEY`.
 

@@ -1,7 +1,11 @@
 <script lang="ts">
 	import type { FeedEntry } from '$lib/api';
 
-	let { entry, onImageClick }: { entry: FeedEntry; onImageClick: (url: string) => void } = $props();
+	let { entry, onImageClick, onViewed }: {
+		entry: FeedEntry;
+		onImageClick: (url: string) => void;
+		onViewed?: (id: number) => void;
+	} = $props();
 
 	const feedSlug = entry.feed.title.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 	const isImage = entry.images.length > 0;
@@ -16,12 +20,47 @@
 			return '';
 		}
 	}
+
+	function trackView(node: HTMLElement) {
+		if (entry.status === 'read' || !onViewed) return;
+
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		let done = false;
+
+		const observer = new IntersectionObserver(
+			(entries) => {
+				const e = entries[0];
+				if (e.isIntersecting && !done) {
+					timer = setTimeout(() => {
+						done = true;
+						onViewed!(entry.id);
+						observer.disconnect();
+					}, 1500);
+				} else if (timer) {
+					clearTimeout(timer);
+					timer = null;
+				}
+			},
+			{ threshold: 0.5 },
+		);
+
+		observer.observe(node);
+
+		return {
+			destroy() {
+				if (timer) clearTimeout(timer);
+				observer.disconnect();
+			},
+		};
+	}
 </script>
 
 <article
 	class="card {isImage ? 'image' : 'text'} feed-{feedSlug}"
+	class:read={entry.status === 'read'}
 	data-published={entry.published_at}
 	data-added={entry.created_at}
+	use:trackView
 >
 	{#if isImage}
 		{#if entry.images.length > 1}
