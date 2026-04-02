@@ -33,7 +33,13 @@ from .storage import (
     read_dated_memories,
     read_user_memory_v2,
 )
-from .stream_parser import ResultEvent, TextEvent, ToolUseEvent, make_stream_parser
+from .stream_parser import (
+    ContextManagementEvent,
+    ResultEvent,
+    TextEvent,
+    ToolUseEvent,
+    make_stream_parser,
+)
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 
 logger = logging.getLogger("istota.executor")
@@ -125,18 +131,48 @@ _SIMILARITY_THRESHOLD = 0.5
 def _compose_full_result(result_text: str, execution_trace: list[dict]) -> str:
     """Compose full result by recovering substantial text blocks from the trace.
 
-    When the model emits a long response as intermediate text, then does more
-    tool calls, the ResultEvent only captures the final (often terse) text.
-    This function detects that pattern and prepends the substantial earlier
-    text blocks to form the complete response.
+    Handles two distinct scenarios:
 
-    Near-duplicate blocks (>50% similar by word-bigram Jaccard) are
-    deduplicated so the model restating itself doesn't produce repeated output.
+    1. **CM-aware composition (ISSUE-026):** When context management fired
+       mid-response, the result_text may contain both pre-CM and post-CM
+       text concatenated.  We segment the execution trace at CM boundaries
+       and use the last segment with substantial text as the authoritative
+       response.  If no segment is substantial, fall back to result_text
+       (the real response may only exist in CM replay events).
+
+    2. **Terse-result recovery (ISSUE-025):** When the model emits a long
+       response as intermediate text then does more tool calls, the
+       ResultEvent only captures the final terse text.  We detect that
+       pattern and prepend the substantial earlier text blocks.
     """
     if not execution_trace:
         return result_text
 
-    # Collect substantial text blocks from the trace
+    # --- CM-aware composition ---
+    has_cm = any(e.get("type") == "cm_boundary" for e in execution_trace)
+    if has_cm:
+        # Split trace into segments at CM boundaries, then walk backwards
+        # to find the last segment with substantial text.
+        segments: list[list[str]] = [[]]
+        for entry in execution_trace:
+            if entry.get("type") == "cm_boundary":
+                segments.append([])
+            elif entry.get("type") == "text":
+                text = entry["text"].strip()
+                if text:
+                    segments[-1].append(text)
+
+        # Walk segments in reverse to find the last substantial one
+        for seg in reversed(segments):
+            joined = "\n\n".join(seg)
+            if len(joined) >= _SUBSTANTIAL_TEXT_MIN_CHARS:
+                return joined
+
+        # No substantial segment found: the real response is only in
+        # result_text (from CM replay events).  Trust it as-is.
+        return result_text
+
+    # --- Terse-result recovery (no CM) ---
     substantial_blocks = []
     for entry in execution_trace:
         if entry.get("type") == "text":
@@ -2414,6 +2450,9 @@ def _execute_streaming_once(
 
             if isinstance(event, ResultEvent):
                 final_result = event
+            elif isinstance(event, ContextManagementEvent):
+                execution_trace.append({"type": "cm_boundary"})
+                continue  # don't stream CM markers as progress
             elif isinstance(event, ToolUseEvent):
                 actions_descriptions.append(event.description)
                 execution_trace.append({"type": "tool", "text": event.description})
@@ -2479,7 +2518,8 @@ def _execute_streaming_once(
     if result_file.exists():
         output = result_file.read_text()
         if process.returncode == 0:
-            return True, output.strip(), actions_json, trace_json
+            output = _compose_full_result(output.strip(), execution_trace)
+            return True, output, actions_json, trace_json
         return False, output.strip(), None, trace_json
 
     # No ResultEvent and no result file — Claude Code likely errored

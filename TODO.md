@@ -243,6 +243,7 @@
 - [x] Task ID in ack messages and done summaries
 - [x] Execution trace collection and `!more #<task_id>` command for post-hoc inspection
 - [x] Result composition from streaming output (`_compose_full_result` recovers lost text blocks)
+- [x] CM-aware result composition (ISSUE-026): `ContextManagementEvent` markers, trace segmentation, last-substantial-segment selection
 - [ ] Stream-level detection in parser (MalformedOutputEvent)
 - [ ] Model-based result validation gate (Sonnet/Haiku for high-tool-count tasks)
 

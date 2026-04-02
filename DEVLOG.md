@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-01: Fix context management causing duplicate response delivery (ISSUE-026)
+
+When Claude Code's context management (CM) fires mid-response, the model restarts and produces a new response covering the same ground. Both pre-CM and post-CM text were delivered to the user, and the result text contained both versions concatenated. Jaccard-based deduplication couldn't catch this because the model rephrases when restarting (similarity ~0.04).
+
+The fix makes the stream parser emit `ContextManagementEvent` markers instead of silently dropping CM events. The executor records these as `cm_boundary` entries in the execution trace. `_compose_full_result` now segments by CM boundaries and uses the last substantial segment as the authoritative response, falling back to `result_text` when all non-CM text is thin progress notes (real response only in CM replay).
+
+Validated against 13 production JSONL session traces covering high-CM (20-36 events), medium (3-9), and low (1-2) scenarios. Correctly deduplicates in all cases without data loss.
+
+**Key changes:**
+- `stream_parser.py`: Added `ContextManagementEvent` dataclass, CM events emit marker instead of `None`
+- `executor.py`: Handle `ContextManagementEvent` in event loop (record `cm_boundary` in trace, skip progress)
+- `executor.py`: CM-aware `_compose_full_result` — segments trace at boundaries, walks backwards for last substantial segment
+- `executor.py`: Result file fallback now also goes through `_compose_full_result`
+
+**Files modified:**
+- `src/istota/stream_parser.py` — `ContextManagementEvent`, updated `StreamEvent` union
+- `src/istota/executor.py` — CM-aware composition, event loop handler, result file fallback
+- `tests/test_stream_parser.py` — 3 tests updated for `ContextManagementEvent`
+- `tests/test_executor.py` — 8 new tests in `TestComposeFullResultCM`
+- `.claude/rules/executor.md` — Updated docs for CM-aware composition
+- `.gitignore` — Ignore production JSONL session traces in test fixtures
+
 ## 2026-04-01: Fix installer bugs found via Docker-based testing
 
 Tested install.sh in a Debian 13 amd64 Docker container (with systemd) on Mac M2. Found and fixed five bugs in the bootstrap and Ansible role.

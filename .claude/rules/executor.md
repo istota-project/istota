@@ -122,9 +122,12 @@ cmd += ["--output-format", "stream-json", "--verbose"]
 
 ## Stream Parsing (`_execute_streaming_once`)
 - Line-by-line from stdout via `parse_stream_line()`
-- Events: `ResultEvent` → final result, `ToolUseEvent` → progress + execution trace, `TextEvent` → progress + execution trace
+- Events: `ResultEvent` → final result, `ToolUseEvent` → progress + execution trace, `TextEvent` → progress + execution trace, `ContextManagementEvent` → `cm_boundary` marker in trace (not streamed as progress)
 - Cancellation checked on each event via `db.is_task_cancelled()`
-- Result composition: `_compose_full_result()` detects when substantial text blocks (>= 200 chars) were emitted as intermediate text but not captured in the final `ResultEvent`, and prepends them to form the complete response
+- Result composition: `_compose_full_result()` has two modes:
+  1. **CM-aware** (ISSUE-026): when `cm_boundary` entries exist in trace, segments by CM boundaries and uses the last segment with substantial text (>= 200 chars). Falls back to `result_text` if no substantial segment (real response may only exist in CM replay events).
+  2. **Terse-result recovery** (ISSUE-025): when no CM, detects substantial text blocks emitted as intermediate text but missing from `ResultEvent`, and prepends them.
+- Both ResultEvent path and result file fallback go through `_compose_full_result()`
 - Result priority: ResultEvent > result file > stderr > fallback error
 
 ## Key Constants
@@ -145,7 +148,7 @@ cmd += ["--output-format", "stream-json", "--verbose"]
 | Function | Purpose |
 |---|---|
 | `detect_malformed_result(text, tool_count, ...)` | Validates model output for leaked tool-call XML. Strict mode (Talk): any `</parameter>`, `</invoke>`, `<thinking>` outside code fences is flagged. Lenient mode (other targets): only flags when entire output is syntax fragments (< 20 chars of real content). Malformed results are reclassified as failures and retried. |
-| `_compose_full_result(result_text, execution_trace)` | Recovers substantial text blocks (>= 200 chars) emitted as intermediate assistant text but missing from the final `ResultEvent`. Deduplicates via exact substring check and fuzzy matching (word-bigram Jaccard >= 0.5) against result text and previously accepted blocks. |
+| `_compose_full_result(result_text, execution_trace)` | Two modes: (1) CM-aware — segments trace at `cm_boundary` markers, uses last substantial segment (>= 200 chars), falls back to `result_text` if none; (2) Terse-result recovery — recovers substantial text blocks from trace, deduplicates via Jaccard >= 0.5. |
 | `_text_similarity(a, b)` | Word-bigram Jaccard similarity (0.0–1.0). Compares first 2000 chars. Used by `_compose_full_result` for near-duplicate detection. |
 
 ## Other Functions

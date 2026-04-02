@@ -3,6 +3,7 @@
 import json
 
 from istota.stream_parser import (
+    ContextManagementEvent,
     ResultEvent,
     TextEvent,
     ToolUseEvent,
@@ -284,8 +285,8 @@ class TestParseStreamLine:
         assert isinstance(event, ToolUseEvent)
         assert event.description == "📄 Reading data.txt"
 
-    def test_assistant_context_management_replay_skipped(self):
-        """Context management replays should be skipped."""
+    def test_assistant_context_management_emits_marker(self):
+        """Context management events emit a ContextManagementEvent marker."""
         line = self._make_line({
             "type": "assistant",
             "message": {
@@ -297,7 +298,8 @@ class TestParseStreamLine:
                 ],
             },
         })
-        assert parse_stream_line(line) is None
+        event = parse_stream_line(line)
+        assert isinstance(event, ContextManagementEvent)
 
     def test_assistant_completed_event_still_parsed(self):
         """Completed events with stop_reason should still be parsed."""
@@ -502,8 +504,8 @@ class TestMessageDedup:
         assert isinstance(event1, TextEvent)
         assert event2 is None  # deduplicated
 
-    def test_context_management_replay_skipped(self):
-        """Context management replay (new ID, same content) is skipped."""
+    def test_context_management_replay_emits_marker(self):
+        """Context management replay emits ContextManagementEvent, not content."""
         parse = make_stream_parser()
 
         original = self._make_line({
@@ -533,7 +535,7 @@ class TestMessageDedup:
         event1 = parse(original)
         event2 = parse(replay)
         assert isinstance(event1, ToolUseEvent)
-        assert event2 is None  # context_management filter
+        assert isinstance(event2, ContextManagementEvent)
 
     def test_result_events_not_affected_by_dedup(self):
         """ResultEvents don't have message IDs, should always pass through."""
@@ -685,4 +687,4 @@ class TestRealCLIOutput:
                 }],
             },
         })
-        assert parse(replay) is None
+        assert isinstance(parse(replay), ContextManagementEvent)
