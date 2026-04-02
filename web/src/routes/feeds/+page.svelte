@@ -21,9 +21,20 @@
 	let sortBy: 'published' | 'added' = $state('published');
 	let viewMode: 'grid' | 'list' = $state('grid');
 
-	function toggleNew() {
+	async function toggleNew() {
 		showNew = !showNew;
 		if (showNew) {
+			// Fetch all unread from Miniflux and merge into local entries
+			try {
+				const data = await getFeeds({ limit: '500', status: 'unread', order: 'published_at', direction: 'desc' });
+				const seen = new Set(entries.map((e) => e.id));
+				const fresh = data.entries.filter((e) => !seen.has(e.id));
+				if (fresh.length > 0) {
+					entries = [...entries, ...fresh];
+				}
+			} catch {
+				// Fall back to what we have locally
+			}
 			newSnapshot = new Set(entries.filter((e) => e.status !== 'read').map((e) => e.id));
 		} else {
 			newSnapshot = null;
@@ -36,12 +47,14 @@
 	// Batch read queue
 	const pendingReadIds = new Set<number>();
 	let flushTimer: ReturnType<typeof setTimeout> | null = null;
+	let flushMaxTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function flushPending() {
 		if (pendingReadIds.size === 0) return;
 		const ids = [...pendingReadIds];
 		pendingReadIds.clear();
-		flushTimer = null;
+		if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+		if (flushMaxTimer) { clearTimeout(flushMaxTimer); flushMaxTimer = null; }
 		updateEntriesStatus(ids, 'read').catch(() => {});
 	}
 
@@ -53,6 +66,9 @@
 		pendingReadIds.add(id);
 		if (flushTimer) clearTimeout(flushTimer);
 		flushTimer = setTimeout(flushPending, 3000);
+		if (!flushMaxTimer) {
+			flushMaxTimer = setTimeout(flushPending, 10000);
+		}
 	}
 
 	async function loadPage(offset: number) {
@@ -85,7 +101,8 @@
 	}
 
 	// Infinite scroll sentinel
-	let sentinel: HTMLDivElement;
+	let sentinel: HTMLDivElement | undefined = $state();
+	let scrollObserver: IntersectionObserver | null = null;
 
 	onMount(async () => {
 		try {
@@ -101,19 +118,21 @@
 	});
 
 	$effect(() => {
-		if (!sentinel || loading) return;
-		const observer = new IntersectionObserver(
+		if (!sentinel) return;
+		scrollObserver?.disconnect();
+		scrollObserver = new IntersectionObserver(
 			(observed) => {
 				if (observed[0].isIntersecting) loadMore();
 			},
 			{ rootMargin: '600px' },
 		);
-		observer.observe(sentinel);
-		return () => observer.disconnect();
+		scrollObserver.observe(sentinel);
+		return () => scrollObserver?.disconnect();
 	});
 
 	onDestroy(() => {
 		if (flushTimer) clearTimeout(flushTimer);
+		if (flushMaxTimer) clearTimeout(flushMaxTimer);
 		flushPending();
 	});
 
