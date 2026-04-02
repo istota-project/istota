@@ -183,7 +183,7 @@ Each user gets a shared Nextcloud folder:
 
 ```bash
 uv sync --extra all                        # Install all dependencies
-uv run pytest tests/ -v                    # Run tests (~2370 unit tests)
+uv run pytest tests/ -v                    # Run tests (~2760 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
@@ -194,7 +194,7 @@ Most skill dependencies are optional. Install everything with `--extra all`, or 
 uv sync --extra calendar         # caldav + icalendar
 uv sync --extra email            # imap-tools
 uv sync --extra markets          # yfinance
-uv sync --extra transcribe       # pytesseract (OCR)
+uv sync --extra transcribe       # pytesseract + Pillow (OCR)
 uv sync --extra memory-search    # sqlite-vec + sentence-transformers for semantic search
 uv sync --extra whisper          # faster-whisper for audio transcription
 uv sync --extra location         # fastapi + uvicorn + geopy for GPS location receiver

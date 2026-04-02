@@ -321,9 +321,9 @@
 - [x] Feeds page: masonry card grid, image/text filter, sort, grid/list view, lightbox
 - [x] Miniflux API proxy (entries, feeds, mark as read)
 - [x] Ansible deployment (Node.js build, systemd service, nginx proxy)
-- [ ] Mark as read on scroll/click
+- [x] Mark as read on scroll/click
 - [ ] Feed category filtering
-- [ ] Pagination / infinite scroll
+- [x] Pagination / infinite scroll
 - [ ] Task history page
 - [ ] Memory viewer page
 - [ ] Remove static feed page generation (once web UI is primary)

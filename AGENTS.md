@@ -73,6 +73,7 @@ istota/
 │   ├── users/               # Per-user config files (override [users] section)
 │   ├── emissaries.md        # Constitutional principles (global only, not user-overridable)
 │   ├── persona.md           # Default personality (user workspace PERSONA.md overrides)
+│   ├── system-prompt.md     # Custom Claude CLI system prompt (used when custom_system_prompt = true)
 │   ├── guidelines/          # Channel-specific formatting (talk.md, email.md, briefing.md)
 │   └── skills/              # Operator override directory (empty by default)
 ├── deploy/
@@ -94,7 +95,7 @@ istota/
 │   ├── svelte.config.js     # adapter-static, base path /istota
 │   └── vite.config.ts       # Dev proxy to FastAPI
 ├── scripts/                 # setup.sh, scheduler.sh
-├── tests/                   # pytest + pytest-asyncio (~2750 tests, 54 files)
+├── tests/                   # pytest + pytest-asyncio (~2760 tests, 56 files)
 ├── schema.sql
 └── pyproject.toml
 ```
