@@ -16,14 +16,14 @@
 	// Filters
 	let showImages = $state(true);
 	let showText = $state(true);
-	let showNew = $state(false);
-	let newSnapshot: Set<number> | null = null;
+	let showUnseen = $state(false);
+	let unseenSnapshot: Set<number> | null = null;
 	let sortBy: 'published' | 'added' = $state('published');
 	let viewMode: 'grid' | 'list' = $state('grid');
 
-	async function toggleNew() {
-		showNew = !showNew;
-		if (showNew) {
+	async function toggleUnseen() {
+		showUnseen = !showUnseen;
+		if (showUnseen) {
 			// Fetch all unread from Miniflux and merge into local entries
 			try {
 				const data = await getFeeds({ limit: '500', status: 'unread', order: 'published_at', direction: 'desc' });
@@ -35,9 +35,14 @@
 			} catch {
 				// Fall back to what we have locally
 			}
-			newSnapshot = new Set(entries.filter((e) => e.status !== 'read').map((e) => e.id));
+			const unseen = new Set(entries.filter((e) => e.status !== 'read').map((e) => e.id));
+			if (unseen.size === 0) {
+				showUnseen = false;
+				return;
+			}
+			unseenSnapshot = unseen;
 		} else {
-			newSnapshot = null;
+			unseenSnapshot = null;
 		}
 	}
 
@@ -141,7 +146,7 @@
 			const isImage = e.images.length > 0;
 			if (isImage && !showImages) return false;
 			if (!isImage && !showText) return false;
-			if (showNew && newSnapshot && !newSnapshot.has(e.id)) return false;
+			if (showUnseen && unseenSnapshot && !unseenSnapshot.has(e.id)) return false;
 			return true;
 		});
 		filtered.sort((a, b) => {
@@ -168,9 +173,9 @@
 				<input type="checkbox" bind:checked={showText} />
 				<span>text</span>
 			</label>
-			<label class="filter-chip" class:checked={showNew}>
-				<input type="checkbox" checked={showNew} onchange={toggleNew} />
-				<span>new</span>
+			<label class="filter-chip" class:checked={showUnseen}>
+				<input type="checkbox" checked={showUnseen} onchange={toggleUnseen} />
+				<span>unseen</span>
 			</label>
 		</div>
 
