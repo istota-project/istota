@@ -299,6 +299,7 @@ def _map_entry(entry: dict) -> dict:
 async def api_feeds(
     user: dict = Depends(_require_api_auth),
     limit: int = Query(default=500, le=1000),
+    offset: int = Query(default=0, ge=0),
     order: str = Query(default="published_at"),
     direction: str = Query(default="desc"),
     status: str = Query(default=""),
@@ -310,7 +311,7 @@ async def api_feeds(
         return JSONResponse({"error": "no miniflux resource configured"}, status_code=404)
     base_url, api_key = creds
 
-    params: dict = {"limit": limit, "order": order, "direction": direction}
+    params: dict = {"limit": limit, "offset": offset, "order": order, "direction": direction}
     if status:
         params["status"] = status
     if category_id:
