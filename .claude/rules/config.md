@@ -143,6 +143,7 @@ markets: dict = {}           news: dict = {}              headlines: dict = {}
 db_path: Path = Path("data/istota.db")
 bot_name: str = "Istota"            emissaries_enabled: bool = True
 model: str = ""                     # Claude model override (empty = CLI default)
+custom_system_prompt: bool = False  # Use config/system-prompt.md instead of CC default
 nextcloud: NextcloudConfig          talk: TalkConfig
 email: EmailConfig                  conversation: ConversationConfig
 scheduler: SchedulerConfig          browser: BrowserConfig

@@ -27,7 +27,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 10. **Build prompt**: includes `confirmation_context` when set
 11. **Dry run check**: return prompt text
 12. **Write prompt file**: `task_{id}_prompt.txt`
-13. **Build command**: `--allowedTools` whitelist, optional `--model` override
+13. **Build command**: `--allowedTools` whitelist, optional `--model` override, optional `--system-prompt-file` (when `custom_system_prompt` enabled)
 14. **Build env**: see env var table below; credential vars split via `_split_credential_env()` when proxy enabled
 15. **Execute**: streaming or simple
 16. **Update fingerprint**: on success, interactive only
@@ -106,6 +106,8 @@ def build_prompt(
 ## Popen Command
 ```python
 cmd = ["claude", "-p", prompt, "--allowedTools", "Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+# If custom system prompt enabled and file exists:
+cmd += ["--system-prompt-file", str(config.skills_dir.parent / "system-prompt.md")]
 # If streaming (on_progress provided):
 cmd += ["--output-format", "stream-json", "--verbose"]
 ```

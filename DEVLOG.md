@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-02: Custom system prompt option
+
+Added `custom_system_prompt` config toggle to replace Claude Code's default system prompt with a minimal one focused on tool usage and working practices. The default system prompt includes identity, interactive modes, git/PR workflows, IDE integration, agent/subagent, auto-memory, and other instructions that are irrelevant or conflicting for Istota's headless `-p` mode.
+
+When enabled, the executor passes `--system-prompt-file` pointing to `config/system-prompt.md`, a ~2,600 token prompt covering tool usage best practices (Read vs cat, Edit vs sed, Grep vs grep, Glob vs find), Bash hygiene, Edit tool guidance, output efficiency, and security basics. Toggle on/off by setting the config flag — Claude Code's default prompt is used when disabled.
+
+Also fixed missing Pillow dependency in the `transcribe` extras group and added `pytest.importorskip` guard so transcribe tests skip gracefully when the extra isn't installed.
+
+**Key changes:**
+- `config/system-prompt.md` — minimal system prompt for headless Claude Code usage
+- `custom_system_prompt` config field (bool, default false) with Ansible support
+- Executor conditionally passes `--system-prompt-file` to Claude CLI
+- Pillow added to `transcribe` extras, test file uses `importorskip`
+
+**Files added/modified:**
+- `config/system-prompt.md` — new custom system prompt file
+- `src/istota/config.py` — added `custom_system_prompt` field and TOML parsing
+- `src/istota/executor.py` — conditional `--system-prompt-file` flag in command builder
+- `config/config.example.toml` — documented new option
+- `deploy/ansible/defaults/main.yml` — `istota_custom_system_prompt` variable
+- `deploy/ansible/templates/config.toml.j2` — template for new config field
+- `pyproject.toml` — added Pillow to transcribe extras
+- `tests/test_config.py` — 3 new tests for config default and loading
+- `tests/test_executor_streaming.py` — 3 new tests for command flag behavior
+- `tests/test_skills_transcribe.py` — `importorskip` guard for PIL
+
 ## 2026-04-01: Feed viewed tracking
 
 Added viewport-based read tracking to the SvelteKit feed page. Entries are marked as read in Miniflux after being visible in the viewport for 1.5 seconds, using IntersectionObserver with a 0.5 threshold. API calls are batched and debounced (flush every 3s or on page leave).
