@@ -34,6 +34,7 @@ An existing script might already do what's needed, or could be extended.
 - Type hints, docstrings, `argparse` for CLI arguments
 - Standalone — import only stdlib and packages available in istota's uv environment
 - Keep it simple. No unnecessary abstractions
+- **State persistence**: use `istota-skill kv set/get` for any runtime state (counters, last-run timestamps, seen items, etc.) — not JSON files
 
 ### After Creating or Updating
 
