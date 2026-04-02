@@ -941,6 +941,63 @@ def _process_deferred_sent_emails(
     return count
 
 
+def _process_deferred_kv_ops(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> int:
+    """Process deferred KV store operations from JSON file.
+
+    When Claude runs `istota-skill kv set/delete` inside the sandbox, the skill
+    CLI writes operations to a deferred file. The scheduler processes them here.
+
+    Returns count of operations processed.
+    """
+    path = user_temp_dir / f"task_{task.id}_kv_ops.json"
+    if not path.exists():
+        return 0
+
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Bad deferred kv_ops file for task %d: %s", task.id, e)
+        path.unlink(missing_ok=True)
+        return 0
+
+    if not isinstance(data, list):
+        logger.warning("Deferred kv_ops for task %d is not a list", task.id)
+        path.unlink(missing_ok=True)
+        return 0
+
+    count = 0
+    with db.get_db(config.db_path) as conn:
+        for entry in data:
+            op = entry.get("op")
+            namespace = entry.get("namespace", "")
+            key = entry.get("key", "")
+            if not namespace or not key:
+                continue
+            try:
+                if op == "set":
+                    value = entry.get("value", "")
+                    db.kv_set(conn, task.user_id, namespace, key, value)
+                    count += 1
+                elif op == "delete":
+                    db.kv_delete(conn, task.user_id, namespace, key)
+                    count += 1
+                else:
+                    logger.warning(
+                        "Unknown KV op %r in deferred file for task %d", op, task.id,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Failed to process KV op for task %d: %s", task.id, e,
+                )
+
+    if count:
+        logger.info("Processed %d deferred KV ops for task %d", count, task.id)
+    path.unlink(missing_ok=True)
+    return count
+
+
 def _warn_orphaned_email_output(task: db.Task, user_temp_dir: Path) -> None:
     """Warn and clean up deferred email output files that won't be delivered.
 
@@ -1331,6 +1388,7 @@ def process_one_task(
         _process_deferred_subtasks(config, task, user_temp_dir)
         _process_deferred_tracking(config, task, user_temp_dir)
         _process_deferred_sent_emails(config, task, user_temp_dir)
+        _process_deferred_kv_ops(config, task, user_temp_dir)
         _warn_orphaned_email_output(task, user_temp_dir)
 
     # Save briefing digest for deduplication in the next run

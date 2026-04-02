@@ -11,7 +11,7 @@ from istota.skills.briefing import (
     _fetch_todo_items,
     _fetch_calendar_events,
     _fetch_headlines,
-    _get_briefing_digest_path,
+    _briefing_digest_key,
     load_previous_briefing_digest,
     save_briefing_digest,
     build_briefing_prompt,
@@ -925,33 +925,26 @@ class TestFinvizInBriefingPrompt:
 
 
 class TestBriefingDigest:
-    def _make_config(self, tmp_path):
+    def _make_config(self, db_path):
         cfg = Config()
-        cfg.nextcloud = NextcloudConfig(url="https://nc.example.com", username="bot", app_password="pw")
-        cfg.nextcloud_mount_path = tmp_path / "mount"
-        cfg.nextcloud_mount_path.mkdir()
+        cfg.db_path = db_path
         return cfg
 
-    def test_digest_path_with_channel(self):
-        cfg = Config()
-        path = _get_briefing_digest_path("alice", cfg, conversation_token="room1")
-        assert path.endswith("Channels/room1/.briefing_digest.md")
+    def test_digest_key_with_channel(self):
+        key = _briefing_digest_key("room1")
+        assert key == "digest:room1"
 
-    def test_digest_path_without_channel(self):
-        cfg = Config()
-        path = _get_briefing_digest_path("alice", cfg)
-        assert "alice" in path
-        assert "/data/.briefing_digest.md" in path
+    def test_digest_key_without_channel(self):
+        key = _briefing_digest_key()
+        assert key == "digest:default"
 
-    def test_load_returns_none_when_no_file(self, tmp_path):
-        cfg = self._make_config(tmp_path)
+    def test_load_returns_none_when_no_entry(self, db_path):
+        cfg = self._make_config(db_path)
         result = load_previous_briefing_digest("alice", cfg, conversation_token="room1")
         assert result is None
 
-    def test_save_and_load_roundtrip(self, tmp_path):
-        cfg = self._make_config(tmp_path)
-        channel_dir = cfg.nextcloud_mount_path / "Channels" / "room1"
-        channel_dir.mkdir(parents=True)
+    def test_save_and_load_roundtrip(self, db_path):
+        cfg = self._make_config(db_path)
 
         save_briefing_digest("alice", cfg, "📰 NEWS\n- Story A\n- Story B", conversation_token="room1")
 
@@ -961,10 +954,8 @@ class TestBriefingDigest:
         assert "Story B" in result
         assert "Generated:" in result
 
-    def test_save_overwrites_previous(self, tmp_path):
-        cfg = self._make_config(tmp_path)
-        channel_dir = cfg.nextcloud_mount_path / "Channels" / "room1"
-        channel_dir.mkdir(parents=True)
+    def test_save_overwrites_previous(self, db_path):
+        cfg = self._make_config(db_path)
 
         save_briefing_digest("alice", cfg, "📰 First briefing", conversation_token="room1")
         save_briefing_digest("alice", cfg, "📰 Second briefing", conversation_token="room1")
