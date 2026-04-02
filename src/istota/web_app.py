@@ -287,6 +287,7 @@ def _map_entry(entry: dict) -> dict:
         "feed": {
             "id": entry.get("feed", {}).get("id", 0),
             "title": entry.get("feed", {}).get("title", ""),
+            "site_url": entry.get("feed", {}).get("site_url", ""),
         },
         "status": entry.get("status", ""),
         "published_at": entry.get("published_at", ""),

@@ -11,6 +11,7 @@
 	const isImage = entry.images.length > 0;
 	const maxGrid = 4;
 	const hiddenCount = Math.max(0, entry.images.length - maxGrid);
+	const permalink = entry.url || entry.feed.site_url || '';
 
 	function formatDate(iso: string): string {
 		try {
@@ -35,7 +36,7 @@
 						done = true;
 						onViewed!(entry.id);
 						observer.disconnect();
-					}, 1500);
+					}, 3000);
 				} else if (timer) {
 					clearTimeout(timer);
 					timer = null;
@@ -57,11 +58,13 @@
 
 <article
 	class="card {isImage ? 'image' : 'text'} feed-{feedSlug}"
-	class:read={entry.status === 'read'}
 	data-published={entry.published_at}
 	data-added={entry.created_at}
 	use:trackView
 >
+	{#if entry.status === 'read'}
+		<span class="seen-pill">SEEN</span>
+	{/if}
 	{#if isImage}
 		{#if entry.images.length > 1}
 			<div class="card-gallery">
@@ -85,7 +88,7 @@
 		{/if}
 		{#if entry.title}
 			<div class="card-title-overlay">
-				{#if entry.url}<a href={entry.url}>{entry.title}</a>{:else}{entry.title}{/if}
+				{#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}
 			</div>
 		{/if}
 		{#if entry.content}
@@ -94,7 +97,7 @@
 	{:else}
 		<div class="card-body">
 			{#if entry.title}
-				<h3>{#if entry.url}<a href={entry.url}>{entry.title}</a>{:else}{entry.title}{/if}</h3>
+				<h3>{#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}</h3>
 			{/if}
 			{#if entry.content}
 				<div class="excerpt">{@html entry.content}</div>
@@ -104,12 +107,14 @@
 	<div class="meta">
 		<span class="feed-name">{entry.feed.title}</span>
 		{#if entry.published_at}
-			{#if entry.url}
-				<a href={entry.url} class="meta-link">
+			{#if permalink}
+				<a href={permalink} class="meta-link">
 					<time datetime={entry.published_at}>{formatDate(entry.published_at)}</time>
 				</a>
 			{:else}
-				<time datetime={entry.published_at}>{formatDate(entry.published_at)}</time>
+				<span class="meta-link">
+					<time datetime={entry.published_at}>{formatDate(entry.published_at)}</time>
+				</span>
 			{/if}
 		{/if}
 	</div>
