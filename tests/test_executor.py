@@ -3178,3 +3178,134 @@ class TestComposeFullResult:
         result = _compose_full_result("Done.", trace)
         assert block1 in result
         assert block2 in result
+
+
+class TestComposeFullResultCM:
+    """Test CM-aware result composition (ISSUE-026)."""
+
+    def _substantial_text(self, variant="a"):
+        if variant == "a":
+            return ("Here are the top findings from the search. " * 10).strip()
+        return ("The market data shows a clear upward trend. " * 10).strip()
+
+    def test_cm_boundary_uses_last_substantial_segment(self):
+        """When CM fires between two substantial text blocks, use the last one."""
+        pre_cm = self._substantial_text("a")
+        post_cm = self._substantial_text("b")
+        trace = [
+            {"type": "text", "text": pre_cm},
+            {"type": "cm_boundary"},
+            {"type": "text", "text": post_cm},
+        ]
+        # result_text would contain both (as Claude Code concatenates them)
+        doubled_result = f"{pre_cm}\n\n{post_cm}"
+        result = _compose_full_result(doubled_result, trace)
+        assert result == post_cm
+
+    def test_cm_boundary_with_thin_last_segment_trusts_result(self):
+        """When last segment is thin progress text, trust result_text."""
+        trace = [
+            {"type": "text", "text": "Let me check."},
+            {"type": "cm_boundary"},
+            {"type": "tool", "text": "Read file"},
+            {"type": "cm_boundary"},
+            {"type": "text", "text": "Now let me write the patch."},
+        ]
+        good_result = self._substantial_text("a")
+        result = _compose_full_result(good_result, trace)
+        assert result == good_result
+
+    def test_cm_boundary_with_tools_after_last_cm(self):
+        """When last segment has only tools (no text), trust result_text."""
+        real_response = self._substantial_text("a")
+        trace = [
+            {"type": "text", "text": real_response},
+            {"type": "cm_boundary"},
+            {"type": "tool", "text": "Write file"},
+            {"type": "tool", "text": "Edit config"},
+        ]
+        result = _compose_full_result(real_response, trace)
+        assert result == real_response
+
+    def test_cm_boundary_empty_last_segment_trusts_result(self):
+        """When CM is the very last entry, last segment is empty."""
+        real_response = self._substantial_text("a")
+        trace = [
+            {"type": "text", "text": real_response},
+            {"type": "cm_boundary"},
+        ]
+        result = _compose_full_result(real_response, trace)
+        assert result == real_response
+
+    def test_no_cm_boundary_falls_through_to_existing_logic(self):
+        """Without CM boundaries, existing terse-result recovery applies."""
+        findings = self._substantial_text("a")
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result("See above.", trace)
+        assert findings in result
+
+    def test_multiple_cm_boundaries_uses_last_substantial(self):
+        """Multiple CM firings: use last segment with substantial text."""
+        block1 = self._substantial_text("a")
+        block2 = self._substantial_text("b")
+        trace = [
+            {"type": "text", "text": block1},
+            {"type": "cm_boundary"},
+            {"type": "text", "text": "Let me rethink."},
+            {"type": "cm_boundary"},
+            {"type": "text", "text": block2},
+            {"type": "cm_boundary"},
+        ]
+        doubled = f"{block1}\n\n{block2}"
+        result = _compose_full_result(doubled, trace)
+        # Last substantial segment is before the final CM boundary
+        assert result == block2
+
+    def test_cm_with_multiple_texts_in_last_segment(self):
+        """Last segment has multiple text blocks — join them all."""
+        block1 = self._substantial_text("a")
+        block2 = self._substantial_text("b")
+        trace = [
+            {"type": "text", "text": "Old analysis."},
+            {"type": "cm_boundary"},
+            {"type": "text", "text": block1},
+            {"type": "tool", "text": "Read file"},
+            {"type": "text", "text": block2},
+        ]
+        result = _compose_full_result("Doubled.", trace)
+        assert block1 in result
+        assert block2 in result
+        assert result == f"{block1}\n\n{block2}"
+
+    def test_cm_real_pattern_pre_and_post_cm_responses(self):
+        """Real pattern: model gives answer, CM fires, model restates."""
+        pre_cm = (
+            "Found it. The issue is clear from the trace data. "
+            "The current fix handles two things correctly: "
+            "filtering CM replay events and deduplicating block IDs. "
+            "But it misses the case where CM fires between two "
+            "legitimate text events with different message IDs. "
+            "Both get through because neither has context_management set."
+        )
+        post_cm = (
+            "Found the issue. Let me trace through what happened. "
+            "The trace has two text entries — the analysis and the "
+            "conclusion. The result text from Claude Code contains "
+            "everything concatenated. The compose function needs "
+            "CM-aware segmentation to pick the right version."
+        )
+        trace = [
+            {"type": "tool", "text": "Read stream_parser.py"},
+            {"type": "tool", "text": "Read executor.py"},
+            {"type": "text", "text": pre_cm},
+            {"type": "cm_boundary"},
+            {"type": "text", "text": post_cm},
+            {"type": "cm_boundary"},
+        ]
+        doubled_result = f"{post_cm}\n\n{pre_cm}"
+        result = _compose_full_result(doubled_result, trace)
+        assert result == post_cm
+        assert pre_cm not in result

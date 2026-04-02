@@ -25,7 +25,13 @@ class ResultEvent:
     text: str
 
 
-StreamEvent = ToolUseEvent | TextEvent | ResultEvent
+@dataclass
+class ContextManagementEvent:
+    """Marker: context management fired, conversation was compacted."""
+    pass
+
+
+StreamEvent = ToolUseEvent | TextEvent | ResultEvent | ContextManagementEvent
 
 
 _TOOL_EMOJI = {
@@ -135,10 +141,11 @@ def parse_stream_line(
     if event_type == "assistant":
         message = data.get("message", {})
 
-        # Skip context-management replay events — these re-emit the most
-        # recent assistant response with a new message ID (ISSUE-024)
+        # Context-management events re-emit the most recent assistant
+        # response with a new message ID (ISSUE-024).  Emit a marker so
+        # downstream code can segment by CM boundaries (ISSUE-026).
         if message.get("context_management") is not None:
-            return None
+            return ContextManagementEvent()
 
         content_blocks = message.get("content", [])
 
