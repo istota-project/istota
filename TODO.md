@@ -336,7 +336,7 @@
 
 ### Script State & Data Access
 - [x] Key-value store (`istota_kv` table) with CLI for script runtime state
-- [ ] Migrate existing scripts to use KV store for state
+- [x] Migrate existing scripts to use KV store for state
 - [ ] Bulk data read/write commands for larger JSON blobs
 
 ### Skills ✅
