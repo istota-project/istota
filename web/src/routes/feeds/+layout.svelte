@@ -56,17 +56,17 @@
 		<h1>Feeds</h1>
 		<div class="feed-nav">
 			<div class="filter-group">
-				<Chip checked={si} onclick={() => showImages.update(v => !v)}>images</Chip>
-				<Chip checked={st} onclick={() => showText.update(v => !v)}>text</Chip>
-				<Chip checked={su} onclick={() => showUnseen.update(v => !v)}>unseen</Chip>
+				<Chip checked={si} onclick={() => showImages.update(v => !v)}>Images</Chip>
+				<Chip checked={st} onclick={() => showText.update(v => !v)}>Text</Chip>
+				<Chip checked={su} onclick={() => showUnseen.update(v => !v)}>Unseen</Chip>
 			</div>
 			<div class="filter-group">
-				<Chip checked={sb === 'published'} onclick={() => sortBy.set('published')}>published</Chip>
-				<Chip checked={sb === 'added'} onclick={() => sortBy.set('added')}>added</Chip>
+				<Chip checked={sb === 'published'} onclick={() => sortBy.set('published')}>Published</Chip>
+				<Chip checked={sb === 'added'} onclick={() => sortBy.set('added')}>Added</Chip>
 			</div>
 			<div class="filter-group">
-				<Chip checked={vm === 'grid'} onclick={() => viewMode.set('grid')}>grid</Chip>
-				<Chip checked={vm === 'list'} onclick={() => viewMode.set('list')}>list</Chip>
+				<Chip checked={vm === 'grid'} onclick={() => viewMode.set('grid')}>Grid</Chip>
+				<Chip checked={vm === 'list'} onclick={() => viewMode.set('list')}>List</Chip>
 			</div>
 		</div>
 		<button class="sidebar-toggle" onclick={() => sidebarOpen = !sidebarOpen} type="button">
