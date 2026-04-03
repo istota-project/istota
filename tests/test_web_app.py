@@ -487,7 +487,7 @@ class TestMoneymanProxy:
         cookies = await _login_as(mm_client, "alice", "Alice")
         mock_http = _mock_moneyman_response({
             "status": "ok",
-            "instances": [{"ledger": "personal", "port": 5000, "prefix": "/istota/fava/personal/"}],
+            "instances": [{"ledger": "personal", "prefix": "/istota/fava/alice/personal"}],
         })
 
         with patch("istota.web_app.httpx.AsyncClient", return_value=mock_http):
