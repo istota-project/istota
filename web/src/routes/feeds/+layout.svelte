@@ -3,6 +3,7 @@
 	import { getFeeds, type Feed } from '$lib/api';
 	import { feedsList, selectedFeedId, showImages, showText, showUnseen, sortBy, viewMode } from '$lib/stores/feeds';
 	import Chip from '$lib/components/ui/Chip.svelte';
+	import { LayoutGrid, List } from 'lucide-svelte';
 
 	let { children } = $props();
 
@@ -64,9 +65,13 @@
 				<Chip checked={sb === 'published'} onclick={() => sortBy.set('published')}>Published</Chip>
 				<Chip checked={sb === 'added'} onclick={() => sortBy.set('added')}>Added</Chip>
 			</div>
-			<div class="filter-group">
-				<Chip checked={vm === 'grid'} onclick={() => viewMode.set('grid')}>Grid</Chip>
-				<Chip checked={vm === 'list'} onclick={() => viewMode.set('list')}>List</Chip>
+			<div class="filter-group view-toggle">
+				<Chip icon checked={vm === 'grid'} onclick={() => viewMode.set('grid')} title="Grid view">
+					<LayoutGrid size={14} />
+				</Chip>
+				<Chip icon checked={vm === 'list'} onclick={() => viewMode.set('list')} title="List view">
+					<List size={14} />
+				</Chip>
 			</div>
 		</div>
 		<button class="sidebar-toggle" onclick={() => sidebarOpen = !sidebarOpen} type="button">
@@ -140,6 +145,10 @@
 	.filter-group {
 		display: flex;
 		gap: 0.25rem;
+	}
+
+	.filter-group.view-toggle {
+		margin-left: auto;
 	}
 
 	.sidebar-toggle {

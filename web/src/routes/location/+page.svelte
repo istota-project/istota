@@ -19,7 +19,7 @@
 	import DayStats from '$lib/components/location/DayStats.svelte';
 	import TripList from '$lib/components/location/TripList.svelte';
 
-	let current: CurrentLocation | null = $state(null);
+	let current = $state<CurrentLocation | null>(null);
 	let pings: LocationPing[] = $state([]);
 	let summary: DaySummary | null = $state(null);
 	let trips: Trip[] = $state([]);
