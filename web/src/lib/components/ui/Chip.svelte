@@ -1,19 +1,26 @@
 <script lang="ts">
+	import type { Snippet } from 'svelte';
+
 	interface Props {
 		checked?: boolean;
+		icon?: boolean;
 		onclick?: () => void;
+		children?: Snippet;
+		title?: string;
 	}
 
-	let { checked = false, onclick, ...rest }: Props = $props();
+	let { checked = false, icon = false, onclick, children, title, ...rest }: Props = $props();
 </script>
 
 <button
 	class="chip"
 	class:checked
+	class:icon
 	{onclick}
+	{title}
 	type="button"
 	{...rest}
-><slot /></button>
+>{#if children}{@render children()}{/if}</button>
 
 <style>
 	.chip {
@@ -31,6 +38,10 @@
 		background: var(--surface-card);
 	}
 
+	.chip.icon {
+		padding: 0.3rem;
+	}
+
 	.chip:hover {
 		color: var(--text-primary);
 		background: var(--surface-raised);
@@ -43,5 +54,6 @@
 
 	@media (max-width: 640px) {
 		.chip { padding: 0.2rem 0.45rem; }
+		.chip.icon { padding: 0.25rem; }
 	}
 </style>
