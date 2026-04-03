@@ -487,7 +487,8 @@ class TestMoneymanProxy:
         cookies = await _login_as(mm_client, "alice", "Alice")
         mock_http = _mock_moneyman_response({
             "status": "ok",
-            "instances": [{"ledger": "personal", "prefix": "/istota/fava/alice/personal"}],
+            "prefix": "/istota/fava/alice",
+            "ledgers": ["personal"],
         })
 
         with patch("istota.web_app.httpx.AsyncClient", return_value=mock_http):
@@ -495,8 +496,8 @@ class TestMoneymanProxy:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data["instances"]) == 1
-        assert data["instances"][0]["ledger"] == "personal"
+        assert data["prefix"] == "/istota/fava/alice"
+        assert data["ledgers"] == ["personal"]
 
     async def test_ledgers_returns_404_without_moneyman(self, mm_client, moneyman_app):
         cookies = await _login_as(mm_client, "bob", "Bob")
