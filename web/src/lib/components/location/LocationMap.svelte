@@ -55,9 +55,9 @@
 	// Gap detection: only break when both time and distance suggest a real location jump.
 	// Short time gaps are always contiguous (normal driving can be 1km+ between pings).
 	// Long time gaps need significant distance to count as a real move.
-	const GAP_TIME_MIN_S = 300;     // 5 min — below this, always contiguous
-	const GAP_DIST_MIN_M = 500;     // must also be this far apart
-	const GAP_SPEED_MAX_MS = 55;    // ~200 km/h — above this, clearly a teleport
+	const GAP_TIME_MIN_S = 600;     // 10 min — below this, always contiguous
+	const GAP_DIST_MIN_M = 1000;    // must also be this far apart
+	const GAP_SPEED_MAX_MS = 85;    // ~300 km/h — above this, clearly a teleport
 
 	function isGap(dist: number, timeDeltaS: number): boolean {
 		if (timeDeltaS <= 0) return false;
