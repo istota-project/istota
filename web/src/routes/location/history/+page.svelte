@@ -28,10 +28,8 @@
 	let error = $state('');
 	let mapComponent: LocationMap | undefined = $state();
 
-	let dateStr = $state('');
 	let startStr = $state('');
 	let endStr = $state('');
-	let viewMode: 'day' | 'range' = $state('day');
 	let showHeat = $state(loadSetting('location.showHeat', false));
 	let panelOpen = $state(false);
 	let activityFilter: string = $state('all');
@@ -45,6 +43,7 @@
 	let places = $derived($locationPlaces);
 
 	const today = new Date().toISOString().slice(0, 10);
+	let isSingleDay = $derived(startStr === endStr);
 
 	function yesterday(): string {
 		const d = new Date();
@@ -65,31 +64,16 @@
 
 	function readUrlParams() {
 		const params = page.url.searchParams;
-		const d = params.get('date');
-		const s = params.get('start');
-		const e = params.get('end');
-
-		if (d) {
-			dateStr = d;
-			viewMode = 'day';
-		} else if (s && e) {
-			startStr = s;
-			endStr = e;
-			viewMode = 'range';
-		} else {
-			dateStr = today;
-			viewMode = 'day';
-		}
+		const s = params.get('start') || params.get('date');
+		const e = params.get('end') || params.get('date');
+		startStr = s || today;
+		endStr = e || today;
 	}
 
 	function updateUrl() {
 		const params = new URLSearchParams();
-		if (viewMode === 'day' && dateStr) {
-			params.set('date', dateStr);
-		} else if (viewMode === 'range' && startStr && endStr) {
-			params.set('start', startStr);
-			params.set('end', endStr);
-		}
+		if (startStr) params.set('start', startStr);
+		if (endStr) params.set('end', endStr);
 		goto(`${base}/location/history?${params.toString()}`, { replaceState: true, noScroll: true });
 	}
 
@@ -101,17 +85,18 @@
 		trips = [];
 
 		try {
-			if (viewMode === 'day' && dateStr) {
+			if (!startStr || !endStr) return;
+			if (isSingleDay) {
 				const [p, s, t] = await Promise.all([
-					getLocationPings({ date: dateStr }),
-					getDaySummary(dateStr),
-					getTrips(dateStr),
+					getLocationPings({ date: startStr }),
+					getDaySummary(startStr),
+					getTrips(startStr),
 				]);
 				pings = p.pings;
 				summary = s;
 				trips = t.trips;
 				panelOpen = s.stops.length > 0 || t.trips.length > 0;
-			} else if (viewMode === 'range' && startStr && endStr) {
+			} else {
 				const p = await getLocationPings({ start: startStr, end: endStr, limit: '50000' });
 				pings = p.pings;
 			}
@@ -122,16 +107,7 @@
 		}
 	}
 
-	function selectDay(date: string) {
-		viewMode = 'day';
-		dateStr = date;
-		showHeat = false;
-		updateUrl();
-		loadData();
-	}
-
 	function selectRange(start: string, end: string) {
-		viewMode = 'range';
 		startStr = start;
 		endStr = end;
 		showHeat = false;
@@ -139,18 +115,8 @@
 		loadData();
 	}
 
-	function handleDateInput() {
-		if (dateStr) {
-			viewMode = 'day';
-			showHeat = false;
-			updateUrl();
-			loadData();
-		}
-	}
-
 	function handleRangeInput() {
 		if (startStr && endStr) {
-			viewMode = 'range';
 			updateUrl();
 			loadData();
 		}
@@ -187,21 +153,18 @@
 <div class="page-fill">
 	<div class="controls-bar">
 		<div class="chip-group">
-			<Chip checked={viewMode === 'day' && dateStr === today} onclick={() => selectDay(today)}>Today</Chip>
-			<Chip checked={viewMode === 'day' && dateStr === yesterday()} onclick={() => selectDay(yesterday())}>Yesterday</Chip>
-			<Chip onclick={() => selectRange(thisWeekStart(), today)}>This week</Chip>
-			<Chip onclick={() => selectRange(thisMonthStart(), today)}>This month</Chip>
+			<Chip checked={isSingleDay && startStr === today} onclick={() => selectRange(today, today)}>Today</Chip>
+			<Chip checked={isSingleDay && startStr === yesterday()} onclick={() => selectRange(yesterday(), yesterday())}>Yesterday</Chip>
+			<Chip checked={startStr === thisWeekStart() && endStr === today} onclick={() => selectRange(thisWeekStart(), today)}>This week</Chip>
+			<Chip checked={startStr === thisMonthStart() && endStr === today} onclick={() => selectRange(thisMonthStart(), today)}>This month</Chip>
 		</div>
 		<div class="date-inputs">
-			<label for="hist-date">Date</label>
-			<input id="hist-date" type="date" bind:value={dateStr} onchange={handleDateInput} max={today} />
-			<span class="sep">or</span>
 			<label for="hist-start">From</label>
 			<input id="hist-start" type="date" bind:value={startStr} onchange={handleRangeInput} max={today} />
 			<label for="hist-end">To</label>
 			<input id="hist-end" type="date" bind:value={endStr} onchange={handleRangeInput} max={today} />
 		</div>
-		{#if viewMode === 'range' && pings.length > 0}
+		{#if !isSingleDay && pings.length > 0}
 			<Chip checked={showHeat} onclick={() => showHeat = !showHeat}>Heat map</Chip>
 		{/if}
 		{#if pings.length > 0}
@@ -238,11 +201,11 @@
 				<span class="stat">{summary.stops.length} stops</span>
 				<span class="stat">{summary.transit_pings} transit</span>
 			{/if}
-			{#if viewMode === 'range'}
+			{#if !isSingleDay}
 				{@const uniquePlaces = new Set(pings.filter(p => p.place).map(p => p.place))}
 				<span class="stat">{uniquePlaces.size} places</span>
 			{/if}
-			{#if viewMode === 'day' && trips.length > 0}
+			{#if isSingleDay && trips.length > 0}
 				<span class="stat">{trips.length} trips</span>
 			{/if}
 			{#if (summary && summary.stops.length > 0) || trips.length > 0}
@@ -252,7 +215,7 @@
 			{/if}
 		</div>
 
-		{#if panelOpen && viewMode === 'day'}
+		{#if panelOpen && isSingleDay}
 			<div class="stops-panel">
 				{#if pings.length > 1}
 					<div class="panel-section">
@@ -306,11 +269,6 @@
 	}
 
 	.date-inputs label {
-		font-size: var(--text-xs);
-		color: var(--text-dim);
-	}
-
-	.sep {
 		font-size: var(--text-xs);
 		color: var(--text-dim);
 	}
