@@ -458,13 +458,13 @@ class TestApiMeWithLedgers:
         cookies = await _login_as(mm_client, "alice", "Alice")
         resp = await mm_client.get("/istota/api/me", cookies=cookies)
         assert resp.status_code == 200
-        assert resp.json()["features"]["ledgers"] is True
+        assert resp.json()["features"]["services"] is True
 
     async def test_ledgers_feature_false_without_moneyman(self, mm_client, moneyman_app):
         cookies = await _login_as(mm_client, "bob", "Bob")
         resp = await mm_client.get("/istota/api/me", cookies=cookies)
         assert resp.status_code == 200
-        assert resp.json()["features"]["ledgers"] is False
+        assert resp.json()["features"]["services"] is False
 
 
 class TestMoneymanProxy:
