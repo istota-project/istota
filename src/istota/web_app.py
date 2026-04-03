@@ -6,11 +6,14 @@ Provides an OIDC-authenticated web UI using Nextcloud as the identity provider.
 SvelteKit frontend served as static files, Python handles auth and API.
 """
 
+import asyncio
 import logging
 import os
 import re
 import signal
+import sqlite3
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
@@ -183,13 +186,24 @@ def _get_miniflux_creds(username: str) -> tuple[str, str] | None:
     return None
 
 
+def _get_location_config(username: str) -> tuple[str, str, str] | None:
+    """Get (db_path, user_id, timezone) for location queries, or None."""
+    if not _config or not _config.location.enabled:
+        return None
+    uc = _config.get_user(username)
+    if not uc:
+        return None
+    return str(_config.db_path), username, uc.timezone
+
+
 @api_router.get("/me")
 async def api_me(user: dict = Depends(_require_api_auth)):
     username = user["username"]
-    features = {"feeds": False}
+    features = {"feeds": False, "location": False}
     if _config:
         creds = _get_miniflux_creds(username)
         features["feeds"] = creds is not None
+        features["location"] = _config.location.enabled
     return {
         "username": username,
         "display_name": user.get("display_name", username),
@@ -411,6 +425,331 @@ async def api_update_entry(
         return JSONResponse({"error": "miniflux api error"}, status_code=502)
 
     return {"status": "ok"}
+
+
+# ============================================================================
+# Location API
+# ============================================================================
+
+
+def _location_query_current(db_path: str, user_id: str) -> dict:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
+                   lp.activity_type, lp.battery, lp.wifi,
+                   p.name as place_name
+            FROM location_pings lp
+            LEFT JOIN places p ON lp.place_id = p.id
+            WHERE lp.user_id = ?
+            ORDER BY lp.timestamp DESC LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return {"last_ping": None, "current_visit": None}
+
+        last_ping = {
+            "timestamp": row["timestamp"],
+            "lat": row["lat"],
+            "lon": row["lon"],
+            "accuracy": row["accuracy"],
+            "activity_type": row["activity_type"],
+            "battery": row["battery"],
+            "place": row["place_name"],
+        }
+
+        visit_row = conn.execute(
+            """
+            SELECT place_name, entered_at, ping_count
+            FROM visits
+            WHERE user_id = ? AND exited_at IS NULL
+            ORDER BY entered_at DESC LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        current_visit = None
+        if visit_row:
+            entered = visit_row["entered_at"]
+            try:
+                entered_dt = datetime.fromisoformat(entered)
+                now = datetime.now(timezone.utc)
+                if entered_dt.tzinfo is None:
+                    entered_dt = entered_dt.replace(tzinfo=timezone.utc)
+                duration_min = int((now - entered_dt).total_seconds() / 60)
+            except (ValueError, TypeError):
+                duration_min = None
+            current_visit = {
+                "place_name": visit_row["place_name"],
+                "entered_at": entered,
+                "duration_minutes": duration_min,
+                "ping_count": visit_row["ping_count"],
+            }
+
+        return {"last_ping": last_ping, "current_visit": current_visit}
+    finally:
+        conn.close()
+
+
+def _location_query_pings(
+    db_path: str, user_id: str, tz_name: str,
+    date: str | None, start: str | None, end: str | None, limit: int,
+) -> dict:
+    from zoneinfo import ZoneInfo
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("America/Los_Angeles")
+
+        if date:
+            day_start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=tz)
+            day_end = day_start + timedelta(days=1)
+            since = day_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            until = day_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif start and end:
+            s = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=tz)
+            e = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=tz) + timedelta(days=1)
+            since = s.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            until = e.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            since = None
+            until = None
+
+        if since and until:
+            query = """
+                SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
+                       lp.activity_type, lp.speed, lp.battery,
+                       p.name as place_name
+                FROM location_pings lp
+                LEFT JOIN places p ON lp.place_id = p.id
+                WHERE lp.user_id = ? AND lp.timestamp >= ? AND lp.timestamp < ?
+                ORDER BY lp.timestamp ASC
+            """
+            params: list = [user_id, since, until]
+            if limit:
+                query += " LIMIT ?"
+                params.append(limit)
+            rows = conn.execute(query, params).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
+                       lp.activity_type, lp.speed, lp.battery,
+                       p.name as place_name
+                FROM location_pings lp
+                LEFT JOIN places p ON lp.place_id = p.id
+                WHERE lp.user_id = ?
+                ORDER BY lp.timestamp DESC LIMIT ?
+                """,
+                (user_id, limit or 100),
+            ).fetchall()
+
+        pings = [
+            {
+                "timestamp": r["timestamp"],
+                "lat": r["lat"],
+                "lon": r["lon"],
+                "accuracy": r["accuracy"],
+                "place": r["place_name"],
+                "speed": r["speed"],
+                "battery": r["battery"],
+            }
+            for r in rows
+        ]
+        return {"pings": pings, "count": len(pings)}
+    finally:
+        conn.close()
+
+
+def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: str | None) -> dict:
+    from zoneinfo import ZoneInfo
+    from .geo import cluster_pings, reverse_geocode, haversine
+
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("America/Los_Angeles")
+
+    target_date = date or datetime.now(tz).strftime("%Y-%m-%d")
+
+    day_start = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=tz)
+    day_end = day_start + timedelta(days=1)
+    since_utc = day_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    until_utc = day_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT lp.timestamp, lp.lat, lp.lon, lp.activity_type, lp.accuracy,
+                   lp.place_id, p.name as place_name
+            FROM location_pings lp
+            LEFT JOIN places p ON lp.place_id = p.id
+            WHERE lp.user_id = ? AND lp.timestamp >= ? AND lp.timestamp < ?
+            ORDER BY lp.timestamp ASC
+            """,
+            (user_id, since_utc, until_utc),
+        ).fetchall()
+
+        if not rows:
+            return {"date": target_date, "timezone": tz_name, "stops": [], "ping_count": 0, "transit_pings": 0}
+
+        pings = [dict(r) for r in rows]
+        clusters = cluster_pings(pings, radius_m=250)
+
+        stops = []
+        transit_pings = 0
+        for c in clusters:
+            if c["ping_count"] <= 2 and not c["place_name"]:
+                transit_pings += c["ping_count"]
+                continue
+            stops.append(c)
+
+        saved_places = conn.execute(
+            "SELECT name, lat, lon, radius_meters FROM places WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        saved_places = [dict(r) for r in saved_places]
+
+        for stop in stops:
+            if stop["place_name"]:
+                stop["location"] = stop["place_name"]
+                stop["location_source"] = "saved_place"
+            else:
+                matched = False
+                for sp in saved_places:
+                    dist = haversine(stop["lat"], stop["lon"], sp["lat"], sp["lon"])
+                    if dist <= max(sp["radius_meters"], 100):
+                        stop["location"] = sp["name"]
+                        stop["location_source"] = "saved_place_proximity"
+                        matched = True
+                        break
+                if not matched:
+                    geo = reverse_geocode(stop["lat"], stop["lon"], conn)
+                    name = (
+                        geo.get("suburb")
+                        or geo.get("neighborhood")
+                        or geo.get("road")
+                        or geo.get("city")
+                        or "unknown"
+                    )
+                    stop["location"] = name
+                    stop["location_source"] = geo.get("source", "unknown")
+
+            for key in ("first_ts", "last_ts"):
+                try:
+                    utc_dt = datetime.fromisoformat(stop[key]).replace(tzinfo=timezone.utc)
+                    stop[key + "_local"] = utc_dt.astimezone(tz).strftime("%H:%M")
+                except Exception:
+                    stop[key + "_local"] = stop[key]
+
+        # Merge consecutive stops at same location
+        merged = []
+        for stop in stops:
+            if merged and merged[-1]["location"] == stop["location"]:
+                prev = merged[-1]
+                prev["last_ts"] = stop["last_ts"]
+                prev["last_ts_local"] = stop.get("last_ts_local")
+                prev["ping_count"] += stop["ping_count"]
+            else:
+                merged.append(stop)
+
+        return {
+            "date": target_date,
+            "timezone": tz_name,
+            "ping_count": len(pings),
+            "transit_pings": transit_pings,
+            "stops": [
+                {
+                    "location": s["location"],
+                    "location_source": s.get("location_source"),
+                    "arrived": s.get("first_ts_local"),
+                    "departed": s.get("last_ts_local"),
+                    "ping_count": s["ping_count"],
+                    "lat": round(s["lat"], 5),
+                    "lon": round(s["lon"], 5),
+                }
+                for s in merged
+            ],
+        }
+    finally:
+        conn.close()
+
+
+def _location_query_places(db_path: str, user_id: str) -> dict:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT name, lat, lon, radius_meters, category FROM places WHERE user_id = ? ORDER BY name",
+            (user_id,),
+        ).fetchall()
+        return {
+            "places": [
+                {"name": r["name"], "lat": r["lat"], "lon": r["lon"],
+                 "radius_meters": r["radius_meters"], "category": r["category"]}
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+@api_router.get("/location/current")
+async def api_location_current(user: dict = Depends(_require_api_auth)):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    return await asyncio.to_thread(_location_query_current, db_path, user_id)
+
+
+@api_router.get("/location/pings")
+async def api_location_pings(
+    user: dict = Depends(_require_api_auth),
+    date: str = Query(default=""),
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    limit: int = Query(default=5000, le=50000),
+):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, tz_name = loc
+    return await asyncio.to_thread(
+        _location_query_pings, db_path, user_id, tz_name,
+        date or None, start or None, end or None, limit,
+    )
+
+
+@api_router.get("/location/day-summary")
+async def api_location_day_summary(
+    user: dict = Depends(_require_api_auth),
+    date: str = Query(default=""),
+):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, tz_name = loc
+    return await asyncio.to_thread(
+        _location_query_day_summary, db_path, user_id, tz_name, date or None,
+    )
+
+
+@api_router.get("/location/places")
+async def api_location_places(user: dict = Depends(_require_api_auth)):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    return await asyncio.to_thread(_location_query_places, db_path, user_id)
 
 
 # ============================================================================

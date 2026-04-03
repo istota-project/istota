@@ -47,6 +47,9 @@
 			{#if user.features.feeds}
 				<a href="{base}/feeds" class:active={isActive('/feeds')}>Feeds</a>
 			{/if}
+			{#if user.features.location}
+				<a href="{base}/location" class:active={isActive('/location')}>Location</a>
+			{/if}
 		</div>
 		<div class="nav-right">
 			<span>{user.display_name}</span>
