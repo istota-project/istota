@@ -1,3 +1,45 @@
+:root {
+	/* Surfaces */
+	--surface-base: #111;
+	--surface-card: #1a1a1a;
+	--surface-raised: #222;
+	--surface-badge: #252525;
+
+	/* Text */
+	--text-primary: #e0e0e0;
+	--text-secondary: #bbb;
+	--text-muted: #888;
+	--text-dim: #666;
+
+	/* Borders */
+	--border-default: #333;
+	--border-subtle: #222;
+
+	/* Interactive */
+	--accent: #e0e0e0;
+	--accent-hover: #fff;
+
+	/* Map colors */
+	--map-path: #4a9eff;
+	--map-current: #4aff7f;
+	--map-stop: #e0e0e0;
+	--map-place-fill: rgba(51, 51, 51, 0.15);
+	--map-place-stroke: #555;
+
+	/* Radii */
+	--radius-card: 0.5rem;
+	--radius-pill: 999px;
+
+	/* Transitions */
+	--transition-fast: 0.15s ease;
+
+	/* Typography */
+	--font-sans: system-ui, -apple-system, sans-serif;
+	--text-xs: 0.7rem;
+	--text-sm: 0.75rem;
+	--text-base: 0.85rem;
+}
+
 *,*::before,*::after { box-sizing: border-box; }
 
 body {

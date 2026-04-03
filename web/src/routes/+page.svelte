@@ -24,6 +24,12 @@
 					<div class="feature-desc">RSS feed reader</div>
 				</a>
 			{/if}
+			{#if user.features.location}
+				<a href="{base}/location" class="feature-card">
+					<div class="feature-title">Location</div>
+					<div class="feature-desc">GPS tracking and map</div>
+				</a>
+			{/if}
 		</div>
 	{/if}
 </div>
