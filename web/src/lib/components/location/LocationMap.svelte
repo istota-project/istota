@@ -55,17 +55,14 @@
 	// Gap detection: only break when both time and distance suggest a real location jump.
 	// Short time gaps are always contiguous (normal driving can be 1km+ between pings).
 	// Long time gaps need significant distance to count as a real move.
-	const GAP_TIME_MIN_S = 600;     // 10 min — below this, always contiguous
-	const GAP_DIST_MIN_M = 1000;    // must also be this far apart
-	const GAP_SPEED_MAX_MS = 85;    // ~300 km/h — above this, clearly a teleport
+	const GAP_TIME_MIN_S = 300;     // 5 min — below this, always contiguous
+	const GAP_DIST_MIN_M = 500;     // must also be this far apart
+	const GAP_SPEED_MAX_MS = 55;    // ~200 km/h — above this, clearly a teleport
 
 	function isGap(dist: number, timeDeltaS: number): boolean {
 		if (timeDeltaS <= 0) return false;
-		// Teleport: impossible speed regardless of time
 		if (dist / timeDeltaS > GAP_SPEED_MAX_MS) return true;
-		// Quick successive pings: always contiguous
 		if (timeDeltaS < GAP_TIME_MIN_S) return false;
-		// Long pause + significant distance = real gap
 		return dist > GAP_DIST_MIN_M;
 	}
 
@@ -96,12 +93,12 @@
 			const dist = approxDistanceM(prev[0], prev[1], cur[0], cur[1]);
 			const timeDelta = curTs - segLastTs;
 
-			const activityChanged = activity !== segActivity;
 			const gap = isGap(dist, timeDelta);
 
-			if (activityChanged || gap) {
+			if (gap) {
+				// Real location jump — break with transit connector
 				flushSegment();
-				if (gap && segCoords.length > 0) {
+				if (segCoords.length > 0) {
 					features.push({
 						type: 'Feature',
 						properties: { activity_type: 'transit', segment_type: 'transit' },
@@ -109,6 +106,11 @@
 					});
 				}
 				segCoords = [cur];
+				segActivity = activity;
+			} else if (activity !== segActivity) {
+				// Activity change but no gap — flush and overlap so lines connect
+				flushSegment();
+				segCoords = [prev, cur];
 				segActivity = activity;
 			} else {
 				segCoords.push(cur);
