@@ -302,6 +302,10 @@ def _map_entry(entry: dict) -> dict:
             "id": entry.get("feed", {}).get("id", 0),
             "title": entry.get("feed", {}).get("title", ""),
             "site_url": entry.get("feed", {}).get("site_url", ""),
+            "category": {
+                "id": entry.get("feed", {}).get("category", {}).get("id", 0),
+                "title": entry.get("feed", {}).get("category", {}).get("title", ""),
+            },
         },
         "status": entry.get("status", ""),
         "published_at": entry.get("published_at", ""),
@@ -350,7 +354,15 @@ async def api_feeds(
 
     entries = [_map_entry(e) for e in entries_data.get("entries", [])]
     feeds = [
-        {"id": f["id"], "title": f.get("title", ""), "site_url": f.get("site_url", "")}
+        {
+            "id": f["id"],
+            "title": f.get("title", ""),
+            "site_url": f.get("site_url", ""),
+            "category": {
+                "id": f.get("category", {}).get("id", 0),
+                "title": f.get("category", {}).get("title", ""),
+            },
+        }
         for f in feeds_data
     ]
 
