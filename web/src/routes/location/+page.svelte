@@ -107,11 +107,9 @@
 			<LocationMap
 				bind:this={mapComponent}
 				{pings}
-				stops={summary?.stops ?? []}
 				{places}
 				currentPosition={currentPos}
 				showPath={true}
-				onStopClick={handleStopClick}
 			/>
 		</div>
 

@@ -2,21 +2,19 @@
 	import { onMount, onDestroy } from 'svelte';
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
-	import type { LocationPing, DaySummaryStop, Place, DiscoveredCluster } from '$lib/api';
+	import type { LocationPing, Place, DiscoveredCluster } from '$lib/api';
 	import { ACTIVITY_COLORS, DEFAULT_PATH_COLOR } from '$lib/location-constants';
 
 	interface Props {
 		center?: [number, number];
 		zoom?: number;
 		pings?: LocationPing[];
-		stops?: DaySummaryStop[];
 		places?: Place[];
 		clusters?: DiscoveredCluster[];
 		currentPosition?: { lat: number; lon: number } | null;
 		showPath?: boolean;
 		showHeat?: boolean;
 		activeActivityTypes?: Set<string> | null;
-		onStopClick?: (stop: DaySummaryStop) => void;
 		onClusterClick?: (cluster: DiscoveredCluster) => void;
 	}
 
@@ -24,14 +22,12 @@
 		center = [-118.3, 34.1],
 		zoom = 12,
 		pings = [],
-		stops = [],
 		places = [],
 		clusters = [],
 		currentPosition = null,
 		showPath = true,
 		showHeat = false,
 		activeActivityTypes = null,
-		onStopClick,
 		onClusterClick,
 	}: Props = $props();
 
@@ -117,22 +113,6 @@
 		};
 	}
 
-	function buildStopsGeoJSON(stops: DaySummaryStop[]): GeoJSON.FeatureCollection {
-		return {
-			type: 'FeatureCollection',
-			features: stops.map(s => ({
-				type: 'Feature' as const,
-				properties: {
-					location: s.location,
-					arrived: s.arrived,
-					departed: s.departed,
-					ping_count: s.ping_count,
-				},
-				geometry: { type: 'Point' as const, coordinates: [s.lon, s.lat] },
-			})),
-		};
-	}
-
 	function buildClustersGeoJSON(clusters: DiscoveredCluster[]): GeoJSON.FeatureCollection {
 		return {
 			type: 'FeatureCollection',
@@ -210,7 +190,6 @@
 		if (!map) return;
 		map.addSource('path', { type: 'geojson', data: buildPathGeoJSON([]) });
 		map.addSource('ping-points', { type: 'geojson', data: buildPingPointsGeoJSON([]) });
-		map.addSource('stops', { type: 'geojson', data: buildStopsGeoJSON([]) });
 		map.addSource('places', { type: 'geojson', data: buildPlacesGeoJSON([]) });
 		map.addSource('clusters', { type: 'geojson', data: buildClustersGeoJSON([]) });
 	}
@@ -288,38 +267,6 @@
 					1, '#ffeb3b',
 				],
 				'heatmap-opacity': 0.8,
-			},
-		});
-
-		// Stop markers
-		map.addLayer({
-			id: 'stop-markers',
-			type: 'circle',
-			source: 'stops',
-			paint: {
-				'circle-radius': 6,
-				'circle-color': '#e0e0e0',
-				'circle-stroke-color': '#111',
-				'circle-stroke-width': 2,
-			},
-		});
-
-		// Stop labels
-		map.addLayer({
-			id: 'stop-labels',
-			type: 'symbol',
-			source: 'stops',
-			layout: {
-				'text-field': ['get', 'location'],
-				'text-size': 11,
-				'text-offset': [0, 1.5],
-				'text-anchor': 'top',
-				'text-allow-overlap': false,
-			},
-			paint: {
-				'text-color': '#ccc',
-				'text-halo-color': '#111',
-				'text-halo-width': 1.5,
 			},
 		});
 
@@ -406,31 +353,6 @@
 			if (map) map.getCanvas().style.cursor = '';
 		});
 
-		// Click handler for stops
-		map.on('click', 'stop-markers', (e) => {
-			if (!e.features?.length || !onStopClick) return;
-			const props = e.features[0].properties;
-			const geom = e.features[0].geometry;
-			if (geom.type === 'Point') {
-				const stop: DaySummaryStop = {
-					location: props.location,
-					location_source: null,
-					arrived: props.arrived,
-					departed: props.departed,
-					ping_count: props.ping_count,
-					lat: geom.coordinates[1],
-					lon: geom.coordinates[0],
-				};
-				onStopClick(stop);
-			}
-		});
-
-		map.on('mouseenter', 'stop-markers', () => {
-			if (map) map.getCanvas().style.cursor = 'pointer';
-		});
-		map.on('mouseleave', 'stop-markers', () => {
-			if (map) map.getCanvas().style.cursor = '';
-		});
 	}
 
 	function updateSources() {
@@ -438,13 +360,11 @@
 
 		const pathSrc = map.getSource('path') as maplibregl.GeoJSONSource;
 		const pingSrc = map.getSource('ping-points') as maplibregl.GeoJSONSource;
-		const stopSrc = map.getSource('stops') as maplibregl.GeoJSONSource;
 		const placeSrc = map.getSource('places') as maplibregl.GeoJSONSource;
 		const clusterSrc = map.getSource('clusters') as maplibregl.GeoJSONSource;
 
 		if (pathSrc) pathSrc.setData(buildPathGeoJSON(pings));
 		if (pingSrc) pingSrc.setData(buildPingPointsGeoJSON(filteredPings(pings)));
-		if (stopSrc) stopSrc.setData(buildStopsGeoJSON(stops));
 		if (placeSrc) placeSrc.setData(buildPlacesGeoJSON(places));
 		if (clusterSrc) clusterSrc.setData(buildClustersGeoJSON(clusters));
 	}
@@ -476,7 +396,6 @@
 		// Priority: activity data > clusters > places
 		const activityCoords: [number, number][] = [];
 		for (const p of pings) activityCoords.push([p.lon, p.lat]);
-		for (const s of stops) activityCoords.push([s.lon, s.lat]);
 		if (currentPosition) activityCoords.push([currentPosition.lon, currentPosition.lat]);
 
 		let allCoords = activityCoords;
@@ -513,7 +432,6 @@
 
 	$effect(() => {
 		pings;
-		stops;
 		places;
 		clusters;
 		activeActivityTypes;

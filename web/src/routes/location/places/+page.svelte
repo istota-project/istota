@@ -66,7 +66,6 @@
 			{places}
 			{clusters}
 			pings={[]}
-			stops={[]}
 			showPath={false}
 			onClusterClick={handleClusterClick}
 		/>
