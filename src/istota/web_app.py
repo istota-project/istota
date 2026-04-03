@@ -772,6 +772,8 @@ def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
 
 def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict) -> dict | None:
     from .db import get_place_by_id, update_place
+    from .geo import haversine
+    import math
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -779,11 +781,45 @@ def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict
         place = get_place_by_id(conn, place_id)
         if not place or place.user_id != user_id:
             return None
+
+        geo_changed = any(k in data for k in ("lat", "lon", "radius_meters"))
+
         update_place(conn, place_id, **{k: v for k, v in data.items() if k in ("name", "lat", "lon", "radius_meters", "category", "notes")})
-        conn.commit()
+
         updated = get_place_by_id(conn, place_id)
         if not updated:
             return None
+
+        # Reassign pings when location or radius changed
+        if geo_changed:
+            lat, lon = updated.lat, updated.lon
+            radius_m = updated.radius_meters
+
+            # Unassign pings that no longer fall within the new geofence
+            assigned = conn.execute(
+                "SELECT id, lat, lon FROM location_pings WHERE user_id = ? AND place_id = ?",
+                (user_id, place_id),
+            ).fetchall()
+            for row in assigned:
+                if haversine(lat, lon, row["lat"], row["lon"]) > radius_m:
+                    conn.execute("UPDATE location_pings SET place_id = NULL WHERE id = ?", (row["id"],))
+
+            # Assign unassigned pings that now fall within the geofence
+            dlat = radius_m / 111_000
+            dlon = radius_m / (111_000 * max(0.01, abs(math.cos(math.radians(lat)))))
+            candidates = conn.execute(
+                """
+                SELECT id, lat, lon FROM location_pings
+                WHERE user_id = ? AND place_id IS NULL
+                  AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
+                """,
+                (user_id, lat - dlat, lat + dlat, lon - dlon, lon + dlon),
+            ).fetchall()
+            for row in candidates:
+                if haversine(lat, lon, row["lat"], row["lon"]) <= radius_m:
+                    conn.execute("UPDATE location_pings SET place_id = ? WHERE id = ?", (place_id, row["id"]))
+
+        conn.commit()
         return {
             "id": updated.id, "name": updated.name, "lat": updated.lat,
             "lon": updated.lon, "radius_meters": updated.radius_meters,

@@ -270,6 +270,75 @@ class TestPlaceStats:
         assert result is None
 
 
+class TestPlaceUpdateReassignment:
+    def test_move_place_reassigns_pings(self, tmp_path):
+        """Moving a place center should reassign pings to match the new geofence."""
+        from istota.web_app import _location_update_place, _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            # Place at 34.0, -118.0
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 50, "food")
+            # Pings at 34.0001, -118.0 (~11m from place) — within 50m radius
+            for i, ts in enumerate([
+                "2026-01-10T09:00:00Z",
+                "2026-01-10T09:05:00Z",
+                "2026-01-10T09:10:00Z",
+                "2026-01-10T09:15:00Z",
+            ]):
+                db.insert_location_ping(conn, "alice", ts, 34.0001, -118.0, accuracy=5.0)
+                last_id = conn.execute("SELECT max(id) FROM location_pings").fetchone()[0]
+                conn.execute("UPDATE location_pings SET place_id = ? WHERE id = ?", (pid, last_id))
+
+            # Pings at 34.001, -118.0 (~111m from place) — outside 50m radius
+            for ts in [
+                "2026-02-10T10:00:00Z",
+                "2026-02-10T10:05:00Z",
+                "2026-02-10T10:10:00Z",
+            ]:
+                db.insert_location_ping(conn, "alice", ts, 34.001, -118.0, accuracy=5.0)
+            conn.commit()
+
+        # Before move: 4 pings assigned, stats should show 1 visit
+        stats = _location_place_stats(str(db_path), "alice", pid)
+        assert stats["total_visits"] == 1
+
+        # Move place to 34.001, -118.0 (near the unassigned pings)
+        _location_update_place(str(db_path), "alice", pid, {"lat": 34.001, "lon": -118.0})
+
+        # After move: old pings should be unassigned, new pings assigned
+        stats = _location_place_stats(str(db_path), "alice", pid)
+        assert stats["total_visits"] == 1
+        assert stats["first_visit"] == "2026-02-10T10:00:00Z"
+
+    def test_radius_change_reassigns_pings(self, tmp_path):
+        """Expanding radius should pick up nearby unassigned pings."""
+        from istota.web_app import _location_update_place, _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 25, "food")
+            # Pings at ~40m away — outside 25m but inside 100m
+            for ts in [
+                "2026-01-10T09:00:00Z",
+                "2026-01-10T09:05:00Z",
+                "2026-01-10T09:10:00Z",
+            ]:
+                db.insert_location_ping(conn, "alice", ts, 34.00035, -118.0, accuracy=5.0)
+            conn.commit()
+
+        # Before: no pings assigned
+        stats = _location_place_stats(str(db_path), "alice", pid)
+        assert stats["total_visits"] == 0
+
+        # Expand radius to 100m
+        _location_update_place(str(db_path), "alice", pid, {"radius_meters": 100})
+
+        # After: pings should now be assigned
+        stats = _location_place_stats(str(db_path), "alice", pid)
+        assert stats["total_visits"] == 1
+
+
 class TestLocationStateDB:
     def test_get_set(self, tmp_path):
         db_path = _init_db(tmp_path)
