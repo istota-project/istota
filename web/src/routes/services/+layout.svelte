@@ -10,29 +10,33 @@
 	let sidebarOpen = $state(false);
 
 	onMount(async () => {
-		const svc: ServiceDetail = {
+		const initial: ServiceDetail = {
 			id: 'fava',
 			name: 'Fava',
 			description: 'Beancount ledger viewer',
 			status: 'loading',
 			detail: null,
 		};
-		services = [svc];
+		services = [initial];
 		selected = 'fava';
-		selectedService.set(svc);
+		selectedService.set(initial);
 
+		let updated: ServiceDetail;
 		try {
 			const [ledgerData, favaData] = await Promise.all([
 				getMoneymanLedgers(),
 				getMoneymanFava(),
 			]);
-			svc.detail = { ledgers: ledgerData.ledgers, favaPrefix: favaData.prefix };
-			svc.status = 'active';
+			updated = {
+				...initial,
+				status: 'active',
+				detail: { ledgers: ledgerData.ledgers, favaPrefix: favaData.prefix },
+			};
 		} catch {
-			svc.status = 'error';
+			updated = { ...initial, status: 'error' };
 		}
-		services = [...services];
-		selectedService.set({ ...svc });
+		services = [updated];
+		selectedService.set(updated);
 	});
 
 	function handleServiceClick(id: string) {
