@@ -178,12 +178,14 @@ class TestHttpMode:
     """Test HTTP client transport."""
 
     def test_http_client_sets_headers(self):
-        from istota.skills.moneyman import _http_client
+        from istota.skills.moneyman import _http_client, _derive_user_key
 
         env = {"MONEYMAN_API_URL": "http://localhost:8090", "MONEYMAN_API_KEY": "test-key", "MONEYMAN_USER": "stefan"}
         with patch.dict(os.environ, env, clear=True):
             client = _http_client()
-            assert client.headers.get("X-API-Key") == "test-key"
+            # Key should be HMAC-derived, not the raw master key
+            expected_key = _derive_user_key("test-key", "stefan")
+            assert client.headers.get("X-API-Key") == expected_key
             assert client.headers.get("X-User") == "stefan"
             client.close()
 
