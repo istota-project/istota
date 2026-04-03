@@ -104,7 +104,7 @@
 		display: flex;
 		align-items: baseline;
 		gap: 1rem;
-		padding: 0.75rem 1rem;
+		padding: 0.75rem 1.5rem;
 		border-bottom: 1px solid var(--border-subtle);
 		flex-shrink: 0;
 	}
@@ -167,7 +167,7 @@
 		display: flex;
 		align-items: baseline;
 		gap: 0.4rem;
-		padding: 0.6rem 0.75rem;
+		padding: 0.6rem 1rem 0.6rem 1.5rem;
 		flex-shrink: 0;
 	}
 
@@ -187,7 +187,7 @@
 	.sidebar-list {
 		flex: 1;
 		overflow-y: auto;
-		padding: 0 0.25rem 0.5rem;
+		padding: 0 0.5rem 0.5rem;
 	}
 
 	.sidebar-list::-webkit-scrollbar {
@@ -213,7 +213,7 @@
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 		font-weight: 500;
-		padding: 0.35rem 0.5rem 0.15rem;
+		padding: 0.35rem 1rem 0.15rem;
 	}
 
 	.place-btn {
@@ -226,7 +226,7 @@
 		color: inherit;
 		font: inherit;
 		cursor: pointer;
-		padding: 0.3rem 0.5rem;
+		padding: 0.3rem 1rem;
 		border-radius: 0.3rem;
 		transition: background var(--transition-fast);
 		text-align: left;
@@ -261,6 +261,10 @@
 		.loc-shell {
 			margin: -1rem -0.75rem;
 			height: calc(100vh - 36px);
+		}
+
+		.loc-header {
+			padding: 0.5rem 0.75rem;
 		}
 
 		.sidebar-toggle {
