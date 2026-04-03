@@ -524,6 +524,266 @@ class TestLocationCLI:
             assert output[0]["name"] == "home"
             assert output[0]["radius_meters"] == 150
 
+    def test_places_includes_id(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 34.0, -118.0, 150, "home")
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_places
+
+            args = MagicMock()
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_places(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert output[0]["id"] == pid
+
+    def test_update_by_name(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "restaurant")
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_update
+
+            args = MagicMock()
+            args.name = "cafe"
+            args.id = None
+            args.category = "food"
+            args.rename = None
+            args.radius = None
+            args.notes = None
+            args.lat = None
+            args.lon = None
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_update(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert output["status"] == "ok"
+            assert output["place"]["category"] == "food"
+            assert output["place"]["name"] == "cafe"
+
+        # Verify DB
+        with db.get_db(db_path) as conn:
+            place = db.get_place_by_name(conn, "alice", "cafe")
+            assert place.category == "food"
+
+    def test_update_by_id(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "restaurant")
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_update
+
+            args = MagicMock()
+            args.name = None
+            args.id = pid
+            args.category = "food"
+            args.rename = None
+            args.radius = None
+            args.notes = None
+            args.lat = None
+            args.lon = None
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_update(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert output["status"] == "ok"
+            assert output["place"]["category"] == "food"
+
+    def test_update_rename(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.insert_place(conn, "alice", "old name", 34.0, -118.0, 100, "other")
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_update
+
+            args = MagicMock()
+            args.name = "old name"
+            args.id = None
+            args.rename = "new name"
+            args.category = None
+            args.radius = None
+            args.notes = None
+            args.lat = None
+            args.lon = None
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_update(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert output["place"]["name"] == "new name"
+
+        with db.get_db(db_path) as conn:
+            assert db.get_place_by_name(conn, "alice", "new name") is not None
+            assert db.get_place_by_name(conn, "alice", "old name") is None
+
+    def test_update_not_found(self, tmp_path):
+        db_path = _init_db(tmp_path)
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_update
+
+            args = MagicMock()
+            args.name = "nonexistent"
+            args.id = None
+            args.category = "food"
+            args.rename = None
+            args.radius = None
+            args.notes = None
+            args.lat = None
+            args.lon = None
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                with pytest.raises(SystemExit):
+                    cmd_update(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert "error" in output
+
+    def test_update_no_changes(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_update
+
+            args = MagicMock()
+            args.name = "cafe"
+            args.id = None
+            args.category = None
+            args.rename = None
+            args.radius = None
+            args.notes = None
+            args.lat = None
+            args.lon = None
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                with pytest.raises(SystemExit):
+                    cmd_update(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert "error" in output
+
+    def test_delete_by_name(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_delete
+
+            args = MagicMock()
+            args.name = "cafe"
+            args.id = None
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_delete(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert output["status"] == "ok"
+            assert output["deleted"] == "cafe"
+
+        with db.get_db(db_path) as conn:
+            assert db.get_place_by_name(conn, "alice", "cafe") is None
+
+    def test_delete_by_id(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_delete
+
+            args = MagicMock()
+            args.name = None
+            args.id = pid
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_delete(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert output["status"] == "ok"
+
+        with db.get_db(db_path) as conn:
+            assert db.get_places(conn, "alice") == []
+
+    def test_delete_not_found(self, tmp_path):
+        db_path = _init_db(tmp_path)
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_delete
+
+            args = MagicMock()
+            args.name = "nonexistent"
+            args.id = None
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                with pytest.raises(SystemExit):
+                    cmd_delete(args)
+            finally:
+                sys.stdout = old_stdout
+
+            output = json.loads(captured.getvalue())
+            assert "error" in output
+
     def test_history_lists_pings(self, tmp_path):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:

@@ -5,6 +5,8 @@ CLI:
     python -m istota.skills.location history [--limit N] [--date YYYY-MM-DD] [--tz TZ]
     python -m istota.skills.location places
     python -m istota.skills.location learn NAME [--category CAT] [--radius N]
+    python -m istota.skills.location update (--name NAME | --id ID) [--rename NEW] [--category CAT] [--radius N] [--notes TXT] [--lat N] [--lon N]
+    python -m istota.skills.location delete (--name NAME | --id ID)
     python -m istota.skills.location reverse-geocode --lat N --lon N
     python -m istota.skills.location day-summary --date YYYY-MM-DD [--tz TZ]
 """
@@ -176,7 +178,7 @@ def cmd_places(args):
 
     cursor = conn.execute(
         """
-        SELECT name, lat, lon, radius_meters, category, notes
+        SELECT id, name, lat, lon, radius_meters, category, notes
         FROM places WHERE user_id = ? ORDER BY name
         """,
         (user_id,),
@@ -184,6 +186,7 @@ def cmd_places(args):
     rows = cursor.fetchall()
     results = [
         {
+            "id": r["id"],
             "name": r["name"],
             "lat": r["lat"],
             "lon": r["lon"],
@@ -236,6 +239,98 @@ def cmd_learn(args):
         "lon": round(lon, 6),
         "radius_meters": radius,
         "message": f"Saved '{name}' at {lat:.4f}, {lon:.4f}.",
+    }))
+
+
+def _resolve_place(conn, user_id, name=None, place_id=None):
+    """Find a place by name or ID. Returns (place, error_msg)."""
+    from istota.db import get_place_by_name, get_place_by_id
+
+    if place_id is not None:
+        place = get_place_by_id(conn, place_id)
+        if not place or place.user_id != user_id:
+            return None, f"No place found with ID {place_id}"
+        return place, None
+    if name:
+        place = get_place_by_name(conn, user_id, name)
+        if not place:
+            return None, f"No place found with name '{name}'"
+        return place, None
+    return None, "Specify --name or --id"
+
+
+def cmd_update(args):
+    conn = _get_conn()
+    user_id = _get_user_id()
+
+    place, err = _resolve_place(conn, user_id, name=args.name, place_id=args.id)
+    if err:
+        print(json.dumps({"error": err}))
+        conn.close()
+        sys.exit(1)
+
+    from istota.db import update_place, get_place_by_id
+
+    updates = {}
+    if args.rename is not None:
+        updates["name"] = args.rename
+    if args.category is not None:
+        updates["category"] = args.category
+    if args.radius is not None:
+        updates["radius_meters"] = args.radius
+    if args.notes is not None:
+        updates["notes"] = args.notes
+    if args.lat is not None:
+        updates["lat"] = args.lat
+    if args.lon is not None:
+        updates["lon"] = args.lon
+
+    if not updates:
+        print(json.dumps({"error": "No changes specified"}))
+        conn.close()
+        sys.exit(1)
+
+    update_place(conn, place.id, **updates)
+    conn.commit()
+
+    updated = get_place_by_id(conn, place.id)
+    conn.close()
+
+    print(json.dumps({
+        "status": "ok",
+        "place": {
+            "id": updated.id,
+            "name": updated.name,
+            "lat": updated.lat,
+            "lon": updated.lon,
+            "radius_meters": updated.radius_meters,
+            "category": updated.category,
+            "notes": updated.notes,
+        },
+    }))
+
+
+def cmd_delete(args):
+    conn = _get_conn()
+    user_id = _get_user_id()
+
+    place, err = _resolve_place(conn, user_id, name=args.name, place_id=args.id)
+    if err:
+        print(json.dumps({"error": err}))
+        conn.close()
+        sys.exit(1)
+
+    from istota.db import delete_place_by_id, nullify_place_on_pings
+
+    place_name = place.name
+    nullify_place_on_pings(conn, place.id)
+    delete_place_by_id(conn, place.id)
+    conn.commit()
+    conn.close()
+
+    print(json.dumps({
+        "status": "ok",
+        "deleted": place_name,
     }))
 
 
@@ -621,6 +716,22 @@ def build_parser():
     learn.add_argument("--category", default="other", help="Place category")
     learn.add_argument("--radius", type=int, default=100, help="Geofence radius in meters")
 
+    update = sub.add_parser("update", help="Update an existing place")
+    update_target = update.add_mutually_exclusive_group(required=True)
+    update_target.add_argument("--name", help="Place name to update")
+    update_target.add_argument("--id", type=int, help="Place ID to update")
+    update.add_argument("--rename", help="New name")
+    update.add_argument("--category", help="New category")
+    update.add_argument("--radius", type=int, help="New radius in meters")
+    update.add_argument("--notes", help="New notes")
+    update.add_argument("--lat", type=float, help="New latitude")
+    update.add_argument("--lon", type=float, help="New longitude")
+
+    delete = sub.add_parser("delete", help="Delete a place")
+    delete_target = delete.add_mutually_exclusive_group(required=True)
+    delete_target.add_argument("--name", help="Place name to delete")
+    delete_target.add_argument("--id", type=int, help="Place ID to delete")
+
     attend = sub.add_parser("attendance", help="Check calendar attendance via GPS")
     attend.add_argument("--date", help="Date to check (YYYY-MM-DD, default: today)")
     attend.add_argument("--event", help="Filter by event UID or title substring")
@@ -645,6 +756,8 @@ def main():
         "history": cmd_history,
         "places": cmd_places,
         "learn": cmd_learn,
+        "update": cmd_update,
+        "delete": cmd_delete,
         "attendance": cmd_attendance,
         "reverse-geocode": cmd_reverse_geocode,
         "day-summary": cmd_day_summary,
