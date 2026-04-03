@@ -429,12 +429,20 @@
 
 	function fitBounds() {
 		if (!map || !mapLoaded) return;
-		const allCoords: [number, number][] = [];
-		for (const p of pings) allCoords.push([p.lon, p.lat]);
-		for (const s of stops) allCoords.push([s.lon, s.lat]);
-		for (const p of places) allCoords.push([p.lon, p.lat]);
-		for (const c of clusters) allCoords.push([c.lon, c.lat]);
-		if (currentPosition) allCoords.push([currentPosition.lon, currentPosition.lat]);
+
+		// Priority: activity data > clusters > places
+		const activityCoords: [number, number][] = [];
+		for (const p of pings) activityCoords.push([p.lon, p.lat]);
+		for (const s of stops) activityCoords.push([s.lon, s.lat]);
+		if (currentPosition) activityCoords.push([currentPosition.lon, currentPosition.lat]);
+
+		let allCoords = activityCoords;
+		if (allCoords.length === 0) {
+			for (const c of clusters) allCoords.push([c.lon, c.lat]);
+		}
+		if (allCoords.length === 0) {
+			for (const p of places) allCoords.push([p.lon, p.lat]);
+		}
 
 		if (allCoords.length === 0) return;
 		if (allCoords.length === 1) {
