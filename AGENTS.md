@@ -205,10 +205,9 @@ Overland GPS webhook receiver (`webhook_receiver.py`) ingests location pings and
 
 Config: `[location]` section — `enabled: bool = False`, `webhooks_port: int = 8765`.
 
-Per-user config via `[location]` section in per-user TOML:
+Per-user config via `[[resources]]` with `type = "overland"`:
 - `ingest_token`: shared secret for Overland endpoint
 - `default_radius`: default geofence radius (meters)
-- `[[location.actions]]`: triggered on `enter`/`exit` events — surfaces: `ntfy`, `talk`, `silent`, `cron_prompt`
 
 Places are managed via the web UI or the `learn` CLI command (stored in `places` DB table). Place detection uses hysteresis (2 consecutive pings required) to avoid flapping.
 

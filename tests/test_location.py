@@ -18,7 +18,7 @@ except ImportError:
 _needs_geopy = pytest.mark.skipif(not _has_geopy, reason="geopy not installed")
 
 from istota import db
-from istota.config import Config, LocationActionConfig, UserConfig, UserLocationConfig
+from istota.config import Config, UserConfig
 from istota.geo import haversine
 from istota.webhook_receiver import resolve_place
 
@@ -234,14 +234,13 @@ class TestResolvePlace:
 class TestStateMachine:
     """Tests for the state machine logic in webhook_receiver."""
 
-    def _process(self, conn, user_id, place_id, place, timestamp, actions=None):
+    def _process(self, conn, user_id, place_id, place, timestamp):
         from istota.webhook_receiver import _update_state_machine
         ping_id = db.insert_location_ping(
             conn, user_id, timestamp, 0.0, 0.0,
         )
         _update_state_machine(
-            conn, user_id, ping_id, place_id, place,
-            timestamp, actions or [],
+            conn, user_id, ping_id, place_id, place, timestamp,
         )
         return ping_id
 
@@ -346,7 +345,7 @@ class TestStateMachine:
             state = db.get_location_state(conn, "alice")
             assert state.current_place_id is None
 
-    def test_actions_fire_on_transition(self, tmp_path):
+    def test_transition_fires_without_errors(self, tmp_path):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
             pid_home = db.insert_place(conn, "alice", "home", 34.0, -118.0)
@@ -354,20 +353,14 @@ class TestStateMachine:
             home = db.get_place_by_name(conn, "alice", "home")
             gym = db.get_place_by_name(conn, "alice", "gym")
 
-            actions = [
-                LocationActionConfig(trigger="exit", place="home", message="Left home", surface="silent"),
-                LocationActionConfig(trigger="enter", place="gym", message="At gym", surface="silent"),
-            ]
-
             # Establish at home
             self._process(conn, "alice", pid_home, home, "2026-02-20T10:00:00Z")
             self._process(conn, "alice", pid_home, home, "2026-02-20T10:05:00Z")
 
-            # Transition to gym (silent actions, just verifying no errors)
-            self._process(conn, "alice", pid_gym, gym, "2026-02-20T10:10:00Z", actions)
-            self._process(conn, "alice", pid_gym, gym, "2026-02-20T10:15:00Z", actions)
+            # Transition to gym
+            self._process(conn, "alice", pid_gym, gym, "2026-02-20T10:10:00Z")
+            self._process(conn, "alice", pid_gym, gym, "2026-02-20T10:15:00Z")
 
-            # If we got here without errors, silent actions worked
             state = db.get_location_state(conn, "alice")
             assert state.current_place_id == pid_gym
 
@@ -403,7 +396,7 @@ class TestOverlandPayloadParsing:
 
         db_path = _init_db(Path(pytest.importorskip("tempfile").mkdtemp()))
         with db.get_db(db_path) as conn:
-            _process_feature(conn, "alice", feature, [], [])
+            _process_feature(conn, "alice", feature, [])
             conn.commit()
 
             pings = db.get_pings(conn, "alice")
@@ -432,7 +425,7 @@ class TestOverlandPayloadParsing:
 
         db_path = _init_db(Path(pytest.importorskip("tempfile").mkdtemp()))
         with db.get_db(db_path) as conn:
-            _process_feature(conn, "alice", feature, [], [])
+            _process_feature(conn, "alice", feature, [])
             conn.commit()
 
             p = db.get_latest_ping(conn, "alice")
@@ -454,7 +447,7 @@ class TestOverlandPayloadParsing:
 
         db_path = _init_db(Path(pytest.importorskip("tempfile").mkdtemp()))
         with db.get_db(db_path) as conn:
-            _process_feature(conn, "alice", feature, [], [])
+            _process_feature(conn, "alice", feature, [])
             conn.commit()
 
             p = db.get_latest_ping(conn, "alice")
@@ -471,7 +464,7 @@ class TestOverlandPayloadParsing:
 
         db_path = _init_db(Path(pytest.importorskip("tempfile").mkdtemp()))
         with db.get_db(db_path) as conn:
-            _process_feature(conn, "alice", feature, [], [])
+            _process_feature(conn, "alice", feature, [])
             conn.commit()
 
             assert db.get_latest_ping(conn, "alice") is None

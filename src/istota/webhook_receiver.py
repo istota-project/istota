@@ -17,7 +17,7 @@ from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from . import db
-from .config import LocationActionConfig, load_config
+from .config import load_config
 
 logger = logging.getLogger("istota.webhook_receiver")
 
@@ -25,7 +25,6 @@ logger = logging.getLogger("istota.webhook_receiver")
 _config = None
 _token_map: dict[str, str] = {}      # token -> user_id
 _places_cache: dict[str, list] = {}   # user_id -> list[Place] (DB objects)
-_actions_cache: dict[str, list[LocationActionConfig]] = {}  # user_id -> actions
 _lock = threading.Lock()
 
 # Hysteresis threshold: consecutive pings at new place before transition
@@ -40,26 +39,32 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
+def _get_overland_resource(user_config):
+    """Find the first overland resource for a user config."""
+    for rc in user_config.resources:
+        if rc.type == "overland" and rc.extra.get("ingest_token"):
+            return rc
+    return None
+
+
 def reload_config() -> None:
-    """Reload config, token map, and places/actions cache."""
-    global _config, _token_map, _places_cache, _actions_cache
+    """Reload config, token map, and places cache."""
+    global _config, _token_map, _places_cache
     _config = load_config()
     with _lock:
         token_map = {}
         places_cache = {}
-        actions_cache = {}
         conn = _get_conn()
         try:
             for user_id, uc in _config.users.items():
-                if uc.location.ingest_token:
-                    token_map[uc.location.ingest_token] = user_id
+                rc = _get_overland_resource(uc)
+                if rc:
+                    token_map[rc.extra["ingest_token"]] = user_id
                     places_cache[user_id] = db.get_places(conn, user_id)
-                    actions_cache[user_id] = uc.location.actions
         finally:
             conn.close()
         _token_map = token_map
         _places_cache = places_cache
-        _actions_cache = actions_cache
     logger.info(
         "Loaded location config: %d user(s) with tokens", len(_token_map),
     )
@@ -114,10 +119,9 @@ async def receive_location(
         places = db.get_places(conn, user_id)
         with _lock:
             _places_cache[user_id] = places
-            actions = _actions_cache.get(user_id, [])
 
         for feature in locations:
-            _process_feature(conn, user_id, feature, places, actions)
+            _process_feature(conn, user_id, feature, places)
         conn.commit()
     except Exception:
         logger.exception("Error processing location batch for %s", user_id)
@@ -137,7 +141,6 @@ def _process_feature(
     user_id: str,
     feature: dict,
     places: list,
-    actions: list[LocationActionConfig],
 ) -> None:
     """Process a single GeoJSON Feature from Overland."""
     geom = feature.get("geometry", {})
@@ -186,7 +189,7 @@ def _process_feature(
     )
 
     # Run state machine
-    _update_state_machine(conn, user_id, ping_id, place_id, place, timestamp, actions)
+    _update_state_machine(conn, user_id, ping_id, place_id, place, timestamp)
 
 
 def _update_state_machine(
@@ -196,7 +199,6 @@ def _update_state_machine(
     new_place_id: int | None,
     new_place,
     timestamp: str,
-    actions: list[LocationActionConfig],
 ) -> None:
     """Run the hysteresis state machine for visit tracking."""
     state = db.get_location_state(conn, user_id)
@@ -208,7 +210,6 @@ def _update_state_machine(
             visit_id = db.insert_visit(
                 conn, user_id, new_place_id, new_place.name, timestamp,
             )
-            _fire_actions(conn, user_id, "enter", new_place.name, actions)
 
         db.set_location_state(
             conn, user_id,
@@ -248,25 +249,12 @@ def _update_state_machine(
         if current_visit_id is not None:
             db.close_visit(conn, current_visit_id, timestamp)
 
-        # Look up old place name for exit action
-        old_place_name = None
-        if current_place_id is not None:
-            for p in db.get_places(conn, user_id):
-                if p.id == current_place_id:
-                    old_place_name = p.name
-                    break
-
-        # Fire exit action for old place
-        if old_place_name:
-            _fire_actions(conn, user_id, "exit", old_place_name, actions)
-
         # Open new visit
         new_visit_id = None
         if new_place_id is not None and new_place is not None:
             new_visit_id = db.insert_visit(
                 conn, user_id, new_place_id, new_place.name, timestamp,
             )
-            _fire_actions(conn, user_id, "enter", new_place.name, actions)
 
         db.set_location_state(
             conn, user_id,
@@ -287,62 +275,6 @@ def _update_state_machine(
         )
         # Ping stays associated with current visit
         db.update_ping_place(conn, ping_id, new_place_id, current_visit_id)
-
-
-def _fire_actions(
-    conn: sqlite3.Connection,
-    user_id: str,
-    trigger: str,
-    place_name: str,
-    actions: list[LocationActionConfig],
-) -> None:
-    """Fire matching actions for a place transition."""
-    for action in actions:
-        if action.trigger != trigger:
-            continue
-        if action.place != place_name:
-            continue
-
-        message = action.message or f"{trigger.capitalize()}: {place_name}"
-
-        if action.surface == "silent":
-            logger.info("Silent action: %s %s for %s", trigger, place_name, user_id)
-            continue
-
-        if action.surface == "cron_prompt":
-            if action.prompt:
-                db.create_task(
-                    conn, action.prompt, user_id,
-                    source_type="scheduled",
-                    conversation_token=action.conversation_token or None,
-                )
-                logger.info(
-                    "Created cron_prompt task for %s: %s %s",
-                    user_id, trigger, place_name,
-                )
-            continue
-
-        # ntfy or talk — use notifications module
-        try:
-            from .notifications import send_notification
-
-            ntfy_priority = None
-            if action.priority == "high":
-                ntfy_priority = 4
-            elif action.priority == "low":
-                ntfy_priority = 2
-
-            send_notification(
-                _config, user_id, message,
-                surface=action.surface,
-                conversation_token=action.conversation_token or None,
-                priority=ntfy_priority,
-                title=f"Location: {place_name}",
-            )
-        except Exception:
-            logger.exception(
-                "Failed to send %s notification for %s", action.surface, user_id,
-            )
 
 
 # =============================================================================
