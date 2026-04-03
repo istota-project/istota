@@ -4,10 +4,9 @@ GPS-based location tracking via the Overland iOS app. Tracks location pings, res
 
 ## Places
 
-Places (named geofences) are stored in the database. They can be managed via:
-- **Web UI** — `/location/places` page: discover unknown clusters, name them, set radius and category, edit or delete
-- **`learn` CLI** — save current GPS position as a named place (inserts/updates DB directly)
-- **`places` CLI** — list all saved places
+Places (named geofences) are stored in the database.
+- **`places`** — list all saved places
+- **`learn`** — save current GPS position as a named place (inserts/updates directly in DB)
 
 Changes take effect on the next incoming GPS ping (no restart needed).
 
