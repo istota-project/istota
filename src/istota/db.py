@@ -165,6 +165,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
 
+    # Places table migrations
+    for col, col_type in [
+        ("source", "TEXT NOT NULL DEFAULT 'file'"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE places ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+
     # Monarch synced transactions migrations (for reconciliation tracking)
     for col, col_type in [
         ("tags_json", "TEXT"),
@@ -2785,8 +2794,9 @@ class Place:
     lon: float
     radius_meters: int
     category: str | None
-    created_at: str
-    notes: str | None
+    source: str = "file"
+    created_at: str = ""
+    notes: str | None = None
 
 
 @dataclass
@@ -2952,14 +2962,15 @@ def insert_place(
     radius_meters: int = 25,
     category: str | None = None,
     notes: str | None = None,
+    source: str = "file",
 ) -> int:
     """Insert a named place. Returns the new row ID."""
     cursor = conn.execute(
         """
-        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (user_id, name, lat, lon, radius_meters, category, notes),
+        (user_id, name, lat, lon, radius_meters, category, notes, source),
     )
     return cursor.lastrowid
 
@@ -2971,7 +2982,7 @@ def get_places(
     """Get all places for a user."""
     cursor = conn.execute(
         """
-        SELECT id, user_id, name, lat, lon, radius_meters, category, created_at, notes
+        SELECT id, user_id, name, lat, lon, radius_meters, category, source, created_at, notes
         FROM places
         WHERE user_id = ?
         ORDER BY name
@@ -2989,7 +3000,7 @@ def get_place_by_name(
     """Get a place by name."""
     cursor = conn.execute(
         """
-        SELECT id, user_id, name, lat, lon, radius_meters, category, created_at, notes
+        SELECT id, user_id, name, lat, lon, radius_meters, category, source, created_at, notes
         FROM places WHERE user_id = ? AND name = ?
         """,
         (user_id, name),
@@ -3009,21 +3020,23 @@ def upsert_place(
     radius_meters: int = 25,
     category: str | None = None,
     notes: str | None = None,
+    source: str = "file",
 ) -> int:
     """Insert or update a place by (user_id, name). Returns the row ID."""
     cursor = conn.execute(
         """
-        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (user_id, name) DO UPDATE SET
             lat = excluded.lat,
             lon = excluded.lon,
             radius_meters = excluded.radius_meters,
             category = excluded.category,
-            notes = excluded.notes
+            notes = excluded.notes,
+            source = excluded.source
         RETURNING id
         """,
-        (user_id, name, lat, lon, radius_meters, category, notes),
+        (user_id, name, lat, lon, radius_meters, category, notes, source),
     )
     row = cursor.fetchone()
     return row[0]
@@ -3040,6 +3053,87 @@ def delete_place(
         (user_id, name),
     )
     return cursor.rowcount > 0
+
+
+def get_place_by_id(
+    conn: sqlite3.Connection,
+    place_id: int,
+) -> Place | None:
+    """Get a place by ID."""
+    cursor = conn.execute(
+        """
+        SELECT id, user_id, name, lat, lon, radius_meters, category, source, created_at, notes
+        FROM places WHERE id = ?
+        """,
+        (place_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return Place(**dict(row))
+
+
+def update_place(
+    conn: sqlite3.Connection,
+    place_id: int,
+    *,
+    name: str | None = None,
+    lat: float | None = None,
+    lon: float | None = None,
+    radius_meters: int | None = None,
+    category: str | None = None,
+    notes: str | None = None,
+) -> bool:
+    """Update a place by ID. Only updates provided fields. Returns True if updated."""
+    fields = []
+    values: list = []
+    if name is not None:
+        fields.append("name = ?")
+        values.append(name)
+    if lat is not None:
+        fields.append("lat = ?")
+        values.append(lat)
+    if lon is not None:
+        fields.append("lon = ?")
+        values.append(lon)
+    if radius_meters is not None:
+        fields.append("radius_meters = ?")
+        values.append(radius_meters)
+    if category is not None:
+        fields.append("category = ?")
+        values.append(category)
+    if notes is not None:
+        fields.append("notes = ?")
+        values.append(notes)
+    if not fields:
+        return False
+    values.append(place_id)
+    cursor = conn.execute(
+        f"UPDATE places SET {', '.join(fields)} WHERE id = ?",
+        values,
+    )
+    return cursor.rowcount > 0
+
+
+def delete_place_by_id(
+    conn: sqlite3.Connection,
+    place_id: int,
+) -> bool:
+    """Delete a place by ID. Returns True if deleted."""
+    cursor = conn.execute("DELETE FROM places WHERE id = ?", (place_id,))
+    return cursor.rowcount > 0
+
+
+def nullify_place_on_pings(
+    conn: sqlite3.Connection,
+    place_id: int,
+) -> int:
+    """Set place_id to NULL on all pings referencing this place. Returns count."""
+    cursor = conn.execute(
+        "UPDATE location_pings SET place_id = NULL WHERE place_id = ?",
+        (place_id,),
+    )
+    return cursor.rowcount
 
 
 # -- Visits --

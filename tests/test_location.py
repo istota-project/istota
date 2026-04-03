@@ -433,7 +433,7 @@ class TestHaversine:
 class TestResolvePlace:
     def test_within_radius(self):
         places = [
-            db.Place(1, "alice", "home", 34.0, -118.0, 200, "home", "", None),
+            db.Place(1, "alice", "home", 34.0, -118.0, 200, "home", "file", "", None),
         ]
         result = resolve_place(34.0001, -118.0001, places)
         assert result is not None
@@ -441,15 +441,15 @@ class TestResolvePlace:
 
     def test_outside_radius(self):
         places = [
-            db.Place(1, "alice", "home", 34.0, -118.0, 50, "home", "", None),
+            db.Place(1, "alice", "home", 34.0, -118.0, 50, "home", "file", "", None),
         ]
         result = resolve_place(35.0, -119.0, places)
         assert result is None
 
     def test_nearest_wins(self):
         places = [
-            db.Place(1, "alice", "far", 34.01, -118.0, 5000, "other", "", None),
-            db.Place(2, "alice", "near", 34.0001, -118.0001, 5000, "other", "", None),
+            db.Place(1, "alice", "far", 34.01, -118.0, 5000, "other", "file", "", None),
+            db.Place(2, "alice", "near", 34.0001, -118.0001, 5000, "other", "file", "", None),
         ]
         result = resolve_place(34.0, -118.0, places)
         assert result.name == "near"

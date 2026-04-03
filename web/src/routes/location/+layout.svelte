@@ -2,13 +2,15 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import { getLocationPlaces, type Place } from '$lib/api';
-	import { locationPlaces, mapFlyTo } from '$lib/stores/location';
+	import { deletePlace, type Place } from '$lib/api';
+	import { locationPlaces, reloadPlaces, mapFlyTo } from '$lib/stores/location';
 
 	let { children } = $props();
 
 	let places: Place[] = $state([]);
 	let sidebarOpen = $state(false);
+
+	locationPlaces.subscribe(v => places = v);
 
 	function isActive(path: string): boolean {
 		return page.url.pathname.startsWith(`${base}${path}`);
@@ -25,6 +27,15 @@
 		sidebarOpen = false;
 	}
 
+	async function handleDeletePlace(place: Place) {
+		try {
+			await deletePlace(place.id);
+			await reloadPlaces();
+		} catch {
+			// ignore
+		}
+	}
+
 	let groupedPlaces = $derived.by(() => {
 		const groups: Record<string, Place[]> = {};
 		for (const p of places) {
@@ -37,9 +48,7 @@
 
 	onMount(async () => {
 		try {
-			const resp = await getLocationPlaces();
-			places = resp.places;
-			locationPlaces.set(resp.places);
+			await reloadPlaces();
 		} catch {
 			// pages handle their own errors
 		}
@@ -70,14 +79,24 @@
 					<div class="cat-group">
 						<div class="cat-label">{category}</div>
 						{#each catPlaces as place}
-							<button
-								class="place-btn"
-								onclick={() => handlePlaceClick(place)}
-								type="button"
-							>
-								<span class="place-name">{place.name}</span>
-								<span class="place-radius">{place.radius_meters}m</span>
-							</button>
+							<div class="place-row">
+								<button
+									class="place-btn"
+									onclick={() => handlePlaceClick(place)}
+									type="button"
+								>
+									<span class="place-name">{place.name}</span>
+									<span class="place-radius">{place.radius_meters}m</span>
+								</button>
+								{#if place.source === 'web'}
+									<button
+										class="place-delete"
+										onclick={() => handleDeletePlace(place)}
+										type="button"
+										title="Delete place"
+									>&times;</button>
+								{/if}
+							</div>
 						{/each}
 					</div>
 				{/each}
@@ -216,11 +235,17 @@
 		padding: 0.35rem 1rem 0.15rem;
 	}
 
+	.place-row {
+		display: flex;
+		align-items: center;
+	}
+
 	.place-btn {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		width: 100%;
+		flex: 1;
+		min-width: 0;
 		background: none;
 		border: none;
 		color: inherit;
@@ -235,6 +260,21 @@
 	.place-btn:hover {
 		background: var(--surface-raised);
 	}
+
+	.place-delete {
+		background: none;
+		border: none;
+		color: var(--text-dim);
+		font-size: var(--text-sm);
+		cursor: pointer;
+		padding: 0.2rem 0.35rem;
+		border-radius: 0.2rem;
+		opacity: 0;
+		transition: opacity var(--transition-fast), color var(--transition-fast);
+	}
+
+	.place-row:hover .place-delete { opacity: 1; }
+	.place-delete:hover { color: #c66; }
 
 	.place-name {
 		font-size: var(--text-sm);

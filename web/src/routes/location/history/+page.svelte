@@ -6,18 +6,24 @@
 	import {
 		getLocationPings,
 		getDaySummary,
+		getTrips,
 		type LocationPing,
 		type DaySummary,
 		type DaySummaryStop,
+		type Trip,
 	} from '$lib/api';
 	import { locationPlaces, mapFlyTo } from '$lib/stores/location';
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
 	import StopTimeline from '$lib/components/location/StopTimeline.svelte';
+	import DayStats from '$lib/components/location/DayStats.svelte';
+	import TripList from '$lib/components/location/TripList.svelte';
 	import Chip from '$lib/components/ui/Chip.svelte';
 	import { loadSetting, saveSetting } from '$lib/stores/persisted';
+	import { ACTIVITY_COLORS, ACTIVITY_LABELS, ALL_ACTIVITY_TYPES } from '$lib/location-constants';
 
 	let pings: LocationPing[] = $state([]);
 	let summary: DaySummary | null = $state(null);
+	let trips: Trip[] = $state([]);
 	let loading = $state(false);
 	let error = $state('');
 	let mapComponent: LocationMap | undefined = $state();
@@ -28,8 +34,28 @@
 	let viewMode: 'day' | 'range' = $state('day');
 	let showHeat = $state(loadSetting('location.showHeat', false));
 	let panelOpen = $state(false);
+	let activeActivityTypes: Set<string> = $state(new Set(ALL_ACTIVITY_TYPES));
 
 	$effect(() => { saveSetting('location.showHeat', showHeat); });
+
+	function toggleActivity(type: string) {
+		const next = new Set(activeActivityTypes);
+		if (next.has(type)) {
+			if (next.size > 1) next.delete(type);
+		} else {
+			next.add(type);
+		}
+		activeActivityTypes = next;
+	}
+
+	let activityCounts = $derived(() => {
+		const counts: Record<string, number> = {};
+		for (const p of pings) {
+			const t = p.activity_type ?? 'stationary';
+			counts[t] = (counts[t] ?? 0) + 1;
+		}
+		return counts;
+	});
 
 	let places = $derived($locationPlaces);
 
@@ -87,16 +113,19 @@
 		error = '';
 		pings = [];
 		summary = null;
+		trips = [];
 
 		try {
 			if (viewMode === 'day' && dateStr) {
-				const [p, s] = await Promise.all([
+				const [p, s, t] = await Promise.all([
 					getLocationPings({ date: dateStr }),
 					getDaySummary(dateStr),
+					getTrips(dateStr),
 				]);
 				pings = p.pings;
 				summary = s;
-				panelOpen = s.stops.length > 0;
+				trips = t.trips;
+				panelOpen = s.stops.length > 0 || t.trips.length > 0;
 			} else if (viewMode === 'range' && startStr && endStr) {
 				const p = await getLocationPings({ start: startStr, end: endStr, limit: '50000' });
 				pings = p.pings;
@@ -146,6 +175,14 @@
 		mapComponent?.flyTo(stop.lat, stop.lon);
 	}
 
+	function handleTripClick(trip: Trip) {
+		mapComponent?.flyTo(
+			(trip.start_lat + trip.end_lat) / 2,
+			(trip.start_lon + trip.end_lon) / 2,
+			13,
+		);
+	}
+
 	onMount(() => {
 		readUrlParams();
 		loadData();
@@ -182,6 +219,20 @@
 		{#if viewMode === 'range' && pings.length > 0}
 			<Chip checked={showHeat} onclick={() => showHeat = !showHeat}>Heat map</Chip>
 		{/if}
+		{#if pings.length > 0}
+			<div class="chip-group activity-chips">
+				{#each ALL_ACTIVITY_TYPES as type}
+					{@const count = activityCounts()[type] ?? 0}
+					{#if count > 0}
+						<Chip checked={activeActivityTypes.has(type)} onclick={() => toggleActivity(type)}>
+							<span class="activity-dot" style="background: {ACTIVITY_COLORS[type]}"></span>
+							{ACTIVITY_LABELS[type]}
+							<span class="chip-count">{count}</span>
+						</Chip>
+					{/if}
+				{/each}
+			</div>
+		{/if}
 	</div>
 
 	{#if loading}
@@ -199,6 +250,7 @@
 				{places}
 				showPath={!showHeat}
 				{showHeat}
+				{activeActivityTypes}
 				onStopClick={handleStopClick}
 			/>
 		</div>
@@ -213,16 +265,35 @@
 				{@const uniquePlaces = new Set(pings.filter(p => p.place).map(p => p.place))}
 				<span class="stat">{uniquePlaces.size} places</span>
 			{/if}
-			{#if summary && summary.stops.length > 0}
+			{#if viewMode === 'day' && trips.length > 0}
+				<span class="stat">{trips.length} trips</span>
+			{/if}
+			{#if (summary && summary.stops.length > 0) || trips.length > 0}
 				<button class="stops-btn" onclick={() => panelOpen = !panelOpen} type="button">
-					{panelOpen ? 'Hide stops' : 'Show stops'}
+					{panelOpen ? 'Hide details' : 'Show details'}
 				</button>
 			{/if}
 		</div>
 
-		{#if panelOpen && summary && summary.stops.length > 0}
+		{#if panelOpen && viewMode === 'day'}
 			<div class="stops-panel">
-				<StopTimeline stops={summary.stops} onStopClick={handleStopClick} />
+				{#if pings.length > 1}
+					<div class="panel-section">
+						<DayStats {pings} />
+					</div>
+				{/if}
+				{#if trips.length > 0}
+					<div class="panel-section">
+						<div class="panel-label">Trips</div>
+						<TripList {trips} onTripClick={handleTripClick} />
+					</div>
+				{/if}
+				{#if summary && summary.stops.length > 0}
+					<div class="panel-section">
+						<div class="panel-label">Stops</div>
+						<StopTimeline stops={summary.stops} onStopClick={handleStopClick} />
+					</div>
+				{/if}
 			</div>
 		{/if}
 	{/if}
@@ -336,7 +407,48 @@
 	.stops-panel::-webkit-scrollbar { width: 3px; }
 	.stops-panel::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
 
+	.panel-section {
+		padding-bottom: 0.5rem;
+		margin-bottom: 0.25rem;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.panel-section:last-child {
+		border-bottom: none;
+		margin-bottom: 0;
+		padding-bottom: 0;
+	}
+
+	.panel-label {
+		font-size: var(--text-xs);
+		color: var(--text-dim);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		font-weight: 500;
+		margin-bottom: 0.25rem;
+	}
+
+	.activity-chips {
+		border-left: 1px solid var(--border-subtle);
+		padding-left: 0.75rem;
+	}
+
+	.activity-dot {
+		display: inline-block;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		margin-right: 0.15rem;
+	}
+
+	.chip-count {
+		font-size: 0.65rem;
+		opacity: 0.6;
+		margin-left: 0.15rem;
+	}
+
 	@media (max-width: 768px) {
 		.date-inputs { display: none; }
+		.activity-chips { border-left: none; padding-left: 0; }
 	}
 </style>
