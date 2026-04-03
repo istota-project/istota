@@ -2,13 +2,16 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import { deletePlace, type Place } from '$lib/api';
+	import { deletePlace, getPlaceStats, type Place, type PlaceStats } from '$lib/api';
 	import { locationPlaces, reloadPlaces, mapFlyTo } from '$lib/stores/location';
 
 	let { children } = $props();
 
 	let places: Place[] = $state([]);
 	let sidebarOpen = $state(false);
+	let selectedPlace: Place | null = $state(null);
+	let placeStats: PlaceStats | null = $state(null);
+	let statsLoading = $state(false);
 
 	locationPlaces.subscribe(v => places = v);
 
@@ -21,15 +24,35 @@
 		return current === `${base}${path}` || current === `${base}${path}/`;
 	}
 
-	function handlePlaceClick(place: Place) {
+	async function handlePlaceClick(place: Place) {
 		const fly = $mapFlyTo;
 		if (fly) fly(place.lat, place.lon, 15);
-		sidebarOpen = false;
+
+		if (selectedPlace?.id === place.id) {
+			selectedPlace = null;
+			placeStats = null;
+			return;
+		}
+
+		selectedPlace = place;
+		placeStats = null;
+		statsLoading = true;
+		try {
+			placeStats = await getPlaceStats(place.id);
+		} catch {
+			placeStats = null;
+		} finally {
+			statsLoading = false;
+		}
 	}
 
 	async function handleDeletePlace(place: Place) {
 		try {
 			await deletePlace(place.id);
+			if (selectedPlace?.id === place.id) {
+				selectedPlace = null;
+				placeStats = null;
+			}
 			await reloadPlaces();
 		} catch {
 			// ignore
@@ -45,6 +68,24 @@
 		}
 		return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
 	});
+
+	function formatDuration(minutes: number | null): string {
+		if (minutes == null) return '—';
+		if (minutes < 60) return `${minutes}m`;
+		const h = Math.floor(minutes / 60);
+		const m = minutes % 60;
+		return m ? `${h}h ${m}m` : `${h}h`;
+	}
+
+	function formatDate(iso: string | null): string {
+		if (!iso) return '—';
+		try {
+			const d = new Date(iso + (iso.includes('T') ? '' : 'T00:00:00Z'));
+			return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+		} catch {
+			return iso;
+		}
+	}
 
 	function handleVisibility() {
 		if (document.visibilityState === 'visible') {
@@ -78,6 +119,43 @@
 				<span class="sidebar-title">Places</span>
 				<span class="sidebar-count">{places.length}</span>
 			</div>
+			{#if selectedPlace && (statsLoading || placeStats)}
+				<div class="stats-panel">
+					<div class="stats-header">
+						<span class="stats-name">{selectedPlace.name}</span>
+						<button class="stats-close" onclick={() => { selectedPlace = null; placeStats = null; }} type="button">&times;</button>
+					</div>
+					{#if statsLoading}
+						<div class="stats-loading">Loading...</div>
+					{:else if placeStats && placeStats.total_visits > 0}
+						<div class="stats-grid">
+							<div class="stat">
+								<span class="stat-value">{placeStats.total_visits}</span>
+								<span class="stat-label">{placeStats.total_visits === 1 ? 'visit' : 'visits'}</span>
+							</div>
+							<div class="stat">
+								<span class="stat-value">{formatDuration(placeStats.avg_duration_min)}</span>
+								<span class="stat-label">avg</span>
+							</div>
+							<div class="stat">
+								<span class="stat-value">{formatDuration(placeStats.longest_visit_min)}</span>
+								<span class="stat-label">longest</span>
+							</div>
+							<div class="stat">
+								<span class="stat-value">{formatDuration(placeStats.total_duration_min)}</span>
+								<span class="stat-label">total</span>
+							</div>
+						</div>
+						<div class="stats-dates">
+							<span>First: {formatDate(placeStats.first_visit)}</span>
+							<span>Last: {formatDate(placeStats.last_visit)}</span>
+						</div>
+					{:else}
+						<div class="stats-empty">No visits recorded</div>
+					{/if}
+				</div>
+			{/if}
+
 			<div class="sidebar-list">
 				{#each groupedPlaces as [category, catPlaces]}
 					<div class="cat-group">
@@ -86,6 +164,7 @@
 							<div class="place-row">
 								<button
 									class="place-btn"
+									class:selected={selectedPlace?.id === place.id}
 									onclick={() => handlePlaceClick(place)}
 									type="button"
 								>
@@ -261,6 +340,77 @@
 
 	.place-btn:hover {
 		background: var(--surface-raised);
+	}
+
+	.place-btn.selected {
+		background: var(--surface-raised);
+		color: var(--text-primary);
+	}
+
+	.stats-panel {
+		border-bottom: 1px solid var(--border-subtle);
+		padding: 0.6rem 1rem;
+		flex-shrink: 0;
+	}
+
+	.stats-header {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		margin-bottom: 0.5rem;
+	}
+
+	.stats-name {
+		font-size: var(--text-sm);
+		font-weight: 500;
+	}
+
+	.stats-close {
+		background: none;
+		border: none;
+		color: var(--text-dim);
+		font-size: var(--text-sm);
+		cursor: pointer;
+		padding: 0 0.25rem;
+		line-height: 1;
+	}
+
+	.stats-close:hover { color: var(--text-muted); }
+
+	.stats-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.4rem 0.75rem;
+		margin-bottom: 0.5rem;
+	}
+
+	.stat {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.stat-value {
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--text-primary);
+	}
+
+	.stat-label {
+		font-size: var(--text-xs);
+		color: var(--text-dim);
+	}
+
+	.stats-dates {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+		font-size: var(--text-xs);
+		color: var(--text-dim);
+	}
+
+	.stats-loading, .stats-empty {
+		font-size: var(--text-xs);
+		color: var(--text-dim);
 	}
 
 	.place-delete {
