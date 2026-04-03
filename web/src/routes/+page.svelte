@@ -30,6 +30,12 @@
 					<div class="feature-desc">GPS tracking and map</div>
 				</a>
 			{/if}
+			{#if user.features.ledgers}
+				<a href="{base}/ledgers" class="feature-card">
+					<div class="feature-title">Ledgers</div>
+					<div class="feature-desc">Accounting and Fava</div>
+				</a>
+			{/if}
 		</div>
 	{/if}
 </div>

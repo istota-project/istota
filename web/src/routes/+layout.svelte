@@ -50,6 +50,9 @@
 			{#if user.features.location}
 				<a href="{base}/location" class:active={isActive('/location')}>Location</a>
 			{/if}
+			{#if user.features.ledgers}
+				<a href="{base}/ledgers" class:active={isActive('/ledgers')}>Ledgers</a>
+			{/if}
 		</div>
 		<div class="nav-right">
 			<span>{user.display_name}</span>

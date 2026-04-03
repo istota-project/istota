@@ -328,6 +328,16 @@
 - [ ] Memory viewer page
 - [ ] Remove static feed page generation (once web UI is primary)
 
+### Moneyman Web Integration
+- [x] Fava reverse proxy via nginx auth_request + Istota session
+- [x] Moneyman API proxy routes (ledgers, fava instances)
+- [x] Auth-check endpoint for nginx sub-request validation
+- [x] Ledgers page with Fava links
+- [x] Auto-port allocation from configurable range (fava_enabled + fava_port_start)
+- [ ] Embedded balances dashboard (direct in Istota UI)
+- [ ] Work log tracking page (timesheet backed by Moneyman work API)
+- [ ] Invoice management page (generate, status, mark paid)
+
 ## Priority 4: Future Ideas
 
 ### Architecture
