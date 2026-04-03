@@ -46,12 +46,16 @@
 		return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
 	});
 
-	onMount(async () => {
-		try {
-			await reloadPlaces();
-		} catch {
-			// pages handle their own errors
+	function handleVisibility() {
+		if (document.visibilityState === 'visible') {
+			reloadPlaces().catch(() => {});
 		}
+	}
+
+	onMount(() => {
+		reloadPlaces().catch(() => {});
+		document.addEventListener('visibilitychange', handleVisibility);
+		return () => document.removeEventListener('visibilitychange', handleVisibility);
 	});
 </script>
 
