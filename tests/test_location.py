@@ -155,7 +155,21 @@ class TestVisitDB:
 
 
 class TestPlaceStats:
-    def test_no_visits(self, tmp_path):
+    def _add_pings(self, conn, user_id, place_id, timestamps):
+        """Insert pings at a place for given ISO timestamps."""
+        for ts in timestamps:
+            db.insert_location_ping(
+                conn, user_id, ts, 34.0, -118.0,
+                accuracy=5.0, activity_type="stationary",
+            )
+            # Assign place_id to the ping we just inserted
+            last_id = conn.execute("SELECT max(id) FROM location_pings").fetchone()[0]
+            conn.execute(
+                "UPDATE location_pings SET place_id = ? WHERE id = ?",
+                (place_id, last_id),
+            )
+
+    def test_no_pings(self, tmp_path):
         from istota.web_app import _location_place_stats
 
         db_path = _init_db(tmp_path)
@@ -168,41 +182,74 @@ class TestPlaceStats:
         assert result["total_visits"] == 0
         assert result["first_visit"] is None
 
-    def test_with_visits(self, tmp_path):
+    def test_single_visit_from_pings(self, tmp_path):
         from istota.web_app import _location_place_stats
 
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
             pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
-            # Two completed visits
-            v1 = db.insert_visit(conn, "alice", pid, "cafe", "2026-01-10T09:00:00")
-            db.close_visit(conn, v1, "2026-01-10T10:00:00")  # 1 hour
-            v2 = db.insert_visit(conn, "alice", pid, "cafe", "2026-02-15T14:00:00")
-            db.close_visit(conn, v2, "2026-02-15T16:00:00")  # 2 hours
-            conn.commit()
-
-        result = _location_place_stats(str(db_path), "alice", pid)
-        assert result["total_visits"] == 2
-        assert result["first_visit"] == "2026-01-10T09:00:00"
-        assert result["last_visit"] == "2026-02-15T14:00:00"
-        assert result["avg_duration_min"] == 90  # (60 + 120) / 2
-        assert result["total_duration_min"] == 180
-        assert result["longest_visit_min"] == 120
-
-    def test_excludes_open_visits(self, tmp_path):
-        from istota.web_app import _location_place_stats
-
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
-            # One completed, one still open
-            v1 = db.insert_visit(conn, "alice", pid, "cafe", "2026-01-10T09:00:00")
-            db.close_visit(conn, v1, "2026-01-10T10:00:00")
-            db.insert_visit(conn, "alice", pid, "cafe", "2026-03-01T12:00:00")
+            # Pings 5 min apart = one visit spanning 1 hour
+            self._add_pings(conn, "alice", pid, [
+                "2026-01-10T09:00:00Z",
+                "2026-01-10T09:05:00Z",
+                "2026-01-10T09:30:00Z",
+                "2026-01-10T10:00:00Z",
+            ])
             conn.commit()
 
         result = _location_place_stats(str(db_path), "alice", pid)
         assert result["total_visits"] == 1
+        assert result["avg_duration_min"] == 60
+        assert result["total_duration_min"] == 60
+
+    def test_two_visits_with_gap(self, tmp_path):
+        from istota.web_app import _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            # Visit 1: 20 min (pings every 5 min)
+            self._add_pings(conn, "alice", pid, [
+                "2026-01-10T09:00:00Z",
+                "2026-01-10T09:05:00Z",
+                "2026-01-10T09:10:00Z",
+                "2026-01-10T09:15:00Z",
+                "2026-01-10T09:20:00Z",
+            ])
+            # 2-hour gap (> 30 min threshold) → new visit
+            # Visit 2: 15 min
+            self._add_pings(conn, "alice", pid, [
+                "2026-01-10T11:20:00Z",
+                "2026-01-10T11:25:00Z",
+                "2026-01-10T11:30:00Z",
+                "2026-01-10T11:35:00Z",
+            ])
+            conn.commit()
+
+        result = _location_place_stats(str(db_path), "alice", pid)
+        assert result["total_visits"] == 2
+        assert result["first_visit"] == "2026-01-10T09:00:00Z"
+        assert result["last_visit"] == "2026-01-10T11:20:00Z"
+        assert result["avg_duration_min"] == 18  # (20 + 15) / 2 rounded
+        assert result["total_duration_min"] == 35
+        assert result["longest_visit_min"] == 20
+
+    def test_walkby_filtered(self, tmp_path):
+        """A visit with fewer than 3 pings (walk-by) should not count."""
+        from istota.web_app import _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            # Only 2 pings — just passing by
+            self._add_pings(conn, "alice", pid, [
+                "2026-01-10T09:00:00Z",
+                "2026-01-10T09:05:00Z",
+            ])
+            conn.commit()
+
+        result = _location_place_stats(str(db_path), "alice", pid)
+        assert result["total_visits"] == 0
 
     def test_wrong_user_returns_none(self, tmp_path):
         from istota.web_app import _location_place_stats

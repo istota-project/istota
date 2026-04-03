@@ -13,7 +13,6 @@ from istota.storage import (
     get_user_memories_path,
     get_user_bot_path,
     get_user_config_path,
-    get_user_data_path,
     get_user_tasks_file_path,
     get_user_shared_path,
     get_user_scripts_path,
@@ -83,9 +82,6 @@ class TestPathHelpers:
 
     def test_user_config_path(self):
         assert get_user_config_path("alice", "istota") == "/Users/alice/istota/config"
-
-    def test_user_data_path(self):
-        assert get_user_data_path("alice", "istota") == "/Users/alice/istota/data"
 
     def test_user_tasks_file_path(self):
         assert get_user_tasks_file_path("alice", "istota") == "/Users/alice/istota/config/TASKS.md"
