@@ -52,7 +52,22 @@
 		return Math.sqrt(dlat * dlat + dlon * dlon);
 	}
 
-	const GAP_THRESHOLD_M = 300;
+	// Gap detection: only break when both time and distance suggest a real location jump.
+	// Short time gaps are always contiguous (normal driving can be 1km+ between pings).
+	// Long time gaps need significant distance to count as a real move.
+	const GAP_TIME_MIN_S = 300;     // 5 min — below this, always contiguous
+	const GAP_DIST_MIN_M = 500;     // must also be this far apart
+	const GAP_SPEED_MAX_MS = 55;    // ~200 km/h — above this, clearly a teleport
+
+	function isGap(dist: number, timeDeltaS: number): boolean {
+		if (timeDeltaS <= 0) return false;
+		// Teleport: impossible speed regardless of time
+		if (dist / timeDeltaS > GAP_SPEED_MAX_MS) return true;
+		// Quick successive pings: always contiguous
+		if (timeDeltaS < GAP_TIME_MIN_S) return false;
+		// Long pause + significant distance = real gap
+		return dist > GAP_DIST_MIN_M;
+	}
 
 	function buildPathGeoJSON(pings: LocationPing[]): GeoJSON.FeatureCollection {
 		const filtered = filteredPings(pings);
@@ -61,6 +76,7 @@
 		const features: GeoJSON.Feature[] = [];
 		let segCoords: [number, number][] = [[filtered[0].lon, filtered[0].lat]];
 		let segActivity = filtered[0].activity_type ?? 'unknown';
+		let segLastTs = new Date(filtered[0].timestamp).getTime() / 1000;
 
 		function flushSegment() {
 			if (segCoords.length >= 2) {
@@ -76,15 +92,16 @@
 			const activity = filtered[i].activity_type ?? 'unknown';
 			const prev = segCoords[segCoords.length - 1];
 			const cur: [number, number] = [filtered[i].lon, filtered[i].lat];
+			const curTs = new Date(filtered[i].timestamp).getTime() / 1000;
 			const dist = approxDistanceM(prev[0], prev[1], cur[0], cur[1]);
+			const timeDelta = curTs - segLastTs;
 
 			const activityChanged = activity !== segActivity;
-			const bigGap = dist > GAP_THRESHOLD_M;
+			const gap = isGap(dist, timeDelta);
 
-			if (activityChanged || bigGap) {
+			if (activityChanged || gap) {
 				flushSegment();
-				// Draw a faint transit connector across the gap
-				if (bigGap && segCoords.length > 0) {
+				if (gap && segCoords.length > 0) {
 					features.push({
 						type: 'Feature',
 						properties: { activity_type: 'transit', segment_type: 'transit' },
@@ -96,6 +113,7 @@
 			} else {
 				segCoords.push(cur);
 			}
+			segLastTs = curTs;
 		}
 		flushSegment();
 
