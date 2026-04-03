@@ -62,7 +62,14 @@ async def lifespan(app: FastAPI):
 # Session secret must be available at import time for SessionMiddleware.
 # Prefer env var (systemd EnvironmentFile=), fall back to a placeholder
 # that will be replaced once lifespan loads the config.
-_session_secret = os.environ.get("ISTOTA_WEB_SECRET_KEY", "change-me-insecure-default")
+_INSECURE_DEFAULT = "change-me-insecure-default"
+_session_secret = os.environ.get("ISTOTA_WEB_SECRET_KEY", _INSECURE_DEFAULT)
+
+if _session_secret == _INSECURE_DEFAULT:
+    logger.warning(
+        "ISTOTA_WEB_SECRET_KEY not set — using insecure default. "
+        "Set this environment variable before running in production."
+    )
 
 app = FastAPI(title="Istota Web", lifespan=lifespan)
 app.add_middleware(
