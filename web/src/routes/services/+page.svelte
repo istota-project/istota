@@ -7,8 +7,7 @@
 		favaPrefix: string | null;
 	}
 
-	let svc = $state($selectedService);
-	selectedService.subscribe((v) => (svc = v));
+	let svc = $derived($selectedService);
 
 	let fava = $derived(
 		svc?.id === 'fava' ? (svc.detail as FavaDetail | null) : null,
