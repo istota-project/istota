@@ -173,8 +173,7 @@ Each user gets a shared Nextcloud folder:
 │   ├── PERSONA.md       # Personality customization
 │   ├── BRIEFINGS.md     # Briefing schedule
 │   ├── CRON.md          # Scheduled jobs
-│   ├── HEARTBEAT.md     # Health monitoring config
-│   └── LOCATION.md      # GPS location tracking config
+│   └── HEARTBEAT.md     # Health monitoring config
 ├── exports/             # Bot-generated files
 └── examples/            # Reference documentation
 ```

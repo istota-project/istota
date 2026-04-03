@@ -20,7 +20,6 @@ istota/
 │   ├── skill_client.py      # istota-skill console script (proxy client + direct fallback)
 │   ├── network_proxy.py     # CONNECT proxy for network isolation (domain allowlist)
 │   ├── heartbeat.py         # Heartbeat monitoring system
-│   ├── location_loader.py   # LOCATION.md parser + place sync
 │   ├── web_app.py            # Authenticated web interface (Nextcloud OIDC)
 │   ├── webhook_receiver.py   # FastAPI webhook receiver (Overland GPS, etc.)
 │   ├── logging_setup.py     # Central logging configuration
