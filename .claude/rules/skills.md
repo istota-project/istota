@@ -136,7 +136,7 @@ Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skill
 **Key fns**: Uses `nextcloud_client.py` (OCS + WebDAV)
 
 ### `location/` - GPS Location + Calendar Attendance
-**Subcommands**: `current`, `history`, `places`, `learn`, `attendance`, `reverse-geocode`, `day-summary`
+**Subcommands**: `current`, `history`, `places`, `learn`, `update`, `delete`, `attendance`, `reverse-geocode`, `day-summary`
 **Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`
 **Optional deps**: `caldav` (in `calendar` extra group)
 
