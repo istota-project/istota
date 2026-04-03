@@ -245,10 +245,9 @@ async def api_me(user: dict = Depends(_require_api_auth)):
     }
 
 
-@api_router.get("/moneyman/ledgers")
-async def api_moneyman_ledgers(user: dict = Depends(_require_api_auth)):
-    """Proxy to Moneyman API to get ledger list."""
-    creds = _get_moneyman_creds(user["username"])
+async def _moneyman_proxy_get(username: str, path: str):
+    """Proxy a GET request to the Moneyman API, or return an error response."""
+    creds = _get_moneyman_creds(username)
     if not creds:
         return JSONResponse({"error": "moneyman not configured"}, status_code=404)
 
@@ -263,40 +262,23 @@ async def api_moneyman_ledgers(user: dict = Depends(_require_api_auth)):
         async with httpx.AsyncClient(
             base_url=base_url.rstrip("/"), headers=headers, timeout=15.0,
         ) as client:
-            resp = await client.get("/api/ledgers")
+            resp = await client.get(path)
             resp.raise_for_status()
     except httpx.HTTPError as e:
-        logger.error("Moneyman API error (ledgers): %s", e)
+        logger.error("Moneyman API error (%s): %s", path, e)
         return JSONResponse({"error": "moneyman api error"}, status_code=502)
 
     return resp.json()
+
+
+@api_router.get("/moneyman/ledgers")
+async def api_moneyman_ledgers(user: dict = Depends(_require_api_auth)):
+    return await _moneyman_proxy_get(user["username"], "/api/ledgers")
 
 
 @api_router.get("/moneyman/fava")
 async def api_moneyman_fava(user: dict = Depends(_require_api_auth)):
-    """Proxy to Moneyman API to get Fava instance list."""
-    creds = _get_moneyman_creds(user["username"])
-    if not creds:
-        return JSONResponse({"error": "moneyman not configured"}, status_code=404)
-
-    base_url, api_key, user_key = creds
-    headers: dict[str, str] = {}
-    if api_key:
-        headers["X-API-Key"] = api_key
-    if user_key:
-        headers["X-User"] = user_key
-
-    try:
-        async with httpx.AsyncClient(
-            base_url=base_url.rstrip("/"), headers=headers, timeout=15.0,
-        ) as client:
-            resp = await client.get("/api/fava")
-            resp.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.error("Moneyman API error (fava): %s", e)
-        return JSONResponse({"error": "moneyman api error"}, status_code=502)
-
-    return resp.json()
+    return await _moneyman_proxy_get(user["username"], "/api/fava")
 
 
 # Tags allowed in feed card excerpts
