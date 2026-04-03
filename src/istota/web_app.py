@@ -811,7 +811,12 @@ def _location_delete_place(db_path: str, user_id: str, place_id: int) -> bool:
 
 
 def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | None:
-    """Get visit statistics for a place."""
+    """Get visit statistics for a place, derived from ping data.
+
+    Groups consecutive pings at the place into visits. A gap of 30+ minutes
+    between pings starts a new visit. This works for places added retroactively
+    (via backfill) where the visit state machine wasn't running.
+    """
     from .db import get_place_by_id
 
     conn = sqlite3.connect(db_path)
@@ -821,13 +826,11 @@ def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | N
         if not place or place.user_id != user_id:
             return None
 
-        # Completed visits (exited_at IS NOT NULL) for this place
         rows = conn.execute(
             """
-            SELECT entered_at, exited_at, duration_sec, ping_count
-            FROM visits
-            WHERE user_id = ? AND place_id = ? AND exited_at IS NOT NULL
-            ORDER BY entered_at ASC
+            SELECT timestamp FROM location_pings
+            WHERE user_id = ? AND place_id = ?
+            ORDER BY timestamp ASC
             """,
             (user_id, place_id),
         ).fetchall()
@@ -843,20 +846,63 @@ def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | N
                 "longest_visit_min": None,
             }
 
-        total = len(rows)
-        first_visit = rows[0]["entered_at"]
-        last_visit = rows[-1]["entered_at"]
+        # Group pings into visits: 30-min gap = new visit, 3+ pings = real visit
+        gap_threshold = 30 * 60  # seconds
+        min_pings = 3  # filter out walk-bys
+        segments: list[tuple[str, str, int]] = []  # (first_ts, last_ts, ping_count)
+        visit_start = rows[0]["timestamp"]
+        prev_ts = visit_start
+        ping_count = 1
 
-        durations = [r["duration_sec"] for r in rows if r["duration_sec"] is not None]
-        total_sec = sum(durations) if durations else 0
-        avg_sec = total_sec / len(durations) if durations else 0
-        longest_sec = max(durations) if durations else 0
+        for row in rows[1:]:
+            ts = row["timestamp"]
+            try:
+                delta = (
+                    datetime.fromisoformat(ts) - datetime.fromisoformat(prev_ts)
+                ).total_seconds()
+            except (ValueError, TypeError):
+                delta = 0
+            if delta > gap_threshold:
+                segments.append((visit_start, prev_ts, ping_count))
+                visit_start = ts
+                ping_count = 1
+            else:
+                ping_count += 1
+            prev_ts = ts
+        segments.append((visit_start, prev_ts, ping_count))
+
+        visits = [(s, e) for s, e, c in segments if c >= min_pings]
+
+        if not visits:
+            return {
+                "place_id": place_id,
+                "total_visits": 0,
+                "first_visit": None,
+                "last_visit": None,
+                "avg_duration_min": None,
+                "total_duration_min": None,
+                "longest_visit_min": None,
+            }
+
+        durations_sec = []
+        for start, end in visits:
+            try:
+                dur = (
+                    datetime.fromisoformat(end) - datetime.fromisoformat(start)
+                ).total_seconds()
+                durations_sec.append(dur)
+            except (ValueError, TypeError):
+                durations_sec.append(0)
+
+        total_sec = sum(durations_sec)
+        avg_sec = total_sec / len(durations_sec) if durations_sec else 0
+        longest_sec = max(durations_sec) if durations_sec else 0
 
         return {
             "place_id": place_id,
-            "total_visits": total,
-            "first_visit": first_visit,
-            "last_visit": last_visit,
+            "total_visits": len(visits),
+            "first_visit": visits[0][0],
+            "last_visit": visits[-1][0],
             "avg_duration_min": round(avg_sec / 60),
             "total_duration_min": round(total_sec / 60),
             "longest_visit_min": round(longest_sec / 60),
