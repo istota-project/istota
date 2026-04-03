@@ -2,6 +2,44 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-03: Location place management and visit stats
+
+Added full CRUD for places via CLI and web UI, plus visit statistics derived from ping data.
+
+The location skill previously only supported listing and creating places. Editing or deleting required raw SQL via deferred subtasks (which broke when the subtask JSON used the wrong key). Now there are proper `update` and `delete` CLI subcommands, and the `places` command includes the place ID in output.
+
+The web UI gained a place edit form (reused for both create and edit), drag-to-reposition on the map (draggable MapLibre marker), and a visit stats panel in the sidebar. Visit stats are derived from `location_pings` rather than the `visits` table, so places added retroactively (with backfilled pings) get proper stats. Visit grouping uses elsewhere-based splitting — a gap only starts a new visit if pings at a different place appear during it, so GPS dropout indoors doesn't fragment visits. Walk-bys (< 3 pings) are filtered out.
+
+Updating a place's location or radius now triggers automatic ping reassignment: pings outside the new geofence are unassigned, and unassigned pings within range are claimed.
+
+Fixed geofence circle rendering on the map — the old exponential interpolation used hardcoded divisors and clamped at zoom 18, making circles shrink at high zoom. Now uses proper ground-resolution math with stops spanning z8-z22.
+
+Also removed dead `get_user_data_path` from storage.py.
+
+**Key changes:**
+- Location CLI: `update` (by name or ID, any field), `delete` (by name or ID), `places` includes ID
+- Web UI: place edit form, drag-to-reposition, visit stats panel, expanded category list
+- Visit stats: ping-based with elsewhere-split grouping, walk-by filtering
+- Ping reassignment on place move/radius change (backfill + unassign)
+- Geofence circle scaling fix (z8-z22 range, correct ground resolution)
+- Removed unused `get_user_data_path`
+
+**Files added/modified:**
+- `src/istota/skills/location/__init__.py` — added `cmd_update`, `cmd_delete`, `_resolve_place`, ID in `cmd_places`
+- `src/istota/skills/location/skill.md` — documented update/delete commands with examples
+- `src/istota/web_app.py` — `_location_place_stats` (ping-based), `_location_update_place` (ping reassignment), `/location/places/{id}/stats` endpoint
+- `src/istota/storage.py` — removed `get_user_data_path`
+- `web/src/lib/api.ts` — `PlaceStats` type, `getPlaceStats()` function
+- `web/src/lib/stores/location.ts` — `selectedPlaceId`, `onPlaceMove` stores
+- `web/src/lib/components/location/PlaceForm.svelte` — dual create/edit mode, expanded categories, coordinate fields
+- `web/src/lib/components/location/LocationMap.svelte` — draggable marker, fixed circle scaling, first-load-only fitBounds
+- `web/src/routes/location/+layout.svelte` — stats panel, edit button, place move handler
+- `web/src/routes/location/+page.svelte` — pass selectedPlaceId/onPlaceMove to map
+- `web/src/routes/location/history/+page.svelte` — pass selectedPlaceId/onPlaceMove to map
+- `web/src/routes/location/places/+page.svelte` — pass selectedPlaceId/onPlaceMove to map
+- `tests/test_location.py` — 13 new tests (CLI update/delete, place stats, reassignment)
+- `tests/test_storage.py` — removed `get_user_data_path` test
+
 ## 2026-04-02: Custom system prompt option
 
 Added `custom_system_prompt` config toggle to replace Claude Code's default system prompt with a minimal one focused on tool usage and working practices. The default system prompt includes identity, interactive modes, git/PR workflows, IDE integration, agent/subagent, auto-memory, and other instructions that are irrelevant or conflicting for Istota's headless `-p` mode.

@@ -208,16 +208,16 @@ Per-user config via `[[resources]]` with `type = "overland"`:
 - `ingest_token`: shared secret for Overland endpoint
 - `default_radius`: default geofence radius (meters)
 
-Places are managed via the web UI or the `learn` CLI command (stored in `places` DB table). Place detection uses hysteresis (2 consecutive pings required) to avoid flapping.
+Places (named geofences) stored in `places` DB table. Full CRUD via CLI (`learn`, `update`, `delete`) and web UI (create from discovered clusters, edit form, drag-to-reposition on map). Place detection uses hysteresis (2 consecutive pings required) to avoid flapping. Updating a place's location or radius triggers automatic ping reassignment (backfill nearby unassigned pings, unassign pings now outside radius).
 
 DB tables: `location_pings`, `places`, `visits`, `location_state`. Old pings cleaned after `location_ping_retention_days` (365).
 
 ### Authenticated Web Interface
 SvelteKit frontend (`web/`) with FastAPI backend (`web_app.py`). Nextcloud OIDC for authentication. Runs as a separate service (`uvicorn istota.web_app:app`). Session-based auth via `SessionMiddleware`, 7-day cookie.
 
-Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark single entry read), `/istota/api/feeds/entries/batch` (batch mark read). SvelteKit build served as static files for all other `/istota/*` paths.
+Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark single entry read), `/istota/api/feeds/entries/batch` (batch mark read), `/istota/api/location/*` (places CRUD, pings, day summary, trips, discover, place stats). SvelteKit build served as static files for all other `/istota/*` paths.
 
-Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design). Dashboard shows available features. Feeds page has masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox, viewport-based read tracking. Reads directly from Miniflux API via the backend proxy (no static file generation).
+Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design). Dashboard shows available features. Feeds page has masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox, viewport-based read tracking. Location pages: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover unknown clusters, create/edit/delete places). Place sidebar with visit stats (derived from pings), edit form, drag-to-reposition on map. Reads directly from Miniflux API via the backend proxy (no static file generation).
 
 Read tracking: IntersectionObserver marks entries as read in Miniflux after 1.5s visible in viewport (half-visible threshold). Batch API calls debounced at 3s intervals. Read cards render at reduced opacity (85%, full on hover). "New" filter chip shows only unread entries. Status badge shows unread/total count.
 

@@ -336,7 +336,7 @@
 
 ### Script State & Data Access
 - [x] Key-value store (`istota_kv` table) with CLI for script runtime state
-- [ ] Migrate existing scripts to use KV store or `data/` directory for state
+- [ ] Migrate existing scripts to use KV store for state
 - [ ] Bulk data read/write commands for larger JSON blobs
 
 ### Skills ✅
@@ -345,7 +345,7 @@
 - [x] Plugin architecture: self-contained skill directories with `skill.toml` manifests, declarative env var wiring, directory-based discovery
 - [x] Markets skill: interactive CLI with quote, summary, finviz commands + keyword triggers
 - [ ] More specialized skills with specific commands/tools
-- [x] Location tracking via Overland GPS (FastAPI receiver, place resolution, visit state machine, CLI skill)
+- [x] Location tracking via Overland GPS (FastAPI receiver, place resolution, visit state machine, full place CRUD CLI)
 - [x] Calendar attendance correlation via GPS pings (geocoding, place matching, proximity check)
 - [x] Dependency isolation: optional deps in extras groups, import guards, `!skills` availability display
 - [x] Service credentials as resources (monarch follows karakeep pattern with ResourceConfig.extra)
@@ -361,7 +361,15 @@
 - [x] `day-summary` CLI subcommand (cluster pings, resolve names, filter transit)
 - [x] Greedy sequential clustering in shared `geo.py`
 
-### Visits & Analytics (Deferred)
+### Place Management ✅
+- [x] Full CRUD via CLI (`update`, `delete` subcommands by name or ID)
+- [x] Web UI: edit form, drag-to-reposition on map, visit stats panel
+- [x] Ping reassignment on place move/radius change
+- [x] Geofence circle rendering fix (correct scaling at all zoom levels)
+
+### Visits & Analytics
+- [x] Visit stats derived from pings (elsewhere-based split, walk-by filter)
+- [x] Web UI visit stats panel (count, avg/total/longest duration, first/last dates)
 - [ ] Dwell detection (periodic check for open visits exceeding dwell threshold)
 - [ ] `stats` CLI subcommand (time-at-place aggregation by month/year)
 - [ ] `top` CLI subcommand (ranked places by visit count/duration)
