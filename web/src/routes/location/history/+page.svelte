@@ -225,12 +225,10 @@
 			<LocationMap
 				bind:this={mapComponent}
 				{pings}
-				stops={summary?.stops ?? []}
 				{places}
 				showPath={!showHeat}
 				{showHeat}
 				{activeActivityTypes}
-				onStopClick={handleStopClick}
 			/>
 		</div>
 

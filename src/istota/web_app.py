@@ -638,6 +638,12 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
             if stop["place_name"]:
                 stop["location"] = stop["place_name"]
                 stop["location_source"] = "saved_place"
+                # Snap to place center for consistent positioning
+                for sp in saved_places:
+                    if sp["name"] == stop["place_name"]:
+                        stop["lat"] = sp["lat"]
+                        stop["lon"] = sp["lon"]
+                        break
             else:
                 matched = False
                 for sp in saved_places:
@@ -645,6 +651,8 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
                     if dist <= max(sp["radius_meters"], 100):
                         stop["location"] = sp["name"]
                         stop["location_source"] = "saved_place_proximity"
+                        stop["lat"] = sp["lat"]
+                        stop["lon"] = sp["lon"]
                         matched = True
                         break
                 if not matched:
@@ -898,8 +906,8 @@ def _location_query_trips(db_path: str, user_id: str, tz_name: str, date: str | 
     tz = ZoneInfo(tz_name)
     now = datetime.now(tz)
     target = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=tz) if date else now.replace(hour=0, minute=0, second=0, microsecond=0)
-    since = target.strftime("%Y-%m-%dT00:00:00")
-    until = (target + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
+    since = target.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    until = (target + timedelta(days=1)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
