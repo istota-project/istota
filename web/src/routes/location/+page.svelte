@@ -11,7 +11,7 @@
 		type DaySummaryStop,
 		type Trip,
 	} from '$lib/api';
-	import { locationPlaces, mapFlyTo } from '$lib/stores/location';
+	import { locationPlaces, mapFlyTo, selectedPlaceId, onPlaceMove } from '$lib/stores/location';
 	import { loadSetting, saveSetting } from '$lib/stores/persisted';
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
 	import CurrentStatus from '$lib/components/location/CurrentStatus.svelte';
@@ -110,6 +110,8 @@
 				{places}
 				currentPosition={currentPos}
 				showPath={true}
+				selectedPlaceId={$selectedPlaceId}
+				onPlaceMove={$onPlaceMove}
 			/>
 		</div>
 

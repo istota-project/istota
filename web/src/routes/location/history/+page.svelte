@@ -12,7 +12,7 @@
 		type DaySummaryStop,
 		type Trip,
 	} from '$lib/api';
-	import { locationPlaces, mapFlyTo } from '$lib/stores/location';
+	import { locationPlaces, mapFlyTo, selectedPlaceId, onPlaceMove } from '$lib/stores/location';
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
 	import StopTimeline from '$lib/components/location/StopTimeline.svelte';
 	import DayStats from '$lib/components/location/DayStats.svelte';
@@ -192,6 +192,8 @@
 				showPath={!showHeat}
 				{showHeat}
 				{activeActivityTypes}
+				selectedPlaceId={$selectedPlaceId}
+				onPlaceMove={$onPlaceMove}
 			/>
 		</div>
 

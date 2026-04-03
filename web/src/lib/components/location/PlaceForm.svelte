@@ -1,26 +1,31 @@
 <script lang="ts">
-	import type { DiscoveredCluster } from '$lib/api';
+	import type { DiscoveredCluster, Place } from '$lib/api';
 
 	interface Props {
-		cluster: DiscoveredCluster;
+		cluster?: DiscoveredCluster;
+		place?: Place;
 		onSave: (data: { name: string; lat: number; lon: number; radius_meters: number; category: string }) => void;
 		onCancel: () => void;
 	}
 
-	let { cluster, onSave, onCancel }: Props = $props();
+	let { cluster, place, onSave, onCancel }: Props = $props();
 
-	let name = $state('');
-	let category = $state('other');
-	let radius = $state(100);
+	const editing = $derived(!!place);
 
-	const categories = ['home', 'work', 'gym', 'food', 'other'];
+	let name = $state(place?.name ?? '');
+	let category = $state(place?.category ?? 'other');
+	let radius = $state(place?.radius_meters ?? cluster?.radius_meters ?? 100);
+	let lat = $state(place?.lat ?? cluster?.lat ?? 0);
+	let lon = $state(place?.lon ?? cluster?.lon ?? 0);
+
+	const categories = ['home', 'work', 'gym', 'food', 'shopping', 'social', 'friend', 'other'];
 
 	function handleSave() {
 		if (!name.trim()) return;
 		onSave({
 			name: name.trim(),
-			lat: cluster.lat,
-			lon: cluster.lon,
+			lat,
+			lon,
 			radius_meters: radius,
 			category,
 		});
@@ -36,10 +41,12 @@
 
 <div class="overlay" onclick={onCancel} role="presentation">
 	<div class="form-card" onclick={(e) => e.stopPropagation()} role="dialog">
-		<div class="header">Name this place</div>
-		<div class="meta">
-			{cluster.total_pings} pings recorded here
-		</div>
+		<div class="header">{editing ? 'Edit place' : 'Name this place'}</div>
+		{#if cluster && !editing}
+			<div class="meta">
+				{cluster.total_pings} pings recorded here
+			</div>
+		{/if}
 
 		<label class="field">
 			<span>Name</span>
@@ -60,9 +67,24 @@
 			<input type="range" min="25" max="500" step="25" bind:value={radius} />
 		</label>
 
+		{#if editing}
+			<div class="coords">
+				<label class="field coord">
+					<span>Lat</span>
+					<input type="number" step="0.00001" bind:value={lat} />
+				</label>
+				<label class="field coord">
+					<span>Lon</span>
+					<input type="number" step="0.00001" bind:value={lon} />
+				</label>
+			</div>
+		{/if}
+
 		<div class="actions">
 			<button class="btn cancel" onclick={onCancel} type="button">Cancel</button>
-			<button class="btn save" onclick={handleSave} disabled={!name.trim()} type="button">Save</button>
+			<button class="btn save" onclick={handleSave} disabled={!name.trim()} type="button">
+				{editing ? 'Update' : 'Save'}
+			</button>
 		</div>
 	</div>
 </div>
@@ -112,6 +134,7 @@
 	}
 
 	.field input[type="text"],
+	.field input[type="number"],
 	.field select {
 		background: var(--surface-bg);
 		border: 1px solid var(--border-default);
@@ -124,6 +147,19 @@
 
 	.field input[type="range"] {
 		accent-color: #ffc107;
+	}
+
+	.coords {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.coord {
+		flex: 1;
+	}
+
+	.coord input {
+		width: 100%;
 	}
 
 	.actions {

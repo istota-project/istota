@@ -2,8 +2,9 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import { deletePlace, getPlaceStats, type Place, type PlaceStats } from '$lib/api';
-	import { locationPlaces, reloadPlaces, mapFlyTo } from '$lib/stores/location';
+	import { deletePlace, updatePlace, getPlaceStats, type Place, type PlaceStats } from '$lib/api';
+	import { locationPlaces, reloadPlaces, mapFlyTo, selectedPlaceId as selectedPlaceIdStore, onPlaceMove as onPlaceMoveStore } from '$lib/stores/location';
+	import PlaceForm from '$lib/components/location/PlaceForm.svelte';
 
 	let { children } = $props();
 
@@ -12,6 +13,7 @@
 	let selectedPlace: Place | null = $state(null);
 	let placeStats: PlaceStats | null = $state(null);
 	let statsLoading = $state(false);
+	let editingPlace: Place | null = $state(null);
 
 	locationPlaces.subscribe(v => places = v);
 
@@ -43,6 +45,23 @@
 			placeStats = null;
 		} finally {
 			statsLoading = false;
+		}
+	}
+
+	function handleEditPlace(place: Place) {
+		editingPlace = place;
+	}
+
+	async function handleEditSave(data: { name: string; lat: number; lon: number; radius_meters: number; category: string }) {
+		if (!editingPlace) return;
+		try {
+			await updatePlace(editingPlace.id, data);
+			editingPlace = null;
+			selectedPlace = null;
+			placeStats = null;
+			await reloadPlaces();
+		} catch {
+			// ignore
 		}
 	}
 
@@ -87,6 +106,37 @@
 		}
 	}
 
+	async function handlePlaceMove(placeId: number, lat: number, lon: number) {
+		try {
+			await updatePlace(placeId, { lat, lon });
+			await reloadPlaces();
+			// Refresh stats if this is the selected place
+			if (selectedPlace?.id === placeId) {
+				placeStats = null;
+				statsLoading = true;
+				try {
+					placeStats = await getPlaceStats(placeId);
+				} catch {
+					placeStats = null;
+				} finally {
+					statsLoading = false;
+				}
+			}
+		} catch {
+			// Reload to revert the marker position
+			await reloadPlaces();
+		}
+	}
+
+	$effect(() => {
+		selectedPlaceIdStore.set(selectedPlace?.id ?? null);
+	});
+
+	$effect(() => {
+		onPlaceMoveStore.set(handlePlaceMove);
+		return () => onPlaceMoveStore.set(null);
+	});
+
 	function handleVisibility() {
 		if (document.visibilityState === 'visible') {
 			reloadPlaces().catch(() => {});
@@ -123,7 +173,10 @@
 				<div class="stats-panel">
 					<div class="stats-header">
 						<span class="stats-name">{selectedPlace.name}</span>
-						<button class="stats-close" onclick={() => { selectedPlace = null; placeStats = null; }} type="button">&times;</button>
+						<div class="stats-actions">
+							<button class="stats-edit" onclick={() => handleEditPlace(selectedPlace!)} type="button" title="Edit place">&#9998;</button>
+							<button class="stats-close" onclick={() => { selectedPlace = null; placeStats = null; }} type="button">&times;</button>
+						</div>
 					</div>
 					{#if statsLoading}
 						<div class="stats-loading">Loading...</div>
@@ -188,6 +241,14 @@
 			{@render children()}
 		</div>
 	</div>
+
+	{#if editingPlace}
+		<PlaceForm
+			place={editingPlace}
+			onSave={handleEditSave}
+			onCancel={() => editingPlace = null}
+		/>
+	{/if}
 </div>
 
 <style>
@@ -365,7 +426,12 @@
 		font-weight: 500;
 	}
 
-	.stats-close {
+	.stats-actions {
+		display: flex;
+		gap: 0.15rem;
+	}
+
+	.stats-edit, .stats-close {
 		background: none;
 		border: none;
 		color: var(--text-dim);
@@ -375,7 +441,7 @@
 		line-height: 1;
 	}
 
-	.stats-close:hover { color: var(--text-muted); }
+	.stats-edit:hover, .stats-close:hover { color: var(--text-muted); }
 
 	.stats-grid {
 		display: grid;

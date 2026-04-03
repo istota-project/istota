@@ -15,7 +15,9 @@
 		showPath?: boolean;
 		showHeat?: boolean;
 		activeActivityTypes?: Set<string> | null;
+		selectedPlaceId?: number | null;
 		onClusterClick?: (cluster: DiscoveredCluster) => void;
+		onPlaceMove?: (placeId: number, lat: number, lon: number) => void;
 	}
 
 	let {
@@ -28,13 +30,16 @@
 		showPath = true,
 		showHeat = false,
 		activeActivityTypes = null,
+		selectedPlaceId = null,
 		onClusterClick,
+		onPlaceMove,
 	}: Props = $props();
 
 	let container: HTMLDivElement;
 	let map: maplibregl.Map | undefined;
 	let mapLoaded = false;
 	let currentMarker: maplibregl.Marker | undefined;
+	let dragMarker: maplibregl.Marker | undefined;
 	let resizeObserver: ResizeObserver | undefined;
 
 	export function flyTo(lat: number, lon: number, z?: number) {
@@ -217,7 +222,10 @@
 	function addLayers() {
 		if (!map) return;
 
-		// Place radius circles
+		// Place radius circles — meters to pixels via exponential zoom interpolation.
+		// Ground resolution at lat ~34°: 78271.484 * cos(34°) / 2^z meters/pixel.
+		// With exponential base 2, pixels double per zoom, matching the map projection.
+		const pxPerMeterAtZ15 = Math.pow(2, 15) / (78271.484 * Math.cos(34.1 * Math.PI / 180));
 		map.addLayer({
 			id: 'place-radius',
 			type: 'circle',
@@ -225,8 +233,8 @@
 			paint: {
 				'circle-radius': [
 					'interpolate', ['exponential', 2], ['zoom'],
-					10, ['/', ['get', 'radius_meters'], 50],
-					18, ['/', ['get', 'radius_meters'], 0.3],
+					10, ['*', ['get', 'radius_meters'], pxPerMeterAtZ15 / 32],
+					15, ['*', ['get', 'radius_meters'], pxPerMeterAtZ15],
 				],
 				'circle-color': 'rgba(51, 51, 51, 0.15)',
 				'circle-stroke-color': '#555',
@@ -410,6 +418,30 @@
 			.addTo(map);
 	}
 
+	function updateDragMarker() {
+		if (dragMarker) {
+			dragMarker.remove();
+			dragMarker = undefined;
+		}
+		if (!map || !selectedPlaceId || !onPlaceMove) return;
+
+		const place = places.find(p => p.id === selectedPlaceId);
+		if (!place) return;
+
+		const el = document.createElement('div');
+		el.className = 'place-drag-marker';
+
+		dragMarker = new maplibregl.Marker({ element: el, draggable: true })
+			.setLngLat([place.lon, place.lat])
+			.addTo(map);
+
+		dragMarker.on('dragend', () => {
+			if (!dragMarker) return;
+			const lngLat = dragMarker.getLngLat();
+			onPlaceMove(place.id, lngLat.lat, lngLat.lng);
+		});
+	}
+
 	function fitBounds() {
 		if (!map || !mapLoaded) return;
 
@@ -447,6 +479,7 @@
 	onDestroy(() => {
 		resizeObserver?.disconnect();
 		currentMarker?.remove();
+		dragMarker?.remove();
 		map?.remove();
 	});
 
@@ -468,6 +501,12 @@
 	$effect(() => {
 		currentPosition;
 		updateCurrentMarker();
+	});
+
+	$effect(() => {
+		selectedPlaceId;
+		places;
+		updateDragMarker();
 	});
 </script>
 
@@ -496,6 +535,21 @@
 	@keyframes pulse {
 		0% { box-shadow: 0 0 0 0 rgba(74, 255, 127, 0.5); }
 		100% { box-shadow: 0 0 0 12px rgba(74, 255, 127, 0); }
+	}
+
+	/* Draggable place marker */
+	:global(.place-drag-marker) {
+		width: 18px;
+		height: 18px;
+		background: #ffc107;
+		border: 2px solid #111;
+		border-radius: 50%;
+		cursor: grab;
+		box-shadow: 0 0 0 3px rgba(255, 193, 7, 0.3);
+	}
+
+	:global(.place-drag-marker:active) {
+		cursor: grabbing;
 	}
 
 	/* Dark theme for MapLibre controls */
