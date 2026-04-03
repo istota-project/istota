@@ -4,18 +4,12 @@
 		getMoneymanLedgers,
 		getMoneymanFava,
 		type MoneymanLedger,
-		type FavaInstance,
 	} from '$lib/api';
 
 	let ledgers: MoneymanLedger[] = $state([]);
-	let favaInstances: FavaInstance[] = $state([]);
+	let favaPrefix: string | null = $state(null);
 	let loading = $state(true);
 	let error = $state('');
-
-	// Map fava instances by ledger name for quick lookup
-	let favaByLedger: Map<string, FavaInstance> = $derived(
-		new Map(favaInstances.map((inst) => [inst.ledger, inst]))
-	);
 
 	onMount(async () => {
 		try {
@@ -24,7 +18,7 @@
 				getMoneymanFava(),
 			]);
 			ledgers = ledgerData.ledgers || [];
-			favaInstances = favaData.instances || [];
+			favaPrefix = favaData.prefix || null;
 		} catch (e) {
 			error = 'Failed to load ledger data';
 		} finally {
@@ -43,16 +37,13 @@
 	{:else if ledgers.length === 0}
 		<div class="empty">No ledgers configured.</div>
 	{:else}
+		{#if favaPrefix}
+			<a href={favaPrefix} class="fava-link">Open in Fava</a>
+		{/if}
 		<div class="ledger-grid">
 			{#each ledgers as ledger}
-				{@const fava = favaByLedger.get(ledger.name)}
 				<div class="ledger-card">
 					<div class="ledger-name">{ledger.name}</div>
-					{#if fava}
-						<a href={fava.prefix} class="fava-link">Open in Fava</a>
-					{:else}
-						<span class="no-fava">No Fava instance</span>
-					{/if}
 				</div>
 			{/each}
 		</div>
@@ -97,14 +88,11 @@
 		border-radius: 0.25rem;
 		transition: background 0.15s, border-color 0.15s;
 		width: fit-content;
+		margin-bottom: 1rem;
 	}
 	.fava-link:hover {
 		background: #222;
 		border-color: #555;
-	}
-	.no-fava {
-		font-size: 0.8rem;
-		color: #666;
 	}
 	.loading, .error-msg, .empty {
 		color: #888;

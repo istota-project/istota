@@ -242,12 +242,6 @@ export interface MoneymanLedger {
 	path: string;
 }
 
-export interface FavaInstance {
-	ledger: string;
-	port: number;
-	prefix: string;
-}
-
 export interface MoneymanLedgersResponse {
 	status: string;
 	ledger_count: number;
@@ -256,7 +250,8 @@ export interface MoneymanLedgersResponse {
 
 export interface MoneymanFavaResponse {
 	status: string;
-	instances: FavaInstance[];
+	prefix: string | null;
+	ledgers: string[];
 }
 
 export async function getMoneymanLedgers(): Promise<MoneymanLedgersResponse> {
