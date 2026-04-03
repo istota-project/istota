@@ -226,10 +226,9 @@
 		// Place radius circles — meters to pixels via exponential zoom interpolation.
 		// At zoom z, ground resolution at lat ~34°: meters/px = 78271.484 * cos(34°) / 2^z
 		// Divisor = meters/px, so circle-radius = radius_meters / divisor = pixels.
-		// With base 2, the ratio between stops 8 zoom levels apart must be 2^8 = 256.
-		const cosLat = Math.cos(34.1 * Math.PI / 180);
-		const divisorZ10 = 78271.484 * cosLat / Math.pow(2, 10); // ~63.3 m/px
-		const divisorZ18 = 78271.484 * cosLat / Math.pow(2, 18); // ~0.247 m/px
+		// MapLibre clamps (doesn't extrapolate) past the last stop, so stops must
+		// span the full usable zoom range.
+		const mPerPxBase = 78271.484 * Math.cos(34.1 * Math.PI / 180); // ~64810
 		map.addLayer({
 			id: 'place-radius',
 			type: 'circle',
@@ -237,8 +236,9 @@
 			paint: {
 				'circle-radius': [
 					'interpolate', ['exponential', 2], ['zoom'],
-					10, ['/', ['get', 'radius_meters'], divisorZ10],
-					18, ['/', ['get', 'radius_meters'], divisorZ18],
+					8, ['/', ['get', 'radius_meters'], mPerPxBase / 256],      // z8
+					16, ['/', ['get', 'radius_meters'], mPerPxBase / 65536],    // z16
+					22, ['/', ['get', 'radius_meters'], mPerPxBase / 4194304],  // z22
 				],
 				'circle-color': 'rgba(51, 51, 51, 0.15)',
 				'circle-stroke-color': '#555',
