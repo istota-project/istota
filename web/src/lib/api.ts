@@ -23,7 +23,6 @@ export interface User {
 	features: {
 		feeds: boolean;
 		location: boolean;
-		services: boolean;
 	};
 }
 
@@ -233,33 +232,6 @@ export async function discoverPlaces(minPings?: number): Promise<DiscoverRespons
 export async function getTrips(date?: string): Promise<TripsResponse> {
 	const qs = date ? `?date=${date}` : '';
 	return apiFetch<TripsResponse>(`/location/trips${qs}`);
-}
-
-// Moneyman / Ledger types
-
-export interface MoneymanLedger {
-	name: string;
-	path: string;
-}
-
-export interface MoneymanLedgersResponse {
-	status: string;
-	ledger_count: number;
-	ledgers: MoneymanLedger[];
-}
-
-export interface MoneymanFavaResponse {
-	status: string;
-	prefix: string | null;
-	ledgers: string[];
-}
-
-export async function getMoneymanLedgers(): Promise<MoneymanLedgersResponse> {
-	return apiFetch<MoneymanLedgersResponse>('/moneyman/ledgers');
-}
-
-export async function getMoneymanFava(): Promise<MoneymanFavaResponse> {
-	return apiFetch<MoneymanFavaResponse>('/moneyman/fava');
 }
 
 export { AuthError };
