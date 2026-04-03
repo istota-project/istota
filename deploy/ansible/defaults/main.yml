@@ -172,9 +172,7 @@ istota_disabled_skills: []
 #         name: "Monarch Money"
 #         session_token: "monarch-token"
 #       - type: "moneyman"
-#         name: "Moneyman"
-#         cli_path: "/srv/app/moneyman/app/.venv/bin/moneyman"
-#         user_key: "username"
+#         user_key: "username"  # maps Istota user to Moneyman user
 #       - type: "overland"
 #         name: "GPS"
 #         ingest_token: "your-overland-secret"
@@ -236,8 +234,12 @@ istota_rclone_password_obscured: ""
 istota_use_nextcloud_mount: true
 istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 
-# Moneyman integration (local CLI access)
+# Moneyman integration
 istota_moneyman_group: ""  # set to "moneyman" to grant CLI + config read access
+istota_moneyman_api_url: ""  # e.g. "http://localhost:8090" — instance-level, shared by all users
+istota_moneyman_api_key: ""  # API key for the Moneyman service
+istota_moneyman_cli_path: ""  # e.g. "/srv/app/moneyman/app/.venv/bin/moneyman"
+istota_moneyman_config_path: ""  # e.g. "/srv/app/moneyman/app/config.toml"
 
 # Fava ledger viewers proxied through the web UI (auth gated via Istota session).
 # Auto-computed by the moneyman role as _moneyman_fava_instances when
