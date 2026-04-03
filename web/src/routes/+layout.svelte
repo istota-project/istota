@@ -56,7 +56,7 @@
 			<a href="{base}/logout">log out</a>
 		</div>
 	</nav>
-	<main class="app-content" class:app-content-fill={isActive('/location')}>
+	<main class="app-content" class:app-content-fill={isActive('/location') || isActive('/feeds')}>
 		{@render children()}
 	</main>
 {/if}

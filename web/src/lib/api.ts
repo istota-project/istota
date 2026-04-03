@@ -26,20 +26,32 @@ export interface User {
 	};
 }
 
+export interface FeedCategory {
+	id: number;
+	title: string;
+}
+
+export interface Feed {
+	id: number;
+	title: string;
+	site_url: string;
+	category: FeedCategory;
+}
+
 export interface FeedEntry {
 	id: number;
 	title: string;
 	url: string;
 	content: string;
 	images: string[];
-	feed: { id: number; title: string; site_url: string };
+	feed: Feed;
 	status: string;
 	published_at: string;
 	created_at: string;
 }
 
 export interface FeedsResponse {
-	feeds: { id: number; title: string; site_url: string }[];
+	feeds: Feed[];
 	entries: FeedEntry[];
 	total: number;
 }

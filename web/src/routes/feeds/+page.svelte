@@ -1,10 +1,9 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { getFeeds, updateEntriesStatus, type FeedEntry, type FeedsResponse } from '$lib/api';
+	import { getFeeds, updateEntriesStatus, type FeedEntry } from '$lib/api';
+	import { selectedFeedId, showImages, showText, showUnseen, sortBy, viewMode } from '$lib/stores/feeds';
 	import FeedCard from '$lib/components/FeedCard.svelte';
 	import Lightbox from '$lib/components/Lightbox.svelte';
-	import Chip from '$lib/components/ui/Chip.svelte';
-	import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
 	const PAGE_SIZE = 50;
 
@@ -15,41 +14,48 @@
 	let error = $state('');
 	let hasMore = $state(true);
 
-	// Filters (persisted)
-	let showImages = $state(loadSetting('feeds.showImages', true));
-	let showText = $state(loadSetting('feeds.showText', true));
-	let showUnseen = $state(false); // not persisted — always starts fresh
+	// Subscribe to stores
+	let si = $state(true), st = $state(true), su = $state(false);
+	let sb: 'published' | 'added' = $state('published');
+	let vm: 'grid' | 'list' = $state('grid');
+	let selFeed = $state(0);
+	showImages.subscribe((v) => si = v);
+	showText.subscribe((v) => st = v);
+	showUnseen.subscribe((v) => su = v);
+	sortBy.subscribe((v) => sb = v);
+	viewMode.subscribe((v) => vm = v);
+	selectedFeedId.subscribe((v) => selFeed = v);
+
 	let unseenSnapshot: Set<number> | null = null;
-	let sortBy: 'published' | 'added' = $state(loadSetting('feeds.sortBy', 'published'));
-	let viewMode: 'grid' | 'list' = $state(loadSetting('feeds.viewMode', 'grid'));
 
-	$effect(() => { saveSetting('feeds.showImages', showImages); });
-	$effect(() => { saveSetting('feeds.showText', showText); });
-	$effect(() => { saveSetting('feeds.sortBy', sortBy); });
-	$effect(() => { saveSetting('feeds.viewMode', viewMode); });
-
-	async function toggleUnseen() {
-		showUnseen = !showUnseen;
-		if (showUnseen) {
-			try {
-				const data = await getFeeds({ limit: '500', status: 'unread', order: 'published_at', direction: 'desc' });
-				const seen = new Set(entries.map((e) => e.id));
-				const fresh = data.entries.filter((e) => !seen.has(e.id));
-				if (fresh.length > 0) {
-					entries = [...entries, ...fresh];
-				}
-			} catch {
-				// Fall back to what we have locally
-			}
-			const unseen = new Set(entries.filter((e) => e.status !== 'read').map((e) => e.id));
-			if (unseen.size === 0) {
-				showUnseen = false;
-				return;
-			}
-			unseenSnapshot = unseen;
-		} else {
+	// Watch for unseen toggle — need to fetch unread entries
+	let prevSu = false;
+	$effect(() => {
+		if (su && !prevSu) {
+			fetchUnseenEntries();
+		} else if (!su && prevSu) {
 			unseenSnapshot = null;
 		}
+		prevSu = su;
+	});
+
+	async function fetchUnseenEntries() {
+		try {
+			const data = await getFeeds({ limit: '500', status: 'unread', order: 'published_at', direction: 'desc' });
+			const seen = new Set(entries.map((e) => e.id));
+			const fresh = data.entries.filter((e) => !seen.has(e.id));
+			if (fresh.length > 0) {
+				entries = [...entries, ...fresh];
+			}
+		} catch {
+			// Fall back to what we have locally
+		}
+		const unseen = new Set(entries.filter((e) => e.status !== 'read').map((e) => e.id));
+		if (unseen.size === 0) {
+			showUnseen.set(false);
+			return;
+		}
+		unseenSnapshot = unseen;
 	}
 
 	// Lightbox
@@ -89,8 +95,7 @@
 			order: 'published_at',
 			direction: 'desc',
 		};
-		const data = await getFeeds(params);
-		return data;
+		return await getFeeds(params);
 	}
 
 	async function loadMore() {
@@ -113,6 +118,7 @@
 	// Infinite scroll sentinel
 	let sentinel: HTMLDivElement | undefined = $state();
 	let scrollObserver: IntersectionObserver | null = null;
+	let scrollRoot: HTMLDivElement | undefined = $state();
 
 	onMount(async () => {
 		try {
@@ -120,7 +126,7 @@
 			entries = data.entries;
 			total = data.total;
 			hasMore = entries.length < total;
-		} catch (e) {
+		} catch {
 			error = 'Failed to load feeds';
 		} finally {
 			loading = false;
@@ -134,7 +140,7 @@
 			(observed) => {
 				if (observed[0].isIntersecting) loadMore();
 			},
-			{ rootMargin: '600px' },
+			{ root: scrollRoot, rootMargin: '600px' },
 		);
 		scrollObserver.observe(sentinel);
 		return () => scrollObserver?.disconnect();
@@ -149,14 +155,15 @@
 	let filteredEntries = $derived.by(() => {
 		let filtered = entries.filter((e) => {
 			const isImage = e.images.length > 0;
-			if (isImage && !showImages) return false;
-			if (!isImage && !showText) return false;
-			if (showUnseen && unseenSnapshot && !unseenSnapshot.has(e.id)) return false;
+			if (isImage && !si) return false;
+			if (!isImage && !st) return false;
+			if (su && unseenSnapshot && !unseenSnapshot.has(e.id)) return false;
+			if (selFeed && e.feed.id !== selFeed) return false;
 			return true;
 		});
 		filtered.sort((a, b) => {
-			const keyA = sortBy === 'published' ? a.published_at : a.created_at;
-			const keyB = sortBy === 'published' ? b.published_at : b.created_at;
+			const keyA = sb === 'published' ? a.published_at : a.created_at;
+			const keyB = sb === 'published' ? b.published_at : b.created_at;
 			return (keyB || '').localeCompare(keyA || '');
 		});
 		return filtered;
@@ -164,38 +171,22 @@
 </script>
 
 {#if loading}
-	<div class="loading">Loading feeds...</div>
+	<div class="center-msg">Loading feeds...</div>
 {:else if error}
-	<div class="error-msg">{error}</div>
+	<div class="center-msg error">{error}</div>
 {:else}
-	<nav class="filters">
-		<div class="filter-group">
-			<Chip checked={showImages} onclick={() => showImages = !showImages}>images</Chip>
-			<Chip checked={showText} onclick={() => showText = !showText}>text</Chip>
-			<Chip checked={showUnseen} onclick={toggleUnseen}>unseen</Chip>
+	<div class="feed-scroll" bind:this={scrollRoot}>
+		<div class="feed-grid" class:list-view={vm === 'list'}>
+			{#each filteredEntries as entry (entry.id)}
+				<FeedCard {entry} onImageClick={(url) => lightboxSrc = url} onViewed={handleViewed} />
+			{/each}
 		</div>
 
-		<div class="filter-group">
-			<Chip checked={sortBy === 'published'} onclick={() => sortBy = 'published'}>published</Chip>
-			<Chip checked={sortBy === 'added'} onclick={() => sortBy = 'added'}>added</Chip>
+		<div bind:this={sentinel} class="sentinel">
+			{#if loadingMore}
+				<span class="loading-more">Loading more...</span>
+			{/if}
 		</div>
-
-		<div class="filter-group view-toggle">
-			<Chip checked={viewMode === 'grid'} onclick={() => viewMode = 'grid'}>grid</Chip>
-			<Chip checked={viewMode === 'list'} onclick={() => viewMode = 'list'}>list</Chip>
-		</div>
-	</nav>
-
-	<div class="feed-grid" class:list-view={viewMode === 'list'}>
-		{#each filteredEntries as entry (entry.id)}
-			<FeedCard {entry} onImageClick={(url) => lightboxSrc = url} onViewed={handleViewed} />
-		{/each}
-	</div>
-
-	<div bind:this={sentinel} class="sentinel">
-		{#if loadingMore}
-			<span class="loading-more">Loading more...</span>
-		{/if}
 	</div>
 
 	<div class="status-badge">{entries.length} / {total}</div>
@@ -204,23 +195,26 @@
 {/if}
 
 <style>
-	/* Controls bar */
-	.filters {
+	.center-msg {
+		flex: 1;
 		display: flex;
-		flex-wrap: wrap;
-		gap: 0.75rem;
-		padding: 0.5rem 0;
-		margin-bottom: 1rem;
-		border-bottom: 1px solid var(--border-subtle);
 		align-items: center;
+		justify-content: center;
+		color: var(--text-dim);
+		font-size: var(--text-sm);
 	}
 
-	.filter-group {
-		display: flex;
-		gap: 0.25rem;
+	.center-msg.error { color: #c66; }
+
+	.feed-scroll {
+		flex: 1;
+		overflow-y: auto;
+		padding: 0.75rem;
 	}
 
-	.view-toggle { margin-left: auto; }
+	.feed-scroll::-webkit-scrollbar { width: 4px; }
+	.feed-scroll::-webkit-scrollbar-track { background: transparent; }
+	.feed-scroll::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
 
 	/* Grid layout */
 	.feed-grid {
@@ -445,10 +439,5 @@
 
 	.feed-grid.list-view :global(.card-gallery .card-image img) {
 		aspect-ratio: auto;
-	}
-
-	@media (max-width: 640px) {
-		.filters { gap: 0.35rem; }
-		.filter-group { gap: 0.15rem; }
 	}
 </style>
