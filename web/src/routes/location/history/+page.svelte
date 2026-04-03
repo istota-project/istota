@@ -19,7 +19,7 @@
 	import TripList from '$lib/components/location/TripList.svelte';
 	import Chip from '$lib/components/ui/Chip.svelte';
 	import { loadSetting, saveSetting } from '$lib/stores/persisted';
-	import { ACTIVITY_COLORS, ACTIVITY_LABELS, ALL_ACTIVITY_TYPES } from '$lib/location-constants';
+	import { ACTIVITY_LABELS, ALL_ACTIVITY_TYPES } from '$lib/location-constants';
 
 	let pings: LocationPing[] = $state([]);
 	let summary: DaySummary | null = $state(null);
@@ -34,28 +34,13 @@
 	let viewMode: 'day' | 'range' = $state('day');
 	let showHeat = $state(loadSetting('location.showHeat', false));
 	let panelOpen = $state(false);
-	let activeActivityTypes: Set<string> = $state(new Set(ALL_ACTIVITY_TYPES));
+	let activityFilter: string = $state('all');
 
 	$effect(() => { saveSetting('location.showHeat', showHeat); });
 
-	function toggleActivity(type: string) {
-		const next = new Set(activeActivityTypes);
-		if (next.has(type)) {
-			if (next.size > 1) next.delete(type);
-		} else {
-			next.add(type);
-		}
-		activeActivityTypes = next;
-	}
-
-	let activityCounts = $derived(() => {
-		const counts: Record<string, number> = {};
-		for (const p of pings) {
-			const t = p.activity_type ?? 'stationary';
-			counts[t] = (counts[t] ?? 0) + 1;
-		}
-		return counts;
-	});
+	let activeActivityTypes = $derived<Set<string> | null>(
+		activityFilter === 'all' ? null : new Set([activityFilter])
+	);
 
 	let places = $derived($locationPlaces);
 
@@ -220,18 +205,12 @@
 			<Chip checked={showHeat} onclick={() => showHeat = !showHeat}>Heat map</Chip>
 		{/if}
 		{#if pings.length > 0}
-			<div class="chip-group activity-chips">
+			<select class="mode-select" bind:value={activityFilter}>
+				<option value="all">All</option>
 				{#each ALL_ACTIVITY_TYPES as type}
-					{@const count = activityCounts()[type] ?? 0}
-					{#if count > 0}
-						<Chip checked={activeActivityTypes.has(type)} onclick={() => toggleActivity(type)}>
-							<span class="activity-dot" style="background: {ACTIVITY_COLORS[type]}"></span>
-							{ACTIVITY_LABELS[type]}
-							<span class="chip-count">{count}</span>
-						</Chip>
-					{/if}
+					<option value={type}>{ACTIVITY_LABELS[type]}</option>
 				{/each}
-			</div>
+			</select>
 		{/if}
 	</div>
 
@@ -428,27 +407,18 @@
 		margin-bottom: 0.25rem;
 	}
 
-	.activity-chips {
-		border-left: 1px solid var(--border-subtle);
-		padding-left: 0.75rem;
-	}
-
-	.activity-dot {
-		display: inline-block;
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		margin-right: 0.15rem;
-	}
-
-	.chip-count {
-		font-size: 0.65rem;
-		opacity: 0.6;
-		margin-left: 0.15rem;
+	.mode-select {
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		color: var(--text-primary);
+		font: inherit;
+		font-size: var(--text-xs);
+		padding: 0.2rem 0.4rem;
+		border-radius: 0.25rem;
+		cursor: pointer;
 	}
 
 	@media (max-width: 768px) {
 		.date-inputs { display: none; }
-		.activity-chips { border-left: none; padding-left: 0; }
 	}
 </style>

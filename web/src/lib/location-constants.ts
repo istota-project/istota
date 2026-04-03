@@ -1,5 +1,5 @@
 export const ACTIVITY_COLORS: Record<string, string> = {
-	automotive: '#4a9eff',
+	driving: '#4a9eff',
 	walking: '#4aff7f',
 	running: '#ff9f4a',
 	cycling: '#b44aff',
@@ -7,7 +7,7 @@ export const ACTIVITY_COLORS: Record<string, string> = {
 };
 
 export const ACTIVITY_LABELS: Record<string, string> = {
-	automotive: 'Driving',
+	driving: 'Driving',
 	walking: 'Walking',
 	running: 'Running',
 	cycling: 'Cycling',
