@@ -88,21 +88,39 @@
 		}
 	}
 
-	async function loadPage(offset: number) {
+	async function loadPage(offset: number, feedId: number = 0) {
 		const params: Record<string, string> = {
 			limit: String(PAGE_SIZE),
 			offset: String(offset),
 			order: 'published_at',
 			direction: 'desc',
 		};
+		if (feedId) params.feed_id = String(feedId);
 		return await getFeeds(params);
+	}
+
+	async function loadEntries(feedId: number) {
+		loading = true;
+		error = '';
+		try {
+			const data = await loadPage(0, feedId);
+			entries = data.entries;
+			total = data.total;
+			hasMore = entries.length < total;
+		} catch {
+			error = 'Failed to load feeds';
+		} finally {
+			loading = false;
+		}
+		// Scroll to top on reload
+		scrollRoot?.scrollTo(0, 0);
 	}
 
 	async function loadMore() {
 		if (loadingMore || !hasMore) return;
 		loadingMore = true;
 		try {
-			const data = await loadPage(entries.length);
+			const data = await loadPage(entries.length, selFeed);
 			const seen = new Set(entries.map((e) => e.id));
 			const fresh = data.entries.filter((e) => !seen.has(e.id));
 			entries = [...entries, ...fresh];
@@ -120,18 +138,16 @@
 	let scrollObserver: IntersectionObserver | null = null;
 	let scrollRoot: HTMLDivElement | undefined = $state();
 
-	onMount(async () => {
-		try {
-			const data = await loadPage(0);
-			entries = data.entries;
-			total = data.total;
-			hasMore = entries.length < total;
-		} catch {
-			error = 'Failed to load feeds';
-		} finally {
-			loading = false;
+	// Reload when selected feed changes
+	let prevSelFeed: number | null = null;
+	$effect(() => {
+		if (prevSelFeed !== null && selFeed !== prevSelFeed) {
+			loadEntries(selFeed);
 		}
+		prevSelFeed = selFeed;
 	});
+
+	onMount(() => loadEntries(selFeed));
 
 	$effect(() => {
 		if (!sentinel) return;
@@ -158,7 +174,6 @@
 			if (isImage && !si) return false;
 			if (!isImage && !st) return false;
 			if (su && unseenSnapshot && !unseenSnapshot.has(e.id)) return false;
-			if (selFeed && e.feed.id !== selFeed) return false;
 			return true;
 		});
 		filtered.sort((a, b) => {
