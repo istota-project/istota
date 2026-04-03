@@ -154,6 +154,75 @@ class TestVisitDB:
             assert visit.ping_count == 3  # 1 initial + 2 increments
 
 
+class TestPlaceStats:
+    def test_no_visits(self, tmp_path):
+        from istota.web_app import _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 34.0, -118.0, 150, "home")
+            conn.commit()
+
+        result = _location_place_stats(str(db_path), "alice", pid)
+        assert result is not None
+        assert result["total_visits"] == 0
+        assert result["first_visit"] is None
+
+    def test_with_visits(self, tmp_path):
+        from istota.web_app import _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            # Two completed visits
+            v1 = db.insert_visit(conn, "alice", pid, "cafe", "2026-01-10T09:00:00")
+            db.close_visit(conn, v1, "2026-01-10T10:00:00")  # 1 hour
+            v2 = db.insert_visit(conn, "alice", pid, "cafe", "2026-02-15T14:00:00")
+            db.close_visit(conn, v2, "2026-02-15T16:00:00")  # 2 hours
+            conn.commit()
+
+        result = _location_place_stats(str(db_path), "alice", pid)
+        assert result["total_visits"] == 2
+        assert result["first_visit"] == "2026-01-10T09:00:00"
+        assert result["last_visit"] == "2026-02-15T14:00:00"
+        assert result["avg_duration_min"] == 90  # (60 + 120) / 2
+        assert result["total_duration_min"] == 180
+        assert result["longest_visit_min"] == 120
+
+    def test_excludes_open_visits(self, tmp_path):
+        from istota.web_app import _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            # One completed, one still open
+            v1 = db.insert_visit(conn, "alice", pid, "cafe", "2026-01-10T09:00:00")
+            db.close_visit(conn, v1, "2026-01-10T10:00:00")
+            db.insert_visit(conn, "alice", pid, "cafe", "2026-03-01T12:00:00")
+            conn.commit()
+
+        result = _location_place_stats(str(db_path), "alice", pid)
+        assert result["total_visits"] == 1
+
+    def test_wrong_user_returns_none(self, tmp_path):
+        from istota.web_app import _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            conn.commit()
+
+        result = _location_place_stats(str(db_path), "bob", pid)
+        assert result is None
+
+    def test_nonexistent_place_returns_none(self, tmp_path):
+        from istota.web_app import _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        result = _location_place_stats(str(db_path), "alice", 9999)
+        assert result is None
+
+
 class TestLocationStateDB:
     def test_get_set(self, tmp_path):
         db_path = _init_db(tmp_path)

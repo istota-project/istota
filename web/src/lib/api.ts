@@ -140,6 +140,16 @@ export interface PlacesResponse {
 	places: Place[];
 }
 
+export interface PlaceStats {
+	place_id: number;
+	total_visits: number;
+	first_visit: string | null;
+	last_visit: string | null;
+	avg_duration_min: number | null;
+	total_duration_min: number | null;
+	longest_visit_min: number | null;
+}
+
 export interface DiscoveredCluster {
 	lat: number;
 	lon: number;
@@ -208,6 +218,10 @@ export async function updatePlace(id: number, data: Partial<Pick<Place, 'name' |
 
 export async function deletePlace(id: number): Promise<void> {
 	await apiFetch(`/location/places/${id}`, { method: 'DELETE' });
+}
+
+export async function getPlaceStats(placeId: number): Promise<PlaceStats> {
+	return apiFetch<PlaceStats>(`/location/places/${placeId}/stats`);
 }
 
 export async function discoverPlaces(minPings?: number): Promise<DiscoverResponse> {

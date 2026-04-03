@@ -810,6 +810,61 @@ def _location_delete_place(db_path: str, user_id: str, place_id: int) -> bool:
         conn.close()
 
 
+def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | None:
+    """Get visit statistics for a place."""
+    from .db import get_place_by_id
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        place = get_place_by_id(conn, place_id)
+        if not place or place.user_id != user_id:
+            return None
+
+        # Completed visits (exited_at IS NOT NULL) for this place
+        rows = conn.execute(
+            """
+            SELECT entered_at, exited_at, duration_sec, ping_count
+            FROM visits
+            WHERE user_id = ? AND place_id = ? AND exited_at IS NOT NULL
+            ORDER BY entered_at ASC
+            """,
+            (user_id, place_id),
+        ).fetchall()
+
+        if not rows:
+            return {
+                "place_id": place_id,
+                "total_visits": 0,
+                "first_visit": None,
+                "last_visit": None,
+                "avg_duration_min": None,
+                "total_duration_min": None,
+                "longest_visit_min": None,
+            }
+
+        total = len(rows)
+        first_visit = rows[0]["entered_at"]
+        last_visit = rows[-1]["entered_at"]
+
+        durations = [r["duration_sec"] for r in rows if r["duration_sec"] is not None]
+        total_sec = sum(durations) if durations else 0
+        avg_sec = total_sec / len(durations) if durations else 0
+        longest_sec = max(durations) if durations else 0
+
+        return {
+            "place_id": place_id,
+            "total_visits": total,
+            "first_visit": first_visit,
+            "last_visit": last_visit,
+            "avg_duration_min": round(avg_sec / 60),
+            "total_duration_min": round(total_sec / 60),
+            "longest_visit_min": round(longest_sec / 60),
+        }
+    finally:
+        conn.close()
+
+
 def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -> dict:
     """Find clusters of stationary pings not assigned to any place."""
     from .geo import haversine
@@ -1072,6 +1127,18 @@ async def api_location_delete_place(place_id: int, user: dict = Depends(_require
     if not deleted:
         return JSONResponse({"error": "place not found or not deletable"}, status_code=404)
     return {"status": "ok"}
+
+
+@api_router.get("/location/places/{place_id}/stats")
+async def api_location_place_stats(place_id: int, user: dict = Depends(_require_api_auth)):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    result = await asyncio.to_thread(_location_place_stats, db_path, user_id, place_id)
+    if result is None:
+        return JSONResponse({"error": "place not found"}, status_code=404)
+    return result
 
 
 @api_router.get("/location/discover-places")
