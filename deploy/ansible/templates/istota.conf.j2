@@ -73,8 +73,9 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
   }
 
-  # Fava ledger viewers (deployed by the moneyman role)
+  # Moneyman services (deployed by the moneyman role)
   include /etc/nginx/includes/moneyman-fava.inc;
+  include /etc/nginx/includes/moneyman-web.inc;
 {% endif %}
 
 {% if istota_location_enabled %}
