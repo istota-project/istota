@@ -4,9 +4,11 @@ GPS-based location tracking via the Overland iOS app. Tracks location pings, res
 
 ## Places
 
-Places (named geofences) are stored in the database.
-- **`places`** — list all saved places
-- **`learn`** — save current GPS position as a named place (inserts/updates directly in DB)
+Places (named geofences) are stored in the database. Full CRUD via CLI:
+- **`places`** — list all saved places (includes `id` for each)
+- **`learn`** — save current GPS position as a named place
+- **`update`** — modify an existing place (category, name, radius, coordinates, notes)
+- **`delete`** — remove a place (also clears place assignment from historical pings)
 
 Changes take effect on the next incoming GPS ping (no restart needed).
 
@@ -24,13 +26,25 @@ istota-skill location history --limit 50
 istota-skill location history --date 2026-02-15
 istota-skill location history --date 2026-02-15 --tz America/New_York
 
-# List known places
+# List known places (each entry includes id, name, lat, lon, radius_meters, category, notes)
 istota-skill location places
 
 # Save current location as a named place (inserts into DB)
 # Takes effect immediately on the next incoming ping
 istota-skill location learn "coffee shop"
 istota-skill location learn "gym" --category gym --radius 75
+
+# Update an existing place — identify by --name or --id
+# Only specified fields are changed; others are left as-is
+istota-skill location update --name "coffee shop" --category food
+istota-skill location update --name "old name" --rename "new name"
+istota-skill location update --id 42 --radius 200 --notes "back entrance"
+istota-skill location update --name "office" --lat 34.05 --lon -118.25
+
+# Delete a place — identify by --name or --id
+# Also removes the place assignment from historical pings
+istota-skill location delete --name "coffee shop"
+istota-skill location delete --id 42
 
 # Check calendar attendance via GPS pings
 # Requires CALDAV_URL, CALDAV_USERNAME, CALDAV_PASSWORD env vars
@@ -90,11 +104,13 @@ istota-skill location day-summary --date 2026-03-08 --tz America/New_York
 ```json
 [
   {
+    "id": 1,
     "name": "home",
     "lat": 34.05,
     "lon": -118.4,
     "radius_meters": 150,
-    "category": "home"
+    "category": "home",
+    "notes": null
   }
 ]
 ```
@@ -109,6 +125,32 @@ istota-skill location day-summary --date 2026-03-08 --tz America/New_York
   "lon": -118.39,
   "radius_meters": 100,
   "message": "Saved 'coffee shop' at 34.0600, -118.3900"
+}
+```
+
+### update
+
+```json
+{
+  "status": "ok",
+  "place": {
+    "id": 42,
+    "name": "coffee shop",
+    "lat": 34.06,
+    "lon": -118.39,
+    "radius_meters": 100,
+    "category": "food",
+    "notes": null
+  }
+}
+```
+
+### delete
+
+```json
+{
+  "status": "ok",
+  "deleted": "coffee shop"
 }
 ```
 
