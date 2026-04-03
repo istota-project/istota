@@ -50,6 +50,14 @@
 		return pings.filter(p => activeActivityTypes!.has(p.activity_type ?? 'stationary'));
 	}
 
+	function approxDistanceM(lon1: number, lat1: number, lon2: number, lat2: number): number {
+		const dlat = (lat2 - lat1) * 111_000;
+		const dlon = (lon2 - lon1) * 111_000 * Math.cos(((lat1 + lat2) / 2) * Math.PI / 180);
+		return Math.sqrt(dlat * dlat + dlon * dlon);
+	}
+
+	const GAP_THRESHOLD_M = 300;
+
 	function buildPathGeoJSON(pings: LocationPing[]): GeoJSON.FeatureCollection {
 		const filtered = filteredPings(pings);
 		if (filtered.length < 2) return { type: 'FeatureCollection', features: [] };
@@ -58,25 +66,43 @@
 		let segCoords: [number, number][] = [[filtered[0].lon, filtered[0].lat]];
 		let segActivity = filtered[0].activity_type ?? 'unknown';
 
-		for (let i = 1; i < filtered.length; i++) {
-			const activity = filtered[i].activity_type ?? 'unknown';
-			segCoords.push([filtered[i].lon, filtered[i].lat]);
-
-			if (activity !== segActivity || i === filtered.length - 1) {
-				if (segCoords.length >= 2) {
-					features.push({
-						type: 'Feature',
-						properties: { activity_type: segActivity },
-						geometry: { type: 'LineString', coordinates: [...segCoords] },
-					});
-				}
-				if (activity !== segActivity && i < filtered.length - 1) {
-					// Start new segment, overlapping last point for continuity
-					segCoords = [[filtered[i].lon, filtered[i].lat]];
-					segActivity = activity;
-				}
+		function flushSegment() {
+			if (segCoords.length >= 2) {
+				features.push({
+					type: 'Feature',
+					properties: { activity_type: segActivity, segment_type: 'activity' },
+					geometry: { type: 'LineString', coordinates: [...segCoords] },
+				});
 			}
 		}
+
+		for (let i = 1; i < filtered.length; i++) {
+			const activity = filtered[i].activity_type ?? 'unknown';
+			const prev = segCoords[segCoords.length - 1];
+			const cur: [number, number] = [filtered[i].lon, filtered[i].lat];
+			const dist = approxDistanceM(prev[0], prev[1], cur[0], cur[1]);
+
+			const activityChanged = activity !== segActivity;
+			const bigGap = dist > GAP_THRESHOLD_M;
+
+			if (activityChanged || bigGap) {
+				flushSegment();
+				// Draw a faint transit connector across the gap
+				if (bigGap && segCoords.length > 0) {
+					features.push({
+						type: 'Feature',
+						properties: { activity_type: 'transit', segment_type: 'transit' },
+						geometry: { type: 'LineString', coordinates: [prev, cur] },
+					});
+				}
+				segCoords = [cur];
+				segActivity = activity;
+			} else {
+				segCoords.push(cur);
+			}
+		}
+		flushSegment();
+
 		return { type: 'FeatureCollection', features };
 	}
 
@@ -209,11 +235,27 @@
 			},
 		});
 
-		// Path trace (colored by activity type)
+		// Transit connectors (faint dashed)
+		map.addLayer({
+			id: 'path-transit',
+			type: 'line',
+			source: 'path',
+			filter: ['==', ['get', 'segment_type'], 'transit'],
+			layout: { visibility: 'visible' },
+			paint: {
+				'line-color': '#555',
+				'line-width': 1,
+				'line-opacity': 0.3,
+				'line-dasharray': [4, 4],
+			},
+		});
+
+		// Activity path trace (colored by activity type)
 		map.addLayer({
 			id: 'path-line',
 			type: 'line',
 			source: 'path',
+			filter: ['==', ['get', 'segment_type'], 'activity'],
 			layout: { visibility: 'visible' },
 			paint: {
 				'line-color': [
@@ -410,6 +452,7 @@
 	function updateLayerVisibility() {
 		if (!map || !mapLoaded) return;
 		map.setLayoutProperty('path-line', 'visibility', showPath ? 'visible' : 'none');
+		map.setLayoutProperty('path-transit', 'visibility', showPath ? 'visible' : 'none');
 		map.setLayoutProperty('heat', 'visibility', showHeat ? 'visible' : 'none');
 	}
 
