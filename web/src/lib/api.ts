@@ -23,7 +23,7 @@ export interface User {
 	features: {
 		feeds: boolean;
 		location: boolean;
-		ledgers: boolean;
+		services: boolean;
 	};
 }
 

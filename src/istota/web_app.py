@@ -232,12 +232,12 @@ async def api_auth_check(request: Request):
 @api_router.get("/me")
 async def api_me(user: dict = Depends(_require_api_auth)):
     username = user["username"]
-    features = {"feeds": False, "location": False, "ledgers": False}
+    features = {"feeds": False, "location": False, "services": False}
     if _config:
         creds = _get_miniflux_creds(username)
         features["feeds"] = creds is not None
         features["location"] = _config.location.enabled
-        features["ledgers"] = _get_moneyman_creds(username) is not None
+        features["services"] = _get_moneyman_creds(username) is not None
     return {
         "username": username,
         "display_name": user.get("display_name", username),
