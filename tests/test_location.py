@@ -18,247 +18,15 @@ except ImportError:
 _needs_geopy = pytest.mark.skipif(not _has_geopy, reason="geopy not installed")
 
 from istota import db
-from istota.config import Config, UserConfig
+from istota.config import Config, LocationActionConfig, UserConfig, UserLocationConfig
 from istota.geo import haversine
-from istota.location_loader import (
-    LocationAction,
-    LocationConfig,
-    LocationPlace,
-    LocationSettings,
-    build_token_user_map,
-    load_location_config,
-    parse_location_data,
-    sync_places_to_db,
-)
 from istota.webhook_receiver import resolve_place
-from istota.storage import get_user_location_path
-
-
-@pytest.fixture
-def mount_path(tmp_path):
-    mount = tmp_path / "mount"
-    mount.mkdir()
-    return mount
-
-
-@pytest.fixture
-def make_config(tmp_path, mount_path):
-    def _make(**overrides):
-        db_path = overrides.pop("db_path", tmp_path / "test.db")
-        return Config(
-            db_path=db_path,
-            nextcloud_mount_path=mount_path,
-            temp_dir=tmp_path / "temp",
-            **overrides,
-        )
-    return _make
-
-
-def _write_location_md(mount_path, user_id, content, bot_dir="istota"):
-    loc_path = mount_path / get_user_location_path(user_id, bot_dir).lstrip("/")
-    loc_path.parent.mkdir(parents=True, exist_ok=True)
-    loc_path.write_text(content)
 
 
 def _init_db(tmp_path):
     db_path = tmp_path / "test.db"
     db.init_db(db_path)
     return db_path
-
-
-# ===========================================================================
-# Location loader tests
-# ===========================================================================
-
-
-class TestParseLocationData:
-    def test_empty_data(self):
-        cfg = parse_location_data({})
-        assert cfg.settings.ingest_token == ""
-        assert cfg.settings.default_radius == 25
-        assert cfg.places == []
-        assert cfg.actions == []
-
-    def test_settings(self):
-        cfg = parse_location_data({
-            "settings": {"ingest_token": "secret123", "default_radius": 200},
-        })
-        assert cfg.settings.ingest_token == "secret123"
-        assert cfg.settings.default_radius == 200
-
-    def test_places(self):
-        cfg = parse_location_data({
-            "places": [
-                {"name": "home", "lat": 34.0, "lon": -118.0, "radius_meters": 150, "category": "home"},
-                {"name": "gym", "lat": 34.1, "lon": -118.1},
-            ],
-        })
-        assert len(cfg.places) == 2
-        assert cfg.places[0].name == "home"
-        assert cfg.places[0].lat == 34.0
-        assert cfg.places[0].radius_meters == 150
-        assert cfg.places[0].category == "home"
-        assert cfg.places[1].name == "gym"
-        assert cfg.places[1].radius_meters == 25  # default
-
-    def test_places_use_default_radius(self):
-        cfg = parse_location_data({
-            "settings": {"default_radius": 200},
-            "places": [{"name": "x", "lat": 0, "lon": 0}],
-        })
-        assert cfg.places[0].radius_meters == 200
-
-    def test_places_skip_unnamed(self):
-        cfg = parse_location_data({
-            "places": [{"name": "", "lat": 0, "lon": 0}, {"lat": 1, "lon": 1}],
-        })
-        assert len(cfg.places) == 0
-
-    def test_actions(self):
-        cfg = parse_location_data({
-            "actions": [
-                {
-                    "trigger": "enter", "place": "gym",
-                    "message": "Arrived", "surface": "ntfy", "priority": "high",
-                },
-                {
-                    "trigger": "exit", "place": "home",
-                    "surface": "silent",
-                },
-                {
-                    "trigger": "dwell", "place": "airport",
-                    "surface": "cron_prompt", "prompt": "check flights",
-                    "dwell_minutes": 120,
-                },
-            ],
-        })
-        assert len(cfg.actions) == 3
-        assert cfg.actions[0].trigger == "enter"
-        assert cfg.actions[0].place == "gym"
-        assert cfg.actions[0].message == "Arrived"
-        assert cfg.actions[0].priority == "high"
-        assert cfg.actions[1].surface == "silent"
-        assert cfg.actions[2].surface == "cron_prompt"
-        assert cfg.actions[2].dwell_minutes == 120
-
-    def test_actions_skip_incomplete(self):
-        cfg = parse_location_data({
-            "actions": [
-                {"trigger": "", "place": "gym"},
-                {"trigger": "enter", "place": ""},
-                {"trigger": "enter"},
-            ],
-        })
-        assert len(cfg.actions) == 0
-
-
-class TestLoadLocationConfig:
-    def test_load_valid_file(self, mount_path, make_config):
-        config = make_config()
-        _write_location_md(mount_path, "alice", """\
-# Location Tracking
-
-```toml
-[settings]
-ingest_token = "tok123"
-default_radius = 200
-
-[[places]]
-name = "home"
-lat = 34.05
-lon = -118.4
-radius_meters = 150
-category = "home"
-
-[[actions]]
-trigger = "enter"
-place = "home"
-message = "Welcome home"
-surface = "ntfy"
-```
-""")
-        cfg = load_location_config(config, "alice")
-        assert cfg is not None
-        assert cfg.settings.ingest_token == "tok123"
-        assert len(cfg.places) == 1
-        assert cfg.places[0].name == "home"
-        assert len(cfg.actions) == 1
-
-    def test_no_file_returns_none(self, make_config):
-        config = make_config()
-        assert load_location_config(config, "alice") is None
-
-    def test_no_toml_block_returns_empty(self, mount_path, make_config):
-        config = make_config()
-        _write_location_md(mount_path, "alice", "# Location\n\nJust text, no TOML.")
-        cfg = load_location_config(config, "alice")
-        assert cfg is not None
-        assert cfg.places == []
-
-    def test_no_mount_returns_none(self, tmp_path):
-        config = Config(nextcloud_mount_path=None)
-        assert load_location_config(config, "alice") is None
-
-
-class TestSyncPlacesToDb:
-    def test_inserts_and_deletes(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            # Insert initial places
-            db.insert_place(conn, "alice", "old", 1.0, 2.0)
-            conn.commit()
-
-            # Sync with new list
-            new_places = [
-                LocationPlace("home", 34.0, -118.0, 150, "home"),
-                LocationPlace("gym", 34.1, -118.1, 75, "gym"),
-            ]
-            sync_places_to_db(conn, "alice", new_places)
-
-            places = db.get_places(conn, "alice")
-            names = {p.name for p in places}
-            assert "home" in names
-            assert "gym" in names
-            assert "old" not in names
-
-    def test_updates_existing(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            db.insert_place(conn, "alice", "home", 1.0, 2.0, radius_meters=50)
-            conn.commit()
-
-            sync_places_to_db(conn, "alice", [
-                LocationPlace("home", 34.0, -118.0, 200, "home"),
-            ])
-
-            place = db.get_place_by_name(conn, "alice", "home")
-            assert place.lat == 34.0
-            assert place.radius_meters == 200
-
-
-class TestBuildTokenUserMap:
-    def test_builds_map(self, mount_path, make_config):
-        config = make_config(users={"alice": UserConfig(), "bob": UserConfig()})
-        _write_location_md(mount_path, "alice", """
-```toml
-[settings]
-ingest_token = "tok-alice"
-```
-""")
-        _write_location_md(mount_path, "bob", """
-```toml
-[settings]
-ingest_token = "tok-bob"
-```
-""")
-        token_map = build_token_user_map(config)
-        assert token_map == {"tok-alice": "alice", "tok-bob": "bob"}
-
-    def test_skips_users_without_token(self, mount_path, make_config):
-        config = make_config(users={"alice": UserConfig()})
-        _write_location_md(mount_path, "alice", "# Location\n\n```toml\n```\n")
-        token_map = build_token_user_map(config)
-        assert token_map == {}
 
 
 # ===========================================================================
@@ -433,7 +201,7 @@ class TestHaversine:
 class TestResolvePlace:
     def test_within_radius(self):
         places = [
-            db.Place(1, "alice", "home", 34.0, -118.0, 200, "home", "file", "", None),
+            db.Place(1, "alice", "home", 34.0, -118.0, 200, "home", "", None),
         ]
         result = resolve_place(34.0001, -118.0001, places)
         assert result is not None
@@ -441,15 +209,15 @@ class TestResolvePlace:
 
     def test_outside_radius(self):
         places = [
-            db.Place(1, "alice", "home", 34.0, -118.0, 50, "home", "file", "", None),
+            db.Place(1, "alice", "home", 34.0, -118.0, 50, "home", "", None),
         ]
         result = resolve_place(35.0, -119.0, places)
         assert result is None
 
     def test_nearest_wins(self):
         places = [
-            db.Place(1, "alice", "far", 34.01, -118.0, 5000, "other", "file", "", None),
-            db.Place(2, "alice", "near", 34.0001, -118.0001, 5000, "other", "file", "", None),
+            db.Place(1, "alice", "far", 34.01, -118.0, 5000, "other", "", None),
+            db.Place(2, "alice", "near", 34.0001, -118.0001, 5000, "other", "", None),
         ]
         result = resolve_place(34.0, -118.0, places)
         assert result.name == "near"
@@ -587,8 +355,8 @@ class TestStateMachine:
             gym = db.get_place_by_name(conn, "alice", "gym")
 
             actions = [
-                LocationAction(trigger="exit", place="home", message="Left home", surface="silent"),
-                LocationAction(trigger="enter", place="gym", message="At gym", surface="silent"),
+                LocationActionConfig(trigger="exit", place="home", message="Left home", surface="silent"),
+                LocationActionConfig(trigger="enter", place="gym", message="At gym", surface="silent"),
             ]
 
             # Establish at home

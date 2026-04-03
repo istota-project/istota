@@ -31,7 +31,6 @@ Configuration files live in the `config/` subfolder:
 - **config/BRIEFINGS.md** — Briefing schedule configuration
 - **config/HEARTBEAT.md** — Health monitoring configuration
 - **config/CRON.md** — Scheduled recurring jobs
-- **config/LOCATION.md** — Location tracking (GPS via Overland)
 - **config/PERSONA.md** — Bot personality (editable copy of global persona)
 
 See `examples/` for detailed documentation and configuration reference.
@@ -57,8 +56,6 @@ Control your own briefing times, delivery channel, and components.
 Set up periodic checks that alert you when something needs attention.
 - **config/CRON.md** — (Optional) Scheduled recurring jobs. \
 Configure tasks that run on a cron schedule with results delivered to Talk or email.
-- **config/LOCATION.md** — (Optional) Location tracking. \
-Configure GPS tracking via the Overland iOS app with place recognition.
 - **config/PERSONA.md** — (Optional) Bot personality. \
 Edit this to customize how Istota behaves and communicates with you.
 
@@ -408,11 +405,6 @@ def get_user_persona_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_config_path(user_id, bot_dir)}/PERSONA.md"
 
 
-def get_user_location_path(user_id: str, bot_dir: str) -> str:
-    """Get the path to a user's LOCATION.md file."""
-    return f"{get_user_config_path(user_id, bot_dir)}/LOCATION.md"
-
-
 CRON_TEMPLATE = """\
 # Scheduled Jobs
 
@@ -508,103 +500,6 @@ def _build_cron_seed(config: "Config", user_id: str) -> str:
                 break
     return CRON_TEMPLATE.format(conversation_token=token)
 
-
-
-LOCATION_TEMPLATE = """\
-# Location Tracking
-
-See `examples/LOCATION.md` for all options.
-
-```toml
-# [settings]
-# ingest_token = "your-secret-token"   # Shared secret for Overland endpoint
-# default_radius = 25                  # meters
-
-# [[places]]
-# name = "home"
-# lat = 0.0
-# lon = 0.0
-# radius_meters = 150
-# category = "home"
-```
-"""
-
-LOCATION_EXAMPLE = """\
-# Location Tracking
-
-Configure GPS location tracking via the Overland iOS app.
-Overland posts location batches to your server endpoint.
-
-## Setup
-
-1. Install Overland from the App Store
-2. Set your ingest token below
-3. In Overland Settings > Server, set URL to:
-   `https://your-server.com/webhooks/location?token=YOUR_TOKEN`
-4. Define your known places
-
-## Settings
-
-```toml
-[settings]
-ingest_token = "your-secret-token"     # Shared secret for Overland endpoint
-default_radius = 25                    # Default geofence radius (meters)
-
-[[places]]
-name = "home"
-lat = 34.0000
-lon = -118.0000
-radius_meters = 150
-category = "home"
-
-[[places]]
-name = "gym"
-lat = 34.0000
-lon = -118.0001
-radius_meters = 75
-category = "gym"
-
-[[actions]]
-trigger = "enter"                      # "enter", "exit", or "dwell"
-place = "gym"
-message = "Arrived at gym"
-surface = "ntfy"                       # "ntfy", "talk", "silent", "cron_prompt"
-priority = "high"
-
-[[actions]]
-trigger = "exit"
-place = "home"
-message = "Left home"
-surface = "silent"                     # Record only, no notification
-```
-
-## Place Categories
-
-home, work, gym, food, transit, shopping, health, social, other
-
-## Action Surfaces
-
-- **ntfy** — Push notification
-- **talk** — Message in a Talk room (requires `conversation_token`)
-- **silent** — Log only
-- **cron_prompt** — Queue a prompt as a task (requires `prompt` and optionally `conversation_token`)
-
-## CLI Commands
-
-```bash
-# Current location + place
-python -m istota.skills.location current
-
-# Recent pings
-python -m istota.skills.location history --limit 20
-
-# List known places
-python -m istota.skills.location places
-
-# Save current location as a named place
-python -m istota.skills.location learn "coffee shop"
-```
-"""
 
 
 def _rclone_mkdir(remote: str, path: str) -> bool:
@@ -852,7 +747,7 @@ def _migrate_workspace_files(user_base: Path) -> None:
 # Config files that live in bot_name/config/
 _CONFIG_FILES = (
     "USER.md", "TASKS.md", "BRIEFINGS.md", "HEARTBEAT.md",
-    "CRON.md", "LOCATION.md",
+    "CRON.md",
 )
 
 
@@ -961,11 +856,6 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             cron_file.write_text(_build_cron_seed(config, user_id))
             logger.debug("Created %s/config/CRON.md for %s", bot_dir, user_id)
 
-        location_file = config_dir / "LOCATION.md"
-        if not location_file.exists():
-            location_file.write_text(LOCATION_TEMPLATE)
-            logger.debug("Created %s/config/LOCATION.md for %s", bot_dir, user_id)
-
         # Seed PERSONA.md from global persona file
         persona_file = config_dir / "PERSONA.md"
         if not persona_file.exists():
@@ -983,7 +873,6 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             "BRIEFINGS.md": BRIEFINGS_EXAMPLE,
             "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
             "CRON.md": CRON_EXAMPLE,
-            "LOCATION.md": LOCATION_EXAMPLE,
         }
         for filename, content in examples.items():
             (examples_dir / filename).write_text(content)

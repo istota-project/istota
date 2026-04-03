@@ -205,14 +205,14 @@ Overland GPS webhook receiver (`webhook_receiver.py`) ingests location pings and
 
 Config: `[location]` section — `enabled: bool = False`, `webhooks_port: int = 8765`.
 
-Per-user config via `LOCATION.md` in the user's bot config folder (TOML format):
-- `[settings]`: `ingest_token`, `default_radius`
-- `[[places]]`: named locations with `lat`, `lon`, `radius_meters`, `category`
-- `[[actions]]`: triggered on `enter`/`exit` events — surfaces: `ntfy`, `talk`, `silent`, `cron_prompt`
+Per-user config via `[location]` section in per-user TOML:
+- `ingest_token`: shared secret for Overland endpoint
+- `default_radius`: default geofence radius (meters)
+- `[[location.actions]]`: triggered on `enter`/`exit` events — surfaces: `ntfy`, `talk`, `silent`, `cron_prompt`
 
-Place detection uses hysteresis (2 consecutive pings required) to avoid flapping. LOCATION.md is reloaded on every ping batch — changes take effect without restart.
+Places are managed via the web UI or the `learn` CLI command (stored in `places` DB table). Place detection uses hysteresis (2 consecutive pings required) to avoid flapping.
 
-DB tables: `location_pings`, `location_places`, `location_visits`, `location_state`. Old pings cleaned after `location_ping_retention_days` (365).
+DB tables: `location_pings`, `places`, `visits`, `location_state`. Old pings cleaned after `location_ping_retention_days` (365).
 
 ### Authenticated Web Interface
 SvelteKit frontend (`web/`) with FastAPI backend (`web_app.py`). Nextcloud OIDC for authentication. Runs as a separate service (`uvicorn istota.web_app:app`). Session-based auth via `SessionMiddleware`, 7-day cookie.

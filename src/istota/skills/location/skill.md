@@ -4,7 +4,7 @@ GPS-based location tracking via the Overland iOS app. Tracks location pings, res
 
 ## Configuration
 
-Location config is stored in `LOCATION.md` (in the user's config directory) as a TOML block. Define places and actions there.
+Places are managed via the web UI or the `learn` CLI command (stored in the DB). Location settings (ingest token, default radius, actions) are in the per-user config file.
 
 ## CLI
 
@@ -23,9 +23,8 @@ istota-skill location history --date 2026-02-15 --tz America/New_York
 # List known places
 istota-skill location places
 
-# Save current location as a named place
-# Reads the most recent ping and appends a [[places]] entry to LOCATION.md
-# New places take effect on the next incoming ping (no restart needed)
+# Save current location as a named place (inserts into DB)
+# Takes effect immediately on the next incoming ping
 istota-skill location learn "coffee shop"
 istota-skill location learn "gym" --category gym --radius 75
 

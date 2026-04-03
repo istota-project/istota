@@ -88,14 +88,12 @@
 									<span class="place-name">{place.name}</span>
 									<span class="place-radius">{place.radius_meters}m</span>
 								</button>
-								{#if place.source === 'web'}
-									<button
-										class="place-delete"
-										onclick={() => handleDeletePlace(place)}
-										type="button"
-										title="Delete place"
-									>&times;</button>
-								{/if}
+								<button
+									class="place-delete"
+									onclick={() => handleDeletePlace(place)}
+									type="button"
+									title="Delete place"
+								>&times;</button>
 							</div>
 						{/each}
 					</div>

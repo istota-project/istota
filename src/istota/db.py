@@ -165,14 +165,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
 
-    # Places table migrations
-    for col, col_type in [
-        ("source", "TEXT NOT NULL DEFAULT 'file'"),
-    ]:
-        try:
-            conn.execute(f"ALTER TABLE places ADD COLUMN {col} {col_type}")
-        except sqlite3.OperationalError:
-            pass
+    # Places table: drop source column (moved to config)
+    try:
+        conn.execute("ALTER TABLE places DROP COLUMN source")
+    except sqlite3.OperationalError:
+        pass  # Column already dropped or doesn't exist
 
     # Monarch synced transactions migrations (for reconciliation tracking)
     for col, col_type in [
@@ -2794,7 +2791,6 @@ class Place:
     lon: float
     radius_meters: int
     category: str | None
-    source: str = "file"
     created_at: str = ""
     notes: str | None = None
 
@@ -2962,15 +2958,14 @@ def insert_place(
     radius_meters: int = 25,
     category: str | None = None,
     notes: str | None = None,
-    source: str = "file",
 ) -> int:
     """Insert a named place. Returns the new row ID."""
     cursor = conn.execute(
         """
-        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (user_id, name, lat, lon, radius_meters, category, notes, source),
+        (user_id, name, lat, lon, radius_meters, category, notes),
     )
     return cursor.lastrowid
 
@@ -2982,7 +2977,7 @@ def get_places(
     """Get all places for a user."""
     cursor = conn.execute(
         """
-        SELECT id, user_id, name, lat, lon, radius_meters, category, source, created_at, notes
+        SELECT id, user_id, name, lat, lon, radius_meters, category, created_at, notes
         FROM places
         WHERE user_id = ?
         ORDER BY name
@@ -3000,7 +2995,7 @@ def get_place_by_name(
     """Get a place by name."""
     cursor = conn.execute(
         """
-        SELECT id, user_id, name, lat, lon, radius_meters, category, source, created_at, notes
+        SELECT id, user_id, name, lat, lon, radius_meters, category, created_at, notes
         FROM places WHERE user_id = ? AND name = ?
         """,
         (user_id, name),
@@ -3020,23 +3015,21 @@ def upsert_place(
     radius_meters: int = 25,
     category: str | None = None,
     notes: str | None = None,
-    source: str = "file",
 ) -> int:
     """Insert or update a place by (user_id, name). Returns the row ID."""
     cursor = conn.execute(
         """
-        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO places (user_id, name, lat, lon, radius_meters, category, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (user_id, name) DO UPDATE SET
             lat = excluded.lat,
             lon = excluded.lon,
             radius_meters = excluded.radius_meters,
             category = excluded.category,
-            notes = excluded.notes,
-            source = excluded.source
+            notes = excluded.notes
         RETURNING id
         """,
-        (user_id, name, lat, lon, radius_meters, category, notes, source),
+        (user_id, name, lat, lon, radius_meters, category, notes),
     )
     row = cursor.fetchone()
     return row[0]
@@ -3062,7 +3055,7 @@ def get_place_by_id(
     """Get a place by ID."""
     cursor = conn.execute(
         """
-        SELECT id, user_id, name, lat, lon, radius_meters, category, source, created_at, notes
+        SELECT id, user_id, name, lat, lon, radius_meters, category, created_at, notes
         FROM places WHERE id = ?
         """,
         (place_id,),
