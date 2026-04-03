@@ -175,6 +175,10 @@ istota_disabled_skills: []
 #         name: "Moneyman"
 #         cli_path: "/srv/app/moneyman/app/.venv/bin/moneyman"
 #         user_key: "username"
+#       - type: "overland"
+#         name: "GPS"
+#         ingest_token: "your-overland-secret"
+#         default_radius: 25
 #     briefings:
 #       - name: "morning"
 #         cron: "0 6 * * *"
@@ -189,9 +193,6 @@ istota_disabled_skills: []
 #             enabled: true
 #           reminders:
 #             enabled: true
-#     location:
-#       ingest_token: "your-overland-secret"
-#       default_radius: 25
 istota_users: {}
 
 # Briefing defaults (expanded when user sets `markets = true` or `news = true`)
