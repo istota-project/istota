@@ -24,7 +24,6 @@
 	async function toggleUnseen() {
 		showUnseen = !showUnseen;
 		if (showUnseen) {
-			// Fetch all unread from Miniflux and merge into local entries
 			try {
 				const data = await getFeeds({ limit: '500', status: 'unread', order: 'published_at', direction: 'desc' });
 				const seen = new Set(entries.map((e) => e.id));
@@ -98,7 +97,6 @@
 			total = data.total;
 			hasMore = entries.length < total;
 		} catch {
-			// Silently stop loading more on error
 			hasMore = false;
 		} finally {
 			loadingMore = false;
@@ -164,38 +162,38 @@
 	<div class="error-msg">{error}</div>
 {:else}
 	<nav class="filters">
-		<div class="filter-type">
-			<label class="filter-chip" class:checked={showImages}>
+		<div class="filter-group">
+			<label class="chip" class:checked={showImages}>
 				<input type="checkbox" bind:checked={showImages} />
 				<span>images</span>
 			</label>
-			<label class="filter-chip" class:checked={showText}>
+			<label class="chip" class:checked={showText}>
 				<input type="checkbox" bind:checked={showText} />
 				<span>text</span>
 			</label>
-			<label class="filter-chip" class:checked={showUnseen}>
+			<label class="chip" class:checked={showUnseen}>
 				<input type="checkbox" checked={showUnseen} onchange={toggleUnseen} />
 				<span>unseen</span>
 			</label>
 		</div>
 
-		<div class="sort-toggle">
-			<label class="filter-chip" class:checked={sortBy === 'published'}>
+		<div class="filter-group">
+			<label class="chip" class:checked={sortBy === 'published'}>
 				<input type="radio" name="sort" value="published" bind:group={sortBy} />
 				<span>published</span>
 			</label>
-			<label class="filter-chip" class:checked={sortBy === 'added'}>
+			<label class="chip" class:checked={sortBy === 'added'}>
 				<input type="radio" name="sort" value="added" bind:group={sortBy} />
 				<span>added</span>
 			</label>
 		</div>
 
-		<div class="view-toggle">
-			<label class="filter-chip" class:checked={viewMode === 'grid'}>
+		<div class="filter-group view-toggle">
+			<label class="chip" class:checked={viewMode === 'grid'}>
 				<input type="radio" name="view" value="grid" bind:group={viewMode} />
 				<span>grid</span>
 			</label>
-			<label class="filter-chip" class:checked={viewMode === 'list'}>
+			<label class="chip" class:checked={viewMode === 'list'}>
 				<input type="radio" name="view" value="list" bind:group={viewMode} />
 				<span>list</span>
 			</label>
@@ -214,7 +212,7 @@
 		{/if}
 	</div>
 
-	<div class="status-notice">{entries.length} / {total}</div>
+	<div class="status-badge">{entries.length} / {total}</div>
 
 	<Lightbox src={lightboxSrc} onClose={() => lightboxSrc = ''} />
 {/if}
@@ -229,37 +227,38 @@
 		position: sticky;
 		top: 0;
 		z-index: 10;
-		background: #111;
+		background: var(--surface-base);
 		padding: 0.75rem 0;
 		align-items: center;
 	}
-	.filter-type {
-		display: flex;
-		gap: 0.5rem;
-	}
-	.sort-toggle, .view-toggle {
+
+	.filter-group {
 		display: flex;
 		gap: 0.25rem;
 	}
+
 	.view-toggle { margin-left: auto; }
 
 	/* Filter chips */
-	.filter-chip {
+	.chip {
 		cursor: pointer;
 		display: inline-flex;
 		align-items: center;
 		padding: 0.25rem 0.75rem;
-		border: 1px solid #333;
-		border-radius: 999px;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-pill);
 		font-size: 0.8rem;
-		transition: all 0.15s;
+		transition: all var(--transition-fast);
 		user-select: none;
+		color: var(--text-primary);
 	}
-	.filter-chip input { display: none; }
-	.filter-chip.checked {
-		background: #e0e0e0;
-		color: #111;
-		border-color: #e0e0e0;
+
+	.chip input { display: none; }
+
+	.chip.checked {
+		background: var(--accent);
+		color: var(--surface-base);
+		border-color: var(--accent);
 	}
 
 	/* Grid layout */
@@ -268,6 +267,7 @@
 		grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
 		gap: 1rem;
 	}
+
 	.feed-grid.list-view {
 		grid-template-columns: 1fr;
 		max-width: 640px;
@@ -277,13 +277,14 @@
 	/* Cards */
 	.feed-grid :global(.card) {
 		position: relative;
-		background: #1a1a1a;
-		border-radius: 0.5rem;
+		background: var(--surface-card);
+		border-radius: var(--radius-card);
 		overflow: hidden;
 		max-height: 420px;
 		display: flex;
 		flex-direction: column;
 	}
+
 	.feed-grid :global(.seen-pill) {
 		position: absolute;
 		top: 0.4rem;
@@ -293,11 +294,12 @@
 		letter-spacing: 0.04em;
 		padding: 0.1rem 0.35rem;
 		background: rgba(0, 0, 0, 0.55);
-		color: #888;
+		color: var(--text-muted);
 		border-radius: 0.2rem;
 		pointer-events: none;
 		z-index: 2;
 	}
+
 	.feed-grid.list-view :global(.card) {
 		max-height: none;
 	}
@@ -312,12 +314,13 @@
 		background: #0e0e0e;
 		width: 100%;
 	}
+
 	.feed-grid :global(.card-image img) {
 		width: 100%;
 		display: block;
 		max-height: 360px;
 		object-fit: contain;
-		border-radius: 0.5rem 0.5rem 0 0;
+		border-radius: var(--radius-card) var(--radius-card) 0 0;
 	}
 
 	/* Gallery */
@@ -326,20 +329,24 @@
 		grid-template-columns: repeat(2, 1fr);
 		gap: 2px;
 	}
+
 	.feed-grid :global(.card-gallery .card-image img) {
 		border-radius: 0;
 		aspect-ratio: 1;
 		object-fit: cover;
 		max-height: none;
 	}
+
 	.feed-grid :global(.card-gallery .card-image:first-child img) {
-		border-radius: 0.5rem 0 0 0;
+		border-radius: var(--radius-card) 0 0 0;
 	}
+
 	.feed-grid :global(.card-gallery .card-image:nth-child(2) img) {
-		border-radius: 0 0.5rem 0 0;
+		border-radius: 0 var(--radius-card) 0 0;
 	}
+
 	.feed-grid :global(.card-gallery .card-image:only-child img) {
-		border-radius: 0.5rem 0.5rem 0 0;
+		border-radius: var(--radius-card) var(--radius-card) 0 0;
 		grid-column: span 2;
 		aspect-ratio: auto;
 		object-fit: initial;
@@ -347,6 +354,7 @@
 
 	/* Gallery overflow */
 	.feed-grid :global(.gallery-more) { position: relative; }
+
 	.feed-grid :global(.gallery-count) {
 		position: absolute;
 		inset: 0;
@@ -364,14 +372,15 @@
 	.feed-grid :global(.card-title-overlay) {
 		padding: 0.25rem 0.6rem;
 		background: #161616;
-		font-size: 0.7rem;
-		color: #888;
+		font-size: var(--text-xs);
+		color: var(--text-muted);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.feed-grid :global(.card-title-overlay a) { color: #888; text-decoration: none; }
-	.feed-grid :global(.card-title-overlay a:hover) { color: #ccc; }
+
+	.feed-grid :global(.card-title-overlay a) { color: var(--text-muted); text-decoration: none; }
+	.feed-grid :global(.card-title-overlay a:hover) { color: var(--text-secondary); }
 
 	/* Card body */
 	.feed-grid :global(.card-body) {
@@ -379,25 +388,29 @@
 		min-height: 0;
 		overflow: hidden;
 	}
+
 	.feed-grid :global(.card-body h3) {
 		margin: 0;
 		padding: 0.5rem 0.75rem 0.25rem;
 		font-size: 0.8rem;
 		font-weight: 600;
 	}
-	.feed-grid :global(.card-body h3 a) { color: #e0e0e0; text-decoration: none; }
+
+	.feed-grid :global(.card-body h3 a) { color: var(--text-primary); text-decoration: none; }
 	.feed-grid :global(.card-body h3 a:hover) { text-decoration: underline; }
 
 	/* Excerpt */
 	.feed-grid :global(.excerpt) {
 		margin: 0;
 		padding: 0.5rem 0.75rem;
-		font-size: 0.85rem;
-		color: #bbb;
+		font-size: var(--text-base);
+		color: var(--text-secondary);
 	}
+
 	.feed-grid :global(.excerpt a) { color: #aaa; text-decoration: underline; }
-	.feed-grid :global(.excerpt a:hover) { color: #e0e0e0; }
+	.feed-grid :global(.excerpt a:hover) { color: var(--text-primary); }
 	.feed-grid :global(.excerpt p) { margin: 0.5em 0; }
+
 	.feed-grid :global(.excerpt img) {
 		max-width: 100%;
 		height: auto;
@@ -412,21 +425,24 @@
 		gap: 0.5rem;
 		align-items: center;
 		padding: 0.5rem 0.75rem;
-		font-size: 0.75rem;
-		color: #666;
-		border-top: 1px solid #222;
+		font-size: var(--text-sm);
+		color: var(--text-dim);
+		border-top: 1px solid var(--border-subtle);
 		margin-top: auto;
 	}
+
 	.feed-grid :global(.feed-name) {
-		background: #252525;
+		background: var(--surface-badge);
 		padding: 0.1rem 0.4rem;
 		border-radius: 0.2rem;
 	}
+
 	.feed-grid :global(.meta-link) {
-		color: #666;
+		color: var(--text-dim);
 		text-decoration: none;
 		margin-left: auto;
 	}
+
 	.feed-grid :global(.meta-link:hover) { color: #aaa; }
 
 	/* Sentinel / loading */
@@ -435,18 +451,19 @@
 		text-align: center;
 		padding: 1rem 0;
 	}
+
 	.loading-more {
-		font-size: 0.75rem;
-		color: #555;
+		font-size: var(--text-sm);
+		color: var(--text-dim);
 	}
 
-	/* Status */
-	.status-notice {
+	/* Status badge */
+	.status-badge {
 		position: fixed;
 		bottom: 0.75rem;
 		right: 0.75rem;
-		font-size: 0.7rem;
-		color: #555;
+		font-size: var(--text-xs);
+		color: var(--text-dim);
 		background: #161616;
 		padding: 0.3rem 0.6rem;
 		border-radius: 0.25rem;
@@ -460,17 +477,18 @@
 		object-fit: cover;
 		border-radius: 0;
 	}
+
 	.feed-grid.list-view :global(.card-gallery) {
 		grid-template-columns: 1fr;
 	}
+
 	.feed-grid.list-view :global(.card-gallery .card-image img) {
 		aspect-ratio: auto;
 	}
 
 	@media (max-width: 640px) {
 		.filters { gap: 0.35rem; padding: 0.5rem 0; }
-		.filter-type { gap: 0.35rem; }
-		.sort-toggle, .view-toggle { gap: 0.15rem; }
-		.filter-chip { font-size: 0.65rem; padding: 0.15rem 0.5rem; }
+		.filter-group { gap: 0.15rem; }
+		.chip { font-size: 0.65rem; padding: 0.15rem 0.5rem; }
 	}
 </style>
