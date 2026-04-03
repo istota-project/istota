@@ -3,6 +3,7 @@
 	import { getFeeds, updateEntriesStatus, type FeedEntry, type FeedsResponse } from '$lib/api';
 	import FeedCard from '$lib/components/FeedCard.svelte';
 	import Lightbox from '$lib/components/Lightbox.svelte';
+	import Chip from '$lib/components/ui/Chip.svelte';
 
 	const PAGE_SIZE = 50;
 
@@ -163,40 +164,19 @@
 {:else}
 	<nav class="filters">
 		<div class="filter-group">
-			<label class="chip" class:checked={showImages}>
-				<input type="checkbox" bind:checked={showImages} />
-				<span>images</span>
-			</label>
-			<label class="chip" class:checked={showText}>
-				<input type="checkbox" bind:checked={showText} />
-				<span>text</span>
-			</label>
-			<label class="chip" class:checked={showUnseen}>
-				<input type="checkbox" checked={showUnseen} onchange={toggleUnseen} />
-				<span>unseen</span>
-			</label>
+			<Chip checked={showImages} onclick={() => showImages = !showImages}>images</Chip>
+			<Chip checked={showText} onclick={() => showText = !showText}>text</Chip>
+			<Chip checked={showUnseen} onclick={toggleUnseen}>unseen</Chip>
 		</div>
 
 		<div class="filter-group">
-			<label class="chip" class:checked={sortBy === 'published'}>
-				<input type="radio" name="sort" value="published" bind:group={sortBy} />
-				<span>published</span>
-			</label>
-			<label class="chip" class:checked={sortBy === 'added'}>
-				<input type="radio" name="sort" value="added" bind:group={sortBy} />
-				<span>added</span>
-			</label>
+			<Chip checked={sortBy === 'published'} onclick={() => sortBy = 'published'}>published</Chip>
+			<Chip checked={sortBy === 'added'} onclick={() => sortBy = 'added'}>added</Chip>
 		</div>
 
 		<div class="filter-group view-toggle">
-			<label class="chip" class:checked={viewMode === 'grid'}>
-				<input type="radio" name="view" value="grid" bind:group={viewMode} />
-				<span>grid</span>
-			</label>
-			<label class="chip" class:checked={viewMode === 'list'}>
-				<input type="radio" name="view" value="list" bind:group={viewMode} />
-				<span>list</span>
-			</label>
+			<Chip checked={viewMode === 'grid'} onclick={() => viewMode = 'grid'}>grid</Chip>
+			<Chip checked={viewMode === 'list'} onclick={() => viewMode = 'list'}>list</Chip>
 		</div>
 	</nav>
 
@@ -235,34 +215,6 @@
 	}
 
 	.view-toggle { margin-left: auto; }
-
-	/* Filter chips */
-	.chip {
-		cursor: pointer;
-		display: inline-flex;
-		align-items: center;
-		padding: 0.25rem 0.5rem;
-		border: none;
-		border-radius: var(--radius-pill);
-		font-size: var(--text-xs);
-		transition: all var(--transition-fast);
-		user-select: none;
-		color: var(--text-muted);
-		background: var(--surface-card);
-		font-family: inherit;
-	}
-
-	.chip input { display: none; }
-
-	.chip:hover {
-		color: var(--text-primary);
-		background: var(--surface-raised);
-	}
-
-	.chip.checked {
-		background: var(--surface-raised);
-		color: var(--text-primary);
-	}
 
 	/* Grid layout */
 	.feed-grid {
@@ -492,6 +444,5 @@
 	@media (max-width: 640px) {
 		.filters { gap: 0.35rem; }
 		.filter-group { gap: 0.15rem; }
-		.chip { padding: 0.2rem 0.4rem; }
 	}
 </style>
