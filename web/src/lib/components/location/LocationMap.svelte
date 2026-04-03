@@ -333,8 +333,8 @@
 			},
 		});
 
-		// Click handler for clusters
-		map.on('click', 'cluster-markers', (e) => {
+		// Click handler for clusters (both circle and label layers)
+		const handleClusterClick = (e: maplibregl.MapMouseEvent & { features?: maplibregl.MapGeoJSONFeature[] }) => {
 			if (!e.features?.length || !onClusterClick) return;
 			const props = e.features[0].properties;
 			const geom = e.features[0].geometry;
@@ -347,12 +347,20 @@
 					last_seen: props.last_seen,
 				});
 			}
-		});
+		};
+		map.on('click', 'cluster-markers', handleClusterClick);
+		map.on('click', 'cluster-labels', handleClusterClick);
 
 		map.on('mouseenter', 'cluster-markers', () => {
 			if (map) map.getCanvas().style.cursor = 'pointer';
 		});
 		map.on('mouseleave', 'cluster-markers', () => {
+			if (map) map.getCanvas().style.cursor = '';
+		});
+		map.on('mouseenter', 'cluster-labels', () => {
+			if (map) map.getCanvas().style.cursor = 'pointer';
+		});
+		map.on('mouseleave', 'cluster-labels', () => {
 			if (map) map.getCanvas().style.cursor = '';
 		});
 
@@ -424,6 +432,8 @@
 		const allCoords: [number, number][] = [];
 		for (const p of pings) allCoords.push([p.lon, p.lat]);
 		for (const s of stops) allCoords.push([s.lon, s.lat]);
+		for (const p of places) allCoords.push([p.lon, p.lat]);
+		for (const c of clusters) allCoords.push([c.lon, c.lat]);
 		if (currentPosition) allCoords.push([currentPosition.lon, currentPosition.lat]);
 
 		if (allCoords.length === 0) return;
