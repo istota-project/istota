@@ -7,7 +7,6 @@ Currently handles:
 """
 
 import logging
-import math
 import signal
 import sqlite3
 import threading
@@ -18,14 +17,7 @@ from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from . import db
-from .config import load_config
-from .location_loader import (
-    LocationAction,
-    LocationPlace,
-    build_token_user_map,
-    load_location_config,
-    sync_places_to_db,
-)
+from .config import LocationActionConfig, load_config
 
 logger = logging.getLogger("istota.webhook_receiver")
 
@@ -33,7 +25,7 @@ logger = logging.getLogger("istota.webhook_receiver")
 _config = None
 _token_map: dict[str, str] = {}      # token -> user_id
 _places_cache: dict[str, list] = {}   # user_id -> list[Place] (DB objects)
-_actions_cache: dict[str, list[LocationAction]] = {}  # user_id -> actions
+_actions_cache: dict[str, list[LocationActionConfig]] = {}  # user_id -> actions
 _lock = threading.Lock()
 
 # Hysteresis threshold: consecutive pings at new place before transition
@@ -49,23 +41,25 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def reload_config() -> None:
-    """Reload config, token map, and places cache."""
+    """Reload config, token map, and places/actions cache."""
     global _config, _token_map, _places_cache, _actions_cache
     _config = load_config()
     with _lock:
-        _token_map = build_token_user_map(_config)
-        _places_cache.clear()
-        _actions_cache.clear()
+        token_map = {}
+        places_cache = {}
+        actions_cache = {}
         conn = _get_conn()
         try:
-            for token, user_id in _token_map.items():
-                loc_config = load_location_config(_config, user_id)
-                if loc_config:
-                    sync_places_to_db(conn, user_id, loc_config.places)
-                    _places_cache[user_id] = db.get_places(conn, user_id)
-                    _actions_cache[user_id] = loc_config.actions
+            for user_id, uc in _config.users.items():
+                if uc.location.ingest_token:
+                    token_map[uc.location.ingest_token] = user_id
+                    places_cache[user_id] = db.get_places(conn, user_id)
+                    actions_cache[user_id] = uc.location.actions
         finally:
             conn.close()
+        _token_map = token_map
+        _places_cache = places_cache
+        _actions_cache = actions_cache
     logger.info(
         "Loaded location config: %d user(s) with tokens", len(_token_map),
     )
@@ -116,21 +110,11 @@ async def receive_location(
 
     conn = _get_conn()
     try:
-        # Reload places from LOCATION.md on each batch so new places
-        # take effect without a service restart (ISSUE-009).
-        loc_config = load_location_config(_config, user_id)
-        if loc_config:
-            sync_places_to_db(conn, user_id, loc_config.places)
-            conn.commit()
-            places = db.get_places(conn, user_id)
-            actions = loc_config.actions
-            with _lock:
-                _places_cache[user_id] = places
-                _actions_cache[user_id] = actions
-        else:
-            with _lock:
-                places = _places_cache.get(user_id, [])
-                actions = _actions_cache.get(user_id, [])
+        # Refresh places from DB (picks up web UI changes without restart)
+        places = db.get_places(conn, user_id)
+        with _lock:
+            _places_cache[user_id] = places
+            actions = _actions_cache.get(user_id, [])
 
         for feature in locations:
             _process_feature(conn, user_id, feature, places, actions)
@@ -153,7 +137,7 @@ def _process_feature(
     user_id: str,
     feature: dict,
     places: list,
-    actions: list[LocationAction],
+    actions: list[LocationActionConfig],
 ) -> None:
     """Process a single GeoJSON Feature from Overland."""
     geom = feature.get("geometry", {})
@@ -212,7 +196,7 @@ def _update_state_machine(
     new_place_id: int | None,
     new_place,
     timestamp: str,
-    actions: list[LocationAction],
+    actions: list[LocationActionConfig],
 ) -> None:
     """Run the hysteresis state machine for visit tracking."""
     state = db.get_location_state(conn, user_id)
@@ -310,7 +294,7 @@ def _fire_actions(
     user_id: str,
     trigger: str,
     place_name: str,
-    actions: list[LocationAction],
+    actions: list[LocationActionConfig],
 ) -> None:
     """Fire matching actions for a place transition."""
     for action in actions:

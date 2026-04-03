@@ -134,7 +134,6 @@ export interface Place {
 	lon: number;
 	radius_meters: number;
 	category: string;
-	source: string;
 }
 
 export interface PlacesResponse {

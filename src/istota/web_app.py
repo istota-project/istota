@@ -712,14 +712,13 @@ def _location_query_places(db_path: str, user_id: str) -> dict:
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT id, name, lat, lon, radius_meters, category, source FROM places WHERE user_id = ? ORDER BY name",
+            "SELECT id, name, lat, lon, radius_meters, category FROM places WHERE user_id = ? ORDER BY name",
             (user_id,),
         ).fetchall()
         return {
             "places": [
                 {"id": r["id"], "name": r["name"], "lat": r["lat"], "lon": r["lon"],
-                 "radius_meters": r["radius_meters"], "category": r["category"],
-                 "source": r["source"]}
+                 "radius_meters": r["radius_meters"], "category": r["category"]}
                 for r in rows
             ]
         }
@@ -741,7 +740,6 @@ def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
             lon=data["lon"],
             radius_meters=data.get("radius_meters", 100),
             category=data.get("category"),
-            source="web",
         )
         # Backfill: assign this place to existing pings within radius
         radius_m = data.get("radius_meters", 100)
@@ -766,7 +764,7 @@ def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
         return {
             "id": place_id, "name": data["name"], "lat": lat, "lon": lon,
             "radius_meters": radius_m, "category": data.get("category"),
-            "source": "web", "backfilled_pings": backfilled,
+            "backfilled_pings": backfilled,
         }
     finally:
         conn.close()
@@ -779,7 +777,7 @@ def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict
     conn.row_factory = sqlite3.Row
     try:
         place = get_place_by_id(conn, place_id)
-        if not place or place.user_id != user_id or place.source != "web":
+        if not place or place.user_id != user_id:
             return None
         update_place(conn, place_id, **{k: v for k, v in data.items() if k in ("name", "lat", "lon", "radius_meters", "category", "notes")})
         conn.commit()
@@ -789,7 +787,7 @@ def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict
         return {
             "id": updated.id, "name": updated.name, "lat": updated.lat,
             "lon": updated.lon, "radius_meters": updated.radius_meters,
-            "category": updated.category, "source": updated.source,
+            "category": updated.category,
         }
     finally:
         conn.close()
@@ -802,7 +800,7 @@ def _location_delete_place(db_path: str, user_id: str, place_id: int) -> bool:
     conn.row_factory = sqlite3.Row
     try:
         place = get_place_by_id(conn, place_id)
-        if not place or place.user_id != user_id or place.source != "web":
+        if not place or place.user_id != user_id:
             return False
         nullify_place_on_pings(conn, place_id)
         delete_place_by_id(conn, place_id)

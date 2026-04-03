@@ -91,6 +91,34 @@ name = "Reminders"
 permissions = "read"
 
 {% endif %}
+{% if user_config.location is defined and user_config.location.ingest_token is defined and user_config.location.ingest_token %}
+[location]
+ingest_token = "{{ user_config.location.ingest_token }}"
+{% if user_config.location.default_radius is defined %}
+default_radius = {{ user_config.location.default_radius }}
+{% endif %}
+{% for action in user_config.location.actions | default([]) %}
+
+[[location.actions]]
+trigger = "{{ action.trigger }}"
+place = "{{ action.place }}"
+{% if action.message is defined and action.message %}
+message = "{{ action.message }}"
+{% endif %}
+{% if action.surface is defined and action.surface != "ntfy" %}
+surface = "{{ action.surface }}"
+{% endif %}
+{% if action.priority is defined and action.priority != "default" %}
+priority = "{{ action.priority }}"
+{% endif %}
+{% if action.prompt is defined and action.prompt %}
+prompt = "{{ action.prompt }}"
+{% endif %}
+{% if action.conversation_token is defined and action.conversation_token %}
+conversation_token = "{{ action.conversation_token }}"
+{% endif %}
+{% endfor %}
+{% endif %}
 {% for briefing in user_config.briefings | default([]) %}
 [[briefings]]
 name = "{{ briefing.name }}"

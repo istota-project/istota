@@ -182,6 +182,27 @@ class ResourceConfig:
 
 
 @dataclass
+class LocationActionConfig:
+    """A location-triggered action (enter/exit/dwell)."""
+    trigger: str = ""       # "enter", "exit", "dwell"
+    place: str = ""
+    message: str = ""
+    surface: str = "ntfy"   # "ntfy", "talk", "silent", "cron_prompt"
+    priority: str = "default"
+    prompt: str = ""        # for cron_prompt surface
+    conversation_token: str = ""
+    dwell_minutes: int = 0
+
+
+@dataclass
+class UserLocationConfig:
+    """Per-user location tracking settings."""
+    ingest_token: str = ""
+    default_radius: int = 25
+    actions: list[LocationActionConfig] = field(default_factory=list)
+
+
+@dataclass
 class UserConfig:
     """Per-user configuration."""
     display_name: str = ""  # friendly name for prompts
@@ -195,6 +216,7 @@ class UserConfig:
     max_foreground_workers: int = 0  # per-user fg worker override (0 = use global default)
     max_background_workers: int = 0  # per-user bg worker override (0 = use global default)
     disabled_skills: list[str] = field(default_factory=list)  # skills to exclude from selection
+    location: UserLocationConfig = field(default_factory=UserLocationConfig)
 
 
 @dataclass
@@ -483,6 +505,30 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             extra={k: v for k, v in monarch_data.items()},
         ))
 
+    # Parse location config
+    loc_data = user_data.get("location", {})
+    location_actions = []
+    for a in loc_data.get("actions", []):
+        trigger = a.get("trigger", "").strip()
+        place = a.get("place", "").strip()
+        if not trigger or not place:
+            continue
+        location_actions.append(LocationActionConfig(
+            trigger=trigger,
+            place=place,
+            message=a.get("message", ""),
+            surface=a.get("surface", "ntfy"),
+            priority=a.get("priority", "default"),
+            prompt=a.get("prompt", ""),
+            conversation_token=a.get("conversation_token", ""),
+            dwell_minutes=a.get("dwell_minutes", 0),
+        ))
+    location = UserLocationConfig(
+        ingest_token=loc_data.get("ingest_token", ""),
+        default_radius=loc_data.get("default_radius", 25),
+        actions=location_actions,
+    )
+
     return UserConfig(
         display_name=user_data.get("display_name", user_id),
         email_addresses=user_data.get("email_addresses", []),
@@ -495,6 +541,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         max_foreground_workers=user_data.get("max_foreground_workers", 0),
         max_background_workers=user_data.get("max_background_workers", 0),
         disabled_skills=user_data.get("disabled_skills", []),
+        location=location,
     )
 
 

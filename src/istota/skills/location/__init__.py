@@ -12,7 +12,7 @@ CLI:
 import argparse
 import json
 import os
-import re
+
 import sys
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -197,9 +197,6 @@ def cmd_places(args):
     conn.close()
 
 
-_TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
-
-
 def cmd_learn(args):
     conn = _get_conn()
     user_id = _get_user_id()
@@ -224,15 +221,13 @@ def cmd_learn(args):
         sys.exit(1)
 
     lat, lon = row["lat"], row["lon"]
+
+    # Insert directly into DB
+    from istota.db import upsert_place
+    upsert_place(conn, user_id, name, lat, lon,
+                 radius_meters=radius, category=category)
+    conn.commit()
     conn.close()
-
-    # Write to LOCATION.md (source of truth — DB synced on webhook reload)
-    mount_path = os.environ.get("NEXTCLOUD_MOUNT_PATH", "")
-    if not mount_path:
-        print(json.dumps({"error": "NEXTCLOUD_MOUNT_PATH not set, cannot write LOCATION.md"}))
-        sys.exit(1)
-
-    _append_place_to_location_md(mount_path, user_id, name, lat, lon, radius, category)
 
     print(json.dumps({
         "status": "ok",
@@ -240,44 +235,8 @@ def cmd_learn(args):
         "lat": round(lat, 6),
         "lon": round(lon, 6),
         "radius_meters": radius,
-        "message": f"Saved '{name}' at {lat:.4f}, {lon:.4f}. Restart webhooks service to sync.",
+        "message": f"Saved '{name}' at {lat:.4f}, {lon:.4f}.",
     }))
-
-
-def _append_place_to_location_md(
-    mount_path: str, user_id: str, name: str,
-    lat: float, lon: float, radius: int, category: str,
-) -> None:
-    """Append a [[places]] entry to the user's LOCATION.md file."""
-    # Find the bot dir by looking for LOCATION.md in any config subdir
-    from pathlib import Path
-    user_base = Path(mount_path) / "Users" / user_id
-    location_files = list(user_base.glob("*/config/LOCATION.md"))
-    if not location_files:
-        return
-
-    loc_file = location_files[0]
-    content = loc_file.read_text()
-
-    new_place = (
-        f'\n[[places]]\n'
-        f'name = "{name}"\n'
-        f'lat = {lat:.6f}\n'
-        f'lon = {lon:.6f}\n'
-        f'radius_meters = {radius}\n'
-        f'category = "{category}"\n'
-    )
-
-    # Insert before the closing ``` of the TOML block
-    match = _TOML_BLOCK_RE.search(content)
-    if match:
-        insert_pos = match.end() - 3  # before closing ```
-        content = content[:insert_pos] + new_place + content[insert_pos:]
-    else:
-        # No TOML block — create one
-        content += f"\n```toml{new_place}```\n"
-
-    loc_file.write_text(content)
 
 
 _VIRTUAL_LOCATION_PATTERNS = [
