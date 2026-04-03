@@ -574,6 +574,7 @@ def _location_query_pings(
                 "place": r["place_name"],
                 "speed": r["speed"],
                 "battery": r["battery"],
+                "activity_type": r["activity_type"],
             }
             for r in rows
         ]
@@ -703,18 +704,276 @@ def _location_query_places(db_path: str, user_id: str) -> dict:
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT name, lat, lon, radius_meters, category FROM places WHERE user_id = ? ORDER BY name",
+            "SELECT id, name, lat, lon, radius_meters, category, source FROM places WHERE user_id = ? ORDER BY name",
             (user_id,),
         ).fetchall()
         return {
             "places": [
-                {"name": r["name"], "lat": r["lat"], "lon": r["lon"],
-                 "radius_meters": r["radius_meters"], "category": r["category"]}
+                {"id": r["id"], "name": r["name"], "lat": r["lat"], "lon": r["lon"],
+                 "radius_meters": r["radius_meters"], "category": r["category"],
+                 "source": r["source"]}
                 for r in rows
             ]
         }
     finally:
         conn.close()
+
+
+def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
+    from .db import insert_place
+    from .geo import haversine
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        place_id = insert_place(
+            conn, user_id,
+            name=data["name"],
+            lat=data["lat"],
+            lon=data["lon"],
+            radius_meters=data.get("radius_meters", 100),
+            category=data.get("category"),
+            source="web",
+        )
+        # Backfill: assign this place to existing pings within radius
+        radius_m = data.get("radius_meters", 100)
+        lat, lon = data["lat"], data["lon"]
+        # Rough lat/lon bounding box (1 degree lat ~ 111km)
+        dlat = radius_m / 111_000
+        dlon = radius_m / (111_000 * max(0.01, abs(__import__("math").cos(__import__("math").radians(lat)))))
+        candidates = conn.execute(
+            """
+            SELECT id, lat, lon FROM location_pings
+            WHERE user_id = ? AND place_id IS NULL
+              AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
+            """,
+            (user_id, lat - dlat, lat + dlat, lon - dlon, lon + dlon),
+        ).fetchall()
+        backfilled = 0
+        for row in candidates:
+            if haversine(lat, lon, row["lat"], row["lon"]) <= radius_m:
+                conn.execute("UPDATE location_pings SET place_id = ? WHERE id = ?", (place_id, row["id"]))
+                backfilled += 1
+        conn.commit()
+        return {
+            "id": place_id, "name": data["name"], "lat": lat, "lon": lon,
+            "radius_meters": radius_m, "category": data.get("category"),
+            "source": "web", "backfilled_pings": backfilled,
+        }
+    finally:
+        conn.close()
+
+
+def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict) -> dict | None:
+    from .db import get_place_by_id, update_place
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        place = get_place_by_id(conn, place_id)
+        if not place or place.user_id != user_id or place.source != "web":
+            return None
+        update_place(conn, place_id, **{k: v for k, v in data.items() if k in ("name", "lat", "lon", "radius_meters", "category", "notes")})
+        conn.commit()
+        updated = get_place_by_id(conn, place_id)
+        if not updated:
+            return None
+        return {
+            "id": updated.id, "name": updated.name, "lat": updated.lat,
+            "lon": updated.lon, "radius_meters": updated.radius_meters,
+            "category": updated.category, "source": updated.source,
+        }
+    finally:
+        conn.close()
+
+
+def _location_delete_place(db_path: str, user_id: str, place_id: int) -> bool:
+    from .db import get_place_by_id, delete_place_by_id, nullify_place_on_pings
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        place = get_place_by_id(conn, place_id)
+        if not place or place.user_id != user_id or place.source != "web":
+            return False
+        nullify_place_on_pings(conn, place_id)
+        delete_place_by_id(conn, place_id)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -> dict:
+    """Find clusters of stationary pings not assigned to any place."""
+    from .geo import haversine
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        # Group pings into ~11m grid cells
+        rows = conn.execute(
+            """
+            SELECT ROUND(lat, 4) as rlat, ROUND(lon, 4) as rlon,
+                   AVG(lat) as avg_lat, AVG(lon) as avg_lon,
+                   COUNT(*) as cnt,
+                   MIN(timestamp) as first_seen, MAX(timestamp) as last_seen
+            FROM location_pings
+            WHERE user_id = ? AND place_id IS NULL
+              AND (activity_type IS NULL OR activity_type = 'stationary')
+            GROUP BY rlat, rlon
+            HAVING cnt >= ?
+            ORDER BY cnt DESC
+            """,
+            (user_id, max(3, min_pings // 3)),
+        ).fetchall()
+
+        # Merge nearby cells (within 200m)
+        points = [
+            {"lat": r["avg_lat"], "lon": r["avg_lon"], "count": r["cnt"],
+             "first_seen": r["first_seen"], "last_seen": r["last_seen"]}
+            for r in rows
+        ]
+
+        clusters: list[dict] = []
+        used = [False] * len(points)
+        for i, p in enumerate(points):
+            if used[i]:
+                continue
+            cluster_lat = p["lat"] * p["count"]
+            cluster_lon = p["lon"] * p["count"]
+            cluster_count = p["count"]
+            first = p["first_seen"]
+            last = p["last_seen"]
+            used[i] = True
+
+            for j in range(i + 1, len(points)):
+                if used[j]:
+                    continue
+                if haversine(p["lat"], p["lon"], points[j]["lat"], points[j]["lon"]) <= 200:
+                    cluster_lat += points[j]["lat"] * points[j]["count"]
+                    cluster_lon += points[j]["lon"] * points[j]["count"]
+                    cluster_count += points[j]["count"]
+                    if points[j]["first_seen"] < first:
+                        first = points[j]["first_seen"]
+                    if points[j]["last_seen"] > last:
+                        last = points[j]["last_seen"]
+                    used[j] = True
+
+            if cluster_count >= min_pings:
+                clusters.append({
+                    "lat": cluster_lat / cluster_count,
+                    "lon": cluster_lon / cluster_count,
+                    "total_pings": cluster_count,
+                    "first_seen": first,
+                    "last_seen": last,
+                })
+
+        # Filter out clusters that are within 200m of an existing place
+        existing = conn.execute(
+            "SELECT lat, lon, radius_meters FROM places WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        filtered = []
+        for c in clusters:
+            too_close = False
+            for ep in existing:
+                dist = haversine(c["lat"], c["lon"], ep["lat"], ep["lon"])
+                if dist <= max(ep["radius_meters"], 200):
+                    too_close = True
+                    break
+            if not too_close:
+                filtered.append(c)
+
+        return {"clusters": filtered}
+    finally:
+        conn.close()
+
+
+def _location_query_trips(db_path: str, user_id: str, tz_name: str, date: str | None) -> dict:
+    """Detect trips: sequences of non-stationary pings between stationary periods."""
+    from zoneinfo import ZoneInfo
+    from .geo import haversine
+
+    tz = ZoneInfo(tz_name)
+    now = datetime.now(tz)
+    target = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=tz) if date else now.replace(hour=0, minute=0, second=0, microsecond=0)
+    since = target.strftime("%Y-%m-%dT00:00:00")
+    until = (target + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT timestamp, lat, lon, activity_type, speed
+            FROM location_pings
+            WHERE user_id = ? AND timestamp >= ? AND timestamp < ?
+            ORDER BY timestamp ASC
+            """,
+            (user_id, since, until),
+        ).fetchall()
+
+        trips: list[dict] = []
+        current_trip: list[dict] = []
+
+        stationary_count = 0
+        STATIONARY_THRESHOLD = 3  # consecutive stationary pings to end a trip
+
+        for r in rows:
+            activity = r["activity_type"] or "stationary"
+            ping = {"timestamp": r["timestamp"], "lat": r["lat"], "lon": r["lon"],
+                    "activity_type": activity, "speed": r["speed"]}
+
+            if activity == "stationary":
+                stationary_count += 1
+                if stationary_count >= STATIONARY_THRESHOLD and current_trip:
+                    # Close the trip
+                    trips.append(_build_trip(current_trip))
+                    current_trip = []
+            else:
+                stationary_count = 0
+                current_trip.append(ping)
+
+        # Close any remaining trip
+        if current_trip:
+            trips.append(_build_trip(current_trip))
+
+        return {"date": target.strftime("%Y-%m-%d"), "trips": trips}
+    finally:
+        conn.close()
+
+
+def _build_trip(pings: list[dict]) -> dict:
+    """Build a trip summary from a list of pings."""
+    from .geo import haversine
+
+    distance = 0.0
+    for i in range(1, len(pings)):
+        distance += haversine(pings[i - 1]["lat"], pings[i - 1]["lon"],
+                              pings[i]["lat"], pings[i]["lon"])
+
+    # Dominant activity type
+    activity_counts: dict[str, int] = {}
+    for p in pings:
+        a = p["activity_type"]
+        activity_counts[a] = activity_counts.get(a, 0) + 1
+    dominant = max(activity_counts, key=activity_counts.get) if activity_counts else "unknown"
+
+    max_speed = max((p["speed"] or 0) for p in pings)
+
+    return {
+        "start_time": pings[0]["timestamp"],
+        "end_time": pings[-1]["timestamp"],
+        "start_lat": pings[0]["lat"],
+        "start_lon": pings[0]["lon"],
+        "end_lat": pings[-1]["lat"],
+        "end_lon": pings[-1]["lon"],
+        "distance_m": round(distance),
+        "ping_count": len(pings),
+        "activity_type": dominant,
+        "max_speed": round(max_speed, 1) if max_speed else None,
+    }
 
 
 @api_router.get("/location/current")
@@ -765,6 +1024,72 @@ async def api_location_places(user: dict = Depends(_require_api_auth)):
         return JSONResponse({"error": "location not available"}, status_code=404)
     db_path, user_id, _ = loc
     return await asyncio.to_thread(_location_query_places, db_path, user_id)
+
+
+@api_router.post("/location/places")
+async def api_location_create_place(request: Request, user: dict = Depends(_require_api_auth)):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    data = await request.json()
+    if not data.get("name") or "lat" not in data or "lon" not in data:
+        return JSONResponse({"error": "name, lat, lon required"}, status_code=400)
+    try:
+        result = await asyncio.to_thread(_location_create_place, db_path, user_id, data)
+        return result
+    except Exception as e:
+        logger.error("Failed to create place: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@api_router.put("/location/places/{place_id}")
+async def api_location_update_place(place_id: int, request: Request, user: dict = Depends(_require_api_auth)):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    data = await request.json()
+    result = await asyncio.to_thread(_location_update_place, db_path, user_id, place_id, data)
+    if not result:
+        return JSONResponse({"error": "place not found or not editable"}, status_code=404)
+    return result
+
+
+@api_router.delete("/location/places/{place_id}")
+async def api_location_delete_place(place_id: int, user: dict = Depends(_require_api_auth)):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    deleted = await asyncio.to_thread(_location_delete_place, db_path, user_id, place_id)
+    if not deleted:
+        return JSONResponse({"error": "place not found or not deletable"}, status_code=404)
+    return {"status": "ok"}
+
+
+@api_router.get("/location/discover-places")
+async def api_location_discover_places(
+    user: dict = Depends(_require_api_auth),
+    min_pings: int = Query(default=10, ge=3, le=1000),
+):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    return await asyncio.to_thread(_location_discover_places, db_path, user_id, min_pings)
+
+
+@api_router.get("/location/trips")
+async def api_location_trips(
+    user: dict = Depends(_require_api_auth),
+    date: str = Query(default=""),
+):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, tz_name = loc
+    return await asyncio.to_thread(_location_query_trips, db_path, user_id, tz_name, date or None)
 
 
 # ============================================================================

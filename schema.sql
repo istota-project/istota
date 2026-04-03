@@ -383,6 +383,7 @@ CREATE TABLE IF NOT EXISTS places (
     lon REAL NOT NULL,
     radius_meters INTEGER NOT NULL DEFAULT 100,
     category TEXT,                     -- home, gym, work, food, other
+    source TEXT NOT NULL DEFAULT 'file', -- 'file' (LOCATION.md) or 'web' (created via UI)
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     notes TEXT,
     UNIQUE(user_id, name)

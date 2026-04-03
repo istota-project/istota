@@ -2,7 +2,8 @@
 	import { onMount, onDestroy } from 'svelte';
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
-	import type { LocationPing, DaySummaryStop, Place } from '$lib/api';
+	import type { LocationPing, DaySummaryStop, Place, DiscoveredCluster } from '$lib/api';
+	import { ACTIVITY_COLORS, DEFAULT_PATH_COLOR } from '$lib/location-constants';
 
 	interface Props {
 		center?: [number, number];
@@ -10,10 +11,13 @@
 		pings?: LocationPing[];
 		stops?: DaySummaryStop[];
 		places?: Place[];
+		clusters?: DiscoveredCluster[];
 		currentPosition?: { lat: number; lon: number } | null;
 		showPath?: boolean;
 		showHeat?: boolean;
+		activeActivityTypes?: Set<string> | null;
 		onStopClick?: (stop: DaySummaryStop) => void;
+		onClusterClick?: (cluster: DiscoveredCluster) => void;
 	}
 
 	let {
@@ -22,10 +26,13 @@
 		pings = [],
 		stops = [],
 		places = [],
+		clusters = [],
 		currentPosition = null,
 		showPath = true,
 		showHeat = false,
+		activeActivityTypes = null,
 		onStopClick,
+		onClusterClick,
 	}: Props = $props();
 
 	let container: HTMLDivElement;
@@ -38,18 +45,39 @@
 		map?.flyTo({ center: [lon, lat], zoom: z ?? 15, duration: 800 });
 	}
 
+	function filteredPings(pings: LocationPing[]): LocationPing[] {
+		if (!activeActivityTypes) return pings;
+		return pings.filter(p => activeActivityTypes!.has(p.activity_type ?? 'stationary'));
+	}
+
 	function buildPathGeoJSON(pings: LocationPing[]): GeoJSON.FeatureCollection {
-		const coords = pings.map(p => [p.lon, p.lat]);
-		return {
-			type: 'FeatureCollection',
-			features: coords.length >= 2
-				? [{
-					type: 'Feature',
-					properties: {},
-					geometry: { type: 'LineString', coordinates: coords },
-				}]
-				: [],
-		};
+		const filtered = filteredPings(pings);
+		if (filtered.length < 2) return { type: 'FeatureCollection', features: [] };
+
+		const features: GeoJSON.Feature[] = [];
+		let segCoords: [number, number][] = [[filtered[0].lon, filtered[0].lat]];
+		let segActivity = filtered[0].activity_type ?? 'unknown';
+
+		for (let i = 1; i < filtered.length; i++) {
+			const activity = filtered[i].activity_type ?? 'unknown';
+			segCoords.push([filtered[i].lon, filtered[i].lat]);
+
+			if (activity !== segActivity || i === filtered.length - 1) {
+				if (segCoords.length >= 2) {
+					features.push({
+						type: 'Feature',
+						properties: { activity_type: segActivity },
+						geometry: { type: 'LineString', coordinates: [...segCoords] },
+					});
+				}
+				if (activity !== segActivity && i < filtered.length - 1) {
+					// Start new segment, overlapping last point for continuity
+					segCoords = [[filtered[i].lon, filtered[i].lat]];
+					segActivity = activity;
+				}
+			}
+		}
+		return { type: 'FeatureCollection', features };
 	}
 
 	function buildPingPointsGeoJSON(pings: LocationPing[]): GeoJSON.FeatureCollection {
@@ -75,6 +103,21 @@
 					ping_count: s.ping_count,
 				},
 				geometry: { type: 'Point' as const, coordinates: [s.lon, s.lat] },
+			})),
+		};
+	}
+
+	function buildClustersGeoJSON(clusters: DiscoveredCluster[]): GeoJSON.FeatureCollection {
+		return {
+			type: 'FeatureCollection',
+			features: clusters.map(c => ({
+				type: 'Feature' as const,
+				properties: {
+					total_pings: c.total_pings,
+					first_seen: c.first_seen,
+					last_seen: c.last_seen,
+				},
+				geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
 			})),
 		};
 	}
@@ -143,6 +186,7 @@
 		map.addSource('ping-points', { type: 'geojson', data: buildPingPointsGeoJSON([]) });
 		map.addSource('stops', { type: 'geojson', data: buildStopsGeoJSON([]) });
 		map.addSource('places', { type: 'geojson', data: buildPlacesGeoJSON([]) });
+		map.addSource('clusters', { type: 'geojson', data: buildClustersGeoJSON([]) });
 	}
 
 	function addLayers() {
@@ -165,14 +209,18 @@
 			},
 		});
 
-		// Path trace
+		// Path trace (colored by activity type)
 		map.addLayer({
 			id: 'path-line',
 			type: 'line',
 			source: 'path',
 			layout: { visibility: 'visible' },
 			paint: {
-				'line-color': '#4a9eff',
+				'line-color': [
+					'match', ['get', 'activity_type'],
+					...Object.entries(ACTIVITY_COLORS).flat(),
+					DEFAULT_PATH_COLOR,
+				] as any,
 				'line-width': 2.5,
 				'line-opacity': 0.7,
 			},
@@ -252,6 +300,62 @@
 			},
 		});
 
+		// Discovered cluster markers
+		map.addLayer({
+			id: 'cluster-markers',
+			type: 'circle',
+			source: 'clusters',
+			paint: {
+				'circle-radius': 10,
+				'circle-color': 'rgba(255, 193, 7, 0.3)',
+				'circle-stroke-color': '#ffc107',
+				'circle-stroke-width': 2,
+				'circle-stroke-dasharray': [2, 2],
+			},
+		});
+
+		// Cluster labels (ping count)
+		map.addLayer({
+			id: 'cluster-labels',
+			type: 'symbol',
+			source: 'clusters',
+			layout: {
+				'text-field': ['concat', ['get', 'total_pings'], 'x'],
+				'text-size': 9,
+				'text-offset': [0, -1.4],
+				'text-anchor': 'bottom',
+				'text-allow-overlap': true,
+			},
+			paint: {
+				'text-color': '#ffc107',
+				'text-halo-color': '#111',
+				'text-halo-width': 1,
+			},
+		});
+
+		// Click handler for clusters
+		map.on('click', 'cluster-markers', (e) => {
+			if (!e.features?.length || !onClusterClick) return;
+			const props = e.features[0].properties;
+			const geom = e.features[0].geometry;
+			if (geom.type === 'Point') {
+				onClusterClick({
+					lat: geom.coordinates[1],
+					lon: geom.coordinates[0],
+					total_pings: props.total_pings,
+					first_seen: props.first_seen,
+					last_seen: props.last_seen,
+				});
+			}
+		});
+
+		map.on('mouseenter', 'cluster-markers', () => {
+			if (map) map.getCanvas().style.cursor = 'pointer';
+		});
+		map.on('mouseleave', 'cluster-markers', () => {
+			if (map) map.getCanvas().style.cursor = '';
+		});
+
 		// Click handler for stops
 		map.on('click', 'stop-markers', (e) => {
 			if (!e.features?.length || !onStopClick) return;
@@ -286,11 +390,13 @@
 		const pingSrc = map.getSource('ping-points') as maplibregl.GeoJSONSource;
 		const stopSrc = map.getSource('stops') as maplibregl.GeoJSONSource;
 		const placeSrc = map.getSource('places') as maplibregl.GeoJSONSource;
+		const clusterSrc = map.getSource('clusters') as maplibregl.GeoJSONSource;
 
 		if (pathSrc) pathSrc.setData(buildPathGeoJSON(pings));
-		if (pingSrc) pingSrc.setData(buildPingPointsGeoJSON(pings));
+		if (pingSrc) pingSrc.setData(buildPingPointsGeoJSON(filteredPings(pings)));
 		if (stopSrc) stopSrc.setData(buildStopsGeoJSON(stops));
 		if (placeSrc) placeSrc.setData(buildPlacesGeoJSON(places));
+		if (clusterSrc) clusterSrc.setData(buildClustersGeoJSON(clusters));
 	}
 
 	function updateLayerVisibility() {
@@ -348,6 +454,8 @@
 		pings;
 		stops;
 		places;
+		clusters;
+		activeActivityTypes;
 		updateSources();
 		fitBounds();
 	});

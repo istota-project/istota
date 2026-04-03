@@ -123,10 +123,10 @@ def sync_places_to_db(conn, user_id: str, places: list[LocationPlace]) -> None:
 
     - New places are inserted
     - Existing places are updated
-    - Orphaned DB places (not in file) are deleted
+    - Orphaned DB places with source='file' are deleted
+    - Web-created places (source='web') are preserved
     """
     db_places = db.get_places(conn, user_id)
-    db_by_name = {p.name: p for p in db_places}
     file_names = {p.name for p in places}
 
     for fp in places:
@@ -134,10 +134,11 @@ def sync_places_to_db(conn, user_id: str, places: list[LocationPlace]) -> None:
             conn, user_id, fp.name, fp.lat, fp.lon,
             radius_meters=fp.radius_meters,
             category=fp.category,
+            source="file",
         )
 
     for dbp in db_places:
-        if dbp.name not in file_names:
+        if dbp.name not in file_names and dbp.source == "file":
             db.delete_place(conn, user_id, dbp.name)
             logger.info(
                 "Removed orphaned place '%s' for user %s", dbp.name, user_id,

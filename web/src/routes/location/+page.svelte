@@ -4,20 +4,25 @@
 		getLocationCurrent,
 		getLocationPings,
 		getDaySummary,
+		getTrips,
 		type CurrentLocation,
 		type LocationPing,
 		type DaySummary,
 		type DaySummaryStop,
+		type Trip,
 	} from '$lib/api';
 	import { locationPlaces, mapFlyTo } from '$lib/stores/location';
 	import { loadSetting, saveSetting } from '$lib/stores/persisted';
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
 	import CurrentStatus from '$lib/components/location/CurrentStatus.svelte';
 	import StopTimeline from '$lib/components/location/StopTimeline.svelte';
+	import DayStats from '$lib/components/location/DayStats.svelte';
+	import TripList from '$lib/components/location/TripList.svelte';
 
 	let current: CurrentLocation | null = $state(null);
 	let pings: LocationPing[] = $state([]);
 	let summary: DaySummary | null = $state(null);
+	let trips: Trip[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let pollInterval: ReturnType<typeof setInterval> | undefined;
@@ -38,14 +43,16 @@
 
 	async function loadData() {
 		try {
-			const [c, p, s] = await Promise.all([
+			const [c, p, s, t] = await Promise.all([
 				getLocationCurrent(),
 				getLocationPings({ date: today }),
 				getDaySummary(today),
+				getTrips(today),
 			]);
 			current = c;
 			pings = p.pings;
 			summary = s;
+			trips = t.trips;
 		} catch {
 			error = 'Failed to load location data';
 		} finally {
@@ -63,6 +70,14 @@
 
 	function handleStopClick(stop: DaySummaryStop) {
 		mapComponent?.flyTo(stop.lat, stop.lon);
+	}
+
+	function handleTripClick(trip: Trip) {
+		mapComponent?.flyTo(
+			(trip.start_lat + trip.end_lat) / 2,
+			(trip.start_lon + trip.end_lon) / 2,
+			13,
+		);
 	}
 
 	onMount(() => {
@@ -110,6 +125,18 @@
 			{#if panelOpen}
 				<div class="panel-content">
 					<CurrentStatus {current} />
+					{#if pings.length > 1}
+						<div class="section">
+							<div class="section-label">Stats</div>
+							<DayStats {pings} />
+						</div>
+					{/if}
+					{#if trips.length > 0}
+						<div class="section">
+							<div class="section-label">Trips <span class="meta">{trips.length}</span></div>
+							<TripList {trips} onTripClick={handleTripClick} />
+						</div>
+					{/if}
 					{#if summary && summary.stops.length > 0}
 						<div class="section">
 							<div class="section-label">

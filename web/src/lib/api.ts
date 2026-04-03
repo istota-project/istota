@@ -91,6 +91,7 @@ export interface LocationPing {
 	place: string | null;
 	speed: number | null;
 	battery: number | null;
+	activity_type: string | null;
 }
 
 export interface CurrentLocation {
@@ -127,15 +128,47 @@ export interface PingsResponse {
 }
 
 export interface Place {
+	id: number;
 	name: string;
 	lat: number;
 	lon: number;
 	radius_meters: number;
 	category: string;
+	source: string;
 }
 
 export interface PlacesResponse {
 	places: Place[];
+}
+
+export interface DiscoveredCluster {
+	lat: number;
+	lon: number;
+	total_pings: number;
+	first_seen: string;
+	last_seen: string;
+}
+
+export interface DiscoverResponse {
+	clusters: DiscoveredCluster[];
+}
+
+export interface Trip {
+	start_time: string;
+	end_time: string;
+	start_lat: number;
+	start_lon: number;
+	end_lat: number;
+	end_lon: number;
+	distance_m: number;
+	ping_count: number;
+	activity_type: string;
+	max_speed: number | null;
+}
+
+export interface TripsResponse {
+	date: string;
+	trips: Trip[];
 }
 
 // Location API
@@ -156,6 +189,36 @@ export async function getDaySummary(date?: string): Promise<DaySummary> {
 
 export async function getLocationPlaces(): Promise<PlacesResponse> {
 	return apiFetch<PlacesResponse>('/location/places');
+}
+
+export async function createPlace(data: { name: string; lat: number; lon: number; radius_meters?: number; category?: string }): Promise<Place> {
+	return apiFetch<Place>('/location/places', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(data),
+	});
+}
+
+export async function updatePlace(id: number, data: Partial<Pick<Place, 'name' | 'lat' | 'lon' | 'radius_meters' | 'category'>>): Promise<Place> {
+	return apiFetch<Place>(`/location/places/${id}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(data),
+	});
+}
+
+export async function deletePlace(id: number): Promise<void> {
+	await apiFetch(`/location/places/${id}`, { method: 'DELETE' });
+}
+
+export async function discoverPlaces(minPings?: number): Promise<DiscoverResponse> {
+	const qs = minPings ? `?min_pings=${minPings}` : '';
+	return apiFetch<DiscoverResponse>(`/location/discover-places${qs}`);
+}
+
+export async function getTrips(date?: string): Promise<TripsResponse> {
+	const qs = date ? `?date=${date}` : '';
+	return apiFetch<TripsResponse>(`/location/trips${qs}`);
 }
 
 export { AuthError };
