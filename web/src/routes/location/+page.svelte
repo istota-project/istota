@@ -1,17 +1,15 @@
 <script lang="ts">
-	import { base } from '$app/paths';
 	import { onMount, onDestroy } from 'svelte';
 	import {
 		getLocationCurrent,
 		getLocationPings,
 		getDaySummary,
-		getLocationPlaces,
 		type CurrentLocation,
 		type LocationPing,
 		type DaySummary,
 		type DaySummaryStop,
-		type Place,
 	} from '$lib/api';
+	import { locationPlaces, mapFlyTo } from '$lib/stores/location';
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
 	import CurrentStatus from '$lib/components/location/CurrentStatus.svelte';
 	import StopTimeline from '$lib/components/location/StopTimeline.svelte';
@@ -19,13 +17,15 @@
 	let current: CurrentLocation | null = $state(null);
 	let pings: LocationPing[] = $state([]);
 	let summary: DaySummary | null = $state(null);
-	let places: Place[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let pollInterval: ReturnType<typeof setInterval> | undefined;
 	let mapComponent: LocationMap | undefined = $state();
+	let panelOpen = $state(true);
 
 	const today = new Date().toISOString().slice(0, 10);
+
+	let places = $derived($locationPlaces);
 
 	let currentPos = $derived(
 		current?.last_ping
@@ -35,17 +35,15 @@
 
 	async function loadData() {
 		try {
-			const [c, p, s, pl] = await Promise.all([
+			const [c, p, s] = await Promise.all([
 				getLocationCurrent(),
 				getLocationPings({ date: today }),
 				getDaySummary(today),
-				getLocationPlaces(),
 			]);
 			current = c;
 			pings = p.pings;
 			summary = s;
-			places = pl.places;
-		} catch (e) {
+		} catch {
 			error = 'Failed to load location data';
 		} finally {
 			loading = false;
@@ -56,7 +54,7 @@
 		try {
 			current = await getLocationCurrent();
 		} catch {
-			// ignore polling errors
+			// ignore
 		}
 	}
 
@@ -71,150 +69,151 @@
 
 	onDestroy(() => {
 		if (pollInterval) clearInterval(pollInterval);
+		mapFlyTo.set(null);
+	});
+
+	$effect(() => {
+		if (mapComponent) {
+			mapFlyTo.set((lat, lon, zoom) => mapComponent?.flyTo(lat, lon, zoom));
+		}
 	});
 </script>
 
-<div class="location-page">
-	<div class="page-header">
-		<h1>Location</h1>
-		<div class="nav-links">
-			<a href="{base}/location" class="active">Today</a>
-			<a href="{base}/location/history">History</a>
-			<a href="{base}/location/places">Places</a>
-		</div>
-	</div>
-
+<div class="page-fill">
 	{#if loading}
 		<div class="loading">Loading location data...</div>
 	{:else if error}
 		<div class="error-msg">{error}</div>
 	{:else}
-		<div class="layout">
-			<div class="map-panel">
-				<LocationMap
-					bind:this={mapComponent}
-					{pings}
-					stops={summary?.stops ?? []}
-					{places}
-					currentPosition={currentPos}
-					showPath={true}
-					onStopClick={handleStopClick}
-				/>
-			</div>
-			<div class="sidebar">
-				<div class="sidebar-section">
-					<div class="section-label">Current</div>
-					<CurrentStatus {current} />
-				</div>
-				{#if summary && summary.stops.length > 0}
-					<div class="sidebar-section">
-						<div class="section-label">
-							Stops
-							{#if summary.ping_count}
-								<span class="ping-count">{summary.ping_count} pings</span>
-							{/if}
-						</div>
-						<StopTimeline stops={summary.stops} onStopClick={handleStopClick} />
-					</div>
+		<div class="map-fill">
+			<LocationMap
+				bind:this={mapComponent}
+				{pings}
+				stops={summary?.stops ?? []}
+				{places}
+				currentPosition={currentPos}
+				showPath={true}
+				onStopClick={handleStopClick}
+			/>
+		</div>
+
+		<div class="info-panel" class:collapsed={!panelOpen}>
+			<button class="panel-toggle" onclick={() => panelOpen = !panelOpen} type="button">
+				{panelOpen ? 'Hide' : 'Info'}
+				{#if !panelOpen && summary}
+					({summary.stops.length} stops)
 				{/if}
-			</div>
+			</button>
+			{#if panelOpen}
+				<div class="panel-content">
+					<CurrentStatus {current} />
+					{#if summary && summary.stops.length > 0}
+						<div class="section">
+							<div class="section-label">
+								Stops
+								{#if summary.ping_count}
+									<span class="meta">{summary.ping_count} pings</span>
+								{/if}
+							</div>
+							<StopTimeline stops={summary.stops} onStopClick={handleStopClick} />
+						</div>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	{/if}
 </div>
 
 <style>
-	.location-page {
-		max-width: 1200px;
-		margin: 0 auto;
-	}
-
-	.page-header {
+	.page-fill {
+		flex: 1;
 		display: flex;
-		align-items: baseline;
-		gap: 1.5rem;
-		margin-bottom: 1rem;
+		position: relative;
+		min-height: 0;
 	}
 
-	.page-header h1 {
-		font-size: 1.1rem;
-		font-weight: 600;
-		margin: 0;
+	.map-fill {
+		position: absolute;
+		inset: 0;
 	}
 
-	.nav-links {
-		display: flex;
-		gap: 0.5rem;
-	}
-
-	.nav-links a {
-		font-size: var(--text-sm);
-		color: var(--text-muted);
-		text-decoration: none;
-		padding: 0.2rem 0.6rem;
-		border-radius: var(--radius-pill);
-		transition: all var(--transition-fast);
-	}
-
-	.nav-links a:hover {
-		color: var(--text-primary);
-	}
-
-	.nav-links a.active {
-		background: var(--surface-raised);
-		color: var(--text-primary);
-	}
-
-	.layout {
-		display: grid;
-		grid-template-columns: 1fr 280px;
-		gap: 1rem;
-		align-items: start;
-	}
-
-	.map-panel {
-		height: 60vh;
-		min-height: 400px;
+	.info-panel {
+		position: absolute;
+		top: 0.5rem;
+		right: 0.5rem;
+		z-index: 10;
+		background: rgba(17, 17, 17, 0.92);
+		border: 1px solid var(--border-default);
 		border-radius: var(--radius-card);
+		max-width: 260px;
+		max-height: calc(100% - 1rem);
+		display: flex;
+		flex-direction: column;
 		overflow: hidden;
+		backdrop-filter: blur(8px);
 	}
 
-	.sidebar {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
+	.info-panel.collapsed {
+		max-width: none;
 	}
 
-	.sidebar-section {
+	.panel-toggle {
+		background: none;
+		border: none;
+		border-bottom: 1px solid var(--border-subtle);
+		color: var(--text-muted);
+		font: inherit;
+		font-size: var(--text-xs);
+		padding: 0.35rem 0.6rem;
+		cursor: pointer;
+		text-align: left;
+		flex-shrink: 0;
+	}
+
+	.panel-toggle:hover { color: var(--text-primary); }
+
+	.panel-content {
+		overflow-y: auto;
+		padding: 0.5rem;
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
+		gap: 0.75rem;
+	}
+
+	.panel-content::-webkit-scrollbar { width: 3px; }
+	.panel-content::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
+
+	.section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
 	}
 
 	.section-label {
-		font-size: var(--text-sm);
+		font-size: var(--text-xs);
 		color: var(--text-dim);
 		font-weight: 500;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 		display: flex;
 		align-items: baseline;
-		gap: 0.5rem;
+		gap: 0.4rem;
 	}
 
-	.ping-count {
+	.meta {
 		font-weight: 400;
 		text-transform: none;
 		letter-spacing: 0;
 	}
 
 	@media (max-width: 768px) {
-		.layout {
-			grid-template-columns: 1fr;
-		}
-
-		.map-panel {
-			height: 50vh;
-			min-height: 300px;
+		.info-panel {
+			top: auto;
+			bottom: 0.5rem;
+			right: 0.5rem;
+			left: 0.5rem;
+			max-width: none;
+			max-height: 40%;
 		}
 	}
 </style>
