@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { locationPlaces, reloadPlaces, mapFlyTo } from '$lib/stores/location';
+	import { locationPlaces, reloadPlaces, mapFlyTo, selectedPlaceId, onPlaceMove } from '$lib/stores/location';
 	import {
 		discoverPlaces,
 		createPlace,
@@ -68,6 +68,8 @@
 			pings={[]}
 			showPath={false}
 			onClusterClick={handleClusterClick}
+			selectedPlaceId={$selectedPlaceId}
+			onPlaceMove={$onPlaceMove}
 		/>
 	</div>
 
