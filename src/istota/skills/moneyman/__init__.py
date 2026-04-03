@@ -5,6 +5,8 @@ Remote mode (MONEYMAN_API_URL set): HTTP client for the Moneyman REST API.
 """
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -62,8 +64,19 @@ def _run_cli(args: list[str]) -> dict:
         return {"status": "error", "error": f"Invalid JSON from CLI: {stdout[:200]}"}
 
 
+def _derive_user_key(master_key: str, username: str) -> str:
+    """Derive a per-user API key: HMAC-SHA256(master_key, username)."""
+    return hmac.new(
+        master_key.encode(), username.encode(), hashlib.sha256,
+    ).hexdigest()
+
+
 def _http_client():
-    """Create an httpx client for remote mode."""
+    """Create an httpx client for remote mode.
+
+    When both MONEYMAN_API_KEY and MONEYMAN_USER are set, derives a per-user
+    key via HMAC so the API scopes access to that user.
+    """
     import httpx
 
     base_url = os.environ.get("MONEYMAN_API_URL", "")
@@ -71,10 +84,12 @@ def _http_client():
     user = os.environ.get("MONEYMAN_USER", "")
 
     headers = {}
-    if api_key:
-        headers["X-API-Key"] = api_key
-    if user:
+    if api_key and user:
+        # Derive per-user key — API verifies HMAC(master, user)
+        headers["X-API-Key"] = _derive_user_key(api_key, user)
         headers["X-User"] = user
+    elif api_key:
+        headers["X-API-Key"] = api_key
 
     return httpx.Client(
         base_url=base_url.rstrip("/"),
