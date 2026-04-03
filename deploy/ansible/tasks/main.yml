@@ -432,6 +432,7 @@
     - "restart istota-scheduler"
     - "restart istota-browser"
     - "restart istota-web"
+    - "restart istota-webhooks"
 
 - name: Resolve and checkout tag
   block:
@@ -464,6 +465,7 @@
         - "restart istota-scheduler"
         - "restart istota-browser"
         - "restart istota-web"
+        - "restart istota-webhooks"
 
     - name: Warn if no tags found
       debug:

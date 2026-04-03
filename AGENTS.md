@@ -221,7 +221,7 @@ Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design
 
 Read tracking: IntersectionObserver marks entries as read in Miniflux after 1.5s visible in viewport (half-visible threshold). Batch API calls debounced at 3s intervals. Read cards render at reduced opacity (85%, full on hover). "New" filter chip shows only unread entries. Status badge shows unread/total count.
 
-User verification: `preferred_username` from OIDC must exist in `config.users`. Config: `[web]` section — `enabled`, `port`, `oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `session_secret_key`. Secrets via env vars: `ISTOTA_OIDC_CLIENT_SECRET`, `ISTOTA_WEB_SECRET_KEY`.
+User verification: `preferred_username` from OIDC must exist in `config.users`. Session rotated on login (cleared before writing user info). CSRF protection via Origin header validation on state-changing endpoints (PUT/POST/DELETE). Config: `[web]` section — `enabled`, `port`, `oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `session_secret_key`. Secrets via env vars: `ISTOTA_OIDC_CLIENT_SECRET`, `ISTOTA_WEB_SECRET_KEY`.
 
 Deploy requires Node.js for `npm run build`. Ansible handles this when `istota_web_enabled` is set.
 
@@ -231,13 +231,13 @@ Per-user filesystem isolation via `bwrap`. Non-admins see only their Nextcloud s
 ### Network Isolation (CONNECT Proxy)
 When `[security.network] enabled`, each task's sandbox gets `--unshare-net` (own network namespace, no external connectivity). Outbound traffic goes through a CONNECT proxy on a Unix socket (`network_proxy.py`) that only tunnels allowlisted `host:port` pairs. A TCP-to-Unix bridge script inside the sandbox listens on `127.0.0.1:18080` and forwards to the proxy socket. Claude Code sees `HTTPS_PROXY=http://127.0.0.1:18080`.
 
-Default allowlist: `api.anthropic.com:443`, `mcp-proxy.anthropic.com:443` (Claude API), `pypi.org:443`, `files.pythonhosted.org:443` (package installs, configurable via `allow_pypi`). Git remote hosts added from `[developer]` config when the developer skill is selected. Operator extras via `extra_hosts`. No MITM — TLS is end-to-end. Config: `[security.network]` section.
+Default allowlist: `api.anthropic.com:443`, `mcp-proxy.anthropic.com:443` (Claude API), `pypi.org:443`, `files.pythonhosted.org:443` (package installs, configurable via `allow_pypi`). Per-user resource hosts (Miniflux, Moneyman) scoped to current task's user only. Git remote hosts added from `[developer]` config when the developer skill is selected. Operator extras via `extra_hosts`. No MITM — TLS is end-to-end. Config: `[security.network]` section.
 
 ### Credential Isolation (Skill Proxy)
 When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, MINIFLUX_API_KEY, MONEYMAN_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, MONARCH_SESSION_TOKEN) are stripped from Claude's env. Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread, which injects credentials server-side. All CLI-capable skills get their credentials through the proxy regardless of whether they were selected for the current task — skill selection controls which docs are loaded, not credential access. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled. Config: `[security]` section, `skill_proxy_enabled`, `skill_proxy_timeout`.
 
 ### Deferred DB Operations
-With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR`). Scheduler processes after successful completion. Patterns: `task_{id}_subtasks.json`, `task_{id}_tracked_transactions.json`, `task_{id}_email_output.json`, `task_{id}_sent_emails.json`.
+With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR`). Scheduler processes after successful completion. Patterns: `task_{id}_subtasks.json`, `task_{id}_tracked_transactions.json`, `task_{id}_email_output.json`, `task_{id}_sent_emails.json`. Identity fields (`user_id`, `conversation_token`) always come from the task, not from deferred JSON — prevents spoofing via prompt injection.
 
 ### Scheduler Robustness
 - Stale confirmations auto-cancelled after 120 min

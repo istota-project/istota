@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-03: Security audit fixes (M-1 through M-4)
+
+Addressed four medium-severity findings from a security audit of the codebase.
+
+**Key changes:**
+- Deferred `sent_emails` identity hardening: `user_id` and `conversation_token` now always come from the task object, not from JSON written by the sandboxed subprocess. Prevents spoofing via prompt injection.
+- Network allowlist scoped to current user: `_build_network_allowlist` now only includes the current task user's Miniflux/Moneyman hosts instead of all users' service URLs.
+- CSRF protection on web app: Origin header validation added to all state-changing endpoints (PUT/POST/DELETE). Returns 403 on missing or mismatched Origin.
+- Session rotation on OIDC login: session cleared before writing user info in the callback, preventing session fixation.
+
+**Files modified:**
+- `src/istota/scheduler.py` — Removed `entry.get("user_id")` and `entry.get("conversation_token")` overrides in `_process_deferred_sent_emails`
+- `src/istota/executor.py` — Added `user_config` parameter to `_build_network_allowlist`, scoped resource host iteration to current user
+- `src/istota/web_app.py` — Added `_verify_origin` dependency, `_ForbiddenException`, session clear before login, applied CSRF check to 5 endpoints
+- `tests/test_scheduler.py` — Added spoofed identity test
+- `tests/test_sandbox.py` — Added 3 user-scoped allowlist tests
+- `tests/test_web_app.py` — Added 4 tests (CSRF origin check, session rotation)
+- `AGENTS.md` — Updated docs for network allowlist scoping, CSRF, session rotation, deferred identity hardening
+
 ## 2026-04-03: Moneyman/Fava web UI integration
 
 Integrated Moneyman's per-ledger Fava web viewers into the Istota web UI. Fava instances are reverse-proxied through nginx with auth gated by Istota's session via `auth_request`. Users with a moneyman resource see a "Ledgers" page listing their beancount ledgers with links to open each in Fava.

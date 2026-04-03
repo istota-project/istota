@@ -441,8 +441,15 @@ _PYPI_HOSTS = frozenset({
 })
 
 
-def _build_network_allowlist(config: Config, selected_skills: list[str]) -> set[str]:
-    """Build per-task network allowlist from config and selected skills."""
+def _build_network_allowlist(
+    config: Config,
+    selected_skills: list[str],
+    user_config: "UserConfig | None" = None,
+) -> set[str]:
+    """Build per-task network allowlist from config and selected skills.
+
+    Only the current user's resource URLs are included (not all users').
+    """
     hosts: set[str] = set(_DEFAULT_NETWORK_HOSTS)
 
     if config.security.network.allow_pypi:
@@ -450,31 +457,31 @@ def _build_network_allowlist(config: Config, selected_skills: list[str]) -> set[
 
     hosts.update(config.security.network.extra_hosts)
 
-    # Feeds skill: add Miniflux host
+    user_resources_cfg = user_config.resources if user_config else []
+
+    # Feeds skill: add Miniflux host for current user only
     if "feeds" in selected_skills:
         from urllib.parse import urlparse
 
-        for _uid, uc in config.users.items():
-            for rc in uc.resources:
-                if rc.type == "miniflux" and rc.base_url:
-                    parsed = urlparse(rc.base_url)
-                    host = parsed.hostname
-                    port = parsed.port or 443
-                    if host:
-                        hosts.add(f"{host}:{port}")
+        for rc in user_resources_cfg:
+            if rc.type == "miniflux" and rc.base_url:
+                parsed = urlparse(rc.base_url)
+                host = parsed.hostname
+                port = parsed.port or 443
+                if host:
+                    hosts.add(f"{host}:{port}")
 
-    # Moneyman skill: add Moneyman API host
+    # Moneyman skill: add Moneyman API host for current user only
     if "moneyman" in selected_skills:
         from urllib.parse import urlparse
 
-        for _uid2, uc2 in config.users.items():
-            for rc in uc2.resources:
-                if rc.type == "moneyman" and rc.base_url:
-                    parsed = urlparse(rc.base_url)
-                    host = parsed.hostname
-                    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-                    if host:
-                        hosts.add(f"{host}:{port}")
+        for rc in user_resources_cfg:
+            if rc.type == "moneyman" and rc.base_url:
+                parsed = urlparse(rc.base_url)
+                host = parsed.hostname
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                if host:
+                    hosts.add(f"{host}:{port}")
 
     # Developer skill: add git remote hosts from config
     if "developer" in selected_skills and config.developer.enabled:
@@ -2229,7 +2236,10 @@ def execute_task(
         if config.security.network.enabled and config.security.sandbox_enabled:
             from .network_proxy import NetworkProxy, write_bridge_script
 
-            allowed_hosts = _build_network_allowlist(config, selected_skills)
+            allowed_hosts = _build_network_allowlist(
+                config, selected_skills,
+                user_config=config.get_user(task.user_id),
+            )
 
             # Write bridge script to .developer/ (RO inside sandbox)
             dev_dir = Path(user_temp_dir) / ".developer"

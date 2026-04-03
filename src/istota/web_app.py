@@ -100,12 +100,39 @@ def _require_api_auth(request: Request) -> dict:
     return user
 
 
+def _verify_origin(request: Request) -> None:
+    """Check Origin/Referer header against configured hostname for CSRF protection."""
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if not origin:
+        raise _ForbiddenException("missing origin")
+    hostname = (
+        _config.site.hostname
+        if _config and _config.site.hostname
+        else request.headers.get("host", "")
+    )
+    if not hostname:
+        return
+    from urllib.parse import urlparse
+    parsed = urlparse(origin)
+    if parsed.hostname != hostname.split(":")[0]:
+        raise _ForbiddenException("origin mismatch")
+
+
+class _ForbiddenException(Exception):
+    pass
+
+
 class _UnauthorizedException(Exception):
     pass
 
 
 class _LoginRedirectException(Exception):
     pass
+
+
+@app.exception_handler(_ForbiddenException)
+async def _handle_forbidden(request: Request, exc: _ForbiddenException):
+    return JSONResponse({"error": "forbidden"}, status_code=403)
 
 
 @app.exception_handler(_UnauthorizedException)
@@ -160,6 +187,7 @@ async def callback(request: Request):
     username = userinfo.get("preferred_username", "")
     if not username or (_config and _config.users and username not in _config.users):
         return Response("Access denied: user not configured", status_code=403)
+    request.session.clear()
     request.session["user"] = {
         "username": username,
         "display_name": userinfo.get("name", username),
@@ -389,6 +417,7 @@ async def api_feeds(
 async def api_update_entries_batch(
     request: Request,
     user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
 ):
     username = user["username"]
     creds = _get_miniflux_creds(username)
@@ -424,6 +453,7 @@ async def api_update_entry(
     entry_id: int,
     request: Request,
     user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
 ):
     username = user["username"]
     creds = _get_miniflux_creds(username)
@@ -1183,7 +1213,7 @@ async def api_location_places(user: dict = Depends(_require_api_auth)):
 
 
 @api_router.post("/location/places")
-async def api_location_create_place(request: Request, user: dict = Depends(_require_api_auth)):
+async def api_location_create_place(request: Request, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin)):
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
@@ -1200,7 +1230,7 @@ async def api_location_create_place(request: Request, user: dict = Depends(_requ
 
 
 @api_router.put("/location/places/{place_id}")
-async def api_location_update_place(place_id: int, request: Request, user: dict = Depends(_require_api_auth)):
+async def api_location_update_place(place_id: int, request: Request, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin)):
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
@@ -1213,7 +1243,7 @@ async def api_location_update_place(place_id: int, request: Request, user: dict 
 
 
 @api_router.delete("/location/places/{place_id}")
-async def api_location_delete_place(place_id: int, user: dict = Depends(_require_api_auth)):
+async def api_location_delete_place(place_id: int, request: Request, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin)):
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)

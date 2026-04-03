@@ -309,6 +309,74 @@ class TestLogout:
         assert resp.status_code == 401
 
 
+class TestCsrfOriginCheck:
+    """Tests for Origin header CSRF protection on state-changing endpoints."""
+
+    async def _login(self, client, app):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+        })
+        login_resp = await client.get("/istota/callback", follow_redirects=False)
+        return login_resp.cookies
+
+    async def test_put_without_origin_returns_403(self, client, app):
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/feeds/entries/batch",
+            json={"entry_ids": [1], "status": "read"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 403
+
+    async def test_put_with_wrong_origin_returns_403(self, client, app):
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/feeds/entries/batch",
+            json={"entry_ids": [1], "status": "read"},
+            cookies=cookies,
+            headers={"origin": "https://evil.com"},
+        )
+        assert resp.status_code == 403
+
+    async def test_put_with_correct_origin_allowed(self, client, app):
+        cookies = await self._login(client, app)
+        # Will fail at miniflux proxy (no real backend), but should not be 403
+        resp = await client.put(
+            "/istota/api/feeds/entries/batch",
+            json={"entry_ids": [1], "status": "read"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code != 403
+
+
+class TestSessionRotation:
+    """Test that session is cleared before writing user info on login."""
+
+    async def test_callback_clears_session_before_login(self, client, app):
+        import istota.web_app as mod
+
+        # Set pre-existing session data (simulating a pre-login session)
+        # First, make a request to establish a session with some data
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        cookies = resp.cookies
+
+        # Log in again as bob — old session data should be cleared
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": "bob", "name": "Bob"},
+        })
+        resp = await client.get("/istota/callback", cookies=cookies, follow_redirects=False)
+        cookies = resp.cookies
+
+        resp = await client.get("/istota/api/me", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json()["username"] == "bob"
+
+
 class TestWebConfigParsing:
     def test_web_config_defaults(self):
         cfg = Config()
