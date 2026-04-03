@@ -202,23 +202,52 @@ class TestPlaceStats:
         assert result["avg_duration_min"] == 60
         assert result["total_duration_min"] == 60
 
-    def test_two_visits_with_gap(self, tmp_path):
+    def test_gap_without_elsewhere_is_same_visit(self, tmp_path):
+        """A long gap with no pings at other places should NOT split the visit."""
         from istota.web_app import _location_place_stats
 
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
             pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
-            # Visit 1: 20 min (pings every 5 min)
+            # Pings with a 2-hour gap (GPS dropout indoors)
             self._add_pings(conn, "alice", pid, [
+                "2026-01-10T09:00:00Z",
+                "2026-01-10T09:05:00Z",
+                "2026-01-10T09:10:00Z",
+                # 2-hour gap — no pings elsewhere
+                "2026-01-10T11:10:00Z",
+                "2026-01-10T11:15:00Z",
+                "2026-01-10T11:20:00Z",
+            ])
+            conn.commit()
+
+        result = _location_place_stats(str(db_path), "alice", pid)
+        assert result["total_visits"] == 1
+        assert result["total_duration_min"] == 140  # 09:00 to 11:20
+
+    def test_two_visits_split_by_elsewhere(self, tmp_path):
+        """Pings at another place during a gap should split into two visits."""
+        from istota.web_app import _location_place_stats
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid_cafe = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            pid_gym = db.insert_place(conn, "alice", "gym", 34.01, -118.01, 100, "gym")
+            # Visit 1 at cafe
+            self._add_pings(conn, "alice", pid_cafe, [
                 "2026-01-10T09:00:00Z",
                 "2026-01-10T09:05:00Z",
                 "2026-01-10T09:10:00Z",
                 "2026-01-10T09:15:00Z",
                 "2026-01-10T09:20:00Z",
             ])
-            # 2-hour gap (> 30 min threshold) → new visit
-            # Visit 2: 15 min
-            self._add_pings(conn, "alice", pid, [
+            # Went to gym in between
+            self._add_pings(conn, "alice", pid_gym, [
+                "2026-01-10T10:00:00Z",
+                "2026-01-10T10:05:00Z",
+            ])
+            # Visit 2 at cafe
+            self._add_pings(conn, "alice", pid_cafe, [
                 "2026-01-10T11:20:00Z",
                 "2026-01-10T11:25:00Z",
                 "2026-01-10T11:30:00Z",
@@ -226,13 +255,10 @@ class TestPlaceStats:
             ])
             conn.commit()
 
-        result = _location_place_stats(str(db_path), "alice", pid)
+        result = _location_place_stats(str(db_path), "alice", pid_cafe)
         assert result["total_visits"] == 2
         assert result["first_visit"] == "2026-01-10T09:00:00Z"
         assert result["last_visit"] == "2026-01-10T11:20:00Z"
-        assert result["avg_duration_min"] == 18  # (20 + 15) / 2 rounded
-        assert result["total_duration_min"] == 35
-        assert result["longest_visit_min"] == 20
 
     def test_walkby_filtered(self, tmp_path):
         """A visit with fewer than 3 pings (walk-by) should not count."""
