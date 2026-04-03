@@ -131,6 +131,13 @@
 		} finally {
 			loadingMore = false;
 		}
+		// Re-observe sentinel so the observer fires again if it's still visible
+		// (needed when client-side filters hide most entries and the sentinel
+		// never leaves the viewport between loads)
+		if (hasMore && sentinel && scrollObserver) {
+			scrollObserver.unobserve(sentinel);
+			scrollObserver.observe(sentinel);
+		}
 	}
 
 	// Infinite scroll sentinel
