@@ -239,6 +239,13 @@ istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 # Moneyman integration (local CLI access)
 istota_moneyman_group: ""  # set to "moneyman" to grant CLI + config read access
 
+# Fava ledger viewers proxied through the web UI (auth gated via Istota session).
+# Auto-computed by the moneyman role as _moneyman_fava_instances when
+# moneyman_fava_enabled is true. Pass that variable here in the playbook:
+#   istota_fava_instances: "{{ _moneyman_fava_instances | default([]) }}"
+# Each entry has: user, ledger, port, data_dir.
+istota_fava_instances: []
+
 # Browser container settings (for web browsing skill)
 istota_browser_enabled: false
 istota_browser_api_port: 9223

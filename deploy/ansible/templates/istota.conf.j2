@@ -72,6 +72,27 @@ server {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
   }
+{% for inst in istota_fava_instances | default([]) %}
+
+  # Fava ledger viewer: {{ inst.user }}/{{ inst.ledger }}
+  location /istota/fava/{{ inst.user }}/{{ inst.ledger }}/ {
+    auth_request /istota/api/auth-check;
+    auth_request_set $auth_user $upstream_http_x_auth_user;
+    error_page 401 = @istota_login;
+
+    proxy_pass http://{{ inst.host | default('127.0.0.1') }}:{{ inst.port }}/istota/fava/{{ inst.user }}/{{ inst.ledger }}/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+{% endfor %}
+{% if istota_fava_instances | default([]) | length > 0 %}
+
+  location @istota_login {
+    return 302 /istota/login;
+  }
+{% endif %}
 {% endif %}
 
 {% if istota_location_enabled %}

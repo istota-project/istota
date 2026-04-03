@@ -186,6 +186,20 @@ def _get_miniflux_creds(username: str) -> tuple[str, str] | None:
     return None
 
 
+def _get_moneyman_creds(username: str) -> tuple[str, str, str] | None:
+    """Get (base_url, api_key, user_key) for a user's moneyman resource, or None."""
+    if not _config:
+        return None
+    uc = _config.get_user(username)
+    if not uc:
+        return None
+    for r in uc.resources:
+        if r.type == "moneyman" and r.base_url:
+            user_key = r.extra.get("user_key", "")
+            return r.base_url, r.api_key, user_key
+    return None
+
+
 def _get_location_config(username: str) -> tuple[str, str, str] | None:
     """Get (db_path, user_id, timezone) for location queries, or None."""
     if not _config or not _config.location.enabled:
@@ -196,19 +210,93 @@ def _get_location_config(username: str) -> tuple[str, str, str] | None:
     return str(_config.db_path), username, uc.timezone
 
 
+@api_router.get("/auth-check")
+async def api_auth_check(request: Request):
+    """Lightweight session check for nginx auth_request.
+
+    Returns 200 if the user is authenticated and has moneyman access.
+    Returns 401/403 otherwise. nginx uses this to gate Fava proxy access.
+    """
+    user = _get_session_user(request)
+    if not user:
+        return Response(status_code=401)
+
+    username = user["username"]
+    creds = _get_moneyman_creds(username)
+    if not creds:
+        return Response(status_code=403)
+
+    return Response(status_code=200, headers={"X-Auth-User": username})
+
+
 @api_router.get("/me")
 async def api_me(user: dict = Depends(_require_api_auth)):
     username = user["username"]
-    features = {"feeds": False, "location": False}
+    features = {"feeds": False, "location": False, "ledgers": False}
     if _config:
         creds = _get_miniflux_creds(username)
         features["feeds"] = creds is not None
         features["location"] = _config.location.enabled
+        features["ledgers"] = _get_moneyman_creds(username) is not None
     return {
         "username": username,
         "display_name": user.get("display_name", username),
         "features": features,
     }
+
+
+@api_router.get("/moneyman/ledgers")
+async def api_moneyman_ledgers(user: dict = Depends(_require_api_auth)):
+    """Proxy to Moneyman API to get ledger list."""
+    creds = _get_moneyman_creds(user["username"])
+    if not creds:
+        return JSONResponse({"error": "moneyman not configured"}, status_code=404)
+
+    base_url, api_key, user_key = creds
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    if user_key:
+        headers["X-User"] = user_key
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=base_url.rstrip("/"), headers=headers, timeout=15.0,
+        ) as client:
+            resp = await client.get("/api/ledgers")
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.error("Moneyman API error (ledgers): %s", e)
+        return JSONResponse({"error": "moneyman api error"}, status_code=502)
+
+    return resp.json()
+
+
+@api_router.get("/moneyman/fava")
+async def api_moneyman_fava(user: dict = Depends(_require_api_auth)):
+    """Proxy to Moneyman API to get Fava instance list."""
+    creds = _get_moneyman_creds(user["username"])
+    if not creds:
+        return JSONResponse({"error": "moneyman not configured"}, status_code=404)
+
+    base_url, api_key, user_key = creds
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    if user_key:
+        headers["X-User"] = user_key
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=base_url.rstrip("/"), headers=headers, timeout=15.0,
+        ) as client:
+            resp = await client.get("/api/fava")
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.error("Moneyman API error (fava): %s", e)
+        return JSONResponse({"error": "moneyman api error"}, status_code=502)
+
+    return resp.json()
 
 
 # Tags allowed in feed card excerpts

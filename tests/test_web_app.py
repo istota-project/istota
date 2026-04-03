@@ -353,3 +353,191 @@ oidc_client_id = "my-client"
         cfg = load_config(config_file)
         assert cfg.web.oidc_client_secret == "env-secret"
         assert cfg.web.session_secret_key == "env-key"
+
+
+# ============================================================================
+# Moneyman / Ledgers integration
+# ============================================================================
+
+
+def _make_moneyman_config(tmp_path):
+    """Build a Config with a moneyman resource for alice."""
+    return _make_config(tmp_path, users={
+        "alice": UserConfig(
+            display_name="Alice",
+            resources=[
+                ResourceConfig(
+                    type="miniflux", name="Feeds",
+                    base_url="http://miniflux:8080", api_key="test-key",
+                ),
+                ResourceConfig(
+                    type="moneyman", name="Moneyman",
+                    base_url="http://localhost:8090", api_key="mm-key",
+                    extra={"user_key": "alice"},
+                ),
+            ],
+        ),
+        "bob": UserConfig(display_name="Bob"),
+    })
+
+
+@pytest.fixture
+def moneyman_app(tmp_path):
+    """Provide a patched app with moneyman resource for alice."""
+    import istota.web_app as mod
+
+    mod._config = _make_moneyman_config(tmp_path)
+
+    mock_oauth = MagicMock()
+    mock_nc = MagicMock()
+    mock_oauth.nextcloud = mock_nc
+    mod._oauth = mock_oauth
+
+    return mod.app
+
+
+@pytest.fixture
+async def mm_client(moneyman_app):
+    transport = ASGITransport(app=moneyman_app)
+    async with AsyncClient(transport=transport, base_url="https://example.com") as c:
+        yield c
+
+
+async def _login_as(client, username, display_name=None):
+    """Login helper — returns cookies."""
+    import istota.web_app as mod
+    mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+        "userinfo": {"preferred_username": username, "name": display_name or username},
+    })
+    login_resp = await client.get("/istota/callback", follow_redirects=False)
+    return login_resp.cookies
+
+
+class TestGetMoneymanCreds:
+    def test_returns_creds_for_user_with_moneyman(self, moneyman_app):
+        from istota.web_app import _get_moneyman_creds
+        result = _get_moneyman_creds("alice")
+        assert result is not None
+        base_url, api_key, user_key = result
+        assert base_url == "http://localhost:8090"
+        assert api_key == "mm-key"
+        assert user_key == "alice"
+
+    def test_returns_none_for_user_without_moneyman(self, moneyman_app):
+        from istota.web_app import _get_moneyman_creds
+        assert _get_moneyman_creds("bob") is None
+
+    def test_returns_none_for_unknown_user(self, moneyman_app):
+        from istota.web_app import _get_moneyman_creds
+        assert _get_moneyman_creds("unknown") is None
+
+
+class TestAuthCheck:
+    async def test_returns_200_for_authenticated_moneyman_user(self, mm_client, moneyman_app):
+        cookies = await _login_as(mm_client, "alice", "Alice")
+        resp = await mm_client.get("/istota/api/auth-check", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.headers.get("x-auth-user") == "alice"
+
+    async def test_returns_401_without_session(self, mm_client):
+        resp = await mm_client.get("/istota/api/auth-check")
+        assert resp.status_code == 401
+
+    async def test_returns_403_for_user_without_moneyman(self, mm_client, moneyman_app):
+        cookies = await _login_as(mm_client, "bob", "Bob")
+        resp = await mm_client.get("/istota/api/auth-check", cookies=cookies)
+        assert resp.status_code == 403
+
+
+class TestApiMeWithLedgers:
+    async def test_ledgers_feature_true_for_moneyman_user(self, mm_client, moneyman_app):
+        cookies = await _login_as(mm_client, "alice", "Alice")
+        resp = await mm_client.get("/istota/api/me", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json()["features"]["ledgers"] is True
+
+    async def test_ledgers_feature_false_without_moneyman(self, mm_client, moneyman_app):
+        cookies = await _login_as(mm_client, "bob", "Bob")
+        resp = await mm_client.get("/istota/api/me", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json()["features"]["ledgers"] is False
+
+
+class TestMoneymanProxy:
+    async def test_ledgers_proxies_to_moneyman(self, mm_client, moneyman_app):
+        cookies = await _login_as(mm_client, "alice", "Alice")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "status": "ok", "ledger_count": 1,
+            "ledgers": [{"name": "personal", "path": "/data/personal.beancount"}],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_response)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("istota.web_app.httpx.AsyncClient", return_value=mock_http):
+            resp = await mm_client.get("/istota/api/moneyman/ledgers", cookies=cookies)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ledger_count"] == 1
+        assert data["ledgers"][0]["name"] == "personal"
+
+    async def test_fava_proxies_to_moneyman(self, mm_client, moneyman_app):
+        cookies = await _login_as(mm_client, "alice", "Alice")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "status": "ok",
+            "instances": [{"ledger": "personal", "port": 5000, "prefix": "/istota/fava/personal/"}],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_response)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("istota.web_app.httpx.AsyncClient", return_value=mock_http):
+            resp = await mm_client.get("/istota/api/moneyman/fava", cookies=cookies)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["instances"]) == 1
+        assert data["instances"][0]["ledger"] == "personal"
+
+    async def test_ledgers_returns_404_without_moneyman(self, mm_client, moneyman_app):
+        cookies = await _login_as(mm_client, "bob", "Bob")
+        resp = await mm_client.get("/istota/api/moneyman/ledgers", cookies=cookies)
+        assert resp.status_code == 404
+
+    async def test_fava_returns_404_without_moneyman(self, mm_client, moneyman_app):
+        cookies = await _login_as(mm_client, "bob", "Bob")
+        resp = await mm_client.get("/istota/api/moneyman/fava", cookies=cookies)
+        assert resp.status_code == 404
+
+    async def test_moneyman_proxy_sends_headers(self, mm_client, moneyman_app):
+        """Verify the proxy sends X-API-Key and X-User headers."""
+        cookies = await _login_as(mm_client, "alice", "Alice")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "ok", "ledger_count": 0, "ledgers": []}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_response)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("istota.web_app.httpx.AsyncClient", return_value=mock_http) as mock_cls:
+            await mm_client.get("/istota/api/moneyman/ledgers", cookies=cookies)
+
+        # Check constructor was called with correct base_url and headers
+        call_kwargs = mock_cls.call_args[1]
+        assert "localhost:8090" in call_kwargs["base_url"]
+        assert call_kwargs["headers"]["X-API-Key"] == "mm-key"
+        assert call_kwargs["headers"]["X-User"] == "alice"

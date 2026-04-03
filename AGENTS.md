@@ -89,7 +89,7 @@ istota/
 │   └── .env.example         # Environment variables template
 ├── web/                     # SvelteKit frontend (adapter-static, base /istota)
 │   ├── src/
-│   │   ├── routes/          # Pages: dashboard, feeds
+│   │   ├── routes/          # Pages: dashboard, feeds, ledgers
 │   │   └── lib/             # API client, components (FeedCard, Lightbox)
 │   ├── svelte.config.js     # adapter-static, base path /istota
 │   └── vite.config.ts       # Dev proxy to FastAPI
@@ -215,9 +215,9 @@ DB tables: `location_pings`, `places`, `visits`, `location_state`. Old pings cle
 ### Authenticated Web Interface
 SvelteKit frontend (`web/`) with FastAPI backend (`web_app.py`). Nextcloud OIDC for authentication. Runs as a separate service (`uvicorn istota.web_app:app`). Session-based auth via `SessionMiddleware`, 7-day cookie.
 
-Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark single entry read), `/istota/api/feeds/entries/batch` (batch mark read), `/istota/api/location/*` (places CRUD, pings, day summary, trips, discover, place stats). SvelteKit build served as static files for all other `/istota/*` paths.
+Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/auth-check` (nginx auth_request for Fava proxy), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark single entry read), `/istota/api/feeds/entries/batch` (batch mark read), `/istota/api/moneyman/ledgers` (Moneyman API proxy), `/istota/api/moneyman/fava` (Fava instance discovery), `/istota/api/location/*` (places CRUD, pings, day summary, trips, discover, place stats). SvelteKit build served as static files for all other `/istota/*` paths. Fava instances reverse-proxied via nginx at `/istota/fava/{user}/{ledger}/` with `auth_request` gating.
 
-Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design). Dashboard shows available features. Feeds page has masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox, viewport-based read tracking. Location pages: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover unknown clusters, create/edit/delete places). Place sidebar with visit stats (derived from pings), edit form, drag-to-reposition on map. Reads directly from Miniflux API via the backend proxy (no static file generation).
+Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design). Dashboard shows available features. Feeds page has masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox, viewport-based read tracking. Location pages: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover unknown clusters, create/edit/delete places). Place sidebar with visit stats (derived from pings), edit form, drag-to-reposition on map. Ledgers page lists beancount ledgers with links to Fava instances. Reads directly from Miniflux API via the backend proxy (no static file generation).
 
 Read tracking: IntersectionObserver marks entries as read in Miniflux after 1.5s visible in viewport (half-visible threshold). Batch API calls debounced at 3s intervals. Read cards render at reduced opacity (85%, full on hover). "New" filter chip shows only unread entries. Status badge shows unread/total count.
 

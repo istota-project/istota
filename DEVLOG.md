@@ -2,6 +2,40 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-03: Moneyman/Fava web UI integration
+
+Integrated Moneyman's per-ledger Fava web viewers into the Istota web UI. Fava instances are reverse-proxied through nginx with auth gated by Istota's session via `auth_request`. Users with a moneyman resource see a "Ledgers" page listing their beancount ledgers with links to open each in Fava.
+
+Changes span both the Moneyman and Istota repos. On the Moneyman side, added Fava instance awareness to the config and API — a global `fava_enabled` flag auto-generates one Fava instance per user+ledger with deterministic port assignment from a configurable range. The Ansible service template now passes `--prefix` to Fava so it serves under `/istota/fava/{user}/{ledger}/`. On the Istota side, added an `/api/auth-check` endpoint for nginx's `auth_request` module, proxy routes to Moneyman's ledger and fava APIs, and a `ledgers` feature flag.
+
+**Key changes:**
+- Moneyman: `FavaInstance` dataclass, `fava_enabled`/`fava_port_start` config, `GET /api/fava` endpoint, `--prefix` in service template
+- Istota backend: `_get_moneyman_creds()`, `/api/auth-check` (nginx auth_request), `/api/moneyman/ledgers`, `/api/moneyman/fava`, `ledgers` feature flag
+- Istota nginx: Fava location blocks with `auth_request` + login redirect on 401
+- Istota frontend: ledgers page with cards and Fava links, nav link, dashboard card
+- Tests: 5 new Moneyman tests (config parsing, API filtering), 13 new Istota tests (auth-check, proxy, feature flag)
+
+**Files added/modified (Istota):**
+- `src/istota/web_app.py` — auth-check endpoint, moneyman proxy routes, credential helper, feature flag
+- `deploy/ansible/templates/istota.conf.j2` — Fava proxy blocks with auth_request
+- `deploy/ansible/defaults/main.yml` — `istota_fava_instances` variable
+- `web/src/lib/api.ts` — moneyman/fava types and fetch functions
+- `web/src/routes/ledgers/+page.svelte` — new ledgers page
+- `web/src/routes/+layout.svelte` — nav link for ledgers
+- `web/src/routes/+page.svelte` — dashboard card for ledgers
+- `tests/test_web_app.py` — 13 new tests
+
+**Files added/modified (Moneyman):**
+- `src/moneyman/cli.py` — `FavaInstance` dataclass, `_build_fava_instances()`, `fava_enabled` config parsing
+- `src/moneyman/api/fava.py` — new `GET /api/fava` endpoint
+- `src/moneyman/api/app.py` — registered fava router
+- `deploy/ansible/templates/moneyman-fava.service.j2` — `--prefix`, per-user data_dir, user in service name
+- `deploy/ansible/templates/config.toml.j2` — `fava_enabled`/`fava_port_start` instead of `[[fava]]`
+- `deploy/ansible/defaults/main.yml` — `moneyman_fava_enabled`, `moneyman_fava_port_start`
+- `deploy/ansible/tasks/main.yml` — auto-compute fava instances from users' ledgers
+- `deploy/ansible/handlers/main.yml` — updated restart handler
+- `tests/test_api.py` — 5 new tests
+
 ## 2026-04-03: Location place management and visit stats
 
 Added full CRUD for places via CLI and web UI, plus visit statistics derived from ping data.
