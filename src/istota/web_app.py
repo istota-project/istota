@@ -849,9 +849,11 @@ def _location_delete_place(db_path: str, user_id: str, place_id: int) -> bool:
 def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | None:
     """Get visit statistics for a place, derived from ping data.
 
-    Groups consecutive pings at the place into visits. A gap of 30+ minutes
-    between pings starts a new visit. This works for places added retroactively
-    (via backfill) where the visit state machine wasn't running.
+    Groups pings into visits by checking whether the user was seen elsewhere
+    during gaps. A gap only splits a visit if there are pings at a different
+    place (or unassigned pings far away) in between — GPS dropout while
+    stationary indoors doesn't break a visit. Walk-bys (< 3 pings) are
+    filtered out.
     """
     from .db import get_place_by_id
 
@@ -882,8 +884,6 @@ def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | N
                 "longest_visit_min": None,
             }
 
-        # Group pings into visits: 30-min gap = new visit, 3+ pings = real visit
-        gap_threshold = 30 * 60  # seconds
         min_pings = 3  # filter out walk-bys
         segments: list[tuple[str, str, int]] = []  # (first_ts, last_ts, ping_count)
         visit_start = rows[0]["timestamp"]
@@ -892,13 +892,17 @@ def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | N
 
         for row in rows[1:]:
             ts = row["timestamp"]
-            try:
-                delta = (
-                    datetime.fromisoformat(ts) - datetime.fromisoformat(prev_ts)
-                ).total_seconds()
-            except (ValueError, TypeError):
-                delta = 0
-            if delta > gap_threshold:
+            # Check if user was seen elsewhere between prev_ts and ts
+            elsewhere = conn.execute(
+                """
+                SELECT 1 FROM location_pings
+                WHERE user_id = ? AND place_id IS NOT ? AND place_id IS NOT NULL
+                  AND timestamp > ? AND timestamp < ?
+                LIMIT 1
+                """,
+                (user_id, place_id, prev_ts, ts),
+            ).fetchone()
+            if elsewhere:
                 segments.append((visit_start, prev_ts, ping_count))
                 visit_start = ts
                 ping_count = 1
