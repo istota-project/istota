@@ -30,10 +30,17 @@
 		if (path === '/') return current === `${base}` || current === `${base}/`;
 		return current.startsWith(`${base}${path}`);
 	}
+
+	const pageTitle = $derived.by(() => {
+		const path = page.url.pathname.replace(base, '').replace(/^\/+/, '');
+		if (!path) return 'Istota';
+		const segment = path.split('/')[0];
+		return `Istota - ${segment.charAt(0).toUpperCase()}${segment.slice(1)}`;
+	});
 </script>
 
 <svelte:head>
-	<title>Istota</title>
+	<title>{pageTitle}</title>
 </svelte:head>
 
 {#if loading}
