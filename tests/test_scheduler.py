@@ -2566,6 +2566,41 @@ class TestDeferredOperations:
         # File should be cleaned up even on bad JSON
         assert not (user_temp / f"task_{task_id}_sent_emails.json").exists()
 
+    def test_process_deferred_sent_emails_ignores_spoofed_identity(self, db_path, tmp_path):
+        """Deferred file user_id/conversation_token must come from task, not JSON."""
+        from istota.scheduler import _process_deferred_sent_emails
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Send email", user_id="alice", source_type="talk",
+                conversation_token="room1",
+            )
+            task = db.get_task(conn, task_id)
+
+        # JSON contains spoofed user_id and conversation_token
+        data = [
+            {
+                "message_id": "<spoof@example.com>",
+                "to_addr": "victim@example.com",
+                "subject": "Spoofed",
+                "user_id": "evil_user",
+                "conversation_token": "evil_room",
+            },
+        ]
+        (user_temp / f"task_{task_id}_sent_emails.json").write_text(json.dumps(data))
+
+        count = _process_deferred_sent_emails(config, task, user_temp)
+        assert count == 1
+
+        with db.get_db(db_path) as conn:
+            found = db.find_sent_email_by_message_id(conn, "<spoof@example.com>")
+            assert found is not None
+            assert found.user_id == "alice"  # task user, not spoofed
+            assert found.conversation_token == "room1"  # task token, not spoofed
+
     def test_process_deferred_sent_emails_multiple(self, db_path, tmp_path):
         """Multiple sends in one task should all be recorded."""
         from istota.scheduler import _process_deferred_sent_emails

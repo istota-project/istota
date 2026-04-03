@@ -313,6 +313,10 @@
 - [x] Admin Nextcloud mount scoped to user dir (was full content tree)
 - [x] Skill proxy phase 3: Monarch credentials as resources (env vars via skill proxy, no file path needed)
 - [x] Network proxy for agent subprocesses (domain allowlist)
+- [x] Network allowlist scoped to current user's resources (not all users)
+- [x] CSRF Origin header validation on web app state-changing endpoints
+- [x] Session rotation on OIDC login (clear before write)
+- [x] Deferred sent_emails identity hardening (always use task.user_id)
 
 ### Authenticated Web Interface
 - [x] Nextcloud OIDC login/callback/logout (authlib + SessionMiddleware)

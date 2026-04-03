@@ -922,12 +922,12 @@ def _process_deferred_sent_emails(
             try:
                 db.record_sent_email(
                     conn,
-                    user_id=entry.get("user_id") or task.user_id,
+                    user_id=task.user_id,
                     message_id=message_id,
                     to_addr=to_addr,
                     subject=entry.get("subject"),
                     task_id=task.id,
-                    conversation_token=entry.get("conversation_token") or task.conversation_token,
+                    conversation_token=task.conversation_token,
                 )
                 count += 1
             except Exception as e:
