@@ -185,12 +185,12 @@
 	});
 </script>
 
-{#if loading}
-	<div class="center-msg">Loading feeds...</div>
-{:else if error}
-	<div class="center-msg error">{error}</div>
-{:else}
-	<div class="feed-scroll" bind:this={scrollRoot}>
+<div class="feed-scroll" bind:this={scrollRoot}>
+	{#if loading}
+		<div class="center-msg">Loading feeds...</div>
+	{:else if error}
+		<div class="center-msg error">{error}</div>
+	{:else}
 		<div class="feed-grid" class:list-view={vm === 'list'}>
 			{#each filteredEntries as entry (entry.id)}
 				<FeedCard {entry} onImageClick={(url) => lightboxSrc = url} onViewed={handleViewed} />
@@ -202,16 +202,18 @@
 				<span class="loading-more">Loading more...</span>
 			{/if}
 		</div>
-	</div>
+	{/if}
+</div>
 
+{#if !loading && !error}
 	<div class="status-badge">{entries.length} / {total}</div>
-
-	<Lightbox src={lightboxSrc} onClose={() => lightboxSrc = ''} />
 {/if}
+
+<Lightbox src={lightboxSrc} onClose={() => lightboxSrc = ''} />
 
 <style>
 	.center-msg {
-		flex: 1;
+		min-height: 100%;
 		display: flex;
 		align-items: center;
 		justify-content: center;
