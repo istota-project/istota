@@ -13,6 +13,7 @@
 	import { locationPlaces, mapFlyTo } from '$lib/stores/location';
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
 	import StopTimeline from '$lib/components/location/StopTimeline.svelte';
+	import Chip from '$lib/components/ui/Chip.svelte';
 
 	let pings: LocationPing[] = $state([]);
 	let summary: DaySummary | null = $state(null);
@@ -160,11 +161,11 @@
 
 <div class="page-fill">
 	<div class="controls-bar">
-		<div class="presets">
-			<button class:active={viewMode === 'day' && dateStr === today} onclick={() => selectDay(today)}>Today</button>
-			<button class:active={viewMode === 'day' && dateStr === yesterday()} onclick={() => selectDay(yesterday())}>Yesterday</button>
-			<button onclick={() => selectRange(thisWeekStart(), today)}>This week</button>
-			<button onclick={() => selectRange(thisMonthStart(), today)}>This month</button>
+		<div class="chip-group">
+			<Chip checked={viewMode === 'day' && dateStr === today} onclick={() => selectDay(today)}>Today</Chip>
+			<Chip checked={viewMode === 'day' && dateStr === yesterday()} onclick={() => selectDay(yesterday())}>Yesterday</Chip>
+			<Chip onclick={() => selectRange(thisWeekStart(), today)}>This week</Chip>
+			<Chip onclick={() => selectRange(thisMonthStart(), today)}>This month</Chip>
 		</div>
 		<div class="date-inputs">
 			<label for="hist-date">Date</label>
@@ -176,10 +177,7 @@
 			<input id="hist-end" type="date" bind:value={endStr} onchange={handleRangeInput} max={today} />
 		</div>
 		{#if viewMode === 'range' && pings.length > 0}
-			<label class="heat-toggle">
-				<input type="checkbox" bind:checked={showHeat} />
-				Heat map
-			</label>
+			<Chip checked={showHeat} onclick={() => showHeat = !showHeat}>Heat map</Chip>
 		{/if}
 	</div>
 
@@ -245,25 +243,10 @@
 		flex-shrink: 0;
 	}
 
-	.presets {
+	.chip-group {
 		display: flex;
 		gap: 0.25rem;
 	}
-
-	.presets button {
-		background: var(--surface-card);
-		border: none;
-		color: var(--text-muted);
-		font-size: var(--text-xs);
-		padding: 0.25rem 0.5rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
-		transition: all var(--transition-fast);
-		font-family: inherit;
-	}
-
-	.presets button:hover { color: var(--text-primary); background: var(--surface-raised); }
-	.presets button.active { background: var(--surface-raised); color: var(--text-primary); }
 
 	.date-inputs {
 		display: flex;
@@ -294,17 +277,6 @@
 	.date-inputs input[type="date"]::-webkit-calendar-picker-indicator {
 		filter: invert(0.7);
 	}
-
-	.heat-toggle {
-		display: flex;
-		align-items: center;
-		gap: 0.3rem;
-		font-size: var(--text-xs);
-		color: var(--text-muted);
-		cursor: pointer;
-	}
-
-	.heat-toggle input { accent-color: var(--text-primary); }
 
 	.map-area {
 		flex: 1;
