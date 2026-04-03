@@ -14,6 +14,7 @@
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
 	import StopTimeline from '$lib/components/location/StopTimeline.svelte';
 	import Chip from '$lib/components/ui/Chip.svelte';
+	import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
 	let pings: LocationPing[] = $state([]);
 	let summary: DaySummary | null = $state(null);
@@ -25,8 +26,10 @@
 	let startStr = $state('');
 	let endStr = $state('');
 	let viewMode: 'day' | 'range' = $state('day');
-	let showHeat = $state(false);
+	let showHeat = $state(loadSetting('location.showHeat', false));
 	let panelOpen = $state(false);
+
+	$effect(() => { saveSetting('location.showHeat', showHeat); });
 
 	let places = $derived($locationPlaces);
 

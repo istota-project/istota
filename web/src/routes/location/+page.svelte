@@ -10,6 +10,7 @@
 		type DaySummaryStop,
 	} from '$lib/api';
 	import { locationPlaces, mapFlyTo } from '$lib/stores/location';
+	import { loadSetting, saveSetting } from '$lib/stores/persisted';
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
 	import CurrentStatus from '$lib/components/location/CurrentStatus.svelte';
 	import StopTimeline from '$lib/components/location/StopTimeline.svelte';
@@ -21,7 +22,9 @@
 	let error = $state('');
 	let pollInterval: ReturnType<typeof setInterval> | undefined;
 	let mapComponent: LocationMap | undefined = $state();
-	let panelOpen = $state(true);
+	let panelOpen = $state(loadSetting('location.panelOpen', true));
+
+	$effect(() => { saveSetting('location.panelOpen', panelOpen); });
 
 	const today = new Date().toISOString().slice(0, 10);
 

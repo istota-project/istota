@@ -4,6 +4,7 @@
 	import FeedCard from '$lib/components/FeedCard.svelte';
 	import Lightbox from '$lib/components/Lightbox.svelte';
 	import Chip from '$lib/components/ui/Chip.svelte';
+	import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
 	const PAGE_SIZE = 50;
 
@@ -14,13 +15,18 @@
 	let error = $state('');
 	let hasMore = $state(true);
 
-	// Filters
-	let showImages = $state(true);
-	let showText = $state(true);
-	let showUnseen = $state(false);
+	// Filters (persisted)
+	let showImages = $state(loadSetting('feeds.showImages', true));
+	let showText = $state(loadSetting('feeds.showText', true));
+	let showUnseen = $state(false); // not persisted — always starts fresh
 	let unseenSnapshot: Set<number> | null = null;
-	let sortBy: 'published' | 'added' = $state('published');
-	let viewMode: 'grid' | 'list' = $state('grid');
+	let sortBy: 'published' | 'added' = $state(loadSetting('feeds.sortBy', 'published'));
+	let viewMode: 'grid' | 'list' = $state(loadSetting('feeds.viewMode', 'grid'));
+
+	$effect(() => { saveSetting('feeds.showImages', showImages); });
+	$effect(() => { saveSetting('feeds.showText', showText); });
+	$effect(() => { saveSetting('feeds.sortBy', sortBy); });
+	$effect(() => { saveSetting('feeds.viewMode', viewMode); });
 
 	async function toggleUnseen() {
 		showUnseen = !showUnseen;
