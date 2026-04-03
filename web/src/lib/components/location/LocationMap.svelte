@@ -38,6 +38,7 @@
 	let container: HTMLDivElement;
 	let map: maplibregl.Map | undefined;
 	let mapLoaded = false;
+	let hasFittedBounds = false;
 	let currentMarker: maplibregl.Marker | undefined;
 	let dragMarker: maplibregl.Marker | undefined;
 	let resizeObserver: ResizeObserver | undefined;
@@ -223,9 +224,12 @@
 		if (!map) return;
 
 		// Place radius circles — meters to pixels via exponential zoom interpolation.
-		// Ground resolution at lat ~34°: 78271.484 * cos(34°) / 2^z meters/pixel.
-		// With exponential base 2, pixels double per zoom, matching the map projection.
-		const pxPerMeterAtZ15 = Math.pow(2, 15) / (78271.484 * Math.cos(34.1 * Math.PI / 180));
+		// At zoom z, ground resolution at lat ~34°: meters/px = 78271.484 * cos(34°) / 2^z
+		// Divisor = meters/px, so circle-radius = radius_meters / divisor = pixels.
+		// With base 2, the ratio between stops 8 zoom levels apart must be 2^8 = 256.
+		const cosLat = Math.cos(34.1 * Math.PI / 180);
+		const divisorZ10 = 78271.484 * cosLat / Math.pow(2, 10); // ~63.3 m/px
+		const divisorZ18 = 78271.484 * cosLat / Math.pow(2, 18); // ~0.247 m/px
 		map.addLayer({
 			id: 'place-radius',
 			type: 'circle',
@@ -233,8 +237,8 @@
 			paint: {
 				'circle-radius': [
 					'interpolate', ['exponential', 2], ['zoom'],
-					10, ['*', ['get', 'radius_meters'], pxPerMeterAtZ15 / 32],
-					15, ['*', ['get', 'radius_meters'], pxPerMeterAtZ15],
+					10, ['/', ['get', 'radius_meters'], divisorZ10],
+					18, ['/', ['get', 'radius_meters'], divisorZ18],
 				],
 				'circle-color': 'rgba(51, 51, 51, 0.15)',
 				'circle-stroke-color': '#555',
@@ -489,7 +493,10 @@
 		clusters;
 		activeActivityTypes;
 		updateSources();
-		fitBounds();
+		if (!hasFittedBounds) {
+			fitBounds();
+			hasFittedBounds = true;
+		}
 	});
 
 	$effect(() => {
