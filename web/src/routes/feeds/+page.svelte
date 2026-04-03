@@ -218,17 +218,14 @@
 {/if}
 
 <style>
-	/* Filter bar */
+	/* Controls bar */
 	.filters {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.5rem;
-		margin-bottom: 1.5rem;
-		position: sticky;
-		top: 0;
-		z-index: 10;
-		background: var(--surface-base);
-		padding: 0.75rem 0;
+		gap: 0.75rem;
+		padding: 0.5rem 0;
+		margin-bottom: 1rem;
+		border-bottom: 1px solid var(--border-subtle);
 		align-items: center;
 	}
 
@@ -244,21 +241,27 @@
 		cursor: pointer;
 		display: inline-flex;
 		align-items: center;
-		padding: 0.25rem 0.75rem;
-		border: 1px solid var(--border-default);
+		padding: 0.25rem 0.5rem;
+		border: none;
 		border-radius: var(--radius-pill);
-		font-size: 0.8rem;
+		font-size: var(--text-xs);
 		transition: all var(--transition-fast);
 		user-select: none;
-		color: var(--text-primary);
+		color: var(--text-muted);
+		background: var(--surface-card);
+		font-family: inherit;
 	}
 
 	.chip input { display: none; }
 
+	.chip:hover {
+		color: var(--text-primary);
+		background: var(--surface-raised);
+	}
+
 	.chip.checked {
-		background: var(--accent);
-		color: var(--surface-base);
-		border-color: var(--accent);
+		background: var(--surface-raised);
+		color: var(--text-primary);
 	}
 
 	/* Grid layout */
@@ -487,8 +490,8 @@
 	}
 
 	@media (max-width: 640px) {
-		.filters { gap: 0.35rem; padding: 0.5rem 0; }
+		.filters { gap: 0.35rem; }
 		.filter-group { gap: 0.15rem; }
-		.chip { font-size: 0.65rem; padding: 0.15rem 0.5rem; }
+		.chip { padding: 0.2rem 0.4rem; }
 	}
 </style>
