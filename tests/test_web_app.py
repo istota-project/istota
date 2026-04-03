@@ -51,19 +51,19 @@ def config(tmp_path):
     return _make_config(tmp_path)
 
 
+def _patch_app(config):
+    """Inject config and mock OAuth into the web app module."""
+    import istota.web_app as mod
+    mod._config = config
+    mock_oauth = MagicMock()
+    mock_oauth.nextcloud = MagicMock()
+    mod._oauth = mock_oauth
+    return mod.app
+
+
 @pytest.fixture
 def app(config):
-    """Provide a patched app with test config."""
-    import istota.web_app as mod
-
-    mod._config = config
-
-    mock_oauth = MagicMock()
-    mock_nc = MagicMock()
-    mock_oauth.nextcloud = mock_nc
-    mod._oauth = mock_oauth
-
-    return mod.app
+    return _patch_app(config)
 
 
 @pytest.fixture
@@ -383,17 +383,7 @@ def _make_moneyman_config(tmp_path):
 
 @pytest.fixture
 def moneyman_app(tmp_path):
-    """Provide a patched app with moneyman resource for alice."""
-    import istota.web_app as mod
-
-    mod._config = _make_moneyman_config(tmp_path)
-
-    mock_oauth = MagicMock()
-    mock_nc = MagicMock()
-    mock_oauth.nextcloud = mock_nc
-    mod._oauth = mock_oauth
-
-    return mod.app
+    return _patch_app(_make_moneyman_config(tmp_path))
 
 
 @pytest.fixture
@@ -411,6 +401,20 @@ async def _login_as(client, username, display_name=None):
     })
     login_resp = await client.get("/istota/callback", follow_redirects=False)
     return login_resp.cookies
+
+
+def _mock_moneyman_response(json_data):
+    """Build a mock httpx.AsyncClient that returns json_data for any GET."""
+    mock_response = MagicMock()
+    mock_response.json.return_value = json_data
+    mock_response.raise_for_status = MagicMock()
+
+    mock_http = AsyncMock()
+    mock_http.get = AsyncMock(return_value=mock_response)
+    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+    mock_http.__aexit__ = AsyncMock(return_value=False)
+
+    return mock_http
 
 
 class TestGetMoneymanCreds:
@@ -466,18 +470,10 @@ class TestApiMeWithLedgers:
 class TestMoneymanProxy:
     async def test_ledgers_proxies_to_moneyman(self, mm_client, moneyman_app):
         cookies = await _login_as(mm_client, "alice", "Alice")
-
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
+        mock_http = _mock_moneyman_response({
             "status": "ok", "ledger_count": 1,
             "ledgers": [{"name": "personal", "path": "/data/personal.beancount"}],
-        }
-        mock_response.raise_for_status = MagicMock()
-
-        mock_http = AsyncMock()
-        mock_http.get = AsyncMock(return_value=mock_response)
-        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-        mock_http.__aexit__ = AsyncMock(return_value=False)
+        })
 
         with patch("istota.web_app.httpx.AsyncClient", return_value=mock_http):
             resp = await mm_client.get("/istota/api/moneyman/ledgers", cookies=cookies)
@@ -489,18 +485,10 @@ class TestMoneymanProxy:
 
     async def test_fava_proxies_to_moneyman(self, mm_client, moneyman_app):
         cookies = await _login_as(mm_client, "alice", "Alice")
-
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
+        mock_http = _mock_moneyman_response({
             "status": "ok",
             "instances": [{"ledger": "personal", "port": 5000, "prefix": "/istota/fava/personal/"}],
-        }
-        mock_response.raise_for_status = MagicMock()
-
-        mock_http = AsyncMock()
-        mock_http.get = AsyncMock(return_value=mock_response)
-        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-        mock_http.__aexit__ = AsyncMock(return_value=False)
+        })
 
         with patch("istota.web_app.httpx.AsyncClient", return_value=mock_http):
             resp = await mm_client.get("/istota/api/moneyman/fava", cookies=cookies)
@@ -521,22 +509,12 @@ class TestMoneymanProxy:
         assert resp.status_code == 404
 
     async def test_moneyman_proxy_sends_headers(self, mm_client, moneyman_app):
-        """Verify the proxy sends X-API-Key and X-User headers."""
         cookies = await _login_as(mm_client, "alice", "Alice")
-
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"status": "ok", "ledger_count": 0, "ledgers": []}
-        mock_response.raise_for_status = MagicMock()
-
-        mock_http = AsyncMock()
-        mock_http.get = AsyncMock(return_value=mock_response)
-        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-        mock_http.__aexit__ = AsyncMock(return_value=False)
+        mock_http = _mock_moneyman_response({"status": "ok", "ledger_count": 0, "ledgers": []})
 
         with patch("istota.web_app.httpx.AsyncClient", return_value=mock_http) as mock_cls:
             await mm_client.get("/istota/api/moneyman/ledgers", cookies=cookies)
 
-        # Check constructor was called with correct base_url and headers
         call_kwargs = mock_cls.call_args[1]
         assert "localhost:8090" in call_kwargs["base_url"]
         assert call_kwargs["headers"]["X-API-Key"] == "mm-key"

@@ -1038,6 +1038,14 @@
     label: "{{ item.key }}"
   when: istota_site_enabled and not istota_web_only
 
+- name: Ensure Fava nginx include exists
+  copy:
+    content: "# Moneyman Fava — placeholder (populated by the moneyman role)\n"
+    dest: /etc/nginx/includes/moneyman-fava.inc
+    force: false
+    mode: "0644"
+  when: istota_web_enabled | default(false) and not istota_web_only
+
 - name: Deploy nginx config
   template:
     src: istota.conf.j2
