@@ -1,0 +1,92 @@
+site_name: Istota
+site_description: A self-hosted AI agent that lives in your Nextcloud instance
+site_url: https://istota.xyz/docs
+
+repo_url: https://forge.cynium.com/cynium/istota
+repo_name: cynium/istota
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+    - getting-started/quickstart-docker.md
+    - getting-started/quickstart-bare-metal.md
+    - getting-started/post-install.md
+  - Architecture:
+    - architecture/overview.md
+    - architecture/scheduler.md
+    - architecture/executor.md
+    - architecture/context.md
+    - architecture/database.md
+  - Features:
+    - features/talk.md
+    - features/email.md
+    - features/skills.md
+    - features/memory.md
+    - features/briefings.md
+    - features/scheduling.md
+    - features/heartbeat.md
+    - features/location.md
+    - features/web-interface.md
+  - Configuration:
+    - configuration/overview.md
+    - configuration/reference.md
+    - configuration/per-user.md
+    - configuration/persona.md
+  - Deployment:
+    - deployment/ansible.md
+    - deployment/docker.md
+    - deployment/security.md
+  - Development:
+    - development/setup.md
+    - development/testing.md
+    - development/adding-skills.md
+  - Reference:
+    - reference/cli.md
+    - reference/commands.md
+    - reference/skills-index.md
+    - reference/environment-variables.md

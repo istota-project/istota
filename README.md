@@ -203,7 +203,7 @@ Skills with missing dependencies are automatically excluded from prompt selectio
 
 ## Further reading
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — system architecture and design decisions
+- [Documentation](https://istota.xyz/docs) — full docs (also buildable locally with `mkdocs serve`)
 - [DEVLOG.md](DEVLOG.md) — changelog
 
 ## License
