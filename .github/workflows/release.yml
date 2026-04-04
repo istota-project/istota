@@ -16,7 +16,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        id: changelog
+
       - name: Create GitHub Release
-        run: gh release create "${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" --notes "$CHANGELOG"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG: ${{ steps.changelog.outputs.content }}
