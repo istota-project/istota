@@ -42,6 +42,9 @@ config/config.toml
 /tmp/istota/
 .env
 
+# MkDocs
+site/
+
 # Test artifacts
 .pytest_cache/
 .coverage
