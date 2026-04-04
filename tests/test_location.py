@@ -1791,6 +1791,30 @@ class TestClusterPings:
         # No single cluster should span the full route
         assert all(c["ping_count"] < 120 for c in result)
 
+    def test_origin_anchor_forces_split(self):
+        """A ping within centroid radius but beyond 1.5x origin radius must split.
+
+        Four pings: A at origin, B1+B2 at ~178m (shifting centroid to ~119m),
+        then C at ~311m from origin. C is within 200m of the centroid but
+        beyond the 1.5*200=300m origin limit.
+        """
+        from istota.geo import cluster_pings, haversine
+
+        a  = {"lat": 34.0500, "lon": -118.25, "timestamp": "2026-04-03T17:00:00Z"}
+        b1 = {"lat": 34.0516, "lon": -118.25, "timestamp": "2026-04-03T17:01:00Z"}
+        b2 = {"lat": 34.0516, "lon": -118.25, "timestamp": "2026-04-03T17:02:00Z"}
+        c  = {"lat": 34.0528, "lon": -118.25, "timestamp": "2026-04-03T17:03:00Z"}
+
+        # Verify geometry: C is within 200m of centroid(A,B1,B2) but >300m from A
+        centroid_lat = (a["lat"] + b1["lat"] + b2["lat"]) / 3
+        assert haversine(centroid_lat, -118.25, c["lat"], -118.25) < 200
+        assert haversine(a["lat"], -118.25, c["lat"], -118.25) > 300
+
+        result = cluster_pings([a, b1, b2, c], radius_m=200)
+        assert len(result) == 2
+        assert result[0]["ping_count"] == 3  # A + B1 + B2
+        assert result[1]["ping_count"] == 1  # C split off by origin anchor
+
     def test_time_gap_splits_cluster(self):
         """Pings at the same location but >5 min apart should split."""
         from istota.geo import cluster_pings
