@@ -1,34 +1,30 @@
 resource_types = ["moneyman"]
 cli = true
 
-# Local mode (same host): moneyman CLI path + user key
+# Instance-level settings (from [moneyman] config section)
 [[env]]
 var = "MONEYMAN_CLI_PATH"
-from = "user_resource_config"
-resource_type = "moneyman"
-field = "cli_path"
+from = "config"
+config_path = "moneyman.cli_path"
 
+[[env]]
+var = "MONEYMAN_CONFIG"
+from = "config"
+config_path = "moneyman.config_path"
+
+[[env]]
+var = "MONEYMAN_API_URL"
+from = "config"
+config_path = "moneyman.api_url"
+
+[[env]]
+var = "MONEYMAN_API_KEY"
+from = "config"
+config_path = "moneyman.api_key"
+
+# Per-user setting (from user's [[resources]] entry)
 [[env]]
 var = "MONEYMAN_USER"
 from = "user_resource_config"
 resource_type = "moneyman"
 field = "user_key"
-
-[[env]]
-var = "MONEYMAN_CONFIG"
-from = "user_resource_config"
-resource_type = "moneyman"
-field = "config_path"
-
-# Remote mode (different host): HTTP URL + API key
-[[env]]
-var = "MONEYMAN_API_URL"
-from = "user_resource_config"
-resource_type = "moneyman"
-field = "base_url"
-
-[[env]]
-var = "MONEYMAN_API_KEY"
-from = "user_resource_config"
-resource_type = "moneyman"
-field = "api_key"

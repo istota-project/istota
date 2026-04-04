@@ -192,6 +192,22 @@ enabled = true
 api_url = "http://localhost:{{ istota_browser_api_port }}"
 vnc_url = "{{ istota_browser_vnc_external_url }}"
 {% endif %}
+{% if istota_moneyman_cli_path or istota_moneyman_api_url %}
+
+[moneyman]
+{% if istota_moneyman_cli_path %}
+cli_path = "{{ istota_moneyman_cli_path }}"
+{% endif %}
+{% if istota_moneyman_config_path %}
+config_path = "{{ istota_moneyman_config_path }}"
+{% endif %}
+{% if istota_moneyman_api_url %}
+api_url = "{{ istota_moneyman_api_url }}"
+{% endif %}
+{% if istota_moneyman_api_key %}
+api_key = "{{ istota_moneyman_api_key }}"
+{% endif %}
+{% endif %}
 
 {% if istota_memory_search_enabled %}
 
