@@ -624,7 +624,7 @@ def _location_query_pings(
 
 def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: str | None) -> dict:
     from zoneinfo import ZoneInfo
-    from .geo import cluster_pings, reverse_geocode, haversine
+    from .geo import cluster_pings, cluster_dwell_seconds, reverse_geocode, haversine
 
     try:
         tz = ZoneInfo(tz_name)
@@ -662,7 +662,10 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
         stops = []
         transit_pings = 0
         for c in clusters:
-            if c["ping_count"] <= 2 and not c["place_name"]:
+            has_place = bool(c["place_name"])
+            few_pings = c["ping_count"] <= 2
+            short_dwell = cluster_dwell_seconds(c) < 300  # <5 minutes
+            if not has_place and (few_pings or short_dwell):
                 transit_pings += c["ping_count"]
                 continue
             stops.append(c)

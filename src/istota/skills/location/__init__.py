@@ -566,7 +566,7 @@ def cmd_reverse_geocode(args):
 
 
 def cmd_day_summary(args):
-    from istota.geo import reverse_geocode, cluster_pings, haversine
+    from istota.geo import reverse_geocode, cluster_pings, cluster_dwell_seconds, haversine
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -607,11 +607,14 @@ def cmd_day_summary(args):
     pings = [dict(r) for r in rows]
     clusters = cluster_pings(pings, radius_m=250)
 
-    # Filter transit (<=2 pings, no place match)
+    # Filter transit: short clusters without a place match
     stops = []
     transit_pings = 0
     for c in clusters:
-        if c["ping_count"] <= 2 and not c["place_name"]:
+        has_place = bool(c["place_name"])
+        few_pings = c["ping_count"] <= 2
+        short_dwell = cluster_dwell_seconds(c) < 300  # <5 minutes
+        if not has_place and (few_pings or short_dwell):
             transit_pings += c["ping_count"]
             continue
         stops.append(c)

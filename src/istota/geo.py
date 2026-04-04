@@ -58,28 +58,68 @@ def reverse_geocode(lat: float, lon: float, conn: sqlite3.Connection) -> dict:
     return {"error": "no result", "source": "error"}
 
 
-def cluster_pings(pings: list[dict], radius_m: float = 200) -> list[dict]:
+def _parse_ts(ts: str):
+    """Parse an ISO-8601 timestamp to a tz-aware datetime (assumes UTC if naive)."""
+    from datetime import datetime, timezone
+
+    if ts.endswith("Z"):
+        ts = ts[:-1] + "+00:00"
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def cluster_dwell_seconds(cluster: dict) -> float:
+    """Duration of a cluster in seconds (first_ts to last_ts)."""
+    return (_parse_ts(cluster["last_ts"]) - _parse_ts(cluster["first_ts"])).total_seconds()
+
+
+def _timestamp_gap_seconds(ts_a: str, ts_b: str) -> float:
+    """Seconds between two ISO-8601 timestamps."""
+    return abs((_parse_ts(ts_b) - _parse_ts(ts_a)).total_seconds())
+
+
+def cluster_pings(
+    pings: list[dict],
+    radius_m: float = 200,
+    max_gap_seconds: float = 300,
+) -> list[dict]:
     """Cluster pings into stops based on spatial proximity.
 
     Pings must be sorted by timestamp ascending.
     Returns list of clusters with centroid, time range, and ping count.
+
+    Split conditions (any triggers a new cluster):
+    - Ping is farther than ``radius_m`` from the running centroid.
+    - Ping is farther than ``radius_m * 1.5`` from the cluster's first ping
+      (origin anchor — prevents centroid drift along a route).
+    - Time gap between consecutive pings exceeds ``max_gap_seconds``.
     """
     if not pings:
         return []
 
-    clusters = []
+    clusters: list[dict] = []
     current = {
         "pings": [pings[0]],
         "lat_sum": pings[0]["lat"],
         "lon_sum": pings[0]["lon"],
     }
+    origin_lat = pings[0]["lat"]
+    origin_lon = pings[0]["lon"]
+    origin_limit = radius_m * 1.5
 
     for ping in pings[1:]:
         centroid_lat = current["lat_sum"] / len(current["pings"])
         centroid_lon = current["lon_sum"] / len(current["pings"])
-        dist = haversine(centroid_lat, centroid_lon, ping["lat"], ping["lon"])
+        dist_centroid = haversine(centroid_lat, centroid_lon, ping["lat"], ping["lon"])
+        dist_origin = haversine(origin_lat, origin_lon, ping["lat"], ping["lon"])
 
-        if dist <= radius_m:
+        # Time gap between this ping and the previous one
+        prev_ts = current["pings"][-1]["timestamp"]
+        gap = _timestamp_gap_seconds(prev_ts, ping["timestamp"])
+
+        if dist_centroid <= radius_m and dist_origin <= origin_limit and gap <= max_gap_seconds:
             current["pings"].append(ping)
             current["lat_sum"] += ping["lat"]
             current["lon_sum"] += ping["lon"]
@@ -90,6 +130,8 @@ def cluster_pings(pings: list[dict], radius_m: float = 200) -> list[dict]:
                 "lat_sum": ping["lat"],
                 "lon_sum": ping["lon"],
             }
+            origin_lat = ping["lat"]
+            origin_lon = ping["lon"]
 
     clusters.append(_finalize_cluster(current))
     return clusters

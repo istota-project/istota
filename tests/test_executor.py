@@ -1445,14 +1445,17 @@ class TestAdminPromptIsolation:
         prompt = build_prompt(task, [], config, is_admin=True)
         assert "sqlite3 for the task database" not in prompt
 
-    def test_admin_prompt_has_subtask_rule(self, tmp_path):
+    def test_admin_prompt_no_subtask_instructions(self, tmp_path):
+        """Subtask creation instructions should NOT be in the hardcoded prompt.
+
+        They belong in the tasks skill doc, loaded only when relevant.
+        """
         config = self._make_config(tmp_path)
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
         prompt = build_prompt(task, [], config, is_admin=True)
-        assert "create subtasks" in prompt.lower()
-        assert "ISTOTA_DEFERRED_DIR" in prompt
+        assert "create subtasks" not in prompt.lower()
 
     def test_non_admin_prompt_no_subtask_rule(self, tmp_path):
         config = self._make_config(tmp_path, admin_users={"bob"})

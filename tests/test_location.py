@@ -1768,6 +1768,57 @@ class TestClusterPings:
         assert result[0]["place_id"] == 42
         assert result[0]["place_name"] == "home"
 
+    def test_centroid_drift_splits_route(self):
+        """Many pings drifting slowly along a road should NOT merge into one cluster.
+
+        Simulates riding ~500m along a street with 120 pings (~4m each).
+        Each ping is close to the drifting centroid but far from the origin.
+        The origin anchor should force a split.
+        """
+        from istota.geo import cluster_pings
+
+        # 120 pings drifting ~4m each north (~480m total), like riding through
+        # an intersection over ~10 minutes. Each ping only ~4m from centroid
+        # so old code absorbs them all into one cluster.
+        pings = [
+            {"lat": 34.0500 + i * 0.000036, "lon": -118.25,
+             "timestamp": f"2026-04-03T17:{i // 12:02d}:{(i % 12) * 5:02d}Z"}
+            for i in range(120)
+        ]
+        result = cluster_pings(pings, radius_m=250)
+        # Origin anchor should split this into multiple clusters
+        assert len(result) >= 2
+        # No single cluster should span the full route
+        assert all(c["ping_count"] < 120 for c in result)
+
+    def test_time_gap_splits_cluster(self):
+        """Pings at the same location but >5 min apart should split."""
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-04-03T10:00:00Z"},
+            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-04-03T10:01:00Z"},
+            # 10-minute gap
+            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-04-03T10:11:00Z"},
+            {"lat": 34.05, "lon": -118.25, "timestamp": "2026-04-03T10:12:00Z"},
+        ]
+        result = cluster_pings(pings, max_gap_seconds=300)
+        assert len(result) == 2
+        assert result[0]["ping_count"] == 2
+        assert result[1]["ping_count"] == 2
+
+    def test_stationary_pings_cluster_normally(self):
+        """Pings at the same spot with no time gaps stay in one cluster."""
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.05, "lon": -118.25, "timestamp": f"2026-04-03T10:{i:02d}:00Z"}
+            for i in range(20)
+        ]
+        result = cluster_pings(pings, radius_m=200)
+        assert len(result) == 1
+        assert result[0]["ping_count"] == 20
+
 
 # ===========================================================================
 # reverse-geocode CLI command tests
