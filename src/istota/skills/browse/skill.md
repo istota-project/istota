@@ -1,3 +1,8 @@
+---
+name: browse
+triggers: [browse, website, web page, scrape, screenshot, url, http, visit, open page, fetch page, web search, look up, check the site]
+description: Web browsing and scraping via headless browser
+---
 # Web Browsing
 
 Headless browser for fetching pages that need JavaScript rendering or bot detection bypass. For simple static pages or APIs, prefer `curl` or `httpx` — they're faster.

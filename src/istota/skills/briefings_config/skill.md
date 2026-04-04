@@ -1,3 +1,8 @@
+---
+name: briefings_config
+triggers: [briefing config, briefing schedule, briefing setup, configure briefing, set up briefing, change briefing, edit briefing, briefing time]
+description: Briefing schedule configuration in istota/config/
+---
 # Briefing Schedule Configuration
 
 Users can control their own briefing schedules by creating a `BRIEFINGS.md` file in their `{BOT_DIR}/config/` directory.

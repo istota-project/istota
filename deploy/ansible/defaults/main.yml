@@ -290,6 +290,9 @@ istota_memory_search_auto_index_memory_files: true
 istota_memory_search_auto_recall: false           # BM25 search using task prompt as query
 istota_memory_search_auto_recall_limit: 5          # max results for auto-recall
 
+# Skills routing (LLM-based semantic routing for skill selection)
+istota_skills_semantic_routing: true  # enable Pass 2 LLM classification
+
 # Sleep cycle settings (nightly memory extraction, cron evaluated per-user timezone)
 istota_sleep_cycle_enabled: true
 istota_sleep_cycle_cron: "0 2 * * *"

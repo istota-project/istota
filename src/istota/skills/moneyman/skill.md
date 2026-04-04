@@ -1,3 +1,8 @@
+---
+name: moneyman
+triggers: [accounting, ledger, beancount, invoice, invoicing, expense, transaction, balance, tax, wash sale, bookkeeping, finances, billing, receivable, work log, work entry, monarch, sync-monarch, moneyman]
+description: Accounting operations via Moneyman service (ledger, invoicing, transactions, work log)
+---
 # Moneyman Accounting Operations
 
 Accounting operations via the Moneyman service. Supports ledger queries, transaction management, invoicing, and work log tracking.

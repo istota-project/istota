@@ -1692,6 +1692,7 @@ def execute_task(
     from .skills._loader import (
         load_skill_index, select_skills, load_skills,
         compute_skills_fingerprint, load_skills_changelog,
+        classify_skills,
     )
 
     is_admin = config.is_admin(task.user_id)
@@ -1714,6 +1715,31 @@ def execute_task(
         attachments=task.attachments,
         disabled_skills=_disabled if _disabled else None,
     )
+
+    # Pass 2: LLM-based semantic routing
+    if config.skills.semantic_routing:
+        extra_skills = classify_skills(
+            prompt=task.prompt,
+            skill_index=skill_index,
+            already_selected=set(selected_skills),
+            disabled_skills=_disabled if _disabled else None,
+            is_admin=is_admin,
+            model=config.skills.semantic_routing_model,
+            timeout=config.skills.semantic_routing_timeout,
+        )
+        if extra_skills:
+            all_selected = set(selected_skills) | set(extra_skills)
+            # Re-apply exclude_skills (Pass 1 already applied, but new skills may trigger new exclusions)
+            excluded = set()
+            for n in list(all_selected):
+                m = skill_index.get(n)
+                if m:
+                    for ex in m.exclude_skills:
+                        if ex in all_selected:
+                            excluded.add(ex)
+            all_selected -= excluded
+            selected_skills = sorted(all_selected)
+
     skills_doc = load_skills(
         config.skills_dir, selected_skills, config.bot_name, config.bot_dir_name,
         skill_index=skill_index, bundled_dir=_bundled_dir,

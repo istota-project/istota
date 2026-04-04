@@ -1,3 +1,7 @@
+---
+name: memory
+description: User memory file operations
+---
 You have access to a persistent memory file for each user. This memory file is automatically loaded and included in your prompt. You can use it to remember important information about users across conversations.
 
 ### Memory File Location

@@ -12,7 +12,10 @@ Discovery order (later wins):
 
 import hashlib
 import importlib
+import json
 import logging
+import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -41,6 +44,57 @@ def _parse_env_specs(data: list[dict]) -> list[EnvSpec]:
     return specs
 
 
+def _parse_frontmatter(md_path: Path) -> dict | None:
+    """Parse YAML frontmatter from a skill.md file.
+
+    Supports a minimal subset: scalar values and inline YAML lists [a, b, c].
+    Returns parsed dict or None if no frontmatter found or parse error.
+    """
+    if not md_path.exists():
+        return None
+    try:
+        text = md_path.read_text()
+    except Exception:
+        return None
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None
+    yaml_text = text[3:end].strip()
+    try:
+        data = {}
+        for line in yaml_text.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            colon = line.find(":")
+            if colon == -1:
+                continue
+            key = line[:colon].strip()
+            value = line[colon + 1:].strip()
+            # Parse inline list: [a, b, c]
+            if value.startswith("[") and value.endswith("]"):
+                items = value[1:-1]
+                data[key] = [item.strip().strip("'\"") for item in items.split(",") if item.strip()]
+            else:
+                data[key] = value.strip("'\"")
+        return data if data else None
+    except Exception as e:
+        logger.warning("Failed to parse frontmatter in %s: %s", md_path, e)
+        return None
+
+
+def _strip_frontmatter(text: str) -> str:
+    """Remove YAML frontmatter from markdown text."""
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return text
+    return text[end + 4:].lstrip("\n")
+
+
 def _load_skill_toml(skill_dir: Path) -> SkillMeta | None:
     """Load a single skill.toml from a directory."""
     toml_path = skill_dir / "skill.toml"
@@ -53,7 +107,7 @@ def _load_skill_toml(skill_dir: Path) -> SkillMeta | None:
         logger.warning("Failed to parse %s: %s", toml_path, e)
         return None
 
-    return SkillMeta(
+    meta = SkillMeta(
         name=skill_dir.name,
         description=data.get("description", ""),
         always_include=data.get("always_include", False),
@@ -72,6 +126,16 @@ def _load_skill_toml(skill_dir: Path) -> SkillMeta | None:
         cli=data.get("cli", False),
         skill_dir=str(skill_dir),
     )
+
+    # Merge frontmatter from skill.md (overrides toml for routing fields)
+    fm = _parse_frontmatter(skill_dir / "skill.md")
+    if fm:
+        if "triggers" in fm and isinstance(fm["triggers"], list):
+            meta.keywords = fm["triggers"]
+        if "description" in fm and isinstance(fm["description"], str):
+            meta.description = fm["description"]
+
+    return meta
 
 
 def _discover_directory_skills(base_dir: Path) -> dict[str, SkillMeta]:
@@ -379,7 +443,7 @@ def load_skills(
         doc_path = _resolve_skill_doc_path(name, meta, skills_dir, bundled_dir)
         if doc_path is not None:
             title = name.replace("-", " ").replace("_", " ").title()
-            content = doc_path.read_text().strip()
+            content = _strip_frontmatter(doc_path.read_text()).strip()
             content = content.replace("{BOT_NAME}", bot_name).replace("{BOT_DIR}", bot_dir)
             parts.append(f"### {title}\n\n{content}")
 
@@ -458,3 +522,132 @@ def load_skills_changelog(
         return content if content else None
 
     return None
+
+
+def build_skill_manifest(
+    skill_index: dict[str, SkillMeta],
+    exclude: set[str],
+    disabled_skills: set[str] | None = None,
+    is_admin: bool = True,
+) -> str:
+    """Build a compact manifest of available skills for LLM classification.
+
+    Excludes already-selected skills, always_include skills (already loaded),
+    disabled skills, admin_only skills for non-admins, and skills with
+    unmet dependencies.
+    """
+    disabled = disabled_skills or set()
+    lines = []
+    for name in sorted(skill_index):
+        if name in exclude:
+            continue
+        meta = skill_index[name]
+        if meta.always_include:
+            continue
+        if name in disabled:
+            continue
+        if meta.admin_only and not is_admin:
+            continue
+        if not _check_dependencies(meta):
+            continue
+        triggers = ", ".join(meta.keywords[:10]) if meta.keywords else "none"
+        lines.append(f"- {name}: {meta.description}. Triggers: {triggers}")
+    return "Available skills (not yet selected):\n" + "\n".join(lines)
+
+
+def classify_skills(
+    prompt: str,
+    skill_index: dict[str, SkillMeta],
+    already_selected: set[str],
+    disabled_skills: set[str] | None = None,
+    is_admin: bool = True,
+    model: str = "haiku",
+    timeout: float = 3.0,
+) -> list[str]:
+    """LLM-based skill classification (Pass 2).
+
+    Returns additional skill names to load beyond keyword matches.
+    Returns [] on timeout, error, or if no additional skills are needed.
+    Respects disabled_skills, admin_only, and dependency checks.
+    """
+    manifest = build_skill_manifest(
+        skill_index, exclude=already_selected,
+        disabled_skills=disabled_skills, is_admin=is_admin,
+    )
+
+    # Check if there are any skills to classify
+    skill_lines = [l for l in manifest.split("\n") if l.startswith("- ")]
+    if not skill_lines:
+        return []
+
+    classification_prompt = (
+        "Given this task, which additional skills (if any) should be loaded?\n"
+        "Return a JSON array of skill names, or [] if none are needed.\n"
+        "Only include skills that are clearly relevant — not speculative matches.\n"
+        "\n"
+        f"Task: {prompt}\n"
+        "\n"
+        f"{manifest}"
+    )
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "-", "--model", model],
+            input=classification_prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+        if result.returncode != 0:
+            logger.warning(
+                "Skill classification failed (returncode=%d): %s",
+                result.returncode,
+                result.stderr or result.stdout,
+            )
+            return []
+
+        output = result.stdout.strip()
+
+        # Extract JSON from code blocks or raw output
+        code_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", output, re.DOTALL)
+        if code_block:
+            output = code_block.group(1).strip()
+
+        skill_names = json.loads(output)
+        if not isinstance(skill_names, list):
+            logger.warning("Skill classification returned non-list: %s", output[:200])
+            return []
+
+        # Filter to valid skill names not already selected, respecting all guards
+        _disabled = disabled_skills or set()
+        valid_names = []
+        for name in skill_names:
+            if not isinstance(name, str) or name not in skill_index:
+                continue
+            if name in already_selected or name in _disabled:
+                continue
+            meta = skill_index[name]
+            if meta.admin_only and not is_admin:
+                continue
+            if not _check_dependencies(meta):
+                continue
+            valid_names.append(name)
+
+        if valid_names:
+            logger.info("Semantic routing added skills: %s", ", ".join(valid_names))
+
+        return valid_names
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Skill classification timed out after %.1fs", timeout)
+        return []
+    except json.JSONDecodeError as e:
+        logger.warning("Skill classification JSON parse error: %s", e)
+        return []
+    except FileNotFoundError:
+        logger.error("Claude CLI not found for skill classification")
+        return []
+    except Exception as e:
+        logger.warning("Skill classification error: %s", e)
+        return []

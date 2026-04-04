@@ -1,3 +1,8 @@
+---
+name: website
+triggers: [website, web page, static site, html page, publish]
+description: Static website hosting at /~user/
+---
 # Website Hosting
 
 The user has a static website served at `$WEBSITE_URL`.

@@ -1,3 +1,8 @@
+---
+name: transcribe
+triggers: [transcribe, ocr, screenshot, text in image, handwriting, scan, extract text]
+description: OCR transcription for images with text
+---
 # Image Transcription with OCR
 
 When you receive images containing text (screenshots, documents, handwritten notes), use the OCR skill to get a text extraction, then compare with what you see.

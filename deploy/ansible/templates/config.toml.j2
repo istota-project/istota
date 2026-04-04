@@ -203,6 +203,12 @@ auto_recall = {{ istota_memory_search_auto_recall | lower }}
 auto_recall_limit = {{ istota_memory_search_auto_recall_limit }}
 {% endif %}
 
+{% if not istota_skills_semantic_routing %}
+
+[skills]
+semantic_routing = false
+{% endif %}
+
 {% if istota_sleep_cycle_enabled %}
 
 [sleep_cycle]

@@ -1,3 +1,7 @@
+---
+name: memory_search
+description: Search past conversations and memory files
+---
 # Memory Search
 
 Search across past conversations and memory files using hybrid BM25 + semantic search.

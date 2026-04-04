@@ -1,3 +1,8 @@
+---
+name: heartbeat
+triggers: [heartbeat, monitoring, health check, alert, file watch, url health, disk space, backup check]
+description: Heartbeat monitoring configuration in istota/config/
+---
 HEARTBEAT.md is for monitoring — checking conditions and alerting on failures. For running tasks on a schedule (including AI-powered checks), use CRON.md instead.
 
 The user can configure heartbeat monitoring checks in their `{BOT_DIR}/config/HEARTBEAT.md` file. The system evaluates these checks periodically and sends alerts when conditions fail.

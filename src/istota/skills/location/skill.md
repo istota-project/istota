@@ -1,3 +1,8 @@
+---
+name: location
+triggers: [location, gps, where, place, places, visit, visits, track, position, coordinates, attendance, reverse geocode, day summary, neighborhood, summary]
+description: Location tracking, place recognition, visit history, and calendar attendance
+---
 # Location Skill
 
 GPS-based location tracking via the Overland iOS app. Tracks location pings, resolves named places, and records visits.

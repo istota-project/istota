@@ -1,3 +1,8 @@
+---
+name: markets
+triggers: [market, stock, stocks, ticker, index, indices, futures, s&p, nasdaq, dow, aapl, quote, trading, finviz, movers, earnings]
+description: Market data for briefings and interactive queries
+---
 For briefings, market data is pre-fetched and included directly in your prompt. You don't need to fetch it yourself.
 
 ### Morning Briefings (before noon)

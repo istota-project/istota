@@ -1,3 +1,8 @@
+---
+name: schedules
+triggers: [schedule, scheduled, recurring, cron, every day, every week, every morning, every evening, periodic, nightly, daily, weekly]
+description: Scheduled recurring job management
+---
 CRON.md is for running tasks and commands on a schedule. For monitoring conditions and alerting on failures, use HEARTBEAT.md instead.
 
 You can manage recurring scheduled jobs by editing the user's `{BOT_DIR}/config/CRON.md` file. The scheduler reads this file automatically — changes take effect within ~60 seconds.

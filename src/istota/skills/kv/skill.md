@@ -1,3 +1,7 @@
+---
+name: kv
+description: Key-value store for persistent runtime state
+---
 # KV Store
 
 Persistent key-value store scoped by user and namespace. Use this to store and retrieve runtime state (small JSON blobs).
