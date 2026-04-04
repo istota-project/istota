@@ -323,6 +323,19 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # priority = 3                           # default priority (1=min, 3=default, 5=max)
 
 # ============================================================================
+# Moneyman Accounting Service
+# ============================================================================
+# Instance-level connection to a Moneyman service. Per-user access is
+# controlled via [[resources]] type = "moneyman" with user_key.
+# Two modes: local CLI (same host) or remote HTTP API.
+
+# [moneyman]
+# cli_path = "/srv/app/moneyman/app/.venv/bin/moneyman"  # local CLI binary
+# config_path = "/srv/app/moneyman/app/config.toml"      # moneyman config file
+# api_url = "http://localhost:8090"                       # remote HTTP API
+# api_key = ""                                            # API key for remote mode
+
+# ============================================================================
 # Static Website Hosting
 # ============================================================================
 # Serves static files at https://{hostname}/~{user_id}/ for users with

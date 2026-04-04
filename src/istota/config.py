@@ -298,6 +298,15 @@ class SecurityConfig:
 
 
 @dataclass
+class MoneymanConfig:
+    """Instance-level Moneyman service configuration."""
+    cli_path: str = ""  # e.g. "/srv/app/moneyman/app/.venv/bin/moneyman"
+    config_path: str = ""  # e.g. "/srv/app/moneyman/app/config.toml"
+    api_url: str = ""  # e.g. "http://localhost:8090"
+    api_key: str = ""
+
+
+@dataclass
 class SkillsConfig:
     """Skill routing configuration."""
     semantic_routing: bool = True  # enable LLM-based Pass 2 skill classification
@@ -337,6 +346,7 @@ class Config:
     security: SecurityConfig = field(default_factory=SecurityConfig)
     site: SiteConfig = field(default_factory=SiteConfig)
     location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
+    moneyman: MoneymanConfig = field(default_factory=MoneymanConfig)
     web: WebConfig = field(default_factory=WebConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
     admin_users: set[str] = field(default_factory=set)  # users with full system access
@@ -864,6 +874,15 @@ def load_config(config_path: Path | None = None) -> Config:
         config.location = LocationReceiverConfig(
             enabled=loc.get("enabled", False),
             webhooks_port=loc.get("webhooks_port", 8765),
+        )
+
+    if "moneyman" in data:
+        mm = data["moneyman"]
+        config.moneyman = MoneymanConfig(
+            cli_path=mm.get("cli_path", ""),
+            config_path=mm.get("config_path", ""),
+            api_url=mm.get("api_url", ""),
+            api_key=mm.get("api_key", ""),
         )
 
     if "web" in data:

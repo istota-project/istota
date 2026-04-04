@@ -45,7 +45,7 @@ def _resolve_env_spec(spec: EnvSpec, ctx: EnvContext) -> str | None:
             if not guard:
                 return None
         val = _resolve_config_path(ctx.config, spec.config_path)
-        if val is None:
+        if not val:
             return None
         return str(val)
 
