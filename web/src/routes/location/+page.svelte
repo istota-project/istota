@@ -31,7 +31,10 @@
 
 	$effect(() => { saveSetting('location.panelOpen', panelOpen); });
 
-	const today = new Date().toISOString().slice(0, 10);
+	function localDate(d: Date = new Date()): string {
+		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+	}
+	const today = localDate();
 
 	let places = $derived($locationPlaces);
 
