@@ -1,6 +1,7 @@
 ---
 name: files
 description: File operations with rclone
+always_include: true
 ---
 Nextcloud files are mounted at `/srv/mount/nextcloud/content`. Use standard filesystem operations:
 

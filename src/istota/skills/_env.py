@@ -1,6 +1,6 @@
 """Declarative env var resolver for skill plugin system.
 
-Processes EnvSpec declarations from skill.toml manifests to build
+Processes EnvSpec declarations from skill manifests to build
 environment variables for the Claude subprocess.
 """
 

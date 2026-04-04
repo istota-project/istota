@@ -1,11 +1,13 @@
 """Tests for istota.skills._loader."""
 
+import json
 from pathlib import Path
 
 from unittest.mock import patch
 
 from istota.skills._loader import (
     _get_attachment_extensions,
+    _parse_frontmatter,
     compute_skills_fingerprint,
     get_skill_availability,
     load_skill_index,
@@ -30,6 +32,29 @@ def _write_skill(skills_dir: Path, name: str, content: str) -> Path:
     p = skills_dir / f"{name}.md"
     p.write_text(content)
     return p
+
+
+def _write_skill_md(base_dir: Path, name: str, frontmatter: dict, body: str = "") -> Path:
+    """Helper to write a skill.md with YAML frontmatter in a skill directory."""
+    skill_dir = base_dir / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["---"]
+    for key, value in frontmatter.items():
+        if isinstance(value, bool):
+            lines.append(f"{key}: {'true' if value else 'false'}")
+        elif isinstance(value, list):
+            if value and isinstance(value[0], dict):
+                lines.append(f"{key}: {json.dumps(value, separators=(',', ':'))}")
+            else:
+                lines.append(f"{key}: [{', '.join(str(v) for v in value)}]")
+        else:
+            lines.append(f"{key}: {value}")
+    lines.append("---")
+    if body:
+        lines.append(body)
+    md_path = skill_dir / "skill.md"
+    md_path.write_text("\n".join(lines) + "\n")
+    return skill_dir
 
 
 def _empty_bundled(tmp_path: Path) -> Path:
@@ -768,56 +793,50 @@ class TestCompanionSkills:
         # No duplicates in result
         assert len(result) == len(set(result))
 
-    def test_companion_skills_parsed_from_toml(self, tmp_path):
+    def test_companion_skills_parsed_from_frontmatter(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "whisper"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text(
-            'description = "Audio"\n'
-            'file_types = ["mp3"]\n'
-            'companion_skills = ["reminders", "calendar"]\n'
-        )
+        _write_skill_md(bundled, "whisper", {
+            "name": "whisper",
+            "description": "Audio",
+            "file_types": ["mp3"],
+            "companion_skills": ["reminders", "calendar"],
+        })
         index = load_skill_index(tmp_path / "empty_skills", bundled_dir=bundled)
         assert index["whisper"].companion_skills == ["reminders", "calendar"]
 
     def test_companion_skills_default_empty(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "email"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text('description = "Email"\n')
+        _write_skill_md(bundled, "email", {
+            "name": "email",
+            "description": "Email",
+        })
         index = load_skill_index(tmp_path / "empty_skills", bundled_dir=bundled)
         assert index["email"].companion_skills == []
 
 
 class TestDirectoryBasedDiscovery:
-    """Tests for the new directory-based skill discovery."""
+    """Tests for directory-based skill discovery via skill.md frontmatter."""
 
-    def test_discovers_skill_toml(self, tmp_path):
+    def test_discovers_skill_from_frontmatter(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "my_skill"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text(
-            'description = "My new skill"\n'
-            'keywords = ["foo", "bar"]\n'
-        )
+        _write_skill_md(bundled, "my_skill", {
+            "name": "my_skill",
+            "triggers": ["foo", "bar"],
+            "description": "My new skill",
+        })
         index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
         assert "my_skill" in index
         assert index["my_skill"].description == "My new skill"
         assert index["my_skill"].keywords == ["foo", "bar"]
 
-    def test_skill_toml_with_env_specs(self, tmp_path):
+    def test_frontmatter_with_env_specs(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "test_skill"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text(
-            'description = "Test skill with env"\n'
-            '\n'
-            '[[env]]\n'
-            'var = "MY_API_URL"\n'
-            'from = "user_resource_config"\n'
-            'resource_type = "my_service"\n'
-            'field = "base_url"\n'
-        )
+        _write_skill_md(bundled, "test_skill", {
+            "name": "test_skill",
+            "description": "Test skill with env",
+            "env": [{"var": "MY_API_URL", "from": "user_resource_config",
+                     "resource_type": "my_service", "field": "base_url"}],
+        })
         index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
         meta = index["test_skill"]
         assert len(meta.env_specs) == 1
@@ -826,27 +845,52 @@ class TestDirectoryBasedDiscovery:
         assert meta.env_specs[0].resource_type == "my_service"
         assert meta.env_specs[0].field == "base_url"
 
-    def test_skill_toml_with_dependencies(self, tmp_path):
+    def test_frontmatter_with_dependencies(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "audio"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text(
-            'description = "Audio processing"\n'
-            'dependencies = ["faster-whisper>=1.1.0"]\n'
-        )
+        _write_skill_md(bundled, "audio", {
+            "name": "audio",
+            "description": "Audio processing",
+            "dependencies": ["faster-whisper>=1.1.0"],
+        })
         index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
         assert index["audio"].dependencies == ["faster-whisper>=1.1.0"]
 
-    def test_operator_override_wins_over_bundled(self, tmp_path):
+    def test_frontmatter_boolean_fields(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "my_skill"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text('description = "Bundled version"\n')
+        _write_skill_md(bundled, "core", {
+            "name": "core",
+            "description": "Core skill",
+            "always_include": True,
+            "cli": True,
+        })
+        index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
+        assert index["core"].always_include is True
+        assert index["core"].cli is True
 
+    def test_toml_fallback_for_operator_overrides(self, tmp_path):
+        """Operator overrides can still use skill.toml for backward compat."""
+        bundled = _empty_bundled(tmp_path)
         config_skills = tmp_path / "config_skills"
         override_dir = config_skills / "my_skill"
         override_dir.mkdir(parents=True)
         (override_dir / "skill.toml").write_text('description = "Operator override"\n')
+
+        index = load_skill_index(config_skills, bundled_dir=bundled)
+        assert "my_skill" in index
+        assert index["my_skill"].description == "Operator override"
+
+    def test_operator_override_wins_over_bundled(self, tmp_path):
+        bundled = tmp_path / "bundled"
+        _write_skill_md(bundled, "my_skill", {
+            "name": "my_skill",
+            "description": "Bundled version",
+        })
+
+        config_skills = tmp_path / "config_skills"
+        _write_skill_md(config_skills, "my_skill", {
+            "name": "my_skill",
+            "description": "Operator override",
+        })
 
         index = load_skill_index(config_skills, bundled_dir=bundled)
         assert index["my_skill"].description == "Operator override"
@@ -856,9 +900,10 @@ class TestDirectoryBasedDiscovery:
         _write_index(config_skills, '[my_skill]\ndescription = "Legacy"\n')
 
         bundled = _empty_bundled(tmp_path)
-        override_dir = config_skills / "my_skill"
-        override_dir.mkdir(parents=True)
-        (override_dir / "skill.toml").write_text('description = "Directory override"\n')
+        _write_skill_md(config_skills, "my_skill", {
+            "name": "my_skill",
+            "description": "Directory override",
+        })
 
         index = load_skill_index(config_skills, bundled_dir=bundled)
         assert index["my_skill"].description == "Directory override"
@@ -868,9 +913,10 @@ class TestDirectoryBasedDiscovery:
         _write_index(config_skills, '[my_skill]\ndescription = "Legacy"\n')
 
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "my_skill"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text('description = "Bundled"\n')
+        _write_skill_md(bundled, "my_skill", {
+            "name": "my_skill",
+            "description": "Bundled",
+        })
 
         index = load_skill_index(config_skills, bundled_dir=bundled)
         assert index["my_skill"].description == "Bundled"
@@ -885,12 +931,10 @@ class TestDirectoryBasedDiscovery:
 
     def test_skips_underscore_and_pycache_dirs(self, tmp_path):
         bundled = tmp_path / "bundled"
-        (bundled / "__pycache__").mkdir(parents=True)
-        (bundled / "__pycache__" / "skill.toml").write_text('description = "Should not load"\n')
-        (bundled / "_loader").mkdir(parents=True)
-        (bundled / "_loader" / "skill.toml").write_text('description = "Should not load"\n')
-        (bundled / ".hidden").mkdir(parents=True)
-        (bundled / ".hidden" / "skill.toml").write_text('description = "Should not load"\n')
+        for name in ["__pycache__", "_loader", ".hidden"]:
+            d = bundled / name
+            d.mkdir(parents=True)
+            (d / "skill.md").write_text("---\nname: bad\ndescription: Should not load\n---\n")
 
         index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
         assert "__pycache__" not in index
@@ -899,10 +943,10 @@ class TestDirectoryBasedDiscovery:
 
     def test_doc_resolution_skill_md_in_bundled(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "my_skill"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text('description = "Test"\n')
-        (skill_dir / "skill.md").write_text("Bundled doc content.")
+        _write_skill_md(bundled, "my_skill", {
+            "name": "my_skill",
+            "description": "Test",
+        }, body="\nBundled doc content.")
 
         config_skills = tmp_path / "config_skills"
         config_skills.mkdir()
@@ -913,10 +957,10 @@ class TestDirectoryBasedDiscovery:
 
     def test_doc_resolution_operator_override(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "my_skill"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text('description = "Test"\n')
-        (skill_dir / "skill.md").write_text("Bundled doc.")
+        _write_skill_md(bundled, "my_skill", {
+            "name": "my_skill",
+            "description": "Test",
+        }, body="\nBundled doc.")
 
         config_skills = tmp_path / "config_skills"
         override_doc = config_skills / "my_skill"
@@ -1003,29 +1047,22 @@ class TestRemindersSkillSelection:
 
 
 class TestSkillEnvSpecs:
-    """Tests for EnvSpec parsing from skill.toml."""
+    """Tests for EnvSpec parsing from skill.md frontmatter."""
 
     def test_multiple_env_specs(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "bookmarks"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text(
-            'description = "Bookmarks"\n'
-            'keywords = ["bookmark"]\n'
-            'resource_types = ["karakeep"]\n'
-            '\n'
-            '[[env]]\n'
-            'var = "KARAKEEP_BASE_URL"\n'
-            'from = "user_resource_config"\n'
-            'resource_type = "karakeep"\n'
-            'field = "base_url"\n'
-            '\n'
-            '[[env]]\n'
-            'var = "KARAKEEP_API_KEY"\n'
-            'from = "user_resource_config"\n'
-            'resource_type = "karakeep"\n'
-            'field = "api_key"\n'
-        )
+        _write_skill_md(bundled, "bookmarks", {
+            "name": "bookmarks",
+            "description": "Bookmarks",
+            "triggers": ["bookmark"],
+            "resource_types": ["karakeep"],
+            "env": [
+                {"var": "KARAKEEP_BASE_URL", "from": "user_resource_config",
+                 "resource_type": "karakeep", "field": "base_url"},
+                {"var": "KARAKEEP_API_KEY", "from": "user_resource_config",
+                 "resource_type": "karakeep", "field": "api_key"},
+            ],
+        })
         index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
         meta = index["bookmarks"]
         assert len(meta.env_specs) == 2
@@ -1034,17 +1071,14 @@ class TestSkillEnvSpecs:
 
     def test_config_source_with_guard(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "browse"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text(
-            'description = "Browser"\n'
-            '\n'
-            '[[env]]\n'
-            'var = "BROWSER_API_URL"\n'
-            'from = "config"\n'
-            'config_path = "browser.api_url"\n'
-            'when = "browser.enabled"\n'
-        )
+        _write_skill_md(bundled, "browse", {
+            "name": "browse",
+            "description": "Browser",
+            "env": [
+                {"var": "BROWSER_API_URL", "from": "config",
+                 "config_path": "browser.api_url", "when": "browser.enabled"},
+            ],
+        })
         index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
         spec = index["browse"].env_specs[0]
         assert spec.source == "config"
@@ -1053,9 +1087,10 @@ class TestSkillEnvSpecs:
 
     def test_no_env_specs_defaults_empty(self, tmp_path):
         bundled = tmp_path / "bundled"
-        skill_dir = bundled / "simple"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "skill.toml").write_text('description = "No env"\n')
+        _write_skill_md(bundled, "simple", {
+            "name": "simple",
+            "description": "No env",
+        })
         index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
         assert index["simple"].env_specs == []
 
@@ -1135,3 +1170,70 @@ class TestDependencyBasedSkillExclusion:
         }
         selected = select_skills("anything", "talk", set(), index)
         assert "broken" not in selected
+
+
+class TestParseFrontmatter:
+    """Tests for YAML frontmatter parsing."""
+
+    def test_basic_fields(self, tmp_path):
+        md = tmp_path / "skill.md"
+        md.write_text("---\nname: test\ndescription: A test skill\n---\nBody.\n")
+        result = _parse_frontmatter(md)
+        assert result == {"name": "test", "description": "A test skill"}
+
+    def test_inline_list(self, tmp_path):
+        md = tmp_path / "skill.md"
+        md.write_text("---\ntriggers: [foo, bar, baz]\n---\n")
+        result = _parse_frontmatter(md)
+        assert result["triggers"] == ["foo", "bar", "baz"]
+
+    def test_empty_list(self, tmp_path):
+        md = tmp_path / "skill.md"
+        md.write_text("---\ntriggers: []\n---\n")
+        result = _parse_frontmatter(md)
+        assert result["triggers"] == []
+
+    def test_boolean_true(self, tmp_path):
+        md = tmp_path / "skill.md"
+        md.write_text("---\nalways_include: true\n---\n")
+        result = _parse_frontmatter(md)
+        assert result["always_include"] is True
+
+    def test_boolean_false(self, tmp_path):
+        md = tmp_path / "skill.md"
+        md.write_text("---\ncli: false\n---\n")
+        result = _parse_frontmatter(md)
+        assert result["cli"] is False
+
+    def test_boolean_case_insensitive(self, tmp_path):
+        md = tmp_path / "skill.md"
+        md.write_text("---\nalways_include: True\ncli: FALSE\n---\n")
+        result = _parse_frontmatter(md)
+        assert result["always_include"] is True
+        assert result["cli"] is False
+
+    def test_json_env_specs(self, tmp_path):
+        md = tmp_path / "skill.md"
+        env = [{"var": "X", "from": "config", "config_path": "a.b"}]
+        md.write_text(f'---\nenv: {json.dumps(env)}\n---\n')
+        result = _parse_frontmatter(md)
+        assert result["env"] == env
+
+    def test_no_frontmatter(self, tmp_path):
+        md = tmp_path / "skill.md"
+        md.write_text("Just body content.\n")
+        assert _parse_frontmatter(md) is None
+
+    def test_missing_file(self, tmp_path):
+        assert _parse_frontmatter(tmp_path / "missing.md") is None
+
+    def test_empty_frontmatter(self, tmp_path):
+        md = tmp_path / "skill.md"
+        md.write_text("---\n---\nBody.\n")
+        assert _parse_frontmatter(md) is None
+
+    def test_comments_ignored(self, tmp_path):
+        md = tmp_path / "skill.md"
+        md.write_text("---\n# comment\nname: test\n---\n")
+        result = _parse_frontmatter(md)
+        assert result == {"name": "test"}

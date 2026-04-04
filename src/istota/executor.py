@@ -2213,7 +2213,7 @@ def execute_task(
                 env["WEBSITE_PATH"] = str(site_dir)
                 env["WEBSITE_URL"] = f"https://{config.site.hostname}/~{task.user_id}"
 
-        # Declarative env vars from skill.toml manifests
+        # Declarative env vars from skill manifests
         from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
         env_ctx = EnvContext(
             config=config,

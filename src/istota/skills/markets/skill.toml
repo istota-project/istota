@@ -1,3 +1,0 @@
-source_types = ["briefing"]
-dependencies = ["yfinance"]
-cli = true

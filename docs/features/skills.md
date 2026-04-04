@@ -1,6 +1,6 @@
 # Skills
 
-Skills are self-contained directories under `src/istota/skills/`, each with a `skill.toml` manifest and `skill.md` documentation file. They provide reference docs loaded into the prompt so Claude knows how to use available tools and CLIs. Some skills also contain Python CLI modules.
+Skills are self-contained directories under `src/istota/skills/`, each with a `skill.md` file containing YAML frontmatter for metadata and a markdown body for documentation. They provide reference docs loaded into the prompt so Claude knows how to use available tools and CLIs. Some skills also contain Python CLI modules.
 
 ## How skills work
 
@@ -40,42 +40,33 @@ Each skill directory contains:
 
 ```
 src/istota/skills/calendar/
-├── skill.toml     # Manifest (required)
-├── skill.md       # Documentation for Claude (required)
+├── skill.md       # Frontmatter metadata + documentation (required)
 ├── __init__.py    # CLI module (optional)
 └── __main__.py    # python -m support (optional)
 ```
 
-### skill.toml
+### skill.md
 
-```toml
-[skill]
-description = "CalDAV calendar operations"
-keywords = ["calendar", "event", "meeting", "schedule"]
-resource_types = ["calendar"]
-source_types = ["briefing"]
-cli = true
-
-[[env]]
-name = "CALDAV_URL"
-source = "config"
-path = "caldav_url"
-```
-
-### skill.md frontmatter
+All metadata lives in the YAML frontmatter. The markdown body is the documentation loaded into Claude's prompt.
 
 ```yaml
 ---
-name: Calendar
-triggers:
-  - calendar
-  - event
-  - meeting
-description: Read, create, update, and delete calendar events via CalDAV
+name: calendar
+triggers: [calendar, event, meeting, schedule, appointment, caldav]
+description: Calendar operations with CalDAV
+cli: true
+source_types: [briefing]
+dependencies: [caldav, icalendar]
 ---
+
+# Calendar Operations
+
+Calendar operations use CalDAV...
 ```
 
-Frontmatter `triggers` overrides `skill.toml` `keywords`. Frontmatter `description` overrides `skill.toml` `description`.
+Supported frontmatter fields: `name`, `triggers`, `description`, `always_include`, `admin_only`, `cli`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_memory`, `exclude_persona`, `exclude_resources`, `env` (JSON-encoded array of env spec objects).
+
+Operator overrides in `config/skills/` can still use `skill.toml` for backward compatibility.
 
 ## Skill CLIs
 

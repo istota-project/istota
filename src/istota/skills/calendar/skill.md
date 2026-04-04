@@ -2,6 +2,9 @@
 name: calendar
 triggers: [calendar,  cal , event, meeting, schedule, appointment, caldav]
 description: Calendar operations with CalDAV
+cli: true
+source_types: [briefing]
+dependencies: [caldav, icalendar]
 ---
 # Calendar Operations
 

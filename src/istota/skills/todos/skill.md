@@ -2,6 +2,7 @@
 name: todos
 triggers: [todo, task, checklist, reminder, done, complete]
 description: TODO file format and operations
+resource_types: [todo_file]
 ---
 TODO files are plain text with a simple format. Each line is a task:
 

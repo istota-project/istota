@@ -1,6 +1,8 @@
 ---
 name: memory_search
 description: Search past conversations and memory files
+always_include: true
+cli: true
 ---
 # Memory Search
 

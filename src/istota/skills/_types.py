@@ -7,8 +7,9 @@ from dataclasses import dataclass, field
 class EnvSpec:
     """Declarative env var wiring specification.
 
-    Defined in skill.toml [[env]] sections. Each spec describes how to
-    resolve one environment variable for the Claude subprocess.
+    Defined in skill.md frontmatter as a JSON-encoded ``env`` list.
+    Each spec describes how to resolve one environment variable for
+    the Claude subprocess.
     """
 
     var: str
@@ -27,7 +28,7 @@ class EnvSpec:
 
 @dataclass
 class SkillMeta:
-    """Metadata for a skill, loaded from skill.toml or _index.toml."""
+    """Metadata for a skill, loaded from skill.md frontmatter (or legacy _index.toml)."""
 
     name: str
     description: str

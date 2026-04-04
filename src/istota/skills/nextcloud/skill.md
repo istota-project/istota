@@ -2,6 +2,7 @@
 name: nextcloud
 triggers: [share, sharing, shared, public link, unshare, nextcloud, permission, access]
 description: Nextcloud OCS API (sharing, user lookup)
+cli: true
 ---
 Nextcloud OCS API for sharing and user lookup. Use the CLI tool for all sharing operations:
 
