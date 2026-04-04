@@ -2013,9 +2013,7 @@ def execute_task(
             env["SMTP_PORT"] = str(config.email.smtp_port)
             env["SMTP_USER"] = config.email.effective_smtp_user
             env["SMTP_PASSWORD"] = config.email.effective_smtp_password
-            # Per-user plus-addressed From so replies route back correctly
-            bot_local, bot_domain = config.email.bot_email.split("@", 1)
-            env["SMTP_FROM"] = f"{bot_local}+{task.user_id}@{bot_domain}"
+            env["SMTP_FROM"] = config.email.bot_email
             env["IMAP_HOST"] = config.email.imap_host
             env["IMAP_PORT"] = str(config.email.imap_port)
             env["IMAP_USER"] = config.email.imap_user

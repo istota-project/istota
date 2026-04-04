@@ -3365,8 +3365,8 @@ class TestPerUserEmailInPrompt:
 # =============================================================================
 
 
-class TestSmtpFromPlusAddress:
-    """Verify SMTP_FROM uses plus-addressed email per user."""
+class TestSmtpFrom:
+    """Verify SMTP_FROM uses plain bot email (not plus-addressed)."""
 
     def _make_config(self, tmp_path):
         db_path = tmp_path / "test.db"
@@ -3393,7 +3393,8 @@ class TestSmtpFromPlusAddress:
         return db.get_task(conn, task_id)
 
     @patch("istota.executor.subprocess.run")
-    def test_smtp_from_uses_plus_address(self, mock_run, tmp_path):
+    def test_smtp_from_uses_plain_bot_email(self, mock_run, tmp_path):
+        """SMTP_FROM should be the plain bot email; plus-addressing is for inbound only."""
         config = self._make_config(tmp_path)
         (tmp_path / "temp" / "stefan").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -3405,4 +3406,4 @@ class TestSmtpFromPlusAddress:
 
         call_args = mock_run.call_args
         env = call_args[1]["env"]
-        assert env["SMTP_FROM"] == "zorg+stefan@x.cynium.com"
+        assert env["SMTP_FROM"] == "zorg@x.cynium.com"
