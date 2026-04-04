@@ -1,3 +1,7 @@
+---
+name: sensitive_actions
+description: Actions requiring user confirmation
+---
 For these actions, output a clear confirmation request instead of executing immediately:
 - Sending emails to **external addresses** (addresses not in the user's configured email_addresses list)
 - Deleting files

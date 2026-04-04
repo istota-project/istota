@@ -1,3 +1,8 @@
+---
+name: whisper
+triggers: [transcribe, whisper, audio, voice, speech, dictation, recording, voice memo]
+description: Local audio transcription using faster-whisper (CPU, int8)
+---
 # Audio Transcription with Whisper
 
 Transcribe audio files locally using faster-whisper (CPU, int8 quantization). Supports all common audio formats (wav, mp3, m4a, flac, ogg, webm).

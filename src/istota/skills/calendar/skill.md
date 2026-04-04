@@ -1,3 +1,8 @@
+---
+name: calendar
+triggers: [calendar,  cal , event, meeting, schedule, appointment, caldav]
+description: Calendar operations with CalDAV
+---
 # Calendar Operations
 
 Calendar operations use CalDAV. Credentials are available via environment variables:

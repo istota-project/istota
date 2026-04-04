@@ -1,3 +1,1 @@
-description = "SQLite subtask creation"
-keywords = ["subtask", "queue", "background", "later"]
 admin_only = true

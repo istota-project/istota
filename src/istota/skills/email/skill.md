@@ -1,3 +1,8 @@
+---
+name: email
+triggers: [email, mail, send, inbox, reply, message]
+description: Email sending and response formatting
+---
 ## Which command to use: `send` vs `output`
 
 - **`send`** — sends the email immediately via SMTP. Use this when **you** need to send an email (the user asked you to email someone, compose a message, etc.). This is the default — if in doubt, use `send`.

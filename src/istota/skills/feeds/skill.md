@@ -1,3 +1,8 @@
+---
+name: feeds
+triggers: [feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe]
+description: RSS feed management via Miniflux
+---
 # Feeds (Miniflux RSS)
 
 Manage RSS feed subscriptions via Miniflux. Supports listing, adding, and removing feeds, browsing entries, and triggering refreshes.

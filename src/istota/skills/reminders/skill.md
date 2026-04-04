@@ -1,3 +1,8 @@
+---
+name: reminders
+triggers: [remind, reminder, reminders, remind me, alert me, notify me, don't forget, don't let me forget, in an hour, in 30 minutes, at 3pm, tomorrow morning]
+description: Set and manage time-based reminders via CRON.md
+---
 Reminders are one-shot scheduled jobs in CRON.md. There is no separate reminder system — you MUST write an entry to CRON.md for the reminder to actually fire. Saying "I'll remind you" without writing the file does nothing.
 
 ## Setting a reminder

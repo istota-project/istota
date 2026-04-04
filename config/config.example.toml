@@ -218,6 +218,18 @@ sources = [
 sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 
 # ============================================================================
+# Skills (routing configuration)
+# ============================================================================
+# Controls how skills are selected for each task. Pass 1 is keyword matching
+# (always on). Pass 2 is an LLM-based classification that catches implied
+# skill needs that keywords miss (e.g., "fix the bug" implies developer skill).
+
+# [skills]
+# semantic_routing = true              # enable LLM-based Pass 2 skill classification
+# semantic_routing_model = "haiku"     # model for classification (fast, cheap)
+# semantic_routing_timeout = 3.0       # seconds, falls back to Pass 1 on timeout
+
+# ============================================================================
 # Sleep Cycle (nightly memory extraction)
 # ============================================================================
 # Extracts long-term memories from completed tasks for each user nightly.

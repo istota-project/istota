@@ -298,6 +298,14 @@ class SecurityConfig:
 
 
 @dataclass
+class SkillsConfig:
+    """Skill routing configuration."""
+    semantic_routing: bool = True  # enable LLM-based Pass 2 skill classification
+    semantic_routing_model: str = "haiku"  # model for classification
+    semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
+
+
+@dataclass
 class BriefingDefaultsConfig:
     """Admin-level defaults for briefing components (expanded when user sets boolean)."""
     markets: dict = field(default_factory=dict)
@@ -321,6 +329,7 @@ class Config:
     ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefing_defaults: BriefingDefaultsConfig = field(default_factory=BriefingDefaultsConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
     sleep_cycle: SleepCycleConfig = field(default_factory=SleepCycleConfig)
     channel_sleep_cycle: ChannelSleepCycleConfig = field(default_factory=ChannelSleepCycleConfig)
@@ -784,6 +793,14 @@ def load_config(config_path: Path | None = None) -> Config:
             username=n.get("username", ""),
             password=n.get("password", ""),
             priority=n.get("priority", 3),
+        )
+
+    if "skills" in data:
+        sk = data["skills"]
+        config.skills = SkillsConfig(
+            semantic_routing=sk.get("semantic_routing", True),
+            semantic_routing_model=sk.get("semantic_routing_model", "haiku"),
+            semantic_routing_timeout=sk.get("semantic_routing_timeout", 3.0),
         )
 
     if "briefing_defaults" in data:

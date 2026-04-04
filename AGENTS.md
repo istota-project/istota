@@ -167,7 +167,11 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 - Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no
 
 ### Skills
-Self-contained directories under `src/istota/skills/`, each with `skill.toml` manifest and `skill.md` doc. Selection based on: `always_include`, `source_types`, `keywords` (if skill also has `resource_types`, requires both keyword match + user has resource), `file_types`, `companion_skills`. Skills can exclude other skills via `exclude_skills` (e.g., briefing excludes email to prevent delivery interference). Skills can also be excluded via `disabled_skills` at instance level (top-level config) and per-user level (user config), both merged at selection time.
+Self-contained directories under `src/istota/skills/`, each with `skill.toml` manifest and `skill.md` doc. Routing metadata (`triggers`, `description`) lives in YAML frontmatter of `skill.md`; structural config (`resource_types`, `companion_skills`, `env`, etc.) stays in `skill.toml`. Frontmatter overrides `skill.toml` for routing fields.
+
+**Two-pass selection:** Pass 1 is keyword matching (deterministic, zero-cost): `always_include`, `source_types`, `triggers`/`keywords` (if skill also has `resource_types`, requires both keyword match + user has resource), `file_types`, `companion_skills`. Pass 2 is LLM-based semantic routing (Haiku, ~500ms, ~$0.0003/task): sees the task prompt + a manifest of unselected skills, returns additional skills to load. Results are unioned. Pass 2 is additive — on timeout/error, falls back to Pass 1 only. Config: `[skills]` section.
+
+Skills can exclude other skills via `exclude_skills` (e.g., briefing excludes email to prevent delivery interference). Skills can also be excluded via `disabled_skills` at instance level (top-level config) and per-user level (user config), both merged at selection time.
 
 Audio attachments pre-transcribed before skill selection so keyword matching works on voice memos.
 

@@ -1,3 +1,8 @@
+---
+name: developer
+triggers: [git, gitlab, github, repo, repository, commit, branch, merge request, MR, pull request, PR, code review, develop, worktree, clone]
+description: Git repository management, GitLab merge requests, and GitHub pull requests
+---
 # Developer Skill — Git, GitLab & GitHub Workflows
 
 Work in git repositories, manage merge requests on GitLab and pull requests on GitHub. Uses bare clones + git worktrees for branch isolation.

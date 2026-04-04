@@ -27,14 +27,18 @@ class SkillMeta:
 
 ### Functions
 ```python
-load_skill_index(skills_dir: Path) -> dict[str, SkillMeta]       # Load skill.toml manifests
+load_skill_index(skills_dir: Path) -> dict[str, SkillMeta]       # Load skill.toml manifests + frontmatter
 select_skills(prompt, source_type, user_resource_types, skill_index, is_admin=True, attachments=None, disabled_skills=None) -> list[str]
-compute_skills_fingerprint(skills_dir: Path) -> str               # L92-105: SHA-256, first 12 hex chars
-load_skills_changelog(skills_dir: Path) -> str | None             # L108-114: CHANGELOG.md
-load_skills(skills_dir: Path, skill_names: list[str]) -> str      # L117-130: Concatenate skill docs
+classify_skills(prompt, skill_index, already_selected, model="haiku", timeout=3.0) -> list[str]  # Pass 2 LLM classification
+build_skill_manifest(skill_index, exclude) -> str                 # Manifest for LLM classification
+compute_skills_fingerprint(skills_dir: Path) -> str               # SHA-256, first 12 hex chars
+load_skills_changelog(skills_dir: Path) -> str | None             # CHANGELOG.md
+load_skills(skills_dir: Path, skill_names: list[str]) -> str      # Concatenate skill docs (strips frontmatter)
 ```
 
-### Selection Logic (`select_skills`)
+### Two-Pass Skill Selection
+
+**Pass 1: Keyword matching** (`select_skills`) — fast, deterministic, zero-cost.
 Skills with `admin_only=True` are skipped when `is_admin=False`.
 Skills with unmet `dependencies` (missing Python packages) are skipped via `_check_dependencies()`.
 Skills listed in `disabled_skills` (instance-level or per-user) are excluded.
@@ -49,7 +53,19 @@ A skill is selected if ANY of these match:
 
 **Pre-transcription**: Before skill selection, `_pre_transcribe_attachments()` in executor.py transcribes audio attachments and enriches `task.prompt` with the spoken text. This allows keyword-based skills to match on voice memo content.
 
+**Pass 2: Semantic routing** (`classify_skills`) — LLM-based, additive to Pass 1.
+When `config.skills.semantic_routing` is enabled (default: true), a Haiku call sees the task prompt + a manifest of unselected skills and returns additional skills to load. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only.
+
+Config: `[skills]` section — `semantic_routing` (bool), `semantic_routing_model` (str), `semantic_routing_timeout` (float).
+
 Returns sorted list of skill names.
+
+### Skill Metadata (two sources, merged)
+Each skill has routing metadata in YAML frontmatter (`skill.md`) and structural config in `skill.toml`:
+- **Frontmatter** (`skill.md`): `name`, `triggers` (keyword list), `description` (for LLM routing manifest)
+- **skill.toml**: `always_include`, `admin_only`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `env`, `cli`, etc.
+
+Frontmatter `triggers` overrides `skill.toml` `keywords`; frontmatter `description` overrides `skill.toml` `description`. If no frontmatter, falls back to `skill.toml` values.
 
 ### Skill Discovery (three layers, merged)
 1. Bundled `skill.toml` directories in `src/istota/skills/*/`

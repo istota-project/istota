@@ -1,3 +1,7 @@
+---
+name: scripts
+description: Reusable script creation and management
+---
 You can create and maintain reusable Python scripts in the user's persistent scripts directory on Nextcloud.
 
 ### Scripts Directory

@@ -87,6 +87,13 @@ passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 network: NetworkConfig = NetworkConfig()
 ```
 
+### `SkillsConfig`
+```
+semantic_routing: bool = True          # enable LLM-based Pass 2 skill classification
+semantic_routing_model: str = "haiku"  # model for classification
+semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
+```
+
 ### `BriefingConfig`
 ```
 name: str                    cron: str                   conversation_token: str = ""
@@ -148,7 +155,8 @@ nextcloud: NextcloudConfig          talk: TalkConfig
 email: EmailConfig                  conversation: ConversationConfig
 scheduler: SchedulerConfig          browser: BrowserConfig
 ntfy: NtfyConfig                    logging: LoggingConfig
-briefing_defaults: BriefingDefaultsConfig   security: SecurityConfig
+briefing_defaults: BriefingDefaultsConfig   skills: SkillsConfig
+security: SecurityConfig
 memory_search: MemorySearchConfig   sleep_cycle: SleepCycleConfig
 channel_sleep_cycle: ChannelSleepCycleConfig
 developer: DeveloperConfig          site: SiteConfig

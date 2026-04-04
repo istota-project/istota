@@ -1,3 +1,8 @@
+---
+name: bookmarks
+triggers: [bookmark, bookmarks, karakeep, saved, reading list, favourited, favorite]
+description: Karakeep bookmark search, browsing, and management
+---
 # Karakeep Bookmarks
 
 Search, browse, and manage bookmarks from the user's Karakeep vault.

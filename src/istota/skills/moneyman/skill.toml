@@ -1,5 +1,3 @@
-description = "Accounting operations via Moneyman service (ledger, invoicing, transactions, work log)"
-keywords = ["accounting", "ledger", "beancount", "invoice", "invoicing", "expense", "transaction", "balance", "tax", "wash sale", "bookkeeping", "finances", "billing", "receivable", "work log", "work entry", "monarch", "sync-monarch", "moneyman"]
 resource_types = ["moneyman"]
 cli = true
 
