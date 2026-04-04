@@ -42,19 +42,22 @@
 
 	let places = $derived($locationPlaces);
 
-	const today = new Date().toISOString().slice(0, 10);
+	function localDate(d: Date = new Date()): string {
+		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+	}
+	const today = localDate();
 	let isSingleDay = $derived(startStr === endStr);
 
 	function yesterday(): string {
 		const d = new Date();
 		d.setDate(d.getDate() - 1);
-		return d.toISOString().slice(0, 10);
+		return localDate(d);
 	}
 
 	function thisWeekStart(): string {
 		const d = new Date();
 		d.setDate(d.getDate() - d.getDay());
-		return d.toISOString().slice(0, 10);
+		return localDate(d);
 	}
 
 	function thisMonthStart(): string {
