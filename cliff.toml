@@ -1,0 +1,33 @@
+# git-cliff configuration
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+header = ""
+body = """
+{%- for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{%- for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | trim }}\
+{%- endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = false
+split_commits = false
+commit_parsers = [
+    { message = "^[Aa]dd ", group = "Features" },
+    { message = "^[Ii]mplement", group = "Features" },
+    { message = "^[Ii]ntroduce", group = "Features" },
+    { message = "^[Ff]ix", group = "Bug fixes" },
+    { message = "^[Rr]emove", group = "Removed" },
+    { message = "^[Dd]elete", group = "Removed" },
+    { message = "^[Uu]pdate", group = "Changes" },
+    { message = "^[Rr]efactor", group = "Changes" },
+    { message = "^[Rr]eplace", group = "Changes" },
+    { message = "^[Mm]ove", group = "Changes" },
+    { message = "^[Rr]ename", group = "Changes" },
+    { message = "^[Mm]erge", skip = true },
+    { message = ".*", group = "Other" },
+]
