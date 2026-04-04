@@ -1605,13 +1605,19 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     if task.is_group_chat:
         group_chat_line = f"\nThis is a group conversation. You were @mentioned by '{task.user_id}'. Other participants' messages are visible in conversation context below."
 
+    # Per-user plus-addressed email line
+    per_user_email_line = ""
+    if config.email.enabled and config.email.bot_email and "@" in config.email.bot_email:
+        local, domain = config.email.bot_email.split("@", 1)
+        per_user_email_line = f"\nPer-user email: {local}+{task.user_id}@{domain}"
+
     prompt = f"""You are {config.bot_name}, a helpful assistant bot. You are responding to a request from user '{task.user_id}'.
 
 Current time: {user_time_str}
 Current task ID: {task.id}
 Conversation token: {task.conversation_token or 'none'}{group_chat_line}
 Source: {source_type or task.source_type or 'unknown'}
-Output target: {output_target or 'text'}
+Output target: {output_target or 'text'}{per_user_email_line}
 {db_path_line}
 {emissaries_section}{persona_section}
 ## User's accessible resources
@@ -1982,7 +1988,9 @@ def execute_task(
             env["SMTP_PORT"] = str(config.email.smtp_port)
             env["SMTP_USER"] = config.email.effective_smtp_user
             env["SMTP_PASSWORD"] = config.email.effective_smtp_password
-            env["SMTP_FROM"] = config.email.bot_email
+            # Per-user plus-addressed From so replies route back correctly
+            bot_local, bot_domain = config.email.bot_email.split("@", 1)
+            env["SMTP_FROM"] = f"{bot_local}+{task.user_id}@{bot_domain}"
             env["IMAP_HOST"] = config.email.imap_host
             env["IMAP_PORT"] = str(config.email.imap_port)
             env["IMAP_USER"] = config.email.imap_user

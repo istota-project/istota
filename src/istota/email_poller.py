@@ -20,6 +20,36 @@ from .storage import ensure_user_directories_v2, upload_file_to_inbox_v2
 logger = logging.getLogger("istota.email_poller")
 
 
+def _extract_user_from_recipient(config: Config, email) -> str | None:
+    """Extract user_id from plus-addressed recipient.
+
+    Checks To and Cc headers for bot+{user_id}@domain pattern.
+    Returns user_id if found and valid, None otherwise.
+    """
+    if not config.email.bot_email or "@" not in config.email.bot_email:
+        return None
+
+    bot_local, bot_domain = config.email.bot_email.split("@", 1)
+
+    pattern = re.compile(
+        rf"^{re.escape(bot_local)}\+(.+)@{re.escape(bot_domain)}$",
+        re.IGNORECASE,
+    )
+
+    for addr in list(getattr(email, "to", ())) + list(getattr(email, "cc", ())):
+        match = pattern.match(addr)
+        if match:
+            candidate = match.group(1).lower()
+            if candidate in config.users:
+                return candidate
+            else:
+                logger.warning(
+                    "Plus-address user '%s' not found in config (from %s)",
+                    candidate, addr,
+                )
+    return None
+
+
 def _match_thread(conn, email) -> db.SentEmail | None:
     """Check if an inbound email is a reply to one of our sent emails.
 
@@ -128,52 +158,54 @@ def poll_emails(config: Config) -> list[int]:
                     )
                     continue
 
-            # Find user by sender email
-            user_id = config.find_user_by_email(envelope.sender)
+            # Read full email for routing (need To/Cc for plus-address check)
+            try:
+                email = read_email(
+                    envelope.id,
+                    folder=config.email.poll_folder,
+                    config=email_config,
+                    envelope=envelope,
+                )
+            except Exception as e:
+                logger.error("Error reading email %s: %s", envelope.id, e)
+                continue
 
-            # For unknown senders, check if this is a reply to a thread we initiated
+            # Route: plus-address → sender → thread → discard
+            routing_method = None
             sent_email_match = None
-            if not user_id:
-                try:
-                    email = read_email(
-                        envelope.id,
-                        folder=config.email.poll_folder,
-                        config=email_config,
-                        envelope=envelope,
-                    )
-                    sent_email_match = _match_thread(conn, email)
-                except Exception as e:
-                    logger.error("Error reading email %s for thread matching: %s", envelope.id, e)
 
+            # 1. Check recipient plus-address
+            user_id = _extract_user_from_recipient(config, email)
+            if user_id:
+                routing_method = "plus_address"
+
+            # 2. Sender match
+            if not user_id:
+                user_id = config.find_user_by_email(envelope.sender)
+                if user_id:
+                    routing_method = "sender_match"
+
+            # 3. Thread match
+            if not user_id:
+                sent_email_match = _match_thread(conn, email)
                 if sent_email_match:
-                    # Route to the user who initiated the thread
                     user_id = sent_email_match.user_id
+                    routing_method = "thread_match"
                     logger.info(
                         "Thread match: email from %s is a reply to sent email %s (user %s)",
                         envelope.sender, sent_email_match.message_id, user_id,
                     )
-                else:
-                    # Unknown sender, not a reply to our thread — discard
-                    db.mark_email_processed(
-                        conn,
-                        email_id=envelope.id,
-                        sender_email=envelope.sender,
-                        subject=envelope.subject,
-                    )
-                    continue
 
-            # Read full email content (if not already read during thread matching)
-            if sent_email_match is None:
-                try:
-                    email = read_email(
-                        envelope.id,
-                        folder=config.email.poll_folder,
-                        config=email_config,
-                        envelope=envelope,
-                    )
-                except Exception as e:
-                    logger.error("Error reading email %s: %s", envelope.id, e)
-                    continue
+            # 4. Discard — no route found
+            if not user_id:
+                db.mark_email_processed(
+                    conn,
+                    email_id=envelope.id,
+                    sender_email=envelope.sender,
+                    subject=envelope.subject,
+                    routing_method="discarded",
+                )
+                continue
 
             # Download attachments directly to target directory
             attachment_id = uuid.uuid4().hex[:8]
@@ -270,6 +302,7 @@ Date: {email.date}
                 references=email.references,
                 user_id=user_id,
                 task_id=task_id,
+                routing_method=routing_method,
             )
 
             created_tasks.append(task_id)

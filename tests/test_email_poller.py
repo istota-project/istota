@@ -10,6 +10,7 @@ import pytest
 from istota import db
 from istota.config import Config, EmailConfig as AppEmailConfig, UserConfig
 from istota.email_poller import (
+    _extract_user_from_recipient,
     cleanup_old_emails,
     compute_thread_id,
     get_email_config,
@@ -61,12 +62,14 @@ def _envelope(id="1", subject="Hello", sender="alice@test.com", date="Mon, 01 Ja
     return EmailEnvelope(id=id, subject=subject, sender=sender, date=date, is_read=False)
 
 
-def _email(id="1", subject="Hello", sender="alice@test.com", body="Hi there"):
+def _email(id="1", subject="Hello", sender="alice@test.com", body="Hi there",
+           to=("bot@test.com",), cc=()):
     return Email(
         id=id, subject=subject, sender=sender,
         date="Mon, 01 Jan 2026 10:00:00 +0000",
         body=body, attachments=[],
         message_id="<msg1@test.com>", references=None,
+        to=to, cc=cc,
     )
 
 
@@ -201,8 +204,12 @@ class TestPollEmails:
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         envelope = _envelope(sender="stranger@unknown.com")
+        email = _email(sender="stranger@unknown.com")
 
-        with patch("istota.email_poller.list_emails", return_value=[envelope]):
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+        ):
             task_ids = poll_emails(config)
 
         assert task_ids == []
@@ -528,6 +535,7 @@ class TestPollEmailsThreadMatching:
             body="How about Tuesday?", attachments=[],
             message_id="<reply@proton.me>",
             references="<outbound@bot.com>",
+            to=("bot@test.com",), cc=(),
         )
 
         with (
@@ -561,6 +569,7 @@ class TestPollEmailsThreadMatching:
             body="Spam", attachments=[],
             message_id="<spam@random.com>",
             references=None,
+            to=("bot@test.com",), cc=(),
         )
 
         with (
@@ -623,6 +632,7 @@ class TestPollEmailsThreadMatching:
             body="Hi back", attachments=[],
             message_id="<r@x.com>",
             references="<out@bot.com>",
+            to=("bot@test.com",), cc=(),
         )
 
         with (
@@ -640,3 +650,278 @@ class TestPollEmailsThreadMatching:
             assert task.output_target == "talk"
             # Should use thread_id since no conversation_token on sent email
             assert task.conversation_token is not None
+
+
+# =============================================================================
+# TestExtractUserFromRecipient
+# =============================================================================
+
+
+class TestExtractUserFromRecipient:
+    """Tests for plus-address routing via recipient headers."""
+
+    def _config_with_users(self):
+        config = Config()
+        config.email = _email_config()  # bot_email = "bot@test.com"
+        config.users = {
+            "stefan": UserConfig(email_addresses=["stefan@example.com"]),
+            "alice": UserConfig(email_addresses=["alice@example.com"]),
+        }
+        return config
+
+    def test_extracts_user_from_to_header(self):
+        config = self._config_with_users()
+        email = _email(to=("bot+stefan@test.com",))
+        assert _extract_user_from_recipient(config, email) == "stefan"
+
+    def test_extracts_user_from_cc_header(self):
+        config = self._config_with_users()
+        email = _email(to=("someone@other.com",), cc=("bot+alice@test.com",))
+        assert _extract_user_from_recipient(config, email) == "alice"
+
+    def test_returns_none_for_bare_bot_address(self):
+        config = self._config_with_users()
+        email = _email(to=("bot@test.com",))
+        assert _extract_user_from_recipient(config, email) is None
+
+    def test_returns_none_for_invalid_user(self):
+        config = self._config_with_users()
+        email = _email(to=("bot+nonexistent@test.com",))
+        assert _extract_user_from_recipient(config, email) is None
+
+    def test_case_insensitive_matching(self):
+        config = self._config_with_users()
+        email = _email(to=("BOT+Stefan@Test.Com",))
+        assert _extract_user_from_recipient(config, email) == "stefan"
+
+    def test_ignores_different_domain(self):
+        config = self._config_with_users()
+        email = _email(to=("bot+stefan@other-domain.com",))
+        assert _extract_user_from_recipient(config, email) is None
+
+    def test_returns_none_when_no_recipients(self):
+        config = self._config_with_users()
+        email = _email(to=(), cc=())
+        assert _extract_user_from_recipient(config, email) is None
+
+    def test_first_valid_match_wins(self):
+        """If both To and Cc have plus-addresses, To wins."""
+        config = self._config_with_users()
+        email = _email(to=("bot+stefan@test.com",), cc=("bot+alice@test.com",))
+        assert _extract_user_from_recipient(config, email) == "stefan"
+
+
+# =============================================================================
+# TestPollEmailsPlusAddressRouting
+# =============================================================================
+
+
+class TestPollEmailsPlusAddressRouting:
+    """Tests for plus-address routing in the poll loop."""
+
+    def test_plus_address_routes_unknown_sender(self, make_config):
+        """Unknown sender emailing bot+stefan@ should route to stefan."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(email_addresses=["stefan@test.com"])}
+
+        envelope = _envelope(id="10", sender="stranger@external.com", subject="Hello agent")
+        email = Email(
+            id="10", subject="Hello agent", sender="stranger@external.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Can you help me?", attachments=[],
+            message_id="<ext1@external.com>", references=None,
+            to=("bot+stefan@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.user_id == "stefan"
+            assert task.source_type == "email"
+            assert "stranger@external.com" in task.prompt
+
+    def test_plus_address_takes_precedence_over_sender_match(self, make_config):
+        """If sender matches alice but To is bot+stefan@, route to stefan."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "stefan": UserConfig(email_addresses=["stefan@test.com"]),
+            "alice": UserConfig(email_addresses=["alice@test.com"]),
+        }
+
+        envelope = _envelope(id="11", sender="alice@test.com", subject="For stefan")
+        email = Email(
+            id="11", subject="For stefan", sender="alice@test.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Route this to stefan", attachments=[],
+            message_id="<a11@test.com>", references=None,
+            to=("bot+stefan@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.user_id == "stefan"  # plus-address wins over sender
+
+    def test_invalid_plus_address_falls_through_to_sender(self, make_config):
+        """Plus-address with invalid user falls through to sender-based routing."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="12", sender="alice@test.com", subject="Test")
+        email = Email(
+            id="12", subject="Test", sender="alice@test.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Hello", attachments=[],
+            message_id="<a12@test.com>", references=None,
+            to=("bot+nonexistent@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.user_id == "alice"  # fell through to sender match
+
+    def test_routing_method_stored_for_plus_address(self, make_config):
+        """routing_method should be 'plus_address' when routed via plus-addressing."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(email_addresses=["stefan@test.com"])}
+
+        envelope = _envelope(id="13", sender="stranger@ext.com", subject="Hi")
+        email = Email(
+            id="13", subject="Hi", sender="stranger@ext.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Hello", attachments=[],
+            message_id="<s13@ext.com>", references=None,
+            to=("bot+stefan@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            poll_emails(config)
+
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(
+                "SELECT routing_method FROM processed_emails WHERE email_id = ?", ("13",)
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "plus_address"
+
+    def test_routing_method_stored_for_sender_match(self, make_config):
+        """routing_method should be 'sender_match' for known sender routing."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="14", sender="alice@test.com", subject="Hi")
+        email = _email(id="14", sender="alice@test.com")
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            poll_emails(config)
+
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(
+                "SELECT routing_method FROM processed_emails WHERE email_id = ?", ("14",)
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "sender_match"
+
+    def test_routing_method_stored_for_thread_match(self, make_config):
+        """routing_method should be 'thread_match' for emissary reply routing."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(email_addresses=["stefan@test.com"])}
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<out15@bot.com>",
+                to_addr="ext@x.com",
+                subject="Hello",
+            )
+
+        envelope = _envelope(id="15", sender="ext@x.com", subject="Re: Hello")
+        email = Email(
+            id="15", subject="Re: Hello", sender="ext@x.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Reply", attachments=[],
+            message_id="<r15@x.com>",
+            references="<out15@bot.com>",
+            to=("bot@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            poll_emails(config)
+
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(
+                "SELECT routing_method FROM processed_emails WHERE email_id = ?", ("15",)
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "thread_match"
+
+    def test_routing_method_stored_for_discard(self, make_config):
+        """routing_method should be 'discarded' for unknown sender with no match."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(email_addresses=["stefan@test.com"])}
+
+        envelope = _envelope(id="16", sender="spam@nowhere.com", subject="Spam")
+        email = Email(
+            id="16", subject="Spam", sender="spam@nowhere.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Buy stuff", attachments=[],
+            message_id="<spam16@nowhere.com>", references=None,
+            to=("bot@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            poll_emails(config)
+
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(
+                "SELECT routing_method FROM processed_emails WHERE email_id = ?", ("16",)
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "discarded"

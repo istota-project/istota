@@ -201,6 +201,12 @@
 - [x] Draft + approval flow for emissary responses (confirmation context injection + stale confirmation cancellation)
 - [x] Multi-turn thread continuity (Phase 1 routing + Talk conversation context handles repeat replies naturally)
 
+### Per-User Email Ingest (Plus-Addressing) ✅
+- [x] Plus-addressed routing (`bot+user_id@domain`) as highest-priority inbound path
+- [x] Per-user `SMTP_FROM` (outbound uses `bot+user_id@domain` so replies route back)
+- [x] `routing_method` tracking in `processed_emails` (plus_address, sender_match, thread_match, discarded)
+- [x] Per-user email address exposed in prompt header
+
 ### Emissary Email Threads (Phase 3 — deferred)
 - [ ] Delegated autonomy levels: per-user `emissary_mode` config (`notify` = just surface reply, `draft` = draft + confirm, `auto` = send autonomously). Requires config schema change, prompt branching in emissary reply prompt, per-user override in user config
 - [ ] Structured email draft storage: `istota-skill email draft` command writes `task_{id}_email_draft.json` instead of relying on confirmation_prompt text. Useful if the prompt-based approach proves unreliable for preserving exact draft content across re-execution

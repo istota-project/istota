@@ -26,7 +26,7 @@ from istota.executor import (
 )
 from pathlib import Path
 
-from istota.config import Config, DeveloperConfig, NextcloudConfig, ResourceConfig, SchedulerConfig, SecurityConfig, SiteConfig, UserConfig
+from istota.config import Config, DeveloperConfig, EmailConfig as AppEmailConfig, NextcloudConfig, ResourceConfig, SchedulerConfig, SecurityConfig, SiteConfig, UserConfig
 from istota import db
 
 
@@ -3309,3 +3309,97 @@ class TestComposeFullResultCM:
         result = _compose_full_result(doubled_result, trace)
         assert result == post_cm
         assert pre_cm not in result
+
+
+# =============================================================================
+# TestPerUserEmailInPrompt
+# =============================================================================
+
+
+class TestPerUserEmailInPrompt:
+    """Verify per-user plus-addressed email appears in prompt header."""
+
+    def _make_task(self, user_id="stefan"):
+        return db.Task(
+            id=1, status="running", prompt="hello", user_id=user_id,
+            source_type="talk", conversation_token="room1",
+        )
+
+    def test_per_user_email_shown_when_email_enabled(self):
+        config = Config()
+        config.email = AppEmailConfig(
+            enabled=True,
+            imap_host="imap.test", imap_port=993,
+            imap_user="u", imap_password="p",
+            bot_email="zorg@x.cynium.com",
+        )
+        task = self._make_task(user_id="stefan")
+        result = build_prompt(task, [], config)
+        assert "zorg+stefan@x.cynium.com" in result
+
+    def test_per_user_email_not_shown_when_email_disabled(self):
+        config = Config()
+        config.email = AppEmailConfig(enabled=False)
+        task = self._make_task(user_id="stefan")
+        result = build_prompt(task, [], config)
+        assert "+stefan@" not in result
+
+    def test_per_user_email_not_shown_when_no_bot_email(self):
+        config = Config()
+        config.email = AppEmailConfig(
+            enabled=True,
+            imap_host="imap.test", imap_port=993,
+            imap_user="u", imap_password="p",
+            bot_email="",
+        )
+        task = self._make_task(user_id="stefan")
+        result = build_prompt(task, [], config)
+        assert "+stefan@" not in result
+
+
+# =============================================================================
+# TestSmtpFromPlusAddress
+# =============================================================================
+
+
+class TestSmtpFromPlusAddress:
+    """Verify SMTP_FROM uses plus-addressed email per user."""
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            email=AppEmailConfig(
+                enabled=True,
+                imap_host="imap.test", imap_port=993,
+                imap_user="u", imap_password="p",
+                smtp_host="smtp.test", smtp_port=587,
+                bot_email="zorg@x.cynium.com",
+            ),
+            security=SecurityConfig(skill_proxy_enabled=False),
+        )
+
+    def _make_task(self, conn):
+        task_id = db.create_task(conn, prompt="test", user_id="stefan", source_type="talk")
+        return db.get_task(conn, task_id)
+
+    @patch("istota.executor.subprocess.run")
+    def test_smtp_from_uses_plus_address(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "stefan").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        call_args = mock_run.call_args
+        env = call_args[1]["env"]
+        assert env["SMTP_FROM"] == "zorg+stefan@x.cynium.com"

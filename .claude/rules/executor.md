@@ -82,7 +82,7 @@ def build_prompt(
 | Nextcloud | `NEXTCLOUD_MOUNT_PATH` | `str(config.nextcloud_mount_path)` |
 | CalDAV | `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD` | `config.caldav_*` |
 | Browser | `BROWSER_API_URL`, `BROWSER_VNC_URL` | `config.browser.*` (if enabled) |
-| Email | `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM` | `config.email.*` |
+| Email | `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM` | `config.email.*` (`SMTP_FROM` is plus-addressed: `bot+user_id@domain`) |
 | Email | `IMAP_HOST/PORT/USER/PASSWORD` | `config.email.*` |
 | Ledger | `LEDGER_PATHS` | JSON array `[{"name": ..., "path": ...}]` |
 | Ledger | `LEDGER_PATH` | First ledger path (backward compat) |
