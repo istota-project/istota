@@ -1,66 +1,29 @@
 # Adding skills
 
-Skills are self-contained directories under `src/istota/skills/`. Each skill needs at minimum a `skill.toml` manifest and a `skill.md` documentation file.
+Skills are self-contained directories under `src/istota/skills/`. Each skill needs a `skill.md` file with YAML frontmatter for metadata and a markdown body for documentation.
 
 ## 1. Create the skill directory
 
 ```
 src/istota/skills/my_skill/
-├── skill.toml     # Manifest (required)
-├── skill.md       # Documentation for Claude (required)
+├── skill.md       # Frontmatter metadata + documentation (required)
 ├── __init__.py    # CLI module (optional)
 └── __main__.py    # python -m support (optional)
 ```
 
-## 2. Define the manifest
+## 2. Write skill.md with frontmatter
 
-```toml
-[skill]
-description = "What this skill does"
-keywords = ["trigger", "words"]        # Optional: prompt keywords
-resource_types = ["my_resource"]       # Optional: require user resource
-source_types = ["briefing"]            # Optional: auto-include for source type
-always_include = false                 # Default
-admin_only = false                     # Default
-dependencies = ["some-package"]        # Optional: skip if missing
-
-[[env]]                                # Optional: declarative env vars
-name = "MY_VAR"
-source = "resource"
-resource_type = "my_resource"
-field = "path"
-```
-
-### Manifest fields
-
-| Field | Purpose |
-|---|---|
-| `description` | Shown in `!skills` and LLM classification manifest |
-| `keywords` | Prompt words that trigger this skill (Pass 1) |
-| `resource_types` | Required user resources (combined with keywords) |
-| `source_types` | Auto-include for these task source types |
-| `file_types` | Auto-include for these attachment extensions |
-| `always_include` | Load for every task |
-| `admin_only` | Hidden from non-admin users |
-| `companion_skills` | Pull in these skills when this one is selected |
-| `exclude_skills` | Remove these skills when this one is selected |
-| `dependencies` | Python packages required (skip skill if missing) |
-| `cli` | Whether this skill has a CLI module |
-| `exclude_memory` | Skip memory loading for tasks using this skill |
-| `exclude_persona` | Skip persona loading |
-| `exclude_resources` | Resource types to hide from prompt |
-
-## 3. Write the documentation
-
-`skill.md` is what Claude sees. It should explain how to use the skill's tools and CLIs. Optional YAML frontmatter overrides routing metadata:
+All metadata lives in the YAML frontmatter block. The markdown body is the documentation loaded into Claude's prompt.
 
 ```yaml
 ---
-name: My Skill
-triggers:
-  - my_keyword
-  - another_keyword
+name: my_skill
+triggers: [my_keyword, another_keyword]
 description: One-line description for the LLM classification manifest
+resource_types: [my_resource]
+cli: true
+dependencies: [some-package]
+env: [{"var":"MY_VAR","from":"user_resource_config","resource_type":"my_resource","field":"path"}]
 ---
 
 # My Skill
@@ -68,11 +31,32 @@ description: One-line description for the LLM classification manifest
 Instructions for Claude on how to use this skill...
 ```
 
-Frontmatter `triggers` overrides `skill.toml` `keywords`. Frontmatter `description` overrides `skill.toml` `description`.
-
 Use `{BOT_NAME}`, `{BOT_DIR}`, and `{user_id}` placeholders -- they're substituted at load time.
 
-## 4. (Optional) Create a CLI module
+### Frontmatter fields
+
+| Field | Type | Purpose |
+|---|---|---|
+| `name` | string | Skill identifier, matches directory name |
+| `triggers` | list | Prompt keywords that trigger this skill (Pass 1) |
+| `description` | string | Shown in `!skills` and LLM classification manifest |
+| `always_include` | bool | Load for every task |
+| `admin_only` | bool | Hidden from non-admin users |
+| `cli` | bool | Whether this skill has a CLI module |
+| `resource_types` | list | Required user resources (combined with keywords) |
+| `source_types` | list | Auto-include for these task source types |
+| `file_types` | list | Auto-include for these attachment extensions |
+| `companion_skills` | list | Pull in these skills when this one is selected |
+| `exclude_skills` | list | Remove these skills when this one is selected |
+| `dependencies` | list | Python packages required (skip skill if missing) |
+| `exclude_memory` | bool | Skip memory loading for tasks using this skill |
+| `exclude_persona` | bool | Skip persona loading |
+| `exclude_resources` | list | Resource types to hide from prompt |
+| `env` | JSON array | Declarative env var specs (see env var sources below) |
+
+Boolean fields default to `false`. List fields default to `[]`. Only include fields that differ from defaults.
+
+## 3. (Optional) Create a CLI module
 
 Skills can expose Python CLIs invoked by Claude via `python -m istota.skills.my_skill`:
 
@@ -112,9 +96,15 @@ main()
 
 Pattern: `build_parser()` + `main()`, JSON output, credentials via env vars.
 
-## 5. (Optional) Add env var mapping
+## 4. (Optional) Add env var mapping
 
-For skills with resource types, add env var mapping in `executor.py`:
+For skills with resource types, use declarative env vars in the frontmatter `env` field:
+
+```yaml
+env: [{"var":"MY_RESOURCE_PATH","from":"resource","resource_type":"my_resource","field":"path"}]
+```
+
+Or add env var mapping directly in `executor.py`:
 
 ```python
 # In execute_task(), after existing resource mappings
@@ -125,24 +115,14 @@ if my_resources:
     )
 ```
 
-Or use declarative env vars in `skill.toml`:
-
-```toml
-[[env]]
-name = "MY_RESOURCE_PATH"
-source = "resource"
-resource_type = "my_resource"
-field = "path"
-```
-
 Declarative env vars don't override hardcoded ones in executor.py.
 
-## 6. (Optional) Add a new resource type
+## 5. (Optional) Add a new resource type
 
 If your skill needs a new resource type:
 
 1. Users add via: `istota resource add -u USER -t my_resource -p /path`
-2. Add env var mapping (step 5)
+2. Add env var mapping (step 4)
 3. Add resource display in `build_prompt()` if users should see it
 4. Document in the skill's `.md` file
 

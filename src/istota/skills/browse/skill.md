@@ -2,6 +2,7 @@
 name: browse
 triggers: [browse, website, web page, scrape, screenshot, url, http, visit, open page, fetch page, web search, look up, check the site]
 description: Web browsing and scraping via headless browser
+cli: true
 ---
 # Web Browsing
 

@@ -1,3 +1,0 @@
-file_types = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "heic"]
-dependencies = ["pytesseract"]
-cli = true

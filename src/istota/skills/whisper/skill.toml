@@ -1,3 +1,0 @@
-file_types = ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]
-dependencies = ["faster_whisper>=1.1.0"]
-cli = true

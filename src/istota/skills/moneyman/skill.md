@@ -2,6 +2,9 @@
 name: moneyman
 triggers: [accounting, ledger, beancount, invoice, invoicing, expense, transaction, balance, tax, wash sale, bookkeeping, finances, billing, receivable, work log, work entry, monarch, sync-monarch, moneyman]
 description: Accounting operations via Moneyman service (ledger, invoicing, transactions, work log)
+cli: true
+resource_types: [moneyman]
+env: [{"var":"MONEYMAN_CLI_PATH","from":"config","config_path":"moneyman.cli_path"},{"var":"MONEYMAN_CONFIG","from":"config","config_path":"moneyman.config_path"},{"var":"MONEYMAN_API_URL","from":"config","config_path":"moneyman.api_url"},{"var":"MONEYMAN_API_KEY","from":"config","config_path":"moneyman.api_key"},{"var":"MONEYMAN_USER","from":"user_resource_config","resource_type":"moneyman","field":"user_key"}]
 ---
 # Moneyman Accounting Operations
 

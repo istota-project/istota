@@ -1,3 +1,0 @@
-dependencies = ["caldav", "icalendar"]
-source_types = ["briefing"]
-cli = true

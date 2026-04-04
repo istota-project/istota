@@ -27,7 +27,7 @@ class SkillMeta:
 
 ### Functions
 ```python
-load_skill_index(skills_dir: Path) -> dict[str, SkillMeta]       # Load skill.toml manifests + frontmatter
+load_skill_index(skills_dir: Path) -> dict[str, SkillMeta]       # Load skill.md frontmatter (toml fallback)
 select_skills(prompt, source_type, user_resource_types, skill_index, is_admin=True, attachments=None, disabled_skills=None) -> list[str]
 classify_skills(prompt, skill_index, already_selected, model="haiku", timeout=3.0) -> list[str]  # Pass 2 LLM classification
 build_skill_manifest(skill_index, exclude) -> str                 # Manifest for LLM classification
@@ -60,19 +60,22 @@ Config: `[skills]` section — `semantic_routing` (bool), `semantic_routing_mode
 
 Returns sorted list of skill names.
 
-### Skill Metadata (two sources, merged)
-Each skill has routing metadata in YAML frontmatter (`skill.md`) and structural config in `skill.toml`:
-- **Frontmatter** (`skill.md`): `name`, `triggers` (keyword list), `description` (for LLM routing manifest)
-- **skill.toml**: `always_include`, `admin_only`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `env`, `cli`, etc.
+### Skill Metadata (YAML frontmatter)
+All metadata lives in YAML frontmatter at the top of each `skill.md` file:
+- `name`, `triggers` (keyword list), `description` (for LLM routing manifest)
+- `always_include`, `admin_only`, `cli` (booleans)
+- `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_resources` (lists)
+- `exclude_memory`, `exclude_persona` (booleans)
+- `env` (JSON-encoded array of env spec objects)
 
-Frontmatter `triggers` overrides `skill.toml` `keywords`; frontmatter `description` overrides `skill.toml` `description`. If no frontmatter, falls back to `skill.toml` values.
+Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 
 ### Skill Discovery (three layers, merged)
-1. Bundled `skill.toml` directories in `src/istota/skills/*/`
-2. Operator override `skill.toml` directories in `config/skills/*/`
+1. Bundled skill directories in `src/istota/skills/*/skill.md`
+2. Operator override directories in `config/skills/*/` (skill.md or skill.toml)
 3. Legacy `_index.toml` (lowest priority, deprecated)
 
-## Skill Index (from `skill.toml` manifests)
+## Skill Index (from skill.md frontmatter)
 
 | Skill | always_include | keywords | resource_types | source_types |
 |---|---|---|---|---|
@@ -182,24 +185,24 @@ Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skill
 
 ### 1. Create the skill directory
 Create `src/istota/skills/<name>/` with:
-- `skill.toml` — manifest (required)
-- `skill.md` — reference documentation for Claude (required)
+- `skill.md` — YAML frontmatter for metadata + markdown body for instructions (required)
 
-### 2. Define the manifest (`skill.toml`)
-```toml
-[skill]
-description = "What it does"
-keywords = ["trigger", "words"]        # Optional
-resource_types = ["my_resource"]       # Optional
-source_types = ["briefing"]            # Optional
-always_include = false                 # Default
-dependencies = ["some-package"]       # Optional: skip if missing
+### 2. Define metadata in `skill.md` frontmatter
+```yaml
+---
+name: my_skill
+triggers: [trigger, words]
+description: What it does
+resource_types: [my_resource]
+source_types: [briefing]
+cli: true
+dependencies: [some-package]
+env: [{"var":"MY_VAR","from":"user_resource_config","resource_type":"my_resource","field":"path"}]
+---
 
-[[env]]                                # Optional: declarative env vars
-name = "MY_VAR"
-source = "resource"
-resource_type = "my_resource"
-field = "path"
+# My Skill
+
+Instructions for Claude follow here...
 ```
 
 ### 3. (Optional) Create CLI module

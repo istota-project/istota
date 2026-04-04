@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-04: Consolidate skill metadata into skill.md frontmatter
+
+Completed the migration from separate `skill.toml` sidecar files to YAML frontmatter in `skill.md`. All 26 bundled skills now store their full metadata (routing triggers, boolean flags, resource types, dependencies, env specs) in the frontmatter block of their markdown doc file. The `skill.toml` files are removed from bundled skills; operator overrides in `config/skills/` can still use toml for backward compatibility.
+
+**Key changes:**
+- Extended frontmatter parser to handle booleans (`true`/`false`), empty lists, JSON-encoded env specs, and malformed list detection
+- Renamed `_load_skill_toml()` to `_load_skill_meta()` — reads frontmatter first, falls back to toml
+- Merged all metadata from 26 `skill.toml` files into corresponding `skill.md` frontmatter
+- Removed all `src/istota/skills/*/skill.toml` files
+- Added `TestParseFrontmatter` test class (12 tests) and `_write_skill_md()` test helper
+- Updated directory discovery tests to use frontmatter-based skills
+- Fixed pre-existing test failure (malformed frontmatter fallback to toml)
+
+**Files added/modified:**
+- `src/istota/skills/_loader.py` — Extended `_parse_frontmatter()`, renamed `_load_skill_toml` → `_load_skill_meta`
+- `src/istota/skills/_types.py` — Updated docstrings
+- `src/istota/skills/_env.py` — Updated docstring
+- `src/istota/skills/*/skill.md` — All 26 skills updated with full metadata in frontmatter
+- `src/istota/skills/*/skill.toml` — All 26 files removed
+- `src/istota/executor.py` — Updated comment
+- `tests/test_skills_loader.py` — Updated discovery/env tests, added frontmatter parser tests
+- `AGENTS.md`, `.claude/rules/skills.md` — Updated skill metadata documentation
+
 ## 2026-04-03: Per-user email ingest via plus-addressing
 
 Added per-user plus-addressed email routing (`bot+user_id@domain`). External contacts can now email a specific user's agent directly without being in the sender allowlist. The plus-address is the highest-priority routing path, followed by sender match and thread match as before.

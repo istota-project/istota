@@ -37,7 +37,7 @@ istota/
 │   ├── talk_poller.py       # Talk conversation polling
 │   ├── tasks_file_poller.py # TASKS.md file monitoring
 │   ├── memory_search.py     # Hybrid BM25 + vector search over conversations/memories
-│   └── skills/              # Self-contained skill directories (skill.toml + skill.md + optional Python)
+│   └── skills/              # Self-contained skill directories (skill.md with YAML frontmatter + optional Python)
 │       ├── _types.py        # SkillMeta, EnvSpec dataclasses
 │       ├── _loader.py       # Skill discovery, manifest loading, doc resolution
 │       ├── _env.py          # Declarative env var resolver + setup_env() hook dispatch
@@ -167,7 +167,7 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 - Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no
 
 ### Skills
-Self-contained directories under `src/istota/skills/`, each with `skill.toml` manifest and `skill.md` doc. Routing metadata (`triggers`, `description`) lives in YAML frontmatter of `skill.md`; structural config (`resource_types`, `companion_skills`, `env`, etc.) stays in `skill.toml`. Frontmatter overrides `skill.toml` for routing fields.
+Self-contained directories under `src/istota/skills/`, each with a `skill.md` file containing YAML frontmatter for all metadata and markdown body for instructions. Frontmatter fields: `name`, `triggers`, `description`, `always_include`, `admin_only`, `cli`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_memory`, `exclude_persona`, `exclude_resources`, `env` (JSON-encoded array of env specs). Operator overrides in `config/skills/` can use `skill.toml` for backward compatibility.
 
 **Two-pass selection:** Pass 1 is keyword matching (deterministic, zero-cost): `always_include`, `source_types`, `triggers`/`keywords` (if skill also has `resource_types`, requires both keyword match + user has resource), `file_types`, `companion_skills`. Pass 2 is LLM-based semantic routing (Haiku, ~500ms, ~$0.0003/task): sees the task prompt + a manifest of unselected skills, returns additional skills to load. Results are unioned. Pass 2 is additive — on timeout/error, falls back to Pass 1 only. Config: `[skills]` section.
 
@@ -175,7 +175,7 @@ Skills can exclude other skills via `exclude_skills` (e.g., briefing excludes em
 
 Audio attachments pre-transcribed before skill selection so keyword matching works on voice memos.
 
-Env var wiring is declarative via `[[env]]` in `skill.toml`. Action skills expose `python -m istota.skills.<name>` CLI with JSON output.
+Env var wiring is declarative via the `env` field in skill.md frontmatter (JSON-encoded array of env specs). Action skills expose `python -m istota.skills.<name>` CLI with JSON output.
 
 ### Conversation Context
 Talk tasks use a poller-fed local cache (`talk_messages` table, bounded by `talk_cache_max_per_conversation`). Email tasks use DB-based context. Both paths use hybrid selection: recent N messages always included, older messages triaged by LLM. Recency window (`context_recency_hours`, default 0 = disabled) filters out old messages while guaranteeing at least `context_min_messages` (10). Config in `[conversation]` section.

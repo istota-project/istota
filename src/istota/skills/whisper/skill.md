@@ -2,6 +2,9 @@
 name: whisper
 triggers: [transcribe, whisper, audio, voice, speech, dictation, recording, voice memo]
 description: Local audio transcription using faster-whisper (CPU, int8)
+cli: true
+file_types: [mp3, wav, ogg, flac, m4a, opus, webm, mp4, aac, wma]
+dependencies: [faster_whisper>=1.1.0]
 ---
 # Audio Transcription with Whisper
 

@@ -2,6 +2,8 @@
 name: location
 triggers: [location, gps, where, place, places, visit, visits, track, position, coordinates, attendance, reverse geocode, day summary, neighborhood, summary]
 description: Location tracking, place recognition, visit history, and calendar attendance
+cli: true
+resource_types: [calendar]
 ---
 # Location Skill
 

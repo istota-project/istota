@@ -1,12 +1,13 @@
 """Skill discovery, manifest loading, and doc loading.
 
 Supports two discovery modes:
-1. Directory-based: each skill is a subdirectory with skill.toml + skill.md
+1. Directory-based: each skill is a subdirectory with skill.md (YAML frontmatter
+   for metadata). Optional skill.toml for backward compat / operator overrides.
 2. Legacy: flat _index.toml + *.md files in a single directory
 
 Discovery order (later wins):
-1. Bundled skills: src/istota/skills/*/skill.toml
-2. Operator overrides: config/skills/*/skill.toml (or skill.md only)
+1. Bundled skills: src/istota/skills/*/skill.md
+2. Operator overrides: config/skills/*/skill.md (or skill.toml)
 3. Legacy fallback: config/skills/_index.toml (lowest priority)
 """
 
@@ -47,7 +48,8 @@ def _parse_env_specs(data: list[dict]) -> list[EnvSpec]:
 def _parse_frontmatter(md_path: Path) -> dict | None:
     """Parse YAML frontmatter from a skill.md file.
 
-    Supports a minimal subset: scalar values and inline YAML lists [a, b, c].
+    Supports a minimal subset: scalar values, booleans, inline YAML lists
+    [a, b, c], and JSON-encoded values (for env specs).
     Returns parsed dict or None if no frontmatter found or parse error.
     """
     if not md_path.exists():
@@ -73,10 +75,24 @@ def _parse_frontmatter(md_path: Path) -> dict | None:
                 continue
             key = line[:colon].strip()
             value = line[colon + 1:].strip()
+            # Parse booleans
+            if value.lower() == "true":
+                data[key] = True
+            elif value.lower() == "false":
+                data[key] = False
             # Parse inline list: [a, b, c]
-            if value.startswith("[") and value.endswith("]"):
-                items = value[1:-1]
-                data[key] = [item.strip().strip("'\"") for item in items.split(",") if item.strip()]
+            elif value.startswith("[") and value.endswith("]"):
+                inner = value[1:-1].strip()
+                if not inner:
+                    data[key] = []
+                # Check if it looks like JSON (contains { })
+                elif "{" in inner:
+                    data[key] = json.loads(value)
+                else:
+                    data[key] = [item.strip().strip("'\"") for item in inner.split(",") if item.strip()]
+            elif value.startswith("["):
+                # Malformed list (unclosed bracket) — skip this field
+                logger.warning("Malformed list in frontmatter key %r: %s", key, value[:50])
             else:
                 data[key] = value.strip("'\"")
         return data if data else None
@@ -95,51 +111,80 @@ def _strip_frontmatter(text: str) -> str:
     return text[end + 4:].lstrip("\n")
 
 
-def _load_skill_toml(skill_dir: Path) -> SkillMeta | None:
-    """Load a single skill.toml from a directory."""
+def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
+    """Load skill metadata from a directory.
+
+    Primary source is YAML frontmatter in skill.md. Falls back to skill.toml
+    for any fields not present in frontmatter (backward compat for operator
+    overrides). Returns None if neither file exists.
+    """
+    md_path = skill_dir / "skill.md"
     toml_path = skill_dir / "skill.toml"
-    if not toml_path.exists():
-        return None
-    try:
-        with open(toml_path, "rb") as f:
-            data = tomllib.load(f)
-    except Exception as e:
-        logger.warning("Failed to parse %s: %s", toml_path, e)
+
+    fm = _parse_frontmatter(md_path)
+    toml_data: dict = {}
+
+    if toml_path.exists():
+        try:
+            with open(toml_path, "rb") as f:
+                toml_data = tomllib.load(f)
+        except Exception as e:
+            logger.warning("Failed to parse %s: %s", toml_path, e)
+
+    if not fm and not toml_data:
         return None
 
-    meta = SkillMeta(
+    def _get(key: str, default=None):
+        """Get from frontmatter first, then toml fallback."""
+        if fm and key in fm:
+            return fm[key]
+        return toml_data.get(key, default)
+
+    def _get_bool(key: str, default: bool = False) -> bool:
+        val = _get(key, default)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.lower() == "true"
+        return default
+
+    def _get_list(key: str) -> list:
+        val = _get(key, [])
+        return val if isinstance(val, list) else []
+
+    # Frontmatter uses "triggers" for keywords
+    keywords = _get_list("triggers") if (fm and "triggers" in fm) else _get_list("keywords")
+
+    # Env specs: frontmatter uses JSON array in "env" field, toml uses [[env]]
+    env_raw = _get("env", [])
+    if isinstance(env_raw, list) and env_raw and isinstance(env_raw[0], dict):
+        env_specs = _parse_env_specs(env_raw)
+    else:
+        env_specs = []
+
+    return SkillMeta(
         name=skill_dir.name,
-        description=data.get("description", ""),
-        always_include=data.get("always_include", False),
-        admin_only=data.get("admin_only", False),
-        keywords=data.get("keywords", []),
-        resource_types=data.get("resource_types", []),
-        source_types=data.get("source_types", []),
-        file_types=data.get("file_types", []),
-        companion_skills=data.get("companion_skills", []),
-        exclude_skills=data.get("exclude_skills", []),
-        env_specs=_parse_env_specs(data.get("env", [])),
-        dependencies=data.get("dependencies", []),
-        exclude_memory=data.get("exclude_memory", False),
-        exclude_persona=data.get("exclude_persona", False),
-        exclude_resources=data.get("exclude_resources", []),
-        cli=data.get("cli", False),
+        description=_get("description", "") or "",
+        always_include=_get_bool("always_include"),
+        admin_only=_get_bool("admin_only"),
+        keywords=keywords,
+        resource_types=_get_list("resource_types"),
+        source_types=_get_list("source_types"),
+        file_types=_get_list("file_types"),
+        companion_skills=_get_list("companion_skills"),
+        exclude_skills=_get_list("exclude_skills"),
+        env_specs=env_specs,
+        dependencies=_get_list("dependencies"),
+        exclude_memory=_get_bool("exclude_memory"),
+        exclude_persona=_get_bool("exclude_persona"),
+        exclude_resources=_get_list("exclude_resources"),
+        cli=_get_bool("cli"),
         skill_dir=str(skill_dir),
     )
 
-    # Merge frontmatter from skill.md (overrides toml for routing fields)
-    fm = _parse_frontmatter(skill_dir / "skill.md")
-    if fm:
-        if "triggers" in fm and isinstance(fm["triggers"], list):
-            meta.keywords = fm["triggers"]
-        if "description" in fm and isinstance(fm["description"], str):
-            meta.description = fm["description"]
-
-    return meta
-
 
 def _discover_directory_skills(base_dir: Path) -> dict[str, SkillMeta]:
-    """Scan subdirectories of base_dir for skill.toml manifests."""
+    """Scan subdirectories of base_dir for skill metadata (frontmatter or toml)."""
     skills = {}
     if not base_dir.is_dir():
         return skills
@@ -148,12 +193,9 @@ def _discover_directory_skills(base_dir: Path) -> dict[str, SkillMeta]:
             continue
         if child.name.startswith("_") or child.name.startswith("."):
             continue
-        if child.name == "__pycache__" or child.name == "whisper":
-            # whisper is a special case — has __init__.py but also needs skill.toml
-            # Once migrated it will be picked up normally; skip only __pycache__
-            if child.name == "__pycache__":
-                continue
-        meta = _load_skill_toml(child)
+        if child.name == "__pycache__":
+            continue
+        meta = _load_skill_meta(child)
         if meta is not None:
             skills[meta.name] = meta
     return skills

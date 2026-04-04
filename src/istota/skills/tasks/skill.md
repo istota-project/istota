@@ -2,6 +2,7 @@
 name: tasks
 triggers: [subtask, queue, background, later]
 description: SQLite subtask creation
+admin_only: true
 ---
 To create subtasks, write a JSON file to `$ISTOTA_DEFERRED_DIR/task_${ISTOTA_TASK_ID}_subtasks.json`:
 
