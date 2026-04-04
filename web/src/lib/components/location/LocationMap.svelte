@@ -73,7 +73,8 @@
 	}
 
 	function buildPathGeoJSON(pings: LocationPing[]): GeoJSON.FeatureCollection {
-		const filtered = filteredPings(pings);
+		// Only draw lines for movement pings — stationary pings render as points
+		const filtered = filteredPings(pings).filter(p => (p.activity_type ?? 'stationary') !== 'stationary');
 		if (filtered.length < 2) return { type: 'FeatureCollection', features: [] };
 
 		const features: GeoJSON.Feature[] = [];
@@ -133,7 +134,11 @@
 			type: 'FeatureCollection',
 			features: pings.map(p => ({
 				type: 'Feature' as const,
-				properties: { timestamp: p.timestamp, place: p.place },
+				properties: {
+					timestamp: p.timestamp,
+					place: p.place,
+					activity_type: p.activity_type ?? 'stationary',
+				},
 				geometry: { type: 'Point' as const, coordinates: [p.lon, p.lat] },
 			})),
 		};
@@ -302,6 +307,20 @@
 			},
 		});
 
+		// Stationary pings as dots (no lines)
+		map.addLayer({
+			id: 'stationary-points',
+			type: 'circle',
+			source: 'ping-points',
+			filter: ['==', ['get', 'activity_type'], 'stationary'],
+			layout: { visibility: 'visible' },
+			paint: {
+				'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 16, 4],
+				'circle-color': ACTIVITY_COLORS.stationary ?? '#666',
+				'circle-opacity': 0.6,
+			},
+		});
+
 		// Place labels
 		map.addLayer({
 			id: 'place-labels',
@@ -405,6 +424,7 @@
 		if (!map || !mapLoaded) return;
 		map.setLayoutProperty('path-line', 'visibility', showPath ? 'visible' : 'none');
 		map.setLayoutProperty('path-transit', 'visibility', showPath ? 'visible' : 'none');
+		map.setLayoutProperty('stationary-points', 'visibility', showPath ? 'visible' : 'none');
 		map.setLayoutProperty('heat', 'visibility', showHeat ? 'visible' : 'none');
 	}
 
