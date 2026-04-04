@@ -113,7 +113,7 @@ Web App ──► Nextcloud OIDC → Session → Dashboard / Feed pages
 ```
 
 - **Talk poller**: Background daemon thread, long-polling per conversation, WAL mode for concurrent DB access
-- **Email poller**: Polls INBOX via imap-tools, creates tasks from known senders. Unknown senders are thread-matched against `sent_emails` — replies to bot-initiated threads route to the originating user via Talk.
+- **Email poller**: Polls INBOX via imap-tools. Routing precedence: (1) recipient plus-address (`bot+user_id@domain`), (2) sender match against user `email_addresses`, (3) thread match against `sent_emails`. Plus-addressing enables external contacts to email a specific user's agent directly. Outbound `SMTP_FROM` uses plus-addressed `bot+user_id@domain` so replies route back correctly. `routing_method` column in `processed_emails` tracks how each email was routed.
 - **Task queue** (`db.py`): Atomic locking with `user_id` filter, retry logic (exponential backoff: 1, 4, 16 min)
 - **Scheduler**: Per-user threaded worker pool. Three-tier concurrency: instance-level fg/bg caps, per-user limits. Workers keyed by `(user_id, queue_type, slot)`.
 - **Executor**: Builds prompts (resources + skills + context + memory), invokes Claude Code via `Popen` with `--output-format stream-json`. Auto-retries transient API errors (5xx, 429) up to 3 times. Validates output for malformed model responses (leaked tool-call XML) and collects execution traces for post-hoc inspection.

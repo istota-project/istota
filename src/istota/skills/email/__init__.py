@@ -46,6 +46,8 @@ class Email:
     attachments: list[str]
     message_id: str | None = None  # RFC 5322 Message-ID for threading
     references: str | None = None  # RFC 5322 References header for thread chain
+    to: tuple[str, ...] = ()       # To recipients
+    cc: tuple[str, ...] = ()       # Cc recipients
 
 
 @dataclass
@@ -157,6 +159,8 @@ def read_email(
                 attachments=[att.filename for att in msg.attachments if att.filename],
                 message_id=message_id,
                 references=references,
+                to=tuple(msg.to) if msg.to else (),
+                cc=tuple(msg.cc) if msg.cc else (),
             )
 
     raise RuntimeError(f"Email {email_id} not found in {folder}")

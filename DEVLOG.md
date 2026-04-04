@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-03: Per-user email ingest via plus-addressing
+
+Added per-user plus-addressed email routing (`bot+user_id@domain`). External contacts can now email a specific user's agent directly without being in the sender allowlist. The plus-address is the highest-priority routing path, followed by sender match and thread match as before.
+
+Also fixed a UTC date bug in the location GUI (ISSUE-029) and closed ISSUE-027 (Chrome container hardening was already implemented).
+
+**Key changes:**
+- `_extract_user_from_recipient()` parses To/Cc headers for `bot+{user_id}@domain` pattern
+- Email polling restructured to read full email before routing (needed for recipient headers)
+- `routing_method` column added to `processed_emails` table (plus_address, sender_match, thread_match, discarded)
+- `SMTP_FROM` now uses plus-addressed `bot+user_id@domain` per user, so replies route back correctly
+- Per-user email address shown in prompt header for agent awareness
+- `Email` dataclass gained `to` and `cc` tuple fields, populated from imap-tools
+- Location GUI: replaced `toISOString().slice(0,10)` with `localDate()` helper using local time components
+
+**Files added/modified:**
+- `src/istota/email_poller.py` — New `_extract_user_from_recipient()`, restructured routing with `routing_method` tracking
+- `src/istota/db.py` — `routing_method` field on `ProcessedEmail`, `mark_email_processed()` parameter, ALTER TABLE migration
+- `src/istota/executor.py` — Per-user email in prompt header, plus-addressed `SMTP_FROM`
+- `src/istota/skills/email/__init__.py` — `to`/`cc` fields on `Email` dataclass, populated in `read_email()`
+- `schema.sql` — `routing_method TEXT` column on `processed_emails`
+- `tests/test_email_poller.py` — 22 new tests (plus-address extraction, routing precedence, routing_method storage)
+- `tests/test_executor.py` — 4 new tests (prompt email line, SMTP_FROM plus-addressing)
+- `web/src/routes/location/+page.svelte` — ISSUE-029 fix (local date helper)
+- `web/src/routes/location/history/+page.svelte` — ISSUE-029 fix (local date helper)
+
 ## 2026-04-03: Security audit fixes (M-1 through M-4)
 
 Addressed four medium-severity findings from a security audit of the codebase.

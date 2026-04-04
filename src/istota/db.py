@@ -68,6 +68,7 @@ class ProcessedEmail:
     user_id: str | None
     task_id: int | None
     processed_at: str
+    routing_method: str | None = None  # plus_address, sender_match, thread_match, discarded
 
 
 @dataclass
@@ -170,6 +171,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE places DROP COLUMN source")
     except sqlite3.OperationalError:
         pass  # Column already dropped or doesn't exist
+
+    # Processed emails migrations
+    for col, col_type in [
+        ("routing_method", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE processed_emails ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
 
     # Monarch synced transactions migrations (for reconciliation tracking)
     for col, col_type in [
@@ -951,15 +961,16 @@ def mark_email_processed(
     references: str | None = None,
     user_id: str | None = None,
     task_id: int | None = None,
+    routing_method: str | None = None,
 ) -> int:
     """Record a processed email."""
     cursor = conn.execute(
         """
-        INSERT INTO processed_emails (email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO processed_emails (email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
-        (email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id),
+        (email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method),
     )
     return cursor.fetchone()[0]
 
@@ -968,7 +979,7 @@ def get_email_for_task(conn: sqlite3.Connection, task_id: int) -> ProcessedEmail
     """Get the original email info for a task."""
     cursor = conn.execute(
         """
-        SELECT id, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, processed_at
+        SELECT id, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, processed_at, routing_method
         FROM processed_emails
         WHERE task_id = ?
         """,
@@ -988,6 +999,7 @@ def get_email_for_task(conn: sqlite3.Connection, task_id: int) -> ProcessedEmail
         user_id=row["user_id"],
         task_id=row["task_id"],
         processed_at=row["processed_at"],
+        routing_method=row["routing_method"],
     )
 
 
