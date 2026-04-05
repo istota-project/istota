@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Worker queue (foreground = interactive, background = scheduled/briefing/subtask)
     queue TEXT NOT NULL DEFAULT 'foreground',
 
+    -- Skill selection tracking (JSON array of skill names)
+    selected_skills TEXT,
+
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
 );
 

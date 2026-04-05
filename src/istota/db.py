@@ -44,6 +44,7 @@ class Task:
     scheduled_job_id: int | None = None
     queue: str = "foreground"
     confirmed_at: str | None = None
+    selected_skills: str | None = None  # JSON array of skill names
 
 
 @dataclass
@@ -145,6 +146,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("queue", "TEXT DEFAULT 'foreground'"),
         ("actions_taken", "TEXT"),
         ("execution_trace", "TEXT"),
+        ("selected_skills", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
@@ -325,6 +327,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         scheduled_job_id=row["scheduled_job_id"] if "scheduled_job_id" in row.keys() else None,
         queue=row["queue"] if "queue" in row.keys() else "foreground",
         confirmed_at=row["confirmed_at"] if "confirmed_at" in row.keys() else None,
+        selected_skills=row["selected_skills"] if "selected_skills" in row.keys() else None,
     )
 
 
@@ -1211,7 +1214,8 @@ def get_reply_parent_task(
                confirmation_prompt, priority, attempt_count, max_attempts,
                created_at, scheduled_for, output_target,
                talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent, actions_taken, scheduled_job_id, queue
+               heartbeat_silent, actions_taken, scheduled_job_id, queue,
+               selected_skills
         FROM tasks
         WHERE conversation_token = ?
         AND (talk_message_id = ? OR talk_response_id = ?)
@@ -1226,6 +1230,59 @@ def get_reply_parent_task(
     if not row:
         return None
     return _row_to_task(row)
+
+
+def save_task_selected_skills(
+    conn: sqlite3.Connection,
+    task_id: int,
+    selected_skills: list[str],
+) -> None:
+    """Store the skills selected for a task (called right after skill selection)."""
+    conn.execute(
+        "UPDATE tasks SET selected_skills = ? WHERE id = ?",
+        (json.dumps(selected_skills), task_id),
+    )
+
+
+def get_recent_conversation_skills(
+    conn: sqlite3.Connection,
+    conversation_token: str,
+    exclude_task_id: int | None = None,
+    max_age_minutes: int = 30,
+    limit: int = 2,
+) -> set[str]:
+    """Get skill names from recent completed tasks in the same conversation.
+
+    Returns a union of skills from the last N tasks within the time window.
+    Used for skill stickiness in follow-up messages.
+    """
+    query = """
+        SELECT selected_skills
+        FROM tasks
+        WHERE conversation_token = ?
+        AND status = 'completed'
+        AND selected_skills IS NOT NULL
+        AND created_at > datetime('now', ?)
+    """
+    params: list = [conversation_token, f"-{max_age_minutes} minutes"]
+
+    if exclude_task_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_task_id)
+
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+
+    cursor = conn.execute(query, params)
+    rows = cursor.fetchall()
+
+    skills: set[str] = set()
+    for row in rows:
+        try:
+            skills.update(json.loads(row["selected_skills"]))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return skills
 
 
 # ============================================================================

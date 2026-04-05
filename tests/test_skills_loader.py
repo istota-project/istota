@@ -372,6 +372,110 @@ class TestSelectSkills:
         assert "memory" not in result
 
 
+class TestStickySkills:
+    def _make_index(self) -> dict[str, SkillMeta]:
+        return {
+            "files": SkillMeta(
+                name="files",
+                description="File ops",
+                always_include=True,
+            ),
+            "google_workspace": SkillMeta(
+                name="google_workspace",
+                description="Google Workspace",
+                keywords=["gmail", "google drive"],
+            ),
+            "email": SkillMeta(
+                name="email",
+                description="Email",
+                keywords=["email", "mail", "send"],
+            ),
+            "admin_tool": SkillMeta(
+                name="admin_tool",
+                description="Admin only",
+                keywords=["admin"],
+                admin_only=True,
+            ),
+            "whisper": SkillMeta(
+                name="whisper",
+                description="Transcription",
+                keywords=["transcribe"],
+                companion_skills=["schedules"],
+            ),
+            "schedules": SkillMeta(
+                name="schedules",
+                description="Scheduled jobs",
+                keywords=["schedule"],
+            ),
+            "briefing": SkillMeta(
+                name="briefing",
+                description="Briefing",
+                source_types=["briefing"],
+                exclude_skills=["email"],
+            ),
+        }
+
+    def test_sticky_skill_injected_without_keyword(self):
+        index = self._make_index()
+        result = select_skills(
+            "what's that email from claude team",
+            "talk", set(), index,
+            sticky_skills={"google_workspace"},
+        )
+        assert "google_workspace" in result
+
+    def test_sticky_none_is_noop(self):
+        index = self._make_index()
+        result_without = select_skills("hello", "talk", set(), index)
+        result_with = select_skills("hello", "talk", set(), index, sticky_skills=None)
+        assert result_without == result_with
+
+    def test_sticky_respects_disabled(self):
+        index = self._make_index()
+        result = select_skills(
+            "hello", "talk", set(), index,
+            sticky_skills={"google_workspace"},
+            disabled_skills={"google_workspace"},
+        )
+        assert "google_workspace" not in result
+
+    def test_sticky_respects_admin_only(self):
+        index = self._make_index()
+        result = select_skills(
+            "hello", "talk", set(), index,
+            sticky_skills={"admin_tool"},
+            is_admin=False,
+        )
+        assert "admin_tool" not in result
+
+    def test_sticky_goes_through_exclude_skills(self):
+        index = self._make_index()
+        result = select_skills(
+            "generate briefing",
+            "briefing", set(), index,
+            sticky_skills={"email"},
+        )
+        assert "briefing" in result
+        assert "email" not in result  # excluded by briefing
+
+    def test_sticky_triggers_companions(self):
+        index = self._make_index()
+        result = select_skills(
+            "hello", "talk", set(), index,
+            sticky_skills={"whisper"},
+        )
+        assert "whisper" in result
+        assert "schedules" in result  # companion of whisper
+
+    def test_sticky_ignores_unknown_skill(self):
+        index = self._make_index()
+        result = select_skills(
+            "hello", "talk", set(), index,
+            sticky_skills={"nonexistent_skill"},
+        )
+        assert "nonexistent_skill" not in result
+
+
 class TestLoadSkills:
     def test_load_existing_skills(self, tmp_path):
         skills_dir = tmp_path / "skills"
