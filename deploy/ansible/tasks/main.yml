@@ -200,12 +200,19 @@
       apt:
         name: nodejs
         state: present
-  when: not istota_update_only and not istota_web_only and (istota_nodejs_enabled or istota_web_enabled | default(false) or istota_google_workspace_enabled | default(false))
+  when: not istota_update_only and not istota_web_only and (istota_nodejs_enabled or istota_web_enabled | default(false))
 
 - name: Install Google Workspace CLI (gws)
-  community.general.npm:
-    name: "@googleworkspace/cli"
-    global: true
+  shell: |
+    set -euo pipefail
+    url=$(curl -s https://api.github.com/repos/googleworkspace/cli/releases/latest \
+      | grep -o '"browser_download_url": *"[^"]*x86_64-unknown-linux-gnu.tar.gz"' \
+      | head -1 | cut -d'"' -f4)
+    curl -sL "$url" | tar xz --strip-components=0 -C "{{ istota_home }}/.local/bin" ./gws
+    chown {{ istota_user }}:{{ istota_group }} "{{ istota_home }}/.local/bin/gws"
+    chmod 0755 "{{ istota_home }}/.local/bin/gws"
+  args:
+    creates: "{{ istota_home }}/.local/bin/gws"
   when: not istota_update_only and not istota_web_only and (istota_google_workspace_enabled | default(false))
   tags: [gws]
 
