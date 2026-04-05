@@ -24,6 +24,7 @@ _ALLOWED_SKILLS = frozenset({
     "calendar",
     "email",
     "feeds",
+    "google_workspace",
     "kv",
     "location",
     "markets",
