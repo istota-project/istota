@@ -104,6 +104,7 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `bookmarks` | — | bookmark, karakeep, save, read later, ... | karakeep | — |
 | `website` | — | website, site, publish, blog, ... | — | — |
 | `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe | miniflux | — |
+| `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, gmail, gws | — | — |
 | `moneyman` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | moneyman | — |
 
 Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skills`. Users with a `moneyman` resource get the API-based skill; users with `ledger` resources get the direct beancount skill.
@@ -167,6 +168,11 @@ Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skill
 **Subcommands**: `list`, `add`, `remove`, `categories`, `entries`, `refresh`
 **Env vars**: `MINIFLUX_BASE_URL`, `MINIFLUX_API_KEY`
 **Key fns**: `cmd_list()`, `cmd_add()`, `cmd_remove()`, `cmd_categories()`, `cmd_entries()`, `cmd_refresh()`
+
+### `google_workspace/` - Google Workspace CLI Passthrough
+**Subcommands**: Passes all arguments through to `gws` binary (Drive, Gmail, Calendar, Sheets, Docs, Chat)
+**Env vars**: `GOOGLE_WORKSPACE_CLI_TOKEN` (injected via `setup_env` hook from DB OAuth tokens), `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` (writable cache dir)
+**Note**: CLI wrapper around the standalone `gws` binary. Credentials injected via skill proxy. OAuth tokens stored in `google_oauth_tokens` DB table, refreshed automatically. Scopes configurable via `[google_workspace]` config section (default: read-only).
 
 ### `moneyman/` - Moneyman Accounting API Client
 **Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `add-transaction`, `sync-monarch`, `import-csv`, `invoice` (sub: `generate`, `list`, `paid`, `create`), `work` (sub: `list`, `add`, `update`, `remove`)
