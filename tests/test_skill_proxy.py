@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota.skill_proxy import SkillProxy, _ALLOWED_SKILLS
+from istota.skill_proxy import SkillProxy
 from istota.executor import _split_credential_env, _PROXY_CREDENTIAL_VARS
 
 
@@ -323,7 +323,8 @@ class TestSkillProxyProtocol:
         return json.loads(b"".join(chunks).decode().strip())
 
     def test_rejects_unknown_skill(self, sock_path):
-        with SkillProxy(sock_path, {}, {"PATH": "/usr/bin"}):
+        with SkillProxy(sock_path, {}, {"PATH": "/usr/bin"},
+                        allowed_skills=frozenset({"calendar"})):
             resp = self._send_request(sock_path, {"skill": "evil_skill", "args": []})
             assert resp["returncode"] == 1
             assert "Unknown skill" in resp["stderr"]
@@ -435,22 +436,34 @@ class TestSkillProxyProtocol:
         assert all(r["returncode"] == 0 for r in results)
 
 
-class TestAllowedSkills:
-    """Verify the allowlist matches actual __main__.py files."""
+class TestCliSkillConsistency:
+    """Verify cli: true in skill metadata matches actual __main__.py files."""
 
-    def test_all_skills_have_main(self):
+    def test_cli_skills_have_main(self):
+        """Skills with cli: true must have __main__.py."""
+        from istota.skills._loader import load_skill_index
         skills_dir = Path(__file__).parent.parent / "src" / "istota" / "skills"
-        for skill_name in _ALLOWED_SKILLS:
-            main_file = skills_dir / skill_name / "__main__.py"
-            assert main_file.exists(), f"Skill {skill_name!r} in _ALLOWED_SKILLS but no __main__.py"
+        index = load_skill_index(
+            skills_dir.parent.parent.parent / "config" / "skills",
+            bundled_dir=skills_dir,
+        )
+        for name, meta in index.items():
+            if meta.cli:
+                main_file = skills_dir / name / "__main__.py"
+                assert main_file.exists(), f"Skill {name!r} has cli: true but no __main__.py"
 
-    def test_no_missing_skills(self):
-        """All skills with __main__.py should be in the allowlist."""
+    def test_main_skills_are_cli(self):
+        """Skills with __main__.py must have cli: true."""
+        from istota.skills._loader import load_skill_index
         skills_dir = Path(__file__).parent.parent / "src" / "istota" / "skills"
+        index = load_skill_index(
+            skills_dir.parent.parent.parent / "config" / "skills",
+            bundled_dir=skills_dir,
+        )
         for child in skills_dir.iterdir():
             if child.is_dir() and (child / "__main__.py").exists():
-                assert child.name in _ALLOWED_SKILLS, (
-                    f"Skill {child.name!r} has __main__.py but is not in _ALLOWED_SKILLS"
+                assert child.name in index and index[child.name].cli, (
+                    f"Skill {child.name!r} has __main__.py but cli is not true"
                 )
 
 

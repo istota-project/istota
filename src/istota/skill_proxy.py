@@ -16,26 +16,6 @@ from pathlib import Path
 
 logger = logging.getLogger("istota.skill_proxy")
 
-# Skills that have __main__.py and can be invoked via the proxy.
-# Maintained manually — must match src/istota/skills/*/__main__.py.
-_ALLOWED_SKILLS = frozenset({
-    "bookmarks",
-    "browse",
-    "calendar",
-    "email",
-    "feeds",
-    "google_workspace",
-    "kv",
-    "location",
-    "markets",
-    "memory_search",
-    "moneyman",
-    "nextcloud",
-    "transcribe",
-    "whisper",
-})
-
-
 class SkillProxy:
     """Unix socket server that proxies skill CLI commands with credentials.
 
@@ -57,6 +37,7 @@ class SkillProxy:
         timeout: int = 300,
         allowed_credentials: set[str] | None = None,
         skill_credential_map: dict[str, set[str]] | None = None,
+        allowed_skills: frozenset[str] | None = None,
     ):
         self.socket_path = socket_path
         self.credential_env = credential_env
@@ -64,6 +45,7 @@ class SkillProxy:
         self.timeout = timeout
         self.allowed_credentials = allowed_credentials
         self.skill_credential_map = skill_credential_map
+        self.allowed_skills = allowed_skills
         self._server_sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -160,8 +142,8 @@ class SkillProxy:
             skill = request.get("skill", "")
             args = request.get("args", [])
 
-            # Validate skill name
-            if skill not in _ALLOWED_SKILLS:
+            # Validate skill name against CLI-capable skills from skill index
+            if self.allowed_skills is not None and skill not in self.allowed_skills:
                 self._send_response(conn, {
                     "stdout": "",
                     "stderr": f"Unknown skill: {skill!r}",

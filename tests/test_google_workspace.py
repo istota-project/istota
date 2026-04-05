@@ -46,7 +46,7 @@ class TestGoogleWorkspaceConfig:
         assert c.client_id == ""
         assert c.client_secret == ""
         assert len(c.scopes) == 5
-        assert "https://www.googleapis.com/auth/drive" in c.scopes
+        assert "https://www.googleapis.com/auth/drive.readonly" in c.scopes
 
     def test_on_main_config(self):
         c = config.Config()
@@ -227,7 +227,8 @@ class TestSetupEnv:
         with db.get_db(ctx.config.db_path) as conn:
             db.upsert_google_token(conn, "alice", "valid-token", "refresh", future)
         result = setup_env(ctx)
-        assert result == {"GOOGLE_WORKSPACE_CLI_TOKEN": "valid-token"}
+        assert result["GOOGLE_WORKSPACE_CLI_TOKEN"] == "valid-token"
+        assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" in result
 
     def test_refreshes_expired_token(self, tmp_path):
         from istota.skills.google_workspace import setup_env
@@ -246,7 +247,8 @@ class TestSetupEnv:
         with mock.patch("httpx.post", return_value=mock_response) as mock_post:
             result = setup_env(ctx)
 
-        assert result == {"GOOGLE_WORKSPACE_CLI_TOKEN": "new-token"}
+        assert result["GOOGLE_WORKSPACE_CLI_TOKEN"] == "new-token"
+        assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" in result
         mock_post.assert_called_once()
         call_kwargs = mock_post.call_args
         assert call_kwargs[1]["data"]["grant_type"] == "refresh_token"
