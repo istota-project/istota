@@ -566,7 +566,10 @@ def cmd_reverse_geocode(args):
 
 
 def cmd_day_summary(args):
-    from istota.geo import reverse_geocode, cluster_pings, cluster_dwell_seconds, haversine
+    from istota.geo import (
+        reverse_geocode, cluster_pings, haversine,
+        filter_transit_clusters, merge_consecutive_stops,
+    )
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -607,17 +610,7 @@ def cmd_day_summary(args):
     pings = [dict(r) for r in rows]
     clusters = cluster_pings(pings, radius_m=250)
 
-    # Filter transit: short clusters without a place match
-    stops = []
-    transit_pings = 0
-    for c in clusters:
-        has_place = bool(c["place_name"])
-        few_pings = c["ping_count"] <= 2
-        short_dwell = cluster_dwell_seconds(c) < 300  # <5 minutes
-        if not has_place and (few_pings or short_dwell):
-            transit_pings += c["ping_count"]
-            continue
-        stops.append(c)
+    stops, transit_pings = filter_transit_clusters(clusters)
 
     # Load saved places for proximity matching
     saved_places = conn.execute(
@@ -664,16 +657,7 @@ def cmd_day_summary(args):
             except Exception:
                 stop[key + "_local"] = stop[key]
 
-    # Merge consecutive stops at the same location
-    merged = []
-    for stop in stops:
-        if merged and merged[-1]["location"] == stop["location"]:
-            prev = merged[-1]
-            prev["last_ts"] = stop["last_ts"]
-            prev["last_ts_local"] = stop.get("last_ts_local")
-            prev["ping_count"] += stop["ping_count"]
-        else:
-            merged.append(stop)
+    merged = merge_consecutive_stops(stops)
 
     result = {
         "date": target_date,

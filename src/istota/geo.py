@@ -150,3 +150,58 @@ def _finalize_cluster(cluster: dict) -> dict:
         "place_id": cluster["pings"][0].get("place_id"),
         "place_name": cluster["pings"][0].get("place_name"),
     }
+
+
+# Max transit pings between same-location stops before they're treated as
+# separate visits.  1-3 stray pings are GPS glitches; 4+ indicates a real trip.
+MERGE_TRANSIT_THRESHOLD = 3
+
+
+def filter_transit_clusters(
+    clusters: list[dict],
+    min_pings: int = 3,
+    min_dwell_seconds: float = 300,
+) -> tuple[list[dict], int]:
+    """Separate stop clusters from transit clusters.
+
+    Returns (stops, total_transit_pings).  Each stop dict gets a
+    ``_transit_pings_before`` key recording how many transit pings were
+    filtered since the previous stop.
+    """
+    stops: list[dict] = []
+    transit_pings = 0
+    transit_pings_since_last_stop = 0
+    for c in clusters:
+        has_place = bool(c["place_name"])
+        few_pings = c["ping_count"] < min_pings
+        short_dwell = cluster_dwell_seconds(c) < min_dwell_seconds
+        if not has_place and (few_pings or short_dwell):
+            transit_pings += c["ping_count"]
+            transit_pings_since_last_stop += c["ping_count"]
+            continue
+        c["_transit_pings_before"] = transit_pings_since_last_stop
+        transit_pings_since_last_stop = 0
+        stops.append(c)
+    return stops, transit_pings
+
+
+def merge_consecutive_stops(stops: list[dict]) -> list[dict]:
+    """Merge consecutive stops at the same location.
+
+    Stops separated by significant transit (> ``MERGE_TRANSIT_THRESHOLD``
+    filtered pings) are kept separate even if they share a location name.
+    """
+    merged: list[dict] = []
+    for stop in stops:
+        if (
+            merged
+            and merged[-1]["location"] == stop["location"]
+            and stop.get("_transit_pings_before", 0) <= MERGE_TRANSIT_THRESHOLD
+        ):
+            prev = merged[-1]
+            prev["last_ts"] = stop["last_ts"]
+            prev["last_ts_local"] = stop.get("last_ts_local")
+            prev["ping_count"] += stop["ping_count"]
+        else:
+            merged.append(stop)
+    return merged
