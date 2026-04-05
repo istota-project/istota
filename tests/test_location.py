@@ -15,12 +15,21 @@ try:
 except ImportError:
     _has_geopy = False
 
+try:
+    import fastapi  # noqa: F401
+    _has_fastapi = True
+except ImportError:
+    _has_fastapi = False
+
 _needs_geopy = pytest.mark.skipif(not _has_geopy, reason="geopy not installed")
+_needs_fastapi = pytest.mark.skipif(not _has_fastapi, reason="fastapi not installed")
 
 from istota import db
 from istota.config import Config, UserConfig
 from istota.geo import haversine
-from istota.webhook_receiver import resolve_place
+
+if _has_fastapi:
+    from istota.webhook_receiver import resolve_place
 
 
 def _init_db(tmp_path):
@@ -154,6 +163,7 @@ class TestVisitDB:
             assert visit.ping_count == 3  # 1 initial + 2 increments
 
 
+@_needs_fastapi
 class TestPlaceStats:
     def _add_pings(self, conn, user_id, place_id, timestamps):
         """Insert pings at a place for given ISO timestamps."""
@@ -296,6 +306,7 @@ class TestPlaceStats:
         assert result is None
 
 
+@_needs_fastapi
 class TestPlaceUpdateReassignment:
     def test_move_place_reassigns_pings(self, tmp_path):
         """Moving a place center should reassign pings to match the new geofence."""
@@ -409,6 +420,7 @@ class TestHaversine:
         assert 100 < dist < 120
 
 
+@_needs_fastapi
 class TestResolvePlace:
     def test_within_radius(self):
         places = [
@@ -442,6 +454,7 @@ class TestResolvePlace:
 # ===========================================================================
 
 
+@_needs_fastapi
 class TestStateMachine:
     """Tests for the state machine logic in webhook_receiver."""
 
@@ -581,6 +594,7 @@ class TestStateMachine:
 # ===========================================================================
 
 
+@_needs_fastapi
 class TestOverlandPayloadParsing:
     """Test that the receiver correctly parses Overland GeoJSON payloads."""
 

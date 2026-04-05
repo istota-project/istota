@@ -4,7 +4,21 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+
+try:
+    import authlib  # noqa: F401
+    import fastapi  # noqa: F401
+    _has_web_deps = True
+except ImportError:
+    _has_web_deps = False
+
+_needs_web_deps = pytest.mark.skipif(
+    not _has_web_deps,
+    reason="web dependencies not installed (install with: uv sync --extra web)",
+)
+
+if _has_web_deps:
+    from httpx import ASGITransport, AsyncClient
 
 from istota.config import (
     Config,
@@ -81,6 +95,7 @@ def _login_cookies(client, app):
     })
 
 
+@_needs_web_deps
 class TestLoginRoute:
     async def test_login_shows_landing_page(self, client, app):
         resp = await client.get("/istota/login")
@@ -99,6 +114,7 @@ class TestLoginRoute:
         mod._oauth.nextcloud.authorize_redirect.assert_called_once()
 
 
+@_needs_web_deps
 class TestCallbackRoute:
     async def test_callback_valid_user_sets_session(self, client, app):
         import istota.web_app as mod
@@ -137,6 +153,7 @@ class TestCallbackRoute:
         mod._oauth.nextcloud.userinfo.assert_called_once()
 
 
+@_needs_web_deps
 class TestUnauthenticatedAccess:
     async def test_api_me_returns_401(self, client):
         resp = await client.get("/istota/api/me")
@@ -147,6 +164,7 @@ class TestUnauthenticatedAccess:
         assert resp.status_code == 401
 
 
+@_needs_web_deps
 class TestApiMe:
     async def test_returns_user_info_with_feeds(self, client, app):
         import istota.web_app as mod
@@ -179,6 +197,7 @@ class TestApiMe:
         assert data["features"]["feeds"] is False
 
 
+@_needs_web_deps
 class TestApiFeeds:
     async def test_feeds_proxies_to_miniflux(self, client, app):
         import istota.web_app as mod
@@ -250,6 +269,7 @@ class TestApiFeeds:
         assert resp.status_code == 404
 
 
+@_needs_web_deps
 class TestImageExtraction:
     def test_extract_images_from_enclosures(self):
         from istota.web_app import _extract_images
@@ -276,6 +296,7 @@ class TestImageExtraction:
         assert _extract_images(entry) == []
 
 
+@_needs_web_deps
 class TestSanitizeHtml:
     def test_strips_disallowed_tags(self):
         from istota.web_app import _sanitize_html
@@ -290,6 +311,7 @@ class TestSanitizeHtml:
         assert "<em>" in result
 
 
+@_needs_web_deps
 class TestLogout:
     async def test_logout_clears_session(self, client, app):
         import istota.web_app as mod
@@ -309,6 +331,7 @@ class TestLogout:
         assert resp.status_code == 401
 
 
+@_needs_web_deps
 class TestCsrfOriginCheck:
     """Tests for Origin header CSRF protection on state-changing endpoints."""
 
@@ -351,6 +374,7 @@ class TestCsrfOriginCheck:
         assert resp.status_code != 403
 
 
+@_needs_web_deps
 class TestSessionRotation:
     """Test that session is cleared before writing user info on login."""
 
