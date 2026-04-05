@@ -56,11 +56,8 @@ def _reload_config():
             client_id=_config.google_workspace.client_id,
             client_secret=_config.google_workspace.client_secret,
             server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-            client_kwargs={
-                "scope": " ".join(_config.google_workspace.scopes),
-                "access_type": "offline",
-                "prompt": "consent",
-            },
+            client_kwargs={"scope": " ".join(_config.google_workspace.scopes)},
+            authorize_params={"access_type": "offline", "prompt": "consent"},
         )
 
 
