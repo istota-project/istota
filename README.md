@@ -151,7 +151,7 @@ Istota is built around Nextcloud — it uses your files, calendars, contacts, an
 | Storage | Nextcloud (WebDAV/rclone mount), includes files, calendars, contacts | Local filesystem |
 | Memory | USER.md + dated memories + channel memory + nightly curation + BM25/vector search + memory cap | Daily logs + MEMORY.md + hybrid search + pre-compaction flush |
 | Scheduling | CRON.md + briefings + heartbeats | Built-in cron + webhooks + Gmail Pub/Sub |
-| Skills | ~23 built-in Python CLIs with TOML manifests, keyword-based selection | 5,700+ community skills via ClawHub registry, three tiers |
+| Skills | ~20 built-in skills with YAML frontmatter manifests, two-pass selection (keyword + semantic) | 5,700+ community skills via ClawHub registry, three tiers |
 | Security | Bubblewrap filesystem sandbox, credential stripping, admin/non-admin isolation, deferred DB writes | DM pairing policy; community skills are an acknowledged risk vector |
 | Voice | Whisper transcription (input only) | ElevenLabs TTS + always-on speech wake |
 | Browser | Dockerized Playwright with bot-detection countermeasures | Built-in Chrome DevTools Protocol |

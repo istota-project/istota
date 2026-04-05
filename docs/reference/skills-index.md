@@ -11,6 +11,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | `memory` | Memory file reference (USER.md, CHANNEL.md, dated memories) |
 | `scripts` | User's reusable Python scripts |
 | `memory_search` | Memory search CLI (search, index, reindex, stats) |
+| `kv` | Key-value store for persistent runtime state |
 
 ## Communication
 
@@ -57,14 +58,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI | Notes |
 |---|---|---|---|
-| `moneyman` | accounting, ledger, beancount, invoice, expense | yes -- Moneyman API client | Requires `moneyman` resource. Mutually exclusive with `accounting` |
-| `accounting` | accounting, ledger, invoice, expense, tax | yes -- direct beancount operations | Requires `ledger` resource. Mutually exclusive with `moneyman` |
-
-## Health and fitness
-
-| Skill | Keywords | CLI |
-|---|---|---|
-| `garmin` | garmin, fitness, activity, workout, health | yes -- connect, user, activities, stats, health |
+| `moneyman` | accounting, ledger, beancount, invoice, expense | yes -- Moneyman API client | Requires `moneyman` resource |
 
 ## Location
 
