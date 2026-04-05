@@ -20,7 +20,7 @@ It runs as a regular Nextcloud user. File sharing, calendars, contacts, and Talk
 ## Features at a glance
 
 - **Messaging** -- Nextcloud Talk (DMs and group rooms), email (IMAP/SMTP with threading), TASKS.md file polling, CLI
-- **Skills** -- ~23 built-in Python CLIs loaded on demand: calendar, email, web browsing, git/GitLab/GitHub, accounting, GPS tracking, bookmarks, voice transcription, OCR, RSS feeds, and more
+- **Skills** -- ~20 built-in skills loaded on demand: calendar, email, web browsing, git/GitLab/GitHub, Moneyman accounting, GPS tracking, bookmarks, voice transcription, OCR, RSS feeds, and more
 - **Memory** -- Per-user persistent memory, per-channel memory, nightly memory extraction, BM25 + vector search
 - **Scheduling** -- Cron jobs via CRON.md, natural-language reminders, scheduled briefings with calendar/markets/headlines/news/todos
 - **Multi-user** -- Per-user config, resource permissions, worker pools, filesystem sandboxing, admin/non-admin isolation

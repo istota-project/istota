@@ -12,7 +12,7 @@ Skills are not plugins or extensions. They are curated documentation and tooling
 
 A skill is selected if any of these match:
 
-- `always_include = true` (files, sensitive_actions, memory, scripts, memory_search)
+- `always_include = true` (files, sensitive_actions, memory, scripts, memory_search, kv)
 - `source_types` matches the task's source type (e.g., `briefing` -> calendar, markets)
 - Any `keywords` found in the prompt text (e.g., "email" -> email skill)
 - Attachment file extensions match `file_types` (e.g., `.wav` -> whisper)
@@ -66,11 +66,11 @@ Calendar operations use CalDAV...
 
 Supported frontmatter fields: `name`, `triggers`, `description`, `always_include`, `admin_only`, `cli`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_memory`, `exclude_persona`, `exclude_resources`, `env` (JSON-encoded array of env spec objects).
 
-Operator overrides in `config/skills/` can still use `skill.toml` for backward compatibility.
+Operator overrides in `config/skills/` can use `skill.md` (or `skill.toml` for backward compatibility).
 
 ## Skill CLIs
 
-Skills with Python modules expose CLIs invoked by Claude Code inside the sandbox via `python -m istota.skills.<name>`. Pattern: `build_parser()` + `main()`, JSON output, credentials via env vars.
+Skills with Python modules expose CLIs invoked by Claude Code inside the sandbox via `python -m istota.skills.<name>`. The external entry point is `istota-skill <name>`, which routes through the credential proxy when enabled. Pattern: `build_parser()` + `main()`, JSON output, credentials via env vars.
 
 When the skill proxy is enabled, CLI commands run through a Unix socket proxy that injects credentials server-side.
 
@@ -78,14 +78,14 @@ When the skill proxy is enabled, CLI commands run through a Unix socket proxy th
 
 Skill discovery uses layered priority:
 
-1. Bundled `skill.toml` directories in `src/istota/skills/*/` (base)
-2. Operator override directories in `config/skills/*/` (higher priority)
+1. Bundled `skill.md` directories in `src/istota/skills/*/` (base)
+2. Operator override directories in `config/skills/*/` (higher priority, `skill.md` or `skill.toml`)
 
 Operator overrides can replace or extend bundled skills.
 
 ## Fingerprinting
 
-Skills have a SHA-256 fingerprint (of all `skill.toml` + `skill.md` files). When the fingerprint changes between interactions, a "what's new" changelog is appended to the prompt for interactive tasks.
+Skills have a SHA-256 fingerprint (of all `skill.md` + `skill.toml` files). When the fingerprint changes between interactions, a "what's new" changelog is appended to the prompt for interactive tasks.
 
 ## Placeholder substitution
 
