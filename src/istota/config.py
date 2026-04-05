@@ -298,6 +298,21 @@ class SecurityConfig:
 
 
 @dataclass
+class GoogleWorkspaceConfig:
+    """Google Workspace CLI integration (OAuth-based)."""
+    enabled: bool = False
+    client_id: str = ""
+    client_secret: str = ""
+    scopes: list[str] = field(default_factory=lambda: [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/documents",
+    ])
+
+
+@dataclass
 class MoneymanConfig:
     """Instance-level Moneyman service configuration."""
     cli_path: str = ""  # e.g. "/srv/app/moneyman/app/.venv/bin/moneyman"
@@ -347,6 +362,7 @@ class Config:
     site: SiteConfig = field(default_factory=SiteConfig)
     location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
     moneyman: MoneymanConfig = field(default_factory=MoneymanConfig)
+    google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
     web: WebConfig = field(default_factory=WebConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
     admin_users: set[str] = field(default_factory=set)  # users with full system access
@@ -885,6 +901,15 @@ def load_config(config_path: Path | None = None) -> Config:
             api_key=mm.get("api_key", ""),
         )
 
+    if "google_workspace" in data:
+        gw = data["google_workspace"]
+        config.google_workspace = GoogleWorkspaceConfig(
+            enabled=gw.get("enabled", False),
+            client_id=gw.get("client_id", ""),
+            client_secret=gw.get("client_secret", ""),
+            scopes=gw.get("scopes", GoogleWorkspaceConfig().scopes),
+        )
+
     if "web" in data:
         w = data["web"]
         config.web = WebConfig(
@@ -949,6 +974,7 @@ def load_config(config_path: Path | None = None) -> Config:
         ("ISTOTA_GITHUB_TOKEN", "developer", "github_token"),
         ("ISTOTA_NTFY_TOKEN", "ntfy", "token"),
         ("ISTOTA_NTFY_PASSWORD", "ntfy", "password"),
+        ("ISTOTA_GOOGLE_CLIENT_SECRET", "google_workspace", "client_secret"),
         ("ISTOTA_OIDC_CLIENT_SECRET", "web", "oidc_client_secret"),
         ("ISTOTA_WEB_SECRET_KEY", "web", "session_secret_key"),
     ]

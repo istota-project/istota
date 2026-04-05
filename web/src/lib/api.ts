@@ -23,6 +23,8 @@ export interface User {
 	features: {
 		feeds: boolean;
 		location: boolean;
+		google_workspace: boolean;
+		google_workspace_enabled: boolean;
 	};
 }
 
@@ -232,6 +234,10 @@ export async function discoverPlaces(minPings?: number): Promise<DiscoverRespons
 export async function getTrips(date?: string): Promise<TripsResponse> {
 	const qs = date ? `?date=${date}` : '';
 	return apiFetch<TripsResponse>(`/location/trips${qs}`);
+}
+
+export async function disconnectGoogle(): Promise<void> {
+	await apiFetch('/google/disconnect', { method: 'DELETE' });
 }
 
 export { AuthError };

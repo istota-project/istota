@@ -1109,6 +1109,60 @@ def find_sent_email_by_references(
 
 
 # ============================================================================
+# Google OAuth token functions
+# ============================================================================
+
+
+def get_google_token(conn: sqlite3.Connection, user_id: str) -> dict | None:
+    """Get Google OAuth tokens for a user."""
+    cursor = conn.execute(
+        "SELECT access_token, refresh_token, token_expiry, scopes FROM google_oauth_tokens WHERE user_id = ?",
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "access_token": row["access_token"],
+        "refresh_token": row["refresh_token"],
+        "token_expiry": row["token_expiry"],
+        "scopes": row["scopes"],
+    }
+
+
+def upsert_google_token(
+    conn: sqlite3.Connection,
+    user_id: str,
+    access_token: str,
+    refresh_token: str,
+    token_expiry: str,
+    scopes: str = "[]",
+) -> None:
+    """Insert or update Google OAuth tokens for a user."""
+    conn.execute(
+        """INSERT INTO google_oauth_tokens (user_id, access_token, refresh_token, token_expiry, scopes)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            access_token = excluded.access_token,
+            refresh_token = excluded.refresh_token,
+            token_expiry = excluded.token_expiry,
+            scopes = excluded.scopes,
+            updated_at = datetime('now')""",
+        (user_id, access_token, refresh_token, token_expiry, scopes),
+    )
+    conn.commit()
+
+
+def delete_google_token(conn: sqlite3.Connection, user_id: str) -> bool:
+    """Delete Google OAuth tokens for a user. Returns True if a row was deleted."""
+    cursor = conn.execute(
+        "DELETE FROM google_oauth_tokens WHERE user_id = ?", (user_id,),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+# ============================================================================
 # Talk message tracking functions
 # ============================================================================
 

@@ -274,6 +274,11 @@ istota_web_oidc_client_id: ""
 istota_web_oidc_client_secret: ""
 istota_web_secret_key: ""
 
+# Google Workspace CLI integration (OAuth-based)
+istota_google_workspace_enabled: false
+istota_google_workspace_client_id: ""
+istota_google_workspace_client_secret: ""
+
 # Install all optional Python dependencies (--extra all)
 # Set to false to use per-feature flags for fine-grained control
 istota_install_all_extras: true
