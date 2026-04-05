@@ -425,6 +425,17 @@ CREATE TABLE IF NOT EXISTS reverse_geocode_cache (
     PRIMARY KEY (lat_rounded, lon_rounded)
 );
 
+-- Google OAuth tokens (per-user Google Workspace access)
+CREATE TABLE IF NOT EXISTS google_oauth_tokens (
+    user_id TEXT PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    token_expiry TEXT NOT NULL,     -- ISO 8601 datetime
+    scopes TEXT NOT NULL DEFAULT '[]',  -- JSON array of granted scopes
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Location state machine (per-user hysteresis tracking)
 CREATE TABLE IF NOT EXISTS location_state (
     user_id TEXT PRIMARY KEY,

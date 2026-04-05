@@ -37,7 +37,7 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "build"
 
 
 def _reload_config():
-    """Load config and register the Nextcloud OIDC client."""
+    """Load config and register OAuth clients (Nextcloud OIDC + Google)."""
     global _config, _oauth
     _config = load_config()
     _oauth = OAuth()
@@ -49,6 +49,18 @@ def _reload_config():
             client_secret=_config.web.oidc_client_secret,
             server_metadata_url=f"{issuer}/index.php/.well-known/openid-configuration",
             client_kwargs={"scope": "openid profile"},
+        )
+    if _config.google_workspace.enabled and _config.google_workspace.client_id:
+        _oauth.register(
+            name="google",
+            client_id=_config.google_workspace.client_id,
+            client_secret=_config.google_workspace.client_secret,
+            server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+            client_kwargs={
+                "scope": " ".join(_config.google_workspace.scopes),
+                "access_type": "offline",
+                "prompt": "consent",
+            },
         )
 
 
@@ -202,6 +214,62 @@ async def logout(request: Request):
 
 
 # ============================================================================
+# Google OAuth routes (auth_router only — API routes added after api_router definition)
+# ============================================================================
+
+
+@auth_router.get("/google/connect")
+async def google_connect(request: Request):
+    """Initiate Google OAuth flow. User must be logged in."""
+    user = _get_session_user(request)
+    if not user:
+        return RedirectResponse(url="/istota/login", status_code=302)
+    if not _oauth or not hasattr(_oauth, "google"):
+        return Response("Google Workspace not configured", status_code=500)
+    hostname = _config.site.hostname if _config and _config.site.hostname else request.headers.get("host", "localhost")
+    scheme = request.headers.get("x-forwarded-proto", "https")
+    redirect_uri = f"{scheme}://{hostname}/istota/callback/google"
+    return await _oauth.google.authorize_redirect(request, redirect_uri)
+
+
+@auth_router.get("/callback/google")
+async def google_callback(request: Request):
+    """Handle Google OAuth callback — store tokens in DB."""
+    user = _get_session_user(request)
+    if not user:
+        return RedirectResponse(url="/istota/login", status_code=302)
+    if not _oauth or not hasattr(_oauth, "google"):
+        return Response("Google Workspace not configured", status_code=500)
+    try:
+        token = await _oauth.google.authorize_access_token(request)
+    except Exception as e:
+        logger.error("Google OAuth callback failed: %s", e)
+        return RedirectResponse(url="/istota/?google=error", status_code=302)
+
+    access_token = token.get("access_token", "")
+    refresh_token = token.get("refresh_token", "")
+    expires_in = token.get("expires_in", 3600)
+    scopes = token.get("scope", "")
+
+    if not access_token or not refresh_token:
+        logger.error("Google OAuth: missing tokens (access=%s, refresh=%s)",
+                      bool(access_token), bool(refresh_token))
+        return RedirectResponse(url="/istota/?google=error", status_code=302)
+
+    import json
+    expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    scopes_json = json.dumps(scopes.split()) if isinstance(scopes, str) else json.dumps(scopes)
+
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        db.upsert_google_token(
+            conn, user["username"], access_token, refresh_token, expiry, scopes_json,
+        )
+    logger.info("Google account connected for user %s", user["username"])
+    return RedirectResponse(url="/istota/?google=connected", status_code=302)
+
+
+# ============================================================================
 # API routes
 # ============================================================================
 
@@ -221,6 +289,18 @@ def _get_miniflux_creds(username: str) -> tuple[str, str] | None:
     return None
 
 
+def _has_google_token(username: str) -> bool:
+    """Check if a user has connected their Google account."""
+    if not _config:
+        return False
+    try:
+        from . import db
+        with db.get_db(_config.db_path) as conn:
+            return db.get_google_token(conn, username) is not None
+    except Exception:
+        return False
+
+
 def _get_location_config(username: str) -> tuple[str, str, str] | None:
     """Get (db_path, user_id, timezone) for location queries, or None."""
     if not _config or not _config.location.enabled:
@@ -234,11 +314,14 @@ def _get_location_config(username: str) -> tuple[str, str, str] | None:
 @api_router.get("/me")
 async def api_me(user: dict = Depends(_require_api_auth)):
     username = user["username"]
-    features = {"feeds": False, "location": False}
+    features: dict = {"feeds": False, "location": False, "google_workspace": False, "google_workspace_enabled": False}
     if _config:
         creds = _get_miniflux_creds(username)
         features["feeds"] = creds is not None
         features["location"] = _config.location.enabled
+        features["google_workspace_enabled"] = _config.google_workspace.enabled
+        if _config.google_workspace.enabled:
+            features["google_workspace"] = _has_google_token(username)
     return {
         "username": username,
         "display_name": user.get("display_name", username),
@@ -246,6 +329,30 @@ async def api_me(user: dict = Depends(_require_api_auth)):
     }
 
 
+# ---- Google Workspace API routes ----
+
+
+@api_router.get("/google/status")
+async def google_status(user: dict = Depends(_require_api_auth)):
+    """Check if user has connected their Google account."""
+    if not _config or not _config.google_workspace.enabled:
+        return {"enabled": False, "connected": False}
+    connected = _has_google_token(user["username"])
+    return {"enabled": True, "connected": connected}
+
+
+@api_router.delete("/google/disconnect")
+async def google_disconnect(
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Remove Google OAuth tokens for the current user."""
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        deleted = db.delete_google_token(conn, user["username"])
+    if deleted:
+        logger.info("Google account disconnected for user %s", user["username"])
+    return {"ok": True, "was_connected": deleted}
 
 
 # Tags allowed in feed card excerpts

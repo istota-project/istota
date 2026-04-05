@@ -202,6 +202,13 @@
         state: present
   when: not istota_update_only and not istota_web_only and (istota_nodejs_enabled or istota_web_enabled | default(false))
 
+- name: Install Google Workspace CLI (gws)
+  community.general.npm:
+    name: "@googleworkspace/cli"
+    global: true
+  when: not istota_update_only and not istota_web_only and (istota_google_workspace_enabled | default(false))
+  tags: [gws]
+
 - name: Check if uv is installed
   command: which uv
   register: uv_check

@@ -410,6 +410,7 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "GITLAB_TOKEN",
     "GITHUB_TOKEN",
     "MONEYMAN_API_KEY",
+    "GOOGLE_WORKSPACE_CLI_TOKEN",
 })
 
 
@@ -425,6 +426,7 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "GITLAB_TOKEN": frozenset({"developer"}),
     "GITHUB_TOKEN": frozenset({"developer"}),
     "MONEYMAN_API_KEY": frozenset({"moneyman"}),
+    "GOOGLE_WORKSPACE_CLI_TOKEN": frozenset({"google_workspace"}),
 }
 
 
@@ -500,6 +502,21 @@ def _build_network_allowlist(
             parsed = urlparse(config.developer.github_url)
             if parsed.hostname and "github.com" in parsed.hostname:
                 hosts.add("api.github.com:443")
+
+    # Google Workspace skill: Google API hosts
+    if "google_workspace" in selected_skills:
+        hosts.update({
+            "oauth2.googleapis.com:443",
+            "www.googleapis.com:443",
+            "sheets.googleapis.com:443",
+            "docs.googleapis.com:443",
+            "drive.googleapis.com:443",
+            "calendar-json.googleapis.com:443",
+            "chat.googleapis.com:443",
+            "gmail.googleapis.com:443",
+            "people.googleapis.com:443",
+            "admin.googleapis.com:443",
+        })
 
     return hosts
 

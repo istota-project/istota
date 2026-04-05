@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { getMe, type User } from '$lib/api';
+	import { getMe, disconnectGoogle, type User } from '$lib/api';
 	import { onMount } from 'svelte';
 
 	let user: User | null = $state(null);
+	let disconnecting = $state(false);
 
 	onMount(async () => {
 		try {
@@ -12,6 +13,18 @@
 			// layout handles auth redirect
 		}
 	});
+
+	async function handleDisconnectGoogle() {
+		if (!confirm('Disconnect your Google account?')) return;
+		disconnecting = true;
+		try {
+			await disconnectGoogle();
+			if (user) user.features.google_workspace = false;
+		} catch {
+			// ignore
+		}
+		disconnecting = false;
+	}
 </script>
 
 <div class="dashboard">
@@ -28,6 +41,24 @@
 				<a href="{base}/location" class="feature-card">
 					<div class="feature-title">Location</div>
 					<div class="feature-desc">GPS tracking and map</div>
+				</a>
+			{/if}
+			{#if user.features.google_workspace}
+				<div class="feature-card">
+					<div class="feature-title">Google Workspace</div>
+					<div class="feature-desc">Connected</div>
+					<button
+						class="disconnect-btn"
+						onclick={handleDisconnectGoogle}
+						disabled={disconnecting}
+					>
+						{disconnecting ? 'Disconnecting...' : 'Disconnect'}
+					</button>
+				</div>
+			{:else if user.features.google_workspace_enabled}
+				<a href="/istota/google/connect" class="feature-card">
+					<div class="feature-title">Google Workspace</div>
+					<div class="feature-desc">Connect your Google account</div>
 				</a>
 			{/if}
 		</div>
@@ -63,4 +94,17 @@
 		font-size: 0.8rem;
 		color: #888;
 	}
+	.disconnect-btn {
+		margin-top: 0.75rem;
+		padding: 0.25rem 0.75rem;
+		font-size: 0.75rem;
+		background: transparent;
+		border: 1px solid #444;
+		border-radius: 999px;
+		color: #888;
+		cursor: pointer;
+		transition: all 0.15s;
+	}
+	.disconnect-btn:hover { border-color: #888; color: #e0e0e0; }
+	.disconnect-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

@@ -361,6 +361,27 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # oidc_client_secret = ""    # or ISTOTA_OIDC_CLIENT_SECRET env var
 # session_secret_key = ""    # or ISTOTA_WEB_SECRET_KEY env var
 
+# ============================================================================
+# Google Workspace Integration
+# ============================================================================
+# Enables the gws CLI skill with OAuth-based authentication.
+# Users connect their Google account through the web UI.
+# Requires a Google Cloud project with OAuth 2.0 credentials:
+# https://console.cloud.google.com/apis/credentials
+# Authorized redirect URI: https://{hostname}/istota/callback/google
+
+# [google_workspace]
+# enabled = false
+# client_id = ""
+# client_secret = ""    # or ISTOTA_GOOGLE_CLIENT_SECRET env var
+# scopes = [
+#     "https://www.googleapis.com/auth/drive",
+#     "https://www.googleapis.com/auth/gmail.modify",
+#     "https://www.googleapis.com/auth/calendar",
+#     "https://www.googleapis.com/auth/spreadsheets",
+#     "https://www.googleapis.com/auth/documents",
+# ]
+
 # User configuration
 # Map Nextcloud usernames to their settings
 # Only messages from configured users will be processed

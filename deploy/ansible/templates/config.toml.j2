@@ -269,6 +269,15 @@ oidc_client_secret = "{{ istota_web_oidc_client_secret }}"
 session_secret_key = "{{ istota_web_secret_key }}"
 {% endif %}
 {% endif %}
+{% if istota_google_workspace_enabled %}
+
+[google_workspace]
+enabled = true
+client_id = "{{ istota_google_workspace_client_id }}"
+{% if not istota_use_environment_file %}
+client_secret = "{{ istota_google_workspace_client_secret }}"
+{% endif %}
+{% endif %}
 {% if istota_developer_enabled %}
 
 [developer]
