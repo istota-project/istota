@@ -368,7 +368,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # Users connect their Google account through the web UI.
 # Requires a Google Cloud project with OAuth 2.0 credentials:
 # https://console.cloud.google.com/apis/credentials
-# Authorized redirect URI: https://{hostname}/istota/callback/google
+# Authorized redirect URI: https://{hostname}/istota/google/callback
 
 # [google_workspace]
 # enabled = false

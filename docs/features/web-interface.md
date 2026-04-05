@@ -52,7 +52,7 @@ uvicorn istota.web_app:app --port 8766
 | `/istota/logout` | Session clear |
 | `/istota/api/me` | User info + features |
 | `/istota/google/connect` | Google OAuth initiation |
-| `/istota/callback/google` | Google OAuth callback |
+| `/istota/google/callback` | Google OAuth callback |
 | `/istota/api/google/status` | Google connection status |
 | `/istota/api/google/disconnect` | Remove Google tokens |
 | `/istota/api/feeds` | Miniflux proxy |

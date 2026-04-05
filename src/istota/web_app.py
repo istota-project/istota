@@ -225,11 +225,11 @@ async def google_connect(request: Request):
         return Response("Google Workspace not configured", status_code=500)
     hostname = _config.site.hostname if _config and _config.site.hostname else request.headers.get("host", "localhost")
     scheme = request.headers.get("x-forwarded-proto", "https")
-    redirect_uri = f"{scheme}://{hostname}/istota/callback/google"
+    redirect_uri = f"{scheme}://{hostname}/istota/google/callback"
     return await _oauth.google.authorize_redirect(request, redirect_uri)
 
 
-@auth_router.get("/callback/google")
+@auth_router.get("/google/callback")
 async def google_callback(request: Request):
     """Handle Google OAuth callback — store tokens in DB."""
     user = _get_session_user(request)
