@@ -18,7 +18,7 @@ Access Google Drive, Gmail, Calendar, Sheets, Docs, and Chat through the [Google
 5. Application type: **Web application**
 6. Add an authorized redirect URI:
    ```
-   https://your-hostname/istota/callback/google
+   https://your-hostname/istota/google/callback
    ```
 7. Copy the **Client ID** and **Client Secret**
 
