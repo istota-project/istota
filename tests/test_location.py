@@ -2079,3 +2079,66 @@ class TestCmdDaySummary:
         assert len(result["stops"]) == 1
         assert result["stops"][0]["location"] == "office"
         assert result["stops"][0]["ping_count"] == 6
+
+    def test_same_location_not_merged_after_real_trip(self, tmp_path):
+        """Home→trip→Home should show two separate Home stops, not one merged."""
+        places = [
+            {"name": "Home", "lat": 34.1025, "lon": -118.3059, "radius_meters": 100},
+            {"name": "Restaurant", "lat": 34.076, "lon": -118.305, "radius_meters": 100},
+        ]
+        pings = [
+            # Home cluster 1
+            {"timestamp": "2026-03-09T00:50:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+            {"timestamp": "2026-03-09T00:50:30Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+            {"timestamp": "2026-03-09T00:52:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+            # Driving away (many transit pings)
+            {"timestamp": "2026-03-09T02:48:00Z", "lat": 34.1029, "lon": -118.3068},
+            {"timestamp": "2026-03-09T02:48:10Z", "lat": 34.1017, "lon": -118.3078},
+            {"timestamp": "2026-03-09T02:48:20Z", "lat": 34.1017, "lon": -118.3088},
+            {"timestamp": "2026-03-09T02:48:30Z", "lat": 34.1006, "lon": -118.3093},
+            {"timestamp": "2026-03-09T02:49:00Z", "lat": 34.0981, "lon": -118.3093},
+            {"timestamp": "2026-03-09T02:49:30Z", "lat": 34.0960, "lon": -118.3093},
+            {"timestamp": "2026-03-09T02:50:00Z", "lat": 34.0937, "lon": -118.3092},
+            {"timestamp": "2026-03-09T02:51:00Z", "lat": 34.0870, "lon": -118.3092},
+            {"timestamp": "2026-03-09T02:52:00Z", "lat": 34.0806, "lon": -118.3091},
+            # Dinner (few pings, short dwell, no saved place nearby)
+            {"timestamp": "2026-03-09T02:58:00Z", "lat": 34.070, "lon": -118.300},
+            {"timestamp": "2026-03-09T02:59:00Z", "lat": 34.070, "lon": -118.300},
+            # Driving back
+            {"timestamp": "2026-03-09T03:37:00Z", "lat": 34.080, "lon": -118.309},
+            {"timestamp": "2026-03-09T03:38:00Z", "lat": 34.087, "lon": -118.309},
+            {"timestamp": "2026-03-09T03:40:00Z", "lat": 34.094, "lon": -118.309},
+            {"timestamp": "2026-03-09T03:43:00Z", "lat": 34.097, "lon": -118.309},
+            {"timestamp": "2026-03-09T03:45:00Z", "lat": 34.100, "lon": -118.309},
+            # Home cluster 2
+            {"timestamp": "2026-03-09T03:47:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+            {"timestamp": "2026-03-09T03:48:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+            {"timestamp": "2026-03-09T03:53:00Z", "lat": 34.1026, "lon": -118.3058, "place_id": 1},
+        ]
+        result = self._run_day_summary(tmp_path, pings=pings, places=places,
+                                        date="2026-03-08", tz="America/Los_Angeles")
+        home_stops = [s for s in result["stops"] if s["location"] == "Home"]
+        assert len(home_stops) == 2, (
+            f"Expected 2 Home stops (left and returned), got {len(home_stops)}: {result['stops']}"
+        )
+
+    def test_same_location_merged_after_phone_sleep(self, tmp_path):
+        """Home with phone sleep gap (no transit) should merge into one stop."""
+        places = [
+            {"name": "Home", "lat": 34.1025, "lon": -118.3059, "radius_meters": 100},
+        ]
+        pings = [
+            # Home cluster 1
+            {"timestamp": "2026-03-09T00:50:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+            {"timestamp": "2026-03-09T00:52:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+            # 2-hour gap (phone sleeping, no pings at all)
+            # Home cluster 2
+            {"timestamp": "2026-03-09T02:46:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+            {"timestamp": "2026-03-09T02:48:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+        ]
+        result = self._run_day_summary(tmp_path, pings=pings, places=places,
+                                        date="2026-03-08", tz="America/Los_Angeles")
+        home_stops = [s for s in result["stops"] if s["location"] == "Home"]
+        assert len(home_stops) == 1, (
+            f"Expected 1 merged Home stop (phone sleep, no transit), got {len(home_stops)}"
+        )
