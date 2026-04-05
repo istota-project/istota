@@ -55,15 +55,6 @@ Derived from Nextcloud credentials:
 | `BROWSER_API_URL` | `config.browser.api_url` |
 | `BROWSER_VNC_URL` | `config.browser.vnc_url` |
 
-## Ledger / accounting
-
-| Variable | Source |
-|---|---|
-| `LEDGER_PATHS` | JSON array: `[{"name": ..., "path": ...}]` |
-| `LEDGER_PATH` | First ledger path (backward compat) |
-| `INVOICING_CONFIG` | Path to INVOICING.md |
-| `ACCOUNTING_CONFIG` | Path to ACCOUNTING.md |
-
 ## Service integrations
 
 | Variable | Source |
