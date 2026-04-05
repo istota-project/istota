@@ -371,6 +371,7 @@
 - [x] Service credentials as resources (monarch follows karakeep pattern with ResourceConfig.extra)
 - [x] Miniflux migration: feeds skill with CLI, miniflux resource type, bridger app for Tumblr/Are.na
 - [x] Moneyman skill: API-based accounting via standalone Moneyman service (mutual exclusion with direct beancount skill)
+- [x] Google Workspace skill: gws CLI wrapper with OAuth token injection, read-only scopes by default
 - [ ] Config validation / "unconfigured" skill status (declarative credential requirements)
 
 ## Priority 5: Location Awareness (Phase 2+)

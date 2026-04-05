@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-05: Google Workspace CLI integration fixes
+
+Got the Google Workspace skill working end-to-end. The initial implementation had the OAuth flow and DB token storage in place but the gws binary wasn't accessible to the bot, credentials weren't injected properly, and skill selection missed common triggers like "gmail".
+
+**Key changes:**
+- Replaced npm global install with direct binary download from GitHub releases (no Node.js dependency for gws)
+- Added CLI passthrough wrapper (`__main__.py`) so gws runs through `istota-skill google_workspace` for credential injection via skill proxy
+- Added `setup_env` hook to set `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` to writable temp dir (sandbox HOME is read-only)
+- Derived skill proxy allowed list from skill index (`cli: true` metadata) instead of hardcoded `_ALLOWED_SKILLS` set
+- Added "gmail" to google_workspace skill triggers
+- Defaulted OAuth scopes to read-only, configurable via `istota_google_workspace_scopes` Ansible var
+- Cleaned up stale npm artifacts from server
+
+**Files added/modified:**
+- `src/istota/skills/google_workspace/__init__.py` — Added `main()` passthrough and `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` in `setup_env`
+- `src/istota/skills/google_workspace/__main__.py` — New file, CLI entry point
+- `src/istota/skills/google_workspace/skill.md` — Added `cli: true`, "gmail" trigger, updated all examples to use `istota-skill` wrapper
+- `src/istota/skill_proxy.py` — Removed hardcoded `_ALLOWED_SKILLS`, uses `allowed_skills` parameter from caller
+- `src/istota/executor.py` — Passes `cli_skills` from skill index to `SkillProxy`
+- `src/istota/config.py` — Default scopes changed to read-only
+- `deploy/ansible/tasks/main.yml` — Direct binary download from GitHub releases, removed npm dependency
+- `deploy/ansible/defaults/main.yml` — Added `istota_google_workspace_scopes` with read-only defaults
+- `deploy/ansible/templates/config.toml.j2` — Renders scopes from Ansible var
+- `config/config.example.toml` — Updated default scopes to read-only
+- `tests/test_skill_proxy.py` — Updated for dynamic allowed skills, consistency tests verify `cli: true` ↔ `__main__.py`
+- `tests/test_google_workspace.py` — Updated for read-only scopes and config dir in setup_env output
+
 ## 2026-04-04: Consolidate skill metadata into skill.md frontmatter
 
 Completed the migration from separate `skill.toml` sidecar files to YAML frontmatter in `skill.md`. All 26 bundled skills now store their full metadata (routing triggers, boolean flags, resource types, dependencies, env specs) in the frontmatter block of their markdown doc file. The `skill.toml` files are removed from bundled skills; operator overrides in `config/skills/` can still use toml for backward compatibility.
