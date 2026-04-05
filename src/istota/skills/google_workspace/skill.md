@@ -1,6 +1,6 @@
 ---
 name: google_workspace
-triggers: [google drive, google docs, google sheets, google calendar, google chat, google workspace, spreadsheet, gws]
+triggers: [google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws]
 description: Google Workspace operations via gws CLI (Drive, Docs, Sheets, Calendar, Chat)
 cli: true
 ---
