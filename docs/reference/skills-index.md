@@ -60,6 +60,14 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 |---|---|---|---|
 | `moneyman` | accounting, ledger, beancount, invoice, expense | yes -- Moneyman API client | Requires `moneyman` resource |
 
+## Google Workspace
+
+| Skill | Keywords | CLI |
+|---|---|---|
+| `google_workspace` | google drive, google docs, google sheets, google calendar, google chat, spreadsheet, gws | doc-only (uses `gws` CLI via Bash) |
+
+Requires OAuth connection via the [web dashboard](../features/google-workspace.md). Token injected via `setup_env()` hook.
+
 ## Location
 
 | Skill | Keywords | CLI |

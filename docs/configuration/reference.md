@@ -239,6 +239,17 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 | `api_url` | `""` | Remote HTTP API URL |
 | `api_key` | `""` | API key for remote mode |
 
+## `[google_workspace]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable Google Workspace skill |
+| `client_id` | `""` | Google OAuth client ID |
+| `client_secret` | `""` | Google OAuth client secret (or `ISTOTA_GOOGLE_CLIENT_SECRET` env var) |
+| `scopes` | Drive, Gmail, Calendar, Sheets, Docs | OAuth scopes to request |
+
+See [Google Workspace](../features/google-workspace.md) for setup instructions.
+
 ## `[site]`
 
 | Setting | Default | Description |
