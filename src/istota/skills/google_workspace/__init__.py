@@ -1,9 +1,10 @@
-"""Google Workspace skill — setup_env hook for OAuth token injection."""
+"""Google Workspace skill — setup_env hook and CLI passthrough."""
 
 from __future__ import annotations
 
-import json
 import logging
+import os
+import sys
 from datetime import datetime, timezone
 
 logger = logging.getLogger("istota.skills.google_workspace")
@@ -91,4 +92,14 @@ def setup_env(ctx) -> dict[str, str]:
             )
         logger.debug("Refreshed Google token for user %s", user_id)
 
-    return {"GOOGLE_WORKSPACE_CLI_TOKEN": access_token}
+    env = {"GOOGLE_WORKSPACE_CLI_TOKEN": access_token}
+
+    # Point gws config/cache to the writable temp dir (sandbox HOME is read-only)
+    env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(ctx.user_temp_dir / "gws_cache")
+
+    return env
+
+
+def main() -> None:
+    """Pass through to gws binary with all arguments."""
+    os.execvp("gws", ["gws"] + sys.argv[1:])

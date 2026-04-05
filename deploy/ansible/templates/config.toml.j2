@@ -277,6 +277,11 @@ client_id = "{{ istota_google_workspace_client_id }}"
 {% if not istota_use_environment_file %}
 client_secret = "{{ istota_google_workspace_client_secret }}"
 {% endif %}
+scopes = [
+{% for scope in istota_google_workspace_scopes %}
+    "{{ scope }}",
+{% endfor %}
+]
 {% endif %}
 {% if istota_developer_enabled %}
 

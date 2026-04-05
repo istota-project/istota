@@ -375,11 +375,11 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # client_id = ""
 # client_secret = ""    # or ISTOTA_GOOGLE_CLIENT_SECRET env var
 # scopes = [
-#     "https://www.googleapis.com/auth/drive",
-#     "https://www.googleapis.com/auth/gmail.modify",
-#     "https://www.googleapis.com/auth/calendar",
-#     "https://www.googleapis.com/auth/spreadsheets",
-#     "https://www.googleapis.com/auth/documents",
+#     "https://www.googleapis.com/auth/drive.readonly",
+#     "https://www.googleapis.com/auth/gmail.readonly",
+#     "https://www.googleapis.com/auth/calendar.readonly",
+#     "https://www.googleapis.com/auth/spreadsheets.readonly",
+#     "https://www.googleapis.com/auth/documents.readonly",
 # ]
 
 # User configuration
