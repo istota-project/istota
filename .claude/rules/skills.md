@@ -104,7 +104,7 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `bookmarks` | — | bookmark, karakeep, save, read later, ... | karakeep | — |
 | `website` | — | website, site, publish, blog, ... | — | — |
 | `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe | miniflux | — |
-| `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, gmail, gws | — | — |
+| `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws | — | — |
 | `moneyman` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | moneyman | — |
 
 Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skills`. Users with a `moneyman` resource get the API-based skill; users with `ledger` resources get the direct beancount skill.

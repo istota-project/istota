@@ -321,6 +321,7 @@ def select_skills(
     is_admin: bool = True,
     attachments: list[str] | None = None,
     disabled_skills: set[str] | None = None,
+    sticky_skills: set[str] | None = None,
 ) -> list[str]:
     """Select relevant skills based on prompt and context.
 
@@ -371,6 +372,19 @@ def select_skills(
                         continue
                 if _check_dependencies(meta):
                     selected.add(name)
+
+    # Inject sticky skills from recent conversation (follow-up context)
+    if sticky_skills:
+        for name in sticky_skills:
+            if name in disabled or name not in skill_index:
+                continue
+            meta = skill_index[name]
+            if meta.admin_only and not is_admin:
+                continue
+            if meta.always_include:
+                continue  # already selected
+            if _check_dependencies(meta):
+                selected.add(name)
 
     # Resolve companion skills (e.g., whisper pulls in reminders, schedules)
     companions = set()

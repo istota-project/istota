@@ -1722,6 +1722,36 @@ def execute_task(
     if user_config:
         _disabled |= set(user_config.disabled_skills)
 
+    # Build sticky skills from recent conversation + explicit reply parent
+    sticky_skills: set[str] | None = None
+    if task.conversation_token and task.source_type in ("talk", "email"):
+        def _get_sticky(c: "db.sqlite3.Connection") -> set[str]:
+            skills = db.get_recent_conversation_skills(
+                c, task.conversation_token,
+                exclude_task_id=task.id,
+                max_age_minutes=30,
+                limit=2,
+            )
+            # Also include skills from explicit reply parent (no time limit)
+            if task.reply_to_talk_id:
+                parent = db.get_reply_parent_task(c, task.conversation_token, task.reply_to_talk_id)
+                if parent and parent.selected_skills:
+                    try:
+                        skills |= set(json.loads(parent.selected_skills))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            return skills
+        try:
+            if conn is not None:
+                sticky_skills = _get_sticky(conn)
+            else:
+                with db.get_db(config.db_path) as temp_conn:
+                    sticky_skills = _get_sticky(temp_conn)
+            if sticky_skills:
+                logger.debug("Sticky skills from conversation: %s", ", ".join(sorted(sticky_skills)))
+        except Exception:
+            logger.debug("Failed to get sticky skills for task %d", task.id, exc_info=True)
+
     selected_skills = select_skills(
         prompt=task.prompt,
         source_type=task.source_type,
@@ -1730,6 +1760,7 @@ def execute_task(
         is_admin=is_admin,
         attachments=task.attachments,
         disabled_skills=_disabled if _disabled else None,
+        sticky_skills=sticky_skills or None,
     )
 
     # Pass 2: LLM-based semantic routing
@@ -1755,6 +1786,19 @@ def execute_task(
                             excluded.add(ex)
             all_selected -= excluded
             selected_skills = sorted(all_selected)
+
+    # Persist selected skills for conversation stickiness
+    if task.id and selected_skills:
+        def _save_skills(c: "db.sqlite3.Connection") -> None:
+            db.save_task_selected_skills(c, task.id, selected_skills)
+        try:
+            if conn is not None:
+                _save_skills(conn)
+            else:
+                with db.get_db(config.db_path) as temp_conn:
+                    _save_skills(temp_conn)
+        except Exception:
+            logger.debug("Failed to save selected_skills for task %d", task.id, exc_info=True)
 
     skills_doc = load_skills(
         config.skills_dir, selected_skills, config.bot_name, config.bot_dir_name,

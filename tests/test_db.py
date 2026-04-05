@@ -735,3 +735,99 @@ class TestFailStuckLockedRunningTasks:
             assert db.has_active_foreground_task_for_channel(conn, "room1") is True
             db.fail_stuck_locked_running_tasks(conn)
             assert db.has_active_foreground_task_for_channel(conn, "room1") is False
+
+
+class TestSaveAndGetRecentConversationSkills:
+    def test_empty_when_no_prior_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            result = db.get_recent_conversation_skills(conn, "room1")
+            assert result == set()
+
+    def test_returns_skills_from_recent_completed_task(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="list gmail", user_id="alice",
+                conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "completed", result="done")
+            db.save_task_selected_skills(conn, task_id, ["files", "google_workspace"])
+            result = db.get_recent_conversation_skills(conn, "room1")
+            assert result == {"files", "google_workspace"}
+
+    def test_excludes_current_task(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="list gmail", user_id="alice",
+                conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "completed", result="done")
+            db.save_task_selected_skills(conn, task_id, ["google_workspace"])
+            result = db.get_recent_conversation_skills(
+                conn, "room1", exclude_task_id=task_id,
+            )
+            assert result == set()
+
+    def test_respects_max_age(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="old task", user_id="alice",
+                conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "completed", result="done")
+            db.save_task_selected_skills(conn, task_id, ["google_workspace"])
+            # Backdate the task
+            conn.execute(
+                "UPDATE tasks SET created_at = datetime('now', '-60 minutes') WHERE id = ?",
+                (task_id,),
+            )
+            result = db.get_recent_conversation_skills(
+                conn, "room1", max_age_minutes=30,
+            )
+            assert result == set()
+
+    def test_respects_limit(self, db_path):
+        with db.get_db(db_path) as conn:
+            for i in range(3):
+                tid = db.create_task(
+                    conn, prompt=f"task {i}", user_id="alice",
+                    conversation_token="room1",
+                )
+                db.update_task_status(conn, tid, "completed", result="done")
+                db.save_task_selected_skills(conn, tid, [f"skill_{i}"])
+            # limit=1 should only get the most recent
+            result = db.get_recent_conversation_skills(conn, "room1", limit=1)
+            assert result == {"skill_2"}
+
+    def test_unions_skills_from_multiple_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            for skills in [["calendar"], ["google_workspace", "email"]]:
+                tid = db.create_task(
+                    conn, prompt="test", user_id="alice",
+                    conversation_token="room1",
+                )
+                db.update_task_status(conn, tid, "completed", result="done")
+                db.save_task_selected_skills(conn, tid, skills)
+            result = db.get_recent_conversation_skills(conn, "room1")
+            assert result == {"calendar", "google_workspace", "email"}
+
+    def test_ignores_null_selected_skills(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="test", user_id="alice",
+                conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "completed", result="done")
+            # No save_task_selected_skills — column stays NULL
+            result = db.get_recent_conversation_skills(conn, "room1")
+            assert result == set()
+
+    def test_ignores_different_conversation(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="test", user_id="alice",
+                conversation_token="room2",
+            )
+            db.update_task_status(conn, task_id, "completed", result="done")
+            db.save_task_selected_skills(conn, task_id, ["google_workspace"])
+            result = db.get_recent_conversation_skills(conn, "room1")
+            assert result == set()
