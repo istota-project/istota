@@ -31,7 +31,7 @@ uvicorn istota.web_app:app --port 8766
 
 ## Pages
 
-**Dashboard**: shows available features for the authenticated user.
+**Dashboard**: shows available features for the authenticated user. When [Google Workspace](google-workspace.md) is enabled, the dashboard also shows a connect/disconnect card for linking a Google account.
 
 **Feeds**: Miniflux RSS feed reader with masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox. Viewport-based read tracking marks entries as read in Miniflux after 1.5s visible. Requires a `miniflux` resource.
 
@@ -51,6 +51,10 @@ uvicorn istota.web_app:app --port 8766
 | `/istota/callback` | Token exchange |
 | `/istota/logout` | Session clear |
 | `/istota/api/me` | User info + features |
+| `/istota/google/connect` | Google OAuth initiation |
+| `/istota/callback/google` | Google OAuth callback |
+| `/istota/api/google/status` | Google connection status |
+| `/istota/api/google/disconnect` | Remove Google tokens |
 | `/istota/api/feeds` | Miniflux proxy |
 | `/istota/api/moneyman/ledgers` | Moneyman API proxy |
 | `/istota/api/location/*` | Places CRUD, pings, trips |

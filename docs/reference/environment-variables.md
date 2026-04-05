@@ -67,6 +67,12 @@ Derived from Nextcloud credentials:
 | `MONEYMAN_API_URL` | From resource config (type=moneyman) |
 | `MONEYMAN_API_KEY` | From resource config (type=moneyman) |
 
+## Google Workspace
+
+| Variable | Source |
+|---|---|
+| `GOOGLE_WORKSPACE_CLI_TOKEN` | OAuth access token from DB (injected via `setup_env()` hook, auto-refreshed) |
+
 ## Developer
 
 | Variable | Source |
@@ -99,6 +105,7 @@ When `skill_proxy_enabled = true`, these variables are stripped from the subproc
 - `KARAKEEP_API_KEY`
 - `MINIFLUX_API_KEY`
 - `MONEYMAN_API_KEY`
+- `GOOGLE_WORKSPACE_CLI_TOKEN`
 - `GITLAB_TOKEN`
 - `GITHUB_TOKEN`
 - `MONARCH_SESSION_TOKEN`
@@ -116,5 +123,6 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_GITHUB_TOKEN` | `developer.github_token` |
 | `ISTOTA_NTFY_TOKEN` | `ntfy.token` |
 | `ISTOTA_NTFY_PASSWORD` | `ntfy.password` |
+| `ISTOTA_GOOGLE_CLIENT_SECRET` | `google_workspace.client_secret` |
 | `ISTOTA_OIDC_CLIENT_SECRET` | `web.oidc_client_secret` |
 | `ISTOTA_WEB_SECRET_KEY` | `web.session_secret_key` |
