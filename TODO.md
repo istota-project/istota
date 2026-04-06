@@ -207,6 +207,29 @@
 - [x] `routing_method` tracking in `processed_emails` (plus_address, sender_match, thread_match, discarded)
 - [x] Per-user email address exposed in prompt header
 
+### Email Confirmation Gate ✅
+- [x] Deterministic gate for plus-addressed emails from untrusted senders (non-LLM, can't be prompt-injected)
+- [x] `trusted_email_senders` config with fnmatch patterns (exact, `*@domain`, `*@*.domain`)
+- [x] User's own `email_addresses` implicitly trusted
+- [x] Confirmation prompt posted to `alerts_channel` in Talk with message_id tracking
+- [x] Three-path confirmation: reply-to-specific message, same-conversation, cross-conversation fallback
+- [x] Auto-detected 1:1 DM token fallback (zero config needed for basic operation)
+- [ ] Skill restriction by trust level for gated-but-confirmed tasks
+- [ ] Thread-match gating (currently ungated — revisit if forwarding abuse seen)
+- [ ] Haiku pre-filter for injection detection on untrusted emails
+
+### Adversarial Testing
+- [x] T1: Direct exfiltration via inbound email (5 tests, all pass)
+- [ ] T2: Action hijacking via email
+- [ ] T3: Confirmation bypass via email
+- [ ] T4: Identity confusion via email
+- [ ] T5: Cross-user information leakage via Talk
+- [ ] T6: Content injection via browsing
+- [ ] T7: Calendar injection
+- [ ] T8: Credential and environment exfiltration
+- [ ] T9: Multi-step social engineering
+- [ ] Automated regression suite for adversarial tests
+
 ### Emissary Email Threads (Phase 3 — deferred)
 - [ ] Delegated autonomy levels: per-user `emissary_mode` config (`notify` = just surface reply, `draft` = draft + confirm, `auto` = send autonomously). Requires config schema change, prompt branching in emissary reply prompt, per-user override in user config
 - [ ] Structured email draft storage: `istota-skill email draft` command writes `task_{id}_email_draft.json` instead of relying on confirmation_prompt text. Useful if the prompt-based approach proves unreliable for preserving exact draft content across re-execution

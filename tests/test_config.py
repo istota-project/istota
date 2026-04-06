@@ -390,6 +390,69 @@ class TestConfigMethods:
         assert cfg.use_mount is True
 
 
+class TestTrustedEmailSenders:
+    def test_own_email_always_trusted(self):
+        cfg = Config(users={
+            "alice": UserConfig(email_addresses=["alice@example.com"]),
+        })
+        assert cfg.is_trusted_email_sender("alice", "alice@example.com") is True
+
+    def test_own_email_case_insensitive(self):
+        cfg = Config(users={
+            "alice": UserConfig(email_addresses=["Alice@Cynium.COM"]),
+        })
+        assert cfg.is_trusted_email_sender("alice", "alice@example.com") is True
+
+    def test_exact_match(self):
+        cfg = Config(users={
+            "alice": UserConfig(trusted_email_senders=["alice@example.com"]),
+        })
+        assert cfg.is_trusted_email_sender("alice", "Alice@Example.com") is True
+
+    def test_domain_wildcard(self):
+        cfg = Config(users={
+            "alice": UserConfig(trusted_email_senders=["*@corp.com"]),
+        })
+        assert cfg.is_trusted_email_sender("alice", "anyone@corp.com") is True
+        assert cfg.is_trusted_email_sender("alice", "anyone@sub.corp.com") is False
+
+    def test_subdomain_wildcard(self):
+        cfg = Config(users={
+            "alice": UserConfig(trusted_email_senders=["*@*.corp.com"]),
+        })
+        assert cfg.is_trusted_email_sender("alice", "x@sub.corp.com") is True
+        assert cfg.is_trusted_email_sender("alice", "x@corp.com") is False
+
+    def test_no_match_returns_false(self):
+        cfg = Config(users={
+            "alice": UserConfig(trusted_email_senders=[]),
+        })
+        assert cfg.is_trusted_email_sender("alice", "stranger@evil.com") is False
+
+    def test_unknown_user_returns_false(self):
+        cfg = Config(users={})
+        assert cfg.is_trusted_email_sender("nobody", "a@b.com") is False
+
+    def test_multiple_patterns(self):
+        cfg = Config(users={
+            "alice": UserConfig(trusted_email_senders=[
+                "alice@example.com",
+                "*@cynium.com",
+            ]),
+        })
+        assert cfg.is_trusted_email_sender("alice", "alice@example.com") is True
+        assert cfg.is_trusted_email_sender("alice", "bob@cynium.com") is True
+        assert cfg.is_trusted_email_sender("alice", "bob@evil.com") is False
+
+    def test_alerts_channel_default_empty(self):
+        uc = UserConfig()
+        assert uc.alerts_channel == ""
+
+    def test_trusted_email_senders_default_empty(self):
+        uc = UserConfig()
+        assert uc.trusted_email_senders == []
+
+
 class TestEmailConfig:
     def test_effective_smtp_user_fallback(self):
         ec = EmailConfig(imap_user="imap@example.com", smtp_user="")
@@ -737,6 +800,26 @@ permissions = "write"
         cfg = load_config(config_file)
         assert len(cfg.users["alice"].resources) == 1
         assert cfg.users["alice"].resources[0].type == "folder"
+
+    def test_load_user_with_alerts_channel_and_trusted_senders(self, tmp_path):
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text("""
+display_name = "Alice"
+alerts_channel = "abc123"
+trusted_email_senders = ["*@cynium.com", "alice@example.com"]
+""")
+        result = load_user_configs(users_dir)
+        assert result["alice"].alerts_channel == "abc123"
+        assert result["alice"].trusted_email_senders == ["*@cynium.com", "alice@example.com"]
+
+    def test_load_user_without_alerts_channel_defaults(self, tmp_path):
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
+        result = load_user_configs(users_dir)
+        assert result["alice"].alerts_channel == ""
+        assert result["alice"].trusted_email_senders == []
 
 
 class TestDeveloperConfig:

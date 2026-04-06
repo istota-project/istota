@@ -152,6 +152,10 @@ istota_disabled_skills: []
 #       - "alice@example.com"
 #     timezone: "America/New_York"
 #     log_channel: ""               # Talk room token for verbose task execution logs
+#     alerts_channel: ""            # Talk room token for confirmations and security alerts
+#     trusted_email_senders:        # patterns for trusted email senders (plus-address gate)
+#       - "*@example.com"           # domain wildcard
+#       - "bob@other.com"           # exact match
 #     max_foreground_workers: 2    # per-user override (0 or omit = use global default)
 #     max_background_workers: 1    # per-user override (0 or omit = use global default)
 #     disabled_skills: []          # per-user skill exclusion list

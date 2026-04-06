@@ -644,6 +644,76 @@ class TestCancelPendingConfirmations:
             assert count == 0
 
 
+class TestGetPendingConfirmationForUser:
+    def test_returns_newest_pending_confirmation(self, db_path):
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="older", user_id="alice", conversation_token="thread1",
+            )
+            db.set_task_confirmation(conn, t1, "Confirm older?")
+            t2 = db.create_task(
+                conn, prompt="newer", user_id="alice", conversation_token="thread2",
+            )
+            db.set_task_confirmation(conn, t2, "Confirm newer?")
+
+            result = db.get_pending_confirmation_for_user(conn, "alice")
+            assert result is not None
+            assert result.id == t2
+
+    def test_returns_none_when_no_pending(self, db_path):
+        with db.get_db(db_path) as conn:
+            result = db.get_pending_confirmation_for_user(conn, "alice")
+            assert result is None
+
+    def test_ignores_other_users(self, db_path):
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="bob's task", user_id="bob", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, t1, "Confirm?")
+
+            result = db.get_pending_confirmation_for_user(conn, "alice")
+            assert result is None
+
+    def test_ignores_non_confirmation_statuses(self, db_path):
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="pending task", user_id="alice", conversation_token="room1",
+            )
+            # Task stays in 'pending' status, not 'pending_confirmation'
+            result = db.get_pending_confirmation_for_user(conn, "alice")
+            assert result is None
+
+
+class TestGetPendingConfirmationByResponseId:
+    def test_returns_matching_task(self, db_path):
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="gated email", user_id="alice", conversation_token="thread1",
+            )
+            db.set_task_confirmation(conn, t1, "Confirm?")
+            db.update_talk_response_id(conn, t1, 42)
+
+            result = db.get_pending_confirmation_by_response_id(conn, 42)
+            assert result is not None
+            assert result.id == t1
+
+    def test_returns_none_when_no_match(self, db_path):
+        with db.get_db(db_path) as conn:
+            result = db.get_pending_confirmation_by_response_id(conn, 999)
+            assert result is None
+
+    def test_ignores_non_confirmation_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="completed task", user_id="alice", conversation_token="room1",
+            )
+            db.update_talk_response_id(conn, t1, 42)
+            # Task is 'pending', not 'pending_confirmation'
+            result = db.get_pending_confirmation_by_response_id(conn, 42)
+            assert result is None
+
+
 class TestFailStuckLockedRunningTasks:
     def test_fails_old_locked_task(self, db_path):
         with db.get_db(db_path) as conn:

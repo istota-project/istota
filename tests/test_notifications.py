@@ -39,6 +39,37 @@ class TestResolveConversationToken:
         assert resolve_conversation_token(config, "alice") is None
 
 
+    def test_falls_back_to_dm_token(self):
+        config = Config(users={"alice": UserConfig()})
+        with patch("istota.talk_poller.get_dm_token", return_value="dm_room_abc"):
+            assert resolve_conversation_token(config, "alice") == "dm_room_abc"
+
+    def test_dm_token_not_used_when_alerts_channel_set(self):
+        config = Config(users={
+            "alice": UserConfig(alerts_channel="alerts_room"),
+        })
+        with patch("istota.talk_poller.get_dm_token", return_value="dm_room_abc"):
+            assert resolve_conversation_token(config, "alice") == "alerts_room"
+
+    def test_prefers_alerts_channel(self):
+        config = Config(users={
+            "alice": UserConfig(
+                alerts_channel="alerts_room",
+                briefings=[BriefingConfig(name="morning", cron="0 6 * * *", conversation_token="briefing_room")],
+            ),
+        })
+        assert resolve_conversation_token(config, "alice") == "alerts_room"
+
+    def test_falls_back_to_briefing_when_no_alerts_channel(self):
+        config = Config(users={
+            "alice": UserConfig(
+                alerts_channel="",
+                briefings=[BriefingConfig(name="morning", cron="0 6 * * *", conversation_token="briefing_room")],
+            ),
+        })
+        assert resolve_conversation_token(config, "alice") == "briefing_room"
+
+
 class TestSendTalk:
     @pytest.mark.asyncio
     async def test_sends_with_explicit_token(self):
@@ -48,9 +79,10 @@ class TestSendTalk:
         )
         with patch("istota.talk.TalkClient") as MockClient:
             mock_client = AsyncMock()
+            mock_client.send_message.return_value = {"ocs": {"data": {"id": 10}}}
             MockClient.return_value = mock_client
             result = await _send_talk(config, "alice", "hello", conversation_token="room1")
-        assert result is True
+        assert result == 10
         mock_client.send_message.assert_called_once_with("room1", "hello")
 
     @pytest.mark.asyncio
@@ -63,27 +95,76 @@ class TestSendTalk:
         )
         with patch("istota.talk.TalkClient") as MockClient:
             mock_client = AsyncMock()
+            mock_client.send_message.return_value = {"ocs": {"data": {"id": 11}}}
             MockClient.return_value = mock_client
             result = await _send_talk(config, "alice", "hello")
-        assert result is True
+        assert result == 11
         mock_client.send_message.assert_called_once_with("room2", "hello")
 
     @pytest.mark.asyncio
-    async def test_returns_false_without_token(self):
+    async def test_returns_none_without_token(self):
         config = Config(
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
         )
         result = await _send_talk(config, "alice", "hello")
-        assert result is False
+        assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_false_without_nextcloud(self):
+    async def test_returns_none_without_nextcloud(self):
         config = Config(users={"alice": UserConfig(
             briefings=[BriefingConfig(name="morning", cron="0 6 * * *", conversation_token="room1")],
         )})
         result = await _send_talk(config, "alice", "hello")
-        assert result is False
+        assert result is None
+
+
+    @pytest.mark.asyncio
+    async def test_returns_message_id_on_success(self):
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
+            users={"alice": UserConfig()},
+        )
+        with patch("istota.talk.TalkClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.send_message.return_value = {"ocs": {"data": {"id": 42}}}
+            MockClient.return_value = mock_client
+            result = await _send_talk(config, "alice", "hello", conversation_token="room1")
+        assert result == 42
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_failure(self):
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
+            users={"alice": UserConfig()},
+        )
+        with patch("istota.talk.TalkClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.send_message.side_effect = Exception("fail")
+            MockClient.return_value = mock_client
+            result = await _send_talk(config, "alice", "hello", conversation_token="room1")
+        assert result is None
+
+
+class TestSendTalkConfirmation:
+    def test_returns_message_id(self):
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
+            users={"alice": UserConfig()},
+        )
+        with patch("istota.talk.TalkClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.send_message.return_value = {"ocs": {"data": {"id": 99}}}
+            MockClient.return_value = mock_client
+            from istota.notifications import send_talk_confirmation
+            result = send_talk_confirmation(config, "alice", "Confirm?", conversation_token="room1")
+        assert result == 99
+
+    def test_returns_none_without_token(self):
+        config = Config(users={"alice": UserConfig()})
+        from istota.notifications import send_talk_confirmation
+        result = send_talk_confirmation(config, "alice", "Confirm?")
+        assert result is None
 
 
 class TestSendEmail:

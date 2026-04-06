@@ -8,6 +8,12 @@ timezone = "{{ user_config.timezone | default('UTC') }}"
 {% if user_config.log_channel is defined and user_config.log_channel %}
 log_channel = "{{ user_config.log_channel }}"
 {% endif %}
+{% if user_config.alerts_channel is defined and user_config.alerts_channel %}
+alerts_channel = "{{ user_config.alerts_channel }}"
+{% endif %}
+{% if user_config.trusted_email_senders is defined and user_config.trusted_email_senders %}
+trusted_email_senders = {{ user_config.trusted_email_senders | to_json }}
+{% endif %}
 {% if user_config.ntfy_topic is defined and user_config.ntfy_topic %}
 ntfy_topic = "{{ user_config.ntfy_topic }}"
 {% endif %}

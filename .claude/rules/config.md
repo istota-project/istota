@@ -113,9 +113,11 @@ display_name: str = ""                    email_addresses: list[str] = []
 timezone: str = "UTC"                     briefings: list[BriefingConfig] = []
 resources: list[ResourceConfig] = []
 ntfy_topic: str = ""                      log_channel: str = ""
+alerts_channel: str = ""                  # Talk room for confirmations/alerts
 site_enabled: bool = False
 max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 = use global default
 disabled_skills: list[str] = []           # per-user skills to exclude
+trusted_email_senders: list[str] = []     # patterns for trusted senders (email gate)
 ```
 
 ### `MemorySearchConfig`
@@ -182,6 +184,7 @@ Methods:
 - `get_user(nc_username) -> UserConfig | None`
 - `is_admin(user_id) -> bool` — True if `admin_users` empty or user in set
 - `find_user_by_email(email_address) -> str | None`
+- `is_trusted_email_sender(user_id, sender_email) -> bool` — checks user's own emails + `trusted_email_senders` patterns via fnmatch
 
 ## Config Loading
 

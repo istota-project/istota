@@ -34,6 +34,15 @@ name = "Reminders"
 # Shows real-time tool calls, timing, and task summaries without cluttering working channels
 # log_channel = "logroom123"
 
+# Alerts channel: Talk room for confirmations and security alerts
+# Used for email confirmation gates (plus-addressed emails from unknown senders)
+# alerts_channel = "alertsroom456"
+
+# Trusted email senders: patterns for senders that bypass the email confirmation gate
+# User's own email_addresses are implicitly trusted (no need to list them here)
+# Supports exact match, domain wildcard (*@example.com), subdomain wildcard (*@*.example.com)
+# trusted_email_senders = ["*@company.com", "bob@partner.com"]
+
 # ntfy topic override (uses global [ntfy] topic if empty)
 # ntfy_topic = "alice-notifications"
 

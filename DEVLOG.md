@@ -2,6 +2,40 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-05: Email confirmation gate for unknown senders
+
+Added a deterministic (non-LLM) confirmation gate for plus-addressed emails from untrusted senders. When an email arrives at `bot+user@domain` from a sender not in the user's trusted list, the task is held in `pending_confirmation` until the user explicitly approves via Talk. Also ran adversarial red-team testing (T1 category) to validate existing prompt injection defenses — all tests passed before the gate was even added, but the gate provides a stronger, non-bypassable layer.
+
+**Key changes:**
+- `alerts_channel` and `trusted_email_senders` fields on `UserConfig` for per-user configuration
+- `is_trusted_email_sender()` on `Config` with fnmatch-based pattern matching (exact, `*@domain`, `*@*.domain`)
+- Email gate in `email_poller.py`: plus-addressed emails from untrusted senders create tasks in `pending_confirmation` status
+- Confirmation prompt posted to user's alerts channel with Talk message_id stored on the task
+- Three-path confirmation lookup in `handle_confirmation_reply`: reply-to-specific message → same-conversation → cross-conversation fallback by user_id
+- `resolve_conversation_token()` priority chain: `alerts_channel` > briefing token > auto-detected 1:1 DM
+- Auto-detected DM tokens: talk poller caches type-1 (one-to-one) conversation tokens per user, so confirmations work out of the box with zero config
+- `_send_talk()` returns message_id instead of bool (backward-compatible)
+- `send_talk_confirmation()` sync wrapper for use from email poller
+- `get_pending_confirmation_for_user()` and `get_pending_confirmation_by_response_id()` DB queries
+- Adversarial test harness in `tests/adversarial/` with SMTP sender script
+
+**Files added/modified:**
+- `src/istota/config.py` — `alerts_channel`, `trusted_email_senders`, `is_trusted_email_sender()`
+- `src/istota/email_poller.py` — Confirmation gate after task creation for untrusted plus-address senders
+- `src/istota/talk_poller.py` — Reply metadata extraction moved before confirmation check, three-path lookup, DM token cache
+- `src/istota/notifications.py` — `alerts_channel` priority, DM fallback, message_id return, `send_talk_confirmation()`
+- `src/istota/db.py` — `get_pending_confirmation_for_user()`, `get_pending_confirmation_by_response_id()`
+- `deploy/ansible/defaults/main.yml` — `alerts_channel`, `trusted_email_senders` in user config example
+- `deploy/ansible/templates/user.toml.j2` — Jinja2 blocks for new fields
+- `config/config.example.toml` — New fields documented
+- `config/users/alice.example.toml` — New fields documented
+- `tests/test_config.py` — 12 tests for trust matching and config loading
+- `tests/test_notifications.py` — 6 tests for alerts_channel, DM fallback, message_id return
+- `tests/test_db.py` — 7 tests for new confirmation queries
+- `tests/test_email_poller.py` — 5 tests for confirmation gate
+- `tests/test_talk_poller.py` — 10 tests for cross-conversation confirmation and DM cache
+- `tests/adversarial/send_t1.py` — T1 adversarial email test sender
+
 ## 2026-04-05: Google Workspace CLI integration fixes
 
 Got the Google Workspace skill working end-to-end. The initial implementation had the OAuth flow and DB token storage in place but the gws binary wasn't accessible to the bot, credentials weren't injected properly, and skill selection missed common triggers like "gmail".

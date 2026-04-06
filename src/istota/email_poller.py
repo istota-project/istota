@@ -293,6 +293,32 @@ Date: {email.date}
                 output_target=output_target,
             )
 
+            # Gate: untrusted plus-address senders require confirmation
+            if (
+                routing_method == "plus_address"
+                and not config.is_trusted_email_sender(user_id, envelope.sender)
+            ):
+                confirmation_msg = (
+                    f"Email from unknown sender {envelope.sender}\n"
+                    f"Subject: {email.subject}\n\n"
+                    f"Reply 'yes' to process or 'no' to discard."
+                )
+                db.set_task_confirmation(conn, task_id, confirmation_msg)
+
+                from .notifications import send_talk_confirmation
+                user_config = config.users.get(user_id)
+                alerts_token = user_config.alerts_channel if user_config else None
+                msg_id = send_talk_confirmation(
+                    config, user_id, confirmation_msg, alerts_token or None,
+                )
+                if msg_id:
+                    db.update_talk_response_id(conn, task_id, msg_id)
+
+                logger.info(
+                    "Task %d from %s held for confirmation (plus_address, untrusted sender)",
+                    task_id, envelope.sender,
+                )
+
             # Mark email as processed with task link
             db.mark_email_processed(
                 conn,
