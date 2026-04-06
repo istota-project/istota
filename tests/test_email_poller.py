@@ -1053,8 +1053,8 @@ class TestEmailConfirmationGate:
             task = db.get_task(conn, task_ids[0])
             assert task.status == "pending"  # Not pending_confirmation
 
-    def test_sender_match_gated_by_default(self, make_config):
-        """Sender-match emails from non-trusted senders are gated when confirm_sender_match is True (default)."""
+    def test_sender_match_own_email_not_gated(self, make_config):
+        """Sender-match emails from user's own email_addresses are trusted (not gated)."""
         config = make_config()
         config.email = _email_config()
         config.users = {"alice": UserConfig(
@@ -1062,7 +1062,6 @@ class TestEmailConfirmationGate:
             alerts_channel="alerts_room",
         )}
 
-        # Spoofed sender — matches alice's email but could be forged
         envelope = _envelope(id="23", sender="alice@test.com", subject="Hi")
         email = _email(id="23", sender="alice@test.com")
 
@@ -1070,14 +1069,13 @@ class TestEmailConfirmationGate:
             patch("istota.email_poller.list_emails", return_value=[envelope]),
             patch("istota.email_poller.read_email", return_value=email),
             patch("istota.email_poller.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=88),
         ):
             task_ids = poll_emails(config)
 
         assert len(task_ids) == 1
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-            assert task.status == "pending_confirmation"
+            assert task.status == "pending"
 
     def test_sender_match_not_gated_when_disabled(self, make_config):
         """Sender-match emails proceed directly when confirm_sender_match is False."""
