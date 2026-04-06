@@ -563,3 +563,74 @@ class TestSendEmailSanitizesSubject:
         assert sent_msg["In-Reply-To"] == "<msg3@example.com>"
         # \r\n each become space, plus original space = 3 spaces between IDs
         assert sent_msg["References"] == "<msg1@example.com>   <msg2@example.com>   <msg3@example.com>"
+
+
+class TestDownloadAttachmentsSecurity:
+    """Verify that attachment filenames are sanitized against path traversal."""
+
+    def test_path_traversal_stripped(self, tmp_path, email_config):
+        """Filenames with ../ components should have directory parts stripped."""
+        from istota.skills.email import download_attachments
+
+        mock_att = MagicMock()
+        mock_att.filename = "../../etc/passwd"
+        mock_att.payload = b"evil content"
+
+        mock_msg = MagicMock()
+        mock_msg.attachments = [mock_att]
+
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=tmp_path, config=email_config)
+
+        # Should write as "passwd" in target_dir, not traverse
+        assert len(result) == 1
+        assert result[0].parent == tmp_path
+        assert result[0].name == "passwd"
+        assert not (tmp_path / ".." / ".." / "etc" / "passwd").exists()
+
+    def test_absolute_path_stripped(self, tmp_path, email_config):
+        from istota.skills.email import download_attachments
+
+        mock_att = MagicMock()
+        mock_att.filename = "/etc/shadow"
+        mock_att.payload = b"evil"
+
+        mock_msg = MagicMock()
+        mock_msg.attachments = [mock_att]
+
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=tmp_path, config=email_config)
+
+        assert len(result) == 1
+        assert result[0].name == "shadow"
+        assert result[0].parent == tmp_path
+
+    def test_empty_filename_after_strip_skipped(self, tmp_path, email_config):
+        from istota.skills.email import download_attachments
+
+        mock_att = MagicMock()
+        mock_att.filename = "../../"
+        mock_att.payload = b"evil"
+
+        mock_msg = MagicMock()
+        mock_msg.attachments = [mock_att]
+
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=tmp_path, config=email_config)
+
+        assert len(result) == 0

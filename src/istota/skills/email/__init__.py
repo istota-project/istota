@@ -197,7 +197,13 @@ def download_attachments(
         for msg in mailbox.fetch(AND(uid=email_id), mark_seen=False):
             for att in msg.attachments:
                 if att.filename:
-                    file_path = target_dir / att.filename
+                    # Strip directory components to prevent path traversal
+                    safe_name = Path(att.filename).name
+                    if not safe_name or safe_name in ("..", "."):
+                        continue
+                    file_path = target_dir / safe_name
+                    if not file_path.resolve().is_relative_to(target_dir.resolve()):
+                        continue
                     file_path.write_bytes(att.payload)
                     downloaded.append(file_path)
 

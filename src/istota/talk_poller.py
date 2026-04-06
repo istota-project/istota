@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from . import db
 from .config import Config
@@ -55,8 +56,11 @@ def extract_attachments(message: dict) -> list[str]:
             # File shared in conversation
             filename = value.get("name", "")
             if filename:
-                # Files shared in Talk are accessible in the bot's Talk folder
-                attachments.append(f"Talk/{filename}")
+                # Strip directory components to prevent path traversal
+                safe_name = Path(filename).name
+                if safe_name and safe_name != ".." and safe_name != ".":
+                    # Files shared in Talk are accessible in the bot's Talk folder
+                    attachments.append(f"Talk/{safe_name}")
 
     return attachments
 
