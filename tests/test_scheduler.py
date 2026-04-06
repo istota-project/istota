@@ -2157,7 +2157,7 @@ class TestDeferredOperations:
         assert subtask.queue == "background"
 
     def test_process_deferred_subtasks_sets_output_target_from_conversation_token(self, db_path, tmp_path):
-        """Subtasks with conversation_token should default output_target to 'talk'."""
+        """Subtasks inherit parent's conversation_token and default output_target to 'talk'."""
         from istota.scheduler import _process_deferred_subtasks
         config = self._make_config(db_path, tmp_path)
         user_temp = tmp_path / "temp" / "alice"
@@ -2171,12 +2171,12 @@ class TestDeferredOperations:
             parent = db.get_task(conn, parent_id)
 
         subtasks = [
-            # Explicit conversation_token → should get output_target="talk"
+            # conversation_token in JSON is ignored — pinned to parent's token
             {"prompt": "Post to room", "conversation_token": "room2"},
-            # No conversation_token but parent has one → inherits, should get "talk"
+            # No conversation_token — inherits from parent
             {"prompt": "Inherit room"},
             # Explicit output_target overrides default
-            {"prompt": "Email result", "conversation_token": "room1", "output_target": "email"},
+            {"prompt": "Email result", "output_target": "email"},
         ]
         (user_temp / f"task_{parent_id}_subtasks.json").write_text(json.dumps(subtasks))
 
@@ -2189,10 +2189,11 @@ class TestDeferredOperations:
             key=lambda t: t.id,
         )
         assert len(subtask_list) == 3
+        # All subtasks get parent's conversation_token (pinned for security)
         assert subtask_list[0].output_target == "talk"
-        assert subtask_list[0].conversation_token == "room2"
+        assert subtask_list[0].conversation_token == "room1"
         assert subtask_list[1].output_target == "talk"
-        assert subtask_list[1].conversation_token == "room1"  # inherited from parent
+        assert subtask_list[1].conversation_token == "room1"
         assert subtask_list[2].output_target == "email"  # explicit override
 
     def test_process_deferred_subtasks_no_output_target_without_conversation(self, db_path, tmp_path):
@@ -2218,6 +2219,32 @@ class TestDeferredOperations:
         subtask = [t for t in tasks if t.source_type == "subtask"][0]
         assert subtask.output_target is None
         assert subtask.conversation_token is None
+
+    def test_process_deferred_subtasks_respects_limit(self, db_path, tmp_path):
+        """Deferred subtask creation is capped at 10 to limit prompt injection damage."""
+        from istota.scheduler import _process_deferred_subtasks
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="Parent", user_id="alice", source_type="talk",
+                conversation_token="room1",
+            )
+            parent = db.get_task(conn, parent_id)
+
+        # Create 15 subtasks — only 10 should be processed
+        subtasks = [{"prompt": f"Subtask {i}"} for i in range(15)]
+        (user_temp / f"task_{parent_id}_subtasks.json").write_text(json.dumps(subtasks))
+
+        count = _process_deferred_subtasks(config, parent, user_temp)
+        assert count == 10
+
+        with db.get_db(db_path) as conn:
+            tasks = db.list_tasks(conn, user_id="alice")
+        subtask_list = [t for t in tasks if t.source_type == "subtask"]
+        assert len(subtask_list) == 10
 
     def test_process_deferred_tracking_monarch(self, db_path, tmp_path):
         """Monarch synced entries should be tracked in DB."""

@@ -568,6 +568,25 @@ class TestChannelMemory:
     def test_get_channel_memories_path(self):
         assert get_channel_memories_path("abc123") == "/Channels/abc123/memories"
 
+    def test_path_traversal_rejected(self):
+        from istota.storage import validate_conversation_token
+        with pytest.raises(ValueError):
+            validate_conversation_token("../etc")
+
+    def test_slash_in_token_rejected(self):
+        from istota.storage import validate_conversation_token
+        with pytest.raises(ValueError):
+            validate_conversation_token("room/../../etc")
+
+    def test_empty_token_rejected(self):
+        from istota.storage import validate_conversation_token
+        with pytest.raises(ValueError):
+            validate_conversation_token("")
+
+    def test_valid_token_passes(self):
+        from istota.storage import validate_conversation_token
+        assert validate_conversation_token("abc123XYZ_-") == "abc123XYZ_-"
+
     def test_ensure_channel_directories(self, mount_config):
         result = ensure_channel_directories(mount_config, "room42")
         assert result is True

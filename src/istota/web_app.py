@@ -120,11 +120,22 @@ def _verify_origin(request: Request) -> None:
         else request.headers.get("host", "")
     )
     if not hostname:
-        return
+        raise _ForbiddenException("cannot determine hostname")
     from urllib.parse import urlparse
     parsed = urlparse(origin)
     if parsed.hostname != hostname.split(":")[0]:
         raise _ForbiddenException("origin mismatch")
+
+
+def _get_external_origin() -> tuple[str, str]:
+    """Get the external hostname and scheme for OAuth redirect URIs.
+
+    Requires site.hostname to be configured — does not fall back to
+    request headers, which can be forged.
+    """
+    if not _config or not _config.site.hostname:
+        raise ValueError("site.hostname must be configured when web app is enabled")
+    return _config.site.hostname, "https"
 
 
 class _ForbiddenException(Exception):
@@ -179,8 +190,7 @@ async def login(request: Request):
             f'<body><div class="box"><h1>{bot_name}</h1>'
             f'<a href="/istota/login?go=1">Log in with Nextcloud</a></div></body></html>'
         )
-    hostname = _config.site.hostname if _config and _config.site.hostname else request.headers.get("host", "localhost")
-    scheme = request.headers.get("x-forwarded-proto", "https")
+    hostname, scheme = _get_external_origin()
     redirect_uri = f"{scheme}://{hostname}/istota/callback"
     return await _oauth.nextcloud.authorize_redirect(request, redirect_uri)
 
@@ -223,8 +233,7 @@ async def google_connect(request: Request):
         return RedirectResponse(url="/istota/login", status_code=302)
     if not _oauth or not hasattr(_oauth, "google"):
         return Response("Google Workspace not configured", status_code=500)
-    hostname = _config.site.hostname if _config and _config.site.hostname else request.headers.get("host", "localhost")
-    scheme = request.headers.get("x-forwarded-proto", "https")
+    hostname, scheme = _get_external_origin()
     redirect_uri = f"{scheme}://{hostname}/istota/google/callback"
     return await _oauth.google.authorize_redirect(request, redirect_uri)
 

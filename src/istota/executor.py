@@ -2307,12 +2307,12 @@ def execute_task(
                 # build_bwrap_cmd() bind-mounts this file into the sandbox.
                 _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{task.id}.sock"
                 env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
-                # All CLI-capable skills get their credentials — skill selection
-                # controls which docs are loaded, not credential access.
+                # Only selected skills' credentials are available via the proxy.
                 # _CREDENTIAL_SKILL_MAP scopes each skill to only its creds.
-                all_skill_names = list({s for ss in _CREDENTIAL_SKILL_MAP.values() for s in ss})
-                allowed_creds = _allowed_credentials_for_skills(all_skill_names)
-                skill_cred_map = _build_skill_credential_map(all_skill_names)
+                cred_skill_names = list({s for ss in _CREDENTIAL_SKILL_MAP.values() for s in ss}
+                                        & set(selected_skills))
+                allowed_creds = _allowed_credentials_for_skills(cred_skill_names)
+                skill_cred_map = _build_skill_credential_map(cred_skill_names)
                 cli_skills = frozenset(
                     name for name, meta in skill_index.items() if meta.cli
                 )

@@ -418,6 +418,24 @@ class TestCsrfOriginCheck:
         )
         assert resp.status_code != 403
 
+    async def test_empty_hostname_returns_403(self, client, app):
+        """When site.hostname is empty and Host header is missing, CSRF check must reject."""
+        import istota.web_app as mod
+        cookies = await self._login(client, app)
+        # Clear hostname after login to test CSRF with no hostname
+        original = mod._config.site.hostname
+        mod._config.site.hostname = ""
+        try:
+            resp = await client.put(
+                "/istota/api/feeds/entries/batch",
+                json={"entry_ids": [1], "status": "read"},
+                cookies=cookies,
+                headers={"origin": "https://evil.com", "host": ""},
+            )
+            assert resp.status_code == 403
+        finally:
+            mod._config.site.hostname = original
+
 
 @_needs_web_deps
 class TestSessionRotation:
