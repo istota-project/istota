@@ -1058,8 +1058,19 @@ The bot can append to this file to remember things relevant to all participants.
 """
 
 
+_TOKEN_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def validate_conversation_token(token: str) -> str:
+    """Validate that a conversation token is safe for filesystem use."""
+    if not token or not _TOKEN_PATTERN.match(token):
+        raise ValueError(f"Invalid conversation token: {token!r}")
+    return token
+
+
 def get_channel_base_path(conversation_token: str) -> str:
     """Get the base path for a channel's bot-managed directory."""
+    validate_conversation_token(conversation_token)
     return f"{CHANNEL_BASE}/{conversation_token}"
 
 

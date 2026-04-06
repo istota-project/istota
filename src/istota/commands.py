@@ -227,6 +227,8 @@ async def cmd_memory(config, conn, user_id, conversation_token, args, client):
         return "**User memory:** (empty)"
 
     if target == "channel":
+        from .storage import validate_conversation_token
+        validate_conversation_token(conversation_token)
         mem_path = mount / "Channels" / conversation_token / "CHANNEL.md"
         if mem_path.exists():
             content = mem_path.read_text()
@@ -636,6 +638,8 @@ async def cmd_export(config, conn, user_id, conversation_token, args, client):
     # Build export path
     export_dir = mount / "Users" / user_id / config.bot_dir_name / "exports" / "conversations"
     export_dir.mkdir(parents=True, exist_ok=True)
+    from .storage import validate_conversation_token
+    validate_conversation_token(conversation_token)
     export_path = export_dir / f"{conversation_token}{ext}"
 
     # Resolve user timezone

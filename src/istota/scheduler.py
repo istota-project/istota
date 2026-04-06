@@ -808,13 +808,22 @@ def _process_deferred_subtasks(
         path.unlink(missing_ok=True)
         return 0
 
+    max_subtasks = 10
     count = 0
     with db.get_db(config.db_path) as conn:
         for entry in data:
+            if count >= max_subtasks:
+                logger.warning(
+                    "Task %d hit deferred subtask limit (%d), ignoring remaining entries",
+                    task.id, max_subtasks,
+                )
+                break
             prompt = entry.get("prompt", "")
             if not prompt:
                 continue
-            conv_token = entry.get("conversation_token", task.conversation_token)
+            # Pin conversation_token to parent task — deferred JSON cannot
+            # override this to prevent prompt-injection-driven routing.
+            conv_token = task.conversation_token
             output_target = entry.get("output_target")
             if not output_target and conv_token:
                 output_target = "talk"
@@ -2644,6 +2653,24 @@ def run_daemon(config: Config) -> None:
     logger.info("STARTUP Task retention: %d days", config.scheduler.task_retention_days)
     logger.info("STARTUP Email retention: %d days", config.scheduler.email_retention_days)
     logger.info("STARTUP Temp file retention: %d days", config.scheduler.temp_file_retention_days)
+
+    # Security status checks
+    from .executor import _bwrap_available
+    if config.security.sandbox_enabled and not _bwrap_available():
+        multi_user = len(config.users) > 1
+        if multi_user:
+            logger.warning(
+                "SECURITY Sandbox enabled but bubblewrap unavailable — "
+                "multi-user file isolation relies on env-var scoping only (not enforced at filesystem level)"
+            )
+        else:
+            logger.info("SECURITY Sandbox enabled but bubblewrap unavailable (single-user, low risk)")
+    elif config.security.sandbox_enabled:
+        logger.info("SECURITY Sandbox enabled with bubblewrap")
+    else:
+        logger.info("SECURITY Sandbox disabled")
+    logger.info("SECURITY Skill proxy: %s", "enabled" if config.security.skill_proxy_enabled else "disabled")
+    logger.info("SECURITY Network proxy: %s", "enabled" if config.security.network.enabled else "disabled")
 
     # Hydrate user configs from Nextcloud API (display name, email, timezone)
     try:
