@@ -1,7 +1,7 @@
 [project]
 name = "istota"
-version = "0.5.0"
-description = "Claude Code-powered bot with Nextcloud Talk interface"
+version = "0.6.1"
+description = "Personal AI agent integrated with Nextcloud"
 license = "MIT"
 readme = "README.md"
 requires-python = ">=3.11"
