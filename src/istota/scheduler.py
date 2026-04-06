@@ -1028,11 +1028,17 @@ def _process_deferred_user_alerts(
 
     count = 0
     for entry in data:
+        if not isinstance(entry, dict):
+            continue
         message = entry.get("message", "").strip()
         if not message:
             continue
 
-        formatted = f"\u26a0\ufe0f **Security alert** (task #{task.id})\n\n{message}"
+        alert_type = entry.get("type", "security")
+        if alert_type == "action_needed":
+            formatted = f"**Action needed** (task #{task.id})\n\n{message}"
+        else:
+            formatted = f"\u26a0\ufe0f **Security alert** (task #{task.id})\n\n{message}"
 
         from .notifications import send_notification
         if send_notification(config, task.user_id, formatted, surface="talk"):
@@ -1056,6 +1062,12 @@ def _notify_confirmed_email_result(
     Returns True if notification was posted, False otherwise.
     """
     if task.source_type != "email" or task.confirmation_prompt is None:
+        return False
+
+    # If output_target already includes Talk, the user sees the result in
+    # their conversation — no need to duplicate it in the alerts channel.
+    target = task.output_target or ""
+    if target in ("both", "all", "talk"):
         return False
 
     # Look up the sender from the processed_emails record

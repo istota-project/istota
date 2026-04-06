@@ -2812,6 +2812,57 @@ class TestDeferredOperations:
 
         assert count == 1
 
+    def test_process_deferred_user_alerts_skips_non_dict_entries(self, db_path, tmp_path):
+        """Non-dict entries in the array should be skipped, not crash."""
+        from istota.scheduler import _process_deferred_user_alerts
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
+            task = db.get_task(conn, task_id)
+
+        alerts = [42, "hello", None, {"message": "Real alert"}]
+        (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            count = _process_deferred_user_alerts(config, task, user_temp)
+
+        assert count == 1
+        assert "Real alert" in mock_notify.call_args[0][2]
+
+    def test_process_deferred_user_alerts_action_needed_type(self, db_path, tmp_path):
+        """Alerts with type=action_needed should use 'Action needed' prefix, not 'Security alert'."""
+        from istota.scheduler import _process_deferred_user_alerts
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
+            task = db.get_task(conn, task_id)
+
+        alerts = [
+            {"message": "Phishing attempt", "type": "security"},
+            {"type": "action_needed", "message": "Told joe@example.com I would check with you about Saturday"},
+        ]
+        (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            count = _process_deferred_user_alerts(config, task, user_temp)
+
+        assert count == 2
+        security_msg = mock_notify.call_args_list[0][0][2]
+        action_msg = mock_notify.call_args_list[1][0][2]
+        assert "Security alert" in security_msg
+        assert "Action needed" in action_msg
+        assert "Security alert" not in action_msg
+
 
 # ---------------------------------------------------------------------------
 # TestNotifyConfirmedEmailResult
@@ -2938,6 +2989,49 @@ class TestNotifyConfirmedEmailResult:
 
         message = mock_notify.call_args[0][2]
         assert "the sender" in message
+
+    def test_output_target_both_skips_notification(self, db_path, tmp_path):
+        """When output_target includes Talk, skip the duplicate alerts-channel notification."""
+        from istota.scheduler import _notify_confirmed_email_result
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Email reply", user_id="alice",
+                source_type="email", output_target="both",
+            )
+            db.set_task_confirmation(conn, task_id, "Confirm?")
+            db.confirm_task(conn, task_id)
+            task = db.get_task(conn, task_id)
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            result = _notify_confirmed_email_result(config, task, "Reply text")
+
+        assert result is False
+        mock_notify.assert_not_called()
+
+    def test_output_target_email_still_notifies(self, db_path, tmp_path):
+        """When output_target is email-only, the alerts-channel notification should fire."""
+        from istota.scheduler import _notify_confirmed_email_result
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Email reply", user_id="alice",
+                source_type="email", output_target="email",
+            )
+            db.set_task_confirmation(conn, task_id, "Confirm?")
+            db.confirm_task(conn, task_id)
+            task = db.get_task(conn, task_id)
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            result = _notify_confirmed_email_result(config, task, "Reply text")
+
+        assert result is True
+        mock_notify.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
