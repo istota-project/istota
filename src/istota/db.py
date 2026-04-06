@@ -1545,6 +1545,58 @@ def cleanup_old_tasks(conn: sqlite3.Connection, retention_days: int) -> int:
 
 
 # ============================================================================
+# Trusted Email Senders
+# ============================================================================
+
+
+def add_trusted_sender(
+    conn: sqlite3.Connection, user_id: str, sender_email: str,
+) -> bool:
+    """Add a trusted email sender. Returns True if newly added, False if already exists."""
+    try:
+        conn.execute(
+            "INSERT INTO trusted_email_senders (user_id, sender_email) VALUES (?, ?)",
+            (user_id, sender_email.lower()),
+        )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def remove_trusted_sender(
+    conn: sqlite3.Connection, user_id: str, sender_email: str,
+) -> bool:
+    """Remove a trusted email sender. Returns True if removed, False if not found."""
+    cursor = conn.execute(
+        "DELETE FROM trusted_email_senders WHERE user_id = ? AND sender_email = ?",
+        (user_id, sender_email.lower()),
+    )
+    return cursor.rowcount > 0
+
+
+def list_trusted_senders(
+    conn: sqlite3.Connection, user_id: str,
+) -> list[dict]:
+    """List all trusted email senders for a user. Returns list of {sender_email, added_at}."""
+    cursor = conn.execute(
+        "SELECT sender_email, added_at FROM trusted_email_senders WHERE user_id = ? ORDER BY sender_email",
+        (user_id,),
+    )
+    return [{"sender_email": row["sender_email"], "added_at": row["added_at"]} for row in cursor]
+
+
+def is_sender_trusted_in_db(
+    conn: sqlite3.Connection, user_id: str, sender_email: str,
+) -> bool:
+    """Check if an email sender is in the runtime trusted senders table."""
+    cursor = conn.execute(
+        "SELECT 1 FROM trusted_email_senders WHERE user_id = ? AND sender_email = ?",
+        (user_id, sender_email.lower()),
+    )
+    return cursor.fetchone() is not None
+
+
+# ============================================================================
 # Key-Value Store
 # ============================================================================
 

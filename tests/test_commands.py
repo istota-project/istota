@@ -2007,3 +2007,84 @@ class TestCmdSearchFiltering:
             result = await cmd_search(config, conn, "alice", "room1", "", client)
         assert "--since" in result
         assert "--memories" in result
+
+
+# =============================================================================
+# TestTrustCommand
+# =============================================================================
+
+
+class TestTrustCommand:
+    @pytest.mark.asyncio
+    async def test_trust_adds_sender(self, make_config, db_path):
+        from istota.commands import cmd_trust
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            client = MagicMock()
+            result = await cmd_trust(config, conn, "alice", "room1", "joe@example.com", client)
+        assert "Trusted" in result
+        assert "joe@example.com" in result
+        with db.get_db(db_path) as conn:
+            assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is True
+
+    @pytest.mark.asyncio
+    async def test_trust_duplicate(self, make_config, db_path):
+        from istota.commands import cmd_trust
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "joe@example.com")
+            client = MagicMock()
+            result = await cmd_trust(config, conn, "alice", "room1", "joe@example.com", client)
+        assert "already trusted" in result
+
+    @pytest.mark.asyncio
+    async def test_trust_no_args_lists_senders(self, make_config, db_path):
+        from istota.commands import cmd_trust
+        config = make_config()
+        config.users["alice"] = UserConfig(trusted_email_senders=["*@corp.com"])
+        with db.get_db(db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "joe@example.com")
+            client = MagicMock()
+            result = await cmd_trust(config, conn, "alice", "room1", "", client)
+        assert "*@corp.com" in result
+        assert "(config)" in result
+        assert "joe@example.com" in result
+
+    @pytest.mark.asyncio
+    async def test_trust_invalid_email(self, make_config, db_path):
+        from istota.commands import cmd_trust
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            client = MagicMock()
+            result = await cmd_trust(config, conn, "alice", "room1", "notanemail", client)
+        assert "Usage" in result
+
+    @pytest.mark.asyncio
+    async def test_untrust_removes_sender(self, make_config, db_path):
+        from istota.commands import cmd_untrust
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "joe@example.com")
+            client = MagicMock()
+            result = await cmd_untrust(config, conn, "alice", "room1", "joe@example.com", client)
+        assert "Removed" in result
+        with db.get_db(db_path) as conn:
+            assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is False
+
+    @pytest.mark.asyncio
+    async def test_untrust_nonexistent(self, make_config, db_path):
+        from istota.commands import cmd_untrust
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            client = MagicMock()
+            result = await cmd_untrust(config, conn, "alice", "room1", "nobody@example.com", client)
+        assert "not in your trusted" in result
+
+    @pytest.mark.asyncio
+    async def test_trust_list_empty(self, make_config, db_path):
+        from istota.commands import cmd_trust
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            client = MagicMock()
+            result = await cmd_trust(config, conn, "alice", "room1", "", client)
+        assert "No trusted senders" in result

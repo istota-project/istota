@@ -452,6 +452,38 @@ class TestTrustedEmailSenders:
         uc = UserConfig()
         assert uc.trusted_email_senders == []
 
+    def test_db_trusted_sender_checked_with_conn(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+
+        cfg = Config(users={
+            "stefan": UserConfig(trusted_email_senders=[]),
+        })
+
+        with db.get_db(db_path) as conn:
+            # Not trusted without DB entry
+            assert cfg.is_trusted_email_sender("stefan", "joe@example.com", conn) is False
+
+            # Add to DB
+            db.add_trusted_sender(conn, "stefan", "joe@example.com")
+            assert cfg.is_trusted_email_sender("stefan", "joe@example.com", conn) is True
+
+    def test_db_trusted_sender_not_checked_without_conn(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+
+        cfg = Config(users={
+            "stefan": UserConfig(trusted_email_senders=[]),
+        })
+
+        with db.get_db(db_path) as conn:
+            db.add_trusted_sender(conn, "stefan", "joe@example.com")
+
+        # Without conn, DB is not checked (backward compat)
+        assert cfg.is_trusted_email_sender("stefan", "joe@example.com") is False
+
 
 class TestEmailConfig:
     def test_effective_smtp_user_fallback(self):

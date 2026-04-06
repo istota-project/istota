@@ -807,6 +807,56 @@ class TestFailStuckLockedRunningTasks:
             assert db.has_active_foreground_task_for_channel(conn, "room1") is False
 
 
+class TestTrustedEmailSendersDB:
+    def test_add_trusted_sender(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.add_trusted_sender(conn, "alice", "joe@example.com") is True
+
+    def test_add_duplicate_returns_false(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "joe@example.com")
+            assert db.add_trusted_sender(conn, "alice", "joe@example.com") is False
+
+    def test_add_is_case_insensitive(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "Joe@Example.COM")
+            assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is True
+
+    def test_remove_trusted_sender(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "joe@example.com")
+            assert db.remove_trusted_sender(conn, "alice", "joe@example.com") is True
+            assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is False
+
+    def test_remove_nonexistent_returns_false(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.remove_trusted_sender(conn, "alice", "nobody@example.com") is False
+
+    def test_list_trusted_senders(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "bob@example.com")
+            db.add_trusted_sender(conn, "alice", "alice@example.com")
+            senders = db.list_trusted_senders(conn, "alice")
+            assert len(senders) == 2
+            assert senders[0]["sender_email"] == "alice@example.com"  # sorted
+            assert senders[1]["sender_email"] == "bob@example.com"
+
+    def test_list_empty(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.list_trusted_senders(conn, "alice") == []
+
+    def test_is_sender_trusted_in_db(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is False
+            db.add_trusted_sender(conn, "alice", "joe@example.com")
+            assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is True
+
+    def test_user_isolation(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "joe@example.com")
+            assert db.is_sender_trusted_in_db(conn, "bob", "joe@example.com") is False
+
+
 class TestSaveAndGetRecentConversationSkills:
     def test_empty_when_no_prior_tasks(self, db_path):
         with db.get_db(db_path) as conn:

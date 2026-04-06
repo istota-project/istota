@@ -470,7 +470,9 @@ async def handle_confirmation_reply(
     """
     # Check for affirmative/negative responses
     content_lower = content.strip().lower()
-    affirmative = content_lower in ("yes", "y", "ok", "okay", "proceed", "confirm", "do it", "go ahead")
+    # "yes trust" variants: confirm + add sender to trusted list
+    trust_sender = content_lower in ("yes trust", "yes, trust", "y trust")
+    affirmative = trust_sender or content_lower in ("yes", "y", "ok", "okay", "proceed", "confirm", "do it", "go ahead")
     negative = content_lower in ("no", "n", "cancel", "abort", "stop", "don't", "nevermind")
 
     if not (affirmative or negative):
@@ -500,6 +502,24 @@ async def handle_confirmation_reply(
         # Confirm the task - return to pending status for execution
         db.confirm_task(conn, pending_task.id)
         db.log_task(conn, pending_task.id, "info", "User confirmed task")
+
+        # Trust the sender if requested and this is an email task
+        if trust_sender and pending_task.source_type == "email":
+            email_record = db.get_email_for_task(conn, pending_task.id)
+            if email_record:
+                db.add_trusted_sender(conn, actor_id, email_record.sender_email)
+                db.log_task(
+                    conn, pending_task.id, "info",
+                    f"Trusted sender: {email_record.sender_email}",
+                )
+                try:
+                    client = TalkClient(config)
+                    await client.send_message(
+                        conversation_token,
+                        f"Trusted {email_record.sender_email} — future emails will be processed automatically.",
+                    )
+                except Exception:
+                    pass
     else:
         # Cancel the task
         db.cancel_task(conn, pending_task.id)

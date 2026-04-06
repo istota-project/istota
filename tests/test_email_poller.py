@@ -1019,6 +1019,40 @@ class TestEmailConfirmationGate:
             task = db.get_task(conn, task_ids[0])
             assert task.status == "pending"
 
+    def test_db_trusted_sender_proceeds_immediately(self, make_config):
+        """Sender trusted via DB (not config) should bypass the confirmation gate."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(
+            email_addresses=["stefan@test.com"],
+            trusted_email_senders=[],  # No config patterns
+        )}
+
+        # Add sender to DB trusted list
+        with db.get_db(config.db_path) as conn:
+            db.add_trusted_sender(conn, "stefan", "friend@newcontact.com")
+
+        envelope = _envelope(id="db1", sender="friend@newcontact.com", subject="Hi")
+        email = Email(
+            id="db1", subject="Hi", sender="friend@newcontact.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Hello", attachments=[],
+            message_id="<db1@newcontact.com>", references=None,
+            to=("bot+stefan@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.status == "pending"  # Not pending_confirmation
+
     def test_sender_match_not_gated(self, make_config):
         config = make_config()
         config.email = _email_config()

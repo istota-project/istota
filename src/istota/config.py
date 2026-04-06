@@ -407,10 +407,13 @@ class Config:
                 return user_id
         return None
 
-    def is_trusted_email_sender(self, user_id: str, sender_email: str) -> bool:
+    def is_trusted_email_sender(
+        self, user_id: str, sender_email: str, conn: "sqlite3.Connection | None" = None,
+    ) -> bool:
         """Check if sender is trusted for the given user.
 
-        Trusted = user's own email addresses OR matches trusted_email_senders patterns.
+        Trusted = user's own email addresses OR matches trusted_email_senders
+        config patterns OR exists in runtime trusted_email_senders DB table.
         """
         from fnmatch import fnmatch
 
@@ -425,6 +428,12 @@ class Config:
 
         for pattern in user.trusted_email_senders:
             if fnmatch(sender_lower, pattern.lower()):
+                return True
+
+        # Check runtime-managed trusted senders in DB
+        if conn is not None:
+            from . import db
+            if db.is_sender_trusted_in_db(conn, user_id, sender_lower):
                 return True
 
         return False
