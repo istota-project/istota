@@ -53,10 +53,10 @@ Each entry needs only a `message` field with a concise description of what was s
 
 When your email reply makes a commitment that requires the owner's actual involvement — checking availability, confirming a decision, getting back to someone with information only the owner has — write a user alert so the owner knows they need to act.
 
-Use the same `$ISTOTA_DEFERRED_DIR/task_${ISTOTA_TASK_ID}_user_alerts.json` file:
+Use the same `$ISTOTA_DEFERRED_DIR/task_${ISTOTA_TASK_ID}_user_alerts.json` file, with `"type": "action_needed"`:
 
 ```json
-[{"message": "Told sender@example.com I would check with you about Saturday availability and get back to them"}]
+[{"type": "action_needed", "message": "Told sender@example.com I would check with you about Saturday availability and get back to them"}]
 ```
 
 This applies when you say things like "Let me check with [owner]", "I'll confirm and get back to you", or defer a decision to the owner. The owner needs to know you made this commitment so they can follow through.
