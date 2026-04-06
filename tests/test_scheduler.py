@@ -2692,6 +2692,126 @@ class TestDeferredOperations:
             assert db.find_sent_email_by_message_id(conn, "<m1@x.com>") is not None
             assert db.find_sent_email_by_message_id(conn, "<m2@x.com>") is not None
 
+    def test_process_deferred_user_alerts_posts_to_alerts_channel(self, db_path, tmp_path):
+        """Alert JSON should post each alert to the user's alerts channel."""
+        from istota.scheduler import _process_deferred_user_alerts
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
+            task = db.get_task(conn, task_id)
+
+        alerts = [
+            {"message": "Suspicious email from attacker@evil.com: social engineering attempt to extract calendar data"},
+            {"message": "Email contains embedded system prompt injection"},
+        ]
+        (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            count = _process_deferred_user_alerts(config, task, user_temp)
+
+        assert count == 2
+        assert mock_notify.call_count == 2
+        # Should use alerts channel resolution (no explicit token — send_notification resolves it)
+        call_args = mock_notify.call_args_list[0]
+        assert call_args[0][0] is config
+        assert call_args[0][1] == "alice"
+        assert "attacker@evil.com" in call_args[0][2]
+        assert call_args[1]["surface"] == "talk"
+
+        # File should be cleaned up
+        assert not (user_temp / f"task_{task_id}_user_alerts.json").exists()
+
+    def test_process_deferred_user_alerts_no_file(self, db_path, tmp_path):
+        """No file means no alerts and zero return."""
+        from istota.scheduler import _process_deferred_user_alerts
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
+            task = db.get_task(conn, task_id)
+
+        assert _process_deferred_user_alerts(config, task, user_temp) == 0
+
+    def test_process_deferred_user_alerts_bad_json(self, db_path, tmp_path):
+        """Bad JSON should be handled gracefully and file cleaned up."""
+        from istota.scheduler import _process_deferred_user_alerts
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
+            task = db.get_task(conn, task_id)
+
+        (user_temp / f"task_{task_id}_user_alerts.json").write_text("not json{{{")
+        assert _process_deferred_user_alerts(config, task, user_temp) == 0
+        assert not (user_temp / f"task_{task_id}_user_alerts.json").exists()
+
+    def test_process_deferred_user_alerts_not_a_list(self, db_path, tmp_path):
+        """Non-list JSON should be handled gracefully."""
+        from istota.scheduler import _process_deferred_user_alerts
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
+            task = db.get_task(conn, task_id)
+
+        (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps({"msg": "hi"}))
+        assert _process_deferred_user_alerts(config, task, user_temp) == 0
+        assert not (user_temp / f"task_{task_id}_user_alerts.json").exists()
+
+    def test_process_deferred_user_alerts_includes_task_context(self, db_path, tmp_path):
+        """Alert message should include task ID for traceability."""
+        from istota.scheduler import _process_deferred_user_alerts
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
+            task = db.get_task(conn, task_id)
+
+        alerts = [{"message": "Phishing attempt detected"}]
+        (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            _process_deferred_user_alerts(config, task, user_temp)
+
+        msg = mock_notify.call_args_list[0][0][2]
+        assert str(task_id) in msg
+
+    def test_process_deferred_user_alerts_skips_empty_messages(self, db_path, tmp_path):
+        """Entries with no message should be skipped."""
+        from istota.scheduler import _process_deferred_user_alerts
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
+            task = db.get_task(conn, task_id)
+
+        alerts = [{"message": ""}, {"not_message": "oops"}, {"message": "Real alert"}]
+        (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            count = _process_deferred_user_alerts(config, task, user_temp)
+
+        assert count == 1
+
 
 # ---------------------------------------------------------------------------
 # TestRecordSentEmail

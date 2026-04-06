@@ -998,6 +998,52 @@ def _process_deferred_kv_ops(
     return count
 
 
+def _process_deferred_user_alerts(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> int:
+    """Process deferred user alert requests from JSON file.
+
+    When the agent detects suspicious inbound content (social engineering,
+    prompt injection, exfiltration attempts), it writes alerts to a deferred
+    file. The scheduler posts them to the user's alerts channel after task
+    completion.
+
+    Returns count of alerts posted.
+    """
+    path = user_temp_dir / f"task_{task.id}_user_alerts.json"
+    if not path.exists():
+        return 0
+
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Bad deferred user_alerts file for task %d: %s", task.id, e)
+        path.unlink(missing_ok=True)
+        return 0
+
+    if not isinstance(data, list):
+        logger.warning("Deferred user_alerts for task %d is not a list", task.id)
+        path.unlink(missing_ok=True)
+        return 0
+
+    count = 0
+    for entry in data:
+        message = entry.get("message", "").strip()
+        if not message:
+            continue
+
+        formatted = f"\u26a0\ufe0f **Security alert** (task #{task.id})\n\n{message}"
+
+        from .notifications import send_notification
+        if send_notification(config, task.user_id, formatted, surface="talk"):
+            count += 1
+
+    if count:
+        logger.info("Posted %d deferred user alerts for task %d", count, task.id)
+    path.unlink(missing_ok=True)
+    return count
+
+
 def _deliver_deferred_email_output(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> None:
@@ -1422,6 +1468,7 @@ def process_one_task(
         _process_deferred_tracking(config, task, user_temp_dir)
         _process_deferred_sent_emails(config, task, user_temp_dir)
         _process_deferred_kv_ops(config, task, user_temp_dir)
+        _process_deferred_user_alerts(config, task, user_temp_dir)
         _deliver_deferred_email_output(config, task, user_temp_dir)
 
     # Save briefing digest for deduplication in the next run
