@@ -310,6 +310,51 @@ class TestSanitizeHtml:
         assert "<strong>" in result
         assert "<em>" in result
 
+    def test_strips_event_handler_attributes(self):
+        from istota.web_app import _sanitize_html
+        result = _sanitize_html('<p onmouseover="alert(1)">text</p>')
+        assert "onmouseover" not in result
+        assert "<p>" in result
+        assert "text" in result
+
+    def test_strips_event_handler_on_blockquote(self):
+        from istota.web_app import _sanitize_html
+        result = _sanitize_html('<blockquote onclick="alert(1)">quote</blockquote>')
+        assert "onclick" not in result
+        assert "<blockquote>" in result
+
+    def test_strips_style_attribute(self):
+        from istota.web_app import _sanitize_html
+        result = _sanitize_html('<b style="color:red">bold</b>')
+        assert "style" not in result
+        assert "<b>" in result
+
+    def test_blocks_javascript_href(self):
+        from istota.web_app import _sanitize_html
+        result = _sanitize_html('<a href="javascript:alert(1)">click</a>')
+        assert "javascript" not in result
+        assert "<a>" in result
+
+    def test_blocks_javascript_href_case_insensitive(self):
+        from istota.web_app import _sanitize_html
+        result = _sanitize_html('<a href="JaVaScRiPt:alert(1)">click</a>')
+        assert "javascript" not in result.lower()
+
+    def test_allows_https_href(self):
+        from istota.web_app import _sanitize_html
+        result = _sanitize_html('<a href="https://example.com">link</a>')
+        assert 'href="https://example.com"' in result
+
+    def test_allows_mailto_href(self):
+        from istota.web_app import _sanitize_html
+        result = _sanitize_html('<a href="mailto:user@example.com">email</a>')
+        assert "mailto:" in result
+
+    def test_blocks_data_href(self):
+        from istota.web_app import _sanitize_html
+        result = _sanitize_html('<a href="data:text/html,<script>alert(1)</script>">click</a>')
+        assert "data:" not in result
+
 
 @_needs_web_deps
 class TestLogout:

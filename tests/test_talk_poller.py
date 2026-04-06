@@ -133,6 +133,23 @@ class TestExtractAttachments:
         result = extract_attachments(msg)
         assert result == []
 
+    def test_path_traversal_in_filename(self):
+        """Filenames with directory traversal components should be stripped."""
+        msg = _msg(message_params={"file0": {"name": "../../etc/passwd", "type": "file"}})
+        result = extract_attachments(msg)
+        assert result == ["Talk/passwd"]
+
+    def test_path_traversal_absolute(self):
+        msg = _msg(message_params={"file0": {"name": "/etc/shadow", "type": "file"}})
+        result = extract_attachments(msg)
+        assert result == ["Talk/shadow"]
+
+    def test_empty_after_sanitization(self):
+        """A filename that resolves to empty after stripping should be skipped."""
+        msg = _msg(message_params={"file0": {"name": "../../", "type": "file"}})
+        result = extract_attachments(msg)
+        assert result == []
+
 
 # =============================================================================
 # TestCleanMessageContent

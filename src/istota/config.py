@@ -51,6 +51,7 @@ class EmailConfig:
     # Polling settings
     poll_folder: str = "INBOX"
     bot_email: str = ""  # bot's email address (to skip own messages)
+    confirm_sender_match: bool = True  # require confirmation for sender-match routing (prevents From: spoofing)
 
     @property
     def effective_smtp_user(self) -> str:

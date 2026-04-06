@@ -356,8 +356,11 @@ async def google_disconnect(
 _ALLOWED_TAGS = {"a", "b", "strong", "i", "em", "br", "p", "ul", "ol", "li", "blockquote", "code", "pre", "img"}
 
 
+_ALLOWED_HREF_SCHEMES = {"http://", "https://", "mailto:"}
+
+
 def _sanitize_html(content: str, max_len: int = 600) -> str:
-    """Sanitize HTML to allowed tags only, truncate by text length."""
+    """Sanitize HTML to allowed tags only, stripping all attributes except img.src and a.href."""
     if not content:
         return ""
     import html as html_mod
@@ -375,18 +378,29 @@ def _sanitize_html(content: str, max_len: int = 600) -> str:
             tag_str = content[i:end + 1]
             tag_match = re.match(r"</?(\w+)", tag_str)
             if tag_match and tag_match.group(1).lower() in _ALLOWED_TAGS:
-                if tag_match.group(1).lower() == "img":
+                tag_name = tag_match.group(1).lower()
+                is_closing = tag_str.startswith("</")
+                if is_closing:
+                    tag_str = f"</{tag_name}>"
+                elif tag_name == "img":
                     src_match = re.search(r'src="([^"]*)"', tag_str)
                     if src_match:
                         tag_str = f'<img src="{escape(html_mod.unescape(src_match.group(1)))}" loading="lazy">'
                     else:
                         tag_str = ""
-                elif tag_match.group(1).lower() == "a" and not tag_str.startswith("</"):
+                elif tag_name == "a":
                     href_match = re.search(r'href="([^"]*)"', tag_str)
                     if href_match:
-                        tag_str = f'<a href="{escape(html_mod.unescape(href_match.group(1)))}">'
+                        href_val = html_mod.unescape(href_match.group(1)).strip()
+                        if any(href_val.lower().startswith(s) for s in _ALLOWED_HREF_SCHEMES):
+                            tag_str = f'<a href="{escape(href_val)}">'
+                        else:
+                            tag_str = "<a>"
                     else:
                         tag_str = "<a>"
+                else:
+                    # All other allowed tags: strip all attributes
+                    tag_str = f"<{tag_name}>"
                 result.append(tag_str)
             i = end + 1
         else:
