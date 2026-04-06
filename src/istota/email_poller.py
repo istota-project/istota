@@ -270,11 +270,13 @@ Date: {email.date}
 
 {email.body}"""
 
-            # Determine output target — emissary replies go to Talk
+            # Determine output target — emissary replies go to Talk + email
+            # "both" ensures the agent's email reply is delivered via SMTP
+            # while the user also sees the conversation in Talk
             output_target = None
             conversation_token = thread_id
             if sent_email_match:
-                output_target = "talk"
+                output_target = "both"
                 # Route to the Talk conversation where the original send was requested
                 if sent_email_match.conversation_token:
                     conversation_token = sent_email_match.conversation_token

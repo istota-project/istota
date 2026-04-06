@@ -550,7 +550,7 @@ class TestPollEmailsThreadMatching:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
             assert task.user_id == "stefan"
-            assert task.output_target == "talk"
+            assert task.output_target == "both"
             assert task.conversation_token == "talk_room_42"
             assert "Emissary email reply" in task.prompt
             assert "external@proton.me" in task.prompt
@@ -647,7 +647,7 @@ class TestPollEmailsThreadMatching:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
             assert task.user_id == "stefan"
-            assert task.output_target == "talk"
+            assert task.output_target == "both"
             # Should use thread_id since no conversation_token on sent email
             assert task.conversation_token is not None
 

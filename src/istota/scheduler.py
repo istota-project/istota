@@ -998,31 +998,54 @@ def _process_deferred_kv_ops(
     return count
 
 
-def _warn_orphaned_email_output(task: db.Task, user_temp_dir: Path) -> None:
-    """Warn and clean up deferred email output files that won't be delivered.
+def _deliver_deferred_email_output(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> None:
+    """Deliver or clean up deferred email output files not handled by the normal path.
 
-    This catches the case where Claude mistakenly used `email output` instead
-    of `email send` for a non-email task (e.g. a Talk user asking to send an
-    email). The deferred file has no recipient and the scheduler won't process
-    it because the output target isn't "email".
+    The normal email delivery path (post_result_to_email via `post_email` flag)
+    handles tasks whose output_target includes "email"/"both"/"all". This
+    function handles two gap cases:
 
-    Skips tasks whose output_target or source_type involves email, since
-    those legitimately use the deferred file for delivery.
+    1. source_type="email" but output_target doesn't include email (e.g. an
+       emissary reply routed to Talk) — deliver via post_result_to_email,
+       which will find the processed_email record and reply correctly.
+    2. Non-email source (e.g. Talk user who asked the agent to email someone)
+       where the agent used `email output` instead of `email send` — warn and
+       delete, because there's no processed_email record and the scheduler
+       would send to the wrong recipient.
     """
     target = task.output_target or ""
-    if task.source_type == "email" or target in ("email", "both", "all"):
+    if target in ("email", "both", "all"):
+        # Normal path will deliver via post_email flag — nothing to do here.
         return
     path = user_temp_dir / f"task_{task.id}_email_output.json"
     if not path.exists():
         return
-    logger.warning(
-        "Orphaned deferred email output file for task %d (source=%s): "
-        "Claude used `email output` instead of `email send`. "
-        "The email was NOT delivered. Removing file.",
-        task.id,
-        task.source_type,
-    )
-    path.unlink(missing_ok=True)
+
+    if task.source_type == "email":
+        # Email-sourced task with non-email output_target (e.g. emissary reply
+        # with output_target="talk"). The processed_email record exists, so
+        # post_result_to_email can reply correctly.
+        logger.info(
+            "Delivering deferred email output for task %d (source=%s, target=%s)",
+            task.id, task.source_type, target,
+        )
+        email_ok = asyncio.run(post_result_to_email(config, task, ""))
+        if not email_ok:
+            logger.error(
+                "Failed to deliver deferred email output for task %d", task.id,
+            )
+    else:
+        # Non-email source — agent used `email output` instead of `email send`.
+        # No processed_email record, so we can't deliver to the right recipient.
+        logger.warning(
+            "Orphaned deferred email output file for task %d (source=%s): "
+            "Claude used `email output` instead of `email send`. "
+            "The email was NOT delivered. Removing file.",
+            task.id, task.source_type,
+        )
+        path.unlink(missing_ok=True)
 
 
 def _execute_command_task(
@@ -1131,6 +1154,16 @@ def process_one_task(
             except Exception:
                 channel_name = task.conversation_token
         log_channel_prefix = _log_channel_source_label(task, channel_name)
+
+    # Clean up stale deferred email output from a previous execution (e.g.
+    # confirmation flow: first run writes a draft via `email output`, re-run
+    # sends via `email send` — the stale file would cause a double-send).
+    if task.confirmation_prompt is not None:
+        from .executor import get_user_temp_dir
+        _stale = get_user_temp_dir(config, task.user_id) / f"task_{task.id}_email_output.json"
+        if _stale.exists():
+            logger.debug("Removing stale email output file from prior execution of task %d", task.id)
+            _stale.unlink(missing_ok=True)
 
     # Command tasks skip Talk ack, attachment download, and resource loading
     progress_callback = None
@@ -1389,7 +1422,7 @@ def process_one_task(
         _process_deferred_tracking(config, task, user_temp_dir)
         _process_deferred_sent_emails(config, task, user_temp_dir)
         _process_deferred_kv_ops(config, task, user_temp_dir)
-        _warn_orphaned_email_output(task, user_temp_dir)
+        _deliver_deferred_email_output(config, task, user_temp_dir)
 
     # Save briefing digest for deduplication in the next run
     if success and task.source_type == "briefing":
