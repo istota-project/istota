@@ -2814,6 +2814,133 @@ class TestDeferredOperations:
 
 
 # ---------------------------------------------------------------------------
+# TestNotifyConfirmedEmailResult
+# ---------------------------------------------------------------------------
+
+
+class TestNotifyConfirmedEmailResult:
+    """Tests for _notify_confirmed_email_result — closes the loop after confirmed email tasks."""
+
+    def _make_config(self, db_path, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example.com", username="istota", app_password="secret"),
+            talk=TalkConfig(enabled=True, bot_username="istota"),
+            email=EmailConfig(enabled=False),
+            scheduler=SchedulerConfig(),
+            nextcloud_mount_path=mount,
+            temp_dir=tmp_path / "temp",
+        )
+
+    def test_confirmed_email_notifies_alerts_channel(self, db_path, tmp_path):
+        """Confirmed email task should post the reply to the alerts channel."""
+        from istota.scheduler import _notify_confirmed_email_result
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Email from joe@example.com", user_id="alice", source_type="email")
+            db.set_task_confirmation(conn, task_id, "Email from unknown sender joe@example.com")
+            db.confirm_task(conn, task_id)
+            db.mark_email_processed(
+                conn, email_id="e1", sender_email="joe@example.com",
+                subject="Hello", thread_id="t1", message_id="<m1@x.com>",
+                references=None, user_id="alice", task_id=task_id,
+                routing_method="plus_address",
+            )
+            task = db.get_task(conn, task_id)
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            result = _notify_confirmed_email_result(
+                config, task, "Hi — thanks for reaching out. Let me check with Stefan.",
+            )
+
+        assert result is True
+        mock_notify.assert_called_once()
+        call_args = mock_notify.call_args
+        assert call_args[0][1] == "alice"
+        assert "joe@example.com" in call_args[0][2]
+        assert "Let me check with Stefan" in call_args[0][2]
+        assert call_args[1]["surface"] == "talk"
+
+    def test_non_confirmed_email_skipped(self, db_path, tmp_path):
+        """Email task that was NOT confirmed should not trigger notification."""
+        from istota.scheduler import _notify_confirmed_email_result
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Email from trusted@example.com", user_id="alice", source_type="email")
+            task = db.get_task(conn, task_id)
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            result = _notify_confirmed_email_result(config, task, "Some reply")
+
+        assert result is False
+        mock_notify.assert_not_called()
+
+    def test_non_email_task_skipped(self, db_path, tmp_path):
+        """Talk task with confirmation should not trigger email notification."""
+        from istota.scheduler import _notify_confirmed_email_result
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Do something", user_id="alice", source_type="talk", conversation_token="room1")
+            db.set_task_confirmation(conn, task_id, "Are you sure?")
+            task = db.get_task(conn, task_id)
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            result = _notify_confirmed_email_result(config, task, "Done")
+
+        assert result is False
+        mock_notify.assert_not_called()
+
+    def test_long_result_truncated(self, db_path, tmp_path):
+        """Very long results should be truncated in the notification."""
+        from istota.scheduler import _notify_confirmed_email_result
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Email from joe@example.com", user_id="alice", source_type="email")
+            db.set_task_confirmation(conn, task_id, "Email from unknown sender")
+            db.confirm_task(conn, task_id)
+            task = db.get_task(conn, task_id)
+
+        long_result = "x" * 3000
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            _notify_confirmed_email_result(config, task, long_result)
+
+        message = mock_notify.call_args[0][2]
+        assert "[...]" in message
+        assert len(message) < 3000
+
+    def test_no_email_record_uses_fallback_sender(self, db_path, tmp_path):
+        """When no processed_email record exists, use fallback sender text."""
+        from istota.scheduler import _notify_confirmed_email_result
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="Email task", user_id="alice", source_type="email")
+            db.set_task_confirmation(conn, task_id, "Confirm?")
+            db.confirm_task(conn, task_id)
+            task = db.get_task(conn, task_id)
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            _notify_confirmed_email_result(config, task, "Reply text")
+
+        message = mock_notify.call_args[0][2]
+        assert "the sender" in message
+
+
+# ---------------------------------------------------------------------------
 # TestRecordSentEmail
 # ---------------------------------------------------------------------------
 

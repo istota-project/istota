@@ -1044,6 +1044,37 @@ def _process_deferred_user_alerts(
     return count
 
 
+def _notify_confirmed_email_result(
+    config: Config, task: db.Task, result: str,
+) -> bool:
+    """Post the bot's email reply to the alerts channel after a confirmed email task.
+
+    When an untrusted sender's email goes through the confirmation gate, the
+    user approves it in the alerts channel. After the bot processes and replies,
+    this closes the loop by showing the user what was sent.
+
+    Returns True if notification was posted, False otherwise.
+    """
+    if task.source_type != "email" or task.confirmation_prompt is None:
+        return False
+
+    # Look up the sender from the processed_emails record
+    sender = "the sender"
+    with db.get_db(config.db_path) as conn:
+        email_record = db.get_email_for_task(conn, task.id)
+        if email_record:
+            sender = email_record.sender_email
+
+    # Truncate long results for the notification
+    max_chars = 2000
+    body = result if len(result) <= max_chars else result[:max_chars] + "\n[...]"
+
+    message = f"Email reply sent to {sender} (task #{task.id}):\n\n{body}"
+
+    from .notifications import send_notification
+    return send_notification(config, task.user_id, message, surface="talk")
+
+
 def _deliver_deferred_email_output(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> None:
@@ -1470,6 +1501,7 @@ def process_one_task(
         _process_deferred_kv_ops(config, task, user_temp_dir)
         _process_deferred_user_alerts(config, task, user_temp_dir)
         _deliver_deferred_email_output(config, task, user_temp_dir)
+        _notify_confirmed_email_result(config, task, result)
 
     # Save briefing digest for deduplication in the next run
     if success and task.source_type == "briefing":
