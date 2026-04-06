@@ -191,10 +191,12 @@ class UserConfig:
     resources: list[ResourceConfig] = field(default_factory=list)
     ntfy_topic: str = ""  # per-user ntfy topic override
     log_channel: str = ""  # Talk room token for verbose task execution logs
+    alerts_channel: str = ""  # Talk room token for confirmations and alerts
     site_enabled: bool = False  # static website hosting at /~user/
     max_foreground_workers: int = 0  # per-user fg worker override (0 = use global default)
     max_background_workers: int = 0  # per-user bg worker override (0 = use global default)
     disabled_skills: list[str] = field(default_factory=list)  # skills to exclude from selection
+    trusted_email_senders: list[str] = field(default_factory=list)  # patterns for trusted senders
 
 
 @dataclass
@@ -405,6 +407,28 @@ class Config:
                 return user_id
         return None
 
+    def is_trusted_email_sender(self, user_id: str, sender_email: str) -> bool:
+        """Check if sender is trusted for the given user.
+
+        Trusted = user's own email addresses OR matches trusted_email_senders patterns.
+        """
+        from fnmatch import fnmatch
+
+        user = self.users.get(user_id)
+        if not user:
+            return False
+
+        sender_lower = sender_email.lower()
+
+        if sender_lower in [e.lower() for e in user.email_addresses]:
+            return True
+
+        for pattern in user.trusted_email_senders:
+            if fnmatch(sender_lower, pattern.lower()):
+                return True
+
+        return False
+
     @property
     def caldav_url(self) -> str:
         """CalDAV base URL derived from Nextcloud URL."""
@@ -526,10 +550,12 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         resources=resources,
         ntfy_topic=user_data.get("ntfy_topic", ""),
         log_channel=user_data.get("log_channel", ""),
+        alerts_channel=user_data.get("alerts_channel", ""),
         site_enabled=user_data.get("site_enabled", False),
         max_foreground_workers=user_data.get("max_foreground_workers", 0),
         max_background_workers=user_data.get("max_background_workers", 0),
         disabled_skills=user_data.get("disabled_skills", []),
+        trusted_email_senders=user_data.get("trusted_email_senders", []),
     )
 
 

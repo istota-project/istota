@@ -20,6 +20,18 @@ _PARTICIPANT_CACHE_TTL = 300  # 5 minutes
 _conversation_cache: tuple[list[dict], float] | None = None
 _CONVERSATION_CACHE_TTL = 60  # seconds
 
+# 1:1 DM token cache: user_id -> conversation_token (populated from list_conversations)
+_dm_token_cache: dict[str, str] = {}
+
+
+def get_dm_token(user_id: str) -> str | None:
+    """Get the 1:1 DM conversation token for a user, if known.
+
+    Populated automatically during Talk polling. Returns None if the
+    poller hasn't run yet or the user has no 1:1 conversation with the bot.
+    """
+    return _dm_token_cache.get(user_id)
+
 
 def extract_attachments(message: dict) -> list[str]:
     """
@@ -205,6 +217,12 @@ async def poll_talk_conversations(config: Config) -> list[int]:
             conv_type = conv.get("type")
             conv_types[conversation_token] = conv_type
 
+            # Cache 1:1 DM tokens by user ID (for notification fallback)
+            if conv_type == 1:
+                other_user = conv.get("name", "")
+                if other_user and other_user in config.users:
+                    _dm_token_cache[other_user] = conversation_token
+
             # Get last known message ID for this conversation
             last_message_id = db.get_talk_poll_state(conn, conversation_token)
 
@@ -353,9 +371,22 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     if handled:
                         continue
 
+                # Extract reply metadata (before confirmation check so we can
+                # match reply-to-specific confirmation prompts)
+                reply_to_talk_id = None
+                reply_to_content = None
+                parent = msg.get("parent")
+                if isinstance(parent, dict) and parent.get("id") and not parent.get("deleted"):
+                    reply_to_talk_id = parent["id"]
+                    # Store parent message content as fallback
+                    parent_content = parent.get("message", "")
+                    if parent_content:
+                        reply_to_content = parent_content[:1000]
+
                 # Check if this is a confirmation reply before creating a new task
                 handled = await handle_confirmation_reply(
-                    conn, config, actor_id, content, conversation_token
+                    conn, config, actor_id, content, conversation_token,
+                    reply_to_talk_id=reply_to_talk_id,
                 )
                 if handled:
                     continue
@@ -388,17 +419,6 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     other_names = _participant_names(participants, exclude=config.talk.bot_username)
                     if other_names:
                         prompt = f"[Room participants: {', '.join(other_names)}]\n{prompt}"
-
-                # Extract reply metadata
-                reply_to_talk_id = None
-                reply_to_content = None
-                parent = msg.get("parent")
-                if isinstance(parent, dict) and parent.get("id") and not parent.get("deleted"):
-                    reply_to_talk_id = parent["id"]
-                    # Store parent message content as fallback
-                    parent_content = parent.get("message", "")
-                    if parent_content:
-                        reply_to_content = parent_content[:1000]
 
                 # Cancel any pending confirmations in this conversation —
                 # the user has moved on by sending a new message
@@ -436,9 +456,15 @@ async def handle_confirmation_reply(
     actor_id: str,
     content: str,
     conversation_token: str,
+    reply_to_talk_id: int | None = None,
 ) -> bool:
     """
     Check if a message is a confirmation reply to a pending task.
+
+    Three-path lookup:
+    1. Reply to specific confirmation message (by talk_response_id)
+    2. Same-conversation confirmation (existing behavior)
+    3. Cross-conversation fallback by user_id (for email gates)
 
     Returns True if the message was handled as a confirmation.
     """
@@ -450,8 +476,18 @@ async def handle_confirmation_reply(
     if not (affirmative or negative):
         return False
 
-    # Find pending confirmation task for this conversation
-    pending_task = db.get_pending_confirmation(conn, conversation_token)
+    # Path A: reply to specific confirmation message
+    pending_task = None
+    if reply_to_talk_id:
+        pending_task = db.get_pending_confirmation_by_response_id(conn, reply_to_talk_id)
+
+    # Path B: same-conversation confirmation (existing behavior)
+    if not pending_task:
+        pending_task = db.get_pending_confirmation(conn, conversation_token)
+
+    # Path C: cross-conversation fallback by user_id (email gates)
+    if not pending_task:
+        pending_task = db.get_pending_confirmation_for_user(conn, actor_id)
 
     if not pending_task:
         return False

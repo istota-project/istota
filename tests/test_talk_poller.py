@@ -13,9 +13,11 @@ from istota.talk_poller import (
     _get_participants,
     _is_multi_user,
     _participant_cache,
+    _dm_token_cache,
     _participant_names,
     clean_message_content,
     extract_attachments,
+    get_dm_token,
     handle_confirmation_reply,
     is_bot_mentioned,
     poll_talk_conversations,
@@ -27,9 +29,11 @@ def _reset_poller_caches():
     """Reset module-level caches between tests."""
     _participant_cache.clear()
     _talk_poller_mod._conversation_cache = None
+    _dm_token_cache.clear()
     yield
     _participant_cache.clear()
     _talk_poller_mod._conversation_cache = None
+    _dm_token_cache.clear()
 
 
 @pytest.fixture
@@ -308,9 +312,198 @@ class TestHandleConfirmationReply:
             assert task.status == "pending"
 
 
+class TestCrossConversationConfirmation:
+    """Tests for reply-to-specific and cross-conversation confirmation paths."""
+
+    @pytest.mark.asyncio
+    async def test_reply_to_specific_confirmation_message(self, make_config):
+        """Path A: user replies to the exact confirmation prompt message."""
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="email task", user_id="alice",
+                source_type="email", conversation_token="email_thread_hash",
+            )
+            db.set_task_confirmation(conn, t1, "Confirm?")
+            db.update_talk_response_id(conn, t1, 42)
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes", "alerts_room",
+                reply_to_talk_id=42,
+            )
+
+        assert result is True
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, t1)
+            assert task.status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_same_conversation_still_works(self, make_config):
+        """Path B: existing behavior — confirmation in the same conversation."""
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="talk task", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, t1, "Confirm?")
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes", "room1",
+            )
+
+        assert result is True
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, t1)
+            assert task.status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_cross_conversation_fallback_by_user(self, make_config):
+        """Path C: user says 'yes' in alerts channel, task is in a different conversation."""
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="email task", user_id="alice",
+                source_type="email", conversation_token="email_thread_hash",
+            )
+            db.set_task_confirmation(conn, t1, "Confirm?")
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes", "alerts_room",
+            )
+
+        assert result is True
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, t1)
+            assert task.status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_multiple_pending_newest_confirmed(self, make_config):
+        """Path C with multiple pending: 'yes' without reply_to confirms newest."""
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="older", user_id="alice",
+                source_type="email", conversation_token="thread1",
+            )
+            db.set_task_confirmation(conn, t1, "Confirm older?")
+            t2 = db.create_task(
+                conn, prompt="newer", user_id="alice",
+                source_type="email", conversation_token="thread2",
+            )
+            db.set_task_confirmation(conn, t2, "Confirm newer?")
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes", "alerts_room",
+            )
+
+        assert result is True
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, t2).status == "pending"
+            assert db.get_task(conn, t1).status == "pending_confirmation"
+
+    @pytest.mark.asyncio
+    async def test_reply_to_wrong_message_falls_through(self, make_config):
+        """reply_to_talk_id doesn't match any pending task, falls through to path B/C."""
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="email task", user_id="alice",
+                source_type="email", conversation_token="email_thread",
+            )
+            db.set_task_confirmation(conn, t1, "Confirm?")
+            db.update_talk_response_id(conn, t1, 42)
+
+        with db.get_db(config.db_path) as conn:
+            # reply_to_talk_id=999 doesn't match task's talk_response_id=42
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes", "alerts_room",
+                reply_to_talk_id=999,
+            )
+
+        assert result is True  # falls through to path C (user fallback)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, t1)
+            assert task.status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_no_pending_returns_false(self, make_config):
+        """No pending confirmations anywhere — returns False."""
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes", "alerts_room",
+            )
+
+        assert result is False
+
+
 # =============================================================================
 # TestPollTalkConversations
 # =============================================================================
+
+
+class TestDmTokenCache:
+    def test_get_dm_token_returns_none_when_empty(self):
+        assert get_dm_token("alice") is None
+
+    def test_get_dm_token_returns_cached_value(self):
+        _dm_token_cache["alice"] = "dm_room_abc"
+        assert get_dm_token("alice") == "dm_room_abc"
+
+    @pytest.mark.asyncio
+    async def test_dm_tokens_populated_during_poll(self, make_config):
+        """1:1 conversations (type=1) should populate the DM token cache."""
+        config = make_config()
+        config.users = {"stefan": UserConfig()}
+
+        conversations = [
+            {"token": "dm_stefan", "type": 1, "name": "stefan"},
+            {"token": "group_room", "type": 2, "name": "Project Chat"},
+        ]
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "dm_stefan", 50)
+                db.set_talk_poll_state(conn, "group_room", 50)
+
+            await poll_talk_conversations(config)
+
+        assert get_dm_token("stefan") == "dm_stefan"
+        assert get_dm_token("unknown") is None
+
+    @pytest.mark.asyncio
+    async def test_dm_cache_ignores_unknown_users(self, make_config):
+        """1:1 conversations with users not in config are not cached."""
+        config = make_config()
+        config.users = {"stefan": UserConfig()}
+
+        conversations = [
+            {"token": "dm_stranger", "type": 1, "name": "stranger"},
+        ]
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+
+            await poll_talk_conversations(config)
+
+        assert get_dm_token("stranger") is None
 
 
 class TestPollTalkConversations:

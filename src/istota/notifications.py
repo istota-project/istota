@@ -14,15 +14,27 @@ logger = logging.getLogger("istota.notifications")
 def resolve_conversation_token(config: "Config", user_id: str) -> str | None:
     """Resolve Talk conversation token for a user.
 
-    Returns the first briefing's conversation token, or None.
+    Priority: alerts_channel > briefing token > auto-detected 1:1 DM.
     """
     user_config = config.users.get(user_id)
     if not user_config:
         return None
 
+    if user_config.alerts_channel:
+        return user_config.alerts_channel
+
     for briefing in user_config.briefings:
         if briefing.conversation_token:
             return briefing.conversation_token
+
+    # Fall back to auto-detected 1:1 DM from talk poller
+    try:
+        from .talk_poller import get_dm_token
+        dm_token = get_dm_token(user_id)
+        if dm_token:
+            return dm_token
+    except ImportError:
+        pass
 
     return None
 
@@ -30,25 +42,36 @@ def resolve_conversation_token(config: "Config", user_id: str) -> str | None:
 async def _send_talk(
     config: "Config", user_id: str, message: str,
     conversation_token: str | None = None,
-) -> bool:
-    """Send a notification via Talk. Returns True on success."""
+) -> int | None:
+    """Send a notification via Talk. Returns message_id on success, None on failure."""
     token = conversation_token or resolve_conversation_token(config, user_id)
     if not token:
         logger.warning("No conversation token for notification (user: %s)", user_id)
-        return False
+        return None
 
     if not config.nextcloud.url:
         logger.warning("Nextcloud not configured for notifications")
-        return False
+        return None
 
     try:
         from .talk import TalkClient
         client = TalkClient(config)
-        await client.send_message(token, message)
-        return True
+        response = await client.send_message(token, message)
+        return response.get("ocs", {}).get("data", {}).get("id")
     except Exception as e:
         logger.error("Failed to send Talk notification (user: %s): %s", user_id, e)
-        return False
+        return None
+
+
+def send_talk_confirmation(
+    config: "Config",
+    user_id: str,
+    message: str,
+    conversation_token: str | None = None,
+) -> int | None:
+    """Send a confirmation prompt via Talk (sync). Returns message_id or None."""
+    import asyncio
+    return asyncio.run(_send_talk(config, user_id, message, conversation_token))
 
 
 def _send_email(

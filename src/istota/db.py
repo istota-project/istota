@@ -639,6 +639,57 @@ def get_pending_confirmation(
     return _row_to_task(row)
 
 
+def get_pending_confirmation_for_user(
+    conn: sqlite3.Connection,
+    user_id: str,
+) -> Task | None:
+    """Get the newest pending_confirmation task for a user, any conversation."""
+    cursor = conn.execute(
+        """
+        SELECT id, status, source_type, user_id, prompt, conversation_token,
+               parent_task_id, is_group_chat, attachments, result, error,
+               confirmation_prompt, priority, attempt_count, max_attempts,
+               created_at, scheduled_for, output_target,
+               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
+               heartbeat_silent
+        FROM tasks
+        WHERE user_id = ? AND status = 'pending_confirmation'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return _row_to_task(row)
+
+
+def get_pending_confirmation_by_response_id(
+    conn: sqlite3.Connection,
+    talk_response_id: int,
+) -> Task | None:
+    """Get a pending_confirmation task by its Talk confirmation message ID."""
+    cursor = conn.execute(
+        """
+        SELECT id, status, source_type, user_id, prompt, conversation_token,
+               parent_task_id, is_group_chat, attachments, result, error,
+               confirmation_prompt, priority, attempt_count, max_attempts,
+               created_at, scheduled_for, output_target,
+               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
+               heartbeat_silent
+        FROM tasks
+        WHERE talk_response_id = ? AND status = 'pending_confirmation'
+        LIMIT 1
+        """,
+        (talk_response_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return _row_to_task(row)
+
+
 def get_user_resources(
     conn: sqlite3.Connection,
     user_id: str,

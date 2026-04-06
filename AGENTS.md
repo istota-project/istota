@@ -114,7 +114,7 @@ Web App ──► Nextcloud OIDC → Session → Dashboard / Feed pages
 ```
 
 - **Talk poller**: Background daemon thread, long-polling per conversation, WAL mode for concurrent DB access
-- **Email poller**: Polls INBOX via imap-tools. Routing precedence: (1) recipient plus-address (`bot+user_id@domain`), (2) sender match against user `email_addresses`, (3) thread match against `sent_emails`. Plus-addressing enables external contacts to email a specific user's agent directly. Outbound `SMTP_FROM` uses plus-addressed `bot+user_id@domain` so replies route back correctly. `routing_method` column in `processed_emails` tracks how each email was routed.
+- **Email poller**: Polls INBOX via imap-tools. Routing precedence: (1) recipient plus-address (`bot+user_id@domain`), (2) sender match against user `email_addresses`, (3) thread match against `sent_emails`. Plus-addressing enables external contacts to email a specific user's agent directly. Outbound `SMTP_FROM` uses plus-addressed `bot+user_id@domain` so replies route back correctly. `routing_method` column in `processed_emails` tracks how each email was routed. **Confirmation gate**: plus-addressed emails from untrusted senders (not in `trusted_email_senders` or user's own `email_addresses`) are held in `pending_confirmation` — deterministic, non-LLM gate. Confirmation prompt posted to user's Talk channel; user replies yes/no.
 - **Task queue** (`db.py`): Atomic locking with `user_id` filter, retry logic (exponential backoff: 1, 4, 16 min)
 - **Scheduler**: Per-user threaded worker pool. Three-tier concurrency: instance-level fg/bg caps, per-user limits. Workers keyed by `(user_id, queue_type, slot)`.
 - **Executor**: Builds prompts (resources + skills + context + memory), invokes Claude Code via `Popen` with `--output-format stream-json`. Auto-retries transient API errors (5xx, 429) up to 3 times. Validates output for malformed model responses (leaked tool-call XML) and collects execution traces for post-hoc inspection.
@@ -163,9 +163,10 @@ Polling-based (user API, not bot API). Istota runs as a regular Nextcloud user.
 - Long-polling per conversation, message cache in `talk_messages` table
 - Progress updates: random ack before execution, streaming progress (rate-limited: min 8s, max 5/task). `progress_style`: `replace` (edit ack in-place with elapsed time, default), `full` (accumulated tool descriptions), `legacy` (post individual progress messages), `none` (silent). Optional `progress_show_text` for intermediate assistant text.
 - Per-user log channel (`log_channel` config): verbose tool-by-tool execution logs posted to a dedicated Talk room
+- Per-user alerts channel (`alerts_channel` config): Talk room for confirmations and security alerts. Falls back to briefing token, then auto-detected 1:1 DM with the bot (from talk poller conversation list cache)
 - Multi-user rooms: only responds when @mentioned; 2-person rooms behave like DMs
 - `!commands`: intercepted in poller before task creation — `!help`, `!stop`, `!status`, `!memory`, `!cron`, `!check`, `!export` (conversation history export), `!skills` (list available skills), `!more #<task_id>` (show execution trace), `!search <query>` (search conversation history via memory index + Talk API)
-- Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no
+- Confirmation flow: regex-detected → `pending_confirmation` → user replies yes/no. Three-path lookup: reply-to-specific message (by `talk_response_id`) → same-conversation → cross-conversation fallback by `user_id`. Supports email confirmation gates where the task's `conversation_token` differs from the Talk channel where the user replies.
 
 ### Skills
 Self-contained directories under `src/istota/skills/`, each with a `skill.md` file containing YAML frontmatter for all metadata and markdown body for instructions. Frontmatter fields: `name`, `triggers`, `description`, `always_include`, `admin_only`, `cli`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_memory`, `exclude_persona`, `exclude_resources`, `env` (JSON-encoded array of env specs). Operator overrides in `config/skills/` can use `skill.toml` for backward compatibility.
@@ -183,7 +184,7 @@ Talk tasks use a poller-fed local cache (`talk_messages` table, bounded by `talk
 
 ### Input Channels
 - **Talk**: Long-polling, message cache, referenceId tagging for ack/progress/result messages
-- **Email**: IMAP polling, attachments to `/Users/{user_id}/inbox/`, threaded replies. Output via `istota-skill email output` (deferred file pattern). Emissary thread matching: unknown sender emails checked against `sent_emails` table via References header — replies to bot-initiated threads route to originating user via Talk.
+- **Email**: IMAP polling, attachments to `/Users/{user_id}/inbox/`, threaded replies. Output via `istota-skill email output` (deferred file pattern). Emissary thread matching: unknown sender emails checked against `sent_emails` table via References header — replies to bot-initiated threads route to originating user via Talk. Plus-addressed emails from untrusted senders are held for user confirmation (see email poller confirmation gate above).
 - **TASKS.md**: Polls user config file (30s). Status markers: `[ ]` `[~]` `[x]` `[!]`. Identity via SHA-256 hash.
 
 ### Emissary Email Threads

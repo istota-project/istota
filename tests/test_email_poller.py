@@ -925,3 +925,149 @@ class TestPollEmailsPlusAddressRouting:
             ).fetchone()
             assert row is not None
             assert row[0] == "discarded"
+
+
+class TestEmailConfirmationGate:
+    """Tests for the confirmation gate on plus-addressed emails from untrusted senders."""
+
+    def test_untrusted_sender_held_for_confirmation(self, make_config):
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(
+            email_addresses=["stefan@test.com"],
+            alerts_channel="alerts_room",
+        )}
+
+        envelope = _envelope(id="20", sender="stranger@evil.com", subject="Hi")
+        email = Email(
+            id="20", subject="Hi", sender="stranger@evil.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Hello", attachments=[],
+            message_id="<s20@evil.com>", references=None,
+            to=("bot+stefan@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=77) as mock_send,
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.status == "pending_confirmation"
+            assert task.talk_response_id == 77
+        mock_send.assert_called_once()
+
+    def test_trusted_sender_proceeds_immediately(self, make_config):
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(
+            email_addresses=["stefan@test.com"],
+            trusted_email_senders=["*@trusted.com"],
+        )}
+
+        envelope = _envelope(id="21", sender="friend@trusted.com", subject="Hi")
+        email = Email(
+            id="21", subject="Hi", sender="friend@trusted.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Hello", attachments=[],
+            message_id="<s21@trusted.com>", references=None,
+            to=("bot+stefan@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.status == "pending"
+
+    def test_own_email_via_plus_address_not_gated(self, make_config):
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(
+            email_addresses=["stefan@test.com"],
+        )}
+
+        envelope = _envelope(id="22", sender="stefan@test.com", subject="Hi")
+        email = Email(
+            id="22", subject="Hi", sender="stefan@test.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Hello", attachments=[],
+            message_id="<s22@test.com>", references=None,
+            to=("bot+stefan@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.status == "pending"
+
+    def test_sender_match_not_gated(self, make_config):
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+        )}
+
+        envelope = _envelope(id="23", sender="alice@test.com", subject="Hi")
+        email = _email(id="23", sender="alice@test.com")
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.status == "pending"
+
+    def test_gate_no_alerts_channel_still_holds(self, make_config):
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(
+            email_addresses=["stefan@test.com"],
+            # No alerts_channel set
+        )}
+
+        envelope = _envelope(id="24", sender="stranger@evil.com", subject="Hi")
+        email = Email(
+            id="24", subject="Hi", sender="stranger@evil.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Hello", attachments=[],
+            message_id="<s24@evil.com>", references=None,
+            to=("bot+stefan@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=None),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.status == "pending_confirmation"
+            assert task.talk_response_id is None

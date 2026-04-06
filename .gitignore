@@ -41,6 +41,7 @@ data/
 config/config.toml
 /tmp/istota/
 .env
+.env.*
 
 # MkDocs
 site/

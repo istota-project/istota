@@ -392,6 +392,8 @@ display_name = "Alice"
 email_addresses = ["alice@example.com", "alice.work@company.com"]
 timezone = "America/New_York"  # IANA timezone for briefing scheduling
 # site_enabled = true  # enable static website at /~alice/
+# alerts_channel = "alertsroom456"  # Talk room for confirmations and security alerts
+# trusted_email_senders = ["*@company.com"]  # trusted senders bypass email confirmation gate
 
 # Alice's resources
 [[users.alice.resources]]
