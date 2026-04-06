@@ -1126,3 +1126,44 @@ async def cmd_search(config, conn, user_id, conversation_token, args, client):
             r["talk_link"] = _build_message_link(config, token, msg_id)
 
     return _format_search_results(all_results, parsed.query)
+
+
+@command("trust", "Trust an email sender: `!trust sender@example.com`")
+async def cmd_trust(config, conn, user_id, conversation_token, args, client):
+    email = args.strip().lower()
+    if not email:
+        # List trusted senders
+        db_senders = db.list_trusted_senders(conn, user_id)
+        user_config = config.users.get(user_id)
+        config_patterns = user_config.trusted_email_senders if user_config else []
+
+        lines = ["**Trusted email senders:**", ""]
+        if config_patterns:
+            for p in sorted(config_patterns):
+                lines.append(f"- `{p}` (config)")
+        if db_senders:
+            for s in db_senders:
+                lines.append(f"- `{s['sender_email']}`")
+        if not config_patterns and not db_senders:
+            lines.append("No trusted senders configured.")
+        return "\n".join(lines)
+
+    if "@" not in email:
+        return "Usage: `!trust sender@example.com` or `!trust` to list."
+
+    added = db.add_trusted_sender(conn, user_id, email)
+    if added:
+        return f"Trusted `{email}` — future emails from this sender will be processed automatically."
+    return f"`{email}` is already trusted."
+
+
+@command("untrust", "Remove a trusted email sender: `!untrust sender@example.com`")
+async def cmd_untrust(config, conn, user_id, conversation_token, args, client):
+    email = args.strip().lower()
+    if not email or "@" not in email:
+        return "Usage: `!untrust sender@example.com`"
+
+    removed = db.remove_trusted_sender(conn, user_id, email)
+    if removed:
+        return f"Removed `{email}` from trusted senders."
+    return f"`{email}` is not in your trusted senders list. Note: senders in config files must be removed from the config."

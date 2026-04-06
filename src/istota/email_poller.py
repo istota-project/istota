@@ -296,12 +296,12 @@ Date: {email.date}
             # Gate: untrusted plus-address senders require confirmation
             if (
                 routing_method == "plus_address"
-                and not config.is_trusted_email_sender(user_id, envelope.sender)
+                and not config.is_trusted_email_sender(user_id, envelope.sender, conn)
             ):
                 confirmation_msg = (
                     f"Email from unknown sender {envelope.sender}\n"
                     f"Subject: {email.subject}\n\n"
-                    f"Reply 'yes' to process or 'no' to discard."
+                    f"Reply 'yes' to process, 'yes trust' to process and trust this sender, or 'no' to discard."
                 )
                 db.set_task_confirmation(conn, task_id, confirmation_msg)
 

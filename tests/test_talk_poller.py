@@ -312,6 +312,121 @@ class TestHandleConfirmationReply:
             assert task.status == "pending"
 
 
+class TestConfirmAndTrust:
+    """Tests for 'yes trust' confirmation flow that also trusts the sender."""
+
+    @pytest.mark.asyncio
+    async def test_yes_trust_confirms_and_trusts_sender(self, make_config):
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Email from stranger@evil.com", user_id="alice",
+                source_type="email", conversation_token="thread1",
+            )
+            db.set_task_confirmation(conn, task_id, "Email from unknown sender")
+            db.mark_email_processed(
+                conn, email_id="e1", sender_email="stranger@evil.com",
+                subject="Hi", thread_id="t1", message_id="<m1@evil.com>",
+                references=None, user_id="alice", task_id=task_id,
+                routing_method="plus_address",
+            )
+
+        with (
+            db.get_db(config.db_path) as conn,
+            patch("istota.talk_poller.TalkClient") as MockClient,
+        ):
+            mock_instance = MockClient.return_value
+            mock_instance.send_message = AsyncMock()
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes trust", "alerts-room"
+            )
+
+        assert result is True
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+            assert task.status == "pending"
+            assert db.is_sender_trusted_in_db(conn, "alice", "stranger@evil.com") is True
+
+    @pytest.mark.asyncio
+    async def test_yes_comma_trust_variant(self, make_config):
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Email", user_id="alice",
+                source_type="email", conversation_token="thread1",
+            )
+            db.set_task_confirmation(conn, task_id, "Confirm?")
+            db.mark_email_processed(
+                conn, email_id="e2", sender_email="joe@example.com",
+                subject="Hi", thread_id="t2", message_id="<m2@x.com>",
+                references=None, user_id="alice", task_id=task_id,
+                routing_method="plus_address",
+            )
+
+        with (
+            db.get_db(config.db_path) as conn,
+            patch("istota.talk_poller.TalkClient") as MockClient,
+        ):
+            mock_instance = MockClient.return_value
+            mock_instance.send_message = AsyncMock()
+            await handle_confirmation_reply(
+                conn, config, "alice", "yes, trust", "alerts-room"
+            )
+
+        with db.get_db(config.db_path) as conn:
+            assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is True
+
+    @pytest.mark.asyncio
+    async def test_plain_yes_does_not_trust(self, make_config):
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Email", user_id="alice",
+                source_type="email", conversation_token="thread1",
+            )
+            db.set_task_confirmation(conn, task_id, "Confirm?")
+            db.mark_email_processed(
+                conn, email_id="e3", sender_email="stranger@evil.com",
+                subject="Hi", thread_id="t3", message_id="<m3@evil.com>",
+                references=None, user_id="alice", task_id=task_id,
+                routing_method="plus_address",
+            )
+
+        with db.get_db(config.db_path) as conn:
+            await handle_confirmation_reply(
+                conn, config, "alice", "yes", "alerts-room"
+            )
+
+        with db.get_db(config.db_path) as conn:
+            assert db.is_sender_trusted_in_db(conn, "alice", "stranger@evil.com") is False
+
+    @pytest.mark.asyncio
+    async def test_yes_trust_on_non_email_task_does_not_crash(self, make_config):
+        """'yes trust' on a Talk task should just confirm without trusting."""
+        config = make_config()
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Please confirm")
+
+        with db.get_db(config.db_path) as conn:
+            result = await handle_confirmation_reply(
+                conn, config, "alice", "yes trust", "room1"
+            )
+
+        assert result is True
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+            assert task.status == "pending"
+
+
 class TestCrossConversationConfirmation:
     """Tests for reply-to-specific and cross-conversation confirmation paths."""
 

@@ -338,6 +338,17 @@ CREATE TABLE IF NOT EXISTS istota_kv (
 
 CREATE INDEX IF NOT EXISTS idx_istota_kv_ns ON istota_kv(user_id, namespace);
 
+-- Trusted email senders (runtime-managed via !trust command / confirmation flow)
+CREATE TABLE IF NOT EXISTS trusted_email_senders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    sender_email TEXT NOT NULL,         -- Exact email address (lowercase)
+    added_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(user_id, sender_email)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trusted_email_senders_user ON trusted_email_senders(user_id);
+
 -- Sent emails (outbound email tracking for emissary thread matching)
 CREATE TABLE IF NOT EXISTS sent_emails (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
