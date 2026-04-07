@@ -11,7 +11,7 @@ export const mapFlyTo = writable<((lat: number, lon: number, zoom?: number) => v
 export const selectedPlaceId = writable<number | null>(null);
 
 /** Callback when a place is dragged on the map. Set by layout. */
-export const onPlaceMove = writable<((placeId: number, lat: number, lon: number) => void) | null>(null);
+export const onPlaceMove = writable<((placeId: number, lat: number, lon: number) => void) | undefined>(undefined);
 
 /** Reload places from the API and update the store. */
 export async function reloadPlaces(): Promise<void> {

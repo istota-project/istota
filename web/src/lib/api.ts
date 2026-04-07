@@ -158,6 +158,7 @@ export interface DiscoveredCluster {
 	total_pings: number;
 	first_seen: string;
 	last_seen: string;
+	radius_meters?: number;
 }
 
 export interface DiscoverResponse {
