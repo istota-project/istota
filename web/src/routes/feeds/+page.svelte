@@ -26,37 +26,14 @@
 	viewMode.subscribe((v) => vm = v);
 	selectedFeedId.subscribe((v) => selFeed = v);
 
-	let unseenSnapshot: Set<number> | null = null;
-
-	// Watch for unseen toggle — need to fetch unread entries
+	// Watch for unseen toggle — reload with/without server-side status filter
 	let prevSu = false;
 	$effect(() => {
-		if (su && !prevSu) {
-			fetchUnseenEntries();
-		} else if (!su && prevSu) {
-			unseenSnapshot = null;
+		if (su !== prevSu) {
+			loadEntries(selFeed);
 		}
 		prevSu = su;
 	});
-
-	async function fetchUnseenEntries() {
-		try {
-			const data = await getFeeds({ limit: '500', status: 'unread', order: 'published_at', direction: 'desc' });
-			const seen = new Set(entries.map((e) => e.id));
-			const fresh = data.entries.filter((e) => !seen.has(e.id));
-			if (fresh.length > 0) {
-				entries = [...entries, ...fresh];
-			}
-		} catch {
-			// Fall back to what we have locally
-		}
-		const unseen = new Set(entries.filter((e) => e.status !== 'read').map((e) => e.id));
-		if (unseen.size === 0) {
-			showUnseen.set(false);
-			return;
-		}
-		unseenSnapshot = unseen;
-	}
 
 	// Lightbox
 	let lightboxSrc = $state('');
@@ -96,6 +73,7 @@
 			direction: 'desc',
 		};
 		if (feedId) params.feed_id = String(feedId);
+		if (su) params.status = 'unread';
 		return await getFeeds(params);
 	}
 
@@ -121,11 +99,19 @@
 		loadingMore = true;
 		try {
 			const data = await loadPage(entries.length, selFeed);
-			const seen = new Set(entries.map((e) => e.id));
-			const fresh = data.entries.filter((e) => !seen.has(e.id));
-			entries = [...entries, ...fresh];
-			total = data.total;
-			hasMore = entries.length < total;
+			if (data.entries.length === 0) {
+				hasMore = false;
+			} else {
+				const seen = new Set(entries.map((e) => e.id));
+				const fresh = data.entries.filter((e) => !seen.has(e.id));
+				if (fresh.length === 0) {
+					hasMore = false;
+				} else {
+					entries = [...entries, ...fresh];
+					total = data.total;
+					hasMore = data.entries.length >= PAGE_SIZE && entries.length < total;
+				}
+			}
 		} catch {
 			hasMore = false;
 		} finally {
@@ -180,7 +166,6 @@
 			const isImage = e.images.length > 0;
 			if (isImage && !si) return false;
 			if (!isImage && !st) return false;
-			if (su && unseenSnapshot && !unseenSnapshot.has(e.id)) return false;
 			return true;
 		});
 		filtered.sort((a, b) => {
