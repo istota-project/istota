@@ -296,6 +296,31 @@ class TestBuildBwrapCmdAdmin:
         bind_pairs = _get_bind_pairs(result, "--bind")
         assert any(src == db_str for src, _ in bind_pairs)
 
+    def test_db_wal_shm_use_bind_try_ro(self, sandbox_config, make_sandbox_task):
+        """WAL/SHM files use --ro-bind-try (transient, may not exist)."""
+        task = make_sandbox_task()
+        result = _run_bwrap(sandbox_config, task, True)
+        db_path = sandbox_config.db_path
+        for suffix in ["-wal", "-shm"]:
+            expected = str(db_path.parent / (db_path.name + suffix))
+            pairs = _get_bind_pairs(result, "--ro-bind-try")
+            assert any(src == expected for src, _ in pairs), (
+                f"{expected} not in --ro-bind-try pairs"
+            )
+
+    def test_db_wal_shm_use_bind_try_rw(self, sandbox_config, make_sandbox_task):
+        """WAL/SHM files use --bind-try when DB write enabled."""
+        sandbox_config.security.sandbox_admin_db_write = True
+        task = make_sandbox_task()
+        result = _run_bwrap(sandbox_config, task, True)
+        db_path = sandbox_config.db_path
+        for suffix in ["-wal", "-shm"]:
+            expected = str(db_path.parent / (db_path.name + suffix))
+            pairs = _get_bind_pairs(result, "--bind-try")
+            assert any(src == expected for src, _ in pairs), (
+                f"{expected} not in --bind-try pairs"
+            )
+
     def test_developer_repos_mounted(self, sandbox_config, make_sandbox_task, tmp_path):
         repos_dir = tmp_path / "repos"
         repos_dir.mkdir()
