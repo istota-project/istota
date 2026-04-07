@@ -8,14 +8,12 @@
 
 	let { children } = $props();
 
-	let places: Place[] = $state([]);
+	let places = $derived($locationPlaces);
 	let sidebarOpen = $state(false);
 	let selectedPlace: Place | null = $state(null);
 	let placeStats: PlaceStats | null = $state(null);
 	let statsLoading = $state(false);
 	let editingPlace: Place | null = $state(null);
-
-	locationPlaces.subscribe(v => places = v);
 
 	function isActive(path: string): boolean {
 		return page.url.pathname.startsWith(`${base}${path}`);

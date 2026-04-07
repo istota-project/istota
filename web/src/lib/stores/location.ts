@@ -5,7 +5,7 @@ import { getLocationPlaces, type Place } from '$lib/api';
 export const locationPlaces = writable<Place[]>([]);
 
 /** Callback to fly the active map to a position. Set by each page's map. */
-export const mapFlyTo = writable<((lat: number, lon: number, zoom?: number) => void) | null>(null);
+export const mapFlyTo = writable<((lat: number, lon: number, zoom?: number) => void) | undefined>(undefined);
 
 /** Currently selected place ID (for drag-to-reposition on the map). */
 export const selectedPlaceId = writable<number | null>(null);

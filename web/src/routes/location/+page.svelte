@@ -90,7 +90,7 @@
 
 	onDestroy(() => {
 		if (pollInterval) clearInterval(pollInterval);
-		mapFlyTo.set(null);
+		mapFlyTo.set(undefined);
 	});
 
 	$effect(() => {

@@ -14,25 +14,13 @@
 	let error = $state('');
 	let hasMore = $state(true);
 
-	// Subscribe to stores
-	let si = $state(true), st = $state(true), su = $state(false);
-	let sb: 'published' | 'added' = $state('published');
-	let vm: 'grid' | 'list' = $state('grid');
-	let selFeed = $state(0);
-	showImages.subscribe((v) => si = v);
-	showText.subscribe((v) => st = v);
-	showUnseen.subscribe((v) => su = v);
-	sortBy.subscribe((v) => sb = v);
-	viewMode.subscribe((v) => vm = v);
-	selectedFeedId.subscribe((v) => selFeed = v);
-
 	// Watch for unseen toggle — reload with/without server-side status filter
 	let prevSu = false;
 	$effect(() => {
-		if (su !== prevSu) {
-			loadEntries(selFeed);
+		if ($showUnseen !== prevSu) {
+			loadEntries($selectedFeedId);
 		}
-		prevSu = su;
+		prevSu = $showUnseen;
 	});
 
 	// Lightbox
@@ -73,7 +61,7 @@
 			direction: 'desc',
 		};
 		if (feedId) params.feed_id = String(feedId);
-		if (su) params.status = 'unread';
+		if ($showUnseen) params.status = 'unread';
 		return await getFeeds(params);
 	}
 
@@ -98,7 +86,7 @@
 		if (loadingMore || !hasMore) return;
 		loadingMore = true;
 		try {
-			const data = await loadPage(entries.length, selFeed);
+			const data = await loadPage(entries.length, $selectedFeedId);
 			if (data.entries.length === 0) {
 				hasMore = false;
 			} else {
@@ -134,13 +122,13 @@
 	// Reload when selected feed changes
 	let prevSelFeed: number | null = null;
 	$effect(() => {
-		if (prevSelFeed !== null && selFeed !== prevSelFeed) {
-			loadEntries(selFeed);
+		if (prevSelFeed !== null && $selectedFeedId !== prevSelFeed) {
+			loadEntries($selectedFeedId);
 		}
-		prevSelFeed = selFeed;
+		prevSelFeed = $selectedFeedId;
 	});
 
-	onMount(() => loadEntries(selFeed));
+	onMount(() => loadEntries($selectedFeedId));
 
 	$effect(() => {
 		if (!sentinel) return;
@@ -164,13 +152,13 @@
 	let filteredEntries = $derived.by(() => {
 		let filtered = entries.filter((e) => {
 			const isImage = e.images.length > 0;
-			if (isImage && !si) return false;
-			if (!isImage && !st) return false;
+			if (isImage && !$showImages) return false;
+			if (!isImage && !$showText) return false;
 			return true;
 		});
 		filtered.sort((a, b) => {
-			const keyA = sb === 'published' ? a.published_at : a.created_at;
-			const keyB = sb === 'published' ? b.published_at : b.created_at;
+			const keyA = $sortBy === 'published' ? a.published_at : a.created_at;
+			const keyB = $sortBy === 'published' ? b.published_at : b.created_at;
 			return (keyB || '').localeCompare(keyA || '');
 		});
 		return filtered;
@@ -183,7 +171,7 @@
 	{:else if error}
 		<div class="center-msg error">{error}</div>
 	{:else}
-		<div class="feed-grid" class:list-view={vm === 'list'}>
+		<div class="feed-grid" class:list-view={$viewMode === 'list'}>
 			{#each filteredEntries as entry (entry.id)}
 				<FeedCard {entry} onImageClick={(url) => lightboxSrc = url} onViewed={handleViewed} />
 			{/each}
