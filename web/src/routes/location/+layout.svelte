@@ -134,7 +134,7 @@
 
 	$effect(() => {
 		onPlaceMoveStore.set(handlePlaceMove);
-		return () => onPlaceMoveStore.set(null);
+		return () => onPlaceMoveStore.set(undefined);
 	});
 
 	function handleVisibility() {
