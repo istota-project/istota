@@ -20,3 +20,6 @@ export const showText = persistedWritable('feeds.showText', true);
 export const showUnseen = writable(false); // not persisted
 export const sortBy = persistedWritable<'published' | 'added'>('feeds.sortBy', 'published');
 export const viewMode = persistedWritable<'grid' | 'list'>('feeds.viewMode', 'grid');
+
+/** Seconds a card must be visible before marking as read. */
+export const markReadDelay = persistedWritable('feeds.markReadDelay', 1.5);

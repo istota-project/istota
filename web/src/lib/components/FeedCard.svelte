@@ -1,11 +1,16 @@
 <script lang="ts">
 	import type { FeedEntry } from '$lib/api';
 
+	import { markReadDelay } from '$lib/stores/feeds';
+
 	let { entry, onImageClick, onViewed }: {
 		entry: FeedEntry;
 		onImageClick: (url: string) => void;
 		onViewed?: (id: number) => void;
 	} = $props();
+
+	let delay = $state(1.5);
+	markReadDelay.subscribe((v) => delay = v);
 
 	const feedSlug = entry.feed.title.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 	const isImage = entry.images.length > 0;
@@ -36,7 +41,7 @@
 						done = true;
 						onViewed!(entry.id);
 						observer.disconnect();
-					}, 3000);
+					}, delay * 1000);
 				} else if (timer) {
 					clearTimeout(timer);
 					timer = null;
