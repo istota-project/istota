@@ -9,19 +9,6 @@
 
 	let feeds: Feed[] = $state([]);
 	let sidebarOpen = $state(false);
-	let selected = $state(0);
-
-	// Sync store to local state
-	selectedFeedId.subscribe((v) => selected = v);
-
-	let si = $state(true), st = $state(true), su = $state(false);
-	let sb: 'published' | 'added' = $state('published');
-	let vm: 'grid' | 'list' = $state('grid');
-	showImages.subscribe((v) => si = v);
-	showText.subscribe((v) => st = v);
-	showUnseen.subscribe((v) => su = v);
-	sortBy.subscribe((v) => sb = v);
-	viewMode.subscribe((v) => vm = v);
 
 	let groupedFeeds = $derived.by(() => {
 		const groups: Record<string, Feed[]> = {};
@@ -37,7 +24,7 @@
 	});
 
 	function handleFeedClick(feedId: number) {
-		selectedFeedId.set(selected === feedId ? 0 : feedId);
+		selectedFeedId.set($selectedFeedId === feedId ? 0 : feedId);
 		sidebarOpen = false;
 	}
 
@@ -57,19 +44,19 @@
 		<h1>Feeds</h1>
 		<div class="feed-nav">
 			<div class="filter-group">
-				<Chip checked={si} onclick={() => showImages.update(v => !v)}>Images</Chip>
-				<Chip checked={st} onclick={() => showText.update(v => !v)}>Text</Chip>
-				<Chip checked={su} onclick={() => showUnseen.update(v => !v)}>Unseen</Chip>
+				<Chip checked={$showImages} onclick={() => showImages.update(v => !v)}>Images</Chip>
+				<Chip checked={$showText} onclick={() => showText.update(v => !v)}>Text</Chip>
+				<Chip checked={$showUnseen} onclick={() => showUnseen.update(v => !v)}>Unseen</Chip>
 			</div>
 			<div class="filter-group">
-				<Chip checked={sb === 'published'} onclick={() => sortBy.set('published')}>Published</Chip>
-				<Chip checked={sb === 'added'} onclick={() => sortBy.set('added')}>Added</Chip>
+				<Chip checked={$sortBy === 'published'} onclick={() => sortBy.set('published')}>Published</Chip>
+				<Chip checked={$sortBy === 'added'} onclick={() => sortBy.set('added')}>Added</Chip>
 			</div>
 			<div class="filter-group view-toggle">
-				<Chip icon checked={vm === 'grid'} onclick={() => viewMode.set('grid')} title="Grid view">
+				<Chip icon checked={$viewMode === 'grid'} onclick={() => viewMode.set('grid')} title="Grid view">
 					<LayoutGrid size={14} />
 				</Chip>
-				<Chip icon checked={vm === 'list'} onclick={() => viewMode.set('list')} title="List view">
+				<Chip icon checked={$viewMode === 'list'} onclick={() => viewMode.set('list')} title="List view">
 					<List size={14} />
 				</Chip>
 			</div>
@@ -92,7 +79,7 @@
 						{#each catFeeds as feed}
 							<button
 								class="feed-btn"
-								class:active={selected === feed.id}
+								class:active={$selectedFeedId === feed.id}
 								onclick={() => handleFeedClick(feed.id)}
 								type="button"
 							>

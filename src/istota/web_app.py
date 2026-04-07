@@ -114,13 +114,9 @@ def _verify_origin(request: Request) -> None:
     origin = request.headers.get("origin") or request.headers.get("referer")
     if not origin:
         raise _ForbiddenException("missing origin")
-    hostname = (
-        _config.site.hostname
-        if _config and _config.site.hostname
-        else request.headers.get("host", "")
-    )
-    if not hostname:
-        raise _ForbiddenException("cannot determine hostname")
+    if not _config or not _config.site.hostname:
+        raise _ForbiddenException("site.hostname not configured")
+    hostname = _config.site.hostname
     from urllib.parse import urlparse
     parsed = urlparse(origin)
     if parsed.hostname != hostname.split(":")[0]:

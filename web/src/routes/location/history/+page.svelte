@@ -143,7 +143,7 @@
 	});
 
 	onDestroy(() => {
-		mapFlyTo.set(null);
+		mapFlyTo.set(undefined);
 	});
 
 	$effect(() => {

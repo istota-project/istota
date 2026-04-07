@@ -9,9 +9,6 @@
 		onViewed?: (id: number) => void;
 	} = $props();
 
-	let delay = $state(1.5);
-	markReadDelay.subscribe((v) => delay = v);
-
 	const feedSlug = entry.feed.title.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 	const isImage = entry.images.length > 0;
 	const maxGrid = 4;
@@ -41,7 +38,7 @@
 						done = true;
 						onViewed!(entry.id);
 						observer.disconnect();
-					}, delay * 1000);
+					}, $markReadDelay * 1000);
 				} else if (timer) {
 					clearTimeout(timer);
 					timer = null;
