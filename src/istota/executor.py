@@ -727,14 +727,14 @@ def build_bwrap_cmd(
                 _bind(db_path)
             else:
                 _ro_bind(db_path)
-            # SQLite WAL/SHM files
+            # SQLite WAL/SHM files — use --*-bind-try because these are
+            # transient (disappear briefly after WAL checkpoint flushes).
             for suffix in ["-wal", "-shm"]:
-                wal = db_path.parent / (db_path.name + suffix)
-                if wal.exists():
-                    if config.security.sandbox_admin_db_write:
-                        _bind(wal)
-                    else:
-                        _ro_bind(wal)
+                wal_path = str(db_path.parent / (db_path.name + suffix))
+                if config.security.sandbox_admin_db_write:
+                    args.extend(["--bind-try", wal_path, wal_path])
+                else:
+                    args.extend(["--ro-bind-try", wal_path, wal_path])
 
     # --- Huggingface model cache (RO) ---
     hf_cache = home / ".cache" / "huggingface"
