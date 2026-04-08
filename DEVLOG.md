@@ -2,6 +2,42 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-08: Temporal knowledge graph and metadata-filtered retrieval
+
+Added a structured knowledge graph for entity-relationship facts with temporal validity, and metadata-filtered search for memory chunks. Inspired by MemPalace's approach to structured memory, adapted to Istota's existing sleep cycle and search infrastructure.
+
+The knowledge graph stores triples like "stefan works_at acme (since 2025-06-01)" with automatic supersession for single-valued predicates (works_at, lives_in) and concurrent facts for multi-valued ones (knows, uses_tech). Temporary facts (staying_in, visiting) coexist with permanent facts without triggering supersession. Memory chunks gain topic and entities columns for filtered search, with NULL-topic chunks always included for backward compatibility.
+
+The sleep cycle extraction prompt now requests structured FACTS and TOPICS sections alongside the existing memory bullets. A regex-based parser splits the output, falling back to plain text if structured sections are missing. Extracted facts are inserted into the KG; topics are passed to the memory indexer.
+
+Post-implementation review by investigative and verification agents caught six bugs: a connection leak in executor KG loading, LIKE-based entity search with false positives, executescript() implicit commits on shared connections, auto-commits in KG mutation functions breaking batch atomicity, variable shadowing, and a rigid regex parser. All fixed before merge.
+
+**Key changes:**
+- `knowledge_graph.py` module with `KnowledgeFact` dataclass, CRUD, dedup/supersession, temporal queries, prompt formatting
+- `knowledge_facts` table in schema.sql with indexes (including partial index on current facts)
+- `topic` and `entities` columns on `memory_chunks` table with migration in db.py
+- `search()` accepts `topics` and `entities` filter params; entity filtering uses `json_each()` for exact matching
+- Sleep cycle extraction outputs MEMORIES/FACTS/TOPICS sections; `_parse_structured_extraction()` handles parsing with fallback
+- `build_prompt()` renders "Known facts" section between user memory and channel memory
+- `_apply_memory_cap()` returns 5-tuple; truncation order: recalled → knowledge facts → dated → user/channel
+- Six new CLI subcommands on memory_search skill: `facts`, `timeline`, `add-fact`, `invalidate`, `delete-fact`
+- `curate_user_memory()` includes KG facts so Claude avoids duplicating structured knowledge in USER.md
+- `stats` command includes KG fact counts
+
+**Files added/modified:**
+- `src/istota/knowledge_graph.py` — New module: KnowledgeFact, add_fact, invalidate_fact, delete_fact, get_current_facts, get_facts_as_of, get_entity_timeline, format_facts_for_prompt
+- `schema.sql` — knowledge_facts table, topic/entities columns on memory_chunks
+- `src/istota/db.py` — Migration for topic/entities columns
+- `src/istota/memory_search.py` — topic/entities params on _insert_chunks, index_conversation, index_file, search, _search_bm25, _search_vec
+- `src/istota/executor.py` — KG fact loading, knowledge_facts param on build_prompt, 5-tuple _apply_memory_cap
+- `src/istota/sleep_cycle.py` — Structured extraction prompt, _parse_structured_extraction, KG fact insertion, topic-aware indexing, KG-aware curation
+- `src/istota/skills/memory_search/__init__.py` — facts, timeline, add-fact, invalidate, delete-fact subcommands; --topic/--entity on search
+- `tests/test_knowledge_graph.py` — 47 tests for KG module
+- `tests/test_skills_memory_search.py` — 27 new tests for KG CLI commands
+- `tests/test_memory_search.py` — 10 new tests for chunk metadata and filtered search
+- `tests/test_sleep_cycle.py` — 9 new tests for structured extraction parsing
+- `tests/test_executor.py` — Updated _apply_memory_cap tests for 5-tuple
+
 ## 2026-04-05: Email confirmation gate for unknown senders
 
 Added a deterministic (non-LLM) confirmation gate for plus-addressed emails from untrusted senders. When an email arrives at `bot+user@domain` from a sender not in the user's trusted list, the task is held in `pending_confirmation` until the user explicitly approves via Talk. Also ran adversarial red-team testing (T1 category) to validate existing prompt injection defenses — all tests passed before the gate was even added, but the gate provides a stronger, non-bypassable layer.
