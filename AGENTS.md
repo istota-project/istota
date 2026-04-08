@@ -19,6 +19,7 @@ istota/
 │   ├── skill_proxy.py       # Unix socket proxy for credential-isolated skill CLI calls
 │   ├── skill_client.py      # istota-skill console script (proxy client + direct fallback)
 │   ├── network_proxy.py     # CONNECT proxy for network isolation (domain allowlist)
+│   ├── knowledge_graph.py   # Temporal entity-relationship triples
 │   ├── heartbeat.py         # Heartbeat monitoring system
 │   ├── web_app.py            # Authenticated web interface (Nextcloud OIDC)
 │   ├── webhook_receiver.py   # FastAPI webhook receiver (Overland GPS, etc.)
@@ -150,11 +151,13 @@ Resources defined in per-user config or DB, merged at task time. Types: `calenda
 ```
 
 ### Memory System
-- **User memory** (`USER.md`): Auto-loaded into prompts (except briefings). Optional nightly curation via `curate_user_memory` (sleep cycle promotes durable facts from dated memories).
+- **User memory** (`USER.md`): Auto-loaded into prompts (except briefings). Optional nightly curation via `curate_user_memory` (sleep cycle promotes durable facts from dated memories; curation prompt includes KG facts to avoid duplication).
 - **Channel memory** (`CHANNEL.md`): Loaded when `conversation_token` set
 - **Dated memories** (`memories/YYYY-MM-DD.md`): Auto-loaded into prompts (last N days via `auto_load_dated_days`, default 3). Includes task provenance references (`ref:TASK_ID`).
-- **Memory recall** (BM25): Auto-recall via `auto_recall` config — searches indexed memories/conversations using task prompt as query, independent of context triage.
-- **Memory cap** (`max_memory_chars`): Limits total memory in prompts. Truncation order: recalled → dated → warn about user/channel. Default 0 (unlimited).
+- **Knowledge graph** (`knowledge_facts` table): Temporal entity-relationship triples (subject, predicate, object) with validity windows (`valid_from`, `valid_until`). Single-valued predicates (`works_at`, `lives_in`, `has_role`, `has_status`) auto-supersede on new value. Multi-valued predicates (`knows`, `uses_tech`, `prefers`) allow concurrent facts. Temporary facts (`staying_in`, `visiting`) coexist with permanent ones. Current facts loaded into prompts as "Known facts" section. CLI: `istota-skill memory_search facts/timeline/add-fact/invalidate/delete-fact`.
+- **Memory recall** (BM25): Auto-recall via `auto_recall` config — searches indexed memories/conversations using task prompt as query, independent of context triage. Search supports `--topic` and `--entity` filters (NULL-topic chunks always included).
+- **Memory cap** (`max_memory_chars`): Limits total memory in prompts. Truncation order: recalled → knowledge facts → dated → warn about user/channel. Default 0 (unlimited).
+- **Chunk metadata**: Memory chunks have optional `topic` (work, tech, personal, finance, admin, learning, meta) and `entities` (JSON array) columns. Populated during sleep cycle extraction. Entity search uses `json_each()` for exact matching.
 - Briefings exclude all personal memory to prevent leaking into newsletter-style output
 
 ### Talk Integration
@@ -197,13 +200,13 @@ Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user's tim
 Defined in user's `CRON.md` (markdown with TOML `[[jobs]]`). Job types: `prompt` (Claude Code), `prompt_file` (prompt loaded from external file), or `command` (shell). `prompt_file` paths are relative to the Nextcloud mount root and resolved at load time. One-time jobs (`once = true`) auto-deleted after success. Auto-disable after 5 consecutive failures. Results excluded from interactive context. Per-job `skip_log_channel = true` suppresses log channel output for frequent jobs.
 
 ### Sleep Cycle
-Nightly memory extraction (direct subprocess). Gathers completed tasks → Claude extracts memories → writes dated memory files with task provenance (`ref:TASK_ID`). Channel sleep cycle runs in parallel for shared context. Optional USER.md curation pass (`curate_user_memory`). Task data uses tail-biased truncation (40% head + 60% tail) to preserve conclusions, with dynamic per-task budget allocation proportional to content length. Tasks sharing a conversation are grouped as threads. Config: `[sleep_cycle]`, `[channel_sleep_cycle]`.
+Nightly memory extraction (direct subprocess). Gathers completed tasks → Claude extracts memories → writes dated memory files with task provenance (`ref:TASK_ID`). Extraction prompt requests structured MEMORIES/FACTS/TOPICS sections; parser falls back to plain text if structured output is missing or malformed. Extracted facts inserted into knowledge graph (`knowledge_facts` table). Dominant topic from TOPICS section passed to memory indexer for chunk metadata. Channel sleep cycle runs in parallel for shared context. Optional USER.md curation pass (`curate_user_memory`, includes KG facts to avoid duplication). Task data uses tail-biased truncation (40% head + 60% tail) to preserve conclusions, with dynamic per-task budget allocation proportional to content length. Tasks sharing a conversation are grouped as threads. Config: `[sleep_cycle]`, `[channel_sleep_cycle]`.
 
 ### Heartbeat Monitoring
 User-defined health checks in `HEARTBEAT.md`. Types: `file-watch`, `shell-command`, `url-health`, `calendar-conflicts`, `task-deadline`, `self-check`. Cooldown, check intervals, and quiet hours supported.
 
 ### Memory Search
-Hybrid BM25 + vector search using sqlite-vec and sentence-transformers. Auto-indexes conversations and memory files. Channel support via `channel:{token}` namespace. Degrades to BM25-only if deps unavailable. Optional: `uv sync --extra memory-search`.
+Hybrid BM25 + vector search using sqlite-vec and sentence-transformers. Auto-indexes conversations and memory files. Channel support via `channel:{token}` namespace. Degrades to BM25-only if deps unavailable. Optional: `uv sync --extra memory-search`. Search supports `topics` and `entities` filter params; entity matching uses `json_each()` for exact JSON array element comparison. Knowledge graph queries (facts, timeline) available via same CLI skill.
 
 ### GPS Location Tracking
 Overland GPS webhook receiver (`webhook_receiver.py`) ingests location pings and detects place transitions. Runs as a separate FastAPI service (`uvicorn istota.webhook_receiver:app`).

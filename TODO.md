@@ -169,6 +169,22 @@
 - [x] `!search` command for synchronous conversation history search (memory index + Talk API, room scoping)
 - [x] `!search` date filtering (`--since`, `--week`)
 - [x] `!search` source type filtering (`--memories`)
+- [x] Metadata-filtered retrieval: `--topic` and `--entity` search filters
+- [x] Topic column on memory_chunks (coarse classifier: work, tech, personal, finance, admin, learning, meta)
+- [x] Entities column on memory_chunks (JSON array, exact matching via json_each)
+- [x] NULL-topic chunks included in filtered searches (backward compat for pre-migration data)
+
+### Temporal Knowledge Graph ✅
+- [x] `knowledge_facts` table with entity-relationship triples and temporal validity windows
+- [x] Dedup/supersession: single-valued predicates auto-supersede, multi-valued allow concurrent facts
+- [x] Temporary facts (staying_in, visiting) coexist with permanent facts
+- [x] Temporal queries: get_current_facts, get_facts_as_of (historical), get_entity_timeline
+- [x] Sleep cycle extraction produces structured FACTS/TOPICS alongside memory bullets
+- [x] KG facts loaded into task prompts ("Known facts" section)
+- [x] CLI: facts, timeline, add-fact, invalidate, delete-fact subcommands
+- [x] Curation integration: USER.md curation prompt includes KG facts to avoid duplication
+- [ ] UNIQUE constraint on current facts to prevent concurrency duplicates (ISSUE-042)
+- [ ] Entity-aware auto-recall: use KG entities to bias search topic without extra LLM call (Phase 8)
 
 ### Git/GitLab/GitHub Developer Skill ✅
 - [x] Clone repos to persistent bare clones with worktree-based branch isolation
