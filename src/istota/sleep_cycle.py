@@ -1,6 +1,8 @@
 """Nightly sleep cycle — extract long-term memories from the day's interactions."""
 
+import json
 import logging
+import re
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -175,7 +177,79 @@ memory is better than {NO_NEW_MEMORIES}.
 If there is genuinely nothing new worth remembering (e.g., only greetings or repeated
 questions with no new information), respond with exactly: {NO_NEW_MEMORIES}
 
-Output ONLY the bullet points (or {NO_NEW_MEMORIES}). No preamble, no explanation."""
+## Output format
+
+Output three sections in this exact order. Each section starts with its marker on its own line.
+
+MEMORIES:
+(bullet points as described above — this is the primary output)
+
+FACTS:
+(JSON array of entity-relationship triples extracted from the interactions)
+Each triple: {{"subject": "entity", "predicate": "relationship", "object": "value"}}
+Predicates: works_at, works_on, lives_in, uses_tech, has_role, prefers, knows, relates_to, has_status, decided, staying_in, visiting
+Use staying_in/visiting for temporary states (not lives_in).
+Normalize entity names to lowercase. Only extract facts that are clearly stated or decided, not speculative.
+If no facts to extract, output an empty array: []
+
+TOPICS:
+(JSON object mapping each task ref to a topic category)
+Topics: work, tech, personal, finance, admin, learning, meta
+Example: {{"ref:1234": "tech", "ref:1235": "personal"}}
+If no topics to classify, output: {{}}
+
+If you cannot produce the structured sections, output only the bullet points (the MEMORIES section).
+Do not include any preamble or explanation outside these sections."""
+
+
+def _parse_structured_extraction(output: str) -> tuple[str, list[dict], dict[str, str]]:
+    """Parse structured extraction output into components.
+
+    Returns (memories_text, facts_list, topics_dict).
+    Falls back gracefully: if structured sections are missing, treats entire
+    output as memories with empty facts/topics.
+    """
+    facts: list[dict] = []
+    topics: dict[str, str] = {}
+
+    # Try to find MEMORIES: section (allow optional newline after marker)
+    memories_match = re.search(r"(?:^|\n)MEMORIES:\s*\n?", output)
+    facts_match = re.search(r"(?:^|\n)FACTS:\s*\n?", output)
+    topics_match = re.search(r"(?:^|\n)TOPICS:\s*\n?", output)
+
+    if not memories_match:
+        # No structured format — treat entire output as memories
+        return output.strip(), facts, topics
+
+    # Extract memories text (from MEMORIES: to FACTS: or end)
+    mem_start = memories_match.end()
+    mem_end = facts_match.start() if facts_match else (topics_match.start() if topics_match else len(output))
+    memories_text = output[mem_start:mem_end].strip()
+
+    # Extract facts JSON
+    if facts_match:
+        facts_start = facts_match.end()
+        facts_end = topics_match.start() if topics_match else len(output)
+        facts_raw = output[facts_start:facts_end].strip()
+        try:
+            parsed = json.loads(facts_raw)
+            if isinstance(parsed, list):
+                facts = [f for f in parsed if isinstance(f, dict)
+                         and "subject" in f and "predicate" in f and "object" in f]
+        except (json.JSONDecodeError, ValueError):
+            logger.debug("Failed to parse FACTS section: %s", facts_raw[:200])
+
+    # Extract topics JSON
+    if topics_match:
+        topics_raw = output[topics_match.end():].strip()
+        try:
+            parsed = json.loads(topics_raw)
+            if isinstance(parsed, dict):
+                topics = {k: v for k, v in parsed.items() if isinstance(v, str)}
+        except (json.JSONDecodeError, ValueError):
+            logger.debug("Failed to parse TOPICS section: %s", topics_raw[:200])
+
+    return memories_text, facts, topics
 
 
 def process_user_sleep_cycle(
@@ -250,7 +324,15 @@ def process_user_sleep_cycle(
         _update_state(config, conn, user_id, last_task_id)
         return False
 
-    # Write dated memory file
+    # Parse structured output (memories + facts + topics)
+    memories_text, extracted_facts, extracted_topics = _parse_structured_extraction(output)
+
+    if not memories_text or memories_text == NO_NEW_MEMORIES:
+        logger.info("Sleep cycle for %s: no memories after parsing", user_id)
+        _update_state(config, conn, user_id, last_task_id)
+        return False
+
+    # Write dated memory file (only the human-readable memories)
     if not config.use_mount:
         logger.warning("Sleep cycle requires mount mode, skipping file write for %s", user_id)
         _update_state(config, conn, user_id, last_task_id)
@@ -260,14 +342,47 @@ def process_user_sleep_cycle(
     context_dir.mkdir(parents=True, exist_ok=True)
 
     memory_file = context_dir / f"{date_str}.md"
-    memory_file.write_text(output + "\n")
-    logger.info("Wrote dated memory file for %s: %s (%d chars)", user_id, memory_file.name, len(output))
+    memory_file.write_text(memories_text + "\n")
+    logger.info("Wrote dated memory file for %s: %s (%d chars)", user_id, memory_file.name, len(memories_text))
+
+    # Insert extracted facts into knowledge graph (non-critical)
+    if extracted_facts:
+        try:
+            from .knowledge_graph import ensure_table, add_fact
+            ensure_table(conn)
+            inserted = 0
+            for fact in extracted_facts:
+                fact_id = add_fact(
+                    conn, user_id,
+                    subject=fact["subject"],
+                    predicate=fact["predicate"],
+                    object_val=fact["object"],
+                    valid_from=fact.get("valid_from"),
+                    source_type="extracted",
+                )
+                if fact_id is not None:
+                    inserted += 1
+            if inserted:
+                logger.info("Inserted %d knowledge facts for %s", inserted, user_id)
+        except Exception as e:
+            logger.debug("Knowledge graph insertion failed for %s: %s", user_id, e)
+
+    # Determine dominant topic from extracted topics (for indexing)
+    _index_topic = None
+    if extracted_topics:
+        # Use the most common topic across refs
+        topic_counts: dict[str, int] = {}
+        for t in extracted_topics.values():
+            topic_counts[t] = topic_counts.get(t, 0) + 1
+        if topic_counts:
+            _index_topic = max(topic_counts, key=topic_counts.get)  # type: ignore[arg-type]
 
     # Index memory file for semantic search (non-critical)
     if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
         try:
             from .memory_search import index_file as _index_file
-            _index_file(conn, user_id, str(memory_file), output, "memory_file")
+            _index_file(conn, user_id, str(memory_file), memories_text, "memory_file",
+                       topic=_index_topic)
         except Exception as e:
             logger.debug("Memory search indexing failed for %s: %s", memory_file.name, e)
 
@@ -280,7 +395,7 @@ def process_user_sleep_cycle(
     # Curate USER.md if enabled
     if sleep_config.curate_user_memory:
         try:
-            curate_user_memory(config, user_id)
+            curate_user_memory(config, user_id, conn=conn)
         except Exception as e:
             logger.error("USER.md curation failed for %s: %s", user_id, e)
 
@@ -295,6 +410,7 @@ def build_curation_prompt(
     user_id: str,
     current_memory: str | None,
     dated_memories: str,
+    knowledge_facts_text: str | None = None,
 ) -> str:
     """Build the prompt that instructs Claude to curate USER.md from dated memories."""
     current_section = ""
@@ -311,9 +427,21 @@ def build_curation_prompt(
 (Empty — no existing memory file)
 """
 
+    kg_section = ""
+    if knowledge_facts_text:
+        kg_section = f"""
+## Structured knowledge graph
+
+The following facts are tracked in the structured knowledge graph.
+You do NOT need to duplicate these in USER.md — they are already stored separately.
+If USER.md contains entries that are now covered by the knowledge graph, you can remove them.
+
+{knowledge_facts_text}
+"""
+
     return f"""You are curating the persistent memory file (USER.md) for user '{user_id}'.
 
-{current_section}
+{current_section}{kg_section}
 ## Recent dated memories
 
 The following memories were extracted from recent conversations:
@@ -332,13 +460,14 @@ Do NOT include:
 - Temporary or time-bound information (e.g., "meeting tomorrow")
 - Task references (ref:NNNN) — those belong in dated memories only
 - Redundant entries — if info is already in USER.md, don't duplicate it
+- Facts already tracked in the knowledge graph (listed above) — those are stored separately
 
 If USER.md is already up to date and no changes are needed, respond with exactly: {NO_CHANGES_NEEDED}
 
 Otherwise, output the COMPLETE updated USER.md content. No preamble, no explanation — just the file content."""
 
 
-def curate_user_memory(config: Config, user_id: str) -> bool:
+def curate_user_memory(config: Config, user_id: str, conn: "db.sqlite3.Connection | None" = None) -> bool:
     """Second pass: update USER.md based on accumulated dated memories.
 
     Returns True if USER.md was updated.
@@ -348,7 +477,25 @@ def curate_user_memory(config: Config, user_id: str) -> bool:
     if not dated:
         return False  # Nothing to curate from
 
-    prompt = build_curation_prompt(user_id, current_memory, dated)
+    # Load knowledge graph facts (non-critical)
+    kg_text = None
+    try:
+        from .knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
+        if conn is not None:
+            ensure_table(conn)
+            kg_facts = get_current_facts(conn, user_id)
+            if kg_facts:
+                kg_text = format_facts_for_prompt(kg_facts)
+        else:
+            with db.get_db(config.db_path) as temp_conn:
+                ensure_table(temp_conn)
+                kg_facts = get_current_facts(temp_conn, user_id)
+                if kg_facts:
+                    kg_text = format_facts_for_prompt(kg_facts)
+    except Exception:
+        pass  # Graceful degradation
+
+    prompt = build_curation_prompt(user_id, current_memory, dated, knowledge_facts_text=kg_text)
 
     try:
         result = subprocess.run(

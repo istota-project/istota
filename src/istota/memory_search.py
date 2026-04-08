@@ -215,12 +215,15 @@ def _insert_chunks(
     source_id: str,
     chunks: list[str],
     metadata: dict | None = None,
+    topic: str | None = None,
+    entities: list[str] | None = None,
 ) -> int:
     """Insert chunks with embeddings. Returns number of chunks inserted."""
     if not chunks:
         return 0
 
     metadata_json = json.dumps(metadata) if metadata else None
+    entities_json = json.dumps(entities) if entities else None
     has_vec = ensure_vec_table(conn)
 
     # Batch embed all chunks
@@ -233,10 +236,11 @@ def _insert_chunks(
         ch = _content_hash(chunk)
         try:
             cursor = conn.execute(
-                "INSERT INTO memory_chunks (user_id, source_type, source_id, chunk_index, content, content_hash, metadata_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO memory_chunks "
+                "(user_id, source_type, source_id, chunk_index, content, content_hash, metadata_json, topic, entities) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(user_id, content_hash) DO NOTHING",
-                (user_id, source_type, source_id, i, chunk, ch, metadata_json),
+                (user_id, source_type, source_id, i, chunk, ch, metadata_json, topic, entities_json),
             )
             if cursor.rowcount > 0:
                 inserted += 1
@@ -296,6 +300,8 @@ def index_conversation(
     prompt: str,
     result: str,
     metadata: dict | None = None,
+    topic: str | None = None,
+    entities: list[str] | None = None,
 ) -> int:
     """Index a conversation (prompt + result) into memory chunks.
 
@@ -314,7 +320,8 @@ def index_conversation(
     chunks = chunk_text(text)
     meta = metadata or {}
     meta["task_id"] = source_id
-    return _insert_chunks(conn, user_id, "conversation", source_id, chunks, meta)
+    return _insert_chunks(conn, user_id, "conversation", source_id, chunks, meta,
+                          topic=topic, entities=entities)
 
 
 def index_file(
@@ -323,6 +330,8 @@ def index_file(
     file_path: str,
     content: str,
     source_type: str = "memory_file",
+    topic: str | None = None,
+    entities: list[str] | None = None,
 ) -> int:
     """Index a file's content, replacing any existing chunks for that source.
 
@@ -333,7 +342,8 @@ def index_file(
 
     chunks = chunk_text(content)
     meta = {"file_path": file_path}
-    return _insert_chunks(conn, user_id, source_type, file_path, chunks, meta)
+    return _insert_chunks(conn, user_id, source_type, file_path, chunks, meta,
+                          topic=topic, entities=entities)
 
 
 def reindex_all(
@@ -459,6 +469,8 @@ def _search_bm25(
     source_types: list[str] | None = None,
     include_user_ids: list[str] | None = None,
     since: str | None = None,
+    topics: list[str] | None = None,
+    entities: list[str] | None = None,
 ) -> list[SearchResult]:
     """Full-text BM25 search via FTS5."""
     escaped = _escape_fts5_query(query)
@@ -482,6 +494,19 @@ def _search_bm25(
     if since:
         sql += " AND mc.created_at >= ?"
         params.append(since)
+
+    if topics:
+        placeholders = ",".join("?" for _ in topics)
+        sql += f" AND (mc.topic IS NULL OR mc.topic IN ({placeholders}))"
+        params.extend(topics)
+
+    if entities:
+        entity_clauses = " OR ".join(
+            "EXISTS (SELECT 1 FROM json_each(mc.entities) WHERE json_each.value = ?)"
+            for _ in entities
+        )
+        sql += f" AND ({entity_clauses})"
+        params.extend(e.lower() for e in entities)
 
     sql += " ORDER BY rank LIMIT ?"
     params.append(limit)
@@ -512,6 +537,8 @@ def _search_vec(
     source_types: list[str] | None = None,
     include_user_ids: list[str] | None = None,
     since: str | None = None,
+    topics: list[str] | None = None,
+    entities: list[str] | None = None,
 ) -> list[SearchResult]:
     """Vector similarity search via sqlite-vec."""
     if not enable_vec_extension(conn):
@@ -545,6 +572,19 @@ def _search_vec(
     if since:
         sql += " AND mc.created_at >= ?"
         params.append(since)
+
+    if topics:
+        placeholders = ",".join("?" for _ in topics)
+        sql += f" AND (mc.topic IS NULL OR mc.topic IN ({placeholders}))"
+        params.extend(topics)
+
+    if entities:
+        entity_clauses = " OR ".join(
+            "EXISTS (SELECT 1 FROM json_each(mc.entities) WHERE json_each.value = ?)"
+            for _ in entities
+        )
+        sql += f" AND ({entity_clauses})"
+        params.extend(e.lower() for e in entities)
 
     sql += " LIMIT ?"
     params.append(limit)
@@ -612,6 +652,8 @@ def search(
     rrf_k: int = 60,
     include_user_ids: list[str] | None = None,
     since: str | None = None,
+    topics: list[str] | None = None,
+    entities: list[str] | None = None,
 ) -> list[SearchResult]:
     """Hybrid search: BM25 + vector with RRF fusion.
 
@@ -621,12 +663,16 @@ def search(
         include_user_ids: Additional user_ids to include in search (e.g., channel IDs).
             The primary user_id is always included.
         since: ISO date string (e.g., "2026-03-25"). Only return chunks created on or after this date.
+        topics: Filter to chunks with these topics (NULL-topic chunks always included).
+        entities: Filter to chunks mentioning these entities (JSON array containment).
     """
     # Fetch more from each source for fusion
     fetch_limit = limit * 3
 
-    bm25_results = _search_bm25(conn, user_id, query, fetch_limit, source_types, include_user_ids, since=since)
-    vec_results = _search_vec(conn, user_id, query, fetch_limit, source_types, include_user_ids, since=since)
+    bm25_results = _search_bm25(conn, user_id, query, fetch_limit, source_types,
+                                 include_user_ids, since=since, topics=topics, entities=entities)
+    vec_results = _search_vec(conn, user_id, query, fetch_limit, source_types,
+                               include_user_ids, since=since, topics=topics, entities=entities)
 
     if vec_results:
         fused = _rrf_fusion(bm25_results, vec_results, k=rrf_k)

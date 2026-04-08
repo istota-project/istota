@@ -2666,7 +2666,7 @@ class TestApplyMemoryCap:
     def test_unlimited_when_zero(self):
         from istota.executor import _apply_memory_cap
         config = Config(max_memory_chars=0)
-        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, "C" * 100, "D" * 100)
+        u, d, c, r, k = _apply_memory_cap(config, "A" * 100, "B" * 100, "C" * 100, "D" * 100)
         assert len(u) == 100
         assert len(d) == 100
         assert len(c) == 100
@@ -2675,7 +2675,7 @@ class TestApplyMemoryCap:
     def test_no_truncation_under_cap(self):
         from istota.executor import _apply_memory_cap
         config = Config(max_memory_chars=500)
-        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, "C" * 100, "D" * 100)
+        u, d, c, r, k = _apply_memory_cap(config, "A" * 100, "B" * 100, "C" * 100, "D" * 100)
         assert len(u) == 100
         assert len(d) == 100
         assert len(c) == 100
@@ -2685,7 +2685,7 @@ class TestApplyMemoryCap:
         from istota.executor import _apply_memory_cap
         config = Config(max_memory_chars=200)
         # total = 300, cap = 200, over = 100, recalled = 100 → removed entirely
-        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, None, "D" * 100)
+        u, d, c, r, k = _apply_memory_cap(config, "A" * 100, "B" * 100, None, "D" * 100)
         assert u == "A" * 100
         assert d == "B" * 100
         assert r is None
@@ -2696,7 +2696,7 @@ class TestApplyMemoryCap:
         # total = 300, cap = 100, over = 200
         # recalled (100) removed → over = 100
         # dated (100) removed → over = 0
-        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, None, "D" * 100)
+        u, d, c, r, k = _apply_memory_cap(config, "A" * 100, "B" * 100, None, "D" * 100)
         assert u == "A" * 100
         assert d is None
         assert r is None
@@ -2706,7 +2706,7 @@ class TestApplyMemoryCap:
         config = Config(max_memory_chars=250)
         # total = 300, cap = 250, over = 50
         # recalled (100) → trim to 50 chars + truncation marker
-        u, d, c, r = _apply_memory_cap(config, "A" * 100, "B" * 100, None, "D" * 100)
+        u, d, c, r, k = _apply_memory_cap(config, "A" * 100, "B" * 100, None, "D" * 100)
         assert u == "A" * 100
         assert d == "B" * 100
         assert r is not None
@@ -2715,7 +2715,7 @@ class TestApplyMemoryCap:
     def test_handles_all_none(self):
         from istota.executor import _apply_memory_cap
         config = Config(max_memory_chars=100)
-        u, d, c, r = _apply_memory_cap(config, None, None, None, None)
+        u, d, c, r, k = _apply_memory_cap(config, None, None, None, None)
         assert u is None and d is None and c is None and r is None
 
 

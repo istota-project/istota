@@ -183,6 +183,16 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
 
+    # Memory chunks metadata columns
+    for col, col_type in [
+        ("topic", "TEXT"),
+        ("entities", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE memory_chunks ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+
     # Monarch synced transactions migrations (for reconciliation tracking)
     for col, col_type in [
         ("tags_json", "TEXT"),

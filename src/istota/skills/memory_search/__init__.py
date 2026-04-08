@@ -58,7 +58,11 @@ def cmd_search(args) -> dict:
     since = getattr(args, "since", None)
     if not isinstance(since, str):
         since = None
-    results = search(conn, user_id, args.query, limit=args.limit, source_types=source_types, include_user_ids=include_user_ids, since=since)
+    topics = [args.topic] if getattr(args, "topic", None) else None
+    entities_arg = getattr(args, "entity", None)
+    entities = [entities_arg] if entities_arg else None
+    results = search(conn, user_id, args.query, limit=args.limit, source_types=source_types,
+                     include_user_ids=include_user_ids, since=since, topics=topics, entities=entities)
     conn.close()
 
     return {
@@ -142,15 +146,143 @@ def cmd_reindex(args) -> dict:
 def cmd_stats(args) -> dict:
     """Get memory search stats."""
     from istota.memory_search import get_stats
+    from istota.knowledge_graph import ensure_table, get_fact_count
 
     conn = _get_conn()
     user_id = _get_user_id()
 
     include_user_ids = _get_channel_user_ids()
     stats = get_stats(conn, user_id, include_user_ids=include_user_ids)
+
+    ensure_table(conn)
+    fact_counts = get_fact_count(conn, user_id)
+    stats["knowledge_facts"] = fact_counts
+
     conn.close()
 
     return {"status": "ok", **stats}
+
+
+def cmd_facts(args) -> dict:
+    """Query knowledge graph facts."""
+    from istota.knowledge_graph import (
+        ensure_table, get_current_facts, get_facts_as_of, format_facts_for_prompt,
+    )
+
+    conn = _get_conn()
+    user_id = _get_user_id()
+    ensure_table(conn)
+
+    if args.as_of:
+        facts = get_facts_as_of(conn, user_id, args.as_of, subject=args.subject)
+    else:
+        facts = get_current_facts(conn, user_id, subject=args.subject,
+                                   predicate=args.predicate)
+    conn.close()
+
+    return {
+        "status": "ok",
+        "count": len(facts),
+        "facts": [
+            {
+                "id": f.id,
+                "subject": f.subject,
+                "predicate": f.predicate,
+                "object": f.object,
+                "valid_from": f.valid_from,
+                "valid_until": f.valid_until,
+                "temporary": f.temporary,
+                "source_type": f.source_type,
+                "source_task_id": f.source_task_id,
+            }
+            for f in facts
+        ],
+    }
+
+
+def cmd_timeline(args) -> dict:
+    """Get entity timeline."""
+    from istota.knowledge_graph import ensure_table, get_entity_timeline
+
+    conn = _get_conn()
+    user_id = _get_user_id()
+    ensure_table(conn)
+
+    facts = get_entity_timeline(conn, user_id, args.subject)
+    conn.close()
+
+    return {
+        "status": "ok",
+        "subject": args.subject,
+        "count": len(facts),
+        "facts": [
+            {
+                "id": f.id,
+                "predicate": f.predicate,
+                "object": f.object,
+                "valid_from": f.valid_from,
+                "valid_until": f.valid_until,
+                "temporary": f.temporary,
+                "source_type": f.source_type,
+            }
+            for f in facts
+        ],
+    }
+
+
+def cmd_add_fact(args) -> dict:
+    """Manually add a fact."""
+    from istota.knowledge_graph import ensure_table, add_fact
+
+    conn = _get_conn()
+    user_id = _get_user_id()
+    ensure_table(conn)
+
+    fact_id = add_fact(
+        conn, user_id, args.subject, args.predicate, args.object,
+        valid_from=args.valid_from, source_type="user_stated",
+    )
+    conn.commit()
+    conn.close()
+
+    if fact_id is None:
+        return {"status": "ok", "message": "Duplicate fact, skipped"}
+
+    return {"status": "ok", "fact_id": fact_id}
+
+
+def cmd_invalidate_fact(args) -> dict:
+    """Invalidate a fact."""
+    from istota.knowledge_graph import ensure_table, invalidate_fact
+
+    conn = _get_conn()
+    ensure_table(conn)
+
+    result = invalidate_fact(conn, args.fact_id, ended=args.ended)
+    conn.commit()
+    conn.close()
+
+    if not result:
+        return {"status": "error", "error": f"Fact {args.fact_id} not found or already invalidated"}
+
+    return {"status": "ok", "fact_id": args.fact_id}
+
+
+def cmd_delete_fact(args) -> dict:
+    """Hard delete a fact."""
+    from istota.knowledge_graph import ensure_table, delete_fact
+
+    conn = _get_conn()
+    ensure_table(conn)
+
+    result = delete_fact(conn, args.fact_id)
+    conn.commit()
+    conn.close()
+
+    if not result:
+        return {"status": "error", "error": f"Fact {args.fact_id} not found"}
+
+    return {"status": "ok", "fact_id": args.fact_id}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -166,6 +298,8 @@ def build_parser() -> argparse.ArgumentParser:
     search_p.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     search_p.add_argument("--source-type", help="Filter by source type")
     search_p.add_argument("--since", help="Only results on or after this date (YYYY-MM-DD)")
+    search_p.add_argument("--topic", help="Filter by topic (work, tech, personal, finance, admin, learning, meta)")
+    search_p.add_argument("--entity", help="Filter by entity name")
 
     # index command with subcommands
     index_p = sub.add_parser("index", help="Index content")
@@ -185,6 +319,32 @@ def build_parser() -> argparse.ArgumentParser:
     # stats command
     sub.add_parser("stats", help="Show memory search stats")
 
+    # facts command (knowledge graph query)
+    facts_p = sub.add_parser("facts", help="Query knowledge graph facts")
+    facts_p.add_argument("--subject", help="Filter by entity subject")
+    facts_p.add_argument("--predicate", help="Filter by predicate type")
+    facts_p.add_argument("--as-of", help="Historical query at date (YYYY-MM-DD)")
+
+    # timeline command
+    timeline_p = sub.add_parser("timeline", help="Get entity timeline")
+    timeline_p.add_argument("subject", help="Entity name")
+
+    # add-fact command
+    add_fact_p = sub.add_parser("add-fact", help="Manually add a fact")
+    add_fact_p.add_argument("subject", help="Entity subject")
+    add_fact_p.add_argument("predicate", help="Relationship predicate")
+    add_fact_p.add_argument("object", help="Object value")
+    add_fact_p.add_argument("--from", dest="valid_from", help="Valid from date (YYYY-MM-DD)")
+
+    # invalidate command
+    inv_p = sub.add_parser("invalidate", help="Mark a fact as ended")
+    inv_p.add_argument("fact_id", type=int, help="Fact ID")
+    inv_p.add_argument("--ended", help="End date (YYYY-MM-DD, default: today)")
+
+    # delete-fact command
+    del_p = sub.add_parser("delete-fact", help="Hard delete a fact")
+    del_p.add_argument("fact_id", type=int, help="Fact ID")
+
     return parser
 
 
@@ -197,6 +357,11 @@ def main(argv=None):
         "index": lambda a: cmd_index_conversation(a) if a.index_command == "conversation" else cmd_index_file(a),
         "reindex": cmd_reindex,
         "stats": cmd_stats,
+        "facts": cmd_facts,
+        "timeline": cmd_timeline,
+        "add-fact": cmd_add_fact,
+        "invalidate": cmd_invalidate_fact,
+        "delete-fact": cmd_delete_fact,
     }
 
     try:
