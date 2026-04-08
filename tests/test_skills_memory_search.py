@@ -9,11 +9,16 @@ import pytest
 
 from istota.skills.memory_search import (
     build_parser,
+    cmd_add_fact,
+    cmd_delete_fact,
+    cmd_facts,
     cmd_index_conversation,
     cmd_index_file,
+    cmd_invalidate_fact,
     cmd_reindex,
     cmd_search,
     cmd_stats,
+    cmd_timeline,
     main,
 )
 
@@ -95,6 +100,8 @@ class TestCmdSearch:
         args.query = "Python"
         args.limit = 10
         args.source_type = None
+        args.topic = None
+        args.entity = None
 
         with patch("istota.memory_search._search_vec", return_value=[]):
             result = cmd_search(args)
@@ -116,6 +123,8 @@ class TestCmdSearch:
         args.limit = 10
         args.source_type = None
         args.since = "2026-03-25"
+        args.topic = None
+        args.entity = None
 
         with patch("istota.memory_search.search") as mock_search:
             mock_search.return_value = []
@@ -136,6 +145,8 @@ class TestCmdSearch:
         args.query = "nonexistent"
         args.limit = 10
         args.source_type = None
+        args.topic = None
+        args.entity = None
 
         with patch("istota.memory_search._search_vec", return_value=[]):
             result = cmd_search(args)
@@ -284,6 +295,8 @@ class TestConversationTokenEnvVar:
         args.query = "GraphQL"
         args.limit = 10
         args.source_type = None
+        args.topic = None
+        args.entity = None
 
         with patch("istota.memory_search._search_vec", return_value=[]):
             result = cmd_search(args)
@@ -309,6 +322,8 @@ class TestConversationTokenEnvVar:
         args.query = "channel"
         args.limit = 10
         args.source_type = None
+        args.topic = None
+        args.entity = None
 
         with patch("istota.memory_search._search_vec", return_value=[]):
             result = cmd_search(args)
@@ -361,6 +376,346 @@ class TestMain:
 
         with patch("istota.memory_search.enable_vec_extension", return_value=False):
             main(["stats"])
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "ok"
+
+
+class TestBuildParserKG:
+    def test_facts_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["facts"])
+        assert args.command == "facts"
+        assert args.subject is None
+        assert args.predicate is None
+        assert args.as_of is None
+
+    def test_facts_with_filters(self):
+        parser = build_parser()
+        args = parser.parse_args(["facts", "--subject", "stefan", "--predicate", "knows"])
+        assert args.subject == "stefan"
+        assert args.predicate == "knows"
+
+    def test_facts_with_as_of(self):
+        parser = build_parser()
+        args = parser.parse_args(["facts", "--as-of", "2025-06-15"])
+        assert args.as_of == "2025-06-15"
+
+    def test_timeline_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["timeline", "stefan"])
+        assert args.command == "timeline"
+        assert args.subject == "stefan"
+
+    def test_add_fact_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["add-fact", "stefan", "works_at", "acme", "--from", "2025-06-01"])
+        assert args.command == "add-fact"
+        assert args.subject == "stefan"
+        assert args.predicate == "works_at"
+        assert args.object == "acme"
+        assert args.valid_from == "2025-06-01"
+
+    def test_invalidate_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["invalidate", "42", "--ended", "2026-04-08"])
+        assert args.command == "invalidate"
+        assert args.fact_id == 42
+        assert args.ended == "2026-04-08"
+
+    def test_delete_fact_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["delete-fact", "42"])
+        assert args.command == "delete-fact"
+        assert args.fact_id == 42
+
+
+class TestCmdFacts:
+    def test_empty_facts(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.subject = None
+        args.predicate = None
+        args.as_of = None
+
+        result = cmd_facts(args)
+        assert result["status"] == "ok"
+        assert result["count"] == 0
+
+    def test_facts_with_data(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        from istota.knowledge_graph import ensure_table, add_fact
+        ensure_table(conn)
+        add_fact(conn, "alice", "stefan", "knows", "python")
+        add_fact(conn, "alice", "stefan", "works_at", "acme")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.subject = None
+        args.predicate = None
+        args.as_of = None
+
+        result = cmd_facts(args)
+        assert result["count"] == 2
+
+    def test_facts_filter_by_subject(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        from istota.knowledge_graph import ensure_table, add_fact
+        ensure_table(conn)
+        add_fact(conn, "alice", "stefan", "knows", "python")
+        add_fact(conn, "alice", "istota", "uses_tech", "svelte")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.subject = "stefan"
+        args.predicate = None
+        args.as_of = None
+
+        result = cmd_facts(args)
+        assert result["count"] == 1
+        assert result["facts"][0]["subject"] == "stefan"
+
+    def test_facts_as_of(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        from istota.knowledge_graph import ensure_table, add_fact
+        ensure_table(conn)
+        add_fact(conn, "alice", "stefan", "works_at", "acme", valid_from="2025-01-01")
+        add_fact(conn, "alice", "stefan", "works_at", "globex", valid_from="2026-04-01")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.subject = None
+        args.predicate = None
+        args.as_of = "2025-06-15"
+
+        result = cmd_facts(args)
+        assert result["count"] == 1
+        assert result["facts"][0]["object"] == "acme"
+
+
+class TestCmdTimeline:
+    def test_timeline(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        from istota.knowledge_graph import ensure_table, add_fact
+        ensure_table(conn)
+        add_fact(conn, "alice", "stefan", "works_at", "acme", valid_from="2025-01-01")
+        add_fact(conn, "alice", "stefan", "works_at", "globex", valid_from="2026-04-01")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.subject = "stefan"
+
+        result = cmd_timeline(args)
+        assert result["status"] == "ok"
+        assert result["count"] == 2
+        assert result["subject"] == "stefan"
+
+    def test_timeline_empty(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.subject = "nobody"
+
+        result = cmd_timeline(args)
+        assert result["count"] == 0
+
+
+class TestCmdAddFact:
+    def test_add_fact(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.subject = "stefan"
+        args.predicate = "knows"
+        args.object = "python"
+        args.valid_from = None
+
+        result = cmd_add_fact(args)
+        assert result["status"] == "ok"
+        assert "fact_id" in result
+
+    def test_add_duplicate(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        from istota.knowledge_graph import ensure_table, add_fact
+        ensure_table(conn)
+        add_fact(conn, "alice", "stefan", "knows", "python")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.subject = "stefan"
+        args.predicate = "knows"
+        args.object = "python"
+        args.valid_from = None
+
+        result = cmd_add_fact(args)
+        assert result["status"] == "ok"
+        assert "Duplicate" in result["message"]
+
+
+class TestCmdInvalidateFact:
+    def test_invalidate(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        from istota.knowledge_graph import ensure_table, add_fact
+        ensure_table(conn)
+        fact_id = add_fact(conn, "alice", "stefan", "knows", "python")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.fact_id = fact_id
+        args.ended = "2026-04-08"
+
+        result = cmd_invalidate_fact(args)
+        assert result["status"] == "ok"
+
+    def test_invalidate_nonexistent(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.fact_id = 9999
+        args.ended = None
+
+        result = cmd_invalidate_fact(args)
+        assert result["status"] == "error"
+
+
+class TestCmdDeleteFact:
+    def test_delete(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        from istota.knowledge_graph import ensure_table, add_fact
+        ensure_table(conn)
+        fact_id = add_fact(conn, "alice", "stefan", "knows", "python")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.fact_id = fact_id
+
+        result = cmd_delete_fact(args)
+        assert result["status"] == "ok"
+
+    def test_delete_nonexistent(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+        args.fact_id = 9999
+
+        result = cmd_delete_fact(args)
+        assert result["status"] == "error"
+
+
+class TestStatsIncludesKG:
+    def test_stats_includes_knowledge_facts(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        from istota.knowledge_graph import ensure_table, add_fact
+        ensure_table(conn)
+        add_fact(conn, "alice", "stefan", "knows", "python")
+        add_fact(conn, "alice", "stefan", "works_at", "acme")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        args = MagicMock()
+
+        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+            result = cmd_stats(args)
+
+        assert result["status"] == "ok"
+        assert "knowledge_facts" in result
+        assert result["knowledge_facts"]["current"] == 2
+
+
+class TestMainKG:
+    def test_main_facts(self, tmp_path, monkeypatch, capsys):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        main(["facts"])
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "ok"
+
+    def test_main_add_fact(self, tmp_path, monkeypatch, capsys):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        main(["add-fact", "stefan", "knows", "python"])
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "ok"
+        assert "fact_id" in output
+
+    def test_main_timeline(self, tmp_path, monkeypatch, capsys):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        main(["timeline", "stefan"])
 
         output = json.loads(capsys.readouterr().out)
         assert output["status"] == "ok"

@@ -11,6 +11,7 @@ from istota import db
 from istota.config import Config, SleepCycleConfig, UserConfig
 from istota.sleep_cycle import (
     _excerpt,
+    _parse_structured_extraction,
     gather_day_data,
     build_memory_extraction_prompt,
     process_user_sleep_cycle,
@@ -623,3 +624,133 @@ class TestCurateUserMemory:
 
         # Only one call: extraction. No curation.
         assert mock_run.call_count == 1
+
+
+class TestParseStructuredExtraction:
+    def test_plain_text_fallback(self):
+        """Output without structured markers is treated as plain memories."""
+        output = "- Memory one (2026-04-08, ref:1)\n- Memory two (2026-04-08, ref:2)"
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert "Memory one" in memories
+        assert "Memory two" in memories
+        assert facts == []
+        assert topics == {}
+
+    def test_full_structured_output(self):
+        output = """MEMORIES:
+- Stefan switched to FastAPI (2026-04-08, ref:1234)
+- Prefers dark mode (2026-04-08, ref:1235)
+
+FACTS:
+[{"subject": "istota", "predicate": "uses_tech", "object": "fastapi"}]
+
+TOPICS:
+{"ref:1234": "tech", "ref:1235": "personal"}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert "Stefan switched to FastAPI" in memories
+        assert "Prefers dark mode" in memories
+        assert len(facts) == 1
+        assert facts[0]["subject"] == "istota"
+        assert facts[0]["predicate"] == "uses_tech"
+        assert topics == {"ref:1234": "tech", "ref:1235": "personal"}
+
+    def test_memories_only_with_empty_facts(self):
+        output = """MEMORIES:
+- Just a memory (2026-04-08, ref:1)
+
+FACTS:
+[]
+
+TOPICS:
+{}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert "Just a memory" in memories
+        assert facts == []
+        assert topics == {}
+
+    def test_malformed_facts_json(self):
+        output = """MEMORIES:
+- A memory (2026-04-08, ref:1)
+
+FACTS:
+not valid json
+
+TOPICS:
+{"ref:1": "tech"}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert "A memory" in memories
+        assert facts == []
+        assert topics == {"ref:1": "tech"}
+
+    def test_malformed_topics_json(self):
+        output = """MEMORIES:
+- A memory (2026-04-08, ref:1)
+
+FACTS:
+[{"subject": "stefan", "predicate": "knows", "object": "python"}]
+
+TOPICS:
+broken json"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert len(facts) == 1
+        assert topics == {}
+
+    def test_missing_facts_section(self):
+        output = """MEMORIES:
+- A memory (2026-04-08, ref:1)
+
+TOPICS:
+{"ref:1": "tech"}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert "A memory" in memories
+        assert facts == []
+        assert topics == {"ref:1": "tech"}
+
+    def test_missing_topics_section(self):
+        output = """MEMORIES:
+- A memory (2026-04-08, ref:1)
+
+FACTS:
+[{"subject": "stefan", "predicate": "knows", "object": "python"}]"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert "A memory" in memories
+        assert len(facts) == 1
+        assert topics == {}
+
+    def test_facts_with_invalid_entries_filtered(self):
+        """Facts missing required fields are filtered out."""
+        output = """MEMORIES:
+- Memory (2026-04-08, ref:1)
+
+FACTS:
+[{"subject": "stefan", "predicate": "knows", "object": "python"}, {"bad": "entry"}, "not a dict"]
+
+TOPICS:
+{}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert len(facts) == 1
+        assert facts[0]["subject"] == "stefan"
+
+    def test_multiple_facts(self):
+        output = """MEMORIES:
+- Memory (2026-04-08, ref:1)
+
+FACTS:
+[
+  {"subject": "stefan", "predicate": "works_at", "object": "acme"},
+  {"subject": "stefan", "predicate": "knows", "object": "python"},
+  {"subject": "istota", "predicate": "uses_tech", "object": "svelte"}
+]
+
+TOPICS:
+{"ref:1": "work"}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert len(facts) == 3

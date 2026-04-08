@@ -276,12 +276,15 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     content TEXT NOT NULL,
     content_hash TEXT NOT NULL,       -- SHA-256 for dedup
     metadata_json TEXT,
+    topic TEXT,                       -- coarse classifier: work, tech, personal, finance, admin, learning, meta
+    entities TEXT,                    -- JSON array of entity names (lowercase)
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, content_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_user ON memory_chunks(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_source ON memory_chunks(user_id, source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_topic ON memory_chunks(user_id, topic);
 
 -- Per-user skills version fingerprint (for "what's new" detection)
 CREATE TABLE IF NOT EXISTS user_skills_fingerprint (
@@ -449,6 +452,28 @@ CREATE TABLE IF NOT EXISTS google_oauth_tokens (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Knowledge graph (temporal entity-relationship triples)
+CREATE TABLE IF NOT EXISTS knowledge_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    predicate TEXT NOT NULL,
+    object TEXT NOT NULL,
+    valid_from TEXT,
+    valid_until TEXT,
+    temporary INTEGER DEFAULT 0,
+    confidence REAL DEFAULT 1.0,
+    source_task_id INTEGER,
+    source_type TEXT DEFAULT 'extracted',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_kf_user_subject ON knowledge_facts(user_id, subject);
+CREATE INDEX IF NOT EXISTS idx_kf_user_predicate ON knowledge_facts(user_id, predicate);
+CREATE INDEX IF NOT EXISTS idx_kf_current ON knowledge_facts(user_id, valid_until)
+    WHERE valid_until IS NULL;
 
 -- Location state machine (per-user hysteresis tracking)
 CREATE TABLE IF NOT EXISTS location_state (

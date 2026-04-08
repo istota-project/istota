@@ -1312,24 +1312,26 @@ def _apply_memory_cap(
     dated_memories: str | None,
     channel_memory: str | None,
     recalled_memories: str | None,
-) -> tuple[str | None, str | None, str | None, str | None]:
+    knowledge_facts: str | None = None,
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
     """Truncate memory components if total exceeds max_memory_chars.
 
-    Truncation order: recalled → dated → (warn about user/channel).
-    Returns updated (user_memory, dated_memories, channel_memory, recalled_memories).
+    Truncation order: recalled → knowledge facts → dated → (warn about user/channel).
+    Returns updated (user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts).
     """
     cap = config.max_memory_chars
     if cap <= 0:
-        return user_memory, dated_memories, channel_memory, recalled_memories
+        return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts
 
     total = (
         len(user_memory or "")
         + len(dated_memories or "")
         + len(channel_memory or "")
         + len(recalled_memories or "")
+        + len(knowledge_facts or "")
     )
     if total <= cap:
-        return user_memory, dated_memories, channel_memory, recalled_memories
+        return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts
 
     over = total - cap
 
@@ -1340,6 +1342,15 @@ def _apply_memory_cap(
             recalled_memories = None
         else:
             recalled_memories = recalled_memories[:len(recalled_memories) - over] + "\n...[truncated]"
+            over = 0
+
+    # Then knowledge facts
+    if knowledge_facts and over > 0:
+        if over >= len(knowledge_facts):
+            over -= len(knowledge_facts)
+            knowledge_facts = None
+        else:
+            knowledge_facts = knowledge_facts[:len(knowledge_facts) - over] + "\n...[truncated]"
             over = 0
 
     # Then dated
@@ -1358,7 +1369,7 @@ def _apply_memory_cap(
             cap, over, len(user_memory or ""), len(channel_memory or ""),
         )
 
-    return user_memory, dated_memories, channel_memory, recalled_memories
+    return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts
 
 
 def build_prompt(
@@ -1382,6 +1393,7 @@ def build_prompt(
     skip_persona: bool = False,
     cli_skills_text: str | None = None,
     confirmation_context: str | None = None,
+    knowledge_facts: str | None = None,
 ) -> str:
     """Build the full prompt for Claude Code execution."""
     # Group resources by type
@@ -1486,6 +1498,18 @@ def build_prompt(
 The following information has been remembered about this user:
 
 {user_memory}
+
+"""
+
+    # Build knowledge facts section
+    knowledge_facts_section = ""
+    if knowledge_facts:
+        knowledge_facts_section = f"""
+## Known facts
+
+Current facts about entities relevant to this user:
+
+{knowledge_facts}
 
 """
 
@@ -1639,7 +1663,7 @@ Output target: {output_target or 'text'}{per_user_email_line}
 ## User's accessible resources
 
 {resources_text}
-{memory_section}{channel_memory_section}{dated_memories_section}{recalled_section}## Available tools
+{memory_section}{knowledge_facts_section}{channel_memory_section}{dated_memories_section}{recalled_section}## Available tools
 
 You have access to:
 {file_tools}{browser_tool}
@@ -1949,9 +1973,28 @@ def execute_task(
     # Auto-recall memories via BM25 search
     recalled_memories = _recall_memories(config, conn, task, skip_memory=_skip_memory)
 
+    # Load knowledge graph facts
+    knowledge_facts_text = None
+    if not _skip_memory:
+        try:
+            from .knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
+            if conn is not None:
+                ensure_table(conn)
+                kg_facts = get_current_facts(conn, task.user_id)
+                if kg_facts:
+                    knowledge_facts_text = format_facts_for_prompt(kg_facts)
+            else:
+                with db.get_db(config.db_path) as _kg_conn:
+                    ensure_table(_kg_conn)
+                    kg_facts = get_current_facts(_kg_conn, task.user_id)
+                    if kg_facts:
+                        knowledge_facts_text = format_facts_for_prompt(kg_facts)
+        except Exception:
+            pass  # Graceful degradation
+
     # Apply memory size cap
-    user_memory, dated_memories, channel_memory, recalled_memories = _apply_memory_cap(
-        config, user_memory, dated_memories, channel_memory, recalled_memories,
+    user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts_text = _apply_memory_cap(
+        config, user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts_text,
     )
 
     # Get user's email addresses for confirmation policy
@@ -1993,6 +2036,7 @@ def execute_task(
         skip_persona=_skip_persona,
         cli_skills_text=cli_skills_text,
         confirmation_context=_confirmation_context,
+        knowledge_facts=knowledge_facts_text,
     )
 
     # Log prompt size breakdown

@@ -484,3 +484,147 @@ class TestIncludeUserIds:
 
         assert stats["total_chunks"] == 1
         conn.close()
+
+
+class TestChunkMetadata:
+    """Tests for topic and entities metadata on chunks."""
+
+    def test_insert_with_topic(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1",
+                          ["Python programming"], None, topic="tech")
+
+        row = conn.execute("SELECT topic FROM memory_chunks WHERE user_id = 'alice'").fetchone()
+        assert row[0] == "tech"
+        conn.close()
+
+    def test_insert_with_entities(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1",
+                          ["Stefan uses Python"], None, entities=["stefan", "python"])
+
+        row = conn.execute("SELECT entities FROM memory_chunks WHERE user_id = 'alice'").fetchone()
+        import json
+        assert json.loads(row[0]) == ["stefan", "python"]
+        conn.close()
+
+    def test_insert_without_metadata_defaults_null(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1", ["plain chunk"], None)
+
+        row = conn.execute("SELECT topic, entities FROM memory_chunks WHERE user_id = 'alice'").fetchone()
+        assert row[0] is None
+        assert row[1] is None
+        conn.close()
+
+    def test_index_conversation_with_metadata(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+            n = index_conversation(conn, "alice", 1, "What is FastAPI?", "A web framework",
+                                  topic="tech", entities=["fastapi"])
+
+        assert n >= 1
+        row = conn.execute("SELECT topic, entities FROM memory_chunks WHERE user_id = 'alice'").fetchone()
+        assert row[0] == "tech"
+        conn.close()
+
+    def test_index_file_with_metadata(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False), \
+             patch("istota.memory_search.enable_vec_extension", return_value=False):
+            n = index_file(conn, "alice", "/path/mem.md", "Some content",
+                          topic="personal", entities=["stefan"])
+
+        assert n >= 1
+        row = conn.execute("SELECT topic FROM memory_chunks WHERE user_id = 'alice'").fetchone()
+        assert row[0] == "personal"
+        conn.close()
+
+
+class TestFilteredSearch:
+    """Tests for topic and entity filtering in search."""
+
+    def test_search_filter_by_topic(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1",
+                          ["Python web framework discussion"], None, topic="tech")
+            _insert_chunks(conn, "alice", "conversation", "2",
+                          ["Python for data analysis at work"], None, topic="work")
+
+        with patch("istota.memory_search._search_vec", return_value=[]):
+            results = search(conn, "alice", "Python", topics=["tech"])
+
+        # Should get tech chunk + not the work chunk (unless it has NULL topic)
+        topics = [r.source_id for r in results]
+        assert "1" in topics
+        assert "2" not in topics
+        conn.close()
+
+    def test_search_topic_filter_includes_null(self, tmp_path):
+        """Chunks with NULL topic are always included in filtered searches."""
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1",
+                          ["Python programming guide"], None, topic="tech")
+            _insert_chunks(conn, "alice", "conversation", "2",
+                          ["Python legacy chunk without topic"], None)  # NULL topic
+
+        with patch("istota.memory_search._search_vec", return_value=[]):
+            results = search(conn, "alice", "Python", topics=["tech"])
+
+        source_ids = [r.source_id for r in results]
+        assert "1" in source_ids  # tech topic matches
+        assert "2" in source_ids  # NULL topic included
+        conn.close()
+
+    def test_search_filter_by_entity(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1",
+                          ["Stefan works on Istota project"], None,
+                          entities=["stefan", "istota"])
+            _insert_chunks(conn, "alice", "conversation", "2",
+                          ["Alice works on Hermes project"], None,
+                          entities=["alice", "hermes"])
+
+        with patch("istota.memory_search._search_vec", return_value=[]):
+            results = search(conn, "alice", "works on", entities=["stefan"])
+
+        source_ids = [r.source_id for r in results]
+        assert "1" in source_ids
+        assert "2" not in source_ids
+        conn.close()
+
+    def test_search_no_filter_returns_all(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1",
+                          ["tech stuff"], None, topic="tech")
+            _insert_chunks(conn, "alice", "conversation", "2",
+                          ["work stuff"], None, topic="work")
+
+        with patch("istota.memory_search._search_vec", return_value=[]):
+            results = search(conn, "alice", "stuff")
+
+        assert len(results) == 2
+        conn.close()
+
+    def test_bm25_topic_filter(self, tmp_path):
+        """Direct test of _search_bm25 with topic filter."""
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1",
+                          ["Machine learning project"], None, topic="tech")
+            _insert_chunks(conn, "alice", "conversation", "2",
+                          ["Machine learning salary discussion"], None, topic="finance")
+
+        results = _search_bm25(conn, "alice", "machine learning", 10, topics=["tech"])
+
+        source_ids = [r.source_id for r in results]
+        assert "1" in source_ids
+        assert "2" not in source_ids
+        conn.close()
