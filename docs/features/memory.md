@@ -38,13 +38,44 @@ Degrades to BM25-only if `sqlite-vec` or `sentence-transformers` are not install
 
 Auto-indexed after task completion and after sleep cycle writes. Indexing failures never affect core processing.
 
+### Metadata filtering
+
+Memory chunks have optional `topic` and `entities` metadata, populated during sleep cycle extraction. Topics are one of: `work`, `tech`, `personal`, `finance`, `admin`, `learning`, `meta`. Entities are a JSON array of named entities mentioned in the chunk.
+
+Search supports filtering by metadata:
+
+- `--topic work` — filter to chunks tagged with a topic (NULL-topic chunks are always included for backward compatibility)
+- `--entity alice` — filter to chunks mentioning a specific entity (exact match via `json_each()`)
+- `--since 2026-01-01` — temporal filtering by chunk creation date
+
+## Tier 5: knowledge graph
+
+Structured entity-relationship facts with temporal validity windows, stored in the `knowledge_facts` table. Each fact is a triple (subject, predicate, object) with optional `valid_from` and `valid_until` dates.
+
+Single-valued predicates (`works_at`, `lives_in`, `has_role`, `has_status`) auto-supersede: adding a new fact with the same subject+predicate invalidates the old one. Multi-valued predicates (`knows`, `uses_tech`, `prefers`) allow concurrent facts. Temporary predicates (`staying_in`, `visiting`) coexist with permanent ones without triggering supersession.
+
+Current (non-expired) facts are loaded into prompts as a "Known facts" section between user memory and channel memory.
+
+Facts are extracted automatically during the sleep cycle from structured FACTS sections in the extraction output. They can also be managed manually via CLI:
+
+```bash
+istota-skill memory_search facts              # list current facts
+istota-skill memory_search timeline alice      # entity timeline
+istota-skill memory_search add-fact            # add fact interactively
+istota-skill memory_search invalidate <id>     # mark fact as ended
+istota-skill memory_search delete-fact <id>    # permanently remove
+```
+
+When `curate_user_memory` is enabled, KG facts are included in the curation prompt so Claude avoids duplicating structured knowledge in USER.md.
+
 ## Memory size cap
 
 `max_memory_chars` (default 0 = unlimited) limits total memory injected into prompts. When exceeded, components are truncated in order:
 
 1. Recalled memories (removed first)
-2. Dated memories
-3. User memory and channel memory are preserved (most stable tiers)
+2. Knowledge graph facts
+3. Dated memories
+4. User memory and channel memory are preserved (most stable tiers)
 
 ## Sleep cycle
 
@@ -53,10 +84,12 @@ Nightly memory extraction runs as a direct subprocess (not a queued task), evalu
 1. Gather completed tasks from the last 24 hours
 2. Invoke `claude -p` with a memory extraction prompt (excludes existing USER.md to avoid duplication)
 3. Extracted memories include task provenance: `- Fact learned (2026-01-28, ref:1234)`
-4. Write extracted memories to dated file, or output `NO_NEW_MEMORIES`
-5. Cleanup old files per retention policy
-6. Trigger memory search indexing
-7. If `curate_user_memory` enabled: second pass to update USER.md (outputs `NO_CHANGES_NEEDED` if nothing to update)
+4. Structured FACTS section parsed and inserted into knowledge graph
+5. Dominant TOPICS section passed to memory indexer for chunk metadata
+6. Write extracted memories to dated file, or output `NO_NEW_MEMORIES`
+7. Cleanup old files per retention policy
+8. Trigger memory search indexing
+9. If `curate_user_memory` enabled: second pass to update USER.md (includes KG facts to avoid duplication; outputs `NO_CHANGES_NEEDED` if nothing to update)
 
 Task data uses tail-biased truncation (40% head + 60% tail) to preserve conclusions, with dynamic per-task budget allocation proportional to content length. Tasks sharing a conversation are grouped as threads.
 
@@ -67,9 +100,10 @@ Channel sleep cycle works the same way but runs in UTC and writes to `/Channels/
 Memory appears in the prompt in this order:
 
 1. User memory (USER.md)
-2. Channel memory (CHANNEL.md)
-3. Dated memories (last N days)
-4. Recalled memories (BM25 results)
+2. Knowledge graph facts (current, non-expired)
+3. Channel memory (CHANNEL.md)
+4. Dated memories (last N days)
+5. Recalled memories (BM25 results)
 
 ## Configuration
 

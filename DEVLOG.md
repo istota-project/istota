@@ -718,7 +718,7 @@ When the bot sends an email on a user's behalf and the recipient replies, the re
 
 ## 2026-03-17: Fix cross-user calendar data leak in briefings (ISSUE-015)
 
-The briefing pipeline could leak one user's calendar events into another user's briefing. When `_fetch_calendar_events()` returned `None` for a user with no calendars (e.g. max), the fallback emitted an unscoped "Today's calendar events" instruction. The agent then discovered alice's calendars via CalDAV and included his events in max's output. The sleep cycle then faithfully extracted these contaminated events into max's memory files.
+The briefing pipeline could leak one user's calendar events into another user's briefing. When `_fetch_calendar_events()` returned `None` for a user with no calendars (e.g. bob), the fallback emitted an unscoped "Today's calendar events" instruction. The agent then discovered alice's calendars via CalDAV and included her events in bob's output. The sleep cycle then faithfully extracted these contaminated events into bob's memory files.
 
 **Key changes:**
 - Removed unscoped calendar fallback — if a user has no calendars, the calendar component is skipped entirely instead of emitting a bare instruction the agent tries to fulfill with whatever calendars it finds
@@ -1632,7 +1632,7 @@ Fixed two bugs in briefing email delivery introduced when the deferred email out
 
 ## 2026-02-22: Emissaries sync script
 
-Added a script to sync `config/emissaries.md` from the canonical public emissaries repo at `https://forge.example.com/alice/emissaries`. This keeps istota's constitutional principles up to date with the upstream source without needing git submodules or CI pipelines.
+Added a script to sync `config/emissaries.md` from the canonical public emissaries repo. This keeps istota's constitutional principles up to date with the upstream source without needing git submodules or CI pipelines.
 
 **Key changes:**
 - Added `scripts/sync-emissaries.sh` to fetch the latest `emissaries.md` via curl from the raw file URL.
