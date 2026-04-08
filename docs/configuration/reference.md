@@ -48,6 +48,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `smtp_password` | `""` | SMTP password (defaults to imap_password) |
 | `poll_folder` | `"INBOX"` | Folder to poll |
 | `bot_email` | `""` | Bot's email address |
+| `confirm_sender_match` | `true` | Require confirmation for sender-match routed emails |
 
 ## `[conversation]`
 

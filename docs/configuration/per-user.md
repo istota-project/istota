@@ -24,6 +24,12 @@ disabled_skills = ["markets"]
 # Verbose tool logging to a dedicated Talk room
 log_channel = "room456"
 
+# Talk room for confirmations and security alerts
+alerts_channel = "room789"
+
+# Trusted email senders (bypass confirmation gate, supports fnmatch patterns)
+trusted_email_senders = ["*@company.com", "boss@other.com"]
+
 # Static website at /~alice/
 site_enabled = true
 

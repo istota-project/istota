@@ -6,7 +6,7 @@
 
 Added a structured knowledge graph for entity-relationship facts with temporal validity, and metadata-filtered search for memory chunks. Inspired by MemPalace's approach to structured memory, adapted to Istota's existing sleep cycle and search infrastructure.
 
-The knowledge graph stores triples like "stefan works_at acme (since 2025-06-01)" with automatic supersession for single-valued predicates (works_at, lives_in) and concurrent facts for multi-valued ones (knows, uses_tech). Temporary facts (staying_in, visiting) coexist with permanent facts without triggering supersession. Memory chunks gain topic and entities columns for filtered search, with NULL-topic chunks always included for backward compatibility.
+The knowledge graph stores triples like "alice works_at acme (since 2025-06-01)" with automatic supersession for single-valued predicates (works_at, lives_in) and concurrent facts for multi-valued ones (knows, uses_tech). Temporary facts (staying_in, visiting) coexist with permanent facts without triggering supersession. Memory chunks gain topic and entities columns for filtered search, with NULL-topic chunks always included for backward compatibility.
 
 The sleep cycle extraction prompt now requests structured FACTS and TOPICS sections alongside the existing memory bullets. A regex-based parser splits the output, falling back to plain text if structured sections are missing. Extracted facts are inserted into the KG; topics are passed to the memory indexer.
 
@@ -718,7 +718,7 @@ When the bot sends an email on a user's behalf and the recipient replies, the re
 
 ## 2026-03-17: Fix cross-user calendar data leak in briefings (ISSUE-015)
 
-The briefing pipeline could leak one user's calendar events into another user's briefing. When `_fetch_calendar_events()` returned `None` for a user with no calendars (e.g. max), the fallback emitted an unscoped "Today's calendar events" instruction. The agent then discovered stefan's calendars via CalDAV and included his events in max's output. The sleep cycle then faithfully extracted these contaminated events into max's memory files.
+The briefing pipeline could leak one user's calendar events into another user's briefing. When `_fetch_calendar_events()` returned `None` for a user with no calendars (e.g. bob), the fallback emitted an unscoped "Today's calendar events" instruction. The agent then discovered alice's calendars via CalDAV and included her events in bob's output. The sleep cycle then faithfully extracted these contaminated events into bob's memory files.
 
 **Key changes:**
 - Removed unscoped calendar fallback — if a user has no calendars, the calendar component is skipped entirely instead of emitting a bare instruction the agent tries to fulfill with whatever calendars it finds
@@ -1632,7 +1632,7 @@ Fixed two bugs in briefing email delivery introduced when the deferred email out
 
 ## 2026-02-22: Emissaries sync script
 
-Added a script to sync `config/emissaries.md` from the canonical public emissaries repo at `https://forge.cynium.com/stefan/emissaries`. This keeps istota's constitutional principles up to date with the upstream source without needing git submodules or CI pipelines.
+Added a script to sync `config/emissaries.md` from the canonical public emissaries repo. This keeps istota's constitutional principles up to date with the upstream source without needing git submodules or CI pipelines.
 
 **Key changes:**
 - Added `scripts/sync-emissaries.sh` to fetch the latest `emissaries.md` via curl from the raw file URL.

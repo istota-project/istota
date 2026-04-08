@@ -12,6 +12,32 @@ The email poller checks the configured IMAP folder (default: `INBOX`) at regular
 
 Attachments are downloaded to `/Users/{user_id}/inbox/`.
 
+### Email confirmation gate
+
+Emails from untrusted senders require explicit user confirmation before processing. This applies to:
+
+- Plus-addressed emails (`bot+user_id@domain`) from senders not in the user's trusted list
+- Sender-match routed emails when `confirm_sender_match` is enabled (default: true)
+
+When an email is gated, a confirmation prompt is posted to the user's alerts channel (Talk) asking them to approve, trust the sender, or discard the message. Trusted senders bypass the gate.
+
+Trusted senders are configured at two levels:
+
+- **Config-time**: `trusted_email_senders` in per-user config (supports fnmatch patterns like `*@company.com`)
+- **Runtime**: managed via Talk commands
+
+```
+!trust sender@example.com     # add trusted sender
+!untrust sender@example.com   # remove trusted sender
+!trust                         # list all trusted senders
+```
+
+Runtime trusted senders are stored in the database and checked alongside config-time patterns.
+
+### Suspicious email alerts
+
+During task execution, if the agent detects suspicious content in an email (social engineering, prompt injection, exfiltration attempts), it writes an alert to a deferred JSON file. After task completion, the scheduler posts these alerts to the user's alerts channel in Talk.
+
 ## Sending email
 
 Outbound emails use SMTP. The `SMTP_FROM` address is plus-addressed as `bot+user_id@domain` so replies route back to the correct user.
@@ -44,3 +70,12 @@ bot_email = "istota@example.com"
 SMTP credentials fall back to IMAP credentials if not set.
 
 Polling interval is controlled by `email_poll_interval` in `[scheduler]` (default 60s). Old processed emails are cleaned after `email_retention_days` (default 7).
+
+### Per-user email settings
+
+```toml
+# config/users/alice.toml
+email_addresses = ["alice@example.com"]
+trusted_email_senders = ["*@company.com", "boss@other.com"]
+alerts_channel = "room789"  # Talk room for confirmations/alerts
+```

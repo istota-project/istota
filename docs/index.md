@@ -47,4 +47,4 @@ Most AI assistant projects treat infrastructure as someone else's problem, conne
 
 ## License
 
-[MIT](https://forge.cynium.com/cynium/istota/src/branch/main/LICENSE). Made by [Stefan Kubicki](https://kubicki.org).
+[MIT](https://forge.cynium.com/cynium/istota/src/branch/main/LICENSE).

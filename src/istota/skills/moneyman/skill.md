@@ -141,7 +141,7 @@ Add to user config (`config/users/{user}.toml`):
 type = "moneyman"
 name = "Moneyman"
 cli_path = "/srv/app/moneyman/app/.venv/bin/moneyman"
-user_key = "stefan"
+user_key = "alice"
 
 # Remote mode (moneyman on different host)
 [[resources]]
@@ -149,5 +149,5 @@ type = "moneyman"
 name = "Moneyman"
 base_url = "https://moneyman.example.com"
 api_key = "your-api-key"
-user_key = "stefan"
+user_key = "alice"
 ```

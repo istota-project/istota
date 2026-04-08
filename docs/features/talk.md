@@ -36,6 +36,8 @@ Per-user verbose logging to a dedicated Talk conversation. When `log_channel` is
 - File attachments downloaded to `/Users/{user_id}/inbox/`
 - Audio attachments pre-transcribed before skill selection (so keyword matching works on voice memos)
 - Confirmation flow: regex-detected confirmation requests prompt user for yes/no reply
+- Alerts channel (`alerts_channel` per-user config): dedicated Talk room for confirmations, email gate prompts, and security alerts. Falls back to briefing token, then auto-detected 1:1 DM with the bot
+- `!trust`/`!untrust` commands for runtime management of trusted email senders
 - Multi-line tool output is collapsed to the first line in progress updates
 - Progress callbacks carry the Talk message ID from the ack so subsequent updates edit the same message
 - Log channel callbacks compose with progress callbacks -- both fire on each event

@@ -30,6 +30,12 @@ When `semantic_routing` is enabled (default), a Haiku call sees the task prompt 
 
 Audio attachments are transcribed before skill selection so keyword matching works on voice memos.
 
+### Skill stickiness
+
+Skills from recent conversation turns are automatically re-selected for follow-up messages in the same conversation. This covers up to 2 prior tasks within a 30-minute window. Skills from a direct reply parent are also carried forward. Sticky skills bypass keyword matching but still respect `disabled_skills` and dependency checks.
+
+This means if you ask about your calendar and then say "also add that to my todos," the calendar skill stays loaded even though the follow-up message only triggers the todos skill.
+
 ### Exclude rules
 
 Skills can exclude other skills via `exclude_skills` (e.g., the briefing skill excludes email to prevent delivery interference).
