@@ -10,7 +10,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | `sensitive_actions` | Confirmation rules for destructive operations |
 | `memory` | Memory file reference (USER.md, CHANNEL.md, dated memories) |
 | `scripts` | User's reusable Python scripts |
-| `memory_search` | Memory search CLI (search, index, reindex, stats) |
+| `memory_search` | Memory search CLI (search, index, reindex, stats, facts, timeline, add-fact, invalidate, delete-fact) |
 | `kv` | Key-value store for persistent runtime state |
 
 ## Communication

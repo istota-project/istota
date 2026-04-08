@@ -20,6 +20,8 @@ Commands prefixed with `!` are intercepted in the Talk poller before task creati
 | `!skills NAME` | Show details for a specific skill |
 | `!more #TASK_ID` | Show execution trace for a completed task |
 | `!search QUERY` | Search conversation history via memory index + Talk API |
+| `!trust [EMAIL]` | List trusted email senders, or add one |
+| `!untrust EMAIL` | Remove a runtime trusted email sender |
 
 ## Export
 
@@ -27,6 +29,12 @@ Commands prefixed with `!` are intercepted in the Talk poller before task creati
 
 Formats: `markdown` (default) or `text`.
 
+## Trust
+
+`!trust` manages runtime trusted email senders (stored in the database, checked alongside config-time `trusted_email_senders` patterns). See [email](../features/email.md) for the full confirmation gate flow.
+
 ## Search
 
 `!search` queries the memory search index and Talk API for matching messages. Returns results with timestamps and conversation context.
+
+Flags: `--since YYYY-MM-DD`, `--week`, `--memories` (memory files only).
