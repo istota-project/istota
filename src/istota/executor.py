@@ -2643,6 +2643,16 @@ def _execute_streaming_once(
     actions_json = json.dumps(actions_descriptions) if actions_descriptions else None
     trace_json = json.dumps(execution_trace) if execution_trace else None
 
+    # Also check DB flag — SIGTERM from !stop may kill the process before the
+    # in-loop cancellation check runs, leaving `cancelled` False.
+    if not cancelled:
+        try:
+            with db.get_db(config.db_path) as cancel_conn:
+                if db.is_task_cancelled(cancel_conn, task.id):
+                    cancelled = True
+        except Exception:
+            pass
+
     if cancelled:
         return False, "Cancelled by user", None, None
 
