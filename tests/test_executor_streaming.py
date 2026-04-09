@@ -670,6 +670,30 @@ class TestStreamingExecution:
         assert success is False
         assert "no output" in result.lower()
 
+    def test_sigterm_cancel_detected_via_db_flag(self, tmp_path):
+        """When !stop sends SIGTERM and kills the process before the in-loop
+        cancel check fires, the post-loop DB check still detects the
+        cancellation and returns 'Cancelled by user' (not a retryable error)."""
+        config = _make_config(tmp_path)
+        task = _make_task()
+
+        # Process killed by SIGTERM — no ResultEvent, rc=-15
+        mock_process = self._make_mock_process([], returncode=-15)
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.Popen", return_value=mock_process),
+            # The post-loop DB check should find cancel_requested=1
+            patch("istota.executor.db.is_task_cancelled", return_value=True),
+            patch("istota.executor.db.update_task_pid"),
+        ]
+        with contextmanager_chain(patches):
+            success, result, _actions, _trace = execute_task(
+                task, config, [], on_progress=lambda m: None,
+            )
+
+        assert success is False
+        assert result == "Cancelled by user"
+
 
 class TestDryRun:
     def test_dry_run_returns_prompt(self, tmp_path):
