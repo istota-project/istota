@@ -161,12 +161,17 @@ def filter_transit_clusters(
     clusters: list[dict],
     min_pings: int = 3,
     min_dwell_seconds: float = 300,
+    merge_radius_m: float = 100,
 ) -> tuple[list[dict], int]:
     """Separate stop clusters from transit clusters.
 
     Returns (stops, total_transit_pings).  Each stop dict gets a
     ``_transit_pings_before`` key recording how many transit pings were
     filtered since the previous stop.
+
+    Small clusters within *merge_radius_m* of the previous surviving stop
+    are absorbed into it rather than discarded.  This handles indoor GPS
+    gaps where the phone is stationary but pings are sparse.
     """
     stops: list[dict] = []
     transit_pings = 0
@@ -176,6 +181,14 @@ def filter_transit_clusters(
         few_pings = c["ping_count"] < min_pings
         short_dwell = cluster_dwell_seconds(c) < min_dwell_seconds
         if not has_place and (few_pings or short_dwell):
+            # Before discarding, check if this fragment is at the same
+            # location as the previous stop (indoor GPS gap scenario)
+            if stops and haversine(
+                stops[-1]["lat"], stops[-1]["lon"], c["lat"], c["lon"]
+            ) <= merge_radius_m:
+                stops[-1]["last_ts"] = c["last_ts"]
+                stops[-1]["ping_count"] += c["ping_count"]
+                continue
             transit_pings += c["ping_count"]
             transit_pings_since_last_stop += c["ping_count"]
             continue

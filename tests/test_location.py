@@ -1726,6 +1726,73 @@ class TestReverseGeocode:
 # ===========================================================================
 
 
+class TestFilterTransitClusters:
+    """Direct unit tests for filter_transit_clusters() spatial absorption."""
+
+    def _make_cluster(self, lat, lon, first_ts, last_ts, ping_count,
+                      place_name=None, place_id=None):
+        return {
+            "lat": lat, "lon": lon,
+            "first_ts": first_ts, "last_ts": last_ts,
+            "ping_count": ping_count,
+            "place_name": place_name, "place_id": place_id,
+        }
+
+    def test_absorbs_nearby_fragment_into_previous_stop(self):
+        """Small cluster within merge radius of previous stop gets absorbed."""
+        from istota.geo import filter_transit_clusters
+
+        clusters = [
+            # Big stop — survives filtering on its own
+            self._make_cluster(34.0836, -118.3101,
+                               "2026-04-08T19:07:00Z", "2026-04-08T19:21:00Z",
+                               ping_count=20),
+            # Small fragment — same location, indoor GPS gap
+            self._make_cluster(34.0837, -118.3100,
+                               "2026-04-08T19:27:00Z", "2026-04-08T19:28:00Z",
+                               ping_count=2),
+        ]
+        stops, transit = filter_transit_clusters(clusters)
+        assert len(stops) == 1
+        # Fragment absorbed: ping count summed, last_ts extended
+        assert stops[0]["ping_count"] == 22
+        assert stops[0]["last_ts"] == "2026-04-08T19:28:00Z"
+        assert transit == 0
+
+    def test_discards_distant_fragment(self):
+        """Small cluster far from previous stop is still discarded as transit."""
+        from istota.geo import filter_transit_clusters
+
+        clusters = [
+            # Stop at location A
+            self._make_cluster(34.0836, -118.3101,
+                               "2026-04-08T19:07:00Z", "2026-04-08T19:21:00Z",
+                               ping_count=20),
+            # Small fragment at a different location (~1km away)
+            self._make_cluster(34.0920, -118.3101,
+                               "2026-04-08T19:27:00Z", "2026-04-08T19:28:00Z",
+                               ping_count=2),
+        ]
+        stops, transit = filter_transit_clusters(clusters)
+        assert len(stops) == 1
+        assert stops[0]["ping_count"] == 20  # not absorbed
+        assert transit == 2
+
+    def test_no_previous_stop_to_absorb_into(self):
+        """First cluster is small with no preceding stop — discarded normally."""
+        from istota.geo import filter_transit_clusters
+
+        clusters = [
+            # Small cluster, nothing to absorb into
+            self._make_cluster(34.0836, -118.3101,
+                               "2026-04-08T19:07:00Z", "2026-04-08T19:08:00Z",
+                               ping_count=2),
+        ]
+        stops, transit = filter_transit_clusters(clusters)
+        assert len(stops) == 0
+        assert transit == 2
+
+
 class TestClusterPings:
     def test_empty_input(self):
         from istota.geo import cluster_pings
@@ -2142,3 +2209,37 @@ class TestCmdDaySummary:
         assert len(home_stops) == 1, (
             f"Expected 1 merged Home stop (phone sleep, no transit), got {len(home_stops)}"
         )
+
+    def test_indoor_gps_gaps_preserve_stop(self, tmp_path):
+        """Indoor GPS gaps should not drop a stop from the summary.
+
+        Simulates the ISSUE-043 scenario: phone at a restaurant for ~95 min
+        with large gaps between pings due to indoor GPS signal loss.
+        """
+        lat, lon = 34.0836, -118.3101
+        pings = [
+            # Cluster 1: strong initial fix (7:07-7:21 PM PST = 03:07-03:21 UTC)
+            *[{"timestamp": f"2026-03-09T03:{7+i:02d}:00Z", "lat": lat + i*0.00001,
+               "lon": lon, "place_id": None}
+              for i in range(15)],
+            # 6-minute gap (indoor)
+            # Cluster 2: brief fix (7:27 PM)
+            {"timestamp": "2026-03-09T03:27:00Z", "lat": lat + 0.00005, "lon": lon, "place_id": None},
+            # 40-minute gap (deep indoor)
+            # Cluster 3: brief fix (8:07 PM)
+            {"timestamp": "2026-03-09T04:07:00Z", "lat": lat - 0.00003, "lon": lon, "place_id": None},
+            {"timestamp": "2026-03-09T04:08:00Z", "lat": lat - 0.00002, "lon": lon, "place_id": None},
+            # 20-minute gap
+            # Cluster 4: leaving (8:28-8:42 PM)
+            *[{"timestamp": f"2026-03-09T04:{28+i}:00Z", "lat": lat + i*0.00001,
+               "lon": lon, "place_id": None}
+              for i in range(5)],
+        ]
+        result = self._run_day_summary(tmp_path, pings=pings,
+                                        date="2026-03-08", tz="America/Los_Angeles")
+        # All pings are at the same location — should be one stop
+        assert len(result["stops"]) == 1, (
+            f"Expected 1 stop (indoor GPS gaps), got {len(result['stops'])}: {result['stops']}"
+        )
+        # The stop should span the full visit
+        assert result["stops"][0]["ping_count"] == len(pings)
