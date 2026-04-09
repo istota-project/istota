@@ -12,6 +12,7 @@ from istota.config import Config, SleepCycleConfig, UserConfig
 from istota.sleep_cycle import (
     _excerpt,
     _parse_structured_extraction,
+    _validate_fact,
     gather_day_data,
     build_memory_extraction_prompt,
     process_user_sleep_cycle,
@@ -22,6 +23,8 @@ from istota.sleep_cycle import (
     NO_NEW_MEMORIES,
     NO_CHANGES_NEEDED,
     MAX_DAY_DATA_CHARS,
+    INTERACTIVE_SOURCE_TYPES,
+    VALID_PREDICATES,
 )
 
 
@@ -196,6 +199,85 @@ class TestGatherDayData:
 
         assert "Conversation" not in result
 
+    def test_separates_interactive_and_automated_sections(self, mount_config, db_path):
+        """Talk and briefing tasks appear in separate labeled sections."""
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="What's the weather?", user_id="alice", source_type="talk",
+            )
+            db.update_task_status(conn, t1, "running")
+            db.update_task_status(conn, t1, "completed", result="It's sunny.")
+
+            t2 = db.create_task(
+                conn, prompt="Morning briefing", user_id="alice", source_type="briefing",
+            )
+            db.update_task_status(conn, t2, "running")
+            db.update_task_status(conn, t2, "completed", result="Here's your briefing.")
+
+            result = gather_day_data(mount_config, conn, "alice", 24, None)
+
+        assert "INTERACTIVE CONVERSATIONS" in result
+        assert "AUTOMATED/SCHEDULED OUTPUT" in result
+        # Interactive task in the interactive section (appears before automated header)
+        interactive_pos = result.index("INTERACTIVE CONVERSATIONS")
+        automated_pos = result.index("AUTOMATED/SCHEDULED OUTPUT")
+        weather_pos = result.index("What's the weather?")
+        briefing_pos = result.index("Morning briefing")
+        assert interactive_pos < weather_pos < automated_pos < briefing_pos
+
+    def test_automated_tasks_get_reduced_budget(self, mount_config, db_path):
+        """Automated section should be shorter than interactive when both exist."""
+        with db.get_db(db_path) as conn:
+            # One interactive task with long content
+            t1 = db.create_task(
+                conn, prompt="A" * 2000, user_id="alice", source_type="talk",
+            )
+            db.update_task_status(conn, t1, "running")
+            db.update_task_status(conn, t1, "completed", result="B" * 2000)
+
+            # One automated task with equally long content
+            t2 = db.create_task(
+                conn, prompt="C" * 2000, user_id="alice", source_type="cron",
+            )
+            db.update_task_status(conn, t2, "running")
+            db.update_task_status(conn, t2, "completed", result="D" * 2000)
+
+            result = gather_day_data(mount_config, conn, "alice", 24, None)
+
+        automated_pos = result.index("AUTOMATED/SCHEDULED OUTPUT")
+        interactive_section = result[:automated_pos]
+        automated_section = result[automated_pos:]
+        # Interactive section should be larger (80% budget vs 20%)
+        assert len(interactive_section) > len(automated_section)
+
+    def test_only_interactive_omits_automated_header(self, mount_config, db_path):
+        """When only talk tasks exist, no automated section header appears."""
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="Hello", user_id="alice", source_type="talk",
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Hi there")
+
+            result = gather_day_data(mount_config, conn, "alice", 24, None)
+
+        assert "INTERACTIVE CONVERSATIONS" in result
+        assert "AUTOMATED" not in result
+
+    def test_only_automated_omits_interactive_header(self, mount_config, db_path):
+        """When only cron tasks exist, no interactive section header appears."""
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="Check status", user_id="alice", source_type="cron",
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="All good")
+
+            result = gather_day_data(mount_config, conn, "alice", 24, None)
+
+        assert "INTERACTIVE" not in result
+        assert "AUTOMATED/SCHEDULED OUTPUT" in result
+
 
 class TestBuildMemoryExtractionPrompt:
     def test_includes_user_id(self):
@@ -243,6 +325,31 @@ class TestBuildMemoryExtractionPrompt:
         """Prompt should say it's OK to extract from days with few interactions."""
         prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
         assert "few interactions" in prompt.lower() or "single" in prompt.lower()
+
+    def test_prompt_includes_source_type_guidance(self):
+        """Prompt should explain how to treat interactive vs automated sections."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "INTERACTIVE CONVERSATIONS" in prompt
+        assert "AUTOMATED/SCHEDULED OUTPUT" in prompt
+        assert "Bot-generated" in prompt
+
+    def test_prompt_includes_subject_constraints(self):
+        """Prompt should constrain who facts can be about."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "Subject constraints" in prompt
+        assert "alice" in prompt  # user_id should be in the constraints
+
+    def test_prompt_includes_negative_fact_examples(self):
+        """Prompt should show bad fact examples to prevent hallucinated attributions."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "Bad fact examples" in prompt
+        assert "Good fact examples" in prompt
+
+    def test_prompt_predicates_from_registry(self):
+        """Every predicate in VALID_PREDICATES should appear in the prompt."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        for predicate in VALID_PREDICATES:
+            assert predicate in prompt, f"Predicate '{predicate}' missing from prompt"
 
 
 class TestProcessUserSleepCycle:
@@ -754,3 +861,89 @@ TOPICS:
 
         memories, facts, topics = _parse_structured_extraction(output)
         assert len(facts) == 3
+
+    def test_unknown_predicate_filtered(self):
+        """Facts with predicates not in VALID_PREDICATES are dropped."""
+        output = """MEMORIES:
+- Memory (2026-04-08, ref:1)
+
+FACTS:
+[
+  {"subject": "stefan", "predicate": "knows", "object": "python"},
+  {"subject": "stefan", "predicate": "favorite_color", "object": "blue"}
+]
+
+TOPICS:
+{}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert len(facts) == 1
+        assert facts[0]["predicate"] == "knows"
+
+    def test_empty_subject_filtered(self):
+        """Facts with empty subject are dropped."""
+        output = """MEMORIES:
+- Memory (2026-04-08, ref:1)
+
+FACTS:
+[{"subject": "", "predicate": "knows", "object": "python"}]
+
+TOPICS:
+{}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert facts == []
+
+    def test_empty_object_filtered(self):
+        """Facts with whitespace-only object are dropped."""
+        output = """MEMORIES:
+- Memory (2026-04-08, ref:1)
+
+FACTS:
+[{"subject": "stefan", "predicate": "works_at", "object": "   "}]
+
+TOPICS:
+{}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert facts == []
+
+    def test_fact_values_normalized(self):
+        """Fact subject, predicate, and object are normalized to lowercase."""
+        output = """MEMORIES:
+- Memory (2026-04-08, ref:1)
+
+FACTS:
+[{"subject": "Stefan", "predicate": "Works_At", "object": "Acme Corp"}]
+
+TOPICS:
+{}"""
+
+        memories, facts, topics = _parse_structured_extraction(output)
+        assert len(facts) == 1
+        assert facts[0]["subject"] == "stefan"
+        assert facts[0]["predicate"] == "works_at"
+        assert facts[0]["object"] == "acme corp"
+
+
+class TestValidateFact:
+    def test_valid_fact_passes(self):
+        assert _validate_fact({"subject": "stefan", "predicate": "knows", "object": "python"})
+
+    def test_missing_field_fails(self):
+        assert not _validate_fact({"subject": "stefan", "predicate": "knows"})
+
+    def test_unknown_predicate_fails(self):
+        assert not _validate_fact({"subject": "stefan", "predicate": "likes", "object": "cats"})
+
+    def test_empty_subject_fails(self):
+        assert not _validate_fact({"subject": "", "predicate": "knows", "object": "python"})
+
+    def test_whitespace_object_fails(self):
+        assert not _validate_fact({"subject": "stefan", "predicate": "knows", "object": "   "})
+
+    def test_not_a_dict_fails(self):
+        assert not _validate_fact("not a dict")
+
+    def test_predicate_case_insensitive(self):
+        assert _validate_fact({"subject": "stefan", "predicate": "Works_At", "object": "acme"})

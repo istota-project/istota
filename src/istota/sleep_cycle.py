@@ -31,6 +31,17 @@ MAX_DAY_DATA_CHARS = 50000
 # Minimum per-task budget to avoid tiny fragments
 _MIN_TASK_BUDGET = 500
 
+# Source type classification for extraction quality
+INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "cli"})
+AUTOMATED_SOURCE_TYPES = frozenset({"cron", "briefing", "subtask"})
+
+# Known predicates for fact validation (keep in sync with extraction prompt)
+VALID_PREDICATES = frozenset({
+    "works_at", "works_on", "lives_in", "uses_tech", "has_role",
+    "prefers", "knows", "relates_to", "has_status", "decided",
+    "staying_in", "visiting",
+})
+
 # Sentinel output from Claude indicating nothing worth saving
 NO_NEW_MEMORIES = "NO_NEW_MEMORIES"
 
@@ -52,35 +63,13 @@ def _excerpt(text: str, budget: int) -> str:
     return text[:head_size] + marker + text[-tail_size:]
 
 
-def gather_day_data(
-    config: Config,
-    conn: "db.sqlite3.Connection",
-    user_id: str,
-    lookback_hours: int,
-    after_task_id: int | None,
-) -> str:
-    """
-    Gather the day's interaction data for memory extraction.
-
-    Uses dynamic per-task budget allocation and tail-biased truncation
-    to preserve conclusions and decisions. Groups tasks by conversation
-    for threading context.
-    """
+def _format_task_section(
+    tasks: list,
+    per_task_budget: int,
+) -> list[str]:
+    """Format a group of tasks with conversation grouping and budget control."""
     from collections import defaultdict
 
-    since = datetime.now(tz=ZoneInfo("UTC")) - timedelta(hours=lookback_hours)
-    # DB stores naive UTC timestamps, so strip tzinfo for comparison
-    since_str = since.replace(tzinfo=None).isoformat()
-
-    tasks = db.get_completed_tasks_since(conn, user_id, since_str, after_task_id)
-
-    if not tasks:
-        return ""
-
-    # Dynamic budget: distribute proportionally with per-task minimum
-    per_task_budget = max(_MIN_TASK_BUDGET, MAX_DAY_DATA_CHARS // len(tasks))
-
-    # Group tasks by conversation_token for threading context
     groups: dict[str | None, list] = defaultdict(list)
     for task in tasks:
         groups[task.conversation_token].append(task)
@@ -101,6 +90,68 @@ def gather_day_data(
                 f"User: {prompt_text}\n"
                 f"Bot: {result_text}\n"
             )
+    return parts
+
+
+def gather_day_data(
+    config: Config,
+    conn: "db.sqlite3.Connection",
+    user_id: str,
+    lookback_hours: int,
+    after_task_id: int | None,
+) -> str:
+    """
+    Gather the day's interaction data for memory extraction.
+
+    Separates interactive conversations from automated/scheduled output
+    with clear section headers so the extraction LLM can distinguish
+    user-stated facts from bot-generated content.
+
+    Uses dynamic per-task budget allocation and tail-biased truncation
+    to preserve conclusions and decisions. Interactive tasks get 80% of
+    the budget when automated tasks are also present.
+    """
+    since = datetime.now(tz=ZoneInfo("UTC")) - timedelta(hours=lookback_hours)
+    # DB stores naive UTC timestamps, so strip tzinfo for comparison
+    since_str = since.replace(tzinfo=None).isoformat()
+
+    tasks = db.get_completed_tasks_since(conn, user_id, since_str, after_task_id)
+
+    if not tasks:
+        return ""
+
+    # Partition by source type
+    interactive = [t for t in tasks if t.source_type in INTERACTIVE_SOURCE_TYPES]
+    automated = [t for t in tasks if t.source_type not in INTERACTIVE_SOURCE_TYPES]
+
+    # Budget split: 80/20 when both exist, full budget for single section
+    if interactive and automated:
+        interactive_budget = int(MAX_DAY_DATA_CHARS * 0.8)
+        automated_budget = MAX_DAY_DATA_CHARS - interactive_budget
+    elif interactive:
+        interactive_budget = MAX_DAY_DATA_CHARS
+        automated_budget = 0
+    else:
+        interactive_budget = 0
+        automated_budget = MAX_DAY_DATA_CHARS
+
+    parts = []
+
+    if interactive:
+        interactive_per_task = max(_MIN_TASK_BUDGET, interactive_budget // len(interactive))
+        parts.append(
+            "======== INTERACTIVE CONVERSATIONS ========\n"
+            "(User spoke directly — primary source for fact extraction)\n"
+        )
+        parts.extend(_format_task_section(interactive, interactive_per_task))
+
+    if automated:
+        automated_per_task = max(_MIN_TASK_BUDGET, automated_budget // len(automated))
+        parts.append(
+            "\n======== AUTOMATED/SCHEDULED OUTPUT ========\n"
+            "(Bot-generated — do not attribute facts to people merely mentioned here)\n"
+        )
+        parts.extend(_format_task_section(automated, automated_per_task))
 
     combined = "\n".join(parts)
     if len(combined) > MAX_DAY_DATA_CHARS:
@@ -135,6 +186,8 @@ Do NOT repeat any of this information in your output.
 {existing_memory}
 """
 
+    predicates_str = ", ".join(sorted(VALID_PREDICATES))
+
     return f"""You are extracting important memories from a day of interactions with user '{user_id}'.
 
 Date: {date_str}
@@ -162,6 +215,20 @@ What to skip:
 - Temporary states no longer relevant (e.g., "waiting for a response" when the response already came)
 - Raw data dumps or lengthy command output
 
+## Source type guidance
+
+The interactions above may be split into two sections:
+
+INTERACTIVE CONVERSATIONS: Direct exchanges where the user stated facts, made decisions,
+or gave instructions. This is the primary source for extracting memories and facts.
+
+AUTOMATED/SCHEDULED OUTPUT: Bot-generated content (briefings, cron jobs, scheduled tasks).
+The bot produced this content — the user did not state it. For this section:
+- DO extract: outcomes of automated tasks (e.g., "morning briefing was sent successfully")
+- DO extract: notable information the bot surfaced that the user would want to remember
+- DO NOT extract facts about people merely mentioned in bot-generated content
+- DO NOT attribute preferences or behaviors to anyone based on automated output
+
 Write bullet points that are self-contained.
 Bad: "Discussed project Alpha."
 Good: "Project Alpha is migrating from Django to FastAPI; target completion is Q2 (ref:1234)."
@@ -187,9 +254,30 @@ MEMORIES:
 FACTS:
 (JSON array of entity-relationship triples extracted from the interactions)
 Each triple: {{"subject": "entity", "predicate": "relationship", "object": "value"}}
-Predicates: works_at, works_on, lives_in, uses_tech, has_role, prefers, knows, relates_to, has_status, decided, staying_in, visiting
+Allowed predicates: {predicates_str}
 Use staying_in/visiting for temporary states (not lives_in).
-Normalize entity names to lowercase. Only extract facts that are clearly stated or decided, not speculative.
+Normalize entity names to lowercase.
+
+Subject constraints:
+- For user preferences, habits, and decisions, the subject should be "{user_id}"
+- Only create facts about other people if {user_id} explicitly stated something about them
+  in an interactive conversation — not because they appeared in bot-generated output
+- Facts about projects, tools, or organizations are fine when clearly discussed
+
+Bad fact examples (do NOT produce facts like these):
+- {{"subject": "max", "predicate": "prefers", "object": "morning briefings"}}
+  (Max was mentioned in a briefing the bot generated — {user_id} never said this about Max)
+- {{"subject": "dana", "predicate": "works_at", "object": "acme corp"}}
+  (Dana appeared in an automated email summary — {user_id} didn't state this)
+
+Good fact examples:
+- {{"subject": "{user_id}", "predicate": "prefers", "object": "morning briefings"}}
+  ({user_id} explicitly said they prefer morning briefings in conversation)
+- {{"subject": "{user_id}", "predicate": "works_on", "object": "project alpha"}}
+  ({user_id} discussed working on this project)
+- {{"subject": "dana", "predicate": "works_at", "object": "acme corp"}}
+  ({user_id} explicitly told the bot that Dana works at Acme in an interactive conversation)
+
 If no facts to extract, output an empty array: []
 
 TOPICS:
@@ -200,6 +288,29 @@ If no topics to classify, output: {{}}
 
 If you cannot produce the structured sections, output only the bullet points (the MEMORIES section).
 Do not include any preamble or explanation outside these sections."""
+
+
+def _validate_fact(fact: dict) -> bool:
+    """Validate an extracted fact has required fields and a known predicate."""
+    if not isinstance(fact, dict):
+        return False
+    if not all(k in fact for k in ("subject", "predicate", "object")):
+        return False
+    predicate = fact["predicate"].strip().lower()
+    if predicate not in VALID_PREDICATES:
+        logger.debug("Dropping fact with unknown predicate: %s", fact.get("predicate"))
+        return False
+    if not fact["subject"].strip() or not fact["object"].strip():
+        return False
+    return True
+
+
+def _normalize_fact(fact: dict) -> dict:
+    """Normalize fact values to lowercase/stripped."""
+    fact["subject"] = fact["subject"].strip().lower()
+    fact["predicate"] = fact["predicate"].strip().lower()
+    fact["object"] = fact["object"].strip().lower()
+    return fact
 
 
 def _parse_structured_extraction(output: str) -> tuple[str, list[dict], dict[str, str]]:
@@ -234,8 +345,7 @@ def _parse_structured_extraction(output: str) -> tuple[str, list[dict], dict[str
         try:
             parsed = json.loads(facts_raw)
             if isinstance(parsed, list):
-                facts = [f for f in parsed if isinstance(f, dict)
-                         and "subject" in f and "predicate" in f and "object" in f]
+                facts = [_normalize_fact(f) for f in parsed if _validate_fact(f)]
         except (json.JSONDecodeError, ValueError):
             logger.debug("Failed to parse FACTS section: %s", facts_raw[:200])
 
