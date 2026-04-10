@@ -494,6 +494,7 @@ def _deduplicate_descriptions(descriptions: list[str]) -> list[str]:
 def _format_log_channel_body(
     prefix: str | tuple[str, str], descriptions: list[str], *, done: bool = False,
     success: bool = True, error: str | None = None,
+    skills: list[str] | None = None,
 ) -> str:
     """Format a log channel message with accumulated tool descriptions."""
     if isinstance(prefix, tuple):
@@ -508,6 +509,8 @@ def _format_log_channel_body(
         status = "⏳ Running"
     header = f"{task_prefix} {status} {count} - {source}" if source else f"{task_prefix} {status} {count}"
     lines = [header]
+    if skills:
+        lines.append(f"Skills: {', '.join(skills)}")
     for desc in _deduplicate_descriptions(descriptions):
         lines.append(desc)
     if done and error:
@@ -567,6 +570,7 @@ def _make_log_channel_callback(
 def _finalize_log_channel(
     config: Config, task: db.Task, log_channel: str, prefix: str,
     log_callback, success: bool, error: str | None = None,
+    skills: list[str] | None = None,
 ):
     """Post/edit the final summary to the log channel."""
     descriptions = getattr(log_callback, "all_descriptions", []) if log_callback else []
@@ -574,6 +578,7 @@ def _finalize_log_channel(
 
     body = _format_log_channel_body(
         prefix, descriptions, done=True, success=success, error=error,
+        skills=skills,
     )
 
     try:
@@ -1569,9 +1574,19 @@ def process_one_task(
     # Finalize log channel message with completion status
     if log_channel and log_channel_prefix:
         error_msg = result if not success else None
+        # Read selected skills from DB (set during execute_task, not on local task object)
+        selected_skills = None
+        try:
+            with db.get_db(config.db_path) as _conn:
+                refreshed = db.get_task(_conn, task_id)
+                if refreshed and refreshed.selected_skills:
+                    selected_skills = json.loads(refreshed.selected_skills)
+        except Exception:
+            pass
         _finalize_log_channel(
             config, task, log_channel, log_channel_prefix,
             log_callback, success, error=error_msg,
+            skills=selected_skills,
         )
 
     # Deduplicate: strip text already sent as progress from the final result.
