@@ -17,6 +17,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `disabled_skills` | `[]` | Instance-wide skills to exclude |
 | `temp_dir` | `"/tmp/istota"` | Temporary directory for task execution |
 | `max_memory_chars` | `0` | Cap total memory in prompts (0 = unlimited) |
+| `max_knowledge_facts` | `0` | Cap knowledge graph facts per prompt (0 = unlimited) |
 
 ## `[nextcloud]`
 
@@ -129,6 +130,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `email_retention_days` | `7` | Delete old IMAP emails (0 = disable) |
 | `talk_cache_max_per_conversation` | `200` | Max cached Talk messages |
 | `scheduled_job_max_consecutive_failures` | `5` | Auto-disable threshold |
+| `log_channel_show_skills` | `true` | Include selected skills in log channel messages |
 
 ## `[security]`
 

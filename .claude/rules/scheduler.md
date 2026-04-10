@@ -156,6 +156,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `stale_pending_fail_hours` | 2 | Ancient task auto-fail |
 | `task_retention_days` | 7 | Task cleanup |
 | `scheduled_job_max_consecutive_failures` | 5 | Auto-disable threshold |
+| `log_channel_show_skills` | true | Include selected skills in log channel messages |
 
 ## Other Scheduler Functions
 

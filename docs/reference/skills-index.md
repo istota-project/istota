@@ -45,8 +45,9 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI |
 |---|---|---|
-| `transcribe` | transcribe, ocr, screenshot, scan | yes -- OCR via Tesseract |
+| `transcribe` | transcribe, ocr, screenshot, scan, image | yes -- OCR via Tesseract |
 | `whisper` | transcribe, whisper, audio, voice, speech | yes -- audio transcription via faster-whisper |
+| `notes` | note, save, write, markdown | doc-only (companion to transcribe) |
 
 ## Development
 

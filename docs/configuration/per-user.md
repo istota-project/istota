@@ -63,7 +63,7 @@ name = "GPS"
 extra = { ingest_token = "secret", default_radius = 100 }
 ```
 
-Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`, `karakeep`, `monarch`, `miniflux`, `moneyman`, `overland`.
+Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`, `ledger`, `karakeep`, `monarch`, `miniflux`, `moneyman`, `overland`.
 
 CalDAV calendars are auto-discovered from Nextcloud and don't need to be configured as resources.
 

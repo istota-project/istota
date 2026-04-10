@@ -97,8 +97,9 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `briefings_config` | — | briefing config, briefing schedule, ... | — | — |
 | `heartbeat` | — | heartbeat, monitoring, health check, alert, ... | — | — |
 | `accounting` | — | accounting, ledger, invoice, expense, tax, ... | ledger, invoicing | — |
-| `transcribe` | — | transcribe, ocr, screenshot, scan, ... | — | — |
+| `transcribe` | — | transcribe, ocr, screenshot, scan, image, ... | — | — |
 | `whisper` | — | transcribe, whisper, audio, voice, speech, dictation, ... | — | — |
+| `notes` | — | note, save, write, markdown | notes_folder | — |
 | `developer` | — | git, gitlab, repo, repository, commit, branch, MR, ... | — | — |
 | `location` | — | location, gps, where, place, tracking, ... | — | — |
 | `bookmarks` | — | bookmark, karakeep, save, read later, ... | karakeep | — |

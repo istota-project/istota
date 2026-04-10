@@ -22,7 +22,8 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 8. **CalDAV discovery**: `get_calendars_for_user()`
 8b. **Dated memories**: `read_dated_memories()`, skip for briefings, controlled by `auto_load_dated_days`
 8c. **Memory recall**: `_recall_memories()`, BM25 search using task prompt, skip for briefings
-8d. **Memory cap**: `_apply_memory_cap()`, truncates recalled → dated if `max_memory_chars` exceeded
+8d. **Knowledge facts**: load from `knowledge_graph`, relevance-filtered by prompt, capped by `max_knowledge_facts`
+8e. **Memory cap**: `_apply_memory_cap()`, truncates recalled → knowledge facts → dated if `max_memory_chars` exceeded
 9. **Confirmation context**: load from `task.confirmation_prompt` if confirmed task
 10. **Build prompt**: includes `confirmation_context` when set
 11. **Dry run check**: return prompt text
@@ -47,6 +48,7 @@ def build_prompt(
     skip_persona: bool = False,
     cli_skills_text: str | None = None,
     confirmation_context: str | None = None,
+    knowledge_facts: str | None = None,
 ) -> str:
 ```
 
@@ -54,8 +56,9 @@ def build_prompt(
 1. Header: role, user_id, datetime, task_id, conversation_token, db_path
 2. Emissaries: `config/emissaries.md` constitutional principles (skipped for briefings)
 3. Persona: user workspace `PERSONA.md` overrides `config/persona.md` (skipped for briefings or `skip_persona`)
-4. Resources: calendars, folders, todos, email_folders, notes, reminders
+4. Resources: calendars, folders, todos, email_folders, notes_folders, reminders
 5. User memory: USER.md (skipped for briefings)
+5b. Knowledge facts: relevance-filtered KG triples (skipped for briefings)
 6. Channel memory: CHANNEL.md
 7. Dated memories: auto-loaded from `memories/YYYY-MM-DD.md` (configurable via `auto_load_dated_days`)
 7b. Recalled memories: BM25 search results (when `auto_recall` enabled)
