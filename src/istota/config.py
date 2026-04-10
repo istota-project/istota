@@ -346,6 +346,7 @@ class Config:
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt
     model: str = ""  # Claude model to use (e.g. "sonnet", "opus"); empty = CLI default
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
+    max_knowledge_facts: int = 0  # cap knowledge graph facts per prompt (0 = unlimited)
     db_path: Path = field(default_factory=lambda: Path("data/istota.db"))
     nextcloud: NextcloudConfig = field(default_factory=NextcloudConfig)
     talk: TalkConfig = field(default_factory=TalkConfig)
@@ -719,6 +720,8 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "max_memory_chars" in data:
         config.max_memory_chars = data["max_memory_chars"]
+    if "max_knowledge_facts" in data:
+        config.max_knowledge_facts = data["max_knowledge_facts"]
 
     if "db_path" in data:
         config.db_path = Path(data["db_path"])

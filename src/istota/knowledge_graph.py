@@ -305,6 +305,62 @@ def get_fact_count(conn: sqlite3.Connection, user_id: str) -> dict:
     return {"total": total, "current": current, "historical": total - current}
 
 
+def _tokenize(text: str) -> set[str]:
+    """Extract lowercase word tokens from text, splitting on non-alphanumeric."""
+    import re
+    return set(re.findall(r"[a-z0-9]+(?:_[a-z0-9]+)*", text.lower()))
+
+
+def select_relevant_facts(
+    facts: list[KnowledgeFact],
+    prompt: str,
+    user_id: str,
+    max_facts: int = 0,
+) -> list[KnowledgeFact]:
+    """Filter facts to those relevant to the prompt.
+
+    Always includes facts where the subject matches user_id (identity facts).
+    Remaining facts are included if their subject or object appears as a token
+    in the prompt text. When max_facts > 0, caps total after filtering
+    (identity facts prioritized, then by creation date descending).
+    """
+    if not facts:
+        return []
+
+    prompt_tokens = _tokenize(prompt)
+    user_id_lower = user_id.lower()
+
+    identity: list[KnowledgeFact] = []
+    matched: list[KnowledgeFact] = []
+
+    for fact in facts:
+        if fact.subject == user_id_lower:
+            identity.append(fact)
+            continue
+
+        # Check if subject or object tokens appear in the prompt
+        subject_tokens = _tokenize(fact.subject)
+        object_tokens = _tokenize(fact.object)
+
+        if subject_tokens & prompt_tokens or object_tokens & prompt_tokens:
+            matched.append(fact)
+
+    result = identity + matched
+
+    if max_facts > 0 and len(result) > max_facts:
+        # Keep identity facts first, then most recent matched
+        matched.sort(key=lambda f: f.created_at, reverse=True)
+        remaining = max_facts - len(identity)
+        if remaining > 0:
+            result = identity + matched[:remaining]
+        else:
+            # Even identity alone exceeds cap — truncate identity by recency
+            identity.sort(key=lambda f: f.created_at, reverse=True)
+            result = identity[:max_facts]
+
+    return result
+
+
 def format_facts_for_prompt(facts: list[KnowledgeFact]) -> str:
     """Format facts as a prompt section."""
     if not facts:
