@@ -1833,15 +1833,7 @@ def execute_task(
             else:
                 with db.get_db(config.db_path) as temp_conn:
                     _save_skills(temp_conn)
-            # Verify the save persisted
-            with db.get_db(config.db_path) as verify_conn:
-                row = verify_conn.execute(
-                    "SELECT selected_skills FROM tasks WHERE id = ?", (task.id,)
-                ).fetchone()
-                if row and row[0]:
-                    logger.info("Saved %d selected skills for task %d (verified)", len(selected_skills), task.id)
-                else:
-                    logger.warning("Saved skills for task %d but verify read returned: %r", task.id, row[0] if row else None)
+            logger.debug("Saved %d selected skills for task %d", len(selected_skills), task.id)
         except Exception:
             logger.warning("Failed to save selected_skills for task %d", task.id, exc_info=True)
 

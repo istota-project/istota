@@ -1571,13 +1571,8 @@ def process_one_task(
                 refreshed = db.get_task(_conn, task_id)
                 if refreshed and refreshed.selected_skills:
                     selected_skills = json.loads(refreshed.selected_skills)
-                    logger.info("Task %d: loaded %d skills for log channel", task_id, len(selected_skills))
-                else:
-                    logger.info("Task %d: no selected_skills in DB (refreshed=%s, skills=%r)",
-                                task_id, refreshed is not None,
-                                refreshed.selected_skills if refreshed else None)
-        except Exception as e:
-            logger.warning("Task %d: failed to read selected_skills: %s", task_id, e)
+        except Exception:
+            pass
         _finalize_log_channel(
             config, task, log_channel, log_channel_prefix,
             log_callback, success, error=error_msg,
