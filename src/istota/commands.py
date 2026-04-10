@@ -210,15 +210,14 @@ async def cmd_status(config, conn, user_id, conversation_token, args, client):
     return "\n".join(lines)
 
 
-@command("memory", "Show your user or channel memory: `!memory user` or `!memory channel`")
+@command("memory", "Show memory: `!memory user`, `!memory channel`, `!memory facts`")
 async def cmd_memory(config, conn, user_id, conversation_token, args, client):
     mount = config.nextcloud_mount_path
-    if mount is None:
-        return "Nextcloud mount not configured -- cannot read memory files."
-
     target = args.strip().lower()
 
     if target == "user":
+        if mount is None:
+            return "Nextcloud mount not configured -- cannot read memory files."
         mem_path = mount / "Users" / user_id / config.bot_dir_name / "config" / "USER.md"
         if mem_path.exists():
             content = mem_path.read_text()
@@ -227,6 +226,8 @@ async def cmd_memory(config, conn, user_id, conversation_token, args, client):
         return "**User memory:** (empty)"
 
     if target == "channel":
+        if mount is None:
+            return "Nextcloud mount not configured -- cannot read memory files."
         from .storage import validate_conversation_token
         validate_conversation_token(conversation_token)
         mem_path = mount / "Channels" / conversation_token / "CHANNEL.md"
@@ -236,7 +237,47 @@ async def cmd_memory(config, conn, user_id, conversation_token, args, client):
                 return f"**Channel memory** ({len(content)} chars):\n\n{content}"
         return "**Channel memory:** (empty)"
 
-    return "Usage: `!memory user` or `!memory channel`"
+    if target == "facts":
+        try:
+            from .knowledge_graph import ensure_table, get_current_facts, get_fact_count, format_facts_for_prompt
+            ensure_table(conn)
+            counts = get_fact_count(conn, user_id)
+            total = counts["current"]
+            if total == 0:
+                return "**Knowledge graph:** (no facts)"
+            facts = get_current_facts(conn, user_id)
+            text = format_facts_for_prompt(facts)
+            if total <= 20:
+                return f"**Knowledge graph** ({total} facts):\n\n{text}"
+            # Summarize by subject for large fact sets
+            subjects: dict[str, int] = {}
+            for f in facts:
+                subjects[f.subject] = subjects.get(f.subject, 0) + 1
+            summary = ", ".join(f"{s} ({n})" for s, n in sorted(subjects.items(), key=lambda x: -x[1]))
+            return (
+                f"**Knowledge graph** ({total} facts across {len(subjects)} entities):\n\n"
+                f"**Entities:** {summary}\n\n"
+                f"Use `istota-skill memory_search facts` or `!memory facts <entity>` to query specific entities."
+            )
+        except Exception as e:
+            return f"Error reading knowledge graph: {e}"
+
+    if target.startswith("facts "):
+        entity = target[6:].strip()
+        if not entity:
+            return "Usage: `!memory facts <entity>`"
+        try:
+            from .knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
+            ensure_table(conn)
+            facts = get_current_facts(conn, user_id, subject=entity)
+            if facts:
+                text = format_facts_for_prompt(facts)
+                return f"**Facts about {entity}** ({len(facts)}):\n\n{text}"
+            return f"**Facts about {entity}:** (none found)"
+        except Exception as e:
+            return f"Error reading knowledge graph: {e}"
+
+    return "Usage: `!memory user`, `!memory channel`, or `!memory facts`"
 
 
 @command("cron", "List/enable/disable scheduled jobs: `!cron`, `!cron enable <name>`, `!cron disable <name>`")
