@@ -1,9 +1,10 @@
 ---
 name: transcribe
-triggers: [transcribe, ocr, screenshot, text in image, handwriting, scan, extract text]
+triggers: [transcribe, ocr, screenshot, text in image, handwriting, scan, extract text, image]
 description: OCR transcription for images with text
 cli: true
 file_types: [png, jpg, jpeg, gif, webp, bmp, tiff, tif, heic]
+companion_skills: [notes]
 dependencies: [pytesseract]
 ---
 # Image Transcription with OCR
@@ -64,3 +65,42 @@ Process a handwritten note with preprocessing:
 ```bash
 istota-skill transcribe ocr /tmp/handwritten_note.jpg --preprocess
 ```
+
+## Transcription workflow
+
+When you receive an image without an explicit request, treat it as a transcription request.
+
+### Saving
+
+- Always save transcriptions automatically — don't ask "should I save this?"
+- For where to save, follow the notes skill save location rules
+
+### Title
+
+- Choose a memorable or representative sentence (or fragment) from the transcribed content
+- Only capitalize the first letter, not every word
+- Never include a title header in the note body — the filename is the title
+
+### Frontmatter
+
+Every transcription note must include YAML frontmatter:
+- `created`: date in YYYY-MM-DD format
+- `tags`: 1-5 tags. If the user has a canonical tag list (in resources or memory), choose only from it. Otherwise, generate a few descriptive lowercase tags based on the content. Tags go in frontmatter only, never as inline hashtags in the body
+
+Example:
+```
+---
+created: 2026-01-29
+tags: [screenshot, philosophy]
+---
+
+The transcribed content goes here...
+
+---
+
+*Commentary in italics*
+```
+
+### Commentary
+
+After the transcription body, append any relevant commentary or context about the topic in italics, separated by a horizontal rule (`---`). Skip commentary if you have nothing meaningful to add.

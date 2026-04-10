@@ -1434,6 +1434,18 @@ def build_prompt(
         )
         resource_sections.append(f"TODO Files:\n{todo_list}")
 
+    # Notes folder: user-configured or default to {bot_dir}/notes/
+    if "notes_folder" in resources_by_type:
+        notes_folders = resources_by_type["notes_folder"]
+        nf_list = "\n".join(
+            f"  - {r.display_name or r.resource_path}: {r.resource_path} ({r.permissions})"
+            for r in notes_folders
+        )
+        resource_sections.append(f"Notes Folders:\n{nf_list}")
+    elif config.use_mount:
+        default_notes = config.nextcloud_mount_path / "Users" / task.user_id / config.bot_dir_name / "notes"
+        resource_sections.append(f"Notes Folder:\n  - {default_notes} (readwrite)")
+
     if "email_folder" in resources_by_type:
         email_folders = resources_by_type["email_folder"]
         email_list = "\n".join(

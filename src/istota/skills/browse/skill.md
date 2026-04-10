@@ -116,6 +116,10 @@ istota-skill browse interact <session_id> --scroll down --scroll-amount 2000
 
 If a response has `"status": "captcha"`, tell the user and provide the `vnc_url`. Wait for them to solve it, then retry with `--session <session_id>`.
 
+## Fallback for web tools
+
+When WebSearch or WebFetch aren't available, use `istota-skill browse` as a fallback — it always works since it runs {BOT_NAME}'s own headless browser.
+
 ## Notes
 
 - Sessions expire after 10 minutes of inactivity — always close them when done
