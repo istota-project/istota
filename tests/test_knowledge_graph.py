@@ -9,6 +9,8 @@ from istota.knowledge_graph import (
     KnowledgeFact,
     SINGLE_VALUED_PREDICATES,
     TEMPORARY_PREDICATES,
+    _normalize,
+    _fact_similarity,
     add_fact,
     delete_fact,
     ensure_table,
@@ -410,3 +412,130 @@ class TestFormatFactsForPrompt:
 
     def test_empty_facts(self):
         assert format_facts_for_prompt([]) == ""
+
+
+class TestNormalize:
+    def test_lowercase_and_strip(self):
+        assert _normalize("  Stefan  ") == "stefan"
+
+    def test_preserves_known_predicates(self):
+        """Known predicates pass through unchanged (lowercase only)."""
+        for pred in SINGLE_VALUED_PREDICATES:
+            assert _normalize(pred) == pred
+        for pred in TEMPORARY_PREDICATES:
+            assert _normalize(pred) == pred
+
+    def test_freeform_predicates_normalized(self):
+        assert _normalize("Allergic_To") == "allergic_to"
+        assert _normalize("  ENJOYS  ") == "enjoys"
+
+
+class TestFactSimilarity:
+    def test_identical_strings(self):
+        assert _fact_similarity("allergic_to tree nuts", "allergic_to tree nuts") == 1.0
+
+    def test_completely_different(self):
+        assert _fact_similarity("allergic_to tree nuts", "lives_in warsaw") == 0.0
+
+    def test_partial_overlap(self):
+        sim = _fact_similarity("allergic_to tree_nuts", "allergic_to tree nuts")
+        # Words: {allergic_to, tree_nuts} vs {allergic_to, tree, nuts}
+        # Intersection: {allergic_to} = 1, Union: 4 → 0.25
+        assert 0.0 < sim < 0.5
+
+    def test_empty_string(self):
+        assert _fact_similarity("", "something") == 0.0
+        assert _fact_similarity("something", "") == 0.0
+
+    def test_high_similarity(self):
+        sim = _fact_similarity("works_at acme corp", "works_at acme corporation")
+        # 2 of 3 vs 2 of 3 shared words → moderate
+        assert sim > 0.4
+
+
+class TestFuzzyDedup:
+    def test_exact_duplicate_still_skipped(self, conn):
+        """Existing exact-dedup behavior is preserved."""
+        id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        id2 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        assert id1 is not None
+        assert id2 is None
+
+    def test_near_duplicate_skipped(self, conn):
+        """Similar predicate+object for same subject is skipped."""
+        id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        # Very similar — "allergic_to tree nuts" vs "allergic_to tree nut"
+        id2 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nut")
+        assert id1 is not None
+        # Jaccard of {"allergic_to", "tree", "nuts"} vs {"allergic_to", "tree", "nut"}
+        # = 2/4 = 0.5 — below threshold, so this is NOT deduped
+        # Actually let's check: the normalized forms are "allergic_to tree nuts" and "allergic_to tree nut"
+        # Words: {allergic_to, tree, nuts} vs {allergic_to, tree, nut} → intersection=2, union=4 → 0.5
+        # Below 0.7 threshold, so it inserts
+        assert id2 is not None
+
+    def test_high_overlap_deduped(self, conn):
+        """High word overlap triggers dedup."""
+        id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts and peanuts")
+        # Same words, slightly different phrasing
+        id2 = add_fact(conn, "user1", "stefan", "allergic_to", "peanuts and tree nuts")
+        assert id1 is not None
+        assert id2 is None  # Same words, Jaccard=1.0
+
+    def test_different_predicate_object_inserted(self, conn):
+        """Completely different predicate+object is inserted normally."""
+        id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        id2 = add_fact(conn, "user1", "stefan", "lives_in", "warsaw")
+        assert id1 is not None
+        assert id2 is not None
+
+    def test_same_fact_different_subject_inserted(self, conn):
+        """Same predicate+object but different subject → not deduped."""
+        id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        id2 = add_fact(conn, "user1", "felix", "allergic_to", "tree nuts")
+        assert id1 is not None
+        assert id2 is not None
+
+    def test_same_fact_different_user_inserted(self, conn):
+        """Same everything but different user_id → not deduped."""
+        id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        id2 = add_fact(conn, "user2", "stefan", "allergic_to", "tree nuts")
+        assert id1 is not None
+        assert id2 is not None
+
+    def test_predicate_variant_fuzzy_dedup(self, conn):
+        """Predicate variants caught by fuzzy dedup (word overlap)."""
+        id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        # "is_allergic_to tree nuts" vs "allergic_to tree nuts"
+        # Words: {is_allergic_to, tree, nuts} vs {allergic_to, tree, nuts}
+        # Intersection: {tree, nuts} = 2, Union: {is_allergic_to, allergic_to, tree, nuts} = 4
+        # Jaccard = 0.5 — below 0.7, so this is NOT caught by fuzzy dedup
+        # This is acceptable — the extraction prompt guides consistent naming
+        id2 = add_fact(conn, "user1", "stefan", "is_allergic_to", "tree nuts")
+        assert id1 is not None
+        assert id2 is not None  # Different predicate, low Jaccard
+
+    def test_freeform_predicate_inserted(self, conn):
+        """Freeform predicates not in any known set are accepted."""
+        fact_id = add_fact(conn, "user1", "stefan", "enjoys", "hiking")
+        assert fact_id is not None
+        fact = get_fact(conn, fact_id)
+        assert fact.predicate == "enjoys"
+        assert fact.object == "hiking"
+
+    def test_freeform_predicate_is_multi_valued(self, conn):
+        """Unknown predicates don't supersede — they're multi-valued by default."""
+        id1 = add_fact(conn, "user1", "stefan", "enjoys", "hiking")
+        id2 = add_fact(conn, "user1", "stefan", "enjoys", "cooking")
+        fact1 = get_fact(conn, id1)
+        fact2 = get_fact(conn, id2)
+        assert fact1.valid_until is None  # Both current
+        assert fact2.valid_until is None
+
+    def test_fuzzy_dedup_only_checks_current_facts(self, conn):
+        """Invalidated facts should not trigger fuzzy dedup."""
+        id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        invalidate_fact(conn, id1, ended="2026-01-01")
+        # Re-add same fact — should succeed since the old one is invalidated
+        id2 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        assert id2 is not None

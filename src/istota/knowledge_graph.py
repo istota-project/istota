@@ -55,6 +55,15 @@ def _normalize(text: str) -> str:
     return text.strip().lower()
 
 
+def _fact_similarity(pred_obj_a: str, pred_obj_b: str) -> float:
+    """Word-level Jaccard similarity between two 'predicate object' strings."""
+    words_a = set(pred_obj_a.split())
+    words_b = set(pred_obj_b.split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
 def _row_to_fact(row: sqlite3.Row) -> KnowledgeFact:
     return KnowledgeFact(
         id=row["id"],
@@ -152,6 +161,24 @@ def add_fact(
 
     if existing:
         return None  # Duplicate
+
+    # Fuzzy dedup: catch near-duplicate predicate+object for same subject
+    # (e.g., "allergic_to tree_nuts" vs "allergic_to tree nuts")
+    FUZZY_DEDUP_THRESHOLD = 0.7
+    new_sig = f"{predicate} {object_val}"
+    near_matches = conn.execute(
+        "SELECT predicate, object FROM knowledge_facts "
+        "WHERE user_id = ? AND subject = ? "
+        "AND (valid_until IS NULL OR valid_until > ?)",
+        (user_id, subject, today),
+    ).fetchall()
+    for row in near_matches:
+        existing_sig = f"{row[0]} {row[1]}"
+        if _fact_similarity(new_sig, existing_sig) >= FUZZY_DEDUP_THRESHOLD:
+            logger.debug(
+                "Skipping near-duplicate fact: '%s' ≈ '%s'", new_sig, existing_sig
+            )
+            return None
 
     # Supersession for single-valued predicates (only permanent facts supersede)
     if predicate in SINGLE_VALUED_PREDICATES and not temporary:

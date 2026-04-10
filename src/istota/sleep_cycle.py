@@ -35,12 +35,14 @@ _MIN_TASK_BUDGET = 500
 INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "cli"})
 AUTOMATED_SOURCE_TYPES = frozenset({"cron", "briefing", "subtask"})
 
-# Known predicates for fact validation (keep in sync with extraction prompt)
-VALID_PREDICATES = frozenset({
+# Suggested predicates listed in the extraction prompt as guidance.
+# Not enforced — freeform predicates are accepted and treated as multi-valued
+# by the knowledge graph (only SINGLE_VALUED_PREDICATES trigger supersession).
+SUGGESTED_PREDICATES = (
     "works_at", "works_on", "lives_in", "uses_tech", "has_role",
     "prefers", "knows", "relates_to", "has_status", "decided",
-    "staying_in", "visiting",
-})
+    "staying_in", "visiting", "allergic_to", "speaks",
+)
 
 # Sentinel output from Claude indicating nothing worth saving
 NO_NEW_MEMORIES = "NO_NEW_MEMORIES"
@@ -186,7 +188,7 @@ Do NOT repeat any of this information in your output.
 {existing_memory}
 """
 
-    predicates_str = ", ".join(sorted(VALID_PREDICATES))
+    predicates_str = ", ".join(sorted(SUGGESTED_PREDICATES))
 
     return f"""You are extracting important memories from a day of interactions with user '{user_id}'.
 
@@ -251,10 +253,22 @@ Output three sections in this exact order. Each section starts with its marker o
 MEMORIES:
 (bullet points as described above — this is the primary output)
 
+Important: if a piece of information is a personal attribute, relationship, or preference
+that reduces cleanly to a (subject, predicate, object) triple, put it in FACTS only —
+do NOT also create a MEMORY bullet for it. MEMORIES are for events, decisions, outcomes,
+and situational context that don't reduce to a simple triple.
+
+Examples:
+- "Stefan is allergic to tree nuts" → FACT only (stefan | allergic_to | tree_nuts)
+- "Felix has an egg allergy" → FACT only (felix | allergic_to | eggs)
+- "Sent intro email to Dana about consulting" → MEMORY (event/outcome, not a triple)
+- "Project Alpha migrating to FastAPI, targeting Q2" → MEMORY (situational context)
+
 FACTS:
 (JSON array of entity-relationship triples extracted from the interactions)
 Each triple: {{"subject": "entity", "predicate": "relationship", "object": "value"}}
-Allowed predicates: {predicates_str}
+Suggested predicates: {predicates_str}
+You may use other predicates when none of the above fit — prefer short, lowercase, snake_case verbs.
 Use staying_in/visiting for temporary states (not lives_in).
 Normalize entity names to lowercase.
 
@@ -291,16 +305,16 @@ Do not include any preamble or explanation outside these sections."""
 
 
 def _validate_fact(fact: dict) -> bool:
-    """Validate an extracted fact has required fields and a known predicate."""
+    """Validate an extracted fact has required fields with non-empty values.
+
+    Predicates are freeform — any non-empty string is accepted. The knowledge
+    graph handles unknown predicates as multi-valued by default.
+    """
     if not isinstance(fact, dict):
         return False
     if not all(k in fact for k in ("subject", "predicate", "object")):
         return False
-    predicate = fact["predicate"].strip().lower()
-    if predicate not in VALID_PREDICATES:
-        logger.debug("Dropping fact with unknown predicate: %s", fact.get("predicate"))
-        return False
-    if not fact["subject"].strip() or not fact["object"].strip():
+    if not fact["subject"].strip() or not fact["predicate"].strip() or not fact["object"].strip():
         return False
     return True
 
@@ -565,12 +579,16 @@ Update USER.md by:
 2. Removing entries that are outdated or contradicted by newer information
 3. Keeping the file concise and well-organized under clear headings
 4. Preserving the existing structure and headings where possible
+5. When adding new information that doesn't fit under any existing heading, create a new
+   appropriately-named heading for it. Never append unrelated information under an existing heading.
 
 Do NOT include:
 - Temporary or time-bound information (e.g., "meeting tomorrow")
 - Task references (ref:NNNN) — those belong in dated memories only
 - Redundant entries — if info is already in USER.md, don't duplicate it
-- Facts already tracked in the knowledge graph (listed above) — those are stored separately
+- Facts already tracked in the knowledge graph (listed above) — those are stored separately.
+  Before promoting a dated memory bullet, check whether its core information is already
+  captured as a knowledge graph fact. If so, skip it — the KG is the authoritative store.
 
 If USER.md is already up to date and no changes are needed, respond with exactly: {NO_CHANGES_NEEDED}
 

@@ -24,7 +24,7 @@ from istota.sleep_cycle import (
     NO_CHANGES_NEEDED,
     MAX_DAY_DATA_CHARS,
     INTERACTIVE_SOURCE_TYPES,
-    VALID_PREDICATES,
+    SUGGESTED_PREDICATES,
 )
 
 
@@ -346,10 +346,22 @@ class TestBuildMemoryExtractionPrompt:
         assert "Good fact examples" in prompt
 
     def test_prompt_predicates_from_registry(self):
-        """Every predicate in VALID_PREDICATES should appear in the prompt."""
+        """Every suggested predicate should appear in the prompt."""
         prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
-        for predicate in VALID_PREDICATES:
+        for predicate in SUGGESTED_PREDICATES:
             assert predicate in prompt, f"Predicate '{predicate}' missing from prompt"
+
+    def test_prompt_allows_freeform_predicates(self):
+        """Prompt should indicate freeform predicates are accepted."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "Suggested predicates" in prompt
+        assert "You may use other predicates" in prompt
+
+    def test_prompt_dedup_guidance(self):
+        """Prompt should instruct to put attributes in FACTS only, not MEMORIES."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "FACT only" in prompt
+        assert "personal attribute" in prompt
 
 
 class TestProcessUserSleepCycle:
@@ -862,14 +874,15 @@ TOPICS:
         memories, facts, topics = _parse_structured_extraction(output)
         assert len(facts) == 3
 
-    def test_unknown_predicate_filtered(self):
-        """Facts with predicates not in VALID_PREDICATES are dropped."""
+    def test_freeform_predicates_accepted(self):
+        """Facts with freeform predicates are accepted (not filtered)."""
         output = """MEMORIES:
 - Memory (2026-04-08, ref:1)
 
 FACTS:
 [
   {"subject": "stefan", "predicate": "knows", "object": "python"},
+  {"subject": "stefan", "predicate": "allergic_to", "object": "tree nuts"},
   {"subject": "stefan", "predicate": "favorite_color", "object": "blue"}
 ]
 
@@ -877,8 +890,9 @@ TOPICS:
 {}"""
 
         memories, facts, topics = _parse_structured_extraction(output)
-        assert len(facts) == 1
-        assert facts[0]["predicate"] == "knows"
+        assert len(facts) == 3
+        predicates = {f["predicate"] for f in facts}
+        assert predicates == {"knows", "allergic_to", "favorite_color"}
 
     def test_empty_subject_filtered(self):
         """Facts with empty subject are dropped."""
@@ -933,11 +947,21 @@ class TestValidateFact:
     def test_missing_field_fails(self):
         assert not _validate_fact({"subject": "stefan", "predicate": "knows"})
 
-    def test_unknown_predicate_fails(self):
-        assert not _validate_fact({"subject": "stefan", "predicate": "likes", "object": "cats"})
+    def test_freeform_predicate_accepted(self):
+        """Freeform predicates are accepted — validation only checks non-empty."""
+        assert _validate_fact({"subject": "stefan", "predicate": "likes", "object": "cats"})
+        assert _validate_fact({"subject": "stefan", "predicate": "allergic_to", "object": "tree nuts"})
+        assert _validate_fact({"subject": "stefan", "predicate": "speaks", "object": "polish"})
+        assert _validate_fact({"subject": "stefan", "predicate": "enjoys", "object": "hiking"})
 
     def test_empty_subject_fails(self):
         assert not _validate_fact({"subject": "", "predicate": "knows", "object": "python"})
+
+    def test_empty_predicate_fails(self):
+        assert not _validate_fact({"subject": "stefan", "predicate": "", "object": "python"})
+
+    def test_whitespace_predicate_fails(self):
+        assert not _validate_fact({"subject": "stefan", "predicate": "   ", "object": "python"})
 
     def test_whitespace_object_fails(self):
         assert not _validate_fact({"subject": "stefan", "predicate": "knows", "object": "   "})
