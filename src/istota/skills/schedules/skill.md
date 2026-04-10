@@ -3,6 +3,8 @@ name: schedules
 triggers: [schedule, scheduled, recurring, cron, every day, every week, every morning, every evening, periodic, nightly, daily, weekly]
 description: Scheduled recurring job management
 ---
+**Always use CRON.md for all scheduled jobs.** Never use session-scoped cron tools (like CronCreate) — they don't survive restarts. CRON.md is persistent and the only supported way to schedule recurring work.
+
 CRON.md is for running tasks and commands on a schedule. For monitoring conditions and alerting on failures, use HEARTBEAT.md instead.
 
 You can manage recurring scheduled jobs by editing the user's `{BOT_DIR}/config/CRON.md` file. The scheduler reads this file automatically — changes take effect within ~60 seconds.

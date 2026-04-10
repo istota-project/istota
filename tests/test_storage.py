@@ -430,8 +430,8 @@ class TestRcloneOperations:
 
         result = ensure_user_directories("nc", "alice", "istota")
         assert result is True
-        # 4 top-level subdirs + 2 bot subdirs (exports, scripts) = 6 mkdir calls
-        assert mock_run.call_count == 6
+        # 4 top-level subdirs + 3 bot subdirs (exports, scripts, notes) = 7 mkdir calls
+        assert mock_run.call_count == 7
 
     @patch("istota.storage.subprocess.run")
     def test_read_memory_via_rclone(self, mock_run):

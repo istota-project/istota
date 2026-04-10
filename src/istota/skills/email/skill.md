@@ -65,3 +65,16 @@ istota-skill email output --subject "Subject" --body-file /tmp/email_body.txt
 ```
 
 **When to use HTML:** Use `--html` when the content benefits from rich formatting (tables, styled sections, links). For simple text responses, use plain text (the default).
+
+## Email formatting
+
+### HTML emails
+When sending HTML emails, use semantic HTML structure:
+- Heading hierarchy: `h2`, `h3`, `h4`
+- Lists with `ul`/`li`, use `strong` for emphasis within items
+- Inline elements: `code`, `s` (strikethrough) where appropriate
+- Structural markup only — no inline CSS, no `style` attributes
+- Always use `--html` flag when sending HTML content
+
+### Sending behavior
+After composing an email, execute the send command. Don't narrate what you would send — actually send it (after confirmation if required by sensitive actions rules).

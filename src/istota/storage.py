@@ -559,7 +559,7 @@ def ensure_user_directories(remote: str, user_id: str, bot_dir: str) -> bool:
                 success = False
 
     # Create bot_dir subdirectories
-    for sub in ["exports", "scripts"]:
+    for sub in ["exports", "scripts", "notes"]:
         sub_path = f"{base}/{bot_dir}/{sub}"
         if not _rclone_mkdir(remote, sub_path):
             if not _rclone_path_exists(remote, sub_path):
@@ -806,6 +806,8 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         exports_dir.mkdir(exist_ok=True)
         scripts_dir = bot_dir_path / "scripts"
         scripts_dir.mkdir(exist_ok=True)
+        notes_dir = bot_dir_path / "notes"
+        notes_dir.mkdir(exist_ok=True)
 
         # Migrate scripts/ from user root into bot dir
         old_scripts = base / "scripts"
