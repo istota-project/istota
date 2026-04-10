@@ -2516,9 +2516,6 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     """
     processed = 0
 
-    # Run DB migrations (idempotent — ensures schema is up to date after deploys)
-    db.init_db(config.db_path)
-
     # Hydrate user configs from Nextcloud API
     try:
         hydrate_user_configs(config)
@@ -2689,9 +2686,6 @@ def run_daemon(config: Config) -> None:
         logger.info("SECURITY Sandbox disabled")
     logger.info("SECURITY Skill proxy: %s", "enabled" if config.security.skill_proxy_enabled else "disabled")
     logger.info("SECURITY Network proxy: %s", "enabled" if config.security.network.enabled else "disabled")
-
-    # Run DB migrations (idempotent — ensures schema is up to date after deploys)
-    db.init_db(config.db_path)
 
     # Hydrate user configs from Nextcloud API (display name, email, timezone)
     try:
