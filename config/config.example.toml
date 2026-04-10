@@ -169,6 +169,8 @@ progress_max_display_items = 20
 
 # Kill task execution after N minutes (default: 30)
 task_timeout_minutes = 30
+# Include selected skills in log channel messages (default: true)
+log_channel_show_skills = true
 # Robustness settings
 # Auto-cancel tasks awaiting confirmation after N minutes (default: 120 = 2 hours)
 confirmation_timeout_minutes = 120
