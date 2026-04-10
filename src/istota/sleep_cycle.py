@@ -35,14 +35,29 @@ _MIN_TASK_BUDGET = 500
 INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "cli"})
 AUTOMATED_SOURCE_TYPES = frozenset({"cron", "briefing", "subtask"})
 
-# Suggested predicates listed in the extraction prompt as guidance.
+# Suggested predicates with usage hints, shown in the extraction prompt.
 # Not enforced — freeform predicates are accepted and treated as multi-valued
 # by the knowledge graph (only SINGLE_VALUED_PREDICATES trigger supersession).
-SUGGESTED_PREDICATES = (
-    "works_at", "works_on", "lives_in", "uses_tech", "has_role",
-    "prefers", "knows", "relates_to", "has_status", "decided",
-    "staying_in", "visiting", "allergic_to", "speaks",
-)
+SUGGESTED_PREDICATES = {
+    # Single-valued (new value supersedes old — use only when one value is correct at a time)
+    "works_at": "employer or organization (single-valued, supersedes)",
+    "lives_in": "permanent residence city/country (single-valued, supersedes)",
+    "has_role": "job title or role (single-valued, supersedes)",
+    "has_status": "current life status like 'on sabbatical' or 'job hunting' (single-valued, supersedes)",
+    # Temporary (coexist with permanent facts, auto-flagged)
+    "staying_in": "temporary location like a trip or hotel (temporary, use valid_from/valid_until for dates)",
+    "visiting": "short visit to a place (temporary, use valid_from/valid_until for dates)",
+    # Multi-valued (concurrent facts allowed)
+    "works_on": "project, product, or initiative",
+    "uses_tech": "software, programming language, or digital tool (not physical objects)",
+    "knows": "skill, language, person, or domain knowledge",
+    "speaks": "spoken/written language",
+    "prefers": "preference or habit (diet, communication style, tools, etc.)",
+    "allergic_to": "allergy or intolerance",
+    "owns": "vehicle, property, or significant possession",
+    "relates_to": "relationship between entities (use when no specific predicate fits)",
+    "decided": "explicit decision or commitment",
+}
 
 # Sentinel output from Claude indicating nothing worth saving
 NO_NEW_MEMORIES = "NO_NEW_MEMORIES"
@@ -188,7 +203,9 @@ Do NOT repeat any of this information in your output.
 {existing_memory}
 """
 
-    predicates_str = ", ".join(sorted(SUGGESTED_PREDICATES))
+    predicates_str = "\n".join(
+        f"  - {pred}: {hint}" for pred, hint in SUGGESTED_PREDICATES.items()
+    )
 
     return f"""You are extracting important memories from a day of interactions with user '{user_id}'.
 
@@ -267,10 +284,20 @@ Examples:
 FACTS:
 (JSON array of entity-relationship triples extracted from the interactions)
 Each triple: {{"subject": "entity", "predicate": "relationship", "object": "value"}}
-Suggested predicates: {predicates_str}
+Optional temporal fields: "valid_from" and "valid_until" (YYYY-MM-DD) for time-bounded facts.
+
+Suggested predicates (with usage guidance):
+{predicates_str}
 You may use other predicates when none of the above fit — prefer short, lowercase, snake_case verbs.
-Use staying_in/visiting for temporary states (not lives_in).
-Normalize entity names to lowercase.
+Choose predicates carefully: use uses_tech for software/tools only (not physical objects like vehicles),
+use has_status for life situations only (not dietary choices — use prefers for those).
+
+Temporal facts: for trips, visits, and time-bounded states, put dates in valid_from/valid_until
+fields — NOT in the object string. Example:
+  {{"subject": "felix", "predicate": "visiting", "object": "japan", "valid_from": "2026-04-14", "valid_until": "2026-04-24"}}
+NOT: {{"subject": "felix", "predicate": "visiting", "object": "japan, april 14-24 2026"}}
+
+Normalize entity names to lowercase. Keep object values concise — a few words, not a sentence.
 
 Subject constraints:
 - For user preferences, habits, and decisions, the subject should be "{user_id}"
@@ -482,6 +509,7 @@ def process_user_sleep_cycle(
                     predicate=fact["predicate"],
                     object_val=fact["object"],
                     valid_from=fact.get("valid_from"),
+                    valid_until=fact.get("valid_until"),
                     source_type="extracted",
                 )
                 if fact_id is not None:

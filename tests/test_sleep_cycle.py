@@ -363,6 +363,21 @@ class TestBuildMemoryExtractionPrompt:
         assert "FACT only" in prompt
         assert "personal attribute" in prompt
 
+    def test_prompt_predicate_hints(self):
+        """Prompt should include usage hints for suggested predicates."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        # Check that hints are present, not just bare predicate names
+        assert "single-valued" in prompt
+        assert "software" in prompt  # uses_tech hint
+        assert "temporary" in prompt  # staying_in/visiting hint
+
+    def test_prompt_temporal_guidance(self):
+        """Prompt should instruct to use valid_from/valid_until, not date strings in objects."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "valid_from" in prompt
+        assert "valid_until" in prompt
+        assert "NOT in the object string" in prompt
+
 
 class TestProcessUserSleepCycle:
     def test_skips_when_no_interactions(self, mount_config, db_path):
