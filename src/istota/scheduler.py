@@ -1566,13 +1566,14 @@ def process_one_task(
         error_msg = result if not success else None
         # Read selected skills from DB (set during execute_task, not on local task object)
         selected_skills = None
-        try:
-            with db.get_db(config.db_path) as _conn:
-                refreshed = db.get_task(_conn, task_id)
-                if refreshed and refreshed.selected_skills:
-                    selected_skills = json.loads(refreshed.selected_skills)
-        except Exception:
-            pass
+        if config.scheduler.log_channel_show_skills:
+            try:
+                with db.get_db(config.db_path) as _conn:
+                    refreshed = db.get_task(_conn, task_id)
+                    if refreshed and refreshed.selected_skills:
+                        selected_skills = json.loads(refreshed.selected_skills)
+            except Exception:
+                pass
         _finalize_log_channel(
             config, task, log_channel, log_channel_prefix,
             log_callback, success, error=error_msg,

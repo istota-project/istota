@@ -68,6 +68,7 @@ istota_scheduler_progress_text_max_chars: 200         # Max chars for text progr
 istota_scheduler_progress_style: "replace"            # "full" (append all), "replace" (latest + elapsed), "none" (silent)
 istota_scheduler_progress_max_display_items: 20       # Max tool actions shown in edited progress message (full mode only)
 istota_scheduler_task_timeout_minutes: 30             # Kill task execution after N minutes
+istota_scheduler_log_channel_show_skills: true        # Include selected skills in log channel messages
 
 # Scheduler robustness settings
 istota_scheduler_confirmation_timeout_minutes: 120  # Auto-cancel pending confirmations

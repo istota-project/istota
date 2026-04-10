@@ -136,6 +136,7 @@ class SchedulerConfig:
     talk_cache_max_per_conversation: int = 200  # max cached talk messages per conversation
     location_ping_retention_days: int = 365  # delete location pings older than this (0 = unlimited)
     config_reload_interval: int = 300  # seconds between user config file re-reads (0 = disabled)
+    log_channel_show_skills: bool = True  # include selected skills in log channel messages
 
 
 @dataclass
