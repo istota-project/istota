@@ -1833,8 +1833,9 @@ def execute_task(
             else:
                 with db.get_db(config.db_path) as temp_conn:
                     _save_skills(temp_conn)
+            logger.info("Saved %d selected skills for task %d", len(selected_skills), task.id)
         except Exception:
-            logger.debug("Failed to save selected_skills for task %d", task.id, exc_info=True)
+            logger.warning("Failed to save selected_skills for task %d", task.id, exc_info=True)
 
     skills_doc = load_skills(
         config.skills_dir, selected_skills, config.bot_name, config.bot_dir_name,
