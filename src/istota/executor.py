@@ -1985,22 +1985,34 @@ def execute_task(
     # Auto-recall memories via BM25 search
     recalled_memories = _recall_memories(config, conn, task, skip_memory=_skip_memory)
 
-    # Load knowledge graph facts
+    # Load knowledge graph facts (filtered by relevance to prompt)
     knowledge_facts_text = None
     if not _skip_memory:
         try:
-            from .knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
+            from .knowledge_graph import (
+                ensure_table, get_current_facts, select_relevant_facts,
+                format_facts_for_prompt,
+            )
+            max_kf = config.max_knowledge_facts
             if conn is not None:
                 ensure_table(conn)
                 kg_facts = get_current_facts(conn, task.user_id)
                 if kg_facts:
-                    knowledge_facts_text = format_facts_for_prompt(kg_facts)
+                    kg_facts = select_relevant_facts(
+                        kg_facts, task.prompt, task.user_id, max_facts=max_kf,
+                    )
+                    if kg_facts:
+                        knowledge_facts_text = format_facts_for_prompt(kg_facts)
             else:
                 with db.get_db(config.db_path) as _kg_conn:
                     ensure_table(_kg_conn)
                     kg_facts = get_current_facts(_kg_conn, task.user_id)
                     if kg_facts:
-                        knowledge_facts_text = format_facts_for_prompt(kg_facts)
+                        kg_facts = select_relevant_facts(
+                            kg_facts, task.prompt, task.user_id, max_facts=max_kf,
+                        )
+                        if kg_facts:
+                            knowledge_facts_text = format_facts_for_prompt(kg_facts)
         except Exception:
             pass  # Graceful degradation
 

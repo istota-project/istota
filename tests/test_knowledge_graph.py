@@ -11,6 +11,7 @@ from istota.knowledge_graph import (
     TEMPORARY_PREDICATES,
     _normalize,
     _fact_similarity,
+    _tokenize,
     add_fact,
     delete_fact,
     ensure_table,
@@ -21,6 +22,7 @@ from istota.knowledge_graph import (
     get_fact_count,
     get_facts_as_of,
     invalidate_fact,
+    select_relevant_facts,
 )
 
 
@@ -539,3 +541,175 @@ class TestFuzzyDedup:
         # Re-add same fact — should succeed since the old one is invalidated
         id2 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
         assert id2 is not None
+
+
+class TestTokenize:
+    def test_basic_words(self):
+        assert _tokenize("Hello World") == {"hello", "world"}
+
+    def test_underscored_words(self):
+        assert _tokenize("project_alpha is active") == {"project_alpha", "is", "active"}
+
+    def test_punctuation_stripped(self):
+        tokens = _tokenize("What's happening with project_alpha?")
+        assert "project_alpha" in tokens
+        assert "what" in tokens
+        assert "s" in tokens
+
+    def test_mixed_case(self):
+        assert _tokenize("Stefan WORKS at Acme") == {"stefan", "works", "at", "acme"}
+
+    def test_empty_string(self):
+        assert _tokenize("") == set()
+
+
+class TestSelectRelevantFacts:
+    def _make_fact(self, subject, predicate, obj, **kwargs):
+        defaults = dict(
+            id=0, user_id="user1", valid_from=None, valid_until=None,
+            temporary=False, confidence=1.0, source_task_id=None,
+            source_type="extracted", created_at="2026-04-01T00:00:00",
+            updated_at="2026-04-01T00:00:00",
+        )
+        defaults.update(kwargs)
+        return KnowledgeFact(
+            subject=subject, predicate=predicate, object=obj, **defaults,
+        )
+
+    def test_identity_facts_always_included(self):
+        facts = [
+            self._make_fact("stefan", "works_at", "acme"),
+            self._make_fact("stefan", "lives_in", "warsaw"),
+            self._make_fact("project_alpha", "has_status", "active"),
+        ]
+        result = select_relevant_facts(facts, "unrelated prompt", "stefan")
+        assert len(result) == 2
+        assert all(f.subject == "stefan" for f in result)
+
+    def test_subject_match_in_prompt(self):
+        facts = [
+            self._make_fact("project_alpha", "has_status", "active"),
+            self._make_fact("project_beta", "has_status", "paused"),
+        ]
+        result = select_relevant_facts(
+            facts, "How is project_alpha going?", "stefan",
+        )
+        assert len(result) == 1
+        assert result[0].subject == "project_alpha"
+
+    def test_object_match_in_prompt(self):
+        facts = [
+            self._make_fact("project_alpha", "uses_tech", "svelte"),
+            self._make_fact("project_beta", "uses_tech", "react"),
+        ]
+        result = select_relevant_facts(
+            facts, "Tell me about our svelte projects", "stefan",
+        )
+        assert len(result) == 1
+        assert result[0].object == "svelte"
+
+    def test_no_match_excluded(self):
+        facts = [
+            self._make_fact("project_gamma", "has_status", "archived"),
+        ]
+        result = select_relevant_facts(
+            facts, "What's for lunch?", "stefan",
+        )
+        assert len(result) == 0
+
+    def test_identity_plus_matched(self):
+        facts = [
+            self._make_fact("stefan", "works_at", "acme"),
+            self._make_fact("acme", "has_status", "growing"),
+            self._make_fact("project_beta", "has_status", "paused"),
+        ]
+        result = select_relevant_facts(
+            facts, "Tell me about acme", "stefan",
+        )
+        # stefan (identity) + acme (subject match)
+        assert len(result) == 2
+        subjects = {f.subject for f in result}
+        assert subjects == {"stefan", "acme"}
+
+    def test_empty_facts(self):
+        result = select_relevant_facts([], "some prompt", "stefan")
+        assert result == []
+
+    def test_max_facts_caps_total(self):
+        facts = [
+            self._make_fact("stefan", "knows", "python", created_at="2026-01-01"),
+            self._make_fact("stefan", "knows", "go", created_at="2026-02-01"),
+            self._make_fact("stefan", "works_at", "acme", created_at="2026-03-01"),
+        ]
+        result = select_relevant_facts(
+            facts, "anything", "stefan", max_facts=2,
+        )
+        assert len(result) == 2
+
+    def test_max_facts_prioritizes_identity_over_matched(self):
+        facts = [
+            self._make_fact("stefan", "works_at", "acme"),
+            self._make_fact("stefan", "knows", "python"),
+            self._make_fact("project_alpha", "has_status", "active"),
+        ]
+        result = select_relevant_facts(
+            facts, "project_alpha update", "stefan", max_facts=2,
+        )
+        # 2 identity facts take priority, project_alpha gets cut
+        assert len(result) == 2
+        assert all(f.subject == "stefan" for f in result)
+
+    def test_max_facts_zero_means_unlimited(self):
+        facts = [
+            self._make_fact("stefan", "knows", f"lang{i}")
+            for i in range(20)
+        ]
+        result = select_relevant_facts(
+            facts, "anything", "stefan", max_facts=0,
+        )
+        assert len(result) == 20
+
+    def test_case_insensitive_matching(self):
+        facts = [
+            self._make_fact("project_alpha", "has_status", "active"),
+        ]
+        result = select_relevant_facts(
+            facts, "What about Project_Alpha?", "stefan",
+        )
+        assert len(result) == 1
+
+    def test_multi_word_entity_partial_match(self):
+        """A multi-word subject matches if any token appears in prompt."""
+        facts = [
+            self._make_fact("alice smith", "works_at", "acme"),
+        ]
+        result = select_relevant_facts(
+            facts, "Send alice the report", "stefan",
+        )
+        assert len(result) == 1
+
+    def test_user_id_match_is_case_insensitive(self):
+        facts = [
+            self._make_fact("stefan", "works_at", "acme"),
+        ]
+        result = select_relevant_facts(
+            facts, "unrelated", "Stefan",
+        )
+        assert len(result) == 1
+
+    def test_max_facts_matched_sorted_by_recency(self):
+        facts = [
+            self._make_fact("stefan", "works_at", "acme"),  # identity
+            self._make_fact("project_old", "uses_tech", "python",
+                           created_at="2025-01-01"),
+            self._make_fact("project_new", "uses_tech", "python",
+                           created_at="2026-04-01"),
+        ]
+        result = select_relevant_facts(
+            facts, "python projects", "stefan", max_facts=2,
+        )
+        # 1 identity + 1 matched (most recent)
+        assert len(result) == 2
+        non_identity = [f for f in result if f.subject != "stefan"]
+        assert len(non_identity) == 1
+        assert non_identity[0].subject == "project_new"
