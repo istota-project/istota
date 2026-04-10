@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-09: Fix sleep cycle fact routing and KG predicate handling
+
+The sleep cycle was producing both MEMORY bullets and FACTS for the same personal attributes (allergies, relationships, dietary preferences), then the curation pass was promoting those bullets into USER.md under unrelated headings. Investigated approaches from Graphiti (LLM + embedding dedup) and MemPalace (simple exact dedup), settled on a middle ground: freeform predicates with word-level Jaccard fuzzy dedup.
+
+**Key changes:**
+- Freeform KG predicates: replaced strict `VALID_PREDICATES` allowlist with suggested predicates — unknown predicates accepted as multi-valued by default
+- Fuzzy fact dedup in `add_fact()`: word-level Jaccard similarity (threshold 0.7) catches near-duplicate facts for the same subject
+- Extraction prompt: personal attributes routed to FACTS only (not also MEMORIES), annotated predicate hints with usage guidance, temporal field instructions (`valid_from`/`valid_until` instead of dates in object strings)
+- Curation prompt: stronger KG cross-reference instruction, new heading placement rule prevents appending unrelated info under existing headings
+- `!memory facts [entity]` command: shows KG facts inline (≤20) or entity summary (>20), with per-entity drill-down
+- KG CLI commands documented in memory_search skill.md
+- `valid_until` now passed through from extracted facts to `add_fact()`
+
+**Files added/modified:**
+- `src/istota/knowledge_graph.py` — Added `_fact_similarity()`, fuzzy dedup in `add_fact()`
+- `src/istota/sleep_cycle.py` — `SUGGESTED_PREDICATES` dict with hints, freeform `_validate_fact()`, extraction/curation prompt improvements, `valid_until` passthrough
+- `src/istota/commands.py` — `!memory facts` and `!memory facts <entity>` subcommands
+- `src/istota/skills/memory_search/skill.md` — Documented KG CLI commands and freeform predicates
+- `tests/test_knowledge_graph.py` — 15 new tests: normalization, similarity, fuzzy dedup, freeform predicates
+- `tests/test_sleep_cycle.py` — Updated for freeform predicates, new prompt guidance tests
+- `tests/test_commands.py` — 5 new tests for `!memory facts` command
+
 ## 2026-04-08: Temporal knowledge graph and metadata-filtered retrieval
 
 Added a structured knowledge graph for entity-relationship facts with temporal validity, and metadata-filtered search for memory chunks. Inspired by MemPalace's approach to structured memory, adapted to Istota's existing sleep cycle and search infrastructure.
