@@ -113,6 +113,32 @@ class TestFormatLogChannelBody:
         assert "✅ Done (no tool calls)" in body
         assert "- " not in body
 
+    def test_skills_included_in_body(self):
+        body = _format_log_channel_body(
+            ("**[#42]**", "Dev"), ["📄 Reading file.txt"],
+            done=True, success=True, skills=["calendar", "email", "files"],
+        )
+        assert "Skills: calendar, email, files" in body
+        # Skills line should come before tool descriptions
+        lines = body.split("\n")
+        skills_idx = next(i for i, l in enumerate(lines) if "Skills:" in l)
+        tool_idx = next(i for i, l in enumerate(lines) if "Reading file.txt" in l)
+        assert skills_idx < tool_idx
+
+    def test_no_skills_line_when_none(self):
+        body = _format_log_channel_body(
+            ("**[#42]**", "Dev"), ["📄 Reading file.txt"],
+            done=True, success=True,
+        )
+        assert "Skills:" not in body
+
+    def test_no_skills_line_when_empty(self):
+        body = _format_log_channel_body(
+            ("**[#42]**", "Dev"), ["📄 Reading file.txt"],
+            done=True, success=True, skills=[],
+        )
+        assert "Skills:" not in body
+
     def test_deduplicates_consecutive_descriptions(self):
         body = _format_log_channel_body(
             ("**[#42]**", "Dev"),
