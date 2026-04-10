@@ -600,20 +600,10 @@ def _finalize_log_channel(
                 reference_id=f"istota:log:{task.id}",
             ))
         else:
-            # No tool calls at all — post a one-liner
-            if isinstance(prefix, tuple):
-                task_prefix, source = prefix
-            else:
-                task_prefix, source = prefix, ""
-            status = "✅ Done" if success else "❌ Failed"
-            line = f"{task_prefix} {status} (no tool calls)"
-            if source:
-                line += f" - {source}"
-            if error:
-                line += f" — {error[:200]}"
+            # No tool calls at all — post using pre-computed body (includes skills)
             client = TalkClient(config)
             asyncio.run(client.send_message(
-                log_channel, line,
+                log_channel, body,
                 reference_id=f"istota:log:{task.id}",
             ))
     except Exception as e:
