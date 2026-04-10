@@ -108,7 +108,7 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 
 **Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, accounting via Moneyman API (ledger, invoicing, transactions), GPS location tracking (Overland), Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), Miniflux RSS feed management, and more. Skills are a curated standard library, not a plugin marketplace.
 
-**Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Configurable memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
+**Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Temporal knowledge graph stores structured facts as entity-relationship triples with validity windows — freeform predicates, automatic supersession for single-valued relations, fuzzy dedup. Configurable memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
 
 **Scheduling** — Cron jobs via CRON.md (AI prompts or shell commands), natural-language reminders as one-shot cron entries, scheduled briefings with calendar/markets/headlines/news/todos components.
 
@@ -149,7 +149,7 @@ Istota is built around Nextcloud — it uses your files, calendars, contacts, an
 | Messaging | Nextcloud Talk + email | WhatsApp, Telegram, Slack, Discord, Signal, Teams, Matrix, and more |
 | Multi-user | Native: per-user config, resources, sandboxing, worker isolation | Single-user per instance; run multiple containers for multiple users |
 | Storage | Nextcloud (WebDAV/rclone mount), includes files, calendars, contacts | Local filesystem |
-| Memory | USER.md + dated memories + channel memory + nightly curation + BM25/vector search + memory cap | Daily logs + MEMORY.md + hybrid search + pre-compaction flush |
+| Memory | USER.md + dated memories + channel memory + knowledge graph (temporal triples) + nightly curation + BM25/vector search + memory cap | Daily logs + MEMORY.md + hybrid search + pre-compaction flush |
 | Scheduling | CRON.md + briefings + heartbeats | Built-in cron + webhooks + Gmail Pub/Sub |
 | Skills | ~20 built-in skills with YAML frontmatter manifests, two-pass selection (keyword + semantic) | 5,700+ community skills via ClawHub registry, three tiers |
 | Security | Bubblewrap filesystem sandbox, credential stripping, admin/non-admin isolation, deferred DB writes | DM pairing policy; community skills are an acknowledged risk vector |
@@ -182,7 +182,7 @@ Each user gets a shared Nextcloud folder:
 
 ```bash
 uv sync --extra all                        # Install all dependencies
-uv run pytest tests/ -v                    # Run tests (~2760 unit tests)
+uv run pytest tests/ -v                    # Run tests (~2960 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
