@@ -56,6 +56,7 @@ istota/
 │       ├── memory/          # Memory file reference (doc-only)
 │       ├── memory_search/   # Memory search CLI (search, index, reindex, stats)
 │       ├── nextcloud/       # Nextcloud sharing + OCS API CLI
+│       ├── notes/           # Markdown note-saving conventions (doc-only)
 │       ├── reminders/       # Time-based reminders via CRON.md (doc-only)
 │       ├── schedules/       # CRON.md job management reference (doc-only)
 │       ├── scripts/         # User scripts reference (doc-only)
@@ -130,7 +131,7 @@ Admin users listed in `/etc/istota/admins`. Empty file = all users are admin (ba
 Non-admin restrictions: scoped mount path, no DB access, no subtask creation, `admin_only` skills filtered out.
 
 ### Multi-user Resources
-Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `ledger`, `karakeep`, `monarch`, `miniflux`, `moneyman`. CalDAV calendars auto-discovered from Nextcloud. Service credentials (Monarch, Karakeep, Miniflux, Moneyman) are configured as `[[resources]]` entries with type-specific fields in `extra`.
+Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`, `ledger`, `karakeep`, `monarch`, `miniflux`, `moneyman`. CalDAV calendars auto-discovered from Nextcloud. Service credentials (Monarch, Karakeep, Miniflux, Moneyman) are configured as `[[resources]]` entries with type-specific fields in `extra`.
 
 ### Nextcloud Directory Structure
 

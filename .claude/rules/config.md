@@ -171,6 +171,7 @@ skills_dir: Path = Path("config/skills")
 temp_dir: Path = Path("/tmp/istota")
 users_dir: Path | None = None
 max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
+max_knowledge_facts: int = 0  # cap knowledge graph facts per prompt (0 = unlimited)
 disabled_skills: list[str] = []    # instance-wide skills to exclude
 bundled_skills_dir: Path | None = None  # override for testing
 ```
