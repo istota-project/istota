@@ -535,6 +535,7 @@ class TestCmdMemory:
             result = await cmd_memory(config, conn, "alice", "room1", "", client)
         assert "!memory user" in result
         assert "!memory channel" in result
+        assert "!memory facts" in result
 
     @pytest.mark.asyncio
     async def test_user_memory_empty(self, make_config):
@@ -604,6 +605,90 @@ class TestCmdMemory:
             client = AsyncMock()
             result = await cmd_memory(config, conn, "alice", "room1", "user", client)
         assert "mount not configured" in result
+
+    @pytest.mark.asyncio
+    async def test_facts_empty(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            result = await cmd_memory(config, conn, "alice", "room1", "facts", client)
+        assert "no facts" in result
+
+    @pytest.mark.asyncio
+    async def test_facts_with_few(self, make_config):
+        """Small fact sets show all facts inline."""
+        config = make_config()
+        from istota.knowledge_graph import ensure_table, add_fact
+        with db.get_db(config.db_path) as conn:
+            ensure_table(conn)
+            add_fact(conn, "alice", "alice", "works_at", "acme")
+            add_fact(conn, "alice", "alice", "knows", "python")
+            conn.commit()
+            client = AsyncMock()
+            result = await cmd_memory(config, conn, "alice", "room1", "facts", client)
+        assert "Knowledge graph" in result
+        assert "2 facts" in result
+        assert "works_at" in result
+        assert "python" in result
+
+    @pytest.mark.asyncio
+    async def test_facts_large_set_summarizes(self, make_config):
+        """Large fact sets show entity summary instead of all facts."""
+        config = make_config()
+        from istota.knowledge_graph import ensure_table, add_fact
+        with db.get_db(config.db_path) as conn:
+            ensure_table(conn)
+            for i in range(25):
+                add_fact(conn, "alice", "alice", "knows", f"tech_{i}")
+            conn.commit()
+            client = AsyncMock()
+            result = await cmd_memory(config, conn, "alice", "room1", "facts", client)
+        assert "25 facts" in result
+        assert "Entities:" in result
+        assert "alice (25)" in result
+        # Should not dump all individual facts
+        assert "tech_0" not in result
+
+    @pytest.mark.asyncio
+    async def test_facts_entity_filter(self, make_config):
+        """!memory facts <entity> shows facts for that entity only."""
+        config = make_config()
+        from istota.knowledge_graph import ensure_table, add_fact
+        with db.get_db(config.db_path) as conn:
+            ensure_table(conn)
+            add_fact(conn, "alice", "alice", "works_at", "acme")
+            add_fact(conn, "alice", "bob", "works_at", "globex")
+            conn.commit()
+            client = AsyncMock()
+            result = await cmd_memory(config, conn, "alice", "room1", "facts alice", client)
+        assert "Facts about alice" in result
+        assert "works_at" in result
+        assert "globex" not in result
+
+    @pytest.mark.asyncio
+    async def test_facts_entity_not_found(self, make_config):
+        config = make_config()
+        from istota.knowledge_graph import ensure_table
+        with db.get_db(config.db_path) as conn:
+            ensure_table(conn)
+            client = AsyncMock()
+            result = await cmd_memory(config, conn, "alice", "room1", "facts nobody", client)
+        assert "none found" in result
+
+    @pytest.mark.asyncio
+    async def test_facts_no_mount_required(self, make_config):
+        """Facts come from DB, not filesystem — works without mount."""
+        config = make_config()
+        config.nextcloud_mount_path = None
+        from istota.knowledge_graph import ensure_table, add_fact
+        with db.get_db(config.db_path) as conn:
+            ensure_table(conn)
+            add_fact(conn, "alice", "alice", "speaks", "polish")
+            conn.commit()
+            client = AsyncMock()
+            result = await cmd_memory(config, conn, "alice", "room1", "facts", client)
+        assert "Knowledge graph" in result
+        assert "speaks" in result
 
 
 # =============================================================================
