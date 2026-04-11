@@ -1793,6 +1793,98 @@ class TestFilterTransitClusters:
         assert transit == 2
 
 
+class TestMergeConsecutiveStops:
+    """Direct unit tests for merge_consecutive_stops() spatial proximity merge."""
+
+    def _make_stop(self, location, lat, lon, first_ts, last_ts, ping_count,
+                   location_source="nominatim", transit_before=0):
+        return {
+            "location": location,
+            "location_source": location_source,
+            "lat": lat, "lon": lon,
+            "first_ts": first_ts, "last_ts": last_ts,
+            "first_ts_local": first_ts[-9:-4] if len(first_ts) > 9 else first_ts,
+            "last_ts_local": last_ts[-9:-4] if len(last_ts) > 9 else last_ts,
+            "ping_count": ping_count,
+            "_transit_pings_before": transit_before,
+        }
+
+    def test_merges_nearby_unnamed_stops_with_different_names(self):
+        """Two consecutive stops ~20m apart with different reverse-geocoded names
+        should merge (ISSUE-047 bug A)."""
+        from istota.geo import merge_consecutive_stops
+
+        stops = [
+            self._make_stop("East Live Oak Drive", 34.1086, -118.3099,
+                            "2026-04-10T01:58:00Z", "2026-04-10T03:56:00Z", 33),
+            self._make_stop("Tryon Road", 34.1087, -118.3100,
+                            "2026-04-10T04:09:00Z", "2026-04-10T04:41:00Z", 11),
+            self._make_stop("East Live Oak Drive", 34.1086, -118.3099,
+                            "2026-04-10T05:05:00Z", "2026-04-10T05:16:00Z", 18),
+        ]
+        merged = merge_consecutive_stops(stops)
+        assert len(merged) == 1
+        assert merged[0]["ping_count"] == 62
+        # Should keep the name from the longest stop
+        assert merged[0]["location"] == "East Live Oak Drive"
+
+    def test_does_not_merge_distant_unnamed_stops(self):
+        """Two consecutive unnamed stops far apart should not merge."""
+        from istota.geo import merge_consecutive_stops
+
+        stops = [
+            self._make_stop("Elm Street", 34.05, -118.25,
+                            "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", 20),
+            self._make_stop("Oak Avenue", 34.06, -118.25,
+                            "2026-04-10T11:30:00Z", "2026-04-10T12:00:00Z", 15),
+        ]
+        merged = merge_consecutive_stops(stops)
+        assert len(merged) == 2
+
+    def test_does_not_proximity_merge_saved_places(self):
+        """Two different saved places nearby should not be merged by proximity."""
+        from istota.geo import merge_consecutive_stops
+
+        stops = [
+            self._make_stop("Home", 34.1025, -118.3059,
+                            "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", 20,
+                            location_source="saved_place"),
+            self._make_stop("Neighbor", 34.1026, -118.3060,
+                            "2026-04-10T11:30:00Z", "2026-04-10T12:00:00Z", 15,
+                            location_source="saved_place"),
+        ]
+        merged = merge_consecutive_stops(stops)
+        assert len(merged) == 2
+
+    def test_proximity_merge_keeps_longer_stop_name(self):
+        """When merging by proximity, the name from the longer stop is kept."""
+        from istota.geo import merge_consecutive_stops
+
+        stops = [
+            self._make_stop("Short Road", 34.1086, -118.3099,
+                            "2026-04-10T10:00:00Z", "2026-04-10T10:10:00Z", 5),
+            self._make_stop("Main Boulevard", 34.1087, -118.3100,
+                            "2026-04-10T10:15:00Z", "2026-04-10T12:00:00Z", 30),
+        ]
+        merged = merge_consecutive_stops(stops)
+        assert len(merged) == 1
+        assert merged[0]["location"] == "Main Boulevard"
+
+    def test_proximity_merge_respects_transit_threshold(self):
+        """Even if nearby, stops separated by significant transit should not merge."""
+        from istota.geo import merge_consecutive_stops
+
+        stops = [
+            self._make_stop("Road A", 34.1086, -118.3099,
+                            "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", 20),
+            self._make_stop("Road B", 34.1087, -118.3100,
+                            "2026-04-10T12:00:00Z", "2026-04-10T13:00:00Z", 15,
+                            transit_before=5),
+        ]
+        merged = merge_consecutive_stops(stops)
+        assert len(merged) == 2
+
+
 class TestClusterPings:
     def test_empty_input(self):
         from istota.geo import cluster_pings
@@ -2243,3 +2335,90 @@ class TestCmdDaySummary:
         )
         # The stop should span the full visit
         assert result["stops"][0]["ping_count"] == len(pings)
+
+    def test_duration_minutes_in_output(self, tmp_path):
+        """Each stop should include a pre-computed duration_minutes field (ISSUE-047 bug B)."""
+        places = [{"name": "home", "lat": 34.05, "lon": -118.25, "radius_meters": 150}]
+        # 2 hours at home (16:00-18:00 UTC on March 8 = within PST day)
+        pings = [
+            {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.05, "lon": -118.25, "place_id": 1},
+            {"timestamp": "2026-03-08T17:00:00Z", "lat": 34.0501, "lon": -118.2501, "place_id": 1},
+            {"timestamp": "2026-03-08T18:00:00Z", "lat": 34.0502, "lon": -118.2502, "place_id": 1},
+        ]
+        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+        assert len(result["stops"]) == 1
+        stop = result["stops"][0]
+        assert "duration_minutes" in stop
+        assert stop["duration_minutes"] == 120
+
+    def test_duration_minutes_for_nominatim_stop(self, tmp_path):
+        """duration_minutes should work for reverse-geocoded stops too."""
+        mock_result = MagicMock()
+        mock_result.address = "Test Place"
+        mock_result.raw = {"address": {"suburb": "TestVille"}}
+
+        # 30-minute stop with pings close enough to avoid cluster splitting
+        # (max_gap_seconds=300, so keep gaps under 5 min)
+        pings = [
+            {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.18, "lon": -118.33},
+            {"timestamp": "2026-03-08T16:04:00Z", "lat": 34.1801, "lon": -118.3301},
+            {"timestamp": "2026-03-08T16:08:00Z", "lat": 34.1801, "lon": -118.3301},
+            {"timestamp": "2026-03-08T16:12:00Z", "lat": 34.1801, "lon": -118.3301},
+            {"timestamp": "2026-03-08T16:16:00Z", "lat": 34.1801, "lon": -118.3301},
+            {"timestamp": "2026-03-08T16:20:00Z", "lat": 34.1801, "lon": -118.3301},
+            {"timestamp": "2026-03-08T16:24:00Z", "lat": 34.1801, "lon": -118.3301},
+            {"timestamp": "2026-03-08T16:28:00Z", "lat": 34.1801, "lon": -118.3301},
+            {"timestamp": "2026-03-08T16:30:00Z", "lat": 34.1802, "lon": -118.3302},
+        ]
+        result = self._run_day_summary(
+            tmp_path, pings=pings,
+            nominatim_results=[mock_result],
+        )
+        assert len(result["stops"]) == 1
+        assert result["stops"][0]["duration_minutes"] == 30
+
+    def test_nearby_stops_with_different_geocoded_names_merge(self, tmp_path):
+        """ISSUE-047 scenario: GPS drift causes different road names for same location.
+
+        Three clusters at nearly identical coordinates get different reverse-geocoded
+        names. They should merge into a single stop via proximity check.
+        """
+        # Three nominatim results returning different road names
+        results = []
+        for road in ["East Live Oak Drive", "Tryon Road", "East Live Oak Drive"]:
+            r = MagicMock()
+            r.address = f"{road}, Los Feliz, CA"
+            r.raw = {"address": {"road": road, "suburb": "Los Feliz"}}
+            results.append(r)
+
+        # Three clusters ~110m apart (within 150m merge radius), separated by
+        # time gaps that cause cluster splitting. Each cluster is big enough
+        # (6+ min dwell, 3+ pings) to independently survive transit filtering,
+        # so they reach merge_consecutive_stops as separate stops.
+        # Coords differ enough that geocode cache gives different results.
+        pings = [
+            # Cluster 1: "East Live Oak Drive" — 5 pings over 10 min
+            *[{"timestamp": f"2026-03-09T01:{i*2:02d}:00Z",
+               "lat": 34.1086, "lon": -118.3099}
+              for i in range(5)],
+            # > 5min gap → new cluster
+            # Cluster 2: "Tryon Road" — ~110m from cluster 1, 5 pings over 10 min
+            *[{"timestamp": f"2026-03-09T01:{20+i*2:02d}:00Z",
+               "lat": 34.1096, "lon": -118.3099}
+              for i in range(5)],
+            # > 5min gap → new cluster
+            # Cluster 3: "East Live Oak Drive" again, 5 pings over 10 min
+            *[{"timestamp": f"2026-03-09T01:{40+i*2:02d}:00Z",
+               "lat": 34.1086, "lon": -118.3099}
+              for i in range(5)],
+        ]
+        result = self._run_day_summary(
+            tmp_path, pings=pings, date="2026-03-08", tz="America/Los_Angeles",
+            nominatim_results=results,
+        )
+        # All three clusters should merge into one stop
+        assert len(result["stops"]) == 1, (
+            f"Expected 1 merged stop, got {len(result['stops'])}: "
+            f"{[s['location'] for s in result['stops']]}"
+        )
+        assert result["stops"][0]["ping_count"] == 15
