@@ -659,6 +659,15 @@ def cmd_day_summary(args):
 
     merged = merge_consecutive_stops(stops)
 
+    # Pre-compute duration for each stop so consumers don't need timestamp math
+    for s in merged:
+        try:
+            first = datetime.fromisoformat(s["first_ts"]).replace(tzinfo=timezone.utc)
+            last = datetime.fromisoformat(s["last_ts"]).replace(tzinfo=timezone.utc)
+            s["duration_minutes"] = int((last - first).total_seconds() / 60)
+        except (ValueError, TypeError):
+            s["duration_minutes"] = None
+
     result = {
         "date": target_date,
         "timezone": tz_name,
@@ -673,6 +682,7 @@ def cmd_day_summary(args):
                 "suburb": s.get("suburb"),
                 "arrived": s.get("first_ts_local"),
                 "departed": s.get("last_ts_local"),
+                "duration_minutes": s.get("duration_minutes"),
                 "ping_count": s["ping_count"],
                 "lat": round(s["lat"], 5),
                 "lon": round(s["lon"], 5),

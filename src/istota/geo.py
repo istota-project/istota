@@ -198,20 +198,52 @@ def filter_transit_clusters(
     return stops, transit_pings
 
 
-def merge_consecutive_stops(stops: list[dict]) -> list[dict]:
+# Default radius (meters) for proximity-based merge of unnamed stops.
+MERGE_PROXIMITY_RADIUS_M = 150
+
+
+def _stop_dwell_seconds(stop: dict) -> float:
+    """Dwell time of a stop in seconds (first_ts to last_ts)."""
+    return (_parse_ts(stop["last_ts"]) - _parse_ts(stop["first_ts"])).total_seconds()
+
+
+def merge_consecutive_stops(stops: list[dict], proximity_radius_m: float = MERGE_PROXIMITY_RADIUS_M) -> list[dict]:
     """Merge consecutive stops at the same location.
 
     Stops separated by significant transit (> ``MERGE_TRANSIT_THRESHOLD``
     filtered pings) are kept separate even if they share a location name.
+
+    For non-saved-place stops, also merges by spatial proximity when
+    coordinates are within ``proximity_radius_m`` — handles GPS drift
+    causing different reverse-geocoded names for the same physical location.
+    When merging by proximity, keeps the name from the longer stop.
     """
     merged: list[dict] = []
     for stop in stops:
-        if (
-            merged
-            and merged[-1]["location"] == stop["location"]
-            and stop.get("_transit_pings_before", 0) <= MERGE_TRANSIT_THRESHOLD
-        ):
-            prev = merged[-1]
+        if not merged or stop.get("_transit_pings_before", 0) > MERGE_TRANSIT_THRESHOLD:
+            merged.append(stop)
+            continue
+
+        prev = merged[-1]
+        same_name = prev["location"] == stop["location"]
+        # Proximity merge: both stops must be non-saved-place (reverse-geocoded)
+        both_unnamed = (
+            prev.get("location_source") not in ("saved_place", "saved_place_proximity")
+            and stop.get("location_source") not in ("saved_place", "saved_place_proximity")
+        )
+        nearby = False
+        if both_unnamed and not same_name:
+            nearby = haversine(prev["lat"], prev["lon"], stop["lat"], stop["lon"]) <= proximity_radius_m
+
+        if same_name or nearby:
+            # When merging by proximity, keep the longer stop's name
+            if nearby and not same_name:
+                if _stop_dwell_seconds(stop) > _stop_dwell_seconds(prev):
+                    prev["location"] = stop["location"]
+                    prev["location_source"] = stop.get("location_source")
+                    prev["road"] = stop.get("road")
+                    prev["neighborhood"] = stop.get("neighborhood")
+                    prev["suburb"] = stop.get("suburb")
             prev["last_ts"] = stop["last_ts"]
             prev["last_ts_local"] = stop.get("last_ts_local")
             prev["ping_count"] += stop["ping_count"]
