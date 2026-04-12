@@ -62,6 +62,9 @@ With the sandbox making the DB read-only, skills write JSON request files to the
 - `task_{id}_subtasks.json` -- subtask creation (admin-only)
 - `task_{id}_tracked_transactions.json` -- transaction dedup
 - `task_{id}_sent_emails.json` -- outbound email tracking
+- `task_{id}_kv_ops.json` -- KV store set/delete operations
+- `task_{id}_user_alerts.json` -- suspicious email alerts posted to user's alerts channel
+- `task_{id}_email_output.json` -- deferred email sends (SMTP delivery after task completion)
 
 Identity fields (`user_id`, `conversation_token`) come from the task, not the JSON, preventing spoofing via prompt injection.
 
