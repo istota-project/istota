@@ -11,17 +11,18 @@ The prompt is built in a specific order, each section adding context for Claude:
 3. **Persona**: user workspace `PERSONA.md` overrides `config/persona.md` (skipped for briefings)
 4. **Resources**: calendars, folders, todos, email folders, notes, reminders
 5. **User memory**: `USER.md` content (skipped for briefings)
-6. **Channel memory**: `CHANNEL.md` content (when `conversation_token` is set)
-7. **Dated memories**: last N days of extracted memories (via `auto_load_dated_days`)
-8. **Recalled memories**: BM25 search results (when `auto_recall` is enabled)
-9. **Confirmation context**: previous bot output for confirmed actions
-10. **Tools**: available tools documentation (file access, browser, CalDAV, sqlite3, email)
-11. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
-12. **Conversation context**: previous messages (selected by the context module)
-13. **Request**: the actual prompt text + file attachments
-14. **Guidelines**: channel-specific formatting from `config/guidelines/{source_type}.md`
-15. **Skills changelog**: "what's new" if skills updated since last interaction
-16. **Skills documentation**: concatenated skill `.md` files, selectively loaded
+6. **Knowledge graph facts**: relevance-filtered entity-relationship triples from `knowledge_facts` table, capped by `max_knowledge_facts` (skipped for briefings)
+7. **Channel memory**: `CHANNEL.md` content (when `conversation_token` is set)
+8. **Dated memories**: last N days of extracted memories (via `auto_load_dated_days`)
+9. **Recalled memories**: BM25 search results (when `auto_recall` is enabled)
+10. **Confirmation context**: previous bot output for confirmed actions
+11. **Tools**: available tools documentation (file access, browser, CalDAV, sqlite3, email)
+12. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
+13. **Conversation context**: previous messages (selected by the context module)
+14. **Request**: the actual prompt text + file attachments
+15. **Guidelines**: channel-specific formatting from `config/guidelines/{source_type}.md`
+16. **Skills changelog**: "what's new" if skills updated since last interaction
+17. **Skills documentation**: concatenated skill `.md` files, selectively loaded
 
 ## Subprocess invocation
 
