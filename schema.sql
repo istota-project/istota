@@ -474,6 +474,9 @@ CREATE INDEX IF NOT EXISTS idx_kf_user_subject ON knowledge_facts(user_id, subje
 CREATE INDEX IF NOT EXISTS idx_kf_user_predicate ON knowledge_facts(user_id, predicate);
 CREATE INDEX IF NOT EXISTS idx_kf_current ON knowledge_facts(user_id, valid_until)
     WHERE valid_until IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kf_unique_current
+    ON knowledge_facts(user_id, subject, predicate, object)
+    WHERE valid_until IS NULL;
 
 -- Location state machine (per-user hysteresis tracking)
 CREATE TABLE IF NOT EXISTS location_state (
