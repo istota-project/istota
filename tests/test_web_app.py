@@ -268,6 +268,80 @@ class TestApiFeeds:
         resp = await client.get("/istota/api/feeds", cookies=cookies)
         assert resp.status_code == 404
 
+    async def test_feeds_forwards_before_cursor(self, client, app):
+        import istota.web_app as mod
+
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+        })
+        login_resp = await client.get("/istota/callback", follow_redirects=False)
+        cookies = login_resp.cookies
+
+        mock_response_entries = MagicMock()
+        mock_response_entries.json.return_value = {"total": 0, "entries": []}
+        mock_response_entries.raise_for_status = MagicMock()
+        mock_response_feeds = MagicMock()
+        mock_response_feeds.json.return_value = []
+        mock_response_feeds.raise_for_status = MagicMock()
+
+        captured_params: dict = {}
+
+        async def mock_get(url, **kwargs):
+            if "entries" in url:
+                captured_params.update(kwargs.get("params", {}))
+                return mock_response_entries
+            return mock_response_feeds
+
+        mock_client = AsyncMock()
+        mock_client.get = mock_get
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("istota.web_app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.get(
+                "/istota/api/feeds?status=unread&before=1700000000",
+                cookies=cookies,
+            )
+
+        assert resp.status_code == 200
+        assert captured_params.get("before") == 1700000000
+        assert captured_params.get("status") == "unread"
+
+    async def test_feeds_omits_before_when_zero(self, client, app):
+        import istota.web_app as mod
+
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+        })
+        login_resp = await client.get("/istota/callback", follow_redirects=False)
+        cookies = login_resp.cookies
+
+        mock_response_entries = MagicMock()
+        mock_response_entries.json.return_value = {"total": 0, "entries": []}
+        mock_response_entries.raise_for_status = MagicMock()
+        mock_response_feeds = MagicMock()
+        mock_response_feeds.json.return_value = []
+        mock_response_feeds.raise_for_status = MagicMock()
+
+        captured_params: dict = {}
+
+        async def mock_get(url, **kwargs):
+            if "entries" in url:
+                captured_params.update(kwargs.get("params", {}))
+                return mock_response_entries
+            return mock_response_feeds
+
+        mock_client = AsyncMock()
+        mock_client.get = mock_get
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("istota.web_app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.get("/istota/api/feeds", cookies=cookies)
+
+        assert resp.status_code == 200
+        assert "before" not in captured_params
+
 
 @_needs_web_deps
 class TestImageExtraction:

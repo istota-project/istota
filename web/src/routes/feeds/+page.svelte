@@ -53,15 +53,22 @@
 		}
 	}
 
-	async function loadPage(offset: number, feedId: number = 0) {
+	type PageOpts = { offset?: number; before?: number; feedId?: number };
+
+	async function loadPage(opts: PageOpts) {
 		const params: Record<string, string> = {
 			limit: String(PAGE_SIZE),
-			offset: String(offset),
 			order: 'published_at',
 			direction: 'desc',
 		};
-		if (feedId) params.feed_id = String(feedId);
+		if (opts.feedId) params.feed_id = String(opts.feedId);
 		if ($showUnseen) params.status = 'unread';
+		if (opts.before != null) {
+			params.before = String(opts.before);
+			params.offset = '0';
+		} else {
+			params.offset = String(opts.offset ?? 0);
+		}
 		return await getFeeds(params);
 	}
 
@@ -69,7 +76,7 @@
 		loading = true;
 		error = '';
 		try {
-			const data = await loadPage(0, feedId);
+			const data = await loadPage({ offset: 0, feedId });
 			entries = data.entries;
 			total = data.total;
 			hasMore = entries.length < total;
@@ -86,7 +93,27 @@
 		if (loadingMore || !hasMore) return;
 		loadingMore = true;
 		try {
-			const data = await loadPage(entries.length, $selectedFeedId);
+			// Under the unread filter, offset is unstable: cards get marked read
+			// mid-scroll, shrinking the server's unread pool and shifting offsets.
+			// Use a `before` cursor on published_at instead.
+			let opts: PageOpts;
+			if ($showUnseen && entries.length > 0) {
+				const oldest = entries[entries.length - 1];
+				const oldestTs = oldest.published_at
+					? Math.floor(new Date(oldest.published_at).getTime() / 1000)
+					: 0;
+				if (!oldestTs) {
+					hasMore = false;
+					return;
+				}
+				// +1 to include entries at exactly oldestTs (Miniflux `before` is
+				// strictly less-than); dedup drops any already-loaded overlap.
+				opts = { before: oldestTs + 1, feedId: $selectedFeedId };
+			} else {
+				opts = { offset: entries.length, feedId: $selectedFeedId };
+			}
+
+			const data = await loadPage(opts);
 			if (data.entries.length === 0) {
 				hasMore = false;
 			} else {
@@ -96,8 +123,10 @@
 					hasMore = false;
 				} else {
 					entries = [...entries, ...fresh];
-					total = data.total;
-					hasMore = data.entries.length >= PAGE_SIZE && entries.length < total;
+					// Under cursor mode miniflux returns total-matching-filter,
+					// which shrinks as we paginate; keep the initial total.
+					if (!$showUnseen) total = data.total;
+					hasMore = data.entries.length >= PAGE_SIZE;
 				}
 			}
 		} catch {
