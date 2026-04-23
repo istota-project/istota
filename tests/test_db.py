@@ -84,6 +84,129 @@ class TestHasActiveForegroundTaskForChannel:
             assert db.has_active_foreground_task_for_channel(conn, "room1") is False
 
 
+class TestClaimTaskChannelGate:
+    def test_claim_skips_channel_blocked_fg_tasks(self, db_path):
+        """claim_task should not return a fg task if another fg task in the
+        same channel is already running/locked."""
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="do thing 1", user_id="user1",
+                source_type="talk", conversation_token="room1",
+                queue="foreground",
+            )
+            db.update_task_status(conn, t1, "running")
+
+            db.create_task(
+                conn, prompt="do thing 2", user_id="user1",
+                source_type="talk", conversation_token="room1",
+                queue="foreground",
+            )
+            t3 = db.create_task(
+                conn, prompt="do thing 3", user_id="user1",
+                source_type="talk", conversation_token="room2",
+                queue="foreground",
+            )
+
+            claimed = db.claim_task(conn, "worker-1", queue="foreground")
+            assert claimed is not None
+            assert claimed.id == t3
+
+    def test_claim_unblocks_after_channel_task_completes(self, db_path):
+        """Once the active task completes, the next one in the same channel
+        becomes claimable."""
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="do thing 1", user_id="user1",
+                source_type="talk", conversation_token="room1",
+                queue="foreground",
+            )
+            db.update_task_status(conn, t1, "running")
+
+            t2 = db.create_task(
+                conn, prompt="do thing 2", user_id="user1",
+                source_type="talk", conversation_token="room1",
+                queue="foreground",
+            )
+
+            claimed = db.claim_task(
+                conn, "worker-1", queue="foreground", user_id="user1",
+            )
+            assert claimed is None
+
+            db.update_task_status(conn, t1, "completed", result="ok")
+
+            claimed = db.claim_task(
+                conn, "worker-2", queue="foreground", user_id="user1",
+            )
+            assert claimed is not None
+            assert claimed.id == t2
+
+    def test_channel_gate_ignores_background_queue(self, db_path):
+        """Background tasks are not subject to the per-channel gate."""
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="fg thing", user_id="user1",
+                source_type="talk", conversation_token="room1",
+                queue="foreground",
+            )
+            db.update_task_status(conn, t1, "running")
+
+            t2 = db.create_task(
+                conn, prompt="bg thing", user_id="user1",
+                source_type="talk", conversation_token="room1",
+                queue="background",
+            )
+
+            claimed = db.claim_task(conn, "worker-1", queue="background")
+            assert claimed is not None
+            assert claimed.id == t2
+
+    def test_channel_gate_ignores_null_token(self, db_path):
+        """Tasks without a conversation_token (email, cron) are never
+        channel-blocked."""
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="cron thing", user_id="user1",
+                source_type="cron", conversation_token=None,
+                queue="foreground",
+            )
+            db.update_task_status(conn, t1, "running")
+
+            t2 = db.create_task(
+                conn, prompt="email thing", user_id="user1",
+                source_type="email", conversation_token=None,
+                queue="foreground",
+            )
+
+            claimed = db.claim_task(conn, "worker-1", queue="foreground")
+            assert claimed is not None
+            assert claimed.id == t2
+
+    def test_cancelled_task_does_not_block(self, db_path):
+        """A cancel_requested task in the channel should not block the next."""
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="do thing 1", user_id="user1",
+                source_type="talk", conversation_token="room1",
+                queue="foreground",
+            )
+            db.update_task_status(conn, t1, "running")
+            conn.execute(
+                "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (t1,),
+            )
+            conn.commit()
+
+            t2 = db.create_task(
+                conn, prompt="do thing 2", user_id="user1",
+                source_type="talk", conversation_token="room1",
+                queue="foreground",
+            )
+
+            claimed = db.claim_task(conn, "worker-1", queue="foreground")
+            assert claimed is not None
+            assert claimed.id == t2
+
+
 class TestCreateTaskTalkDedup:
     def test_duplicate_talk_message_id_returns_existing(self, db_path):
         with db.get_db(db_path) as conn:
