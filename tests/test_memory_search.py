@@ -15,6 +15,7 @@ from istota.memory_search import (
     _delete_source_chunks,
     _rrf_fusion,
     _serialize_embedding,
+    _VEC_MAX_K,
     chunk_text,
     embed_batch,
     embed_text,
@@ -25,6 +26,7 @@ from istota.memory_search import (
     reindex_all,
     search,
     _search_bm25,
+    _search_vec,
 )
 
 
@@ -628,3 +630,99 @@ class TestFilteredSearch:
         assert "1" in source_ids
         assert "2" not in source_ids
         conn.close()
+
+
+class TestVecAdaptiveK:
+    """Tests for ISSUE-041 — adaptive KNN k in _search_vec."""
+
+    def _make_row(self, chunk_id, distance=0.1):
+        # Matches the column order returned by _search_vec's SELECT.
+        return (chunk_id, distance, f"content {chunk_id}", "conversation", str(chunk_id), None)
+
+    def _capture_execute(self, batches):
+        """Build a fake conn.execute that yields one batch per call and records k."""
+        call_ks: list[int] = []
+        idx = {"i": 0}
+
+        def fake_execute(sql, params):
+            # k is the 2nd positional param (after serialized embedding).
+            call_ks.append(params[1])
+            i = idx["i"]
+            idx["i"] = i + 1
+            return iter(batches[i] if i < len(batches) else [])
+
+        conn = MagicMock()
+        conn.execute.side_effect = fake_execute
+        return conn, call_ks
+
+    def test_starts_wider_with_filters(self):
+        """When any post-filter is active, initial k is limit*10 (vs limit*5 without)."""
+        conn_no, ks_no = self._capture_execute([[self._make_row(i) for i in range(10)]])
+        conn_filt, ks_filt = self._capture_execute([[self._make_row(i) for i in range(10)]])
+
+        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
+             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+            _search_vec(conn_no, "alice", "q", limit=10)
+            _search_vec(conn_filt, "alice", "q", limit=10, topics=["tech"])
+
+        assert ks_no[0] == 50   # limit * 5
+        assert ks_filt[0] == 100  # limit * 10
+
+    def test_grows_k_when_filter_starves_results(self):
+        """If post-filter leaves fewer than `limit` results, k doubles and re-runs."""
+        # First call: 2 rows survive the filter (too few). Second: 6 more rows.
+        first = [self._make_row(i) for i in (1, 2)]
+        second = [self._make_row(i) for i in (1, 2, 3, 4, 5, 6, 7, 8)]
+        conn, ks = self._capture_execute([first, second])
+
+        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
+             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+            results = _search_vec(conn, "alice", "q", limit=5, topics=["tech"])
+
+        assert len(ks) == 2
+        assert ks[1] == ks[0] * 2
+        # Dedup by chunk_id: total distinct chunks across both batches = 8.
+        assert len(results) == 5
+        assert [r.chunk_id for r in results] == [1, 2, 3, 4, 5]
+
+    def test_stops_when_no_new_rows(self):
+        """If a larger k returns no new chunk ids, stop (pool exhausted)."""
+        first = [self._make_row(i) for i in (1, 2)]
+        # Same rows on second pass — post-filter admits nothing new.
+        second = [self._make_row(i) for i in (1, 2)]
+        conn, ks = self._capture_execute([first, second, [self._make_row(99)]])
+
+        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
+             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+            results = _search_vec(conn, "alice", "q", limit=10, topics=["tech"])
+
+        # Should have stopped after the 2nd call (no new rows), not tried 3rd.
+        assert len(ks) == 2
+        assert len(results) == 2
+
+    def test_caps_at_max_k(self):
+        """Growth stops once k reaches _VEC_MAX_K, even if still short of limit."""
+        # Every iteration returns the same 1 row — never satisfies limit=10.
+        batches = [[self._make_row(i)] for i in range(20)]
+        conn, ks = self._capture_execute(batches)
+
+        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
+             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+            _search_vec(conn, "alice", "q", limit=10, topics=["tech"])
+
+        assert ks[-1] == _VEC_MAX_K
+        # Sequence should be non-decreasing and monotonically doubling up to cap.
+        assert ks == sorted(ks)
+        assert ks[0] == 100  # limit*10 with filters
+
+    def test_single_pass_when_first_batch_satisfies_limit(self):
+        """If first KNN pass yields >= limit rows, no second call."""
+        rows = [self._make_row(i) for i in range(50)]
+        conn, ks = self._capture_execute([rows])
+
+        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
+             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+            results = _search_vec(conn, "alice", "q", limit=10)
+
+        assert len(ks) == 1
+        assert len(results) == 10
