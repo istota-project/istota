@@ -118,6 +118,17 @@ def ensure_table(conn: sqlite3.Connection) -> None:
             ON knowledge_facts(user_id, valid_until)
             WHERE valid_until IS NULL
     """)
+    try:
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_kf_unique_current
+                ON knowledge_facts(user_id, subject, predicate, object)
+                WHERE valid_until IS NULL
+        """)
+    except sqlite3.IntegrityError:
+        logger.warning(
+            "Cannot create unique index on knowledge_facts — "
+            "duplicate current facts exist. Run dedup migration first."
+        )
 
 
 def add_fact(
@@ -191,13 +202,15 @@ def add_fact(
         )
 
     cursor = conn.execute(
-        "INSERT INTO knowledge_facts "
+        "INSERT OR IGNORE INTO knowledge_facts "
         "(user_id, subject, predicate, object, valid_from, valid_until, "
         "temporary, confidence, source_task_id, source_type) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (user_id, subject, predicate, object_val, valid_from, valid_until,
          int(temporary), confidence, source_task_id, source_type),
     )
+    if cursor.rowcount == 0:
+        return None  # Unique index caught a race-condition duplicate
     return cursor.lastrowid
 
 

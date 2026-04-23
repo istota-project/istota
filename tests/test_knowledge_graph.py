@@ -59,6 +59,131 @@ class TestEnsureTable:
         assert "idx_kf_user_subject" in indexes
         assert "idx_kf_user_predicate" in indexes
         assert "idx_kf_current" in indexes
+        assert "idx_kf_unique_current" in indexes
+
+    def test_unique_index_blocks_duplicate_current_facts(self, conn):
+        """Raw INSERT of duplicate current triple is blocked by unique index."""
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+            "VALUES (?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python"),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+                "VALUES (?, ?, ?, ?)",
+                ("user1", "stefan", "knows", "python"),
+            )
+
+    def test_unique_index_allows_historical_duplicates(self, conn):
+        """Same triple can appear multiple times in historical record."""
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object, valid_until) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python", "2026-01-01"),
+        )
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object, valid_until) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python", "2026-02-01"),
+        )
+        # One current, two historical — no error
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+            "VALUES (?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python"),
+        )
+
+    def test_ensure_table_survives_existing_duplicates(self, tmp_path, caplog):
+        """If current-fact duplicates exist, ensure_table logs warning but does not crash."""
+        import logging
+        db_path = tmp_path / "dup.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        # Create table without unique index, insert dupes
+        conn.execute("""
+            CREATE TABLE knowledge_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                object TEXT NOT NULL,
+                valid_from TEXT,
+                valid_until TEXT,
+                temporary INTEGER DEFAULT 0,
+                confidence REAL DEFAULT 1.0,
+                source_task_id INTEGER,
+                source_type TEXT DEFAULT 'extracted',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        for _ in range(2):
+            conn.execute(
+                "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+                "VALUES (?, ?, ?, ?)",
+                ("user1", "stefan", "knows", "python"),
+            )
+        with caplog.at_level(logging.WARNING, logger="istota.knowledge_graph"):
+            ensure_table(conn)
+        assert any("duplicate" in r.message.lower() for r in caplog.records)
+
+
+class _ConnProxy:
+    """Wraps a sqlite3 connection so a test can intercept execute() calls."""
+
+    def __init__(self, real, on_execute=None):
+        self._real = real
+        self._on_execute = on_execute
+
+    def execute(self, sql, params=()):
+        if self._on_execute is not None:
+            self._on_execute(sql, params, self._real)
+        return self._real.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class TestAddFactRaceCondition:
+    def test_add_fact_returns_none_on_constraint_race(self, conn):
+        """If the SELECT dedup passes but the INSERT hits the unique constraint
+        (because another writer inserted the same triple in between),
+        add_fact must return None rather than raising IntegrityError.
+        """
+        import istota.knowledge_graph as kg
+
+        inserted = {"done": False}
+
+        def interceptor(sql, params, real):
+            if (
+                not inserted["done"]
+                and sql.strip().upper().startswith("INSERT OR IGNORE INTO KNOWLEDGE_FACTS")
+            ):
+                real.execute(
+                    "INSERT INTO knowledge_facts "
+                    "(user_id, subject, predicate, object) VALUES (?, ?, ?, ?)",
+                    ("user1", "stefan", "likes", "coffee"),
+                )
+                inserted["done"] = True
+
+        proxy = _ConnProxy(conn, on_execute=interceptor)
+        result = kg.add_fact(proxy, "user1", "stefan", "likes", "coffee")
+        assert result is None
+        count = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_facts WHERE subject='stefan' "
+            "AND predicate='likes' AND object='coffee'"
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_add_fact_still_dedups_via_select_path(self, conn):
+        """Normal dedup (no race) still returns None via the SELECT check,
+        without relying on the constraint.
+        """
+        id1 = add_fact(conn, "user1", "stefan", "enjoys", "hiking")
+        id2 = add_fact(conn, "user1", "stefan", "enjoys", "hiking")
+        assert id1 is not None
+        assert id2 is None
 
 
 class TestAddFact:
