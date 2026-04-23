@@ -427,6 +427,30 @@ def claim_task(
     if queue is not None:
         filters.append("queue = ?")
         params.append(queue)
+
+    # Per-channel gate: one active foreground task per conversation_token.
+    # Skip pending fg tasks whose channel already has a locked/running fg task.
+    # Tasks with no conversation_token (cron, email routed to talk later) and
+    # background-queue tasks are unaffected.
+    if queue == "foreground" or queue is None:
+        filters.append(
+            """
+            NOT (
+                tasks.queue = 'foreground'
+                AND tasks.conversation_token IS NOT NULL
+                AND tasks.conversation_token != ''
+                AND EXISTS (
+                    SELECT 1 FROM tasks t2
+                    WHERE t2.conversation_token = tasks.conversation_token
+                    AND t2.queue = 'foreground'
+                    AND t2.status IN ('locked', 'running')
+                    AND t2.cancel_requested = 0
+                    AND t2.id != tasks.id
+                )
+            )
+            """
+        )
+
     where_clause = " AND ".join(filters)
 
     cursor = conn.execute(
