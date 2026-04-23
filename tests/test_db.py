@@ -1,5 +1,7 @@
 """Tests for db module functions."""
 
+import sqlite3
+
 import pytest
 
 from istota import db
@@ -1074,3 +1076,213 @@ class TestSaveAndGetRecentConversationSkills:
             db.save_task_selected_skills(conn, task_id, ["google_workspace"])
             result = db.get_recent_conversation_skills(conn, "room1")
             assert result == set()
+
+
+class TestKnowledgeFactsDedupMigration:
+    """The init_db pipeline must tolerate pre-existing duplicate current KG facts.
+
+    Production knowledge_facts has no UNIQUE constraint historically, so two
+    concurrent sleep cycles could both insert the same current triple. The new
+    partial unique index in schema.sql would fail to apply via executescript()
+    if duplicates exist — that breaks every deploy that ran an update. The
+    migration in _run_migrations() must invalidate older duplicates (keep the
+    newest id per group) before schema.sql runs.
+    """
+
+    def _prep_legacy_db(self, path):
+        """Create a legacy knowledge_facts table (no unique index) with duplicates."""
+        conn = sqlite3.connect(str(path))
+        conn.execute("""
+            CREATE TABLE knowledge_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                object TEXT NOT NULL,
+                valid_from TEXT,
+                valid_until TEXT,
+                temporary INTEGER DEFAULT 0,
+                confidence REAL DEFAULT 1.0,
+                source_task_id INTEGER,
+                source_type TEXT DEFAULT 'extracted',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def test_init_db_succeeds_with_duplicate_current_facts(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        self._prep_legacy_db(path)
+        conn = sqlite3.connect(str(path))
+        # Two duplicate current rows for the same triple
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+            "VALUES (?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python"),
+        )
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+            "VALUES (?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python"),
+        )
+        conn.commit()
+        conn.close()
+
+        # The original failure: executescript of schema.sql aborts on
+        # IntegrityError when CREATE UNIQUE INDEX hits existing duplicates.
+        # With the dedup migration in _run_migrations, init_db must succeed.
+        db.init_db(path)
+
+        conn = sqlite3.connect(str(path))
+        current_count = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_facts "
+            "WHERE user_id=? AND subject=? AND predicate=? AND object=? "
+            "AND valid_until IS NULL",
+            ("user1", "stefan", "knows", "python"),
+        ).fetchone()[0]
+        assert current_count == 1  # Duplicate invalidated
+
+        total = conn.execute("SELECT COUNT(*) FROM knowledge_facts").fetchone()[0]
+        assert total == 2  # Older row kept as historical, not deleted
+
+        # Unique index now exists and blocks a fresh duplicate insert
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+                "VALUES (?, ?, ?, ?)",
+                ("user1", "stefan", "knows", "python"),
+            )
+        conn.close()
+
+    def test_migration_keeps_newest_row_per_group(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        self._prep_legacy_db(path)
+        conn = sqlite3.connect(str(path))
+        # Three dupes — the one with the highest id should survive as current
+        for _ in range(3):
+            conn.execute(
+                "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+                "VALUES (?, ?, ?, ?)",
+                ("user1", "stefan", "knows", "python"),
+            )
+        conn.commit()
+        conn.close()
+
+        db.init_db(path)
+
+        conn = sqlite3.connect(str(path))
+        rows = conn.execute(
+            "SELECT id, valid_until FROM knowledge_facts "
+            "WHERE user_id=? AND subject=? AND predicate=? AND object=? "
+            "ORDER BY id",
+            ("user1", "stefan", "knows", "python"),
+        ).fetchall()
+        assert len(rows) == 3
+        # Oldest two invalidated
+        assert rows[0][1] is not None
+        assert rows[1][1] is not None
+        # Newest kept
+        assert rows[2][1] is None
+        conn.close()
+
+    def test_migration_only_touches_current_duplicates(self, tmp_path):
+        """Rows that differ in any of (user_id, subject, predicate, object) are untouched."""
+        path = tmp_path / "legacy.db"
+        self._prep_legacy_db(path)
+        conn = sqlite3.connect(str(path))
+        # Two distinct triples — not duplicates
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+            "VALUES (?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python"),
+        )
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+            "VALUES (?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "rust"),
+        )
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+            "VALUES (?, ?, ?, ?)",
+            ("user2", "stefan", "knows", "python"),
+        )
+        conn.commit()
+        conn.close()
+
+        db.init_db(path)
+
+        conn = sqlite3.connect(str(path))
+        current_count = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_facts WHERE valid_until IS NULL"
+        ).fetchone()[0]
+        assert current_count == 3
+        conn.close()
+
+    def test_migration_ignores_historical_duplicates(self, tmp_path):
+        """Rows with valid_until set aren't affected — duplicates are allowed in history."""
+        path = tmp_path / "legacy.db"
+        self._prep_legacy_db(path)
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object, valid_until) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python", "2026-01-01"),
+        )
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object, valid_until) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python", "2026-02-01"),
+        )
+        conn.commit()
+        conn.close()
+
+        db.init_db(path)
+
+        conn = sqlite3.connect(str(path))
+        historical_count = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_facts WHERE valid_until IS NOT NULL"
+        ).fetchone()[0]
+        assert historical_count == 2  # Both preserved
+        current_count = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_facts WHERE valid_until IS NULL"
+        ).fetchone()[0]
+        assert current_count == 0
+        conn.close()
+
+    def test_migration_idempotent_on_clean_db(self, tmp_path):
+        """Running init_db twice on a fresh DB with no dupes is a no-op."""
+        path = tmp_path / "clean.db"
+        db.init_db(path)
+        # Insert a unique current fact
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
+            "VALUES (?, ?, ?, ?)",
+            ("user1", "stefan", "knows", "python"),
+        )
+        conn.commit()
+        conn.close()
+        # Second init_db run must not touch the fact
+        db.init_db(path)
+        conn = sqlite3.connect(str(path))
+        row = conn.execute(
+            "SELECT valid_until FROM knowledge_facts"
+        ).fetchone()
+        assert row[0] is None
+        conn.close()
+
+    def test_migration_tolerates_missing_table(self, tmp_path):
+        """init_db on a brand-new DB (no knowledge_facts table yet) works fine."""
+        path = tmp_path / "fresh.db"
+        db.init_db(path)  # No pre-existing table at all
+        conn = sqlite3.connect(str(path))
+        # Table created by schema.sql, unique index in place
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='knowledge_facts'"
+        ).fetchall()
+        index_names = {r[0] for r in rows}
+        assert "idx_kf_unique_current" in index_names
+        conn.close()

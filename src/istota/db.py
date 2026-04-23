@@ -208,6 +208,25 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
 
+    # Knowledge facts dedup: invalidate older duplicate current facts so the
+    # partial unique index in schema.sql can be created without IntegrityError
+    # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id
+    # per (user_id, subject, predicate, object) group as current; older rows
+    # get valid_until = today so they stay in the historical record.
+    try:
+        conn.execute("""
+            UPDATE knowledge_facts
+            SET valid_until = date('now'), updated_at = datetime('now')
+            WHERE valid_until IS NULL
+              AND id NOT IN (
+                  SELECT MAX(id) FROM knowledge_facts
+                  WHERE valid_until IS NULL
+                  GROUP BY user_id, subject, predicate, object
+              )
+        """)
+    except sqlite3.OperationalError:
+        pass  # Table doesn't exist yet (fresh install before schema.sql runs)
+
 
 def init_db(db_path: Path) -> None:
     """Initialize database with schema."""
