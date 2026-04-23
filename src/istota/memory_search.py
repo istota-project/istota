@@ -529,6 +529,9 @@ def _search_bm25(
     return results
 
 
+_VEC_MAX_K = 1000
+
+
 def _search_vec(
     conn: sqlite3.Connection,
     user_id: str,
@@ -540,7 +543,14 @@ def _search_vec(
     topics: list[str] | None = None,
     entities: list[str] | None = None,
 ) -> list[SearchResult]:
-    """Vector similarity search via sqlite-vec."""
+    """Vector similarity search via sqlite-vec with adaptive k.
+
+    KNN returns the k nearest candidates, then SQL post-filters by
+    user_id/source_type/since/topic/entity. When filters eliminate most
+    candidates, a fixed k can yield fewer than `limit` results (or zero).
+    This runs the query with a growing k until enough rows survive the
+    post-filter, the candidate pool is exhausted, or `k` hits `_VEC_MAX_K`.
+    """
     if not enable_vec_extension(conn):
         return []
 
@@ -552,59 +562,84 @@ def _search_vec(
 
     user_filter, user_params = _build_user_filter(user_id, include_user_ids)
 
-    # KNN search with post-filter on user_id
-    # Fetch extra results to account for user filtering
-    fetch_limit = limit * 5
-    sql = (
+    has_post_filter = bool(source_types or since or topics or entities)
+    # Post-filter narrows the pool — start wider so the first pass has room.
+    base_multiplier = 10 if has_post_filter else 5
+    k = max(limit * base_multiplier, 10)
+
+    base_sql = (
         "SELECT v.chunk_id, v.distance, mc.content, mc.source_type, mc.source_id, mc.metadata_json "
         "FROM memory_chunks_vec v "
         "JOIN memory_chunks mc ON mc.id = v.chunk_id "
         f"WHERE v.embedding MATCH ? AND k = ? "
         f"AND {user_filter}"
     )
-    params: list = [serialized, fetch_limit, *user_params]
+    filter_sql = ""
+    filter_params: list = []
 
     if source_types:
         placeholders = ",".join("?" for _ in source_types)
-        sql += f" AND mc.source_type IN ({placeholders})"
-        params.extend(source_types)
+        filter_sql += f" AND mc.source_type IN ({placeholders})"
+        filter_params.extend(source_types)
 
     if since:
-        sql += " AND mc.created_at >= ?"
-        params.append(since)
+        filter_sql += " AND mc.created_at >= ?"
+        filter_params.append(since)
 
     if topics:
         placeholders = ",".join("?" for _ in topics)
-        sql += f" AND (mc.topic IS NULL OR mc.topic IN ({placeholders}))"
-        params.extend(topics)
+        filter_sql += f" AND (mc.topic IS NULL OR mc.topic IN ({placeholders}))"
+        filter_params.extend(topics)
 
     if entities:
         entity_clauses = " OR ".join(
             "EXISTS (SELECT 1 FROM json_each(mc.entities) WHERE json_each.value = ?)"
             for _ in entities
         )
-        sql += f" AND ({entity_clauses})"
-        params.extend(e.lower() for e in entities)
+        filter_sql += f" AND ({entity_clauses})"
+        filter_params.extend(e.lower() for e in entities)
 
-    sql += " LIMIT ?"
-    params.append(limit)
+    sql = base_sql + filter_sql
 
-    results = []
-    try:
-        for row in conn.execute(sql, params):
-            meta = json.loads(row[5]) if row[5] else {}
-            results.append(SearchResult(
-                chunk_id=row[0],
-                content=row[2],
-                score=1.0 - row[1],  # Convert distance to similarity
-                source_type=row[3],
-                source_id=row[4],
-                metadata=meta,
-            ))
-    except Exception as e:
-        logger.debug("Vector search failed: %s", e)
+    results: list[SearchResult] = []
+    seen_chunk_ids: set[int] = set()
 
-    return results
+    while True:
+        effective_k = min(k, _VEC_MAX_K)
+        params: list = [serialized, effective_k, *user_params, *filter_params]
+
+        new_rows_seen = 0
+        try:
+            for row in conn.execute(sql, params):
+                chunk_id = row[0]
+                if chunk_id in seen_chunk_ids:
+                    continue
+                seen_chunk_ids.add(chunk_id)
+                new_rows_seen += 1
+                meta = json.loads(row[5]) if row[5] else {}
+                results.append(SearchResult(
+                    chunk_id=chunk_id,
+                    content=row[2],
+                    score=1.0 - row[1],  # Convert distance to similarity
+                    source_type=row[3],
+                    source_id=row[4],
+                    metadata=meta,
+                ))
+        except Exception as e:
+            logger.debug("Vector search failed: %s", e)
+            break
+
+        if len(results) >= limit:
+            break
+        if effective_k >= _VEC_MAX_K:
+            break
+        if new_rows_seen == 0:
+            # Enlarging k produced no new candidates — pool exhausted.
+            break
+
+        k *= 2
+
+    return results[:limit]
 
 
 def _rrf_fusion(
