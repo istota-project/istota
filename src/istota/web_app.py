@@ -483,6 +483,7 @@ async def api_feeds(
     status: str = Query(default=""),
     category_id: int = Query(default=0),
     feed_id: int = Query(default=0),
+    before: int = Query(default=0, ge=0),
 ):
     username = user["username"]
     creds = _get_miniflux_creds(username)
@@ -497,6 +498,8 @@ async def api_feeds(
         params["category_id"] = category_id
     if feed_id:
         params["feed_id"] = feed_id
+    if before:
+        params["before"] = before
 
     try:
         async with httpx.AsyncClient(
