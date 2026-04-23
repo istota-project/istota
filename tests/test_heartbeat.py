@@ -2,7 +2,7 @@
 
 import sqlite3
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -683,8 +683,11 @@ interval_minutes = 30
         )
 
         with db.get_db(db_path) as conn:
-            # Set last_check_at to 31 minutes ago
-            old_time = (datetime.now(tz=None) - timedelta(minutes=31)).isoformat()
+            # Set last_check_at to 31 minutes ago. check_heartbeats compares
+            # against datetime.now(UTC), so use UTC here regardless of local tz.
+            old_time = (
+                datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=31)
+            ).isoformat()
             db.update_heartbeat_state(conn, "alice", "slow-check", last_check_at=True)
             conn.execute(
                 "UPDATE heartbeat_state SET last_check_at = ? WHERE user_id = ? AND check_name = ?",
