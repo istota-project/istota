@@ -270,6 +270,14 @@ istota_ntfy_priority: 3                    # default priority (1=min, 3=default,
 # Location tracking (Overland GPS receiver)
 istota_location_enabled: false
 istota_webhooks_port: 8765
+istota_location_accuracy_threshold_m: 100.0
+istota_location_visit_exit_minutes: 5.0
+istota_location_reconcile_enabled: true
+istota_location_reconcile_lookback_hours: 6.0
+istota_location_reconcile_buffer_minutes: 10.0
+istota_location_reconcile_grace_minutes: 10.0
+istota_location_reconcile_min_pings: 3
+istota_location_reconcile_min_dwell_sec: 60
 
 # Authenticated web interface (Nextcloud OIDC)
 istota_web_enabled: false

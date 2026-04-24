@@ -66,7 +66,15 @@ lookback_hours: int = 24     memory_retention_days: int = 0
 
 ### `LocationReceiverConfig`
 ```
-enabled: bool = False        webhooks_port: int = 8765
+enabled: bool = False                    webhooks_port: int = 8765
+accuracy_threshold_m: float = 100.0      # pings worse than this skip place match + state machine
+visit_exit_minutes: float = 5.0          # continuous away time before closing an open visit
+reconcile_enabled: bool = True           # periodic re-derivation of closed visits from pings
+reconcile_lookback_hours: float = 6.0    # reconcile window
+reconcile_buffer_minutes: float = 10.0   # don't touch pings newer than this (keeps open visit safe)
+reconcile_grace_minutes: float = 10.0    # gap between at-place pings before splitting
+reconcile_min_pings: int = 3             # walk-by filter
+reconcile_min_dwell_sec: int = 60
 ```
 
 ### `SiteConfig`

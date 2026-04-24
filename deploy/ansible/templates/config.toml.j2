@@ -257,6 +257,14 @@ hostname = "{{ istota_hostname }}"
 [location]
 enabled = true
 webhooks_port = {{ istota_webhooks_port }}
+accuracy_threshold_m = {{ istota_location_accuracy_threshold_m }}
+visit_exit_minutes = {{ istota_location_visit_exit_minutes }}
+reconcile_enabled = {{ istota_location_reconcile_enabled | lower }}
+reconcile_lookback_hours = {{ istota_location_reconcile_lookback_hours }}
+reconcile_buffer_minutes = {{ istota_location_reconcile_buffer_minutes }}
+reconcile_grace_minutes = {{ istota_location_reconcile_grace_minutes }}
+reconcile_min_pings = {{ istota_location_reconcile_min_pings }}
+reconcile_min_dwell_sec = {{ istota_location_reconcile_min_dwell_sec }}
 {% endif %}
 {% if istota_web_enabled %}
 

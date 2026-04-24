@@ -218,7 +218,7 @@ Per-user config via `[[resources]]` with `type = "overland"`:
 - `ingest_token`: shared secret for Overland endpoint
 - `default_radius`: default geofence radius (meters)
 
-Places (named geofences) stored in `places` DB table. Full CRUD via CLI (`learn`, `update`, `delete`) and web UI (create from discovered clusters, edit form, drag-to-reposition on map). Place detection uses hysteresis (2 consecutive pings required) to avoid flapping. Updating a place's location or radius triggers automatic ping reassignment (backfill nearby unassigned pings, unassign pings now outside radius).
+Places (named geofences) stored in `places` DB table. Full CRUD via CLI (`learn`, `update`, `delete`) and web UI (create from discovered clusters, edit form, drag-to-reposition on map). Place detection uses asymmetric thresholds: opening a visit needs 2 consecutive pings at a place (hysteresis), closing one needs continuous "away" time to reach `visit_exit_minutes` (default 5) so brief GPS drift doesn't fragment a stay. Pings with `horizontal_accuracy > accuracy_threshold_m` (default 100 m) are stored but skipped for place matching and state-machine updates. A periodic reconciler (`reconcile_enabled`, default on) re-derives closed visits from pings in a recent window (`reconcile_lookback_hours` back, stopping `reconcile_buffer_minutes` before now) so historical visits recover from state-machine drift without touching the currently-open visit. Updating a place's location or radius triggers automatic ping reassignment (backfill nearby unassigned pings, unassign pings now outside radius).
 
 DB tables: `location_pings`, `places`, `visits`, `location_state`. Old pings cleaned after `location_ping_retention_days` (365).
 

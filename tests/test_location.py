@@ -2422,3 +2422,398 @@ class TestCmdDaySummary:
             f"{[s['location'] for s in result['stops']]}"
         )
         assert result["stops"][0]["ping_count"] == 15
+
+
+# ===========================================================================
+# Accuracy gate + dwell-based exit + reconciliation
+# ===========================================================================
+
+
+@_needs_fastapi
+class TestAccuracyGate:
+    """Low-accuracy pings must not be matched to places or move the state machine."""
+
+    def _feature(self, lat, lon, ts, accuracy):
+        return {
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {"timestamp": ts, "horizontal_accuracy": accuracy},
+        }
+
+    def test_low_accuracy_ping_not_assigned_to_place(self, tmp_path, monkeypatch):
+        from istota import webhook_receiver as wr
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741, radius_meters=200)
+            places = db.get_places(conn, "alice")
+
+            # Set module config with default 100m threshold
+            cfg = MagicMock()
+            cfg.location.accuracy_threshold_m = 100.0
+            cfg.location.visit_exit_minutes = 5.0
+            monkeypatch.setattr(wr, "_config", cfg)
+
+            feat = self._feature(35.629, 139.741, "2026-04-21T08:19:35Z", accuracy=1336)
+            wr._process_feature(conn, "alice", feat, places)
+            conn.commit()
+
+            pings = db.get_pings(conn, "alice")
+            assert len(pings) == 1
+            assert pings[0].place_id is None, (
+                "1336m accuracy ping should not have been assigned to the place"
+            )
+            # State machine must not have opened a visit from the bad ping
+            assert db.get_open_visit(conn, "alice") is None
+
+    def test_good_accuracy_ping_is_assigned(self, tmp_path, monkeypatch):
+        from istota import webhook_receiver as wr
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741, radius_meters=200)
+            places = db.get_places(conn, "alice")
+
+            cfg = MagicMock()
+            cfg.location.accuracy_threshold_m = 100.0
+            cfg.location.visit_exit_minutes = 5.0
+            monkeypatch.setattr(wr, "_config", cfg)
+
+            feat = self._feature(35.629, 139.741, "2026-04-21T08:20:00Z", accuracy=15)
+            wr._process_feature(conn, "alice", feat, places)
+            conn.commit()
+
+            pings = db.get_pings(conn, "alice")
+            assert pings[0].place_id == pid
+
+    def test_null_accuracy_passes(self, tmp_path, monkeypatch):
+        """Missing accuracy shouldn't cause us to drop the ping silently."""
+        from istota import webhook_receiver as wr
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741, radius_meters=200)
+            places = db.get_places(conn, "alice")
+
+            cfg = MagicMock()
+            cfg.location.accuracy_threshold_m = 100.0
+            cfg.location.visit_exit_minutes = 5.0
+            monkeypatch.setattr(wr, "_config", cfg)
+
+            feat = {
+                "geometry": {"type": "Point", "coordinates": [139.741, 35.629]},
+                "properties": {"timestamp": "2026-04-21T08:20:00Z"},
+            }
+            wr._process_feature(conn, "alice", feat, places)
+            conn.commit()
+
+            pings = db.get_pings(conn, "alice")
+            assert pings[0].place_id == pid
+
+
+@_needs_fastapi
+class TestDwellBasedExit:
+    """Brief GPS flicker out of place radius must not close an open visit."""
+
+    def _process(self, conn, user_id, place_id, place, timestamp):
+        from istota.webhook_receiver import _update_state_machine
+        ping_id = db.insert_location_ping(
+            conn, user_id, timestamp, 0.0, 0.0, accuracy=10.0,
+            place_id=place_id,
+        )
+        _update_state_machine(conn, user_id, ping_id, place_id, place, timestamp)
+        return ping_id
+
+    def test_flicker_does_not_close_visit(self, tmp_path, monkeypatch):
+        """Pings alternating in/out of radius for < dwell threshold keep visit open."""
+        from istota import webhook_receiver as wr
+        cfg = MagicMock()
+        cfg.location.visit_exit_minutes = 5.0
+        cfg.location.accuracy_threshold_m = 100.0
+        monkeypatch.setattr(wr, "_config", cfg)
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            place = db.get_place_by_name(conn, "alice", "home")
+
+            # Open visit with two consecutive in-place pings
+            self._process(conn, "alice", pid, place, "2026-04-21T10:00:00Z")
+            self._process(conn, "alice", pid, place, "2026-04-21T10:00:30Z")
+
+            # Flicker: out, in, out, in — each gap under 2 min
+            self._process(conn, "alice", None, None, "2026-04-21T10:01:00Z")
+            self._process(conn, "alice", pid, place, "2026-04-21T10:02:00Z")
+            self._process(conn, "alice", None, None, "2026-04-21T10:03:00Z")
+            self._process(conn, "alice", pid, place, "2026-04-21T10:04:00Z")
+            self._process(conn, "alice", None, None, "2026-04-21T10:05:00Z")
+            self._process(conn, "alice", pid, place, "2026-04-21T10:06:00Z")
+
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 1, "Flicker should not create extra visits"
+            assert visits[0].exited_at is None, "Visit should still be open"
+
+    def test_continuous_away_closes_after_threshold(self, tmp_path, monkeypatch):
+        """Continuous out-of-place for exit_minutes closes the visit at exit start."""
+        from istota import webhook_receiver as wr
+        cfg = MagicMock()
+        cfg.location.visit_exit_minutes = 5.0
+        cfg.location.accuracy_threshold_m = 100.0
+        monkeypatch.setattr(wr, "_config", cfg)
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            place = db.get_place_by_name(conn, "alice", "home")
+
+            self._process(conn, "alice", pid, place, "2026-04-21T10:00:00Z")
+            self._process(conn, "alice", pid, place, "2026-04-21T10:05:00Z")
+
+            # Exit: 4 pings spaced across 6 minutes
+            self._process(conn, "alice", None, None, "2026-04-21T10:10:00Z")
+            self._process(conn, "alice", None, None, "2026-04-21T10:12:00Z")
+            self._process(conn, "alice", None, None, "2026-04-21T10:14:00Z")
+            self._process(conn, "alice", None, None, "2026-04-21T10:16:00Z")
+
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 1
+            assert visits[0].exited_at == "2026-04-21T10:10:00Z", (
+                "Exited_at should be the first away ping, not the last"
+            )
+            # Duration: 10:00 to 10:10 = 600 sec
+            assert visits[0].duration_sec == 600
+
+    def test_away_then_return_extends_visit(self, tmp_path, monkeypatch):
+        """Briefly away (< threshold), then back — keeps single visit with fuller duration."""
+        from istota import webhook_receiver as wr
+        cfg = MagicMock()
+        cfg.location.visit_exit_minutes = 5.0
+        cfg.location.accuracy_threshold_m = 100.0
+        monkeypatch.setattr(wr, "_config", cfg)
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            place = db.get_place_by_name(conn, "alice", "home")
+
+            self._process(conn, "alice", pid, place, "2026-04-21T10:00:00Z")
+            self._process(conn, "alice", pid, place, "2026-04-21T10:05:00Z")
+            # 2 min away, then back
+            self._process(conn, "alice", None, None, "2026-04-21T10:06:00Z")
+            self._process(conn, "alice", None, None, "2026-04-21T10:07:30Z")
+            self._process(conn, "alice", pid, place, "2026-04-21T10:08:00Z")
+            self._process(conn, "alice", pid, place, "2026-04-21T10:20:00Z")
+
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 1
+            assert visits[0].exited_at is None, "Visit should still be open"
+
+            # State's exit timer should have been cleared
+            state = db.get_location_state(conn, "alice")
+            assert state.exit_started_at is None
+
+    def test_direct_place_to_place_closes_old_opens_new(self, tmp_path, monkeypatch):
+        """Moving from one named place straight to another closes old + opens new."""
+        from istota import webhook_receiver as wr
+        cfg = MagicMock()
+        cfg.location.visit_exit_minutes = 5.0
+        cfg.location.accuracy_threshold_m = 100.0
+        monkeypatch.setattr(wr, "_config", cfg)
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid_h = db.insert_place(conn, "alice", "home", 34.0, -118.0)
+            pid_g = db.insert_place(conn, "alice", "gym", 34.1, -118.1)
+            home = db.get_place_by_name(conn, "alice", "home")
+            gym = db.get_place_by_name(conn, "alice", "gym")
+
+            self._process(conn, "alice", pid_h, home, "2026-04-21T10:00:00Z")
+            self._process(conn, "alice", pid_h, home, "2026-04-21T10:05:00Z")
+            # Two consecutive gym pings (hysteresis open); dwell threshold not met
+            self._process(conn, "alice", pid_g, gym, "2026-04-21T10:06:00Z")
+            self._process(conn, "alice", pid_g, gym, "2026-04-21T10:07:00Z")
+
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 2
+            home_visit = [v for v in visits if v.place_name == "home"][0]
+            gym_visit = [v for v in visits if v.place_name == "gym"][0]
+            assert home_visit.exited_at is not None
+            assert gym_visit.exited_at is None
+
+
+class TestReconcileVisits:
+    def _ping(self, conn, user_id, ts, place_id):
+        db.insert_location_ping(
+            conn, user_id, ts, 0.0, 0.0, accuracy=10.0, place_id=place_id,
+        )
+
+    def test_reconciles_fragmented_visit_into_one(self, tmp_path):
+        """The Shinagawa case: flicker split a single stay into many short segments."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            # 15 pings mostly at place, a handful briefly outside
+            at_place = [f"2026-04-21T10:{m:02d}:00Z" for m in range(0, 30, 2)]
+            for ts in at_place:
+                self._ping(conn, "alice", ts, pid)
+            # sprinkle a few unassigned pings in between — gaps < grace
+            for ts in ("2026-04-21T10:05:30Z", "2026-04-21T10:13:30Z", "2026-04-21T10:19:30Z"):
+                self._ping(conn, "alice", ts, None)
+            conn.commit()
+
+            n = db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+            )
+            conn.commit()
+
+            assert n == 1
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 1
+            assert visits[0].entered_at == "2026-04-21T10:00:00Z"
+            assert visits[0].exited_at == "2026-04-21T10:28:00Z"
+            assert visits[0].ping_count == 15
+
+    def test_splits_when_gap_exceeds_grace(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            # Morning visit
+            for m in range(0, 10, 2):
+                self._ping(conn, "alice", f"2026-04-21T08:{m:02d}:00Z", pid)
+            # 45-min gap (away), no pings at place
+            # Evening visit
+            for m in range(0, 10, 2):
+                self._ping(conn, "alice", f"2026-04-21T09:{m:02d}:00Z", pid)
+            conn.commit()
+
+            n = db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+            )
+            conn.commit()
+
+            assert n == 2
+            visits = sorted(db.get_visits(conn, "alice"), key=lambda v: v.entered_at)
+            assert visits[0].entered_at == "2026-04-21T08:00:00Z"
+            assert visits[1].entered_at == "2026-04-21T09:00:00Z"
+
+    def test_filters_walkby(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            # Only 2 pings at place — below min_pings=3
+            self._ping(conn, "alice", "2026-04-21T10:00:00Z", pid)
+            self._ping(conn, "alice", "2026-04-21T10:01:00Z", pid)
+            conn.commit()
+
+            n = db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+            )
+            assert n == 0
+            assert db.get_visits(conn, "alice") == []
+
+    def test_splits_on_different_place(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid_a = db.insert_place(conn, "alice", "home", 34.0, -118.0)
+            pid_b = db.insert_place(conn, "alice", "gym", 34.1, -118.1)
+            for m in range(0, 10, 2):
+                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid_a)
+            for m in range(12, 22, 2):
+                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid_b)
+            conn.commit()
+
+            n = db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+            )
+            assert n == 2
+            visits = sorted(db.get_visits(conn, "alice"), key=lambda v: v.entered_at)
+            assert visits[0].place_name == "home"
+            assert visits[1].place_name == "gym"
+
+    def test_preserves_open_visit_outside_window(self, tmp_path):
+        """An open visit started before `since` must be left alone."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            # Open visit entered before reconcile window
+            vid = db.insert_visit(conn, "alice", pid, "home", "2026-04-20T23:00:00Z")
+            for m in range(0, 10, 2):
+                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid)
+            conn.commit()
+
+            db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+            )
+            conn.commit()
+
+            visits = db.get_visits(conn, "alice")
+            # The open visit must still exist and be open
+            open_ones = [v for v in visits if v.exited_at is None]
+            assert len(open_ones) == 1
+            assert open_ones[0].id == vid
+
+    def test_accuracy_filter_drops_bad_pings(self, tmp_path):
+        """Historical pings with accuracy > threshold are treated as unassigned."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            # One early bad-accuracy ping pinned to the place (like the 1336m Shinagawa case)
+            db.insert_location_ping(
+                conn, "alice", "2026-04-21T08:00:00Z", 35.629, 139.741,
+                accuracy=1200.0, place_id=pid,
+            )
+            # Real visit starts later with good pings
+            for m in range(30, 50, 2):
+                db.insert_location_ping(
+                    conn, "alice", f"2026-04-21T08:{m:02d}:00Z", 35.629, 139.741,
+                    accuracy=10.0, place_id=pid,
+                )
+            conn.commit()
+
+            # Without filter: the bad ping would anchor a visit starting at 08:00
+            db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+                accuracy_threshold_m=100.0,
+            )
+            conn.commit()
+
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 1
+            assert visits[0].entered_at == "2026-04-21T08:30:00Z", (
+                "Bad-accuracy ping should not have anchored the visit's entered_at"
+            )
+            assert visits[0].exited_at == "2026-04-21T08:48:00Z"
+
+    def test_replaces_stale_closed_visits_in_window(self, tmp_path):
+        """Existing closed visits in the window are dropped before re-derivation."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            # Seed with an incorrect, short closed visit
+            stale_id = db.insert_visit(conn, "alice", pid, "home", "2026-04-21T10:05:00Z")
+            db.close_visit(conn, stale_id, "2026-04-21T10:07:00Z")
+            # Pings showing the true longer stay
+            for m in range(0, 30, 2):
+                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid)
+            conn.commit()
+
+            db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+            )
+            conn.commit()
+
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 1
+            assert visits[0].id != stale_id  # stale row deleted
+            assert visits[0].entered_at == "2026-04-21T10:00:00Z"
+            assert visits[0].exited_at == "2026-04-21T10:28:00Z"
