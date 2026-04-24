@@ -4,7 +4,7 @@
 	interface Props {
 		cluster?: DiscoveredCluster;
 		place?: Place;
-		onSave: (data: { name: string; lat: number; lon: number; radius_meters: number; category: string }) => void;
+		onSave: (data: { name: string; lat: number; lon: number; radius_meters: number; category: string; notes: string }) => void;
 		onCancel: () => void;
 		onDismiss?: (data: { lat: number; lon: number; radius_meters: number }) => void;
 	}
@@ -18,6 +18,7 @@
 	let radius = $state(place?.radius_meters ?? cluster?.radius_meters ?? 100);
 	let lat = $state(place?.lat ?? cluster?.lat ?? 0);
 	let lon = $state(place?.lon ?? cluster?.lon ?? 0);
+	let notes = $state(place?.notes ?? '');
 
 	const categories = [
 		'home', 'work', 'gym', 'food', 'shopping',
@@ -32,6 +33,7 @@
 			lon,
 			radius_meters: radius,
 			category,
+			notes: notes.trim(),
 		});
 	}
 
@@ -41,7 +43,11 @@
 
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape') onCancel();
-		if (e.key === 'Enter') handleSave();
+		if (e.key === 'Enter') {
+			const target = e.target as HTMLElement | null;
+			if (target?.tagName === 'TEXTAREA') return;
+			handleSave();
+		}
 	}
 </script>
 
@@ -87,6 +93,15 @@
 				</label>
 			</div>
 		{/if}
+
+		<label class="field">
+			<span>Notes (optional)</span>
+			<textarea
+				bind:value={notes}
+				rows="2"
+				placeholder="Anything to remember about this place"
+			></textarea>
+		</label>
 
 		<div class="actions">
 			<button class="btn cancel" onclick={onCancel} type="button">Cancel</button>
@@ -153,7 +168,8 @@
 
 	.field input[type="text"],
 	.field input[type="number"],
-	.field select {
+	.field select,
+	.field textarea {
 		background: var(--surface-bg);
 		border: 1px solid var(--border-default);
 		color: var(--text-primary);
@@ -161,6 +177,12 @@
 		font-size: var(--text-sm);
 		padding: 0.35rem 0.5rem;
 		border-radius: 0.25rem;
+	}
+
+	.field textarea {
+		resize: vertical;
+		min-height: 2.5rem;
+		font-family: inherit;
 	}
 
 	.field input[type="range"] {

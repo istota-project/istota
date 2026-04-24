@@ -4,7 +4,7 @@ CLI:
     python -m istota.skills.location current
     python -m istota.skills.location history [--limit N] [--date YYYY-MM-DD] [--tz TZ]
     python -m istota.skills.location places
-    python -m istota.skills.location learn NAME [--category CAT] [--radius N]
+    python -m istota.skills.location learn NAME [--category CAT] [--radius N] [--notes TXT]
     python -m istota.skills.location update (--name NAME | --id ID) [--rename NEW] [--category CAT] [--radius N] [--notes TXT] [--lat N] [--lon N]
     python -m istota.skills.location delete (--name NAME | --id ID)
     python -m istota.skills.location reverse-geocode --lat N --lon N
@@ -207,6 +207,7 @@ def cmd_learn(args):
     name = args.name
     radius = args.radius or 100
     category = args.category or "other"
+    notes = (getattr(args, "notes", None) or "").strip() or None
 
     # Get latest ping
     cursor = conn.execute(
@@ -228,7 +229,7 @@ def cmd_learn(args):
     # Insert directly into DB
     from istota.db import upsert_place
     upsert_place(conn, user_id, name, lat, lon,
-                 radius_meters=radius, category=category)
+                 radius_meters=radius, category=category, notes=notes)
     conn.commit()
     conn.close()
 
@@ -238,6 +239,7 @@ def cmd_learn(args):
         "lat": round(lat, 6),
         "lon": round(lon, 6),
         "radius_meters": radius,
+        "notes": notes,
         "message": f"Saved '{name}' at {lat:.4f}, {lon:.4f}.",
     }))
 
@@ -272,6 +274,7 @@ def cmd_update(args):
     from istota.db import update_place, get_place_by_id
 
     updates = {}
+    clear_notes = False
     if args.rename is not None:
         updates["name"] = args.rename
     if args.category is not None:
@@ -279,18 +282,26 @@ def cmd_update(args):
     if args.radius is not None:
         updates["radius_meters"] = args.radius
     if args.notes is not None:
-        updates["notes"] = args.notes
+        n = args.notes.strip()
+        if n:
+            updates["notes"] = n
+        else:
+            clear_notes = True
     if args.lat is not None:
         updates["lat"] = args.lat
     if args.lon is not None:
         updates["lon"] = args.lon
 
-    if not updates:
+    if not updates and not clear_notes:
         print(json.dumps({"error": "No changes specified"}))
         conn.close()
         sys.exit(1)
 
-    update_place(conn, place.id, **updates)
+    if updates:
+        update_place(conn, place.id, **updates)
+    if clear_notes:
+        # update_place skips None, so write NULL directly to clear notes.
+        conn.execute("UPDATE places SET notes = NULL WHERE id = ?", (place.id,))
     conn.commit()
 
     updated = get_place_by_id(conn, place.id)
@@ -712,6 +723,7 @@ def build_parser():
     learn.add_argument("name", help="Place name")
     learn.add_argument("--category", default="other", help="Place category")
     learn.add_argument("--radius", type=int, default=100, help="Geofence radius in meters")
+    learn.add_argument("--notes", help="Optional free-text notes")
 
     update = sub.add_parser("update", help="Update an existing place")
     update_target = update.add_mutually_exclusive_group(required=True)

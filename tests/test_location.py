@@ -128,6 +128,60 @@ class TestPlaceDB:
             assert place.radius_meters == 200
 
 
+@_needs_fastapi
+class TestPlaceNotesAPI:
+    def test_create_persists_notes(self, tmp_path):
+        from istota.web_app import _location_create_place, _location_query_places
+
+        db_path = _init_db(tmp_path)
+        _location_create_place(str(db_path), "alice", {
+            "name": "office", "lat": 34.0, "lon": -118.0,
+            "radius_meters": 100, "category": "work",
+            "notes": "side entrance, 4th floor",
+        })
+
+        result = _location_query_places(str(db_path), "alice")
+        assert result["places"][0]["notes"] == "side entrance, 4th floor"
+
+    def test_create_empty_notes_stored_as_null(self, tmp_path):
+        from istota.web_app import _location_create_place, _location_query_places
+
+        db_path = _init_db(tmp_path)
+        _location_create_place(str(db_path), "alice", {
+            "name": "office", "lat": 34.0, "lon": -118.0,
+            "notes": "   ",
+        })
+
+        result = _location_query_places(str(db_path), "alice")
+        assert result["places"][0]["notes"] is None
+
+    def test_update_changes_notes(self, tmp_path):
+        from istota.web_app import _location_create_place, _location_update_place
+
+        db_path = _init_db(tmp_path)
+        created = _location_create_place(str(db_path), "alice", {
+            "name": "office", "lat": 34.0, "lon": -118.0, "notes": "old",
+        })
+
+        result = _location_update_place(str(db_path), "alice", created["id"], {
+            "notes": "new"
+        })
+        assert result["notes"] == "new"
+
+    def test_update_empty_notes_clears_field(self, tmp_path):
+        from istota.web_app import _location_create_place, _location_update_place
+
+        db_path = _init_db(tmp_path)
+        created = _location_create_place(str(db_path), "alice", {
+            "name": "office", "lat": 34.0, "lon": -118.0, "notes": "to be cleared",
+        })
+
+        result = _location_update_place(str(db_path), "alice", created["id"], {
+            "notes": ""
+        })
+        assert result["notes"] is None
+
+
 class TestDismissedClusterDB:
     def test_insert_list_delete(self, tmp_path):
         db_path = _init_db(tmp_path)

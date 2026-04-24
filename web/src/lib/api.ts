@@ -136,6 +136,7 @@ export interface Place {
 	lon: number;
 	radius_meters: number;
 	category: string;
+	notes?: string | null;
 }
 
 export interface PlacesResponse {
@@ -232,7 +233,7 @@ export async function getLocationPlaces(): Promise<PlacesResponse> {
 	return apiFetch<PlacesResponse>('/location/places');
 }
 
-export async function createPlace(data: { name: string; lat: number; lon: number; radius_meters?: number; category?: string }): Promise<Place> {
+export async function createPlace(data: { name: string; lat: number; lon: number; radius_meters?: number; category?: string; notes?: string | null }): Promise<Place> {
 	return apiFetch<Place>('/location/places', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
@@ -240,7 +241,7 @@ export async function createPlace(data: { name: string; lat: number; lon: number
 	});
 }
 
-export async function updatePlace(id: number, data: Partial<Pick<Place, 'name' | 'lat' | 'lon' | 'radius_meters' | 'category'>>): Promise<Place> {
+export async function updatePlace(id: number, data: Partial<Pick<Place, 'name' | 'lat' | 'lon' | 'radius_meters' | 'category' | 'notes'>>): Promise<Place> {
 	return apiFetch<Place>(`/location/places/${id}`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json' },
