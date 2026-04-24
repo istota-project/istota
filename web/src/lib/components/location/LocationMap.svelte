@@ -135,7 +135,7 @@
 	//     geofence, where the first new ping is already hundreds of metres
 	//     away. Without this, such edges render as solid coloured straight
 	//     lines cutting across blocks.
-	const GAP_SPEED_MAX_MS = 55;             // ~200 km/h — clearly a teleport
+	const GAP_SPEED_MAX_MS = 140;            // ~500 km/h — above any ground transport (Shinkansen ~300), below any flight
 	const PLACE_CROSSING_DIST_M = 200;       // boundary-skip threshold
 
 	function isGap(a: LocationPing, b: LocationPing, dist: number, timeDeltaS: number): boolean {
@@ -334,15 +334,31 @@
 		return { type: 'FeatureCollection', features };
 	}
 
+	// Cap per-ping dwell weight so a data-collection gap (phone off, lost signal)
+	// doesn't dominate the heatmap. 300 s matches the default visit-exit threshold.
+	const HEATMAP_MAX_DWELL_S = 300;
+
 	function buildPingPointsGeoJSON(pings: LocationPing[]): GeoJSON.FeatureCollection {
+		const sorted = [...pings].sort(
+			(a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp),
+		);
+		const ts = sorted.map(p => Date.parse(p.timestamp));
+		const dwellS = sorted.map((_, i) => {
+			const next = i + 1 < ts.length ? (ts[i + 1] - ts[i]) / 1000 : NaN;
+			const prev = i > 0 ? (ts[i] - ts[i - 1]) / 1000 : NaN;
+			const gap = Number.isFinite(next) ? next : prev;
+			if (!Number.isFinite(gap) || gap <= 0) return 0;
+			return Math.min(gap, HEATMAP_MAX_DWELL_S);
+		});
 		return {
 			type: 'FeatureCollection',
-			features: pings.map(p => ({
+			features: sorted.map((p, i) => ({
 				type: 'Feature' as const,
 				properties: {
 					timestamp: p.timestamp,
 					place: p.place,
 					activity_type: p.activity_type ?? 'stationary',
+					dwell_s: dwellS[i],
 				},
 				geometry: { type: 'Point' as const, coordinates: [p.lon, p.lat] },
 			})),
@@ -502,7 +518,15 @@
 			source: 'ping-points',
 			layout: { visibility: 'none' },
 			paint: {
-				'heatmap-weight': 1,
+				// Weight each ping by how long it represents (seconds → minutes),
+				// so a stationary hour isn't outweighed by a fast flyby with a
+				// high sampling rate. interpolate clamps the effective range so
+				// extreme dwells don't flatten the colour scale.
+				'heatmap-weight': [
+					'interpolate', ['linear'], ['get', 'dwell_s'],
+					0, 0,
+					HEATMAP_MAX_DWELL_S, HEATMAP_MAX_DWELL_S / 60,
+				],
 				'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 16, 1.5],
 				'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 10, 8, 16, 25],
 				'heatmap-color': [
