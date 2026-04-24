@@ -98,14 +98,19 @@
 	const DWELL_MIN_DURATION_S = 300;   // 5 min
 	const DWELL_MAX_SPREAD_M = 50;      // tight cluster
 
-	// Outlier detection on single rogue GPS fixes (iOS multipath, urban canyons).
-	// A ping B is an outlier when removing it barely changes the track: its
-	// neighbours A and C are close to each other but B detours far away. The
-	// accuracy gate can't catch these — they often report <100 m accuracy yet
-	// are hundreds of metres off. Geometric test: drop B if including it more
-	// than triples the local path length and the detour is above GPS noise.
-	const OUTLIER_MIN_DIST_M = 100;     // above normal walking jitter
-	const OUTLIER_PATH_RATIO = 3;       // (AB + BC) / AC — detour inflation factor
+	// Outlier detection on rogue GPS fixes (iOS multipath, urban canyons,
+	// intermittent subway reacquisition). A ping B is an outlier when removing
+	// it barely changes the track: it either detours far (path inflation) or
+	// sits well off the line its neighbours define (perpendicular offset).
+	// Lookahead lets the test see past 1-2 consecutive bad fixes by trying the
+	// next few pings as C candidates — a chain of outliers can't all be
+	// justified by their immediate neighbours, but one of the next good pings
+	// will expose them.
+	const OUTLIER_MIN_DIST_M = 100;     // AB jitter floor — below this, always keep
+	const OUTLIER_PATH_RATIO = 3;       // drop if (AB + BC) > ratio * AC
+	const OUTLIER_LOOKAHEAD = 3;        // try up to N next pings as C candidates
+	const OUTLIER_MIN_PERP_M = 150;     // perpendicular offset floor (normal noise)
+	const OUTLIER_PERP_RATIO = 0.3;     // perp threshold scales with AC length
 
 	// Speed clamp for color gradient (km/h). Anything above maps to the top-of-scale color.
 	const MAX_DISPLAY_KMH = 180;
@@ -159,6 +164,32 @@
 		return kept;
 	}
 
+	function perpDistanceToLineM(
+		plat: number, plon: number,
+		alat: number, alon: number,
+		clat: number, clon: number,
+	): number {
+		const mPerDegLat = 111_000;
+		const mPerDegLon = 111_000 * Math.cos(((alat + clat) / 2) * Math.PI / 180);
+		const cx = (clon - alon) * mPerDegLon;
+		const cy = (clat - alat) * mPerDegLat;
+		const px = (plon - alon) * mPerDegLon;
+		const py = (plat - alat) * mPerDegLat;
+		const lenSq = cx * cx + cy * cy;
+		if (lenSq === 0) return Math.sqrt(px * px + py * py);
+		return Math.abs(px * cy - py * cx) / Math.sqrt(lenSq);
+	}
+
+	function isOutlierStep(a: LocationPing, b: LocationPing, c: LocationPing, ab: number): boolean {
+		const ac = approxDistanceM(a.lon, a.lat, c.lon, c.lat);
+		if (ac <= 0) return false;
+		const bc = approxDistanceM(b.lon, b.lat, c.lon, c.lat);
+		if (ab + bc > OUTLIER_PATH_RATIO * ac) return true;
+		const perp = perpDistanceToLineM(b.lat, b.lon, a.lat, a.lon, c.lat, c.lon);
+		const perpThreshold = Math.max(OUTLIER_MIN_PERP_M, OUTLIER_PERP_RATIO * ac);
+		return perp > perpThreshold;
+	}
+
 	function dropOutlierPings(pings: LocationPing[]): LocationPing[] {
 		let current = pings;
 		for (let pass = 0; pass < 3; pass++) {
@@ -168,15 +199,19 @@
 			for (let i = 1; i < current.length - 1; i++) {
 				const a = kept[kept.length - 1];
 				const b = current[i];
-				const c = current[i + 1];
 				const ab = approxDistanceM(a.lon, a.lat, b.lon, b.lat);
 				if (ab <= OUTLIER_MIN_DIST_M) {
 					kept.push(b);
 					continue;
 				}
-				const bc = approxDistanceM(b.lon, b.lat, c.lon, c.lat);
-				const ac = approxDistanceM(a.lon, a.lat, c.lon, c.lat);
-				if (ac > 0 && ab + bc > OUTLIER_PATH_RATIO * ac) {
+				let drop = false;
+				for (let k = 1; k <= OUTLIER_LOOKAHEAD && i + k < current.length; k++) {
+					if (isOutlierStep(a, b, current[i + k], ab)) {
+						drop = true;
+						break;
+					}
+				}
+				if (drop) {
 					removed++;
 					continue;
 				}
