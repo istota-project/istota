@@ -23,6 +23,8 @@ from istota.scheduler import (
     _load_deferred_email_output,
     _talk_poll_loop,
     _format_error_for_user,
+    _is_policy_refusal,
+    _post_policy_refusal_alert,
     _strip_action_prefix,
     _execute_command_task,
     check_briefings,
@@ -153,6 +155,125 @@ class TestFormatErrorForUser:
         result = _format_error_for_user(error)
         assert "{" not in result
         assert "}" not in result
+
+    def test_formats_400_policy_refusal(self):
+        # 400 with safety-related keywords should give a meaningful message
+        # pointing the user at the alerts channel.
+        error = 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Output blocked by content filtering policy"},"request_id":"req_x"}'
+        result = _format_error_for_user(error)
+        assert "safety filter" in result.lower() or "policy" in result.lower()
+        assert "alerts" in result.lower()
+
+    def test_formats_400_non_policy(self):
+        # 400 without safety keywords should fall through to the generic bucket.
+        error = 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens exceeds limit"}}'
+        result = _format_error_for_user(error)
+        assert "the deep stared back" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# TestIsPolicyRefusal
+# ---------------------------------------------------------------------------
+
+
+class TestIsPolicyRefusal:
+    def test_400_with_policy_keyword(self):
+        error = 'API Error: 400 {"type":"error","error":{"message":"Output blocked by content filtering policy"}}'
+        assert _is_policy_refusal(error) is True
+
+    def test_400_with_safety_keyword(self):
+        error = 'API Error: 400 {"type":"error","error":{"message":"This request was refused by safety classifier"}}'
+        assert _is_policy_refusal(error) is True
+
+    def test_400_with_harm_keyword(self):
+        error = 'API Error: 400 {"type":"error","error":{"message":"Content flagged as potentially harmful"}}'
+        assert _is_policy_refusal(error) is True
+
+    def test_400_with_blocked_keyword(self):
+        error = 'API Error: 400 {"type":"error","error":{"message":"Request blocked"}}'
+        assert _is_policy_refusal(error) is True
+
+    def test_400_without_safety_keywords(self):
+        error = 'API Error: 400 {"type":"error","error":{"message":"max_tokens exceeds limit"}}'
+        assert _is_policy_refusal(error) is False
+
+    def test_500_is_not_policy_refusal(self):
+        error = 'API Error: 500 {"type":"error","error":{"message":"safety filter triggered"}}'
+        # Must be 400 — even if message has keywords
+        assert _is_policy_refusal(error) is False
+
+    def test_429_is_not_policy_refusal(self):
+        error = 'API Error: 429 {"type":"error","error":{"message":"rate limit"}}'
+        assert _is_policy_refusal(error) is False
+
+    def test_non_api_error(self):
+        assert _is_policy_refusal("Process killed (likely out of memory)") is False
+        assert _is_policy_refusal("Cancelled by user") is False
+        assert _is_policy_refusal("") is False
+
+
+# ---------------------------------------------------------------------------
+# TestPostPolicyRefusalAlert
+# ---------------------------------------------------------------------------
+
+
+class TestPostPolicyRefusalAlert:
+    def _config(self, tmp_path):
+        return Config(
+            db_path=tmp_path / "ignore.db",
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(),
+            temp_dir=tmp_path / "temp",
+        )
+
+    def _task(self, **kwargs):
+        defaults = dict(
+            id=42, status="failed", source_type="email", user_id="alice",
+            prompt="From: attacker@evil.com\nSubject: bad\n\nbody",
+            conversation_token=None, priority=5, attempt_count=0, max_attempts=3,
+        )
+        defaults.update(kwargs)
+        return db.Task(**defaults)
+
+    @patch("istota.scheduler.send_notification")
+    def test_email_alert_includes_sender(self, mock_send, tmp_path):
+        config = self._config(tmp_path)
+        task = self._task()
+        error = 'API Error: 400 {"type":"error","error":{"message":"blocked by safety policy"}}'
+
+        _post_policy_refusal_alert(config, task, error)
+
+        mock_send.assert_called_once()
+        kwargs = mock_send.call_args.kwargs
+        message = mock_send.call_args.args[2] if len(mock_send.call_args.args) >= 3 else kwargs.get("message", "")
+        assert "attacker@evil.com" in message
+        assert "42" in message  # task id
+        assert "blocked by safety policy" in message.lower()
+
+    @patch("istota.scheduler.send_notification")
+    def test_non_email_alert_is_generic(self, mock_send, tmp_path):
+        config = self._config(tmp_path)
+        task = self._task(
+            source_type="talk", conversation_token="roomXYZ",
+            prompt="hi from talk",
+        )
+        error = 'API Error: 400 {"type":"error","error":{"message":"content refused"}}'
+
+        _post_policy_refusal_alert(config, task, error)
+
+        mock_send.assert_called_once()
+        message = mock_send.call_args.args[2]
+        assert "roomXYZ" in message
+        assert "attacker" not in message  # no sender extraction for non-email
+
+    @patch("istota.scheduler.send_notification", side_effect=Exception("no alerts channel"))
+    def test_alert_failure_does_not_raise(self, mock_send, tmp_path):
+        config = self._config(tmp_path)
+        task = self._task()
+        # Should not raise even if notification dispatch fails
+        _post_policy_refusal_alert(config, task, "API Error: 400 {}")
 
 
 # ---------------------------------------------------------------------------
@@ -948,6 +1069,112 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         # OOM should fail immediately, no retry
         assert task.status == "failed"
+
+    @patch("istota.scheduler.execute_task", return_value=(
+        False,
+        'API Error: 400 {"type":"error","error":{"message":"Output blocked by content filtering policy"},"request_id":"req_z"}',
+        None, None,
+    ))
+    @patch("istota.scheduler._post_policy_refusal_alert")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_policy_refusal_skips_retry_and_alerts_for_email(
+        self, mock_arun, mock_alert, mock_exec, db_path, tmp_path,
+    ):
+        config = self._make_config(db_path, tmp_path)
+        prompt = "From: attacker@evil.com\nSubject: Test\n\nbody"
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt=prompt, user_id="testuser", source_type="email")
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is False
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        # Policy refusal: failed permanently, no retry, attempt_count stays at 0
+        assert task.status == "failed"
+        assert task.attempt_count == 0
+        # Alert should have been posted with the failed task
+        mock_alert.assert_called_once()
+        called_task = mock_alert.call_args[0][1]
+        assert called_task.id == task_id
+
+    @patch("istota.scheduler.execute_task", return_value=(
+        False,
+        'API Error: 400 {"type":"error","error":{"message":"safety classifier refused"}}',
+        None, None,
+    ))
+    @patch("istota.scheduler._post_policy_refusal_alert")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_policy_refusal_skips_retry_for_talk(
+        self, mock_arun, mock_alert, mock_exec, db_path, tmp_path,
+    ):
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="Talk task", user_id="testuser",
+                source_type="talk", conversation_token="room1",
+            )
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, _ = result
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "failed"
+        assert task.attempt_count == 0
+        mock_alert.assert_called_once()
+
+    @patch("istota.scheduler.execute_task", return_value=(
+        False,
+        'API Error: 400 {"type":"error","error":{"message":"max_tokens exceeds limit"}}',
+        None, None,
+    ))
+    @patch("istota.scheduler._post_policy_refusal_alert")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_non_policy_400_still_retries(
+        self, mock_arun, mock_alert, mock_exec, db_path, tmp_path,
+    ):
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="Big request", user_id="testuser", source_type="cli")
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, _ = result
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        # Plain 400 should follow normal retry logic
+        assert task.status == "pending"
+        assert task.attempt_count == 1
+        mock_alert.assert_not_called()
+
+    @patch("istota.scheduler.execute_task", return_value=(
+        False,
+        'API Error: 503 {"type":"error","error":{"message":"service unavailable"}}',
+        None, None,
+    ))
+    @patch("istota.scheduler._post_policy_refusal_alert")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_transient_5xx_unchanged_by_policy_branch(
+        self, mock_arun, mock_alert, mock_exec, db_path, tmp_path,
+    ):
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="Hello", user_id="testuser", source_type="cli")
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, _ = result
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "pending"
+        assert task.attempt_count == 1
+        mock_alert.assert_not_called()
 
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.asyncio.run", return_value=42)

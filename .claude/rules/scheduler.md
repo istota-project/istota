@@ -50,8 +50,9 @@ def process_one_task(config: Config, dry_run: bool = False, user_id: str | None 
    - Deliver results
    - Reset scheduled job failures
 6. **Failure path**:
-   - Check cancellation
-   - Retry with backoff if attempts remain (1, 4, 16 min)
+   - Check cancellation (`Cancelled by user` → status `cancelled`, no retry)
+   - Check policy refusal (`_is_policy_refusal()`: 400 + safety/policy/content/refused/harm/blocked keyword) → mark failed, post alert via `_post_policy_refusal_alert()` (extracts `From:` header for email tasks), no retry
+   - Retry with backoff if attempts remain (1, 4, 16 min) — skipped for OOM
    - Mark failed permanently
    - Track scheduled job failures, auto-disable after threshold
 7. Deliver results (Talk/email) outside DB context

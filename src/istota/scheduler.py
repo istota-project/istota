@@ -32,6 +32,7 @@ from .skills.briefing import (
 from .config import Config, load_config
 from .executor import detect_malformed_result, execute_task, is_transient_api_error, parse_api_error
 from .nextcloud_api import hydrate_user_configs
+from .notifications import send_notification
 from .talk import TalkClient, split_message
 from .email_poller import get_email_config
 from .skills.email import reply_to_email
@@ -118,6 +119,64 @@ PROGRESS_MESSAGES = [
 ]
 
 
+_POLICY_REFUSAL_KEYWORDS = ("safety", "policy", "content", "refused", "harm", "blocked")
+
+_FROM_HEADER_PATTERN = re.compile(r"(?:^|\n)From:\s*(.+?)(?:\n|$)")
+
+
+def _is_policy_refusal(error_text: str) -> bool:
+    """Check if a task failure is an API policy/safety refusal (non-retryable)."""
+    parsed = parse_api_error(error_text)
+    if not parsed:
+        return False
+    if parsed["status_code"] != 400:
+        return False
+    msg = (parsed.get("message") or "").lower()
+    return any(kw in msg for kw in _POLICY_REFUSAL_KEYWORDS)
+
+
+def _post_policy_refusal_alert(
+    config: "Config", task: "db.Task", error_text: str,
+) -> None:
+    """Post an alert to the user's alerts channel when content triggers an API policy refusal.
+
+    For email tasks, extracts the sender from the prompt's `From:` header so the user can
+    see who tripped the filter. For other sources, falls back to the conversation token.
+    """
+    parsed = parse_api_error(error_text)
+    api_msg = (parsed or {}).get("message") or "Unknown"
+
+    sender = None
+    if task.source_type == "email" and task.prompt:
+        m = _FROM_HEADER_PATTERN.search(task.prompt)
+        if m:
+            sender = m.group(1).strip()
+
+    if task.source_type == "email" and sender:
+        message = (
+            f"⚠️ **Inbound email blocked** (task #{task.id})\n\n"
+            f"Email from **{sender}** triggered the API safety filter "
+            f"and was not processed.\n\n"
+            f"Reason: {api_msg}"
+        )
+    else:
+        source_label = task.conversation_token or task.source_type or "unknown"
+        message = (
+            f"⚠️ **Task blocked by API safety filter** (task #{task.id})\n\n"
+            f"Content from {source_label} triggered a policy refusal "
+            f"and was not processed.\n\n"
+            f"Reason: {api_msg}"
+        )
+
+    try:
+        send_notification(config, task.user_id, message, surface="talk")
+    except Exception as e:
+        logger.warning(
+            "Failed to post policy refusal alert for task %d (user=%s): %s",
+            task.id, task.user_id, e,
+        )
+
+
 def _format_error_for_user(error_text: str) -> str:
     """
     Convert raw error text to a user-friendly message for Talk.
@@ -140,6 +199,8 @@ def _format_error_for_user(error_text: str) -> str:
             return "Being throttled by the mothership. Apparently I'm too chatty. Give it a minute."
         elif status in (401, 403):
             return "Can't authenticate with Anthropic — locked out of my own brain. This needs human intervention."
+        elif status == 400 and _is_policy_refusal(error_text):
+            return "Content triggered the API safety filter and couldn't be processed. Check the alerts channel for details."
         else:
             return "Something went wrong talking to Anthropic. The deep stared back. Try again?"
 
@@ -1454,13 +1515,38 @@ def process_one_task(
                         remove_job_from_cron_md(config, task.user_id, job.name)
 
         else:
-            # Check if we should retry (skip for OOM and cancellation — no point retrying)
+            # Check if we should retry (skip for OOM, cancellation, and policy refusals)
             is_oom = "killed (likely out of memory)" in result
             is_cancelled = result == "Cancelled by user"
+            is_policy = _is_policy_refusal(result)
             if is_cancelled:
                 db.update_task_status(conn, task_id, "cancelled", error=result)
                 db.log_task(conn, task_id, "info", "Task cancelled by user via !stop")
                 # No Talk notification needed — !stop already acknowledged
+            elif is_policy:
+                # Policy refusals are non-retryable: same content will be rejected again.
+                # Mark failed and post an alert so the user sees what was blocked.
+                db.update_task_status(conn, task_id, "failed", error=result)
+                db.log_task(
+                    conn, task_id, "warn",
+                    f"Task failed: API policy refusal (not retried): {result[:200]}",
+                )
+                _post_policy_refusal_alert(config, task, result)
+                if task.scheduled_job_id:
+                    fail_count = db.increment_scheduled_job_failures(
+                        conn, task.scheduled_job_id, result,
+                    )
+                    max_failures = config.scheduler.scheduled_job_max_consecutive_failures
+                    if max_failures > 0 and fail_count >= max_failures:
+                        db.disable_scheduled_job(conn, task.scheduled_job_id)
+                        db.log_task(
+                            conn, task_id, "warn",
+                            f"Scheduled job auto-disabled after {fail_count} consecutive failures",
+                        )
+                        logger.warning(
+                            "Scheduled job %d auto-disabled after %d failures",
+                            task.scheduled_job_id, fail_count,
+                        )
             elif task.attempt_count < task.max_attempts - 1 and not is_oom:
                 # Exponential backoff: 1, 4, 16 minutes
                 delay = 1 << (task.attempt_count * 2)
