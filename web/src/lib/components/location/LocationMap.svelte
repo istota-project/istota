@@ -47,9 +47,17 @@
 		map?.flyTo({ center: [lon, lat], zoom: z ?? 15, duration: 800 });
 	}
 
+	// Low-accuracy pings (phone inside a building, multipath in airport terminals, etc.)
+	// are dropped before any path or point rendering — they produce the scattered
+	// spaghetti and lone ocean segments seen around LAX.
+	const MAX_ACCURACY_M = 100;
+
 	function filteredPings(pings: LocationPing[]): LocationPing[] {
-		if (!activeActivityTypes) return pings;
-		return pings.filter(p => activeActivityTypes!.has(p.activity_type ?? 'stationary'));
+		const accurate = pings.filter(
+			p => p.accuracy == null || p.accuracy <= MAX_ACCURACY_M,
+		);
+		if (!activeActivityTypes) return accurate;
+		return accurate.filter(p => activeActivityTypes!.has(p.activity_type ?? 'stationary'));
 	}
 
 	function approxDistanceM(lon1: number, lat1: number, lon2: number, lat2: number): number {
@@ -58,12 +66,12 @@
 		return Math.sqrt(dlat * dlat + dlon * dlon);
 	}
 
-	// Gap detection: only break when both time and distance suggest a real location jump.
-	// Short time gaps are always contiguous (normal driving can be 1km+ between pings).
-	// Long time gaps need significant distance to count as a real move.
-	const GAP_TIME_MIN_S = 300;     // 5 min — below this, always contiguous
-	const GAP_DIST_MIN_M = 500;     // must also be this far apart
-	const GAP_SPEED_MAX_MS = 55;    // ~200 km/h — above this, clearly a teleport
+	// Gap detection: only dash when the jump is genuinely large. Normal walking
+	// with a GPS hiccup (a few hundred meters over a few minutes) should just
+	// draw as a solid path, not a dashed teleport.
+	const GAP_TIME_MIN_S = 900;      // 15 min — below this, contiguous
+	const GAP_DIST_MIN_M = 2000;     // 2 km minimum distance for a "gap"
+	const GAP_SPEED_MAX_MS = 55;     // ~200 km/h — clearly a teleport
 
 	function isGap(dist: number, timeDeltaS: number): boolean {
 		if (timeDeltaS <= 0) return false;
@@ -73,12 +81,14 @@
 	}
 
 	// Transit detection: within a run of consecutive non-gap edges, a "brief pause"
-	// is a sub-run of near-stationary edges lasting 20-180s. Runs with ≥2 such pauses
-	// are flagged as public transit (buses/trains with station stops).
+	// is a sub-run of near-stationary edges lasting 20-180s. Conservative thresholds
+	// here — we'd rather miss real transit than false-positive on urban walks with
+	// signal hiccups.
 	const TRANSIT_PAUSE_MAX_SPEED_MS = 1;
 	const TRANSIT_PAUSE_MIN_S = 20;
 	const TRANSIT_PAUSE_MAX_S = 180;
-	const TRANSIT_MIN_PAUSES = 2;
+	const TRANSIT_MIN_PAUSES = 3;
+	const TRANSIT_MIN_RUN_S = 600;   // 10 min — shorter runs stay solid
 
 	// Speed clamp for color gradient (km/h). Anything above maps to the top-of-scale color.
 	const MAX_DISPLAY_KMH = 180;
@@ -124,24 +134,29 @@
 			const endOfRun = i === edges.length || edges[i].gap;
 			if (!endOfRun) continue;
 			if (i > runStart) {
-				let pauses = 0;
-				let p = runStart;
-				while (p < i) {
-					if (edges[p].speedMs < TRANSIT_PAUSE_MAX_SPEED_MS) {
-						let q = p;
-						let pauseDt = 0;
-						while (q < i && edges[q].speedMs < TRANSIT_PAUSE_MAX_SPEED_MS) {
-							pauseDt += edges[q].dt;
-							q++;
+				let runDuration = 0;
+				for (let k = runStart; k < i; k++) runDuration += edges[k].dt;
+
+				if (runDuration >= TRANSIT_MIN_RUN_S) {
+					let pauses = 0;
+					let p = runStart;
+					while (p < i) {
+						if (edges[p].speedMs < TRANSIT_PAUSE_MAX_SPEED_MS) {
+							let q = p;
+							let pauseDt = 0;
+							while (q < i && edges[q].speedMs < TRANSIT_PAUSE_MAX_SPEED_MS) {
+								pauseDt += edges[q].dt;
+								q++;
+							}
+							if (pauseDt >= TRANSIT_PAUSE_MIN_S && pauseDt <= TRANSIT_PAUSE_MAX_S) pauses++;
+							p = q;
+						} else {
+							p++;
 						}
-						if (pauseDt >= TRANSIT_PAUSE_MIN_S && pauseDt <= TRANSIT_PAUSE_MAX_S) pauses++;
-						p = q;
-					} else {
-						p++;
 					}
-				}
-				if (pauses >= TRANSIT_MIN_PAUSES) {
-					for (let k = runStart; k < i; k++) transit[k] = true;
+					if (pauses >= TRANSIT_MIN_PAUSES) {
+						for (let k = runStart; k < i; k++) transit[k] = true;
+					}
 				}
 			}
 			runStart = i + 1;
