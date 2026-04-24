@@ -1117,6 +1117,61 @@ def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | N
         conn.close()
 
 
+def _location_list_dismissed(db_path: str, user_id: str) -> dict:
+    from .db import list_dismissed_clusters
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = list_dismissed_clusters(conn, user_id)
+        return {
+            "dismissed": [
+                {
+                    "id": r["id"],
+                    "lat": r["lat"],
+                    "lon": r["lon"],
+                    "radius_meters": r["radius_meters"],
+                    "dismissed_at": r["dismissed_at"],
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+def _location_dismiss_cluster(db_path: str, user_id: str, data: dict) -> dict:
+    from .db import insert_dismissed_cluster
+
+    radius = int(data.get("radius_meters", 100))
+    conn = sqlite3.connect(db_path)
+    try:
+        cluster_id = insert_dismissed_cluster(
+            conn, user_id, float(data["lat"]), float(data["lon"]), radius,
+        )
+        conn.commit()
+        return {
+            "id": cluster_id,
+            "lat": float(data["lat"]),
+            "lon": float(data["lon"]),
+            "radius_meters": radius,
+        }
+    finally:
+        conn.close()
+
+
+def _location_restore_dismissed(db_path: str, user_id: str, cluster_id: int) -> bool:
+    from .db import delete_dismissed_cluster
+
+    conn = sqlite3.connect(db_path)
+    try:
+        deleted = delete_dismissed_cluster(conn, user_id, cluster_id)
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
 def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -> dict:
     """Find clusters of stationary pings not assigned to any place."""
     from .geo import haversine
@@ -1158,6 +1213,7 @@ def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -
             cluster_count = p["count"]
             first = p["first_seen"]
             last = p["last_seen"]
+            members = [(p["lat"], p["lon"])]
             used[i] = True
 
             for j in range(i + 1, len(points)):
@@ -1167,6 +1223,7 @@ def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -
                     cluster_lat += points[j]["lat"] * points[j]["count"]
                     cluster_lon += points[j]["lon"] * points[j]["count"]
                     cluster_count += points[j]["count"]
+                    members.append((points[j]["lat"], points[j]["lon"]))
                     if points[j]["first_seen"] < first:
                         first = points[j]["first_seen"]
                     if points[j]["last_seen"] > last:
@@ -1174,17 +1231,30 @@ def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -
                     used[j] = True
 
             if cluster_count >= min_pings:
+                center_lat = cluster_lat / cluster_count
+                center_lon = cluster_lon / cluster_count
+                spread = max(
+                    (haversine(center_lat, center_lon, mlat, mlon) for mlat, mlon in members),
+                    default=0.0,
+                )
+                radius_meters = int(min(300, max(50, round(spread + 25))))
                 clusters.append({
-                    "lat": cluster_lat / cluster_count,
-                    "lon": cluster_lon / cluster_count,
+                    "lat": center_lat,
+                    "lon": center_lon,
                     "total_pings": cluster_count,
                     "first_seen": first,
                     "last_seen": last,
+                    "radius_meters": radius_meters,
                 })
 
         # Filter out clusters that are within 200m of an existing place
         existing = conn.execute(
             "SELECT lat, lon, radius_meters FROM places WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        # Also filter clusters whose center falls within a dismissed zone
+        dismissed = conn.execute(
+            "SELECT lat, lon, radius_meters FROM dismissed_clusters WHERE user_id = ?",
             (user_id,),
         ).fetchall()
         filtered = []
@@ -1193,6 +1263,12 @@ def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -
             for ep in existing:
                 dist = haversine(c["lat"], c["lon"], ep["lat"], ep["lon"])
                 if dist <= max(ep["radius_meters"], 200):
+                    too_close = True
+                    break
+            if too_close:
+                continue
+            for dz in dismissed:
+                if haversine(c["lat"], c["lon"], dz["lat"], dz["lon"]) <= dz["radius_meters"]:
                     too_close = True
                     break
             if not too_close:
@@ -1407,6 +1483,54 @@ async def api_location_discover_places(
         return JSONResponse({"error": "location not available"}, status_code=404)
     db_path, user_id, _ = loc
     return await asyncio.to_thread(_location_discover_places, db_path, user_id, min_pings)
+
+
+@api_router.get("/location/dismissed-clusters")
+async def api_location_list_dismissed(user: dict = Depends(_require_api_auth)):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    return await asyncio.to_thread(_location_list_dismissed, db_path, user_id)
+
+
+@api_router.post("/location/dismissed-clusters")
+async def api_location_dismiss_cluster(
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    data = await request.json()
+    if "lat" not in data or "lon" not in data or "radius_meters" not in data:
+        return JSONResponse({"error": "lat, lon, radius_meters required"}, status_code=400)
+    try:
+        result = await asyncio.to_thread(
+            _location_dismiss_cluster, db_path, user_id, data,
+        )
+        return result
+    except Exception as e:
+        logger.error("Failed to dismiss cluster: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@api_router.delete("/location/dismissed-clusters/{cluster_id}")
+async def api_location_restore_dismissed(
+    cluster_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    loc = _get_location_config(user["username"])
+    if not loc:
+        return JSONResponse({"error": "location not available"}, status_code=404)
+    db_path, user_id, _ = loc
+    deleted = await asyncio.to_thread(_location_restore_dismissed, db_path, user_id, cluster_id)
+    if not deleted:
+        return JSONResponse({"error": "dismissed cluster not found"}, status_code=404)
+    return {"status": "ok"}
 
 
 @api_router.get("/location/trips")

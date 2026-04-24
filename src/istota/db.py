@@ -3415,6 +3415,55 @@ def nullify_place_on_pings(
     return cursor.rowcount
 
 
+# -- Dismissed clusters --
+
+def insert_dismissed_cluster(
+    conn: sqlite3.Connection,
+    user_id: str,
+    lat: float,
+    lon: float,
+    radius_meters: int,
+) -> int:
+    """Record a dismissed cluster zone. Returns the new row ID."""
+    cursor = conn.execute(
+        """
+        INSERT INTO dismissed_clusters (user_id, lat, lon, radius_meters)
+        VALUES (?, ?, ?, ?)
+        """,
+        (user_id, lat, lon, radius_meters),
+    )
+    return cursor.lastrowid or 0
+
+
+def list_dismissed_clusters(
+    conn: sqlite3.Connection,
+    user_id: str,
+) -> list[sqlite3.Row]:
+    """Return all dismissed cluster zones for a user."""
+    return conn.execute(
+        """
+        SELECT id, lat, lon, radius_meters, dismissed_at
+        FROM dismissed_clusters
+        WHERE user_id = ?
+        ORDER BY dismissed_at DESC
+        """,
+        (user_id,),
+    ).fetchall()
+
+
+def delete_dismissed_cluster(
+    conn: sqlite3.Connection,
+    user_id: str,
+    cluster_id: int,
+) -> bool:
+    """Delete a dismissed cluster row. Returns True if deleted."""
+    cursor = conn.execute(
+        "DELETE FROM dismissed_clusters WHERE id = ? AND user_id = ?",
+        (cluster_id, user_id),
+    )
+    return cursor.rowcount > 0
+
+
 # -- Visits --
 
 def insert_visit(

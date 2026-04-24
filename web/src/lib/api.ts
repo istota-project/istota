@@ -165,6 +165,18 @@ export interface DiscoverResponse {
 	clusters: DiscoveredCluster[];
 }
 
+export interface DismissedCluster {
+	id: number;
+	lat: number;
+	lon: number;
+	radius_meters: number;
+	dismissed_at: string;
+}
+
+export interface DismissedClustersResponse {
+	dismissed: DismissedCluster[];
+}
+
 export interface Trip {
 	start_time: string;
 	end_time: string;
@@ -247,6 +259,22 @@ export async function getPlaceStats(placeId: number): Promise<PlaceStats> {
 export async function discoverPlaces(minPings?: number): Promise<DiscoverResponse> {
 	const qs = minPings ? `?min_pings=${minPings}` : '';
 	return apiFetch<DiscoverResponse>(`/location/discover-places${qs}`);
+}
+
+export async function listDismissedClusters(): Promise<DismissedClustersResponse> {
+	return apiFetch<DismissedClustersResponse>('/location/dismissed-clusters');
+}
+
+export async function dismissCluster(data: { lat: number; lon: number; radius_meters: number }): Promise<DismissedCluster> {
+	return apiFetch<DismissedCluster>('/location/dismissed-clusters', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(data),
+	});
+}
+
+export async function restoreDismissedCluster(id: number): Promise<void> {
+	await apiFetch(`/location/dismissed-clusters/${id}`, { method: 'DELETE' });
 }
 
 export async function getTrips(date?: string): Promise<TripsResponse> {
