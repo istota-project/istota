@@ -98,6 +98,15 @@
 	const DWELL_MIN_DURATION_S = 300;   // 5 min
 	const DWELL_MAX_SPREAD_M = 50;      // tight cluster
 
+	// Outlier detection on single rogue GPS fixes (iOS multipath, urban canyons).
+	// A ping B is an outlier when removing it barely changes the track: its
+	// neighbours A and C are close to each other but B detours far away. The
+	// accuracy gate can't catch these — they often report <100 m accuracy yet
+	// are hundreds of metres off. Geometric test: drop B if including it more
+	// than triples the local path length and the detour is above GPS noise.
+	const OUTLIER_MIN_DIST_M = 100;     // above normal walking jitter
+	const OUTLIER_PATH_RATIO = 3;       // (AB + BC) / AC — detour inflation factor
+
 	// Speed clamp for color gradient (km/h). Anything above maps to the top-of-scale color.
 	const MAX_DISPLAY_KMH = 180;
 
@@ -150,8 +159,38 @@
 		return kept;
 	}
 
+	function dropOutlierPings(pings: LocationPing[]): LocationPing[] {
+		let current = pings;
+		for (let pass = 0; pass < 3; pass++) {
+			if (current.length < 3) return current;
+			const kept: LocationPing[] = [current[0]];
+			let removed = 0;
+			for (let i = 1; i < current.length - 1; i++) {
+				const a = kept[kept.length - 1];
+				const b = current[i];
+				const c = current[i + 1];
+				const ab = approxDistanceM(a.lon, a.lat, b.lon, b.lat);
+				if (ab <= OUTLIER_MIN_DIST_M) {
+					kept.push(b);
+					continue;
+				}
+				const bc = approxDistanceM(b.lon, b.lat, c.lon, c.lat);
+				const ac = approxDistanceM(a.lon, a.lat, c.lon, c.lat);
+				if (ac > 0 && ab + bc > OUTLIER_PATH_RATIO * ac) {
+					removed++;
+					continue;
+				}
+				kept.push(b);
+			}
+			kept.push(current[current.length - 1]);
+			if (removed === 0) return kept;
+			current = kept;
+		}
+		return current;
+	}
+
 	function buildEdges(pings: LocationPing[]): Edge[] {
-		const filtered = excludeDwellPings(filteredPings(pings));
+		const filtered = dropOutlierPings(excludeDwellPings(filteredPings(pings)));
 		if (filtered.length < 2) return [];
 
 		const edges: Edge[] = [];
