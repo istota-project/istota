@@ -66,30 +66,26 @@
 		return Math.sqrt(dlat * dlat + dlon * dlon);
 	}
 
-	// Gap detection: an edge is a gap if either the implied speed is impossible
-	// (clear teleport) or the time delta reaches the dwell minimum. Hitting the
-	// dwell minimum means a filtered dwell sits between the two kept pings —
-	// this splits the edge stream at dwell boundaries so transit detection
-	// runs per-trip, not across a whole month of concatenated activity.
-	// Brief in-transit stationary runs stay below the dwell threshold and
-	// keep their pings, so dt stays small and no gap fires mid-transit.
-	const GAP_SPEED_MAX_MS = 55;     // ~200 km/h — clearly a teleport
+	// Gap detection. An edge is a gap if any of these hold:
+	//   - implied speed > 200 km/h (clear teleport)
+	//   - dt >= dwell minimum (a filtered dwell sits between the two kept pings)
+	//   - the two pings are in different place states (null vs place, or two
+	//     different places) AND the distance crosses a place boundary. This
+	//     catches "rays" — the phone waking up mid-trip after leaving a
+	//     geofence, where the first new ping is already hundreds of metres
+	//     away. Without this, such edges render as solid coloured straight
+	//     lines cutting across blocks.
+	const GAP_SPEED_MAX_MS = 55;             // ~200 km/h — clearly a teleport
+	const PLACE_CROSSING_DIST_M = 200;       // boundary-skip threshold
 
-	function isGap(dist: number, timeDeltaS: number): boolean {
+	function isGap(a: LocationPing, b: LocationPing, dist: number, timeDeltaS: number): boolean {
 		if (timeDeltaS <= 0) return false;
 		if (dist / timeDeltaS > GAP_SPEED_MAX_MS) return true;
-		return timeDeltaS >= DWELL_MIN_DURATION_S;
+		if (timeDeltaS >= DWELL_MIN_DURATION_S) return true;
+		const placeA = a.place ?? null;
+		const placeB = b.place ?? null;
+		return placeA !== placeB && dist > PLACE_CROSSING_DIST_M;
 	}
-
-	// Transit detection: within a run of consecutive non-gap edges, a "brief pause"
-	// is a sub-run of near-stationary edges lasting 20-180s. Conservative thresholds
-	// here — we'd rather miss real transit than false-positive on urban walks with
-	// signal hiccups.
-	const TRANSIT_PAUSE_MAX_SPEED_MS = 1;
-	const TRANSIT_PAUSE_MIN_S = 20;
-	const TRANSIT_PAUSE_MAX_S = 180;
-	const TRANSIT_MIN_PAUSES = 3;
-	const TRANSIT_MIN_RUN_S = 600;   // 10 min — shorter runs stay solid
 
 	// Dwell detection on consecutive stationary pings: a real dwell is a long run
 	// of stationary pings tightly clustered in space. Those get excluded from the
@@ -244,55 +240,17 @@
 				speedKmh: Math.min(speedMs * 3.6, MAX_DISPLAY_KMH),
 				speedMs,
 				dt,
-				gap: isGap(dist, dt),
+				gap: isGap(a, b, dist, dt),
 			});
 		}
 		return edges;
-	}
-
-	function detectTransitRuns(edges: Edge[]): boolean[] {
-		const transit = new Array<boolean>(edges.length).fill(false);
-		let runStart = 0;
-		for (let i = 0; i <= edges.length; i++) {
-			const endOfRun = i === edges.length || edges[i].gap;
-			if (!endOfRun) continue;
-			if (i > runStart) {
-				let runDuration = 0;
-				for (let k = runStart; k < i; k++) runDuration += edges[k].dt;
-
-				if (runDuration >= TRANSIT_MIN_RUN_S) {
-					let pauses = 0;
-					let p = runStart;
-					while (p < i) {
-						if (edges[p].speedMs < TRANSIT_PAUSE_MAX_SPEED_MS) {
-							let q = p;
-							let pauseDt = 0;
-							while (q < i && edges[q].speedMs < TRANSIT_PAUSE_MAX_SPEED_MS) {
-								pauseDt += edges[q].dt;
-								q++;
-							}
-							if (pauseDt >= TRANSIT_PAUSE_MIN_S && pauseDt <= TRANSIT_PAUSE_MAX_S) pauses++;
-							p = q;
-						} else {
-							p++;
-						}
-					}
-					if (pauses >= TRANSIT_MIN_PAUSES) {
-						for (let k = runStart; k < i; k++) transit[k] = true;
-					}
-				}
-			}
-			runStart = i + 1;
-		}
-		return transit;
 	}
 
 	function buildPathGeoJSON(pings: LocationPing[]): GeoJSON.FeatureCollection {
 		const edges = buildEdges(pings);
 		if (edges.length === 0) return { type: 'FeatureCollection', features: [] };
 
-		const transit = detectTransitRuns(edges);
-		const features: GeoJSON.Feature[] = edges.map((e, i) => {
+		const features: GeoJSON.Feature[] = edges.map(e => {
 			if (e.gap) {
 				return {
 					type: 'Feature',
@@ -305,7 +263,6 @@
 				properties: {
 					segment_type: 'activity',
 					speed_kmh: e.speedKmh,
-					is_transit: transit[i] ? 1 : 0,
 				},
 				geometry: { type: 'LineString', coordinates: [e.a, e.b] },
 			};
@@ -459,40 +416,19 @@
 			...SPEED_GRADIENT_STOPS.flatMap(([kmh, color]) => [kmh, color]),
 		];
 
-		// Activity path trace (normal movement — solid line, speed-colored)
+		// Activity path trace — solid, speed-coloured. The speed gradient alone
+		// conveys mode (walking vs cycling vs transit), so no secondary dashed
+		// style is needed.
 		map.addLayer({
 			id: 'path-line',
 			type: 'line',
 			source: 'path',
-			filter: [
-				'all',
-				['==', ['get', 'segment_type'], 'activity'],
-				['!=', ['get', 'is_transit'], 1],
-			],
+			filter: ['==', ['get', 'segment_type'], 'activity'],
 			layout: { visibility: 'visible' },
 			paint: {
 				'line-color': speedColorExpr,
 				'line-width': 2.5,
 				'line-opacity': 0.75,
-			},
-		});
-
-		// Detected public-transit runs (same speed gradient, dashed so they read differently)
-		map.addLayer({
-			id: 'path-transit',
-			type: 'line',
-			source: 'path',
-			filter: [
-				'all',
-				['==', ['get', 'segment_type'], 'activity'],
-				['==', ['get', 'is_transit'], 1],
-			],
-			layout: { visibility: 'visible' },
-			paint: {
-				'line-color': speedColorExpr,
-				'line-width': 2.5,
-				'line-opacity': 0.85,
-				'line-dasharray': [2, 2],
 			},
 		});
 
