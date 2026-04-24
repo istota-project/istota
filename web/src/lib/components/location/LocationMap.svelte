@@ -556,11 +556,13 @@
 			},
 		});
 
-		// Place labels
+		// Place labels — only at neighbourhood zoom and closer, otherwise they
+		// pile up illegibly on country-scale views (Tokyo alone has dozens).
 		map.addLayer({
 			id: 'place-labels',
 			type: 'symbol',
 			source: 'places',
+			minzoom: 12,
 			layout: {
 				'text-field': ['get', 'name'],
 				'text-size': 10,
