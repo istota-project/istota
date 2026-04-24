@@ -1,24 +1,34 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import type { DiscoveredCluster, Place } from '$lib/api';
 
 	interface Props {
 		cluster?: DiscoveredCluster;
 		place?: Place;
+		initialLat?: number;
+		initialLon?: number;
 		onSave: (data: { name: string; lat: number; lon: number; radius_meters: number; category: string; notes: string }) => void;
 		onCancel: () => void;
 		onDismiss?: (data: { lat: number; lon: number; radius_meters: number }) => void;
 	}
 
-	let { cluster, place, onSave, onCancel, onDismiss }: Props = $props();
+	let { cluster, place, initialLat, initialLon, onSave, onCancel, onDismiss }: Props = $props();
+
+	let nameInput: HTMLInputElement | undefined = $state();
+	$effect(() => {
+		nameInput?.focus();
+	});
 
 	const editing = $derived(!!place);
+	const manual = $derived(!place && !cluster);
+	const showCoords = $derived(editing || manual);
 
-	let name = $state(place?.name ?? '');
-	let category = $state(place?.category ?? 'other');
-	let radius = $state(place?.radius_meters ?? cluster?.radius_meters ?? 100);
-	let lat = $state(place?.lat ?? cluster?.lat ?? 0);
-	let lon = $state(place?.lon ?? cluster?.lon ?? 0);
-	let notes = $state(place?.notes ?? '');
+	let name = $state(untrack(() => place?.name ?? ''));
+	let category = $state(untrack(() => place?.category ?? 'other'));
+	let radius = $state(untrack(() => place?.radius_meters ?? cluster?.radius_meters ?? 100));
+	let lat = $state(untrack(() => place?.lat ?? cluster?.lat ?? initialLat ?? 0));
+	let lon = $state(untrack(() => place?.lon ?? cluster?.lon ?? initialLon ?? 0));
+	let notes = $state(untrack(() => place?.notes ?? ''));
 
 	const categories = [
 		'home', 'work', 'gym', 'food', 'shopping',
@@ -53,9 +63,10 @@
 
 <svelte:window on:keydown={handleKeydown} />
 
-<div class="overlay" onclick={onCancel} role="presentation">
-	<div class="form-card" onclick={(e) => e.stopPropagation()} role="dialog">
-		<div class="header">{editing ? 'Edit place' : 'Name this place'}</div>
+<div class="overlay">
+	<button type="button" class="backdrop" onclick={onCancel} aria-label="Close"></button>
+	<div class="form-card" role="dialog" aria-modal="true" tabindex={-1}>
+		<div class="header">{editing ? 'Edit place' : manual ? 'New place' : 'Name this place'}</div>
 		{#if cluster && !editing}
 			<div class="meta">
 				{cluster.total_pings} pings recorded here
@@ -64,7 +75,7 @@
 
 		<label class="field">
 			<span>Name</span>
-			<input type="text" bind:value={name} placeholder="e.g. Office, Gym..." autofocus />
+			<input type="text" bind:this={nameInput} bind:value={name} placeholder="e.g. Office, Gym..." />
 		</label>
 
 		<label class="field">
@@ -81,7 +92,7 @@
 			<input type="range" min="25" max="500" step="25" bind:value={radius} />
 		</label>
 
-		{#if editing}
+		{#if showCoords}
 			<div class="coords">
 				<label class="field coord">
 					<span>Lat</span>
@@ -127,13 +138,23 @@
 		position: fixed;
 		inset: 0;
 		z-index: 100;
-		background: rgba(0, 0, 0, 0.5);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 	}
 
+	.backdrop {
+		position: absolute;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.5);
+		border: none;
+		padding: 0;
+		cursor: default;
+	}
+
 	.form-card {
+		position: relative;
+		z-index: 1;
 		background: var(--surface-card);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-card);

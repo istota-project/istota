@@ -17,9 +17,11 @@
 		showHeat?: boolean;
 		activeActivityTypes?: Set<string> | null;
 		selectedPlaceId?: number | null;
+		pickingLocation?: boolean;
 		onClusterClick?: (cluster: DiscoveredCluster) => void;
 		onDismissedClusterClick?: (dismissed: DismissedCluster) => void;
 		onPlaceMove?: (placeId: number, lat: number, lon: number) => void;
+		onMapClick?: (lat: number, lon: number) => void;
 	}
 
 	let {
@@ -34,9 +36,11 @@
 		showHeat = false,
 		activeActivityTypes = null,
 		selectedPlaceId = null,
+		pickingLocation = false,
 		onClusterClick,
 		onDismissedClusterClick,
 		onPlaceMove,
+		onMapClick,
 	}: Props = $props();
 
 	let container: HTMLDivElement;
@@ -46,6 +50,7 @@
 	let currentMarker: maplibregl.Marker | undefined;
 	let dragMarker: maplibregl.Marker | undefined;
 	let resizeObserver: ResizeObserver | undefined;
+	let pickClickHandler: ((e: maplibregl.MapMouseEvent) => void) | null = null;
 
 	export function flyTo(lat: number, lon: number, z?: number) {
 		map?.flyTo({ center: [lon, lat], zoom: z ?? 15, duration: 800 });
@@ -849,6 +854,21 @@
 		selectedPlaceId;
 		places;
 		updateDragMarker();
+	});
+
+	$effect(() => {
+		if (!map) return;
+		const canvas = map.getCanvas();
+		canvas.style.cursor = pickingLocation ? 'crosshair' : '';
+		if (pickClickHandler) {
+			map.off('click', pickClickHandler);
+			pickClickHandler = null;
+		}
+		if (pickingLocation && onMapClick) {
+			const cb = onMapClick;
+			pickClickHandler = (e) => cb(e.lngLat.lat, e.lngLat.lng);
+			map.on('click', pickClickHandler);
+		}
 	});
 </script>
 

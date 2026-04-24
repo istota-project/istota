@@ -9,11 +9,11 @@
 		onViewed?: (id: number) => void;
 	} = $props();
 
-	const feedSlug = entry.feed.title.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-	const isImage = entry.images.length > 0;
 	const maxGrid = 4;
-	const hiddenCount = Math.max(0, entry.images.length - maxGrid);
-	const permalink = entry.url || entry.feed.site_url || '';
+	const feedSlug = $derived(entry.feed.title.toLowerCase().replace(/[^a-z0-9-]/g, '-'));
+	const isImage = $derived(entry.images.length > 0);
+	const hiddenCount = $derived(Math.max(0, entry.images.length - maxGrid));
+	const permalink = $derived(entry.url || entry.feed.site_url || '');
 
 	function formatDate(iso: string): string {
 		try {
