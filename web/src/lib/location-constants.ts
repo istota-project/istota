@@ -17,3 +17,15 @@ export const ACTIVITY_LABELS: Record<string, string> = {
 export const ALL_ACTIVITY_TYPES = Object.keys(ACTIVITY_COLORS);
 
 export const DEFAULT_PATH_COLOR = '#4a9eff';
+
+// Speed-gradient stops (km/h → color). Log-ish spacing so walking/cycling/driving
+// each land in a visually distinct band despite the wide speed range.
+export const SPEED_GRADIENT_STOPS: Array<[number, string]> = [
+	[0, '#2a4a8a'],     // standstill — deep blue
+	[4, '#3f7dc8'],     // walking
+	[10, '#4aff7f'],    // fast walk / slow bike — green
+	[20, '#b6ff3a'],    // cycling
+	[40, '#ffd84a'],    // urban driving — yellow
+	[80, '#ff8a3a'],    // highway — orange
+	[120, '#ff3a3a'],   // fast highway — red
+];

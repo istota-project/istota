@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-24: Location web UI — speed gradient, transit detection, browser-tz grouping
+
+Closed three open location issues (ISSUE-049, ISSUE-051, ISSUE-052). The map now colors paths by a continuous speed gradient instead of relying on unreliable activity classification, flags public-transit runs heuristically, and groups days by the browser's physical timezone instead of the user's configured home timezone.
+
+**Key changes:**
+- Per-edge LineString features with computed `speed_kmh` (distance/time, ignoring noisy GPS speed) and a seven-stop linear gradient (0→120 km/h, deep blue → red) on `path-line`.
+- `detectTransitRuns()` heuristic: ≥2 brief low-speed pauses (<1 m/s, 20–180 s) within a movement run tags edges as transit; rendered speed-colored but dashed on a new `path-transit` layer.
+- Renamed the old teleport-connector layer from `path-transit` to `path-gap` to free the transit name for actual transit detection.
+- Location API (`/pings`, `/day-summary`, `/trips`) accepts optional `tz=<IANA>` query param, validated via `zoneinfo` in `_resolve_tz()` with fallback to the user's configured tz. Frontend auto-injects `Intl.DateTimeFormat().resolvedOptions().timeZone` on every location call.
+- 4 new `TestResolveTz` unit tests.
+
+**Files added/modified:**
+- `src/istota/web_app.py` — `_resolve_tz()` helper, `tz` query param on three endpoints
+- `web/src/lib/api.ts` — `browserTz()` + `withBrowserTz()` injected into location API calls
+- `web/src/lib/components/location/LocationMap.svelte` — `buildEdges()`, `detectTransitRuns()`, new gradient/gap/transit layers
+- `web/src/lib/location-constants.ts` — `SPEED_GRADIENT_STOPS`
+- `tests/test_web_app.py` — `TestResolveTz` (4 tests)
+
 ## 2026-04-09: Fix sleep cycle fact routing and KG predicate handling
 
 The sleep cycle was producing both MEMORY bullets and FACTS for the same personal attributes (allergies, relationships, dietary preferences), then the curation pass was promoting those bullets into USER.md under unrelated headings. Investigated approaches from Graphiti (LLM + embedding dedup) and MemPalace (simple exact dedup), settled on a middle ground: freeform predicates with word-level Jaccard fuzzy dedup.

@@ -584,3 +584,25 @@ oidc_client_id = "my-client"
         assert cfg.web.session_secret_key == "env-key"
 
 
+@_needs_web_deps
+class TestResolveTz:
+    """Client-supplied timezone is accepted when valid, else falls back (ISSUE-049)."""
+
+    def test_valid_client_tz_overrides_fallback(self):
+        from istota.web_app import _resolve_tz
+        assert _resolve_tz("Asia/Tokyo", "America/Los_Angeles") == "Asia/Tokyo"
+
+    def test_empty_client_tz_returns_fallback(self):
+        from istota.web_app import _resolve_tz
+        assert _resolve_tz("", "America/Los_Angeles") == "America/Los_Angeles"
+
+    def test_invalid_client_tz_returns_fallback(self):
+        from istota.web_app import _resolve_tz
+        assert _resolve_tz("Not/A/Real/Zone", "America/Los_Angeles") == "America/Los_Angeles"
+
+    def test_malformed_client_tz_returns_fallback(self):
+        from istota.web_app import _resolve_tz
+        # Null bytes and other oddities should not crash
+        assert _resolve_tz("../etc/passwd", "UTC") == "UTC"
+
+

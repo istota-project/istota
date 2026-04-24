@@ -185,18 +185,35 @@ export interface TripsResponse {
 
 // Location API
 
+function browserTz(): string {
+	try {
+		return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+	} catch {
+		return '';
+	}
+}
+
+function withBrowserTz(params: Record<string, string>): URLSearchParams {
+	const qs = new URLSearchParams(params);
+	const tz = browserTz();
+	if (tz && !qs.has('tz')) qs.set('tz', tz);
+	return qs;
+}
+
 export async function getLocationCurrent(): Promise<CurrentLocation> {
 	return apiFetch<CurrentLocation>('/location/current');
 }
 
 export async function getLocationPings(params: Record<string, string>): Promise<PingsResponse> {
-	const qs = '?' + new URLSearchParams(params).toString();
-	return apiFetch<PingsResponse>(`/location/pings${qs}`);
+	const qs = withBrowserTz(params).toString();
+	return apiFetch<PingsResponse>(`/location/pings?${qs}`);
 }
 
 export async function getDaySummary(date?: string): Promise<DaySummary> {
-	const qs = date ? `?date=${date}` : '';
-	return apiFetch<DaySummary>(`/location/day-summary${qs}`);
+	const params: Record<string, string> = {};
+	if (date) params.date = date;
+	const qs = withBrowserTz(params).toString();
+	return apiFetch<DaySummary>(`/location/day-summary${qs ? '?' + qs : ''}`);
 }
 
 export async function getLocationPlaces(): Promise<PlacesResponse> {
@@ -233,8 +250,10 @@ export async function discoverPlaces(minPings?: number): Promise<DiscoverRespons
 }
 
 export async function getTrips(date?: string): Promise<TripsResponse> {
-	const qs = date ? `?date=${date}` : '';
-	return apiFetch<TripsResponse>(`/location/trips${qs}`);
+	const params: Record<string, string> = {};
+	if (date) params.date = date;
+	const qs = withBrowserTz(params).toString();
+	return apiFetch<TripsResponse>(`/location/trips${qs ? '?' + qs : ''}`);
 }
 
 export async function disconnectGoogle(): Promise<void> {
