@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25: API policy refusal alert (ISSUE-033)
+
+Closed ISSUE-033: when an inbound email (or any task) trips Anthropic's safety filter, the scheduler used to retry the same content three times against the same block, then deliver a generic "deep stared back" Talk message — silent failure from the user's perspective. Now policy refusals are detected, retries are skipped, and the user gets an alert naming what was blocked.
+
+**Key changes:**
+- `_is_policy_refusal()` classifies an error string as a non-retryable policy refusal: `parse_api_error()` → status 400 + safety/policy/content/refused/harm/blocked keyword in the API message.
+- New branch in `process_one_task()` after `is_cancelled` and before the retry path: policy refusals mark the task `failed` immediately (attempt_count stays at 0), bump scheduled-job failure counters where applicable, and call `_post_policy_refusal_alert()`.
+- `_post_policy_refusal_alert()` extracts the `From:` header from email-task prompts so the alert names the sender; for non-email surfaces it labels by conversation token / source type. Dispatches via `send_notification(surface="talk")`, wrapped in try/except so a missing alerts channel never crashes the scheduler.
+- `_format_error_for_user()` now returns a meaningful "content triggered the API safety filter — check the alerts channel" message for 400+safety, instead of the generic bucket. Defense-in-depth — the alert is the primary surface, but if the Talk error path ever fires (e.g. classification miss followed by max_attempts exhaustion), the message points the user the right way.
+- 11 new tests across `TestIsPolicyRefusal`, `TestPostPolicyRefusalAlert`, `TestFormatErrorForUser`, `TestProcessOneTask`. Full suite: 3060 passed, 1 skipped.
+
+**Files added/modified:**
+- `src/istota/scheduler.py` — `_is_policy_refusal()`, `_post_policy_refusal_alert()`, `_FROM_HEADER_PATTERN`, `_POLICY_REFUSAL_KEYWORDS`; new policy branch in `process_one_task()`; 400+safety case in `_format_error_for_user()`; module-level `from .notifications import send_notification`
+- `tests/test_scheduler.py` — added `TestIsPolicyRefusal` (8 tests), `TestPostPolicyRefusalAlert` (3 tests), 2 new `TestFormatErrorForUser` cases, 4 new `TestProcessOneTask` cases
+
+## 2026-04-25: Persona/talk guideline tuning — emoji discipline + work-effort puffery
+
+Tightened the persona file and Talk channel guideline to stop reflexive emoji signoffs and a couple of AI-tell phrases that had crept into outputs.
+
+**Key changes:**
+- Talk guideline: emoji rule rewritten to "default to none, at most one per reply, only when it adds information the text doesn't already carry." Allowed roles preserved; opening/signoff usage forbidden.
+- Persona: explicit line that "being the octopus is enough — you don't need to signal it with an emoji." New entry in the AI-tells list banning *doing the heavy lifting / the real work / under the hood is where it happens* and similar work-effort puffery.
+
+**Files added/modified:**
+- `config/guidelines/talk.md` — emoji rule reworded
+- `config/persona.md` — emoji-restraint paragraph + work-effort puffery ban
+
 ## 2026-04-25: Dismissable cluster zones for location discovery
 
 Discovered "unknown places" piled up indefinitely on the location places page — clicking each one only offered a Save action, so frequent transit stops, parking lots, and short street stays kept reappearing. Added a Dismiss path that records a persistent zone instead of a place, so future pings in that area don't form a new cluster either.
