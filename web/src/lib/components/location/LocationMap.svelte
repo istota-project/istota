@@ -170,7 +170,7 @@
 	const OUTLIER_PERP_RATIO = 0.3;     // perp threshold scales with AC length
 
 	// Speed clamp for color gradient (km/h). Anything above maps to the top-of-scale color.
-	const MAX_DISPLAY_KMH = 180;
+	const MAX_DISPLAY_KMH = 320;
 
 	interface Edge {
 		a: [number, number];
