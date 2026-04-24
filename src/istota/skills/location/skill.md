@@ -40,12 +40,14 @@ istota-skill location places
 # Takes effect immediately on the next incoming ping
 istota-skill location learn "coffee shop"
 istota-skill location learn "gym" --category gym --radius 75
+istota-skill location learn "office" --notes "side entrance, 4th floor"
 
 # Update an existing place — identify by --name or --id
 # Only specified fields are changed; others are left as-is
 istota-skill location update --name "coffee shop" --category food
 istota-skill location update --name "old name" --rename "new name"
 istota-skill location update --id 42 --radius 200 --notes "back entrance"
+istota-skill location update --id 42 --notes ""  # clear notes
 istota-skill location update --name "office" --lat 34.05 --lon -118.25
 
 # Delete a place — identify by --name or --id

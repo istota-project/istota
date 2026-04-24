@@ -878,13 +878,14 @@ def _location_query_places(db_path: str, user_id: str) -> dict:
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT id, name, lat, lon, radius_meters, category FROM places WHERE user_id = ? ORDER BY name",
+            "SELECT id, name, lat, lon, radius_meters, category, notes FROM places WHERE user_id = ? ORDER BY name",
             (user_id,),
         ).fetchall()
         return {
             "places": [
                 {"id": r["id"], "name": r["name"], "lat": r["lat"], "lon": r["lon"],
-                 "radius_meters": r["radius_meters"], "category": r["category"]}
+                 "radius_meters": r["radius_meters"], "category": r["category"],
+                 "notes": r["notes"]}
                 for r in rows
             ]
         }
@@ -899,6 +900,7 @@ def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        notes = (data.get("notes") or "").strip() or None
         place_id = insert_place(
             conn, user_id,
             name=data["name"],
@@ -906,6 +908,7 @@ def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
             lon=data["lon"],
             radius_meters=data.get("radius_meters", 100),
             category=data.get("category"),
+            notes=notes,
         )
         # Backfill: assign this place to existing pings within radius
         radius_m = data.get("radius_meters", 100)
@@ -930,6 +933,7 @@ def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
         return {
             "id": place_id, "name": data["name"], "lat": lat, "lon": lon,
             "radius_meters": radius_m, "category": data.get("category"),
+            "notes": notes,
             "backfilled_pings": backfilled,
         }
     finally:
@@ -950,7 +954,17 @@ def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict
 
         geo_changed = any(k in data for k in ("lat", "lon", "radius_meters"))
 
-        update_place(conn, place_id, **{k: v for k, v in data.items() if k in ("name", "lat", "lon", "radius_meters", "category", "notes")})
+        normalized = {k: v for k, v in data.items() if k in ("name", "lat", "lon", "radius_meters", "category", "notes")}
+        # Notes: empty string clears the field. update_place skips None values, so
+        # write NULL directly when the client sends an empty notes string.
+        if "notes" in normalized:
+            n = normalized.pop("notes")
+            n = n.strip() if isinstance(n, str) else n
+            if n:
+                normalized["notes"] = n
+            else:
+                conn.execute("UPDATE places SET notes = NULL WHERE id = ?", (place_id,))
+        update_place(conn, place_id, **normalized)
 
         updated = get_place_by_id(conn, place_id)
         if not updated:
@@ -989,7 +1003,7 @@ def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict
         return {
             "id": updated.id, "name": updated.name, "lat": updated.lat,
             "lon": updated.lon, "radius_meters": updated.radius_meters,
-            "category": updated.category,
+            "category": updated.category, "notes": updated.notes,
         }
     finally:
         conn.close()

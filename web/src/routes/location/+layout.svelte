@@ -50,7 +50,7 @@
 		editingPlace = place;
 	}
 
-	async function handleEditSave(data: { name: string; lat: number; lon: number; radius_meters: number; category: string }) {
+	async function handleEditSave(data: { name: string; lat: number; lon: number; radius_meters: number; category: string; notes: string }) {
 		if (!editingPlace) return;
 		try {
 			await updatePlace(editingPlace.id, data);
@@ -176,6 +176,9 @@
 							<button class="stats-close" onclick={() => { selectedPlace = null; placeStats = null; }} type="button">&times;</button>
 						</div>
 					</div>
+					{#if selectedPlace.notes}
+						<div class="stats-notes">{selectedPlace.notes}</div>
+					{/if}
 					{#if statsLoading}
 						<div class="stats-loading">Loading...</div>
 					{:else if placeStats && placeStats.total_visits > 0}
@@ -475,6 +478,15 @@
 	.stats-loading, .stats-empty {
 		font-size: var(--text-xs);
 		color: var(--text-dim);
+	}
+
+	.stats-notes {
+		font-size: var(--text-xs);
+		color: var(--text-muted);
+		font-style: italic;
+		white-space: pre-wrap;
+		padding: 0.25rem 0;
+		border-top: 1px solid var(--border-subtle);
 	}
 
 	.place-delete {

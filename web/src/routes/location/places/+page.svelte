@@ -43,7 +43,7 @@
 		mapComponent?.flyTo(cluster.lat, cluster.lon, 16);
 	}
 
-	async function handleSave(data: { name: string; lat: number; lon: number; radius_meters: number; category: string }) {
+	async function handleSave(data: { name: string; lat: number; lon: number; radius_meters: number; category: string; notes: string }) {
 		try {
 			await createPlace(data);
 			selectedCluster = null;
