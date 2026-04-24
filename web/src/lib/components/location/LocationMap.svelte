@@ -3,7 +3,7 @@
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
 	import type { LocationPing, Place, DiscoveredCluster } from '$lib/api';
-	import { ACTIVITY_COLORS, DEFAULT_PATH_COLOR } from '$lib/location-constants';
+	import { ACTIVITY_COLORS, SPEED_GRADIENT_STOPS } from '$lib/location-constants';
 
 	interface Props {
 		center?: [number, number];
@@ -72,59 +72,106 @@
 		return dist > GAP_DIST_MIN_M;
 	}
 
-	function buildPathGeoJSON(pings: LocationPing[]): GeoJSON.FeatureCollection {
-		// Only draw lines for movement pings — stationary pings render as points
+	// Transit detection: within a run of consecutive non-gap edges, a "brief pause"
+	// is a sub-run of near-stationary edges lasting 20-180s. Runs with ≥2 such pauses
+	// are flagged as public transit (buses/trains with station stops).
+	const TRANSIT_PAUSE_MAX_SPEED_MS = 1;
+	const TRANSIT_PAUSE_MIN_S = 20;
+	const TRANSIT_PAUSE_MAX_S = 180;
+	const TRANSIT_MIN_PAUSES = 2;
+
+	// Speed clamp for color gradient (km/h). Anything above maps to the top-of-scale color.
+	const MAX_DISPLAY_KMH = 180;
+
+	interface Edge {
+		a: [number, number];
+		b: [number, number];
+		speedKmh: number;
+		speedMs: number;
+		dt: number;
+		gap: boolean;
+	}
+
+	function buildEdges(pings: LocationPing[]): Edge[] {
 		const filtered = filteredPings(pings).filter(p => (p.activity_type ?? 'stationary') !== 'stationary');
-		if (filtered.length < 2) return { type: 'FeatureCollection', features: [] };
+		if (filtered.length < 2) return [];
 
-		const features: GeoJSON.Feature[] = [];
-		let segCoords: [number, number][] = [[filtered[0].lon, filtered[0].lat]];
-		let segActivity = filtered[0].activity_type ?? 'unknown';
-		let segLastTs = new Date(filtered[0].timestamp).getTime() / 1000;
-
-		function flushSegment() {
-			if (segCoords.length >= 2) {
-				features.push({
-					type: 'Feature',
-					properties: { activity_type: segActivity, segment_type: 'activity' },
-					geometry: { type: 'LineString', coordinates: [...segCoords] },
-				});
-			}
-		}
-
+		const edges: Edge[] = [];
 		for (let i = 1; i < filtered.length; i++) {
-			const activity = filtered[i].activity_type ?? 'unknown';
-			const prev = segCoords[segCoords.length - 1];
-			const cur: [number, number] = [filtered[i].lon, filtered[i].lat];
-			const curTs = new Date(filtered[i].timestamp).getTime() / 1000;
-			const dist = approxDistanceM(prev[0], prev[1], cur[0], cur[1]);
-			const timeDelta = curTs - segLastTs;
-
-			const gap = isGap(dist, timeDelta);
-
-			if (gap) {
-				// Real location jump — break with transit connector
-				flushSegment();
-				if (segCoords.length > 0) {
-					features.push({
-						type: 'Feature',
-						properties: { activity_type: 'transit', segment_type: 'transit' },
-						geometry: { type: 'LineString', coordinates: [prev, cur] },
-					});
-				}
-				segCoords = [cur];
-				segActivity = activity;
-			} else if (activity !== segActivity) {
-				// Activity change but no gap — flush and overlap so lines connect
-				flushSegment();
-				segCoords = [prev, cur];
-				segActivity = activity;
-			} else {
-				segCoords.push(cur);
-			}
-			segLastTs = curTs;
+			const a = filtered[i - 1];
+			const b = filtered[i];
+			const aTs = new Date(a.timestamp).getTime() / 1000;
+			const bTs = new Date(b.timestamp).getTime() / 1000;
+			const dt = bTs - aTs;
+			const dist = approxDistanceM(a.lon, a.lat, b.lon, b.lat);
+			const speedMs = dt > 0 ? dist / dt : 0;
+			edges.push({
+				a: [a.lon, a.lat],
+				b: [b.lon, b.lat],
+				speedKmh: Math.min(speedMs * 3.6, MAX_DISPLAY_KMH),
+				speedMs,
+				dt,
+				gap: isGap(dist, dt),
+			});
 		}
-		flushSegment();
+		return edges;
+	}
+
+	function detectTransitRuns(edges: Edge[]): boolean[] {
+		const transit = new Array<boolean>(edges.length).fill(false);
+		let runStart = 0;
+		for (let i = 0; i <= edges.length; i++) {
+			const endOfRun = i === edges.length || edges[i].gap;
+			if (!endOfRun) continue;
+			if (i > runStart) {
+				let pauses = 0;
+				let p = runStart;
+				while (p < i) {
+					if (edges[p].speedMs < TRANSIT_PAUSE_MAX_SPEED_MS) {
+						let q = p;
+						let pauseDt = 0;
+						while (q < i && edges[q].speedMs < TRANSIT_PAUSE_MAX_SPEED_MS) {
+							pauseDt += edges[q].dt;
+							q++;
+						}
+						if (pauseDt >= TRANSIT_PAUSE_MIN_S && pauseDt <= TRANSIT_PAUSE_MAX_S) pauses++;
+						p = q;
+					} else {
+						p++;
+					}
+				}
+				if (pauses >= TRANSIT_MIN_PAUSES) {
+					for (let k = runStart; k < i; k++) transit[k] = true;
+				}
+			}
+			runStart = i + 1;
+		}
+		return transit;
+	}
+
+	function buildPathGeoJSON(pings: LocationPing[]): GeoJSON.FeatureCollection {
+		const edges = buildEdges(pings);
+		if (edges.length === 0) return { type: 'FeatureCollection', features: [] };
+
+		const transit = detectTransitRuns(edges);
+		const features: GeoJSON.Feature[] = edges.map((e, i) => {
+			if (e.gap) {
+				return {
+					type: 'Feature',
+					properties: { segment_type: 'gap' },
+					geometry: { type: 'LineString', coordinates: [e.a, e.b] },
+				};
+			}
+			return {
+				type: 'Feature',
+				properties: {
+					segment_type: 'activity',
+					speed_kmh: e.speedKmh,
+					is_transit: transit[i] ? 1 : 0,
+				},
+				geometry: { type: 'LineString', coordinates: [e.a, e.b] },
+			};
+		});
 
 		return { type: 'FeatureCollection', features };
 	}
@@ -251,12 +298,12 @@
 			},
 		});
 
-		// Transit connectors (faint dashed)
+		// Long-jump / teleport connectors (faint dashed grey)
 		map.addLayer({
-			id: 'path-transit',
+			id: 'path-gap',
 			type: 'line',
 			source: 'path',
-			filter: ['==', ['get', 'segment_type'], 'transit'],
+			filter: ['==', ['get', 'segment_type'], 'gap'],
 			layout: { visibility: 'visible' },
 			paint: {
 				'line-color': '#555',
@@ -266,21 +313,48 @@
 			},
 		});
 
-		// Activity path trace (colored by activity type)
+		// Speed gradient: interpolate color along a continuous km/h scale.
+		const speedColorExpr: any = [
+			'interpolate',
+			['linear'],
+			['get', 'speed_kmh'],
+			...SPEED_GRADIENT_STOPS.flatMap(([kmh, color]) => [kmh, color]),
+		];
+
+		// Activity path trace (normal movement — solid line, speed-colored)
 		map.addLayer({
 			id: 'path-line',
 			type: 'line',
 			source: 'path',
-			filter: ['==', ['get', 'segment_type'], 'activity'],
+			filter: [
+				'all',
+				['==', ['get', 'segment_type'], 'activity'],
+				['!=', ['get', 'is_transit'], 1],
+			],
 			layout: { visibility: 'visible' },
 			paint: {
-				'line-color': [
-					'match', ['get', 'activity_type'],
-					...Object.entries(ACTIVITY_COLORS).flat(),
-					DEFAULT_PATH_COLOR,
-				] as any,
+				'line-color': speedColorExpr,
 				'line-width': 2.5,
-				'line-opacity': 0.7,
+				'line-opacity': 0.75,
+			},
+		});
+
+		// Detected public-transit runs (same speed gradient, dashed so they read differently)
+		map.addLayer({
+			id: 'path-transit',
+			type: 'line',
+			source: 'path',
+			filter: [
+				'all',
+				['==', ['get', 'segment_type'], 'activity'],
+				['==', ['get', 'is_transit'], 1],
+			],
+			layout: { visibility: 'visible' },
+			paint: {
+				'line-color': speedColorExpr,
+				'line-width': 2.5,
+				'line-opacity': 0.85,
+				'line-dasharray': [2, 2],
 			},
 		});
 
@@ -424,6 +498,7 @@
 		if (!map || !mapLoaded) return;
 		map.setLayoutProperty('path-line', 'visibility', showPath ? 'visible' : 'none');
 		map.setLayoutProperty('path-transit', 'visibility', showPath ? 'visible' : 'none');
+		map.setLayoutProperty('path-gap', 'visibility', showPath ? 'visible' : 'none');
 		map.setLayoutProperty('stationary-points', 'visibility', showPath ? 'visible' : 'none');
 		map.setLayoutProperty('heat', 'visibility', showHeat ? 'visible' : 'none');
 	}

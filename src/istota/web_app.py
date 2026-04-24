@@ -313,6 +313,19 @@ def _get_location_config(username: str) -> tuple[str, str, str] | None:
     return str(_config.db_path), username, uc.timezone
 
 
+def _resolve_tz(client_tz: str, fallback: str) -> str:
+    """Accept a client-supplied IANA timezone only if zoneinfo validates it."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    if not client_tz:
+        return fallback
+    try:
+        ZoneInfo(client_tz)
+        return client_tz
+    except (ZoneInfoNotFoundError, ValueError):
+        return fallback
+
+
 @api_router.get("/me")
 async def api_me(user: dict = Depends(_require_api_auth)):
     username = user["username"]
@@ -1292,13 +1305,15 @@ async def api_location_pings(
     start: str = Query(default=""),
     end: str = Query(default=""),
     limit: int = Query(default=5000, le=50000),
+    tz: str = Query(default=""),
 ):
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
     db_path, user_id, tz_name = loc
+    effective_tz = _resolve_tz(tz, tz_name)
     return await asyncio.to_thread(
-        _location_query_pings, db_path, user_id, tz_name,
+        _location_query_pings, db_path, user_id, effective_tz,
         date or None, start or None, end or None, limit,
     )
 
@@ -1307,13 +1322,15 @@ async def api_location_pings(
 async def api_location_day_summary(
     user: dict = Depends(_require_api_auth),
     date: str = Query(default=""),
+    tz: str = Query(default=""),
 ):
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
     db_path, user_id, tz_name = loc
+    effective_tz = _resolve_tz(tz, tz_name)
     return await asyncio.to_thread(
-        _location_query_day_summary, db_path, user_id, tz_name, date or None,
+        _location_query_day_summary, db_path, user_id, effective_tz, date or None,
     )
 
 
@@ -1396,12 +1413,14 @@ async def api_location_discover_places(
 async def api_location_trips(
     user: dict = Depends(_require_api_auth),
     date: str = Query(default=""),
+    tz: str = Query(default=""),
 ):
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
     db_path, user_id, tz_name = loc
-    return await asyncio.to_thread(_location_query_trips, db_path, user_id, tz_name, date or None)
+    effective_tz = _resolve_tz(tz, tz_name)
+    return await asyncio.to_thread(_location_query_trips, db_path, user_id, effective_tz, date or None)
 
 
 # ============================================================================
