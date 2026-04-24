@@ -66,6 +66,66 @@
 		return Math.sqrt(dlat * dlat + dlon * dlon);
 	}
 
+	// Great-circle arc between two lon/lat points, sampled along the shortest
+	// spherical path (slerp on unit vectors). Used to render long gap edges
+	// (flights, cross-continent jumps) as curved polylines that also take the
+	// Pacific shortcut when appropriate instead of going around the long way.
+	// Returns segments+1 points. Longitudes are unwrapped so consecutive
+	// deltas stay within ±180°, letting MapLibre cross the anti-meridian
+	// without visual wrap-around.
+	const EARTH_RADIUS_M = 6_371_000;
+	const GAP_ARC_MIN_M = 500_000;       // below this, straight line is fine
+	const GAP_ARC_SEGMENT_M = 200_000;   // one segment per ~200 km
+	const GAP_ARC_MAX_SEGMENTS = 64;
+
+	function haversineM(lon1: number, lat1: number, lon2: number, lat2: number): number {
+		const phi1 = lat1 * Math.PI / 180;
+		const phi2 = lat2 * Math.PI / 180;
+		const dphi = (lat2 - lat1) * Math.PI / 180;
+		const dlam = (lon2 - lon1) * Math.PI / 180;
+		const a = Math.sin(dphi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dlam / 2) ** 2;
+		return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(a)));
+	}
+
+	function greatCircleArc(
+		lon1: number, lat1: number,
+		lon2: number, lat2: number,
+	): [number, number][] {
+		const distM = haversineM(lon1, lat1, lon2, lat2);
+		if (distM < GAP_ARC_MIN_M) return [[lon1, lat1], [lon2, lat2]];
+		const segments = Math.min(
+			GAP_ARC_MAX_SEGMENTS,
+			Math.max(2, Math.round(distM / GAP_ARC_SEGMENT_M)),
+		);
+		const phi1 = lat1 * Math.PI / 180;
+		const phi2 = lat2 * Math.PI / 180;
+		const lam1 = lon1 * Math.PI / 180;
+		const lam2 = lon2 * Math.PI / 180;
+		const d = distM / EARTH_RADIUS_M;
+		const sinD = Math.sin(d);
+		if (sinD === 0) return [[lon1, lat1], [lon2, lat2]];
+		const points: [number, number][] = [];
+		let prevLon = lon1;
+		for (let i = 0; i <= segments; i++) {
+			const f = i / segments;
+			const A = Math.sin((1 - f) * d) / sinD;
+			const B = Math.sin(f * d) / sinD;
+			const x = A * Math.cos(phi1) * Math.cos(lam1) + B * Math.cos(phi2) * Math.cos(lam2);
+			const y = A * Math.cos(phi1) * Math.sin(lam1) + B * Math.cos(phi2) * Math.sin(lam2);
+			const z = A * Math.sin(phi1) + B * Math.sin(phi2);
+			const lat = Math.atan2(z, Math.sqrt(x * x + y * y)) * 180 / Math.PI;
+			let lon = Math.atan2(y, x) * 180 / Math.PI;
+			if (i > 0) {
+				const delta = lon - prevLon;
+				if (delta > 180) lon -= 360;
+				else if (delta < -180) lon += 360;
+			}
+			points.push([lon, lat]);
+			prevLon = lon;
+		}
+		return points;
+	}
+
 	// Gap detection. An edge is a gap if any of these hold:
 	//   - implied speed > 200 km/h (clear teleport)
 	//   - dt >= dwell minimum (a filtered dwell sits between the two kept pings)
@@ -255,7 +315,10 @@
 				return {
 					type: 'Feature',
 					properties: { segment_type: 'gap' },
-					geometry: { type: 'LineString', coordinates: [e.a, e.b] },
+					geometry: {
+						type: 'LineString',
+						coordinates: greatCircleArc(e.a[0], e.a[1], e.b[0], e.b[1]),
+					},
 				};
 			}
 			return {
