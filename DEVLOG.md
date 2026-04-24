@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-24: Location visit accuracy — accuracy gate, dwell exit, batch reconciler
+
+Visits were undercounting dwell time because brief GPS flicker out of a place's radius triggered the 2-ping hysteresis close — e.g. Shinagawa Station showed 1 visit / 9m across what was really a ~24m stay, plus a 1336m-accuracy ping had anchored the visit's start. Replaced the symmetric hysteresis with an asymmetric open/close policy and added a batch reconciler.
+
+**Key changes:**
+- Webhook accuracy gate: pings with `horizontal_accuracy > accuracy_threshold_m` (default 100m) are stored but skip place matching and state-machine updates so jittery pings can't open phantom visits.
+- Dwell-based visit close: open visits now close only after continuous "away" time reaches `visit_exit_minutes` (default 5), with `exited_at` recorded as the first away ping. A single in-place ping resets the away clock. Direct place-to-place moves still close + open on the 2-ping hysteresis.
+- Batch reconciler in scheduler cleanup loop: re-derives closed visits from pings in the last `reconcile_lookback_hours` (default 6), stopping `reconcile_buffer_minutes` before now so the open visit is never rewritten. Honours `accuracy_threshold_m` so historical bad pings don't anchor reconciled visits either.
+- Schema: additive `location_state.exit_started_at TEXT` column.
+- Config: 8 new `[location]` knobs with defaults, all wired through Ansible defaults/template.
+- 14 new tests: accuracy gate (3), dwell-based exit (4), reconciliation (6 incl. accuracy filter, window preservation, walk-by filter, place splits, stale-visit replacement).
+
+**Files added/modified:**
+- `src/istota/webhook_receiver.py` — accuracy gate in `_process_feature`, dwell-based exit in `_update_state_machine`
+- `src/istota/db.py` — `reconcile_visits()`, `LocationState.exit_started_at`, get/set state plumbing, `ALTER TABLE` migration
+- `src/istota/scheduler.py` — `_reconcile_visits_for_all_users()` hook in `run_cleanup_checks`
+- `src/istota/config.py` — `LocationReceiverConfig` extended with 8 fields, loader updated
+- `schema.sql` — added `exit_started_at` to `location_state`
+- `tests/test_location.py` — `TestAccuracyGate`, `TestDwellBasedExit`, `TestReconcileVisits` (14 tests)
+- `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2` — new config vars
+- `AGENTS.md`, `.claude/rules/config.md` — documented new behaviour
+
 ## 2026-04-24: Location web UI — speed gradient, transit detection, browser-tz grouping
 
 Closed three open location issues (ISSUE-049, ISSUE-051, ISSUE-052). The map now colors paths by a continuous speed gradient instead of relying on unreliable activity classification, flags public-transit runs heuristically, and groups days by the browser's physical timezone instead of the user's configured home timezone.
