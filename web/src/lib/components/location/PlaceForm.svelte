@@ -6,9 +6,10 @@
 		place?: Place;
 		onSave: (data: { name: string; lat: number; lon: number; radius_meters: number; category: string }) => void;
 		onCancel: () => void;
+		onDismiss?: (data: { lat: number; lon: number; radius_meters: number }) => void;
 	}
 
-	let { cluster, place, onSave, onCancel }: Props = $props();
+	let { cluster, place, onSave, onCancel, onDismiss }: Props = $props();
 
 	const editing = $derived(!!place);
 
@@ -32,6 +33,10 @@
 			radius_meters: radius,
 			category,
 		});
+	}
+
+	function handleDismiss() {
+		onDismiss?.({ lat, lon, radius_meters: radius });
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -85,6 +90,16 @@
 
 		<div class="actions">
 			<button class="btn cancel" onclick={onCancel} type="button">Cancel</button>
+			{#if !editing && onDismiss}
+				<button
+					class="btn dismiss"
+					onclick={handleDismiss}
+					type="button"
+					title="Don't show this cluster again"
+				>
+					Dismiss
+				</button>
+			{/if}
 			<button class="btn save" onclick={handleSave} disabled={!name.trim()} type="button">
 				{editing ? 'Update' : 'Save'}
 			</button>
@@ -187,4 +202,6 @@
 	.btn.save { background: #ffc107; color: #111; border-color: #ffc107; }
 	.btn.save:hover { background: #ffca28; }
 	.btn.save:disabled { opacity: 0.4; cursor: default; }
+	.btn.dismiss { color: var(--text-muted); }
+	.btn.dismiss:hover { color: var(--text-primary); }
 </style>

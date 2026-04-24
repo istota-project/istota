@@ -128,6 +128,99 @@ class TestPlaceDB:
             assert place.radius_meters == 200
 
 
+class TestDismissedClusterDB:
+    def test_insert_list_delete(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            cid = db.insert_dismissed_cluster(conn, "alice", 34.0, -118.0, 100)
+            assert cid > 0
+
+            rows = db.list_dismissed_clusters(conn, "alice")
+            assert len(rows) == 1
+            assert rows[0]["lat"] == 34.0
+            assert rows[0]["radius_meters"] == 100
+
+            assert db.delete_dismissed_cluster(conn, "alice", cid)
+            assert db.list_dismissed_clusters(conn, "alice") == []
+
+    def test_delete_other_user_fails(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            cid = db.insert_dismissed_cluster(conn, "alice", 34.0, -118.0, 100)
+            assert not db.delete_dismissed_cluster(conn, "bob", cid)
+            assert len(db.list_dismissed_clusters(conn, "alice")) == 1
+
+    def test_per_user_isolation(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.insert_dismissed_cluster(conn, "alice", 34.0, -118.0, 100)
+            db.insert_dismissed_cluster(conn, "bob", 35.0, -119.0, 200)
+            assert len(db.list_dismissed_clusters(conn, "alice")) == 1
+            assert len(db.list_dismissed_clusters(conn, "bob")) == 1
+
+
+@_needs_fastapi
+class TestDiscoverPlacesFiltersDismissed:
+    def _seed_cluster(self, conn, user_id, lat, lon, count=15):
+        for i in range(count):
+            ts = f"2026-01-10T09:{i:02d}:00Z"
+            # Tiny jitter so they share a rounded grid cell
+            db.insert_location_ping(
+                conn, user_id, ts, lat + (i % 3) * 0.00002, lon,
+                accuracy=5.0, activity_type="stationary",
+            )
+
+    def test_unknown_cluster_appears(self, tmp_path):
+        from istota.web_app import _location_discover_places
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            self._seed_cluster(conn, "alice", 34.0, -118.0)
+            conn.commit()
+
+        result = _location_discover_places(str(db_path), "alice", min_pings=10)
+        assert len(result["clusters"]) == 1
+        assert "radius_meters" in result["clusters"][0]
+
+    def test_dismissed_cluster_is_filtered(self, tmp_path):
+        from istota.web_app import _location_discover_places
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            self._seed_cluster(conn, "alice", 34.0, -118.0)
+            db.insert_dismissed_cluster(conn, "alice", 34.0, -118.0, 200)
+            conn.commit()
+
+        result = _location_discover_places(str(db_path), "alice", min_pings=10)
+        assert result["clusters"] == []
+
+    def test_dismissed_zone_only_affects_owner(self, tmp_path):
+        from istota.web_app import _location_discover_places
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            self._seed_cluster(conn, "alice", 34.0, -118.0)
+            self._seed_cluster(conn, "bob", 34.0, -118.0)
+            db.insert_dismissed_cluster(conn, "alice", 34.0, -118.0, 200)
+            conn.commit()
+
+        assert _location_discover_places(str(db_path), "alice", min_pings=10)["clusters"] == []
+        assert len(_location_discover_places(str(db_path), "bob", min_pings=10)["clusters"]) == 1
+
+    def test_distant_dismissal_does_not_filter(self, tmp_path):
+        from istota.web_app import _location_discover_places
+
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            self._seed_cluster(conn, "alice", 34.0, -118.0)
+            # Dismissed zone in a different city
+            db.insert_dismissed_cluster(conn, "alice", 40.0, -73.0, 200)
+            conn.commit()
+
+        result = _location_discover_places(str(db_path), "alice", min_pings=10)
+        assert len(result["clusters"]) == 1
+
+
 class TestVisitDB:
     def test_insert_and_close(self, tmp_path):
         db_path = _init_db(tmp_path)

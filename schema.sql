@@ -478,6 +478,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kf_unique_current
     ON knowledge_facts(user_id, subject, predicate, object)
     WHERE valid_until IS NULL;
 
+-- Dismissed cluster zones (suppress detected unknown places without saving them)
+CREATE TABLE IF NOT EXISTS dismissed_clusters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    radius_meters INTEGER NOT NULL,
+    dismissed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dismissed_clusters_user ON dismissed_clusters(user_id);
+
 -- Location state machine (per-user hysteresis tracking)
 CREATE TABLE IF NOT EXISTS location_state (
     user_id TEXT PRIMARY KEY,

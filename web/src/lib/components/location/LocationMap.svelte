@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
-	import type { LocationPing, Place, DiscoveredCluster } from '$lib/api';
+	import type { LocationPing, Place, DiscoveredCluster, DismissedCluster } from '$lib/api';
 	import { ACTIVITY_COLORS, SPEED_GRADIENT_STOPS } from '$lib/location-constants';
 
 	interface Props {
@@ -11,12 +11,14 @@
 		pings?: LocationPing[];
 		places?: Place[];
 		clusters?: DiscoveredCluster[];
+		dismissedClusters?: DismissedCluster[];
 		currentPosition?: { lat: number; lon: number } | null;
 		showPath?: boolean;
 		showHeat?: boolean;
 		activeActivityTypes?: Set<string> | null;
 		selectedPlaceId?: number | null;
 		onClusterClick?: (cluster: DiscoveredCluster) => void;
+		onDismissedClusterClick?: (dismissed: DismissedCluster) => void;
 		onPlaceMove?: (placeId: number, lat: number, lon: number) => void;
 	}
 
@@ -26,12 +28,14 @@
 		pings = [],
 		places = [],
 		clusters = [],
+		dismissedClusters = [],
 		currentPosition = null,
 		showPath = true,
 		showHeat = false,
 		activeActivityTypes = null,
 		selectedPlaceId = null,
 		onClusterClick,
+		onDismissedClusterClick,
 		onPlaceMove,
 	}: Props = $props();
 
@@ -374,8 +378,24 @@
 					total_pings: c.total_pings,
 					first_seen: c.first_seen,
 					last_seen: c.last_seen,
+					radius_meters: c.radius_meters ?? 100,
 				},
 				geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
+			})),
+		};
+	}
+
+	function buildDismissedGeoJSON(rows: DismissedCluster[]): GeoJSON.FeatureCollection {
+		return {
+			type: 'FeatureCollection',
+			features: rows.map(d => ({
+				type: 'Feature' as const,
+				properties: {
+					id: d.id,
+					radius_meters: d.radius_meters,
+					dismissed_at: d.dismissed_at,
+				},
+				geometry: { type: 'Point' as const, coordinates: [d.lon, d.lat] },
 			})),
 		};
 	}
@@ -444,6 +464,7 @@
 		map.addSource('ping-points', { type: 'geojson', data: buildPingPointsGeoJSON([]) });
 		map.addSource('places', { type: 'geojson', data: buildPlacesGeoJSON([]) });
 		map.addSource('clusters', { type: 'geojson', data: buildClustersGeoJSON([]) });
+		map.addSource('dismissed', { type: 'geojson', data: buildDismissedGeoJSON([]) });
 	}
 
 	function addLayers() {
@@ -641,6 +662,59 @@
 			if (map) map.getCanvas().style.cursor = '';
 		});
 
+		// Dismissed cluster zones — gray, sized by radius, restorable on click
+		map.addLayer({
+			id: 'dismissed-zones',
+			type: 'circle',
+			source: 'dismissed',
+			paint: {
+				'circle-radius': [
+					'interpolate', ['exponential', 2], ['zoom'],
+					8, ['/', ['get', 'radius_meters'], mPerPxBase / 256],
+					16, ['/', ['get', 'radius_meters'], mPerPxBase / 65536],
+					22, ['/', ['get', 'radius_meters'], mPerPxBase / 4194304],
+				],
+				'circle-color': 'rgba(120, 120, 120, 0.10)',
+				'circle-stroke-color': '#888',
+				'circle-stroke-width': 1,
+				'circle-stroke-opacity': 0.5,
+			},
+		});
+
+		map.addLayer({
+			id: 'dismissed-center',
+			type: 'circle',
+			source: 'dismissed',
+			paint: {
+				'circle-radius': 5,
+				'circle-color': 'rgba(120, 120, 120, 0.4)',
+				'circle-stroke-color': '#888',
+				'circle-stroke-width': 1,
+			},
+		});
+
+		const handleDismissedClick = (e: maplibregl.MapMouseEvent & { features?: maplibregl.MapGeoJSONFeature[] }) => {
+			if (!e.features?.length || !onDismissedClusterClick) return;
+			const props = e.features[0].properties;
+			const geom = e.features[0].geometry;
+			if (geom.type === 'Point') {
+				onDismissedClusterClick({
+					id: props.id,
+					lat: geom.coordinates[1],
+					lon: geom.coordinates[0],
+					radius_meters: props.radius_meters,
+					dismissed_at: props.dismissed_at,
+				});
+			}
+		};
+		map.on('click', 'dismissed-center', handleDismissedClick);
+		map.on('click', 'dismissed-zones', handleDismissedClick);
+		map.on('mouseenter', 'dismissed-center', () => {
+			if (map) map.getCanvas().style.cursor = 'pointer';
+		});
+		map.on('mouseleave', 'dismissed-center', () => {
+			if (map) map.getCanvas().style.cursor = '';
+		});
 	}
 
 	function updateSources() {
@@ -650,11 +724,13 @@
 		const pingSrc = map.getSource('ping-points') as maplibregl.GeoJSONSource;
 		const placeSrc = map.getSource('places') as maplibregl.GeoJSONSource;
 		const clusterSrc = map.getSource('clusters') as maplibregl.GeoJSONSource;
+		const dismissedSrc = map.getSource('dismissed') as maplibregl.GeoJSONSource;
 
 		if (pathSrc) pathSrc.setData(buildPathGeoJSON(pings));
 		if (pingSrc) pingSrc.setData(buildPingPointsGeoJSON(filteredPings(pings)));
 		if (placeSrc) placeSrc.setData(buildPlacesGeoJSON(places));
 		if (clusterSrc) clusterSrc.setData(buildClustersGeoJSON(clusters));
+		if (dismissedSrc) dismissedSrc.setData(buildDismissedGeoJSON(dismissedClusters));
 	}
 
 	function updateLayerVisibility() {
@@ -749,6 +825,7 @@
 		pings;
 		places;
 		clusters;
+		dismissedClusters;
 		activeActivityTypes;
 		updateSources();
 		if (!hasFittedBounds) {

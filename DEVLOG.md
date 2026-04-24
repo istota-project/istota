@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25: Dismissable cluster zones for location discovery
+
+Discovered "unknown places" piled up indefinitely on the location places page — clicking each one only offered a Save action, so frequent transit stops, parking lots, and short street stays kept reappearing. Added a Dismiss path that records a persistent zone instead of a place, so future pings in that area don't form a new cluster either.
+
+**Key changes:**
+- New `dismissed_clusters` table (per-user lat/lon/radius_meters/dismissed_at), additive — picks up automatically on next `init_db` since the schema uses `CREATE TABLE IF NOT EXISTS`.
+- `_location_discover_places` now also filters clusters whose center falls inside any dismissed zone, on top of the existing-place exclusion.
+- Discovery query now computes per-cluster `radius_meters` from the actual ping spread (clamped to 50–300 m) so the form pre-fills with the discovered footprint instead of a fixed default.
+- Three new API endpoints: `GET /location/dismissed-clusters`, `POST /location/dismissed-clusters`, `DELETE /location/dismissed-clusters/{id}`. POST/DELETE go through the existing `_verify_origin` CSRF gate.
+- `PlaceForm` gains an optional Dismiss button (only shown when adding from a cluster, not when editing). Defaults the dismiss radius to the cluster's discovered radius.
+- Places page gains a `Show N dismissed` toggle pill that renders dismissed zones as faint gray circles; clicking one prompts to restore.
+- 7 new tests: DB CRUD, per-user isolation, ownership enforcement on delete, discovery-query filtering, distance check that distant dismissals don't suppress unrelated clusters.
+
+**Files added/modified:**
+- `schema.sql` — `dismissed_clusters` table + index
+- `src/istota/db.py` — `insert_dismissed_cluster`, `list_dismissed_clusters`, `delete_dismissed_cluster`
+- `src/istota/web_app.py` — `_location_list_dismissed`, `_location_dismiss_cluster`, `_location_restore_dismissed`, three new API routes, dismissed-zone filter in `_location_discover_places`, cluster radius computation
+- `web/src/lib/api.ts` — `DismissedCluster` type + `listDismissedClusters` / `dismissCluster` / `restoreDismissedCluster`
+- `web/src/lib/components/location/PlaceForm.svelte` — `onDismiss` prop, Dismiss button
+- `web/src/lib/components/location/LocationMap.svelte` — `dismissedClusters` prop, `dismissed-zones` / `dismissed-center` layers, click-to-restore handler
+- `web/src/routes/location/places/+page.svelte` — load + render dismissed zones, toggle pill, restore confirmation
+- `tests/test_location.py` — `TestDismissedClusterDB`, `TestDiscoverPlacesFiltersDismissed` (7 tests)
+
 ## 2026-04-24: Location visit accuracy — accuracy gate, dwell exit, batch reconciler
 
 Visits were undercounting dwell time because brief GPS flicker out of a place's radius triggered the 2-ping hysteresis close — e.g. Shinagawa Station showed 1 visit / 9m across what was really a ~24m stay, plus a 1336m-accuracy ping had anchored the visit's start. Replaced the symmetric hysteresis with an asymmetric open/close policy and added a batch reconciler.
