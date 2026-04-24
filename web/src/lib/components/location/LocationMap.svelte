@@ -90,6 +90,14 @@
 	const TRANSIT_MIN_PAUSES = 3;
 	const TRANSIT_MIN_RUN_S = 600;   // 10 min — shorter runs stay solid
 
+	// Dwell detection on consecutive stationary pings: a real dwell is a long run
+	// of stationary pings tightly clustered in space. Those get excluded from the
+	// path. Short runs (station stops, traffic lights) or widely-spread runs
+	// (mislabelled-stationary while moving, e.g. on a train) stay in the path so
+	// the line follows the actual track.
+	const DWELL_MIN_DURATION_S = 300;   // 5 min
+	const DWELL_MAX_SPREAD_M = 50;      // tight cluster
+
 	// Speed clamp for color gradient (km/h). Anything above maps to the top-of-scale color.
 	const MAX_DISPLAY_KMH = 180;
 
@@ -102,8 +110,48 @@
 		gap: boolean;
 	}
 
+	function isDwellRun(run: LocationPing[]): boolean {
+		if (run.length < 2) return false;
+		const t0 = new Date(run[0].timestamp).getTime() / 1000;
+		const t1 = new Date(run[run.length - 1].timestamp).getTime() / 1000;
+		if (t1 - t0 < DWELL_MIN_DURATION_S) return false;
+		let sumLat = 0;
+		let sumLon = 0;
+		for (const p of run) {
+			sumLat += p.lat;
+			sumLon += p.lon;
+		}
+		const clat = sumLat / run.length;
+		const clon = sumLon / run.length;
+		for (const p of run) {
+			if (approxDistanceM(clon, clat, p.lon, p.lat) > DWELL_MAX_SPREAD_M) return false;
+		}
+		return true;
+	}
+
+	function excludeDwellPings(pings: LocationPing[]): LocationPing[] {
+		const kept: LocationPing[] = [];
+		let i = 0;
+		while (i < pings.length) {
+			const stationary = (pings[i].activity_type ?? 'stationary') === 'stationary';
+			if (!stationary) {
+				kept.push(pings[i]);
+				i++;
+				continue;
+			}
+			let j = i;
+			while (j < pings.length && (pings[j].activity_type ?? 'stationary') === 'stationary') j++;
+			const run = pings.slice(i, j);
+			if (!isDwellRun(run)) {
+				for (const p of run) kept.push(p);
+			}
+			i = j;
+		}
+		return kept;
+	}
+
 	function buildEdges(pings: LocationPing[]): Edge[] {
-		const filtered = filteredPings(pings).filter(p => (p.activity_type ?? 'stationary') !== 'stationary');
+		const filtered = excludeDwellPings(filteredPings(pings));
 		if (filtered.length < 2) return [];
 
 		const edges: Edge[] = [];
