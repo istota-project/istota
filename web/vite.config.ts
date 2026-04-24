@@ -5,7 +5,9 @@ import { defineConfig } from 'vite';
 function gitVersion(): string {
 	try {
 		const sha = execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
-		const dirty = execSync('git status --porcelain', { encoding: 'utf8' }).trim().length > 0;
+		// Scope the dirty check to web/ — runtime config files under config/ and
+		// config/users/ are expected to drift on deployed hosts.
+		const dirty = execSync('git status --porcelain -- .', { encoding: 'utf8' }).trim().length > 0;
 		return dirty ? `${sha}-dirty` : sha;
 	} catch {
 		return 'unknown';
