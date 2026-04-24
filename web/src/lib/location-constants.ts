@@ -28,4 +28,6 @@ export const SPEED_GRADIENT_STOPS: Array<[number, string]> = [
 	[40, '#ffd84a'],    // urban driving — yellow
 	[80, '#ff8a3a'],    // highway — orange
 	[120, '#ff3a3a'],   // fast highway — red
+	[200, '#ff3aff'],   // HSR / intercity rail — magenta
+	[300, '#ffffff'],   // Shinkansen — white-hot
 ];
