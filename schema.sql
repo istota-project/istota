@@ -484,5 +484,6 @@ CREATE TABLE IF NOT EXISTS location_state (
     current_place_id INTEGER REFERENCES places(id),
     current_visit_id INTEGER REFERENCES visits(id),
     consecutive_count INTEGER DEFAULT 0,
-    last_ping_place_id INTEGER
+    last_ping_place_id INTEGER,
+    exit_started_at TEXT               -- first away-from-current-place ping, NULL when at place
 );

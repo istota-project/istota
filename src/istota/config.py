@@ -258,6 +258,14 @@ class LocationReceiverConfig:
     """Location receiver (Overland GPS) configuration."""
     enabled: bool = False
     webhooks_port: int = 8765
+    accuracy_threshold_m: float = 100.0  # drop pings with accuracy worse than this from place matching
+    visit_exit_minutes: float = 5.0       # continuous "away" time before a visit is closed
+    reconcile_enabled: bool = True         # re-derive closed visits from pings periodically
+    reconcile_lookback_hours: float = 6.0  # reconcile pings within this window
+    reconcile_buffer_minutes: float = 10.0  # don't reconcile pings newer than this (safety margin)
+    reconcile_grace_minutes: float = 10.0  # gap between at-place pings before splitting a visit
+    reconcile_min_pings: int = 3            # minimum at-place pings to count as a visit
+    reconcile_min_dwell_sec: int = 60       # minimum duration (sec) to count as a visit
 
 
 @dataclass
@@ -930,6 +938,14 @@ def load_config(config_path: Path | None = None) -> Config:
         config.location = LocationReceiverConfig(
             enabled=loc.get("enabled", False),
             webhooks_port=loc.get("webhooks_port", 8765),
+            accuracy_threshold_m=loc.get("accuracy_threshold_m", 100.0),
+            visit_exit_minutes=loc.get("visit_exit_minutes", 5.0),
+            reconcile_enabled=loc.get("reconcile_enabled", True),
+            reconcile_lookback_hours=loc.get("reconcile_lookback_hours", 6.0),
+            reconcile_buffer_minutes=loc.get("reconcile_buffer_minutes", 10.0),
+            reconcile_grace_minutes=loc.get("reconcile_grace_minutes", 10.0),
+            reconcile_min_pings=loc.get("reconcile_min_pings", 3),
+            reconcile_min_dwell_sec=loc.get("reconcile_min_dwell_sec", 60),
         )
 
     if "moneyman" in data:

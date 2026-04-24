@@ -13,7 +13,7 @@ import subprocess
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -2326,6 +2326,13 @@ async def run_cleanup_checks(config: Config) -> None:
             if deleted_pings > 0:
                 logger.info(f"Cleaned up {deleted_pings} old location ping(s)")
 
+    # 8b. Reconcile visits from pings (batch cleanup of state-machine drift)
+    if config.location.reconcile_enabled:
+        try:
+            _reconcile_visits_for_all_users(config)
+        except Exception as e:
+            logger.error(f"Error reconciling visits: {e}")
+
     # 9. Clean up old Claude session logs
     if sched.temp_file_retention_days > 0:
         try:
@@ -2334,6 +2341,43 @@ async def run_cleanup_checks(config: Config) -> None:
                 logger.info(f"Deleted {deleted_logs} old Claude session log(s)")
         except Exception as e:
             logger.error(f"Error cleaning up Claude logs: {e}")
+
+
+def _reconcile_visits_for_all_users(config: Config) -> None:
+    """Re-derive the visits table for each user with an overland resource.
+
+    Operates on a window ending ``reconcile_buffer_minutes`` before now so
+    the currently-open visit is never rewritten. Only closed visits in the
+    window are replaced.
+    """
+    loc = config.location
+    now = datetime.now(timezone.utc)
+    until = now - timedelta(minutes=loc.reconcile_buffer_minutes)
+    since = until - timedelta(hours=loc.reconcile_lookback_hours)
+    since_s = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    until_s = until.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    with db.get_db(config.db_path) as conn:
+        user_ids = [
+            uid for uid, uc in config.users.items()
+            if any(rc.type == "overland" for rc in uc.resources)
+        ]
+        for uid in user_ids:
+            try:
+                n = db.reconcile_visits(
+                    conn, uid, since_s, until_s,
+                    grace_minutes=loc.reconcile_grace_minutes,
+                    min_pings=loc.reconcile_min_pings,
+                    min_dwell_sec=loc.reconcile_min_dwell_sec,
+                    accuracy_threshold_m=loc.accuracy_threshold_m,
+                )
+                if n:
+                    logger.info(
+                        "Reconciled %d visit(s) for user=%s window=[%s,%s)",
+                        n, uid, since_s, until_s,
+                    )
+            except Exception as e:
+                logger.error(f"Visit reconciliation failed for {uid}: {e}")
 
 
 def cleanup_old_claude_logs(retention_days: int) -> int:

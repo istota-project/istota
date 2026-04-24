@@ -208,6 +208,12 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
 
+    # Location state: add dwell-based exit tracking column
+    try:
+        conn.execute("ALTER TABLE location_state ADD COLUMN exit_started_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError
     # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id
@@ -3095,6 +3101,7 @@ class LocationState:
     current_visit_id: int | None
     consecutive_count: int
     last_ping_place_id: int | None
+    exit_started_at: str | None = None
 
 
 def insert_location_ping(
@@ -3511,6 +3518,170 @@ def get_visits(
     return [Visit(**dict(row)) for row in cursor.fetchall()]
 
 
+def reconcile_visits(
+    conn: sqlite3.Connection,
+    user_id: str,
+    since: str,
+    until: str,
+    grace_minutes: float = 10.0,
+    min_pings: int = 3,
+    min_dwell_sec: int = 60,
+    accuracy_threshold_m: float | None = None,
+) -> int:
+    """Re-derive closed visits from location_pings in the window [since, until).
+
+    Walks pings ordered by timestamp. A candidate visit starts on the first
+    ping at a place and extends while subsequent pings are at the same place
+    or unassigned. It closes when a ping at a different place arrives, or
+    when the time gap since the last at-place ping exceeds ``grace_minutes``.
+    Candidates that don't reach ``min_pings`` at-place pings or
+    ``min_dwell_sec`` total duration are dropped (walk-by filter).
+
+    When ``accuracy_threshold_m`` is set, pings with worse horizontal
+    accuracy are treated as unassigned (place_id=NULL) for reconciliation
+    so historical bad-accuracy pings don't pin visits to the wrong place.
+
+    Only closed visits in the window are replaced. The currently-open visit
+    (``exited_at IS NULL``) is never touched so the live state machine stays
+    consistent. Returns the number of visits written.
+    """
+    from datetime import datetime
+
+    def _parse(ts: str) -> datetime:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        return datetime.fromisoformat(ts)
+
+    if accuracy_threshold_m is None:
+        place_expr = "place_id"
+        params: tuple = (user_id, since, until)
+    else:
+        # Treat low-accuracy pings as unassigned regardless of their stored place_id
+        place_expr = (
+            "CASE WHEN accuracy IS NOT NULL AND accuracy > ? "
+            "THEN NULL ELSE place_id END"
+        )
+        params = (accuracy_threshold_m, user_id, since, until)
+
+    all_rows = conn.execute(
+        f"""
+        SELECT timestamp, {place_expr} AS place_id
+        FROM location_pings
+        WHERE user_id = ? AND timestamp >= ? AND timestamp < ?
+        ORDER BY timestamp ASC
+        """,
+        params,
+    ).fetchall()
+
+    grace_sec = grace_minutes * 60.0
+    segments: list[dict] = []
+    current: dict | None = None
+
+    for row in all_rows:
+        ts = row["timestamp"]
+        pid = row["place_id"]
+        if current is None:
+            if pid is not None:
+                current = {
+                    "place_id": pid,
+                    "first_ts": ts,
+                    "last_ts": ts,
+                    "ping_count": 1,
+                }
+            continue
+
+        gap_sec = (_parse(ts) - _parse(current["last_ts"])).total_seconds()
+
+        if pid == current["place_id"]:
+            # Long silence between two at-place pings means the user likely
+            # left and came back — split into separate visits.
+            if gap_sec > grace_sec:
+                segments.append(current)
+                current = {
+                    "place_id": pid,
+                    "first_ts": ts,
+                    "last_ts": ts,
+                    "ping_count": 1,
+                }
+            else:
+                current["last_ts"] = ts
+                current["ping_count"] += 1
+            continue
+
+        if pid is None:
+            # Unassigned — only break the visit if grace expired
+            if gap_sec > grace_sec:
+                segments.append(current)
+                current = None
+            continue
+
+        # Different named place — always break
+        segments.append(current)
+        current = {
+            "place_id": pid,
+            "first_ts": ts,
+            "last_ts": ts,
+            "ping_count": 1,
+        }
+
+    if current is not None:
+        segments.append(current)
+
+    # Filter walk-bys
+    kept: list[dict] = []
+    for seg in segments:
+        dur_sec = (_parse(seg["last_ts"]) - _parse(seg["first_ts"])).total_seconds()
+        if seg["ping_count"] >= min_pings and dur_sec >= min_dwell_sec:
+            kept.append(seg)
+
+    place_names = {
+        r["id"]: r["name"]
+        for r in conn.execute(
+            "SELECT id, name FROM places WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    }
+
+    # Delete closed visits entirely within the window. Keep any open visit
+    # and any visit that began before ``since`` (outside our scope).
+    conn.execute(
+        """
+        DELETE FROM visits
+        WHERE user_id = ?
+          AND exited_at IS NOT NULL
+          AND entered_at >= ?
+          AND entered_at < ?
+        """,
+        (user_id, since, until),
+    )
+
+    written = 0
+    open_visit = get_open_visit(conn, user_id)
+    open_place_id = open_visit.place_id if open_visit else None
+    open_entered = open_visit.entered_at if open_visit else None
+
+    for seg in kept:
+        # Skip if this segment overlaps the open visit (state machine owns it)
+        if (
+            open_entered is not None
+            and seg["place_id"] == open_place_id
+            and seg["last_ts"] >= open_entered
+        ):
+            continue
+        visit_id = insert_visit(
+            conn, user_id, seg["place_id"],
+            place_names.get(seg["place_id"], "?"), seg["first_ts"],
+        )
+        close_visit(conn, visit_id, seg["last_ts"])
+        # ping_count defaults to 1 from insert_visit; set the true count
+        conn.execute(
+            "UPDATE visits SET ping_count = ? WHERE id = ?",
+            (seg["ping_count"], visit_id),
+        )
+        written += 1
+
+    return written
+
+
 # -- Location state machine --
 
 def get_location_state(
@@ -3521,7 +3692,7 @@ def get_location_state(
     cursor = conn.execute(
         """
         SELECT user_id, current_place_id, current_visit_id,
-               consecutive_count, last_ping_place_id
+               consecutive_count, last_ping_place_id, exit_started_at
         FROM location_state
         WHERE user_id = ?
         """,
@@ -3540,22 +3711,24 @@ def set_location_state(
     current_visit_id: int | None,
     consecutive_count: int,
     last_ping_place_id: int | None = None,
+    exit_started_at: str | None = None,
 ) -> None:
     """Update (upsert) the location state for a user."""
     conn.execute(
         """
         INSERT INTO location_state (
             user_id, current_place_id, current_visit_id,
-            consecutive_count, last_ping_place_id
-        ) VALUES (?, ?, ?, ?, ?)
+            consecutive_count, last_ping_place_id, exit_started_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (user_id) DO UPDATE SET
             current_place_id = excluded.current_place_id,
             current_visit_id = excluded.current_visit_id,
             consecutive_count = excluded.consecutive_count,
-            last_ping_place_id = excluded.last_ping_place_id
+            last_ping_place_id = excluded.last_ping_place_id,
+            exit_started_at = excluded.exit_started_at
         """,
         (user_id, current_place_id, current_visit_id,
-         consecutive_count, last_ping_place_id),
+         consecutive_count, last_ping_place_id, exit_started_at),
     )
 
 
