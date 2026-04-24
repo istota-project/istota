@@ -18,6 +18,8 @@
 	let clusters: DiscoveredCluster[] = $state([]);
 	let dismissed: DismissedCluster[] = $state([]);
 	let selectedCluster: DiscoveredCluster | null = $state(null);
+	let pendingPick: { lat: number; lon: number } | null = $state(null);
+	let picking = $state(false);
 	let showDismissed = $state(false);
 	let loading = $state(false);
 	let error = $state('');
@@ -39,14 +41,31 @@
 	}
 
 	function handleClusterClick(cluster: DiscoveredCluster) {
+		if (picking) return;
 		selectedCluster = cluster;
 		mapComponent?.flyTo(cluster.lat, cluster.lon, 16);
+	}
+
+	function handleMapClick(lat: number, lon: number) {
+		if (!picking) return;
+		picking = false;
+		pendingPick = { lat, lon };
+	}
+
+	function toggleNewPlace() {
+		if (selectedCluster || pendingPick) return;
+		picking = !picking;
+	}
+
+	function closeForm() {
+		selectedCluster = null;
+		pendingPick = null;
 	}
 
 	async function handleSave(data: { name: string; lat: number; lon: number; radius_meters: number; category: string; notes: string }) {
 		try {
 			await createPlace(data);
-			selectedCluster = null;
+			closeForm();
 			await reloadPlaces();
 			await loadClusters();
 		} catch (e) {
@@ -57,7 +76,7 @@
 	async function handleDismiss(data: { lat: number; lon: number; radius_meters: number }) {
 		try {
 			await dismissCluster(data);
-			selectedCluster = null;
+			closeForm();
 			await loadClusters();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to dismiss cluster';
@@ -65,7 +84,7 @@
 	}
 
 	async function handleDismissedClick(d: DismissedCluster) {
-		if (!showDismissed) return;
+		if (!showDismissed || picking) return;
 		const ok = confirm('Restore this dismissed area? Future pings here may form a cluster again.');
 		if (!ok) return;
 		try {
@@ -104,10 +123,21 @@
 			onDismissedClusterClick={handleDismissedClick}
 			selectedPlaceId={$selectedPlaceId}
 			onPlaceMove={$onPlaceMove}
+			pickingLocation={picking}
+			onMapClick={handleMapClick}
 		/>
 	</div>
 
 	<div class="badges">
+		<button
+			class="toggle-badge new-place"
+			class:active={picking}
+			onclick={toggleNewPlace}
+			type="button"
+			title={picking ? 'Click anywhere on the map to set the location' : 'Add a new place'}
+		>
+			{picking ? 'Click on map…' : '+ New place'}
+		</button>
 		{#if clusters.length > 0 && !selectedCluster}
 			<div class="discover-badge">
 				{clusters.length} unknown {clusters.length === 1 ? 'place' : 'places'} detected
@@ -135,7 +165,14 @@
 			cluster={selectedCluster}
 			onSave={handleSave}
 			onDismiss={handleDismiss}
-			onCancel={() => (selectedCluster = null)}
+			onCancel={closeForm}
+		/>
+	{:else if pendingPick}
+		<PlaceForm
+			initialLat={pendingPick.lat}
+			initialLon={pendingPick.lon}
+			onSave={handleSave}
+			onCancel={closeForm}
 		/>
 	{/if}
 </div>
@@ -188,6 +225,11 @@
 
 	.toggle-badge:hover { color: var(--text-primary); border-color: #777; }
 	.toggle-badge.active { color: var(--text-primary); border-color: #888; }
+
+	.new-place.active {
+		color: #ffc107;
+		border-color: #ffc107;
+	}
 
 	.error-badge {
 		position: absolute;
