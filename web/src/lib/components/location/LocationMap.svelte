@@ -66,18 +66,19 @@
 		return Math.sqrt(dlat * dlat + dlon * dlon);
 	}
 
-	// Gap detection: only dash when the jump is genuinely large. Normal walking
-	// with a GPS hiccup (a few hundred meters over a few minutes) should just
-	// draw as a solid path, not a dashed teleport.
-	const GAP_TIME_MIN_S = 900;      // 15 min — below this, contiguous
-	const GAP_DIST_MIN_M = 2000;     // 2 km minimum distance for a "gap"
+	// Gap detection: an edge is a gap if either the implied speed is impossible
+	// (clear teleport) or the time delta reaches the dwell minimum. Hitting the
+	// dwell minimum means a filtered dwell sits between the two kept pings —
+	// this splits the edge stream at dwell boundaries so transit detection
+	// runs per-trip, not across a whole month of concatenated activity.
+	// Brief in-transit stationary runs stay below the dwell threshold and
+	// keep their pings, so dt stays small and no gap fires mid-transit.
 	const GAP_SPEED_MAX_MS = 55;     // ~200 km/h — clearly a teleport
 
 	function isGap(dist: number, timeDeltaS: number): boolean {
 		if (timeDeltaS <= 0) return false;
 		if (dist / timeDeltaS > GAP_SPEED_MAX_MS) return true;
-		if (timeDeltaS < GAP_TIME_MIN_S) return false;
-		return dist > GAP_DIST_MIN_M;
+		return timeDeltaS >= DWELL_MIN_DURATION_S;
 	}
 
 	// Transit detection: within a run of consecutive non-gap edges, a "brief pause"
