@@ -12,6 +12,7 @@
 	let error = $state('');
 
 	onMount(async () => {
+		console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);
 		try {
 			user = await getMe();
 		} catch (e) {
