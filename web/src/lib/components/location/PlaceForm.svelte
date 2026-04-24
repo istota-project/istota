@@ -18,7 +18,10 @@
 	let lat = $state(place?.lat ?? cluster?.lat ?? 0);
 	let lon = $state(place?.lon ?? cluster?.lon ?? 0);
 
-	const categories = ['home', 'work', 'gym', 'food', 'shopping', 'social', 'friend', 'other'];
+	const categories = [
+		'home', 'work', 'gym', 'food', 'shopping',
+		'social', 'friend', 'medical', 'hotel', 'transit', 'other',
+	];
 
 	function handleSave() {
 		if (!name.trim()) return;
