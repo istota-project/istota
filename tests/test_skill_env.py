@@ -273,6 +273,48 @@ class TestBuildSkillEnvUserResourceConfig:
         env = build_skill_env(["bookmarks"], {"bookmarks": meta}, ctx)
         assert "KARAKEEP_BASE_URL" not in env
 
+    def test_resolves_via_resource_types_list(self, tmp_path):
+        """A spec with resource_types matches any of the listed types."""
+        config = _make_config(tmp_path)
+        user_config = _MockUserConfig(resources=[
+            _MockResourceConfig(type="moneyman", extra={"config_path": "/etc/money/config.toml"}),
+        ])
+        ctx = _make_ctx(tmp_path, config=config, user_config=user_config)
+
+        meta = SkillMeta(
+            name="money",
+            description="Money",
+            env_specs=[EnvSpec(
+                var="MONEY_CONFIG",
+                source="user_resource_config",
+                resource_types=["money", "moneyman"],
+                field="config_path",
+            )],
+        )
+        env = build_skill_env(["money"], {"money": meta}, ctx)
+        assert env["MONEY_CONFIG"] == "/etc/money/config.toml"
+
+    def test_resource_types_falls_back_to_singular(self, tmp_path):
+        """Singular resource_type still works when resource_types is empty."""
+        config = _make_config(tmp_path)
+        user_config = _MockUserConfig(resources=[
+            _MockResourceConfig(type="karakeep", base_url="https://keep.example.com", api_key="k"),
+        ])
+        ctx = _make_ctx(tmp_path, config=config, user_config=user_config)
+
+        meta = SkillMeta(
+            name="bookmarks",
+            description="Bookmarks",
+            env_specs=[EnvSpec(
+                var="KARAKEEP_BASE_URL",
+                source="user_resource_config",
+                resource_type="karakeep",
+                field="base_url",
+            )],
+        )
+        env = build_skill_env(["bookmarks"], {"bookmarks": meta}, ctx)
+        assert env["KARAKEEP_BASE_URL"] == "https://keep.example.com"
+
 
 class TestBuildSkillEnvUserId:
     """Tests for 'user_id' source type."""

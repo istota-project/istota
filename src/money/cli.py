@@ -220,14 +220,55 @@ def _parse_user_context(user_data: dict, config_dir: Path) -> UserContext:
     )
 
 
+def _load_workspace_context(mctx: Context, workspace: str) -> Context:
+    """Synthesize a UserContext from a workspace dir and register it under MONEY_USER.
+
+    Used when no money config file is configured but the caller (typically the
+    istota money skill) has pointed MONEY_WORKSPACE at a user's istota
+    workspace. Mirrors the workspace-mode loader used by istota.web_app.
+    """
+    import json
+    import os
+
+    from money.workspace import synthesize_user_context
+
+    user_key = os.environ.get("MONEY_USER", "") or "default"
+
+    data_dir_env = os.environ.get("MONEY_DATA_DIR", "")
+    config_dir_env = os.environ.get("MONEY_CONFIG_DIR", "")
+    ledgers_env = os.environ.get("MONEY_LEDGERS", "")
+    db_path_env = os.environ.get("MONEY_DB_PATH", "")
+
+    kwargs: dict = {}
+    if data_dir_env:
+        kwargs["data_dir"] = Path(data_dir_env)
+    if config_dir_env:
+        kwargs["config_dir"] = Path(config_dir_env)
+    if db_path_env:
+        kwargs["db_path"] = Path(db_path_env)
+    if ledgers_env:
+        kwargs["ledgers"] = json.loads(ledgers_env)
+
+    uctx = synthesize_user_context(Path(workspace), **kwargs)
+    mctx.users[user_key] = uctx
+    mctx.activate_user(user_key)
+    return mctx
+
+
 def load_context(config_path: str | None = None) -> Context:
     """Load configuration and return a Context.
 
-    Config is found via: explicit path, MONEY_CONFIG env var, or ./config.toml.
+    Config is found via: explicit path, MONEY_CONFIG env var, MONEY_WORKSPACE
+    workspace synthesis, or ./config.toml.
 
     Supports multi-user configs with a [users] section. When no [users] section
     exists but a top-level data_dir is present, creates a single implicit "default"
     user for backward compatibility.
+
+    Workspace mode: if MONEY_WORKSPACE is set (and no config file is found),
+    synthesize a UserContext from the workspace dir using money.workspace.
+    The user is registered under MONEY_USER (defaulting to "default"), and
+    MONEY_DATA_DIR / MONEY_CONFIG_DIR / MONEY_LEDGERS override the defaults.
     """
     import os
 
@@ -242,6 +283,9 @@ def load_context(config_path: str | None = None) -> Context:
         if cwd_config.exists():
             config_path = str(cwd_config)
     if not config_path:
+        workspace_env = os.environ.get("MONEY_WORKSPACE", "")
+        if workspace_env:
+            return _load_workspace_context(mctx, workspace_env)
         return mctx
 
     config_file = Path(config_path)
@@ -324,6 +368,13 @@ def cli(ctx, config_path, user_key):
     ctx.ensure_object(Context)
     mctx = load_context(config_path)
     if user_key:
+        # Workspace mode synthesizes a single user under MONEY_USER (or "default").
+        # When --user is given but doesn't match, re-key to the requested name.
+        if user_key not in mctx.users and len(mctx.users) == 1:
+            existing = next(iter(mctx.users))
+            mctx.users[user_key] = mctx.users.pop(existing)
+            if mctx.active_user == existing:
+                mctx.active_user = user_key
         if user_key not in mctx.users:
             raise click.ClickException(
                 f"Unknown user: {user_key}. Available: {', '.join(mctx.available_users)}"

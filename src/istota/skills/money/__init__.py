@@ -8,6 +8,72 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
+
+
+_MONEY_RESOURCE_TYPES = ("money", "moneyman")
+
+
+def setup_env(ctx) -> dict[str, str]:
+    """Inject MONEY_WORKSPACE so the CLI can synthesize a UserContext.
+
+    Mirrors istota.web_app._install_money_loader: when the user has a money
+    resource without ``config_path`` (workspace mode), point MONEY_WORKSPACE
+    at ``{nextcloud_mount}/Users/{user_id}/{bot_dir}``. ``data_dir`` /
+    ``config_dir`` / ``ledgers`` overrides on the resource flow through as
+    extra env vars consumed by money.cli.load_context.
+
+    Skipped (returns ``{}``) when the user has no money resource, when
+    ``config_path`` is set (legacy mode covered by MONEY_CONFIG via the
+    declarative ``user_resource_config`` env spec), or when no Nextcloud
+    mount is configured.
+    """
+    user_config = getattr(ctx, "user_config", None)
+    if not user_config:
+        return {}
+
+    resource = None
+    for rc in user_config.resources:
+        if rc.type in _MONEY_RESOURCE_TYPES:
+            resource = rc
+            break
+    if resource is None:
+        return {}
+
+    extra = getattr(resource, "extra", {}) or {}
+    if extra.get("config_path") or getattr(resource, "path", ""):
+        # Legacy mode: MONEY_CONFIG resolves the file via the declarative
+        # env spec; workspace synthesis would shadow it.
+        return {}
+
+    config = ctx.config
+    mount = getattr(config, "nextcloud_mount_path", None)
+    if not mount:
+        return {}
+
+    user_id = getattr(ctx.task, "user_id", "") or ""
+    if not user_id:
+        return {}
+
+    bot_dir = getattr(config, "bot_dir_name", "istota")
+    workspace = Path(mount) / "Users" / user_id / bot_dir
+
+    env: dict[str, str] = {"MONEY_WORKSPACE": str(workspace)}
+
+    data_dir = extra.get("data_dir")
+    if data_dir:
+        env["MONEY_DATA_DIR"] = str(data_dir)
+    config_dir = extra.get("config_dir")
+    if config_dir:
+        env["MONEY_CONFIG_DIR"] = str(config_dir)
+    db_path = extra.get("db_path")
+    if db_path:
+        env["MONEY_DB_PATH"] = str(db_path)
+    ledgers = extra.get("ledgers")
+    if ledgers:
+        env["MONEY_LEDGERS"] = json.dumps(ledgers)
+
+    return env
 
 
 def _run(args: list[str]) -> dict:

@@ -38,6 +38,7 @@ def _parse_env_specs(data: list[dict]) -> list[EnvSpec]:
             config_path=entry.get("config_path", ""),
             when=entry.get("when", ""),
             resource_type=entry.get("resource_type", ""),
+            resource_types=list(entry.get("resource_types") or []),
             field=entry.get("field", ""),
             template=entry.get("template", ""),
             user_path_fn=entry.get("user_path_fn", ""),

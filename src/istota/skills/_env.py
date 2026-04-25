@@ -36,6 +36,19 @@ def _resolve_config_path(config: object, dotted_path: str) -> object:
     return obj
 
 
+def _spec_resource_types(spec: EnvSpec) -> set[str]:
+    """Return the set of resource types this spec accepts.
+
+    Supports both ``resource_types: [a, b]`` (plural) and the legacy
+    ``resource_type: a`` (singular). Either form alone works; if both are
+    set, they are unioned.
+    """
+    accepted = set(spec.resource_types or [])
+    if spec.resource_type:
+        accepted.add(spec.resource_type)
+    return accepted
+
+
 def _resolve_env_spec(spec: EnvSpec, ctx: EnvContext) -> str | None:
     """Resolve a single EnvSpec to an env var value, or None to skip."""
     if spec.source == "config":
@@ -79,8 +92,9 @@ def _resolve_env_spec(spec: EnvSpec, ctx: EnvContext) -> str | None:
         # From user config [[resources]] entry
         if not ctx.user_config:
             return None
+        accepted = _spec_resource_types(spec)
         for rc in ctx.user_config.resources:
-            if rc.type == spec.resource_type:
+            if rc.type in accepted:
                 # Check named field first, then fall back to extra dict
                 val = getattr(rc, spec.field, None)
                 if val is None or val == "":
