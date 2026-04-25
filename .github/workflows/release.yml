@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)publish a release for, e.g. v0.7.0'
+        required: true
 
 permissions:
   contents: write
@@ -12,26 +17,43 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          fetch-tags: true
+          ref: ${{ steps.tag.outputs.tag }}
 
-      - name: Extract release notes from tag annotation
-        id: notes
+      - name: Extract release notes from CHANGELOG.md
         run: |
-          NOTES=$(git tag -l --format='%(contents)' "${{ github.ref_name }}" | sed -n '/-----BEGIN PGP/q;p')
-          if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
-            echo "::error::Tag ${{ github.ref_name }} has no annotation body — push it with 'git tag -a -m'"
+          awk -v v="${{ steps.tag.outputs.version }}" '
+            $0 ~ "^## \\[" v "\\]" {capture=1; next}
+            capture && /^## \[/ {exit}
+            capture {print}
+          ' CHANGELOG.md > /tmp/release-notes.md
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "::error::No section for [${{ steps.tag.outputs.version }}] in CHANGELOG.md"
             exit 1
           fi
-          {
-            echo 'NOTES<<RELEASE_NOTES_EOF'
-            printf '%s\n' "$NOTES"
-            echo 'RELEASE_NOTES_EOF'
-          } >> "$GITHUB_OUTPUT"
+          echo "----- Release notes -----"
+          cat /tmp/release-notes.md
+          echo "-------------------------"
 
-      - name: Create GitHub Release
-        run: gh release create "${{ github.ref_name }}" --notes "${{ steps.notes.outputs.NOTES }}"
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file /tmp/release-notes.md
+          else
+            gh release create "$TAG" --notes-file /tmp/release-notes.md
+          fi
