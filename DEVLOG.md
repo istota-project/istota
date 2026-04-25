@@ -2,6 +2,40 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25 (cont. 2): Fix Monarch sync recategorization for income postings
+
+The user caught a real accounting bug after a `sync-monarch` run. An eBay sale that had been synced as business income (DR Owner-Drawings / CR Income:Sales) had its `#business` tag removed in Monarch. The resulting recat entry was wrong: instead of reversing the original posting, it emitted `DR Expenses:Personal-Expense / CR Income:Sales` — credited Income:Sales a *second* time (doubling the credit instead of cancelling it), introduced a phantom Personal-Expense debit, and never undid the original Owner-Drawings debit.
+
+**Root cause.** `format_recategorization_entry` was hardcoded for the expense-swap case ("retag this expense from one bucket to another"). It worked accidentally when the original was an expense — swapping one expense for another is sign-symmetric. For income the convention flips and the same shape produced a malformed entry. Worse, only the `posted_account` (the income/expense leg) was stored in `monarch_synced_transactions`; the contra account was lost on insert, so even if the formatter knew to do a true reversal it had nothing to reverse against.
+
+`format_category_change_entry` had the same shape (`DR new / CR old`) and the same latent bug — fine for expense→expense changes, broken for income→income.
+
+**Fix.**
+
+1. **Schema migration.** Added `contra_account TEXT` to `monarch_synced_transactions`. Renamed `_migrate_monarch_profile_column` → `_migrate_monarch_synced_columns` and ALTERed in the new column on existing DBs. `MonarchSyncedTransaction` dataclass carries `contra_account: str | None`. `track_monarch_transactions_batch` and `get_active_monarch_synced_transactions` round-trip it. Sync loop populates `contra_account` in `synced_data`.
+
+2. **`format_recategorization_entry` now branches by account type:**
+   - Income posting (`Income:*`) → emits a true reversal of the original via `format_beancount_transaction(amount=-amount)` using the stored `posted_account` + `contra_account`. Returns `None` when `contra_account` is missing (legacy row), so the caller skips and surfaces the count rather than producing wrong math.
+   - Expense posting → keeps the existing category-swap shape. Cash leg is untouched; only the expense bucket changes from the original to `recategorize_account`. Doesn't need `contra_account`.
+
+3. **`format_category_change_entry` is now sign-aware.** When either side is `Income:*`, it flips to `DR old / CR new` to cancel the original income credit and re-credit the new income account. Expense→expense cases unchanged.
+
+4. **Sync result surfaces skipped legacy rows.** `result["recat_skipped_legacy_count"]` and `recat_skipped_legacy_ids` (and the human-readable message) call out income recats that couldn't be reversed because their contra_account wasn't tracked at original-sync time. Operator hand-patches those in the ledger.
+
+**What this doesn't fix.** The bad Apr 25 ledger entry that surfaced this is still on disk — the formatter fix doesn't rewrite history. That's a manual fixup: replace the `DR Personal-Expense / CR Income:Sales` line with a clean reversal (`DR Income:Sales / CR Equity:Owner-InvestmentDrawings`).
+
+**Validation**
+
+- 304 money-related tests pass (touched files + broader money-skill / web / workspace suites).
+- 8 new tests covering: expense recat with and without contra, income recat reversal (positive + negative source amount), legacy-row None return, expense category change (existing shape preserved), income category change (new sign-flip), DB column round-trip, optional-for-legacy handling, and a fresh-init migration test that builds a pre-migration schema and confirms `contra_account` gets ALTERed in without data loss.
+- 6 pre-existing WeasyPrint/libgobject failures in `test_invoicing.py` are environmental and unchanged.
+
+**Files added/modified:**
+- `src/istota/money/db.py` — `contra_account` column + migration; dataclass field; INSERT/SELECT plumbing.
+- `src/istota/money/core/transactions.py` — recategorization formatter rewritten as branching reversal-or-swap; category-change formatter sign-aware; sync loop tracks contra_account and surfaces legacy-skip count.
+- `tests/money/test_transactions.py` — replaced 2 tests with 8 covering both branches and edge cases.
+- `tests/money/test_db.py` — round-trip test, legacy-row test, ALTER-migration test.
+
 ## 2026-04-25 (cont.): Money cleanup — drop standalone API, unify credential storage
 
 Three small follow-ups to the money rollup, in one session:

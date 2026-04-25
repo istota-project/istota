@@ -88,6 +88,75 @@ class TestMonarchSync:
         assert len(active) == 1
         assert active[0].merchant == "A Updated"
 
+    def test_contra_account_round_trip(self, db):
+        """contra_account is persisted and returned for reversal-based recat."""
+        with get_db(db) as conn:
+            track_monarch_transactions_batch(conn, [{
+                "id": "txn-1", "amount": 40.89, "merchant": "eBay",
+                "posted_account": "Income:Sales",
+                "contra_account": "Equity:Owner-InvestmentDrawings",
+                "txn_date": "2026-04-21",
+            }])
+        with get_db(db) as conn:
+            active = get_active_monarch_synced_transactions(conn)
+        assert len(active) == 1
+        assert active[0].posted_account == "Income:Sales"
+        assert active[0].contra_account == "Equity:Owner-InvestmentDrawings"
+
+    def test_contra_account_optional_for_legacy_rows(self, db):
+        """Older sync data without contra_account still works (returns None)."""
+        with get_db(db) as conn:
+            track_monarch_transactions_batch(conn, [{
+                "id": "txn-1", "amount": 10, "merchant": "A",
+                "posted_account": "Expenses:A",
+            }])
+        with get_db(db) as conn:
+            active = get_active_monarch_synced_transactions(conn)
+        assert active[0].contra_account is None
+
+    def test_migration_adds_contra_account_column(self, tmp_path):
+        """Existing DBs without contra_account get the column added on init."""
+        import sqlite3
+        db_path = tmp_path / "legacy.db"
+        # Build a pre-migration schema without contra_account.
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE monarch_synced_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                monarch_transaction_id TEXT NOT NULL,
+                synced_at TEXT DEFAULT (datetime('now')),
+                tags_json TEXT,
+                amount REAL,
+                merchant TEXT,
+                posted_account TEXT,
+                txn_date TEXT,
+                content_hash TEXT,
+                recategorized_at TEXT,
+                profile TEXT NOT NULL DEFAULT '',
+                UNIQUE(monarch_transaction_id, profile)
+            );
+        """)
+        conn.execute(
+            "INSERT INTO monarch_synced_transactions "
+            "(monarch_transaction_id, amount, merchant, posted_account) "
+            "VALUES ('legacy-1', 10, 'L', 'Expenses:Old')"
+        )
+        conn.commit()
+        conn.close()
+
+        # Re-init: should add contra_account without dropping data.
+        init_db(db_path)
+
+        with get_db(db_path) as conn:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(monarch_synced_transactions)").fetchall()}
+        assert "contra_account" in cols
+
+        with get_db(db_path) as conn:
+            active = get_active_monarch_synced_transactions(conn)
+        assert len(active) == 1
+        assert active[0].monarch_transaction_id == "legacy-1"
+        assert active[0].contra_account is None
+
 
 class TestContentHashDedup:
     def test_monarch_content_hash(self, db):

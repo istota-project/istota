@@ -195,17 +195,81 @@ class TestBeancountFormatting:
         assert '\\"Best\\"' in result
         assert '\\"Special\\"' in result
 
-    def test_recategorization_entry(self):
+    def test_recategorization_entry_expense(self):
+        """Expense recat: category swap from original bucket to recategorize_account."""
         result = format_recategorization_entry(
             txn_date=date(2026, 2, 7), merchant="Starbucks",
-            original_account="Expenses:Food:Coffee",
-            recategorize_account="Expenses:Personal-Expense", amount=5.50,
+            posted_account="Expenses:Food:Coffee",
+            contra_account="Liabilities:CreditCard",
+            amount=-5.50,
+            recategorize_account="Expenses:Personal-Expense",
         )
         assert "Recategorized: business tag removed" in result
         assert "Expenses:Personal-Expense  5.50 USD" in result
         assert "Expenses:Food:Coffee  -5.50 USD" in result
+        # Cash leg untouched — only the expense bucket changed.
+        assert "Liabilities:CreditCard" not in result
 
-    def test_category_change_entry(self):
+    def test_recategorization_entry_income_reverses_original(self):
+        """Income recat: full reversal of the original entry.
+
+        Original eBay income (amount=+40.89):
+            DR Equity:Owner-Drawings +40.89 / CR Income:Sales -40.89
+        Reversal must be the exact mirror.
+        """
+        result = format_recategorization_entry(
+            txn_date=date(2026, 4, 25), merchant="eBay",
+            posted_account="Income:Sales",
+            contra_account="Equity:Owner-InvestmentDrawings",
+            amount=40.89,
+        )
+        assert result is not None
+        assert "Reversal: business tag removed" in result
+        assert "Income:Sales  40.89 USD" in result
+        # contra side gets the implicit balancing -40.89 (no explicit amount line)
+        assert "Equity:Owner-InvestmentDrawings" in result
+        # Personal-Expense must NOT appear — that was the bug.
+        assert "Personal-Expense" not in result
+
+    def test_recategorization_entry_income_negative_amount(self):
+        """Income reversal still works when Monarch stored a negative-signed amount."""
+        result = format_recategorization_entry(
+            txn_date=date(2026, 4, 25), merchant="eBay",
+            posted_account="Income:Sales",
+            contra_account="Assets:Bank:Checking",
+            amount=-40.89,
+        )
+        assert result is not None
+        assert "Reversal:" in result
+        # Reversal must still balance regardless of original sign.
+        assert "Income:Sales" in result
+        assert "Assets:Bank:Checking" in result
+
+    def test_recategorization_entry_income_missing_contra_returns_none(self):
+        """Legacy rows synced before contra_account was tracked can't be reversed."""
+        result = format_recategorization_entry(
+            txn_date=date(2026, 4, 25), merchant="eBay",
+            posted_account="Income:Sales",
+            contra_account=None,
+            amount=40.89,
+        )
+        assert result is None
+
+    def test_recategorization_entry_expense_works_without_contra(self):
+        """Expense recat doesn't need contra_account — it only swaps the expense bucket."""
+        result = format_recategorization_entry(
+            txn_date=date(2026, 2, 7), merchant="Starbucks",
+            posted_account="Expenses:Food:Coffee",
+            contra_account=None,
+            amount=-5.50,
+            recategorize_account="Expenses:Personal-Expense",
+        )
+        assert result is not None
+        assert "Expenses:Personal-Expense  5.50 USD" in result
+        assert "Expenses:Food:Coffee  -5.50 USD" in result
+
+    def test_category_change_entry_expense(self):
+        """Expense → expense category change: DR new / CR old."""
         result = format_category_change_entry(
             txn_date=date(2026, 2, 14), merchant="PayPal",
             old_account="Expenses:Office-Supplies",
@@ -214,6 +278,18 @@ class TestBeancountFormatting:
         assert "Recategorized in Monarch" in result
         assert "Expenses:Entertainment:Recreation  25.00 USD" in result
         assert "Expenses:Office-Supplies  -25.00 USD" in result
+
+    def test_category_change_entry_income(self):
+        """Income → income category change: signs flip — DR old / CR new — to
+        cancel the original credit and re-credit the new income account."""
+        result = format_category_change_entry(
+            txn_date=date(2026, 4, 25), merchant="Client Co",
+            old_account="Income:Sales",
+            new_account="Income:Consulting", amount=500.00,
+        )
+        assert "Recategorized in Monarch" in result
+        assert "Income:Sales  500.00 USD" in result
+        assert "Income:Consulting  -500.00 USD" in result
 
 
 class TestConfigParsing:

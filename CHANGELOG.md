@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Money skill in sandboxed task runs no longer fails with "Unknown user" for workspace-mode users (resource entry without `config_path`). The unified resolver handles workspace and legacy modes uniformly across web, skill, and scheduler call sites.
 - Monarch sync no longer fails with "No Monarch credentials configured" on instances whose namespace differs from `"istota"`. The hardcoded fallback in `_loader.load_user_secrets` and `scheduler._sync_money_module_jobs` was reading from the wrong `/etc/...` path; now uses `Config.namespace` directly. Also obsoleted by the unified credential storage on the resource entry.
+- Monarch `sync-monarch` recategorization for income postings: removing a `#business` tag from an income transaction in Monarch produced a malformed ledger entry (double-credited the income account, introduced a phantom personal-expense debit, never reversed the original contra leg). The formatter now branches by account type — true reversal for income postings, category swap for expenses — and `monarch_synced_transactions` tracks `contra_account` so the reversal has the second leg available. Income→income category changes flip signs symmetrically. Income recats for rows synced before this change are skipped and surfaced in the sync result for manual reversal.
 
 ## [0.7.0] - 2026-04-24
 

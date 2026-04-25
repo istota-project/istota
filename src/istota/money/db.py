@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS monarch_synced_transactions (
     amount REAL,
     merchant TEXT,
     posted_account TEXT,
+    contra_account TEXT,
     txn_date TEXT,
     content_hash TEXT,
     recategorized_at TEXT,
@@ -77,21 +78,24 @@ def init_db(db_path: Path | str) -> None:
     """Create tables if they don't exist."""
     with get_db(db_path) as conn:
         conn.executescript(SCHEMA)
-        _migrate_monarch_profile_column(conn)
+        _migrate_monarch_synced_columns(conn)
 
 
-def _migrate_monarch_profile_column(conn: sqlite3.Connection) -> None:
-    """Add profile column if upgrading from older schema."""
+def _migrate_monarch_synced_columns(conn: sqlite3.Connection) -> None:
+    """Bring older monarch_synced_transactions schemas up to current."""
     cursor = conn.execute("PRAGMA table_info(monarch_synced_transactions)")
     columns = {row["name"] for row in cursor.fetchall()}
+
     if "profile" not in columns:
         conn.execute("ALTER TABLE monarch_synced_transactions ADD COLUMN profile TEXT NOT NULL DEFAULT ''")
-        # Recreate unique index to include profile
         conn.execute("DROP INDEX IF EXISTS idx_monarch_synced_unique")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_monarch_synced_unique "
             "ON monarch_synced_transactions(monarch_transaction_id, profile)"
         )
+
+    if "contra_account" not in columns:
+        conn.execute("ALTER TABLE monarch_synced_transactions ADD COLUMN contra_account TEXT")
 
 
 # =============================================================================
@@ -109,6 +113,7 @@ class MonarchSyncedTransaction:
     merchant: str | None
     posted_account: str | None
     txn_date: str | None
+    contra_account: str | None = None
 
 
 def is_monarch_transaction_synced(
@@ -146,14 +151,15 @@ def track_monarch_transactions_batch(
             """
             INSERT INTO monarch_synced_transactions (
                 monarch_transaction_id, tags_json, amount, merchant,
-                posted_account, txn_date, content_hash, profile
+                posted_account, contra_account, txn_date, content_hash, profile
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (monarch_transaction_id, profile) DO UPDATE SET
                 tags_json = excluded.tags_json,
                 amount = excluded.amount,
                 merchant = excluded.merchant,
                 posted_account = excluded.posted_account,
+                contra_account = excluded.contra_account,
                 txn_date = excluded.txn_date,
                 content_hash = excluded.content_hash
             """,
@@ -163,6 +169,7 @@ def track_monarch_transactions_batch(
                 txn.get("amount"),
                 txn.get("merchant"),
                 txn.get("posted_account"),
+                txn.get("contra_account"),
                 txn.get("txn_date"),
                 txn.get("content_hash"),
                 profile,
@@ -183,7 +190,8 @@ def get_active_monarch_synced_transactions(
     if profile is not None:
         cursor = conn.execute(
             """
-            SELECT id, monarch_transaction_id, tags_json, amount, merchant, posted_account, txn_date
+            SELECT id, monarch_transaction_id, tags_json, amount, merchant,
+                   posted_account, contra_account, txn_date
             FROM monarch_synced_transactions
             WHERE recategorized_at IS NULL AND profile = ?
             """,
@@ -192,7 +200,8 @@ def get_active_monarch_synced_transactions(
     else:
         cursor = conn.execute(
             """
-            SELECT id, monarch_transaction_id, tags_json, amount, merchant, posted_account, txn_date
+            SELECT id, monarch_transaction_id, tags_json, amount, merchant,
+                   posted_account, contra_account, txn_date
             FROM monarch_synced_transactions
             WHERE recategorized_at IS NULL
             """
@@ -206,6 +215,7 @@ def get_active_monarch_synced_transactions(
             merchant=row["merchant"],
             posted_account=row["posted_account"],
             txn_date=row["txn_date"],
+            contra_account=row["contra_account"],
         )
         for row in cursor.fetchall()
     ]
