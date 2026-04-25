@@ -2,6 +2,66 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25: Money module — rolled into istota as a regular subpackage
+
+Collapsed the standalone-style `src/money/` package into `src/istota/money/` and deleted the dual-loader / env-var-marshaling indirection introduced during the original moneyman migration. Same session also fixed the upstream cause: in a deployed bot, the money skill was failing with "Unknown user" because workspace-mode users had `MONEY_CONFIG` resolve to nothing in the sandbox.
+
+**Why**
+
+The earlier extract-friendly architecture (`src/money/` as a top-level package with zero `istota.*` imports, pluggable `set_loader`, periodic extract to a public repo) imposed real cost: two parallel config loaders (web vs. CLI), env-var marshaling for workspace mode, a `setup_env` hook on the skill, and a TTL/mtime cache for per-user resolution. The drift between the loaders is what caused today's "Unknown user: stefan" sandbox bug — the web side supported workspace mode, the CLI did not. Public extract was a periodic snapshot that wasn't being run on a release cadence anyway. Net result: paying the boilerplate without collecting the benefit.
+
+**Two-stage fix**
+
+Stage 1 — point fix that landed first (`71232b5`):
+
+- Workspace-mode support added to `money.cli.load_context`: new `MONEY_WORKSPACE` / `MONEY_DATA_DIR` / `MONEY_CONFIG_DIR` / `MONEY_LEDGERS` / `MONEY_DB_PATH` env vars synthesize a `UserContext` via `money.workspace.synthesize_user_context` when no config file is set.
+- New `setup_env(ctx)` hook on the money skill emits those env vars when the user has a money/moneyman resource without `config_path`. Mirrors what the web-side `_install_money_loader` does in-process.
+- `EnvSpec` gained `resource_types: list[str]` so a single declarative env spec can match multiple resource types — `MONEY_CONFIG` now resolved correctly for both `money` and legacy `moneyman` resources.
+
+Stage 2 — full rollup (`52bfbec`, this entry's main subject):
+
+- `git mv src/money/ src/istota/money/`. Imports rewritten everywhere (`from money.X` → `from istota.money.X`), patch strings, `pyproject.toml` packages list, and the `money` console script entry point.
+- New `src/istota/money/_loader.py` with a single `resolve_for_user(user_id, istota_config) -> UserContext` that handles both legacy (`config_path`) and workspace modes via direct calls. Re-exported from `istota.money`.
+- Deleted: `src/istota/money/config.py` (the entire TTL cache + `set_loader` + mtime invalidation machinery), `web_app._install_money_loader` (replaced with `app.state.istota_config = _config` and a one-line FastAPI dep in `routes.py`), the `setup_env` hook and the env-var marshaling on the skill, `_load_workspace_context` and the user-rekey logic in `cli()`, the workspace-mode CLI test class, and `tests/money/test_config.py` (the cache/loader test suite).
+- Skill is now `_run`: gets `MONEY_USER` env, calls `load_config()` + `resolve_for_user()` in-process, builds a `Context` with the user pre-registered, invokes the CLI via `runner.invoke(cli, args, obj=...)`. The `cli()` group recognizes a populated `obj` and skips file loading.
+- Scheduler `_sync_money_module_jobs` switched from shelling out `MONEY_CONFIG=… money --user X sync-monarch` to `MONEY_USER=X istota-skill money sync-monarch`. Workspace-mode users now get scheduled jobs (previously skipped with a "no config_path" warning).
+- The standalone `money --config /path/to/config.toml` terminal entry point still works — file-based `load_context` retained for that path; only the workspace bolt-ons were removed.
+
+**Validation**
+
+- 564 passed in money-touched tests; 3315 passed in the full istota suite. Pre-existing WeasyPrint and OCR/Pillow env failures unchanged.
+- End-to-end smoke: `MONEY_USER=<user_id> python -m istota.skills.money list` against a workspace-mode resource returns a synthesized `main` ledger and `status: ok`.
+
+**Net diff** — 53 files, +557 / -1225, single commit (the rollup).
+
+**Files added/modified:**
+
+- `src/istota/money/_loader.py` — new; `resolve_for_user`, `UserNotFoundError`, `list_users`
+- `src/istota/money/__init__.py` — re-exports the loader; `__version__ = "0.2.0"`
+- `src/istota/money/cli.py` — workspace env-var support and user-rekey logic removed; `cli()` group accepts pre-built `Context` via `runner.invoke(obj=...)`
+- `src/istota/money/jobs.py` — command templates use `MONEY_USER=X istota-skill money <cmd>`; `jobs_for_user` signature is `(user_context, user_id, *, secrets_path=...)`
+- `src/istota/skills/money/__init__.py` — `setup_env` hook removed; `_run` resolves the UserContext in-process and injects it into Click via `obj=`
+- `src/istota/skills/money/skill.md` — workspace env-var docs and `MONEY_CONFIG` env spec gone; only `MONEY_USER` declared
+- `src/istota/web_app.py` — `_install_money_loader` deleted; `_publish_config(app)` sets `app.state.istota_config` after each load (initial + SIGHUP)
+- `src/istota/money/routes.py` — `get_user_config` reads `request.app.state.istota_config` and calls `resolve_for_user`; no `set_loader` dependency
+- `src/istota/scheduler.py::_sync_money_module_jobs` — calls `resolve_for_user`; workspace-mode users are no longer skipped
+- `src/istota/skills/_loader.py` + `_types.py` + `_env.py` — `EnvSpec.resource_types: list[str]` (the multi-type capability is kept even though money no longer needs it; pattern is generally useful)
+- `pyproject.toml` — wheel packages collapsed to `["src/istota"]`; console script `money = "istota.money.cli:cli"`
+- `tests/money/test_config.py` — deleted (obsolete cache/loader tests)
+- `tests/money/test_cli.py` — workspace-mode tests replaced with a single test for the injected-Context pattern
+- `tests/test_skill_money.py` — `TestSetupEnvHook` class deleted; `TestRunInProcess` updated for the in-process resolver flow
+- `tests/test_money_jobs.py` — `jobs_for_user` signature update; command-shape assertions updated
+- `tests/test_web_app_money.py` — fixture sets `app.state.istota_config` directly instead of mocking `set_loader`
+- `AGENTS.md` — module path note updated
+
+**Design notes**
+
+- The CLI gracefully degrades to a plain file-config tool for standalone terminal use. The skill bypasses that path entirely by injecting the resolved `Context` — this keeps both call sites simple and removed about ~150 LOC of env-var glue + a pluggable-loader abstraction that nothing else used.
+- Workspace mode previously required marshaling four separate env vars (`MONEY_DATA_DIR`, `MONEY_CONFIG_DIR`, `MONEY_LEDGERS`, `MONEY_DB_PATH`) so the CLI subprocess could synthesize what istota already had. With the in-process resolver, all of that is just function arguments to `synthesize_user_context`.
+- Per-user TTL cache was load-bearing for the standalone moneyman web service (avoid re-parsing TOML on every request). Inside istota, the istota config is already loaded once at startup and we re-resolve cheaply on demand; no cache needed. Re-introducing it would be premature optimization.
+- The scheduler-side change (jobs go through `istota-skill money` rather than `money` directly) was the unblocker for workspace-mode scheduled jobs. Previously the seeder needed a `config_path` to format the command template; the new template only needs a `user_id`, which every user has.
+- Public extract tooling (`scripts/extract_money_to_standalone.py`, `scripts/check_money_isolation.sh`, `tests/test_money_extract.py`) was already removed in a prior commit; this session deleted only stale `__pycache__` entries.
+
 ## 2026-04-25: Money module migration — Phases 3–6 (scheduler, workspace config, deploy, extract)
 
 Completed the second half of folding the standalone moneyman service into istota as the in-tree `money` package. Phases 0–2 were already in the working tree (per-request config refactor in moneyman, vendor source into istota, mount routers in the web app). Phases 3–6 land here.
