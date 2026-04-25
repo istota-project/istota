@@ -63,7 +63,7 @@ fi
 
 git add CHANGELOG.md pyproject.toml
 git commit -m "Bump version to $NEW"
-git tag -a "$TAG" -m "Release $TAG" -m "$NOTES"
+git tag -a "$TAG" --cleanup=verbatim -m "Release $TAG" -m "$NOTES"
 git push --follow-tags
 
 echo
