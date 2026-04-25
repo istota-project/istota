@@ -643,6 +643,88 @@
     label: "{{ item.key }}"
   when: not istota_web_only
 
+# Money workspace bootstrap. For each user with a [[resources]] type =
+# "money" entry we ensure {data_dir}/{config,data,ledgers,invoices/{work,
+# generated}} exist on the Nextcloud mount, and seed an empty
+# .beancount file for each declared ledger name (without overwriting an
+# existing one). data_dir defaults to {nextcloud_mount}/Users/{user}/
+# {namespace}/money but can be overridden on the resource.
+
+- name: Ensure money workspace data_dir
+  file:
+    path: "{{ _money_data_dir }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0750"
+  loop: "{{ _istota_money_users | default([]) }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    _money_resource: "{{ (item.value.resources | selectattr('type', 'in', ['money', 'moneyman']) | list | first | default(none)) }}"
+    _money_data_dir: "{{ _money_resource.data_dir | default(istota_nextcloud_mount_path + '/Users/' + item.key + '/' + istota_namespace + '/money') }}"
+  when:
+    - istota_use_nextcloud_mount
+    - not istota_web_only
+    - _money_resource is not none
+
+- name: Ensure money workspace subdirs
+  file:
+    path: "{{ _money_data_dir }}/{{ item.1 }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0750"
+  loop: "{{ (_istota_money_users | default([])) | product(['config', 'data', 'ledgers', 'invoices', 'invoices/work', 'invoices/generated']) | list }}"
+  loop_control:
+    label: "{{ item.0.key }}: {{ item.1 }}"
+  vars:
+    _money_resource: "{{ (item.0.value.resources | selectattr('type', 'in', ['money', 'moneyman']) | list | first | default(none)) }}"
+    _money_data_dir: "{{ _money_resource.data_dir | default(istota_nextcloud_mount_path + '/Users/' + item.0.key + '/' + istota_namespace + '/money') }}"
+  when:
+    - istota_use_nextcloud_mount
+    - not istota_web_only
+    - _money_resource is not none
+
+- name: Plan money ledger files to seed
+  set_fact:
+    _money_ledger_targets: "{{ _money_ledger_targets_json | from_json }}"
+  vars:
+    _money_ledger_targets_json: |-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for u in (_istota_money_users | default([])) -%}
+      {%- set mr = u.value.resources | selectattr('type', 'in', ['money', 'moneyman']) | list | first | default(none) -%}
+      {%- if mr -%}
+      {%- set ddir = mr.data_dir | default(istota_nextcloud_mount_path + '/Users/' + u.key + '/' + istota_namespace + '/money') -%}
+      {%- for l in mr.ledgers | default([]) -%}
+      {%- set lname = l if l is string else l.name -%}
+      {%- set _ = ns.out.append({'user': u.key, 'name': lname, 'path': ddir + '/ledgers/' + lname + '.beancount'}) -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.out | to_json }}
+  when:
+    - istota_use_nextcloud_mount
+    - not istota_web_only
+
+- name: Seed empty money ledger files (does not overwrite existing)
+  copy:
+    dest: "{{ item.path }}"
+    content: |
+      ;; Beancount ledger — managed by you.
+      ;; Money does not modify this file directly except via sync/import
+      ;; staging files in ./imports/.
+    force: no
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0640"
+  loop: "{{ _money_ledger_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.user }}: {{ item.name }}"
+  when:
+    - istota_use_nextcloud_mount
+    - not istota_web_only
+
 - name: Deploy secrets environment file
   template:
     src: secrets.env.j2
