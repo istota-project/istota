@@ -2,6 +2,57 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25 (cont.): Money cleanup — drop standalone API, unify credential storage
+
+Three small follow-ups to the money rollup, in one session:
+
+**1. Deleted the standalone money REST API (`src/istota/money/api/`)**
+
+That layer was the original moneyman HTTP service with API-key auth (`api/app.py`, `api/auth.py`, plus per-domain routers). Now that the skill calls money in-process via `CliRunner`, nothing wires the standalone app: no nginx include, no systemd unit, no uvicorn invocation in deploy. Deleted the directory, the `money serve` CLI subcommand (which referenced the dead `moneyman.api.app:app` module path), and the two tests that exclusively exercised it (`test_api.py`, `test_security.py`). Moved one PDF-deletion helper out of `api/invoices.py` to `core/invoicing.py` (renamed `_delete_invoice_pdf` → `delete_invoice_pdf`, updated `cli.py` import).
+
+The session-auth `routes.py` router stays — that's what the SvelteKit pages at `/istota/money/*` consume via `web_app.py`.
+
+Net: −2110 lines of dead code; 66 money integration tests still pass.
+
+**2. Added `Config.namespace` field**
+
+The codebase had two call sites doing `getattr(app_config, "namespace", None) or "istota"` — but `Config` had no `namespace` attribute, so the fallback always won. On a deployed instance whose namespace differs from `"istota"`, the per-user money secrets file ended up at `/etc/istota/secrets/...` while ansible was writing to `/etc/{namespace}/secrets/...`. The seeded `_module.money.monarch_sync` cron job fetched the wrong path; same for the in-process skill fallback. Result: `sync-monarch` failing with "No Monarch credentials configured" even when the secrets file existed.
+
+Added `namespace: str = "istota"` to `Config`, parsed from the TOML's top level in `load_config()`, emitted by `config.toml.j2` (`namespace = "{{ istota_namespace }}"`). Replaced both `getattr(... or "istota")` calls with direct `app_config.namespace` access.
+
+**3. Unified monarch credentials onto the user resource entry**
+
+After fixing the namespace bug, the obvious next question: why does money have its own `/etc/{namespace}/secrets/{user_id}/money.toml` file at all when every other resource (karakeep, miniflux, overland) puts its credentials directly on the `[[resources]]` entry in the user TOML? Both files are zorg-owned and off the Nextcloud mount — same security profile.
+
+Walked it back: monarch creds now render under the `money` resource block in `user.toml.j2` as `monarch_session_token` / `monarch_email` / `monarch_password`, captured in `ResourceConfig.extra`. `load_user_secrets` reads from `istota_config.users[user_id].resources[money].extra` instead of a separate file, strips the `monarch_` prefix, and assembles the existing `{"monarch": {...}}` shape so `parse_monarch_config` is unchanged. `MONEY_SECRETS_FILE` env var preserved as an escape hatch for direct `money` CLI invocations and tests.
+
+Stripped `MONEY_SECRETS_FILE=...` from the seeded cron command in `jobs.py` and `_sync_money_module_jobs`; the skill `_run` reads creds in-process. Deleted `templates/money-secrets.toml.j2` and the "Deploy per-user money secrets" task; replaced with idempotent cleanup that removes any stale `money.toml` / `moneyman.toml` from `/etc/{namespace}/secrets/{user}/`. Updated the two tests that asserted the old behavior (`test_secrets_path_threaded_into_command`, `test_falls_back_to_namespace_path`) to cover the new resource-entry sourcing.
+
+**Why now:** the rollup made the standalone `api/` redundant, exposed the namespace assumption (which only held when the namespace happened to be `"istota"`), and made it visible that monarch creds were the only resource credential type stored separately. Three threads of the same theme: collapsing the moneyman-era indirections that no longer pay rent.
+
+**Validation**
+
+- 494 money/skill/web/config tests pass.
+- 475 scheduler + executor tests pass.
+- Pre-existing WeasyPrint env failures unchanged.
+
+**Files added/modified:**
+
+- `src/istota/money/api/` — deleted (10 files, ~950 LOC)
+- `tests/money/test_api.py`, `tests/money/test_security.py` — deleted (~1024 LOC)
+- `src/istota/money/cli.py` — `serve` subcommand removed; PDF helper import points to `core/invoicing`
+- `src/istota/money/core/invoicing.py` — added public `delete_invoice_pdf`
+- `src/istota/config.py` — `Config.namespace` field + parser
+- `src/istota/money/_loader.py` — `load_user_secrets` now reads from the resource entry
+- `src/istota/money/jobs.py` — dropped `secrets_path` parameter and `MONEY_SECRETS_FILE` env wiring
+- `src/istota/scheduler.py` — direct `app_config.namespace`; no `secrets_path` arg to `jobs_for_user`
+- `deploy/ansible/templates/config.toml.j2` — emit top-level `namespace = "..."`
+- `deploy/ansible/templates/user.toml.j2` — render monarch creds under the money resource block
+- `deploy/ansible/templates/money-secrets.toml.j2` — deleted
+- `deploy/ansible/tasks/main.yml` — replaced "Deploy per-user money secrets" with cleanup tasks
+- `tests/test_money_jobs.py`, `tests/test_money_workspace.py` — updated to cover the new behavior
+- `docs/reference/environment-variables.md` — updated `MONEY_SECRETS_FILE` description
+
 ## 2026-04-25: Money module — rolled into istota as a regular subpackage
 
 Collapsed the standalone-style `src/money/` package into `src/istota/money/` and deleted the dual-loader / env-var-marshaling indirection introduced during the original moneyman migration. Same session also fixed the upstream cause: in a deployed bot, the money skill was failing with "Unknown user" because workspace-mode users had `MONEY_CONFIG` resolve to nothing in the sandbox.

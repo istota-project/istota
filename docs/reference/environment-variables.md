@@ -66,7 +66,7 @@ Derived from Nextcloud credentials:
 | `MINIFLUX_API_KEY` | From resource config (type=miniflux) |
 | `MONEY_CONFIG` | From the user's `money` resource (`config_path` extra) |
 | `MONEY_USER` | The istota user_id (override via `user_key` on the resource) |
-| `MONEY_SECRETS_FILE` | `/etc/{namespace}/secrets/{user_id}/money.toml`, exported by seeded scheduler jobs |
+| `MONEY_SECRETS_FILE` | Optional escape hatch for direct `money` CLI use; not used by seeded scheduler jobs (the skill reads creds in-process from the resource entry) |
 
 ## Google Workspace
 

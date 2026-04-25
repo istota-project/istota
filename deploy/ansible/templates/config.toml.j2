@@ -1,5 +1,8 @@
 # {{ istota_namespace | capitalize }} configuration - managed by Ansible
 
+# Install namespace (drives /etc/{namespace}/, secrets paths, etc.)
+namespace = "{{ istota_namespace }}"
+
 # Bot identity
 bot_name = "{{ istota_bot_name | default(istota_namespace | capitalize, true) }}"
 emissaries_enabled = {{ istota_emissaries_enabled | lower }}
