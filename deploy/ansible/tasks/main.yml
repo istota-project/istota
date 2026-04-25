@@ -1061,7 +1061,6 @@
     force: false
     mode: "0644"
   loop:
-    - { file: moneyman-fava.inc, label: Fava }
     - { file: moneyman-web.inc, label: Web }
   when: istota_web_enabled | default(false) and not istota_web_only
 

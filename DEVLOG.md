@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25: Service manifest spec tiers + Fava removal
+
+Reworked the service manifest spec to ship in four tiers, smallest first. Tier 1 closes ISSUE-032 (manifest-driven installer wizard) without requiring the full web/UI plugin layer. Same pass cleaned out lingering Fava references — Moneyman runs its own web UI now.
+
+**Key changes:**
+- New "Implementation tiers" section in `Service manifest and plugin architecture spec.md` defining T1 installer-only, T2 `/api/services` endpoint, T3 web UI integration, T4 settings + dashboard. Existing sections tagged with the tier they belong to.
+- Manifest location moved to `services/{id}/manifest.json` at repo root so installer + backend + web build all read one source of truth.
+- Added `install` field to the manifest schema with three methods (`script`, `package`, `external`) and a per-service wizard flow (detect → install → connect → register). Added field-table `Tier` column so a reader can see when each field becomes meaningful.
+- Dropped `proxy_routes` from the schema entirely — Fava was its only consumer; nothing else needs nginx-proxied UIs today.
+- Per-service migration plan rewritten per tier for miniflux, moneyman, gws, location, karakeep.
+- AGENTS.md: pruned the `/api/auth-check`, `/api/moneyman/fava`, Fava reverse-proxy, and Ledgers-page-with-Fava-links references from the Authenticated Web Interface section.
+- Ansible role: removed `moneyman-fava.inc` from the placeholder-include loop in `tasks/main.yml` and the matching `include` directive in `templates/istota.conf.j2`.
+- Earlier in the same session: small docs sync commit (`60ce609`) updating `.claude/rules/executor.md`, `.claude/rules/skills.md`, and `AGENTS.md` for the kv skill, sticky-skill flow, post-Pass-2 exclude_skills re-application, and removal of stale ledger/invoicing env vars.
+
+**Files added/modified:**
+- `/Users/stefan/Dust/Notes/Projects/Istota/Service manifest and plugin architecture spec.md` — tiers, install field, schema cleanup, Fava removal (outside repo)
+- `AGENTS.md` — Authenticated Web Interface section: Fava-related routes and proxy notes removed
+- `deploy/ansible/tasks/main.yml` — `moneyman-fava.inc` dropped from include-creation loop
+- `deploy/ansible/templates/istota.conf.j2` — `include moneyman-fava.inc;` removed
+- `.claude/rules/executor.md`, `.claude/rules/skills.md` (prior commit `60ce609`)
+
+**Notes:**
+- Backend route list in AGENTS.md is broadly stale (e.g. `/api/moneyman/ledgers` no longer exists in `web_app.py`, `ledgers` SvelteKit route is gone). Left alone in this pass — outside Fava scope. Worth a separate sweep.
+- Hosts that ran the role previously will keep an orphaned `/etc/nginx/includes/moneyman-fava.inc` on disk. Once nothing references it, nginx ignores it; harmless. No active deletion task added.
+- ISSUE-032 spec is ready; Tier 1 implementation not yet started.
+
 ## 2026-04-25: API policy refusal alert (ISSUE-033)
 
 Closed ISSUE-033: when an inbound email (or any task) trips Anthropic's safety filter, the scheduler used to retry the same content three times against the same block, then deliver a generic "deep stared back" Talk message — silent failure from the user's perspective. Now policy refusals are detected, retries are skipped, and the user gets an alert naming what was blocked.
