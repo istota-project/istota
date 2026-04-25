@@ -274,6 +274,31 @@ class TestBuildSkillEnvUserResourceConfig:
         assert "KARAKEEP_BASE_URL" not in env
 
 
+class TestBuildSkillEnvUserId:
+    """Tests for 'user_id' source type."""
+
+    def test_returns_task_user_id(self, tmp_path):
+        ctx = _make_ctx(tmp_path)
+        meta = SkillMeta(
+            name="money",
+            description="Money",
+            env_specs=[EnvSpec(var="MONEYMAN_USER", source="user_id")],
+        )
+        env = build_skill_env(["money"], {"money": meta}, ctx)
+        assert env["MONEYMAN_USER"] == "alice"
+
+    def test_skips_when_user_id_empty(self, tmp_path):
+        ctx = _make_ctx(tmp_path)
+        ctx.task.user_id = ""
+        meta = SkillMeta(
+            name="money",
+            description="Money",
+            env_specs=[EnvSpec(var="MONEYMAN_USER", source="user_id")],
+        )
+        env = build_skill_env(["money"], {"money": meta}, ctx)
+        assert "MONEYMAN_USER" not in env
+
+
 class TestBuildSkillEnvMultipleSkills:
     """Tests for env resolution across multiple skills."""
 

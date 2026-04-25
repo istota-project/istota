@@ -4,7 +4,7 @@ triggers: [accounting, ledger, beancount, invoice, invoicing, expense, transacti
 description: Accounting operations (ledger, invoicing, transactions, work log) — runs in-process via the vendored money package
 cli: true
 resource_types: [money, moneyman]
-env: [{"var":"MONEYMAN_CONFIG","from":"config","config_path":"money.config_path"},{"var":"MONEYMAN_USER","from":"user_resource_config","resource_type":"money","field":"user_key"}]
+env: [{"var":"MONEYMAN_CONFIG","from":"user_resource_config","resource_type":"money","field":"config_path"},{"var":"MONEYMAN_USER","from":"user_id"}]
 ---
 # Money Accounting Operations
 
@@ -123,8 +123,8 @@ A wash sale occurs when you sell a security at a loss and buy substantially iden
 
 | Variable | Description |
 |---|---|
-| `MONEYMAN_CONFIG` | Path to money config file |
-| `MONEYMAN_USER` | User key for multi-user money config |
+| `MONEYMAN_CONFIG` | Path to money config file (from the user's `money` resource) |
+| `MONEYMAN_USER` | User key in the money config — defaults to the istota user_id |
 
 The env var names are kept as `MONEYMAN_*` for backward compatibility with the standalone moneyman CLI heritage.
 
@@ -137,7 +137,8 @@ Add to user config (`config/users/{user}.toml`):
 type = "money"
 name = "Money"
 config_path = "/etc/istota/money/config.toml"
-user_key = "alice"
 ```
+
+`MONEYMAN_USER` defaults to the istota user_id (the per-user TOML basename). Override with `user_key = "alice"` on the resource if the money config uses a different key.
 
 The `moneyman` resource type is also accepted for backward compatibility with the legacy out-of-process integration.

@@ -89,6 +89,9 @@ def _resolve_env_spec(spec: EnvSpec, ctx: EnvContext) -> str | None:
                     return str(val)
         return None
 
+    elif spec.source == "user_id":
+        return getattr(ctx.task, "user_id", None) or None
+
     elif spec.source == "template_file":
         # Auto-create from template if missing, return path
         mount = getattr(ctx.config, "nextcloud_mount_path", None)

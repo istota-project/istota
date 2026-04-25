@@ -28,59 +28,102 @@ _LEGACY_TAX = "tax.toml"
 _LEGACY_MONARCH = "monarch.toml"
 
 
-def _resolve_optional(config_dir: Path, primary: str, legacy: str) -> Path | None:
-    """Return the first existing file (primary, then legacy), or None."""
-    p = config_dir / primary
-    if p.exists():
-        return p
-    p = config_dir / legacy
-    if p.exists():
-        return p
+def _resolve_optional(
+    config_dirs: list[Path], primary: str, legacy: str,
+) -> Path | None:
+    """Return the first existing file across ``config_dirs``.
+
+    Search order is by filename preference, then by directory order: the
+    primary filename is looked up in every dir before falling back to the
+    legacy filename. So an ``INVOICING.md`` in any dir wins over an
+    ``invoicing.toml`` in any dir.
+    """
+    for fname in (primary, legacy):
+        for cd in config_dirs:
+            p = cd / fname
+            if p.exists():
+                return p
     return None
+
+
+def _config_search_dirs(
+    workspace_root: Path, data_dir: Path, config_dir: Path | None,
+) -> list[Path]:
+    """Return the ordered list of dirs to search for module config files.
+
+    With an explicit ``config_dir`` override, that's the only one consulted.
+    Otherwise prefer ``{data_dir}/config/`` (module-local layout) and fall
+    back to ``{workspace_root}/config/`` (configs colocated with USER.md /
+    CRON.md / etc).
+    """
+    if config_dir is not None:
+        return [Path(config_dir).resolve()]
+    return [data_dir / "config", workspace_root / "config"]
 
 
 def synthesize_user_context(
     workspace_root: Path,
     *,
     data_dir: Path | None = None,
-    ledgers: list[dict] | None = None,
+    config_dir: Path | None = None,
+    ledgers: list | None = None,
     db_path: Path | None = None,
 ) -> UserContext:
     """Build a money :class:`UserContext` rooted at a workspace dir.
 
     Defaults:
       * ``data_dir`` = ``{workspace_root}/money``
-      * ``db_path`` = ``{data_dir}/moneyman.db``
-      * ``ledgers`` = ``[{"name": "main", "path": "{data_dir}/ledger/main.beancount"}]``
-        when not supplied (only used if the file exists)
-      * config files are resolved out of ``{workspace_root}/config/``
+      * ``db_path`` = ``{data_dir}/data/moneyman.db`` (matches the
+        standalone ``money.cli`` convention)
+      * ``ledgers`` = ``[{"name": "main", "path": "{data_dir}/ledgers/main.beancount"}]``
+        when not supplied
+      * config files are resolved out of ``{data_dir}/config/`` first,
+        falling back to ``{workspace_root}/config/``. Pass ``config_dir``
+        to force a single explicit location.
+
+    ``ledgers`` accepts either dicts (``{"name": ..., "path": ...}``) or
+    short-form strings — bare names get resolved to
+    ``{data_dir}/ledgers/{name}.beancount``, mirroring
+    :func:`money.cli._parse_user_context`.
 
     The function does not create any files on disk; the caller is
     responsible for ensuring the data dir and ledger files exist before any
     operation that needs them.
     """
     workspace_root = Path(workspace_root).resolve()
-    config_dir = workspace_root / "config"
     if data_dir is None:
         data_dir = workspace_root / "money"
     else:
         data_dir = Path(data_dir).resolve()
 
+    config_dirs = _config_search_dirs(workspace_root, data_dir, config_dir)
+
     if db_path is None:
-        db_path = data_dir / "moneyman.db"
+        db_path = data_dir / "data" / "moneyman.db"
 
     if ledgers is None:
-        default_ledger = data_dir / "ledger" / "main.beancount"
-        ledgers = [{"name": "main", "path": default_ledger}]
+        ledgers = [{
+            "name": "main",
+            "path": data_dir / "ledgers" / "main.beancount",
+        }]
     else:
-        ledgers = [
-            {"name": l.get("name", "default"), "path": Path(l["path"])}
-            for l in ledgers
-        ]
+        normalized = []
+        for entry in ledgers:
+            if isinstance(entry, str):
+                normalized.append({
+                    "name": entry,
+                    "path": data_dir / "ledgers" / f"{entry}.beancount",
+                })
+            else:
+                normalized.append({
+                    "name": entry.get("name", "default"),
+                    "path": Path(entry["path"]),
+                })
+        ledgers = normalized
 
-    invoicing_path = _resolve_optional(config_dir, INVOICING_FILENAME, _LEGACY_INVOICING)
-    tax_path = _resolve_optional(config_dir, TAX_FILENAME, _LEGACY_TAX)
-    monarch_path = _resolve_optional(config_dir, MONARCH_FILENAME, _LEGACY_MONARCH)
+    invoicing_path = _resolve_optional(config_dirs, INVOICING_FILENAME, _LEGACY_INVOICING)
+    tax_path = _resolve_optional(config_dirs, TAX_FILENAME, _LEGACY_TAX)
+    monarch_path = _resolve_optional(config_dirs, MONARCH_FILENAME, _LEGACY_MONARCH)
 
     return UserContext(
         data_dir=data_dir,
@@ -92,24 +135,27 @@ def synthesize_user_context(
     )
 
 
-def list_workspace_features(workspace_root: Path) -> dict[str, bool]:
+def list_workspace_features(
+    workspace_root: Path,
+    *,
+    data_dir: Path | None = None,
+    config_dir: Path | None = None,
+) -> dict[str, bool]:
     """Return which money features the workspace has configured.
 
-    Useful for UI badges and quick gates without instantiating a full
-    UserContext.
+    Searches the same dirs as :func:`synthesize_user_context`. Useful for
+    UI badges and quick gates without instantiating a full
+    :class:`UserContext`.
     """
-    config_dir = Path(workspace_root) / "config"
+    workspace_root = Path(workspace_root).resolve()
+    data_dir = Path(data_dir).resolve() if data_dir else workspace_root / "money"
+    config_dirs = _config_search_dirs(workspace_root, data_dir, config_dir)
     return {
         "invoicing": (
-            (config_dir / INVOICING_FILENAME).exists()
-            or (config_dir / _LEGACY_INVOICING).exists()
+            _resolve_optional(config_dirs, INVOICING_FILENAME, _LEGACY_INVOICING) is not None
         ),
-        "tax": (
-            (config_dir / TAX_FILENAME).exists()
-            or (config_dir / _LEGACY_TAX).exists()
-        ),
+        "tax": _resolve_optional(config_dirs, TAX_FILENAME, _LEGACY_TAX) is not None,
         "monarch": (
-            (config_dir / MONARCH_FILENAME).exists()
-            or (config_dir / _LEGACY_MONARCH).exists()
+            _resolve_optional(config_dirs, MONARCH_FILENAME, _LEGACY_MONARCH) is not None
         ),
     }
