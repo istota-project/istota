@@ -103,50 +103,47 @@
 	});
 </script>
 
-<div class="page-shell">
-	<div class="page-header">
-		<h1>Transactions</h1>
-		{#if $selectedAccount}
-			<button class="active-filter" onclick={() => selectedAccount.set('')} type="button">
-				{$selectedAccount} <span class="clear">&times;</span>
-			</button>
-		{/if}
-		<div class="header-right">
-			<select class="header-select" value={$selectedYear || ''} onchange={handleYearChange}>
-				<option value="">All years</option>
-				{#each years as y}
-					<option value={y}>{y}</option>
-				{/each}
-			</select>
-			<input
-				type="text"
-				class="filter-input"
-				placeholder="Filter by tag, payee..."
-				value={$filterText}
-				oninput={(e) => handleFilterInput(e.currentTarget.value)}
-			/>
-		</div>
+<div class="money-section-header">
+	{#if $selectedAccount}
+		<button class="active-filter" onclick={() => selectedAccount.set('')} type="button">
+			{$selectedAccount} <span class="clear">&times;</span>
+		</button>
+	{/if}
+	<div class="money-section-tools">
+		<select class="money-control-select" value={$selectedYear || ''} onchange={handleYearChange}>
+			<option value="">All years</option>
+			{#each years as y}
+				<option value={y}>{y}</option>
+			{/each}
+		</select>
+		<input
+			type="text"
+			class="money-control-input"
+			placeholder="Filter by tag, payee..."
+			value={$filterText}
+			oninput={(e) => handleFilterInput(e.currentTarget.value)}
+		/>
 		<button class="sidebar-toggle" onclick={() => sidebarOpen = !sidebarOpen} type="button">
 			{sidebarOpen ? 'Close' : 'Accounts'}
 		</button>
 	</div>
+</div>
 
-	<div class="txn-body">
-		<aside class="txn-sidebar" class:open={sidebarOpen}>
-			<div class="sidebar-header">
-				<span class="sidebar-title">Accounts</span>
-				<span class="sidebar-count">{accounts.length}</span>
-			</div>
-			<div class="sidebar-list">
-				{#each tree as node (node.fullName)}
-					{@render accountNode(node, 0)}
-				{/each}
-			</div>
-		</aside>
-
-		<div class="txn-main">
-			{@render children()}
+<div class="txn-body">
+	<aside class="txn-sidebar" class:open={sidebarOpen}>
+		<div class="sidebar-header">
+			<span class="sidebar-title">Accounts</span>
+			<span class="sidebar-count">{accounts.length}</span>
 		</div>
+		<div class="sidebar-list">
+			{#each tree as node (node.fullName)}
+				{@render accountNode(node, 0)}
+			{/each}
+		</div>
+	</aside>
+
+	<div class="txn-main">
+		{@render children()}
 	</div>
 </div>
 

@@ -18,24 +18,22 @@
 	}
 </script>
 
-<div class="page-shell">
-	<div class="page-header">
-		<div class="sub-nav">
-			<a href="{base}/reports/cash-flow" class:active={isActive('/reports/cash-flow')}>Cash flow</a>
-			<a href="{base}/reports/income-statement" class:active={isActive('/reports/income-statement')}>Income statement</a>
-			<a href="{base}/reports/balance-sheet" class:active={isActive('/reports/balance-sheet')}>Balance sheet</a>
-		</div>
-		<div class="header-right">
-			<select class="header-select" value={$selectedYear || ''} onchange={handleYearChange}>
-				<option value="">All years</option>
-				{#each years as y}
-					<option value={y}>{y}</option>
-				{/each}
-			</select>
-		</div>
+<div class="money-section-header">
+	<div class="money-section-nav">
+		<a href="{base}/money/reports/cash-flow" class:active={isActive('/money/reports/cash-flow')}>Cash flow</a>
+		<a href="{base}/money/reports/income-statement" class:active={isActive('/money/reports/income-statement')}>Income statement</a>
+		<a href="{base}/money/reports/balance-sheet" class:active={isActive('/money/reports/balance-sheet')}>Balance sheet</a>
 	</div>
+	<div class="money-section-tools">
+		<select class="money-control-select" value={$selectedYear || ''} onchange={handleYearChange}>
+			<option value="">All years</option>
+			{#each years as y}
+				<option value={y}>{y}</option>
+			{/each}
+		</select>
+	</div>
+</div>
 
-	<div class="page-body">
-		{@render children()}
-	</div>
+<div class="money-section-body">
+	{@render children()}
 </div>
