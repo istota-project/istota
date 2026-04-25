@@ -23,6 +23,7 @@ export interface User {
 	features: {
 		feeds: boolean;
 		location: boolean;
+		money: boolean;
 		google_workspace: boolean;
 		google_workspace_enabled: boolean;
 	};

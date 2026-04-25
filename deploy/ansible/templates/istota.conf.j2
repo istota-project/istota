@@ -73,8 +73,8 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
   }
 
-  # Moneyman services (deployed by the moneyman role)
-  include /etc/nginx/includes/moneyman-web.inc;
+  # Money is served by istota's web service at /istota/money/* — no separate
+  # backend or nginx include needed.
 {% endif %}
 
 {% if istota_location_enabled %}

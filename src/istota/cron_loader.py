@@ -14,6 +14,10 @@ logger = logging.getLogger("istota.cron_loader")
 
 _TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
 
+# Names with this prefix are managed by module integrations (e.g. money) and
+# are not subject to CRON.md orphan deletion.
+_MODULE_JOB_PREFIX = "_module."
+
 
 @dataclass
 class CronJob:
@@ -164,10 +168,19 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
     - enabled logic: file is authoritative (symmetric: file false → DB 0, file true → DB 1)
     """
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
+    # Module-managed jobs are owned by their integration (see jobs.py in the
+    # respective module package); CRON.md must not touch them.
+    db_jobs = [j for j in db_jobs if not j.name.startswith(_MODULE_JOB_PREFIX)]
     db_by_name = {j.name: j for j in db_jobs}
     file_names = {j.name for j in file_jobs}
 
     for fj in file_jobs:
+        if fj.name.startswith(_MODULE_JOB_PREFIX):
+            logger.warning(
+                "Skipping CRON.md job '%s' for %s: '%s' prefix is reserved",
+                fj.name, user_id, _MODULE_JOB_PREFIX,
+            )
+            continue
         existing = db_by_name.get(fj.name)
         if existing:
             # Update definition fields, preserve state
@@ -253,6 +266,9 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
         return False
 
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
+    # Module-managed jobs are owned by their integrations and must not be
+    # serialized into CRON.md.
+    db_jobs = [j for j in db_jobs if not j.name.startswith(_MODULE_JOB_PREFIX)]
     if not db_jobs:
         return False
 

@@ -23,6 +23,8 @@
 		"vite": "^7.3.1"
 	},
 	"dependencies": {
+		"bits-ui": "^2.18.0",
+		"chart.js": "^4.5.1",
 		"lucide-svelte": "^1.0.1",
 		"maplibre-gl": "^5.21.1"
 	}

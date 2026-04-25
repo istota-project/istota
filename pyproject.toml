@@ -51,6 +51,13 @@ web = [
     "itsdangerous>=2.1.0",
     "python-multipart>=0.0.9",
 ]
+money = [
+    "click>=8.0",
+    "beancount>=3.0.0",
+    "beanquery>=0.1.0",
+    "weasyprint>=62.0",
+    "monarchmoneycommunity @ git+https://github.com/bradleyseanf/monarchmoney@main",
+]
 docs = [
     "mkdocs>=1.6.0",
     "mkdocs-material>=9.5.0",
@@ -64,12 +71,14 @@ all = [
     "istota[whisper]",
     "istota[location]",
     "istota[web]",
+    "istota[money]",
 ]
 
 [project.scripts]
 istota = "istota.cli:main"
 istota-scheduler = "istota.scheduler:main"
 istota-skill = "istota.skill_client:main"
+money = "money.cli:cli"
 
 [build-system]
 requires = ["hatchling"]
@@ -79,7 +88,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/istota"]
+packages = ["src/istota", "src/money"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

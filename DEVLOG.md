@@ -2,6 +2,42 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25: Money module migration — Phases 3–6 (scheduler, workspace config, deploy, extract)
+
+Completed the second half of folding the standalone moneyman service into istota as the in-tree `money` package. Phases 0–2 were already in the working tree (per-request config refactor in moneyman, vendor source into istota, mount routers in the web app). Phases 3–6 land here.
+
+**Key changes:**
+- Per-user scheduled job seeding for money (`monarch_sync` daily 6am, `run_scheduled` daily 8am). Reserved `_module.*` name prefix in the scheduler, so CRON.md sync leaves these rows alone — both orphan deletion and `migrate_db_jobs_to_file` filter them out. The seeded command shells out to `MONEYMAN_CONFIG=… money --user … sync-monarch` (or `run-scheduled`); `money` is on PATH because it's a console script in istota's venv. Feature-gated: a user without monarch config gets only the invoice scheduler.
+- Workspace-mode config loading: `INVOICING.md` / `TAX.md` / `MONARCH.md` files (each holding a fenced ```toml block) in the user's workspace `config/` dir. Three core parsers (`parse_invoicing_config`, `parse_tax_config`, `parse_monarch_config`) now route through a new `read_toml_config()` helper that handles both `.md` and plain `.toml`. The web app's money loader picks workspace mode automatically when the resource has no `config_path` extra; legacy mode (a money config TOML referenced by `config_path`) keeps working.
+- Migration script for legacy → workspace TOML→MD conversion. Idempotent: re-running on already-migrated `.md` files re-extracts the toml block instead of double-wrapping. Source files are not deleted.
+- Ansible role updated for the in-process integration: `user.toml.j2` accepts `type = "money"` (with legacy `moneyman` aliased) and passes through `config_path`/`user_key`/`data_dir` extras; `[moneyman]` block dropped from `config.toml.j2`; the moneyman nginx include is removed (cleanup task replaces the old placeholder-creation task); per-user money secrets render to `/etc/{namespace}/secrets/{user_id}/moneyman.toml` from `istota_users[<user>].money.monarch.*`. Old `istota_moneyman_*` vars kept as deprecated no-ops for compat.
+- Public extract tooling: `scripts/extract_money_to_standalone.py` builds a publishable `moneyman` tree from `src/money/` — rewrites imports `money.X` → `moneyman.X`, excludes istota-only files (`routes.py`, `jobs.py`, `workspace.py`), flattens frontend `$lib/money/` and `${base}/money/api` paths, generates a minimal `pyproject.toml`, preserves `.git/` if pre-existing. `scripts/check_money_isolation.sh` fails on any `istota.*` import in `src/money/` (passes today; runs the same regex the extract script uses for its own pre-flight).
+- 38 new tests across `test_money_jobs.py` (12), `test_money_workspace.py` (18), `test_money_extract.py` (8). Final consolidated sweep: 605 passed in the relevant test slice; the 6 pre-existing weasyprint env failures in `tests/money/test_invoicing.py` are unchanged.
+
+**Design notes:**
+- Path-of-least-resistance taken for the scheduler integration: option (a) from the spec — DB rows seeded directly with a reserved name prefix — rather than option (b) (invent an `add_per_user_daily` API). Reason: istota's scheduler is DB/CRON.md-driven, not registration-API-driven, so a parallel module-jobs hook fits the existing pattern. The hook lives next to `_sync_cron_files` and runs after it on every scheduler tick; per-tick cost is bounded by Phase 0's 5-minute config-resolution cache.
+- Workspace synthesizer doesn't mkdir or touch disk — it just constructs a `UserContext` with paths. The CLI/skill is responsible for ensuring the data dir exists before any operation that needs it. Keeps the loader free of side effects and easy to call from tests.
+- Extract script preserves `.git/` if the destination is pre-cloned. That matches a release flow where CI clones the public repo, runs the extract over its worktree, then `git add -A && git commit && git push`. Script itself does no git operations.
+- The two scheduled commands inherit the istota venv's PATH via `build_stripped_env()`. `money` is registered as a console script in `pyproject.toml` (Phase 1), so it lands in the venv's `bin/` and shell `command` lookup finds it without an absolute path.
+
+**Files added/modified:**
+- `src/money/jobs.py` — new; module-job definitions and per-user filtering
+- `src/money/workspace.py` — new; `synthesize_user_context`, `list_workspace_features`
+- `src/money/_config_io.py` — new; `read_toml_config(path)` accepts `.md` or `.toml`
+- `src/money/core/{invoicing.py, tax.py}`, `src/money/core/transactions.py` — parsers route through `_config_io.read_toml_config`
+- `src/istota/scheduler.py` — `_sync_cron_files` calls new `_sync_money_module_jobs`
+- `src/istota/cron_loader.py` — `_MODULE_JOB_PREFIX = "_module."` reserved; sync skips orphan deletion of module rows; `migrate_db_jobs_to_file` filters them out of CRON.md
+- `src/istota/web_app.py` — `_install_money_loader` extended with workspace mode
+- `scripts/migrate_money_workspace_config.py` — new; one-shot legacy→md migration
+- `scripts/extract_money_to_standalone.py` — new; standalone tree builder
+- `scripts/check_money_isolation.sh` — new; CI guard for zero `istota.*` imports
+- `deploy/ansible/templates/{user.toml.j2, config.toml.j2, istota.conf.j2}` — money resource rendering, nginx include removed, legacy `[moneyman]` block dropped
+- `deploy/ansible/templates/money-secrets.toml.j2` — new; per-user `[monarch]` secrets template
+- `deploy/ansible/tasks/main.yml` — per-user money secrets directory + file rendering; obsolete nginx include cleanup
+- `deploy/ansible/defaults/main.yml` — old vars deprecated; new `istota_users[<user>].money.monarch.*` structure documented
+- `tests/test_money_jobs.py`, `tests/test_money_workspace.py`, `tests/test_money_extract.py` — new
+- `AGENTS.md` — money skill description + resource type list + web-routes line updated
+
 ## 2026-04-25: `agents:` markdown frontmatter convention
 
 Standardized a per-file instruction field for markdown files. Files in the user's notes, channel memory, or bot workspace can carry an `agents:` field in their YAML frontmatter — a single short string (1–3 sentences) of read/write quirks that travels with the file. Replaces the pattern of scattering per-file rules across USER.md / CHANNEL.md / skill prompts, which drift out of sync with the files they describe.

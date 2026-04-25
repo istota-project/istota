@@ -58,13 +58,16 @@
 			{#if user.features.location}
 				<a href="{base}/location" class:active={isActive('/location')}>Location</a>
 			{/if}
+			{#if user.features.money}
+				<a href="{base}/money" class:active={isActive('/money')}>Money</a>
+			{/if}
 		</div>
 		<div class="nav-right">
 			<span>{user.display_name}</span>
 			<a href="{base}/logout">log out</a>
 		</div>
 	</nav>
-	<main class="app-content" class:app-content-fill={isActive('/location') || isActive('/feeds')}>
+	<main class="app-content" class:app-content-fill={isActive('/location') || isActive('/feeds') || isActive('/money')}>
 		{@render children()}
 	</main>
 {/if}

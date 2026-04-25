@@ -67,7 +67,7 @@ istota/
 │       ├── website/         # Website management reference (doc-only)
 │       ├── google_workspace/ # Google Workspace CLI wrapper (Drive, Gmail, Calendar, Sheets, Docs)
 │       ├── location/       # GPS location tracking + calendar attendance (Overland)
-│       ├── moneyman/       # Moneyman accounting API client (ledger, invoicing, work log)
+│       ├── money/         # Accounting (ledger, invoicing, work log) — in-process facade over `money.cli`
 │       └── whisper/         # Audio transcription via faster-whisper
 ├── config/
 │   ├── config.toml          # Active configuration (gitignored)
@@ -123,6 +123,17 @@ Web App ──► Nextcloud OIDC → Session → Dashboard / Feed pages
 - **Context** (`context.py`): Hybrid triage — recent N messages always included, older messages selected by LLM
 - **Storage** (`storage.py`): Bot-owned Nextcloud directories and user memory files
 
+## Key Architecture Notes
+
+- **Technical identifiers** (package, env vars, DB tables, CLI): always `istota`
+- **User-facing identity** (Nextcloud folders, chat persona, email signatures): configurable via `bot_name` config field (default: "Istota")
+- `config.bot_dir_name` sanitizes `bot_name` for filesystem use (ASCII lowercase, spaces→underscores, non-alphanumeric stripped)
+- All storage path functions require explicit `bot_dir` parameter — no hidden defaults
+- Skill docs, persona, and guidelines use `{BOT_NAME}`, `{BOT_DIR}`, and `{user_id}` placeholders, substituted at load time
+- **Emissaries** (`config/emissaries.md`): constitutional principles — global only, not user-overridable, no `{BOT_NAME}` substitution. Injected before persona in every prompt. Controlled by `emissaries_enabled` (default true).
+- **Persona** (`config/persona.md`): character layer — user workspace `PERSONA.md` overrides global (seeded from global on first run). Uses `{BOT_NAME}` placeholders.
+- **Custom system prompt** (`config/system-prompt.md`): when `custom_system_prompt = true`, replaces Claude Code's default system prompt with a minimal one (~2,600 tokens) focused on tool usage and working practices. Eliminates identity conflicts with persona/emissaries and removes irrelevant interactive/git/IDE instructions. Toggle via config — disabled by default.
+
 ## Key Design Decisions
 
 ### Admin/Non-Admin User Isolation
@@ -131,7 +142,7 @@ Admin users listed in `/etc/istota/admins`. Empty file = all users are admin (ba
 Non-admin restrictions: scoped mount path, no DB access, no subtask creation, `admin_only` skills filtered out.
 
 ### Multi-user Resources
-Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`, `ledger`, `karakeep`, `monarch`, `miniflux`, `moneyman`. CalDAV calendars auto-discovered from Nextcloud. Service credentials (Monarch, Karakeep, Miniflux, Moneyman) are configured as `[[resources]]` entries with type-specific fields in `extra`.
+Resources defined in per-user config or DB, merged at task time. Types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`, `ledger`, `karakeep`, `monarch`, `miniflux`, `money` (legacy alias `moneyman` accepted). CalDAV calendars auto-discovered from Nextcloud. Service credentials (Monarch, Karakeep, Miniflux) are configured as `[[resources]]` entries with type-specific fields in `extra`. The `money` resource has two modes: legacy (`config_path` points at a money config TOML) and workspace (no `config_path`; loader reads `INVOICING.md`/`TAX.md`/`MONARCH.md` from the user's workspace `config/` dir).
 
 ### Nextcloud Directory Structure
 
@@ -229,7 +240,7 @@ DB tables: `location_pings`, `places`, `visits`, `location_state`, `dismissed_cl
 ### Authenticated Web Interface
 SvelteKit frontend (`web/`) with FastAPI backend (`web_app.py`). Nextcloud OIDC for authentication. Runs as a separate service (`uvicorn istota.web_app:app`). Session-based auth via `SessionMiddleware`, 7-day cookie.
 
-Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark single entry read), `/istota/api/feeds/entries/batch` (batch mark read), `/istota/api/location/*` (places CRUD, pings, day summary, trips, discover, place stats, dismissed-clusters CRUD). SvelteKit build served as static files for all other `/istota/*` paths. Moneyman runs its own web UI behind nginx (`moneyman-web.inc`).
+Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark single entry read), `/istota/api/feeds/entries/batch` (batch mark read), `/istota/api/location/*` (places CRUD, pings, day summary, trips, discover, place stats, dismissed-clusters CRUD). SvelteKit build served as static files for all other `/istota/*` paths. Money pages live at `/istota/money/*`, served by the same web service; backend routers from `money.routes` mount at `/istota/money/api/*`.
 
 Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design). Dashboard shows available features. Feeds page has masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox, viewport-based read tracking. Location pages: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover unknown clusters, create/edit/delete places). Place sidebar with visit stats (derived from pings), edit form, drag-to-reposition on map. Reads directly from Miniflux API via the backend proxy (no static file generation).
 
