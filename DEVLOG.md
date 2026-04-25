@@ -17,10 +17,19 @@ Adopted the layered DEVLOG / CHANGELOG model from the updated /boom skill. DEVLO
 
 **Files added/modified:**
 - `CHANGELOG.md` — new, KaC 1.1.0 format, all 10 prior versions backfilled
-- `scripts/release.sh` — new, executable
-- `.github/workflows/release.yml` — rewritten: tag annotation → GitHub Release (replaces git-cliff path)
+- `scripts/release.sh` — new, executable; uses `--cleanup=verbatim` on `git tag -a` so `### Added` etc. headers in the annotation aren't stripped as `#` comments
+- `.github/workflows/release.yml` — rewritten twice: first attempt read tag annotation + `--notes "$X"` inline, second attempt reads `CHANGELOG.md` from the tree + `--notes-file`. Idempotent (`gh release view` → edit-or-create) and adds `workflow_dispatch` with a `tag` input so any past release can be regenerated from the Actions tab
 - `cliff.toml` — deleted
 - `README.md` — Further reading lists CHANGELOG + DEVLOG as separate items
+
+**v0.7.0 cut as the test release. Two workflow gotchas surfaced:**
+
+1. `actions/checkout@v4` with `fetch-depth: 0, fetch-tags: true` fetches the tag *ref* but not necessarily the tag *object*. Inside the runner, `git tag -l --format='%(contents)' v0.7.0` fell back to lightweight-tag behavior and returned the *commit message* instead of the annotation body. So the first GitHub Release for v0.7.0 ended up with `Bump version to 0.7.0` as its body. Tag force-push doesn't re-trigger the workflow either, so the corrected annotation never got read.
+2. Even with a correct extraction, `--notes "${{ steps.notes.outputs.NOTES }}"` substitutes the value text-for-text into the shell command. CHANGELOG bullets contain `"Known facts"`, backticks like `` `!memory facts` ``, etc. — that breaks shell quoting. Always use `--notes-file` (or pass through an `env:` block) for content with arbitrary characters.
+
+Final design avoids both: workflow reads `CHANGELOG.md` from the checked-out tree (always present, no fetch surprises), writes the awk-extracted section to a temp file, passes via `--notes-file`. Tag annotation is still set by `release.sh` for viewers of `git show vX.Y.Z`, but it's not load-bearing.
+
+
 
 
 
