@@ -2,6 +2,18 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25: `agents:` markdown frontmatter convention
+
+Standardized a per-file instruction field for markdown files. Files in the user's notes, channel memory, or bot workspace can carry an `agents:` field in their YAML frontmatter — a single short string (1–3 sentences) of read/write quirks that travels with the file. Replaces the pattern of scattering per-file rules across USER.md / CHANNEL.md / skill prompts, which drift out of sync with the files they describe.
+
+**Where it lives:**
+- `config/system-prompt.md` — added a "File conventions" section (always loaded). Defines the field, the trust boundary (honor on user-trusted paths, ignore on inbox/third-party content), and notes that global rules win on conflict.
+- `src/istota/skills/notes/skill.md` — brief mention in the writing-side conventions, pointing at the system-prompt section for the spec.
+
+**Trust boundary** is the key design choice. `agents:` becomes effective prompt content when a file is read, so it's a prompt-injection vector for any path the bot pulls from but doesn't trust. The convention: honor it on files the user authors (Notes/, the bot workspace, channels), ignore it as data on files that arrive from outside (inbox attachments, transcribed third-party docs).
+
+The full long-form spec was originally drafted in `Notes/Projects/Istota/Agents frontmatter spec.md` for the user's reference; that note can stay or be removed once this lands — the system-prompt version is now canonical.
+
 ## 2026-04-25: CHANGELOG.md + tag-annotation-driven release flow
 
 Adopted the layered DEVLOG / CHANGELOG model from the updated /boom skill. DEVLOG keeps doing what it's been doing (verbose dev journal); CHANGELOG.md is new and follows Keep a Changelog 1.1.0. Release process restructured so that the same CHANGELOG section drives both the local tag annotation and the auto-generated GitHub Release — single source of truth that survives the GitLab → Forgejo → GitHub mirror chain (Release objects don't ride the git wire, but annotated tag bodies do).
