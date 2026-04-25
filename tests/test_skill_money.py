@@ -189,6 +189,28 @@ class TestRunInProcess:
         assert result["status"] == "error"
         assert "invalid JSON" in result["error"]
 
+    def test_run_threads_user_secrets_into_context(self):
+        """Without this, scheduler-driven sync-monarch runs with no credentials."""
+        from istota.skills.money import _run
+
+        fake_result = MagicMock()
+        fake_result.exception = None
+        fake_result.exit_code = 0
+        fake_result.output = '{"status": "ok"}'
+
+        secrets = {"monarch": {"session_token": "tok-abc"}}
+
+        with patch.dict(os.environ, {"MONEY_USER": "alice"}, clear=True), \
+             self._patch_resolver(), \
+             patch("istota.money.load_user_secrets", return_value=secrets), \
+             patch("click.testing.CliRunner") as MockRunner:
+            MockRunner.return_value.invoke.return_value = fake_result
+            _run(["sync-monarch"])
+
+        invoke_kwargs = MockRunner.return_value.invoke.call_args.kwargs
+        passed_obj = invoke_kwargs["obj"]
+        assert passed_obj.secrets == secrets
+
 
 class TestCommandDispatch:
     """End-to-end: each cmd_X composes args and routes through _run."""

@@ -17,7 +17,10 @@ Two modes:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import tomli
 
 from istota.money.cli import UserContext, load_context
 from istota.money.workspace import synthesize_user_context
@@ -28,6 +31,29 @@ _MONEY_RESOURCE_TYPES = ("money", "moneyman")
 
 class UserNotFoundError(Exception):
     """The user has no usable money configuration."""
+
+
+def load_user_secrets(user_id: str, istota_config) -> dict:
+    """Load per-user money secrets (e.g. ``[monarch] session_token``).
+
+    Resolution order:
+
+    1. ``MONEY_SECRETS_FILE`` env var (used by the scheduler).
+    2. ``/etc/{namespace}/secrets/{user_id}/money.toml`` (the ansible-rendered
+       location).
+
+    Returns ``{}`` if no file is found — sync commands that require credentials
+    will surface their own error.
+    """
+    explicit = os.environ.get("MONEY_SECRETS_FILE", "")
+    if explicit:
+        path = Path(explicit)
+    else:
+        namespace = getattr(istota_config, "namespace", None) or "istota"
+        path = Path(f"/etc/{namespace}/secrets/{user_id}/money.toml")
+    if path.exists():
+        return tomli.loads(path.read_text())
+    return {}
 
 
 def resolve_for_user(user_id: str, istota_config) -> UserContext:
