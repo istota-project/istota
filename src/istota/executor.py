@@ -409,7 +409,6 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "MINIFLUX_API_KEY",
     "GITLAB_TOKEN",
     "GITHUB_TOKEN",
-    "MONEYMAN_API_KEY",
     "GOOGLE_WORKSPACE_CLI_TOKEN",
 })
 
@@ -425,7 +424,6 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "MINIFLUX_API_KEY": frozenset({"feeds"}),
     "GITLAB_TOKEN": frozenset({"developer"}),
     "GITHUB_TOKEN": frozenset({"developer"}),
-    "MONEYMAN_API_KEY": frozenset({"moneyman"}),
     "GOOGLE_WORKSPACE_CLI_TOKEN": frozenset({"google_workspace"}),
 }
 
@@ -470,18 +468,6 @@ def _build_network_allowlist(
                 parsed = urlparse(rc.base_url)
                 host = parsed.hostname
                 port = parsed.port or 443
-                if host:
-                    hosts.add(f"{host}:{port}")
-
-    # Moneyman skill: add Moneyman API host for current user only
-    if "moneyman" in selected_skills:
-        from urllib.parse import urlparse
-
-        for rc in user_resources_cfg:
-            if rc.type == "moneyman" and rc.base_url:
-                parsed = urlparse(rc.base_url)
-                host = parsed.hostname
-                port = parsed.port or (443 if parsed.scheme == "https" else 80)
                 if host:
                     hosts.add(f"{host}:{port}")
 
@@ -2417,12 +2403,6 @@ def execute_task(
 
         # Collect extra paths to RO bind-mount into the sandbox
         _extra_ro_binds: list[Path] = []
-        # Moneyman CLI needs /etc/moneyman for secrets.toml
-        moneyman_cli = env.get("MONEYMAN_CLI_PATH")
-        if moneyman_cli:
-            moneyman_etc = Path("/etc/moneyman")
-            if moneyman_etc.is_dir():
-                _extra_ro_binds.append(moneyman_etc)
 
         def _build_and_run():
             nonlocal cmd

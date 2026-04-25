@@ -176,8 +176,11 @@ istota_disabled_skills: []
 #       - type: "monarch"
 #         name: "Monarch Money"
 #         session_token: "monarch-token"
-#       - type: "moneyman"
-#         user_key: "username"  # maps Istota user to Moneyman user
+#       - type: "money"
+#         # Workspace mode: omit config_path; the loader reads
+#         # INVOICING.md/TAX.md/MONARCH.md from the user's workspace config/.
+#         # Legacy mode: config_path = "/srv/app/moneyman/app/config.toml"
+#         # user_key = "username"   # if multi-user money config TOML
 #       - type: "overland"
 #         name: "GPS"
 #         ingest_token: "your-overland-secret"
@@ -239,12 +242,30 @@ istota_rclone_password_obscured: ""
 istota_use_nextcloud_mount: true
 istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 
-# Moneyman integration
-istota_moneyman_group: ""  # set to "moneyman" to grant CLI + config read access
-istota_moneyman_api_url: ""  # e.g. "http://localhost:8090" — instance-level, shared by all users
-istota_moneyman_api_key: ""  # API key for the Moneyman service
-istota_moneyman_cli_path: ""  # e.g. "/srv/app/moneyman/app/.venv/bin/moneyman"
-istota_moneyman_config_path: ""  # e.g. "/srv/app/moneyman/app/config.toml"
+# Money (formerly Moneyman) integration. The skill is now in-process; the
+# legacy out-of-process settings (api_url/api_key/cli_path/config_path) are
+# no longer rendered into config.toml. They remain here only as a compat
+# shim so existing inventories don't break on upgrade — set them to ""
+# unless you have a custom downstream consumer.
+istota_moneyman_group: ""  # set to "money" to grant filesystem group access
+istota_moneyman_api_url: ""  # DEPRECATED — no longer rendered (in-process skill)
+istota_moneyman_api_key: ""  # DEPRECATED — no longer rendered
+istota_moneyman_cli_path: ""  # DEPRECATED — money is on PATH inside istota's venv
+istota_moneyman_config_path: ""  # DEPRECATED — per-user resource entry replaces this
+
+# Per-user money configuration goes inside the istota_users dict, e.g.:
+#   istota_users:
+#     alice:
+#       resources:
+#         - type: "money"
+#           # Workspace mode: omit config_path; reads INVOICING.md / TAX.md /
+#           # MONARCH.md from the user's istota workspace config/ dir.
+#           # (Legacy: set config_path to a money config TOML.)
+#       money:
+#         monarch:
+#           session_token: "{{ vault_alice_monarch_token }}"
+#           email: "alice@example.com"
+#           password: "{{ vault_alice_monarch_password }}"
 
 # Browser container settings (for web browsing skill)
 istota_browser_enabled: false

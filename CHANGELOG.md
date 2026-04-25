@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `agents:` markdown frontmatter convention baked into the system prompt: per-file instructions (1–3 sentence string) travel with a file and are honored on reads from trusted paths, ignored on untrusted paths.
+- In-tree `money` package (formerly the standalone moneyman service): accounting CLI, business logic, REST API, and SvelteKit pages folded into the istota repo. Optional install: `pip install istota[money]`.
+- Money web pages at `/istota/money/*` (Accounts, Transactions, Reports, Taxes, Business). Feature flag exposed via `/istota/api/me` as `features.money`; nav item appears when the user has a money resource.
+- Money skill is in-process — no API key, no HTTP round-trip. Resource type accepts both `money` and legacy `moneyman`.
+- Per-user money scheduled jobs (`monarch_sync` daily 6am, `run_scheduled` daily 8am). Seeded under a reserved `_module.money.*` name prefix; auto-removed when a user's resource or feature config disappears. Feature-gated: monarch sync only runs for users with a monarch config.
+- Workspace-mode money config loading: `INVOICING.md` / `TAX.md` / `MONARCH.md` files (TOML in fenced code blocks) in the user's workspace `config/` dir. Legacy `*.toml` files still accepted as a fallback.
+- `scripts/migrate_money_workspace_config.py` — one-shot migration from legacy `*.toml` to `*.md`.
+- `scripts/extract_money_to_standalone.py` — builds a publishable moneyman tree from `src/money/` (rewrites imports, flattens frontend paths, generates `pyproject.toml`).
+- `scripts/check_money_isolation.sh` — CI guard: fails if `src/money/` imports `istota.*`.
+- Ansible role: per-user money secrets rendered to `/etc/{namespace}/secrets/{user_id}/moneyman.toml` from `istota_users[<user>].money.monarch.*`.
+
+### Changed
+- The `[[resources]] type = "moneyman"` rendering now emits `type = "money"` (the loader still accepts both forms).
+- Ansible: `[moneyman]` block removed from `config.toml.j2`; the moneyman nginx include is dropped; standalone moneyman cron entries are no longer used (the istota scheduler runs them per-user).
+
+### Deprecated
+- `istota_moneyman_*` ansible vars (`api_url`, `api_key`, `cli_path`, `config_path`) — kept as no-ops for inventory compatibility but no longer rendered into config. Use the per-user `[[resources]] type = "money"` entry instead.
 
 ## [0.7.0] - 2026-04-24
 

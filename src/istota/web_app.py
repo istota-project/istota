@@ -61,10 +61,76 @@ def _reload_config():
         )
 
 
+def _install_money_loader() -> None:
+    """Wire money's per-user config resolver to istota's user resources.
+
+    Money's resolver caches per username with TTL + mtime invalidation, so
+    this is set once at startup. Two modes are supported:
+
+    * **Legacy:** the resource carries ``extra.config_path`` (or ``path``)
+      pointing at a money ``config.toml`` with ``[users.X]`` sections; the
+      loader reads it and returns the matching ``UserContext``.
+    * **Workspace:** the resource has no ``config_path``. The loader
+      synthesizes a ``UserContext`` rooted at the user's istota workspace
+      (``{nextcloud_mount}/Users/{user_id}/{bot_dir}``) and reads
+      ``INVOICING.md`` / ``TAX.md`` / ``MONARCH.md`` from its ``config/``
+      subdir. Data dir defaults to ``{workspace}/money``.
+    """
+    try:
+        from money.cli import load_context as _money_load_context
+        from money.config import UserNotFoundError as _MoneyUserNotFound
+        from money.config import set_loader as _money_set_loader
+        from money.workspace import synthesize_user_context as _money_synthesize
+    except ImportError:
+        # money extra not installed; nothing to wire.
+        return
+
+    from .storage import get_user_bot_path
+
+    def loader(username: str):
+        if not _config:
+            raise _MoneyUserNotFound("istota config not loaded")
+        uc = _config.get_user(username)
+        if not uc:
+            raise _MoneyUserNotFound(f"user '{username}' not in istota config")
+        for r in uc.resources:
+            if r.type not in ("money", "moneyman"):
+                continue
+            config_path = r.extra.get("config_path") or r.path
+            user_key = r.extra.get("user_key") or username
+
+            if config_path:
+                ctx = _money_load_context(str(config_path))
+                if user_key not in ctx.users:
+                    raise _MoneyUserNotFound(
+                        f"user '{user_key}' not in money config at {config_path}"
+                    )
+                return ctx.users[user_key]
+
+            # Workspace mode — synthesize from the user's istota workspace
+            mount = _config.nextcloud_mount_path
+            if not mount:
+                raise _MoneyUserNotFound(
+                    f"money resource for '{username}' has no config_path "
+                    "and no nextcloud mount is configured"
+                )
+            workspace = Path(mount) / get_user_bot_path(
+                username, _config.bot_dir_name,
+            ).lstrip("/")
+            data_dir_override = r.extra.get("data_dir")
+            data_dir = Path(data_dir_override) if data_dir_override else None
+            return _money_synthesize(workspace, data_dir=data_dir)
+
+        raise _MoneyUserNotFound(f"no money resource for user '{username}'")
+
+    _money_set_loader(loader)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _reload_config()
-    signal.signal(signal.SIGHUP, lambda *_: _reload_config())
+    _install_money_loader()
+    signal.signal(signal.SIGHUP, lambda *_: (_reload_config(), _install_money_loader()))
     yield
 
 
@@ -291,6 +357,16 @@ def _get_miniflux_creds(username: str) -> tuple[str, str] | None:
     return None
 
 
+def _user_has_money(username: str) -> bool:
+    """True if the user has a money/moneyman resource configured."""
+    if not _config:
+        return False
+    uc = _config.get_user(username)
+    if not uc:
+        return False
+    return any(r.type in ("money", "moneyman") for r in uc.resources)
+
+
 def _has_google_token(username: str) -> bool:
     """Check if a user has connected their Google account."""
     if not _config:
@@ -329,11 +405,12 @@ def _resolve_tz(client_tz: str, fallback: str) -> str:
 @api_router.get("/me")
 async def api_me(user: dict = Depends(_require_api_auth)):
     username = user["username"]
-    features: dict = {"feeds": False, "location": False, "google_workspace": False, "google_workspace_enabled": False}
+    features: dict = {"feeds": False, "location": False, "money": False, "google_workspace": False, "google_workspace_enabled": False}
     if _config:
         creds = _get_miniflux_creds(username)
         features["feeds"] = creds is not None
         features["location"] = _config.location.enabled
+        features["money"] = _user_has_money(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
         if _config.google_workspace.enabled:
             features["google_workspace"] = _has_google_token(username)
@@ -1567,6 +1644,16 @@ async def api_location_trips(
 
 app.include_router(api_router)
 app.include_router(auth_router)
+
+# Money web API — mounted when the optional ``money`` extra is installed.
+try:
+    from money.routes import require_auth as _money_require_auth
+    from money.routes import router as _money_router
+
+    app.include_router(_money_router, prefix="/istota/money/api", tags=["money"])
+    app.dependency_overrides[_money_require_auth] = _require_api_auth
+except ImportError:
+    pass
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():

@@ -595,6 +595,49 @@
   notify:
     - "restart istota-scheduler"
 
+- name: Compute money-enabled users
+  set_fact:
+    _istota_money_users: >-
+      {{ istota_users | dict2items
+         | selectattr('value.resources', 'defined')
+         | selectattr('value.resources', 'iterable')
+         | rejectattr('value.resources', 'equalto', [])
+         | list }}
+  when: not istota_web_only
+
+- name: Ensure per-user money secrets directory
+  file:
+    path: "/etc/{{ istota_namespace }}/secrets/{{ item.key }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0750"
+  loop: "{{ _istota_money_users | default([]) }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - not istota_web_only
+    - item.value.money is defined
+    - item.value.money | length > 0
+
+- name: Deploy per-user money secrets
+  template:
+    src: money-secrets.toml.j2
+    dest: "/etc/{{ istota_namespace }}/secrets/{{ item.key }}/moneyman.toml"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0600"
+  loop: "{{ _istota_money_users | default([]) }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - not istota_web_only
+    - item.value.money is defined
+    - item.value.money.monarch is defined
+  notify:
+    - "restart istota-scheduler"
+    - "restart istota-web"
+
 - name: Deploy secrets environment file
   template:
     src: secrets.env.j2
@@ -1054,15 +1097,11 @@
     label: "{{ item.key }}"
   when: istota_site_enabled and not istota_web_only
 
-- name: Ensure Moneyman nginx includes exist
-  copy:
-    content: "# Moneyman {{ item.label }} — placeholder (populated by the moneyman role)\n"
-    dest: "/etc/nginx/includes/{{ item.file }}"
-    force: false
-    mode: "0644"
-  loop:
-    - { file: moneyman-web.inc, label: Web }
-  when: istota_web_enabled | default(false) and not istota_web_only
+- name: Remove obsolete moneyman nginx include
+  file:
+    path: /etc/nginx/includes/moneyman-web.inc
+    state: absent
+  when: not istota_web_only
 
 - name: Deploy nginx config
   template:

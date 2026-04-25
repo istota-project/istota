@@ -2510,13 +2510,24 @@ def cleanup_old_claude_logs(retention_days: int) -> int:
 
 def _sync_cron_files(conn, app_config: Config) -> None:
     """Sync CRON.md files to DB for all configured users."""
-    from .cron_loader import load_cron_jobs, migrate_db_jobs_to_file, sync_cron_jobs_to_db
+    from .cron_loader import (
+        _MODULE_JOB_PREFIX,
+        load_cron_jobs,
+        migrate_db_jobs_to_file,
+        sync_cron_jobs_to_db,
+    )
 
     for user_id in app_config.users:
         try:
             file_jobs = load_cron_jobs(app_config, user_id)
             if file_jobs is not None:
-                if not file_jobs and db.get_user_scheduled_jobs(conn, user_id):
+                # Count only user-defined DB jobs when deciding whether to
+                # migrate-to-file; module-managed jobs don't belong in CRON.md.
+                user_db_jobs = [
+                    j for j in db.get_user_scheduled_jobs(conn, user_id)
+                    if not j.name.startswith(_MODULE_JOB_PREFIX)
+                ]
+                if not file_jobs and user_db_jobs:
                     # File exists but empty (e.g. seeded template), DB has jobs —
                     # write DB jobs into the file instead of wiping them
                     migrate_db_jobs_to_file(conn, app_config, user_id, overwrite=True)
@@ -2527,6 +2538,121 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                 migrate_db_jobs_to_file(conn, app_config, user_id)
         except Exception as e:
             logger.error("Error syncing CRON.md for %s: %s", user_id, e)
+
+    # Sync module-managed jobs (e.g. money's monarch_sync, run_scheduled).
+    # These are not user-editable via CRON.md; their definitions come from
+    # the module's jobs.py and the user's istota resource entry.
+    try:
+        _sync_money_module_jobs(conn, app_config)
+    except Exception as e:
+        logger.error("Error syncing money module jobs: %s", e)
+
+
+def _sync_money_module_jobs(conn, app_config: Config) -> None:
+    """Seed/refresh ``_module.money.*`` scheduled jobs from each user's money config.
+
+    Idempotent: existing rows are updated when cron or command differs;
+    obsolete rows (e.g. user removed monarch config) are deleted.
+    Users without a money resource have all their ``_module.money.*`` rows
+    cleaned up.
+    """
+    try:
+        from money.cli import load_context
+        from money.jobs import MODULE_PREFIX, jobs_for_user
+    except ImportError:
+        # money extra not installed
+        return
+
+    for user_id in app_config.users:
+        uc = app_config.users.get(user_id)
+        if uc is None:
+            continue
+        money_resource = None
+        for r in getattr(uc, "resources", []) or []:
+            if getattr(r, "type", None) in ("money", "moneyman"):
+                money_resource = r
+                break
+
+        if money_resource is None:
+            # Drop any stale module rows
+            conn.execute(
+                "DELETE FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+                (user_id, f"{MODULE_PREFIX}%"),
+            )
+            continue
+
+        config_path = (
+            (getattr(money_resource, "extra", None) or {}).get("config_path")
+            or getattr(money_resource, "path", None)
+        )
+        user_key = (
+            (getattr(money_resource, "extra", None) or {}).get("user_key") or user_id
+        )
+        if not config_path:
+            logger.warning(
+                "User %s has money resource with no config_path; skipping job seed",
+                user_id,
+            )
+            continue
+
+        try:
+            money_ctx = load_context(str(config_path))
+        except Exception as e:
+            logger.warning(
+                "Could not load money config for %s at %s: %s",
+                user_id, config_path, e,
+            )
+            continue
+        if user_key not in money_ctx.users:
+            logger.warning(
+                "User key '%s' not in money config at %s",
+                user_key, config_path,
+            )
+            continue
+
+        wanted = jobs_for_user(money_ctx.users[user_key], str(config_path), user_key)
+        wanted_by_name = {j["name"]: j for j in wanted}
+
+        existing_rows = list(conn.execute(
+            "SELECT id, name, cron_expression, command "
+            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            (user_id, f"{MODULE_PREFIX}%"),
+        ))
+        existing_by_name = {row[1]: row for row in existing_rows}
+
+        for name, j in wanted_by_name.items():
+            row = existing_by_name.get(name)
+            if row is None:
+                conn.execute(
+                    "INSERT INTO scheduled_jobs "
+                    "(user_id, name, cron_expression, prompt, command, enabled) "
+                    "VALUES (?, ?, ?, '', ?, 1)",
+                    (user_id, name, j["cron"], j["command"]),
+                )
+                logger.info(
+                    "Seeded module job '%s' for user %s", name, user_id,
+                )
+            else:
+                if row[2] != j["cron"] or row[3] != j["command"]:
+                    conn.execute(
+                        "UPDATE scheduled_jobs "
+                        "SET cron_expression = ?, command = ?, last_run_at = datetime('now') "
+                        "WHERE id = ?",
+                        (j["cron"], j["command"], row[0]),
+                    )
+                    logger.info(
+                        "Updated module job '%s' for user %s", name, user_id,
+                    )
+
+        for name, row in existing_by_name.items():
+            if name not in wanted_by_name:
+                conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (row[0],))
+                logger.info(
+                    "Removed obsolete module job '%s' for user %s",
+                    name, user_id,
+                )
+
+    conn.commit()
 
 
 def check_scheduled_jobs(conn, app_config: Config) -> list[int]:

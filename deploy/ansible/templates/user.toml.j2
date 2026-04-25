@@ -57,12 +57,21 @@ base_url = "{{ resource.base_url }}"
 api_key = "{{ resource.api_key }}"
 
 {% endif %}
-{% elif resource.type == 'moneyman' %}
+{% elif resource.type in ['money', 'moneyman'] %}
 [[resources]]
-type = "moneyman"
-name = "{{ resource.name | default('Moneyman') }}"
+type = "money"
+name = "{{ resource.name | default('Money') }}"
+{# Workspace mode (preferred): no config_path; loader reads INVOICING.md /
+   TAX.md / MONARCH.md from the user's istota workspace config/ dir. Legacy
+   mode: set config_path to a money config TOML with [users.X] sections. #}
+{% if resource.config_path is defined and resource.config_path %}
+config_path = "{{ resource.config_path }}"
+{% endif %}
 {% if resource.user_key is defined and resource.user_key %}
 user_key = "{{ resource.user_key }}"
+{% endif %}
+{% if resource.data_dir is defined and resource.data_dir %}
+data_dir = "{{ resource.data_dir }}"
 {% endif %}
 
 {% elif resource.type == 'overland' %}
