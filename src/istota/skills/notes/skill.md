@@ -9,7 +9,7 @@ resource_types: [notes_folder]
 - Always save notes as `.md` (markdown)
 - Filename: descriptive sentence with spaces (e.g. `Meeting notes from Thursday.md`), not slugified or kebab-case
 - Use YAML frontmatter with at least a `created` date field
-- If the note has non-obvious read/write quirks worth pinning (ordering, structure, things to avoid), set an `agents:` field — a single 1–3 sentence string of per-file instructions. See the "Markdown frontmatter" section of the system prompt for the full convention.
+- If the note has non-obvious read/write quirks worth pinning (ordering, structure, things to avoid), set an `agents:` field — a single 1–3 sentence string of per-file instructions, written as a quoted YAML string (e.g. `agents: "Append new entries at the top."`). See the "Markdown frontmatter" section of the system prompt for the full convention.
 
 ## Markdown conventions
 
