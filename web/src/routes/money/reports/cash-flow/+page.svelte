@@ -13,7 +13,7 @@
 
 	function navigateToAccount(fullName: string) {
 		selectedAccount.set(fullName);
-		goto(`${base}/transactions`);
+		goto(`${base}/money/transactions`);
 	}
 
 	let loading = $state(true);

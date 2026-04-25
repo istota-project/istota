@@ -13,27 +13,24 @@
 	}
 </script>
 
-<div class="page-shell">
-	<div class="page-header">
-		<h1>Accounts</h1>
-		<div class="header-right">
-			<select class="header-select" value={$selectedYear || ''} onchange={handleYearChange}>
-				<option value="">All years</option>
-				{#each years as y}
-					<option value={y}>{y}</option>
-				{/each}
-			</select>
-			<input
-				type="text"
-				class="filter-input"
-				placeholder="Filter accounts..."
-				value={$accountFilter}
-				oninput={(e) => accountFilter.set(e.currentTarget.value)}
-			/>
-		</div>
+<div class="money-section-header">
+	<div class="money-section-tools">
+		<select class="money-control-select" value={$selectedYear || ''} onchange={handleYearChange}>
+			<option value="">All years</option>
+			{#each years as y}
+				<option value={y}>{y}</option>
+			{/each}
+		</select>
+		<input
+			type="text"
+			class="money-control-input"
+			placeholder="Filter accounts..."
+			value={$accountFilter}
+			oninput={(e) => accountFilter.set(e.currentTarget.value)}
+		/>
 	</div>
+</div>
 
-	<div class="page-body">
-		{@render children()}
-	</div>
+<div class="money-section-body">
+	{@render children()}
 </div>

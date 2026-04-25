@@ -9,16 +9,14 @@
 	}
 </script>
 
-<div class="page-shell">
-	<div class="page-header">
-		<div class="sub-nav">
-			<a href="{base}/business/invoices" class:active={isActive('/business/invoices')}>Invoices</a>
-			<a href="{base}/business/clients" class:active={isActive('/business/clients')}>Clients</a>
-			<a href="{base}/business/settings" class:active={isActive('/business/settings')}>Settings</a>
-		</div>
+<div class="money-section-header">
+	<div class="money-section-nav">
+		<a href="{base}/money/business/invoices" class:active={isActive('/money/business/invoices')}>Invoices</a>
+		<a href="{base}/money/business/clients" class:active={isActive('/money/business/clients')}>Clients</a>
+		<a href="{base}/money/business/settings" class:active={isActive('/money/business/settings')}>Settings</a>
 	</div>
+</div>
 
-	<div class="page-body">
-		{@render children()}
-	</div>
+<div class="money-section-body">
+	{@render children()}
 </div>

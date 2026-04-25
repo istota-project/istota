@@ -2,8 +2,6 @@
 	let { children } = $props();
 </script>
 
-<div class="page-shell">
-	<div class="page-body">
-		{@render children()}
-	</div>
+<div class="money-section-body">
+	{@render children()}
 </div>
