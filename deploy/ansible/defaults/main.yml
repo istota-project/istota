@@ -258,7 +258,6 @@ istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 # Money integration. The skill is in-process — no separate service, no
 # api_url/api_key/cli_path/config_path. Per-user money config is declared
 # on the user's `money` resource entry (see istota_users below).
-istota_money_group: ""  # filesystem group for shared data access; empty = no group add
 
 # Per-user money configuration goes inside the istota_users dict, on the
 # money resource entry itself. Only `monarch_session_token` is needed;
