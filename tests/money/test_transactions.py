@@ -4,14 +4,14 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from money.core.models import (
+from istota.money.core.models import (
     MonarchConfig,
     MonarchCredentials,
     MonarchProfile,
     MonarchSyncSettings,
     MonarchTagFilters,
 )
-from money.core.transactions import (
+from istota.money.core.transactions import (
     MONARCH_CATEGORY_MAP,
     filter_by_tags,
     format_beancount_transaction,
@@ -360,7 +360,7 @@ class TestSyncAllProfiles:
         )
         ledgers = [{"name": "main", "path": ledger}]
 
-        with patch("money.core.transactions.fetch_monarch_transactions") as mock_fetch:
+        with patch("istota.money.core.transactions.fetch_monarch_transactions") as mock_fetch:
             mock_fetch.return_value = []
             result = sync_all_profiles(config, ledgers, dry_run=True)
 
@@ -398,7 +398,7 @@ class TestSyncAllProfiles:
             {"name": "personal", "path": personal_ledger},
         ]
 
-        with patch("money.core.transactions.fetch_monarch_transactions") as mock_fetch:
+        with patch("istota.money.core.transactions.fetch_monarch_transactions") as mock_fetch:
             mock_fetch.return_value = []
             result = sync_all_profiles(config, ledgers, dry_run=True)
 
@@ -464,7 +464,7 @@ class TestSyncAllProfiles:
             },
         ]
 
-        with patch("money.core.transactions.fetch_monarch_transactions") as mock_fetch:
+        with patch("istota.money.core.transactions.fetch_monarch_transactions") as mock_fetch:
             mock_fetch.return_value = mock_txns
             result = sync_all_profiles(config, ledgers, dry_run=True)
 
@@ -489,7 +489,7 @@ class TestSyncAllProfiles:
         )
         ledgers = [{"name": "main", "path": tmp_path / "main.beancount"}]
 
-        with patch("money.core.transactions.fetch_monarch_transactions") as mock_fetch:
+        with patch("istota.money.core.transactions.fetch_monarch_transactions") as mock_fetch:
             mock_fetch.return_value = []
             result = sync_all_profiles(config, ledgers)
 
@@ -539,7 +539,7 @@ class TestAddTransaction:
         ledger_file = ledger_dir / "main.beancount"
         ledger_file.write_text('include "transactions/*.beancount"\n')
 
-        with patch("money.core.ledger.run_bean_check") as mock_check:
+        with patch("istota.money.core.ledger.run_bean_check") as mock_check:
             mock_check.return_value = (True, [])
             result = add_transaction(
                 ledger_file, date(2026, 2, 4), "Test Store", "Test purchase",
@@ -570,7 +570,7 @@ class TestAddTransaction:
         ledger_file = ledger_dir / "main.beancount"
         ledger_file.write_text('include "transactions/*.beancount"\n')
 
-        with patch("money.core.ledger.run_bean_check") as mock_check:
+        with patch("istota.money.core.ledger.run_bean_check") as mock_check:
             mock_check.return_value = (False, ["Invalid account"])
             result = add_transaction(
                 ledger_file, date(2026, 2, 4), "Store", "Purchase",

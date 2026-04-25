@@ -36,7 +36,7 @@ def client(tmp_config):
     os.environ["MONEY_CONFIG"] = str(tmp_config)
     os.environ.pop("MONEY_API_KEY", None)
 
-    from money.api.app import create_app
+    from istota.money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
@@ -51,7 +51,7 @@ def authed_client(tmp_config):
     os.environ["MONEY_CONFIG"] = str(tmp_config)
     os.environ["MONEY_API_KEY"] = "test-secret-key"
 
-    from money.api.app import create_app
+    from istota.money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
@@ -110,14 +110,14 @@ class TestLedgerEndpoints:
         assert data["ledgers"][0]["name"] == "main"
 
     def test_check_ledger(self, client):
-        with patch("money.core.ledger.run_bean_check", return_value=(True, [])):
+        with patch("istota.money.core.ledger.run_bean_check", return_value=(True, [])):
             resp = client.get("/api/check")
             assert resp.status_code == 200
             data = resp.json()
             assert data["status"] == "ok"
 
     def test_check_ledger_with_name(self, client):
-        with patch("money.core.ledger.run_bean_check", return_value=(True, [])):
+        with patch("istota.money.core.ledger.run_bean_check", return_value=(True, [])):
             resp = client.get("/api/check", params={"ledger": "main"})
             assert resp.status_code == 200
 
@@ -126,14 +126,14 @@ class TestLedgerEndpoints:
         assert resp.status_code == 400
 
     def test_balances(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[]):
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[]):
             resp = client.get("/api/balances")
             assert resp.status_code == 200
             data = resp.json()
             assert data["status"] == "ok"
 
     def test_balances_with_account(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[
             {"account": "Assets:Bank", "sum_position": "1000 USD"}
         ]):
             resp = client.get("/api/balances", params={"account": "Assets:Bank"})
@@ -142,7 +142,7 @@ class TestLedgerEndpoints:
             assert data["account_count"] == 1
 
     def test_query(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[
             {"account": "Assets:Bank", "amount": "500 USD"}
         ]):
             resp = client.post("/api/query", json={"bql": "SELECT account, sum(position)"})
@@ -156,7 +156,7 @@ class TestLedgerEndpoints:
         assert resp.status_code == 422
 
     def test_report(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[]):
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[]):
             resp = client.get("/api/reports/income-statement")
             assert resp.status_code == 200
             data = resp.json()
@@ -164,7 +164,7 @@ class TestLedgerEndpoints:
             assert data["report_type"] == "income-statement"
 
     def test_report_with_year(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[]):
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[]):
             resp = client.get("/api/reports/income-statement", params={"year": 2025})
             assert resp.status_code == 200
             data = resp.json()
@@ -175,7 +175,7 @@ class TestLedgerEndpoints:
         assert resp.status_code == 400
 
     def test_lots(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[]):
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[]):
             resp = client.get("/api/lots/AAPL")
             assert resp.status_code == 200
             data = resp.json()
@@ -183,14 +183,14 @@ class TestLedgerEndpoints:
             assert data["symbol"] == "AAPL"
 
     def test_wash_sales(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[]):
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[]):
             resp = client.get("/api/wash-sales")
             assert resp.status_code == 200
             data = resp.json()
             assert data["status"] == "ok"
 
     def test_wash_sales_with_year(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[]):
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[]):
             resp = client.get("/api/wash-sales", params={"year": 2025})
             assert resp.status_code == 200
             data = resp.json()
@@ -320,7 +320,7 @@ class TestWorkEndpoints:
 
 class TestTransactionEndpoints:
     def test_add_transaction(self, client):
-        with patch("money.core.ledger.run_bean_check", return_value=(True, [])):
+        with patch("istota.money.core.ledger.run_bean_check", return_value=(True, [])):
             resp = client.post("/api/transactions", json={
                 "date": "2025-03-15",
                 "payee": "Coffee Shop",
@@ -378,7 +378,7 @@ class TestInvoiceEndpoints:
         client.post("/api/work", json={
             "date": "2025-03-15", "client": "acme", "service": "dev", "qty": 8.0,
         })
-        from money.work import assign_invoice_number, get_entries_for_invoice, load_work_entries
+        from istota.money.work import assign_invoice_number, get_entries_for_invoice, load_work_entries
         # Get data_dir from the app state
         data_dir = client.app.state.ctx.data_dir
         assign_invoice_number(data_dir, [1], "INV-000001")
@@ -399,7 +399,7 @@ class TestInvoiceEndpoints:
             "date": "2025-03-15", "client": "acme", "service": "dev", "qty": 8.0,
         })
         data_dir = client.app.state.ctx.data_dir
-        from money.work import assign_invoice_number, record_invoice_payment
+        from istota.money.work import assign_invoice_number, record_invoice_payment
         assign_invoice_number(data_dir, [1], "INV-000001")
         record_invoice_payment(data_dir, "INV-000001", "2025-04-15")
 
@@ -412,7 +412,7 @@ class TestInvoiceEndpoints:
             "date": "2025-03-15", "client": "acme", "service": "dev", "qty": 8.0,
         })
         data_dir = client.app.state.ctx.data_dir
-        from money.work import assign_invoice_number, record_invoice_payment
+        from istota.money.work import assign_invoice_number, record_invoice_payment
         assign_invoice_number(data_dir, [1], "INV-000001")
         record_invoice_payment(data_dir, "INV-000001", "2025-04-15")
 
@@ -437,7 +437,7 @@ class TestLoadContext:
         import os
         os.environ["MONEY_CONFIG"] = str(tmp_config)
         try:
-            from money.cli import load_context
+            from istota.money.cli import load_context
             ctx = load_context()
             assert ctx.data_dir is not None
             assert len(ctx.ledgers) == 1
@@ -446,7 +446,7 @@ class TestLoadContext:
             os.environ.pop("MONEY_CONFIG", None)
 
     def test_load_context_with_path(self, tmp_config):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         ctx = load_context(config_path=str(tmp_config))
         assert ctx.data_dir is not None
 
@@ -454,7 +454,7 @@ class TestLoadContext:
         import os
         os.environ.pop("MONEY_CONFIG", None)
         # Change to a dir with no config.toml
-        from money.cli import load_context
+        from istota.money.cli import load_context
         ctx = load_context(config_path=None)
         # Should return empty context (no ledgers, etc.)
         assert ctx.ledgers == []
@@ -464,7 +464,7 @@ class TestLoadContext:
         os.environ["MONEY_CONFIG"] = str(tmp_config)
         os.environ["MONEY_API_KEY"] = "env-key-123"
         try:
-            from money.cli import load_context
+            from istota.money.cli import load_context
             ctx = load_context()
             assert ctx.api_key == "env-key-123"
         finally:
@@ -482,7 +482,7 @@ class TestLoadContext:
         )
         import os
         os.environ.pop("MONEY_API_KEY", None)
-        from money.cli import load_context
+        from istota.money.cli import load_context
         ctx = load_context(config_path=str(config))
         assert ctx.api_key == "secret-key-456"
 
@@ -498,7 +498,7 @@ class TestLoadContext:
         import os
         os.environ["MONEY_API_KEY"] = "env-key"
         try:
-            from money.cli import load_context
+            from istota.money.cli import load_context
             ctx = load_context(config_path=str(config))
             assert ctx.api_key == "env-key"
         finally:
@@ -513,12 +513,12 @@ class TestLoadContext:
 
 class TestResolveLedger:
     def test_resolve_ledger_default(self, tmp_path):
-        from money.cli import resolve_ledger
+        from istota.money.cli import resolve_ledger
         ledgers = [{"name": "main", "path": tmp_path / "main.beancount"}]
         assert resolve_ledger(None, ledgers) == tmp_path / "main.beancount"
 
     def test_resolve_ledger_by_name(self, tmp_path):
-        from money.cli import resolve_ledger
+        from istota.money.cli import resolve_ledger
         ledgers = [
             {"name": "main", "path": tmp_path / "main.beancount"},
             {"name": "secondary", "path": tmp_path / "secondary.beancount"},
@@ -526,13 +526,13 @@ class TestResolveLedger:
         assert resolve_ledger("secondary", ledgers) == tmp_path / "secondary.beancount"
 
     def test_resolve_ledger_not_found(self):
-        from money.cli import resolve_ledger
+        from istota.money.cli import resolve_ledger
         import click
         with pytest.raises(click.ClickException):
             resolve_ledger("nope", [{"name": "main", "path": Path("/x")}])
 
     def test_resolve_ledger_no_ledgers(self):
-        from money.cli import resolve_ledger
+        from istota.money.cli import resolve_ledger
         import click
         with pytest.raises(click.ClickException):
             resolve_ledger(None, [])
@@ -583,7 +583,7 @@ def multi_user_client(multi_user_config):
     os.environ["MONEY_CONFIG"] = str(multi_user_config)
     os.environ.pop("MONEY_API_KEY", None)
 
-    from money.api.app import create_app
+    from istota.money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c

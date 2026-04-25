@@ -1,103 +1,45 @@
 """Money accounting operations -- in-process facade.
 
-Invokes the vendored ``money`` package's Click CLI in-process. No subprocess,
-no HTTP. Output is JSON on stdout (the same shape the CLI produces).
+Invokes the in-tree ``istota.money`` Click CLI in-process. The user's
+:class:`UserContext` is resolved up front via :func:`istota.money.resolve_for_user`
+against the istota config and injected into Click via ``obj=``. No env-var
+marshaling, no subprocess, no HTTP.
 """
 
 import argparse
 import json
 import os
 import sys
-from pathlib import Path
-
-
-_MONEY_RESOURCE_TYPES = ("money", "moneyman")
-
-
-def setup_env(ctx) -> dict[str, str]:
-    """Inject MONEY_WORKSPACE so the CLI can synthesize a UserContext.
-
-    Mirrors istota.web_app._install_money_loader: when the user has a money
-    resource without ``config_path`` (workspace mode), point MONEY_WORKSPACE
-    at ``{nextcloud_mount}/Users/{user_id}/{bot_dir}``. ``data_dir`` /
-    ``config_dir`` / ``ledgers`` overrides on the resource flow through as
-    extra env vars consumed by money.cli.load_context.
-
-    Skipped (returns ``{}``) when the user has no money resource, when
-    ``config_path`` is set (legacy mode covered by MONEY_CONFIG via the
-    declarative ``user_resource_config`` env spec), or when no Nextcloud
-    mount is configured.
-    """
-    user_config = getattr(ctx, "user_config", None)
-    if not user_config:
-        return {}
-
-    resource = None
-    for rc in user_config.resources:
-        if rc.type in _MONEY_RESOURCE_TYPES:
-            resource = rc
-            break
-    if resource is None:
-        return {}
-
-    extra = getattr(resource, "extra", {}) or {}
-    if extra.get("config_path") or getattr(resource, "path", ""):
-        # Legacy mode: MONEY_CONFIG resolves the file via the declarative
-        # env spec; workspace synthesis would shadow it.
-        return {}
-
-    config = ctx.config
-    mount = getattr(config, "nextcloud_mount_path", None)
-    if not mount:
-        return {}
-
-    user_id = getattr(ctx.task, "user_id", "") or ""
-    if not user_id:
-        return {}
-
-    bot_dir = getattr(config, "bot_dir_name", "istota")
-    workspace = Path(mount) / "Users" / user_id / bot_dir
-
-    env: dict[str, str] = {"MONEY_WORKSPACE": str(workspace)}
-
-    data_dir = extra.get("data_dir")
-    if data_dir:
-        env["MONEY_DATA_DIR"] = str(data_dir)
-    config_dir = extra.get("config_dir")
-    if config_dir:
-        env["MONEY_CONFIG_DIR"] = str(config_dir)
-    db_path = extra.get("db_path")
-    if db_path:
-        env["MONEY_DB_PATH"] = str(db_path)
-    ledgers = extra.get("ledgers")
-    if ledgers:
-        env["MONEY_LEDGERS"] = json.dumps(ledgers)
-
-    return env
 
 
 def _run(args: list[str]) -> dict:
-    """Invoke money.cli.cli in-process with the given args, return parsed JSON.
-
-    ``MONEY_CONFIG`` (config file path) and ``MONEY_USER`` (user key) are
-    threaded through to the Click CLI via ``-c`` and ``-u`` so per-user state
-    resolves correctly.
-    """
+    """Resolve the user's UserContext, invoke money.cli.cli, return parsed JSON."""
     from click.testing import CliRunner
-    from money.cli import cli
 
-    user = os.environ.get("MONEY_USER", "")
-    config = os.environ.get("MONEY_CONFIG", "")
+    from istota.config import load_config
+    from istota.money import UserNotFoundError, resolve_for_user
+    from istota.money.cli import Context, cli
 
-    cli_args: list[str] = []
-    if config:
-        cli_args += ["-c", config]
-    if user:
-        cli_args += ["-u", user]
-    cli_args += args
+    user_id = os.environ.get("MONEY_USER", "") or ""
+    if not user_id:
+        return {"status": "error", "error": "MONEY_USER not set"}
+
+    try:
+        user_ctx = resolve_for_user(user_id, load_config())
+    except UserNotFoundError as e:
+        return {"status": "error", "error": str(e)}
+
+    obj = Context()
+    obj.users[user_id] = user_ctx
+    obj.activate_user(user_id)
 
     runner = CliRunner()
-    result = runner.invoke(cli, cli_args, standalone_mode=False, catch_exceptions=True)
+    result = runner.invoke(
+        cli, ["-u", user_id, *args],
+        obj=obj,
+        standalone_mode=False,
+        catch_exceptions=True,
+    )
 
     if result.exception is not None and not isinstance(result.exception, SystemExit):
         return {"status": "error", "error": f"{type(result.exception).__name__}: {result.exception}"}

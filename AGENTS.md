@@ -67,7 +67,7 @@ istota/
 │       ├── website/         # Website management reference (doc-only)
 │       ├── google_workspace/ # Google Workspace CLI wrapper (Drive, Gmail, Calendar, Sheets, Docs)
 │       ├── location/       # GPS location tracking + calendar attendance (Overland)
-│       ├── money/         # Accounting (ledger, invoicing, work log) — in-process facade over `money.cli`
+│       ├── money/         # Accounting (ledger, invoicing, work log) — in-process facade over `istota.money.cli`
 │       └── whisper/         # Audio transcription via faster-whisper
 ├── config/
 │   ├── config.toml          # Active configuration (gitignored)
@@ -240,7 +240,7 @@ DB tables: `location_pings`, `places`, `visits`, `location_state`, `dismissed_cl
 ### Authenticated Web Interface
 SvelteKit frontend (`web/`) with FastAPI backend (`web_app.py`). Nextcloud OIDC for authentication. Runs as a separate service (`uvicorn istota.web_app:app`). Session-based auth via `SessionMiddleware`, 7-day cookie.
 
-Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark single entry read), `/istota/api/feeds/entries/batch` (batch mark read), `/istota/api/location/*` (places CRUD, pings, day summary, trips, discover, place stats, dismissed-clusters CRUD). SvelteKit build served as static files for all other `/istota/*` paths. Money pages live at `/istota/money/*`, served by the same web service; backend routers from `money.routes` mount at `/istota/money/api/*`.
+Backend routes: `/istota/login` (OIDC redirect), `/istota/callback` (token exchange), `/istota/logout`, `/istota/api/me` (user info + features), `/istota/api/feeds` (Miniflux proxy), `/istota/api/feeds/entries/{id}` (mark single entry read), `/istota/api/feeds/entries/batch` (batch mark read), `/istota/api/location/*` (places CRUD, pings, day summary, trips, discover, place stats, dismissed-clusters CRUD). SvelteKit build served as static files for all other `/istota/*` paths. Money pages live at `/istota/money/*`, served by the same web service; backend routers from `istota.money.routes` mount at `/istota/money/api/*`.
 
 Frontend: SvelteKit with `adapter-static`, dark theme (matching feed page design). Dashboard shows available features. Feeds page has masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox, viewport-based read tracking. Location pages: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover unknown clusters, create/edit/delete places). Place sidebar with visit stats (derived from pings), edit form, drag-to-reposition on map. Reads directly from Miniflux API via the backend proxy (no static file generation).
 

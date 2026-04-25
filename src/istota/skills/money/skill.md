@@ -4,7 +4,7 @@ triggers: [accounting, ledger, beancount, invoice, invoicing, expense, transacti
 description: Accounting operations (ledger, invoicing, transactions, work log) — runs in-process via the vendored money package
 cli: true
 resource_types: [money, moneyman]
-env: [{"var":"MONEY_CONFIG","from":"user_resource_config","resource_types":["money","moneyman"],"field":"config_path"},{"var":"MONEY_USER","from":"user_id"}]
+env: [{"var":"MONEY_USER","from":"user_id"}]
 ---
 # Money Accounting Operations
 
@@ -123,13 +123,7 @@ A wash sale occurs when you sell a security at a loss and buy substantially iden
 
 | Variable | Description |
 |---|---|
-| `MONEY_CONFIG` | Path to a money config TOML file (legacy mode) |
-| `MONEY_WORKSPACE` | Path to the user's istota workspace (workspace mode); set automatically by the skill's `setup_env` hook when the resource has no `config_path` |
-| `MONEY_USER` | User key — defaults to the istota user_id |
-| `MONEY_DATA_DIR` | Override workspace data dir (default `{workspace}/money`) |
-| `MONEY_CONFIG_DIR` | Override config dir (default `{data_dir}/config`, then `{workspace}/config`) |
-| `MONEY_LEDGERS` | JSON-encoded list of ledger names or `{name, path}` dicts |
-| `MONEY_DB_PATH` | Override SQLite DB path (default `{data_dir}/data/money.db`) |
+| `MONEY_USER` | User id — set automatically from the task's user_id |
 
 ## Adding the money resource
 

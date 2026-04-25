@@ -33,7 +33,7 @@ from .models import (
 
 def parse_invoicing_config(config_path: Path) -> InvoicingConfig:
     """Parse invoicing config file (TOML or UPPERCASE.md with TOML block)."""
-    from money._config_io import read_toml_config
+    from istota.money._config_io import read_toml_config
     data = read_toml_config(config_path)
 
     # Parse companies (multi-entity) or company (single entity)
@@ -288,7 +288,7 @@ def generate_invoices_for_period(
     generated PDFs (a year subdirectory is appended).  Otherwise falls back to
     ``accounting_path / config.invoice_output`` for backward compatibility.
     """
-    from money.work import get_uninvoiced_entries, assign_invoice_number
+    from istota.money.work import get_uninvoiced_entries, assign_invoice_number
 
     entries = get_uninvoiced_entries(data_dir, client=client_filter, period=period)
     if not entries:
@@ -407,7 +407,7 @@ def check_scheduled_invoices(
     import calendar
     import sqlite3
 
-    from money.db import get_invoice_schedule_state
+    from istota.money.db import get_invoice_schedule_state
 
     if today is None:
         today = date.today()

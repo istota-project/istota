@@ -5,14 +5,14 @@ from __future__ import annotations
 import click
 from fastapi import APIRouter, Depends, HTTPException
 
-from money.api.deps import get_ctx
-from money.api.models import (
+from istota.money.api.deps import get_ctx
+from istota.money.api.models import (
     InvoiceCreateRequest,
     InvoiceGenerateRequest,
     InvoicePaidRequest,
     InvoiceVoidRequest,
 )
-from money.cli import Context, _get_db_conn, _load_invoicing_config, _require_data_dir
+from istota.money.cli import Context, _get_db_conn, _load_invoicing_config, _require_data_dir
 
 router = APIRouter()
 
@@ -28,8 +28,8 @@ def list_invoices(
     except click.ClickException as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    from money.core.invoicing import build_line_items
-    from money.work import get_invoice_numbers, get_entries_for_invoice
+    from istota.money.core.invoicing import build_line_items
+    from istota.money.work import get_invoice_numbers, get_entries_for_invoice
 
     try:
         data_dir = _require_data_dir(ctx)
@@ -86,7 +86,7 @@ def generate_invoices(
     req: InvoiceGenerateRequest,
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.invoicing import generate_invoices_for_period
+    from istota.money.core.invoicing import generate_invoices_for_period
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
@@ -133,13 +133,13 @@ def invoice_paid(
 ):
     from datetime import datetime
 
-    from money.core.invoicing import (
+    from istota.money.core.invoicing import (
         compute_income_lines, create_income_posting,
         resolve_bank_account, resolve_currency, resolve_entity,
     )
-    from money.core.transactions import append_to_ledger
-    from money.core.ledger import run_bean_check
-    from money.work import get_entries_for_invoice, record_invoice_payment
+    from istota.money.core.transactions import append_to_ledger
+    from istota.money.core.ledger import run_bean_check
+    from istota.money.work import get_entries_for_invoice, record_invoice_payment
 
     try:
         parsed_date = datetime.strptime(req.date, "%Y-%m-%d").date()
@@ -221,13 +221,13 @@ def invoice_create(
 ):
     from datetime import date, timedelta
 
-    from money.core.invoicing import (
+    from istota.money.core.invoicing import (
         build_line_items, format_invoice_number,
         generate_invoice_html, generate_invoice_pdf,
         resolve_entity as resolve_entity_fn, update_invoice_number,
     )
-    from money.core.models import Invoice, InvoiceLineItem
-    from money.work import add_work_entry, get_entries_for_invoice
+    from istota.money.core.models import Invoice, InvoiceLineItem
+    from istota.money.work import add_work_entry, get_entries_for_invoice
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
@@ -347,7 +347,7 @@ def invoice_void(
 ):
     from pathlib import Path
 
-    from money.work import get_entries_for_invoice, void_invoice
+    from istota.money.work import get_entries_for_invoice, void_invoice
 
     try:
         data_dir = _require_data_dir(ctx)
@@ -374,7 +374,7 @@ def invoice_void(
     db_conn = _get_db_conn(ctx)
     if db_conn:
         try:
-            from money.db import clear_invoice_state
+            from istota.money.db import clear_invoice_state
             db_cleanup = clear_invoice_state(db_conn, req.invoice_number)
             db_conn.commit()
         finally:

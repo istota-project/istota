@@ -8,9 +8,9 @@ from pathlib import Path
 import click
 from fastapi import APIRouter, Depends, HTTPException
 
-from money.api.deps import get_ctx, get_ledger_path
-from money.api.models import ImportCsvRequest, SyncMonarchRequest, TransactionRequest
-from money.cli import Context
+from istota.money.api.deps import get_ctx, get_ledger_path
+from istota.money.api.models import ImportCsvRequest, SyncMonarchRequest, TransactionRequest
+from istota.money.cli import Context
 
 router = APIRouter()
 
@@ -19,7 +19,7 @@ def _get_db_conn(ctx: Context):
     if not ctx.db_path:
         return None
     import sqlite3
-    from money.db import init_db
+    from istota.money.db import init_db
     ctx.db_path.parent.mkdir(parents=True, exist_ok=True)
     init_db(ctx.db_path)
     conn = sqlite3.connect(str(ctx.db_path))
@@ -32,7 +32,7 @@ def add_transaction(
     req: TransactionRequest,
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.transactions import add_transaction as core_add
+    from istota.money.core.transactions import add_transaction as core_add
 
     try:
         parsed_date = datetime.strptime(req.date, "%Y-%m-%d").date()
@@ -55,7 +55,7 @@ def sync_monarch(
     req: SyncMonarchRequest,
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.transactions import (
+    from istota.money.core.transactions import (
         parse_monarch_config,
         sync_all_profiles,
         sync_monarch as core_sync,
@@ -79,8 +79,8 @@ def sync_monarch(
             matching = [p for p in config.profiles if p.ledger.lower() == req.ledger.lower()]
             if matching:
                 import asyncio
-                from money.core.models import MonarchConfig as MC
-                from money.core.transactions import fetch_monarch_transactions
+                from istota.money.core.models import MonarchConfig as MC
+                from istota.money.core.transactions import fetch_monarch_transactions
                 lookback = max(p.sync.lookback_days for p in matching)
                 txns = asyncio.run(fetch_monarch_transactions(config, lookback))
                 results = []
@@ -117,7 +117,7 @@ def import_csv(
     req: ImportCsvRequest,
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.transactions import import_csv as core_import
+    from istota.money.core.transactions import import_csv as core_import
 
     file_path = Path(req.file).resolve()
     if ctx.data_dir:

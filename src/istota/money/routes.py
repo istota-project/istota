@@ -3,7 +3,8 @@
 The host application (istota) mounts ``router`` at its chosen prefix and
 overrides ``require_auth`` via ``app.dependency_overrides`` so that the
 session/cookie/OIDC concerns stay with the host. Per-user data config is
-resolved per request through ``money.config.resolve_user_config``.
+resolved per request through :func:`istota.money.resolve_for_user`,
+fed by the istota config attached to ``request.app.state.istota_config``.
 """
 
 from __future__ import annotations
@@ -11,8 +12,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from money.cli import UserContext
-from money.config import UserNotFoundError, resolve_user_config
+from istota.money._loader import UserNotFoundError, resolve_for_user
+from istota.money.cli import UserContext
 
 
 # ---------------------------------------------------------------------------
@@ -37,9 +38,13 @@ def require_auth(request: Request) -> dict:
     return user
 
 
-def get_user_config(user: dict = Depends(require_auth)) -> UserContext:
+def get_user_config(
+    request: Request,
+    user: dict = Depends(require_auth),
+) -> UserContext:
+    istota_config = getattr(request.app.state, "istota_config", None)
     try:
-        return resolve_user_config(user["username"])
+        return resolve_for_user(user["username"], istota_config)
     except UserNotFoundError:
         raise HTTPException(404, "user not configured")
 
@@ -78,7 +83,7 @@ async def api_accounts(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     """Return account tree with balances for the authenticated user."""
-    from money.core.ledger import run_bean_query
+    from istota.money.core.ledger import run_bean_query
 
     ledger_path = _resolve_user_ledger(user_ctx, ledger)
     if not ledger_path:
@@ -104,7 +109,7 @@ async def api_transactions(
     per_page: int = 100,
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from money.core.ledger import run_bean_query, _sanitize_bql_string
+    from istota.money.core.ledger import run_bean_query, _sanitize_bql_string
 
     ledger_path = _resolve_user_ledger(user_ctx, ledger)
     if not ledger_path:
@@ -158,7 +163,7 @@ async def api_postings(
     ledger: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from money.core.ledger import run_bean_query, _sanitize_bql_string
+    from istota.money.core.ledger import run_bean_query, _sanitize_bql_string
 
     ledger_path = _resolve_user_ledger(user_ctx, ledger)
     if not ledger_path:
@@ -207,7 +212,7 @@ async def api_report(
     year: int | None = None,
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from money.core.ledger import report
+    from istota.money.core.ledger import report
 
     if report_type not in ("income-statement", "balance-sheet", "cash-flow"):
         return JSONResponse({"error": "unknown report type"}, status_code=400)
@@ -227,7 +232,7 @@ async def api_check(
     ledger: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from money.core.ledger import check
+    from istota.money.core.ledger import check
 
     ledger_path = _resolve_user_ledger(user_ctx, ledger)
     if not ledger_path:
@@ -246,7 +251,7 @@ async def api_ledgers(user_ctx: UserContext = Depends(get_user_config)):
 
 @router.get("/clients")
 async def api_clients(user_ctx: UserContext = Depends(get_user_config)):
-    from money.core.invoicing import parse_invoicing_config
+    from istota.money.core.invoicing import parse_invoicing_config
 
     if not user_ctx.invoicing_config_path or not user_ctx.invoicing_config_path.exists():
         return {"status": "ok", "clients": []}
@@ -280,8 +285,8 @@ async def api_invoices(
     show_all: bool = False,
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from money.core.invoicing import build_line_items, parse_invoicing_config
-    from money.work import get_invoice_numbers, get_entries_for_invoice
+    from istota.money.core.invoicing import build_line_items, parse_invoicing_config
+    from istota.money.work import get_invoice_numbers, get_entries_for_invoice
 
     if not user_ctx.invoicing_config_path or not user_ctx.invoicing_config_path.exists():
         return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0}
@@ -340,7 +345,7 @@ async def api_invoices(
 
 @router.get("/business-settings")
 async def api_business_settings(user_ctx: UserContext = Depends(get_user_config)):
-    from money.core.invoicing import parse_invoicing_config
+    from istota.money.core.invoicing import parse_invoicing_config
 
     if not user_ctx.invoicing_config_path or not user_ctx.invoicing_config_path.exists():
         return {"status": "ok", "entities": [], "services": [], "defaults": {}}
@@ -388,8 +393,8 @@ async def api_invoice_details(
     invoice_number: str,
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from money.core.invoicing import build_line_items, parse_invoicing_config
-    from money.work import get_entries_for_invoice
+    from istota.money.core.invoicing import build_line_items, parse_invoicing_config
+    from istota.money.work import get_entries_for_invoice
 
     if not user_ctx.invoicing_config_path or not user_ctx.invoicing_config_path.exists():
         return JSONResponse({"error": "no invoicing config"}, status_code=404)
@@ -412,7 +417,7 @@ async def api_invoice_details(
 
     for e in entries:
         if e.service == "_manual":
-            from money.core.models import InvoiceLineItem
+            from istota.money.core.models import InvoiceLineItem
             items.append(InvoiceLineItem(
                 display_name=e.description or "Manual item",
                 description="",
@@ -446,8 +451,8 @@ async def api_tax_estimate(
 ):
     from datetime import date
 
-    from money.core.models import TaxConfig
-    from money.core.tax import (
+    from istota.money.core.models import TaxConfig
+    from istota.money.core.tax import (
         estimate_quarterly_tax,
         load_tax_inputs,
         parse_tax_config,
@@ -513,8 +518,8 @@ async def api_tax_estimate_recalculate(
 ):
     from datetime import date
 
-    from money.core.models import TaxConfig
-    from money.core.tax import (
+    from istota.money.core.models import TaxConfig
+    from istota.money.core.tax import (
         estimate_quarterly_tax,
         parse_tax_config,
         payment_quarter_from_date,

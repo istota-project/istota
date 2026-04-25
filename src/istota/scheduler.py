@@ -2557,8 +2557,8 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
     cleaned up.
     """
     try:
-        from money.cli import load_context
-        from money.jobs import MODULE_PREFIX, jobs_for_user
+        from istota.money import UserNotFoundError, resolve_for_user
+        from istota.money.jobs import MODULE_PREFIX, jobs_for_user
     except ImportError:
         # money extra not installed
         return
@@ -2567,13 +2567,12 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
         uc = app_config.users.get(user_id)
         if uc is None:
             continue
-        money_resource = None
-        for r in getattr(uc, "resources", []) or []:
-            if getattr(r, "type", None) in ("money", "moneyman"):
-                money_resource = r
-                break
 
-        if money_resource is None:
+        has_money = any(
+            getattr(r, "type", None) in ("money", "moneyman")
+            for r in getattr(uc, "resources", []) or []
+        )
+        if not has_money:
             # Drop any stale module rows
             conn.execute(
                 "DELETE FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
@@ -2581,33 +2580,10 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
             )
             continue
 
-        config_path = (
-            (getattr(money_resource, "extra", None) or {}).get("config_path")
-            or getattr(money_resource, "path", None)
-        )
-        user_key = (
-            (getattr(money_resource, "extra", None) or {}).get("user_key") or user_id
-        )
-        if not config_path:
-            logger.warning(
-                "User %s has money resource with no config_path; skipping job seed",
-                user_id,
-            )
-            continue
-
         try:
-            money_ctx = load_context(str(config_path))
-        except Exception as e:
-            logger.warning(
-                "Could not load money config for %s at %s: %s",
-                user_id, config_path, e,
-            )
-            continue
-        if user_key not in money_ctx.users:
-            logger.warning(
-                "User key '%s' not in money config at %s",
-                user_key, config_path,
-            )
+            money_ctx = resolve_for_user(user_id, app_config)
+        except UserNotFoundError as e:
+            logger.warning("Could not resolve money config for %s: %s", user_id, e)
             continue
 
         # Per-user secrets path follows the namespace convention so the
@@ -2617,8 +2593,7 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
         secrets_path = f"/etc/{namespace}/secrets/{user_id}/money.toml"
 
         wanted = jobs_for_user(
-            money_ctx.users[user_key], str(config_path), user_key,
-            secrets_path=secrets_path,
+            money_ctx, user_id, secrets_path=secrets_path,
         )
         wanted_by_name = {j["name"]: j for j in wanted}
 

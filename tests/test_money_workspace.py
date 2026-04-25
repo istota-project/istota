@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("money", reason="money extra not installed")
+pytest.importorskip("istota.money", reason="money extra not installed")
 pytest.importorskip("beancount", reason="money requires beancount")
 
 
-from money._config_io import read_toml_config
-from money.workspace import (
+from istota.money._config_io import read_toml_config
+from istota.money.workspace import (
     INVOICING_FILENAME,
     MONARCH_FILENAME,
     TAX_FILENAME,
@@ -174,7 +174,7 @@ class TestSynthesizeUserContext:
 
 class TestParsersAcceptMd:
     def test_invoicing_md(self, tmp_path):
-        from money.core.invoicing import parse_invoicing_config
+        from istota.money.core.invoicing import parse_invoicing_config
         p = tmp_path / "INVOICING.md"
         p.write_text(
             "# Inv\n\n"
@@ -190,7 +190,7 @@ class TestParsersAcceptMd:
         assert cfg.company.name == "Acme"
 
     def test_monarch_md(self, tmp_path):
-        from money.core.transactions import parse_monarch_config
+        from istota.money.core.transactions import parse_monarch_config
         p = tmp_path / "MONARCH.md"
         p.write_text(
             "# Mon\n\n```toml\n[monarch]\nemail = \"x@y.z\"\n```\n"
@@ -199,7 +199,7 @@ class TestParsersAcceptMd:
         assert cfg.credentials.email == "x@y.z"
 
     def test_tax_md(self, tmp_path):
-        from money.core.tax import parse_tax_config
+        from istota.money.core.tax import parse_tax_config
         p = tmp_path / "TAX.md"
         p.write_text(
             "# Tax\n\n```toml\n[tax]\nfiling_status = \"single\"\n```\n"
@@ -270,7 +270,7 @@ class TestMigrationScript:
 
     def test_migrate_output_is_loadable(self, tmp_path):
         """Migrated MONARCH.md round-trips through parse_monarch_config."""
-        from money.core.transactions import parse_monarch_config
+        from istota.money.core.transactions import parse_monarch_config
         src = tmp_path / "src"
         dst = tmp_path / "dst"
         src.mkdir()

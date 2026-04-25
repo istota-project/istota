@@ -15,7 +15,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
-from money.core.models import QuarterlyTaxEstimate, TaxConfig
+from istota.money.core.models import QuarterlyTaxEstimate, TaxConfig
 
 
 # =============================================================================
@@ -466,7 +466,7 @@ def estimate_quarterly_tax(
 
 def parse_tax_config(config_path: Path) -> TaxConfig:
     """Parse tax configuration from a TOML file or TAX.md."""
-    from money._config_io import read_toml_config
+    from istota.money._config_io import read_toml_config
     data = read_toml_config(config_path)
     tax = data.get("tax", data)  # support both [tax] wrapper and flat
 
@@ -521,7 +521,7 @@ def load_tax_inputs(db_path: Path) -> dict:
     """Load saved tax inputs from the DB kv_store, or empty dict."""
     import json
 
-    from money.db import get_db, kv_get
+    from istota.money.db import get_db, kv_get
 
     if not db_path or not db_path.exists():
         return {}
@@ -540,7 +540,7 @@ def save_tax_inputs(db_path: Path, inputs: dict) -> None:
     """Save tax inputs to the DB kv_store."""
     import json
 
-    from money.db import get_db, kv_set
+    from istota.money.db import get_db, kv_set
 
     if not db_path:
         return
@@ -593,7 +593,7 @@ def query_se_income(
     Quarter here is the payment quarter: Q1 = through month 3, Q2 = through month 6, etc.
     Returns net SE income as a positive number.
     """
-    from money.core.ledger import run_bean_query
+    from istota.money.core.ledger import run_bean_query
 
     year = config.tax_year
     end_month = _quarter_end_month(quarter)

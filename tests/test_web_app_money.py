@@ -13,7 +13,7 @@ except ImportError:
     _has_web_deps = False
 
 try:
-    import money  # noqa: F401
+    import istota.money  # noqa: F401
     _has_money = True
 except ImportError:
     _has_money = False
@@ -82,8 +82,8 @@ def _patch_app(config: Config):
     mod._config = config
     mod._oauth = MagicMock()
     mod._oauth.nextcloud = MagicMock()
-    # Re-install the money loader against the new config
-    mod._install_money_loader()
+    # Routes resolve per-user config via request.app.state.istota_config.
+    mod.app.state.istota_config = config
     return mod.app
 
 
