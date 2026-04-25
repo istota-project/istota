@@ -280,16 +280,40 @@ def format_beancount_transaction(
 def format_recategorization_entry(
     txn_date: date,
     merchant: str,
-    original_account: str,
-    recategorize_account: str,
+    posted_account: str,
+    contra_account: str | None,
     amount: float,
+    recategorize_account: str = "Expenses:Personal-Expense",
     currency: str = "USD",
-) -> str:
-    """Format a recategorization entry that moves an expense to personal."""
+) -> str | None:
+    """Format a ledger entry that handles a #business tag being removed in Monarch.
+
+    For income postings, emits a true reversal of the original entry — income
+    that was synced as business income is undone entirely. Requires
+    `contra_account` from the original entry; returns None when it's missing
+    (legacy rows synced before contra_account was tracked) so the caller can
+    fall back or surface a warning.
+
+    For expense postings, emits a category swap: the cash already left the
+    contra account, only the expense bucket changes from posted_account to
+    recategorize_account.
+    """
+    if posted_account.startswith("Income:"):
+        if not contra_account:
+            return None
+        return format_beancount_transaction(
+            txn_date=txn_date,
+            payee=merchant,
+            narration="Reversal: business tag removed in Monarch",
+            posting_account=posted_account,
+            contra_account=contra_account,
+            amount=-amount,
+        )
+
     merchant = merchant.replace('"', '\\"')
     lines = [f'{txn_date.isoformat()} * "{merchant}" "Recategorized: business tag removed in Monarch"']
     lines.append(f'  {recategorize_account}  {abs(amount):.2f} {currency}')
-    lines.append(f'  {original_account}  -{abs(amount):.2f} {currency}')
+    lines.append(f'  {posted_account}  -{abs(amount):.2f} {currency}')
     return "\n".join(lines)
 
 
@@ -301,11 +325,21 @@ def format_category_change_entry(
     amount: float,
     currency: str = "USD",
 ) -> str:
-    """Format a ledger entry that moves a transaction from one category to another."""
+    """Format a ledger entry that moves a transaction from one category to another.
+
+    For expense categories the entry is `DR new / CR old` — the cash leg is
+    untouched, only the expense bucket changes. For income categories the signs
+    flip: `DR old / CR new` cancels the original income credit and re-credits
+    the new income account.
+    """
     merchant = merchant.replace('"', '\\"')
     lines = [f'{txn_date.isoformat()} * "{merchant}" "Recategorized in Monarch"']
-    lines.append(f'  {new_account}  {abs(amount):.2f} {currency}')
-    lines.append(f'  {old_account}  -{abs(amount):.2f} {currency}')
+    if old_account.startswith("Income:") or new_account.startswith("Income:"):
+        lines.append(f'  {old_account}  {abs(amount):.2f} {currency}')
+        lines.append(f'  {new_account}  -{abs(amount):.2f} {currency}')
+    else:
+        lines.append(f'  {new_account}  {abs(amount):.2f} {currency}')
+        lines.append(f'  {old_account}  -{abs(amount):.2f} {currency}')
     return "\n".join(lines)
 
 
@@ -565,6 +599,7 @@ def sync_monarch(
                 "amount": amount,
                 "merchant": merchant,
                 "posted_account": posting_account,
+                "contra_account": contra_account,
                 "txn_date": txn_date.isoformat(),
                 "content_hash": compute_transaction_hash(txn_date.isoformat(), abs(amount), merchant),
             })
@@ -572,6 +607,7 @@ def sync_monarch(
     # Reconciliation: check for tag/category changes on previously synced transactions
     recategorized_entries = []
     recategorized_ids = []
+    recat_skipped_legacy: list[str] = []
     category_change_entries = []
     category_change_updates = []
 
@@ -601,12 +637,16 @@ def sync_monarch(
                         recat_entry = format_recategorization_entry(
                             txn_date=date.today(),
                             merchant=synced_txn.merchant,
-                            original_account=synced_txn.posted_account,
-                            recategorize_account=config.sync.recategorize_account,
+                            posted_account=synced_txn.posted_account,
+                            contra_account=synced_txn.contra_account,
                             amount=synced_txn.amount,
+                            recategorize_account=config.sync.recategorize_account,
                         )
-                        recategorized_entries.append(recat_entry)
-                        recategorized_ids.append(synced_txn.monarch_transaction_id)
+                        if recat_entry is None:
+                            recat_skipped_legacy.append(synced_txn.monarch_transaction_id)
+                        else:
+                            recategorized_entries.append(recat_entry)
+                            recategorized_ids.append(synced_txn.monarch_transaction_id)
                     continue
 
                 if (
@@ -644,9 +684,12 @@ def sync_monarch(
         "skipped_count": skipped_count,
         "content_skipped_count": content_skipped_count,
         "recategorized_count": len(recategorized_entries),
+        "recat_skipped_legacy_count": len(recat_skipped_legacy),
         "category_changed_count": len(category_change_entries),
         "dry_run": dry_run,
     }
+    if recat_skipped_legacy:
+        result["recat_skipped_legacy_ids"] = recat_skipped_legacy
 
     if dry_run:
         result["message"] = f"Would import {len(entries)} transactions"
@@ -720,6 +763,11 @@ def sync_monarch(
         messages.append(f"Synced {len(entries)} new transactions")
     if recategorized_entries:
         messages.append(f"Created {len(recategorized_entries)} recategorization entries")
+    if recat_skipped_legacy:
+        messages.append(
+            f"Skipped {len(recat_skipped_legacy)} income recat(s) — legacy rows "
+            "missing contra_account; reverse manually"
+        )
     if category_change_entries:
         messages.append(f"Updated {len(category_change_entries)} categories")
     if not entries and not recategorized_entries and not category_change_entries:
