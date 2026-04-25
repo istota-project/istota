@@ -2610,7 +2610,16 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
             )
             continue
 
-        wanted = jobs_for_user(money_ctx.users[user_key], str(config_path), user_key)
+        # Per-user secrets path follows the namespace convention so the
+        # subprocess CLI reads the right credentials. Falls back to the
+        # CLI's default if the file doesn't yet exist.
+        namespace = getattr(app_config, "namespace", None) or "istota"
+        secrets_path = f"/etc/{namespace}/secrets/{user_id}/moneyman.toml"
+
+        wanted = jobs_for_user(
+            money_ctx.users[user_key], str(config_path), user_key,
+            secrets_path=secrets_path,
+        )
         wanted_by_name = {j["name"]: j for j in wanted}
 
         existing_rows = list(conn.execute(

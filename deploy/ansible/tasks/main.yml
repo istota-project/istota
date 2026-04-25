@@ -595,7 +595,7 @@
   notify:
     - "restart istota-scheduler"
 
-- name: Compute money-enabled users
+- name: Compute money-enabled users (those with a money resource carrying monarch credentials)
   set_fact:
     _istota_money_users: >-
       {{ istota_users | dict2items
@@ -617,8 +617,10 @@
     label: "{{ item.key }}"
   when:
     - not istota_web_only
-    - item.value.money is defined
-    - item.value.money | length > 0
+    - (item.value.resources
+       | selectattr('type', 'in', ['money', 'moneyman'])
+       | selectattr('monarch_session_token', 'defined')
+       | list) | length > 0
 
 - name: Deploy per-user money secrets
   template:
@@ -632,8 +634,10 @@
     label: "{{ item.key }}"
   when:
     - not istota_web_only
-    - item.value.money is defined
-    - item.value.money.monarch is defined
+    - (item.value.resources
+       | selectattr('type', 'in', ['money', 'moneyman'])
+       | selectattr('monarch_session_token', 'defined')
+       | list) | length > 0
   notify:
     - "restart istota-scheduler"
     - "restart istota-web"
