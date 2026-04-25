@@ -2,7 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
-## 2026-04-25: Service manifest spec tiers + Fava removal
+## 2026-04-25: CHANGELOG.md + tag-annotation-driven release flow
+
+Adopted the layered DEVLOG / CHANGELOG model from the updated /boom skill. DEVLOG keeps doing what it's been doing (verbose dev journal); CHANGELOG.md is new and follows Keep a Changelog 1.1.0. Release process restructured so that the same CHANGELOG section drives both the local tag annotation and the auto-generated GitHub Release — single source of truth that survives the GitLab → Forgejo → GitHub mirror chain (Release objects don't ride the git wire, but annotated tag bodies do).
+
+**Key changes:**
+- Created `CHANGELOG.md` with summarized backfill across all 10 prior releases (v0.1.0 → v0.6.1) plus a populated `[Unreleased]` section. Boundaries derived from `git log v$PREV..v$NEXT` (not DEVLOG dates — first pass via subagent had drift between the two).
+- Replaced `.github/workflows/release.yml`: the cliff-based "generate notes from commit messages" step is gone; new step extracts release notes from the annotated tag body via `git tag -l --format='%(contents)'`, with a guard that fails the workflow if the body is empty.
+- Added `scripts/release.sh`: pre-flight checks (clean tree, tag doesn't exist, `[Unreleased]` present), moves `[Unreleased]` to a versioned section in CHANGELOG, bumps `pyproject.toml`, extracts the new section as the tag annotation body via `awk`, commits, annotated-tags, pushes with `--follow-tags`. Link references at the bottom of CHANGELOG are rewritten in the same Python pass.
+- Deleted `cliff.toml`. Boom flow appends to CHANGELOG as you go, so commit-message → release-notes generation is no longer needed.
+- README's "Further reading" section now lists CHANGELOG (release notes) and DEVLOG (dev journal) as separate artifacts.
+
+**Mirror-chain reasoning:** GitLab Releases / Forgejo Releases / GitHub Releases are platform-side metadata (API objects) and don't propagate via `git push --mirror`. Annotated tag bodies *do* propagate. So the design is: tag annotation = canonical release notes, each downstream platform that wants a Release page builds one from the tag annotation. Forgejo gets nothing (CHANGELOG.md visible in repo is enough); GitHub gets a Release page via the workflow above; GitLab is private so no Release object is needed there.
+
+**Files added/modified:**
+- `CHANGELOG.md` — new, KaC 1.1.0 format, all 10 prior versions backfilled
+- `scripts/release.sh` — new, executable
+- `.github/workflows/release.yml` — rewritten: tag annotation → GitHub Release (replaces git-cliff path)
+- `cliff.toml` — deleted
+- `README.md` — Further reading lists CHANGELOG + DEVLOG as separate items
+
+
 
 Reworked the service manifest spec to ship in four tiers, smallest first. Tier 1 closes ISSUE-032 (manifest-driven installer wizard) without requiring the full web/UI plugin layer. Same pass cleaned out lingering Fava references — Moneyman runs its own web UI now.
 

@@ -204,7 +204,8 @@ Skills with missing dependencies are automatically excluded from prompt selectio
 ## Further reading
 
 - [Documentation](https://istota.xyz/docs) — full docs (also buildable locally with `mkdocs serve`)
-- [DEVLOG.md](DEVLOG.md) — changelog
+- [CHANGELOG.md](CHANGELOG.md) — release notes
+- [DEVLOG.md](DEVLOG.md) — verbose development journal
 
 ## License
 
