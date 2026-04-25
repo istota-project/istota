@@ -61,9 +61,16 @@ api_key = "{{ resource.api_key }}"
 [[resources]]
 type = "money"
 name = "{{ resource.name | default('Money') }}"
-{# Workspace mode (preferred): no config_path; loader reads INVOICING.md /
-   TAX.md / MONARCH.md from the user's istota workspace config/ dir. Legacy
-   mode: set config_path to a money config TOML with [users.X] sections. #}
+{# Workspace mode (preferred): no config_path; loader synthesizes a
+   UserContext rooted at the user's istota workspace and reads INVOICING.md
+   / TAX.md / MONARCH.md (with .toml fallback). Search order is
+   {data_dir}/config/ first, then {workspace}/config/. data_dir defaults to
+   {workspace}/money, db_path to {data_dir}/data/moneyman.db, ledgers to a
+   single 'main' ledger at {data_dir}/ledgers/main.beancount. Override via
+   data_dir / db_path / config_dir / ledgers as needed.
+
+   Legacy mode: set config_path to a money config TOML with [users.X]
+   sections; user_key defaults to the istota username when omitted. #}
 {% if resource.config_path is defined and resource.config_path %}
 config_path = "{{ resource.config_path }}"
 {% endif %}
@@ -72,6 +79,15 @@ user_key = "{{ resource.user_key }}"
 {% endif %}
 {% if resource.data_dir is defined and resource.data_dir %}
 data_dir = "{{ resource.data_dir }}"
+{% endif %}
+{% if resource.config_dir is defined and resource.config_dir %}
+config_dir = "{{ resource.config_dir }}"
+{% endif %}
+{% if resource.db_path is defined and resource.db_path %}
+db_path = "{{ resource.db_path }}"
+{% endif %}
+{% if resource.ledgers is defined and resource.ledgers %}
+ledgers = {{ resource.ledgers | to_json }}
 {% endif %}
 
 {% elif resource.type == 'overland' %}

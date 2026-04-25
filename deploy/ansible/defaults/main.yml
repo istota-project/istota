@@ -177,12 +177,23 @@ istota_disabled_skills: []
 #         name: "Monarch Money"
 #         session_token: "monarch-token"
 #       - type: "money"
-#         # Legacy: point at an existing money config TOML.
-#         config_path: "/srv/app/moneyman/app/config.toml"
+#         # Workspace mode (preferred): omit config_path. The loader
+#         # synthesizes a UserContext rooted at the user's istota workspace
+#         # and reads INVOICING.md / TAX.md / MONARCH.md (with .toml
+#         # fallback) from {data_dir}/config/ first, then {workspace}/config/.
+#         # Defaults: data_dir = {workspace}/money,
+#         #           db_path = {data_dir}/data/moneyman.db,
+#         #           ledgers = single 'main' at {data_dir}/ledgers/main.beancount.
+#         # Overrides:
+#         #   data_dir: "/srv/mount/.../shared/Money"
+#         #   db_path: "/srv/mount/.../moneyman.db"
+#         #   config_dir: "/srv/mount/.../config"
+#         ledgers: ["personal", "business"]
 #         monarch_session_token: "{{ vault_alice_monarch_token }}"
-#         # Workspace mode (alternative): omit config_path and let the
-#         # loader read INVOICING.md/TAX.md/MONARCH.md from the user's
-#         # workspace config/ dir. Override data_dir if needed.
+#         # Legacy mode (alternative): point config_path at a money config
+#         # TOML with [users.X] sections. user_key defaults to the istota
+#         # username when omitted.
+#         # config_path: "/srv/app/moneyman/app/config.toml"
 #       - type: "overland"
 #         name: "GPS"
 #         ingest_token: "your-overland-secret"
@@ -263,17 +274,26 @@ istota_moneyman_config_path: ""  # DEPRECATED — per-user resource entry replac
 #     alice:
 #       resources:
 #         - type: "money"
-#           # Legacy mode: set config_path to a money config TOML with
-#           # [users.<key>] sections. user_key is optional — defaults to
-#           # the istota username when omitted.
-#           config_path: "/srv/app/moneyman/app/config.toml"
-#           # user_key: "alice"
+#           # Workspace mode (preferred): no config_path. The loader
+#           # synthesizes a UserContext rooted at the user's istota
+#           # workspace and reads INVOICING.md / TAX.md / MONARCH.md (with
+#           # .toml fallback). Search order: {data_dir}/config/ first, then
+#           # {workspace}/config/.
+#           # Defaults: data_dir = {workspace}/money,
+#           #           db_path = {data_dir}/data/moneyman.db,
+#           #           ledgers = single 'main' at {data_dir}/ledgers/main.beancount.
+#           # Override fields are optional:
+#           #   data_dir: "/srv/mount/.../shared/Money"
+#           #   db_path:  "/srv/mount/.../moneyman.db"
+#           #   config_dir: "/srv/mount/.../config"
+#           ledgers: ["personal", "business"]
 #           monarch_session_token: "{{ vault_alice_monarch_token }}"
-#           # Workspace mode (alternative): omit config_path; the loader
-#           # reads INVOICING.md / TAX.md / MONARCH.md from the user's
-#           # istota workspace config/ dir, with data_dir defaulting to
-#           # {workspace}/money. Override via:
-#           # data_dir: "/srv/mount/.../shared/Money"
+#
+#           # Legacy mode (alternative): set config_path to a money config
+#           # TOML with [users.<key>] sections. user_key defaults to the
+#           # istota username when omitted.
+#           # config_path: "/srv/app/moneyman/app/config.toml"
+#           # user_key: "alice"
 
 # Browser container settings (for web browsing skill)
 istota_browser_enabled: false
