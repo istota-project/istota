@@ -27,34 +27,53 @@ class SkillMeta:
 
 ### Functions
 ```python
-load_skill_index(skills_dir: Path) -> dict[str, SkillMeta]       # Load skill.md frontmatter (toml fallback)
-select_skills(prompt, source_type, user_resource_types, skill_index, is_admin=True, attachments=None, disabled_skills=None) -> list[str]
-classify_skills(prompt, skill_index, already_selected, model="haiku", timeout=3.0) -> list[str]  # Pass 2 LLM classification
-build_skill_manifest(skill_index, exclude) -> str                 # Manifest for LLM classification
+load_skill_index(skills_dir: Path, bundled_dir: Path | None = None) -> dict[str, SkillMeta]
+    # Load skill.md frontmatter (toml fallback). bundled_dir overrides _BUNDLED_SKILLS_DIR (for tests).
+select_skills(prompt, source_type, user_resource_types, skill_index,
+              is_admin=True, attachments=None, disabled_skills=None,
+              sticky_skills=None) -> list[str]
+classify_skills(prompt, skill_index, already_selected,
+                disabled_skills=None, is_admin=True,
+                model="haiku", timeout=3.0) -> list[str]  # Pass 2 LLM classification
+build_skill_manifest(skill_index, exclude, disabled_skills=None, is_admin=True) -> str
 compute_skills_fingerprint(skills_dir: Path) -> str               # SHA-256, first 12 hex chars
 load_skills_changelog(skills_dir: Path) -> str | None             # CHANGELOG.md
-load_skills(skills_dir: Path, skill_names: list[str]) -> str      # Concatenate skill docs (strips frontmatter)
+load_skills(skills_dir: Path, skill_names: list[str], bot_name, bot_dir, skill_index=None, bundled_dir=None) -> str
+    # Concatenate skill docs (strips frontmatter)
 ```
 
 ### Two-Pass Skill Selection
 
-**Pass 1: Keyword matching** (`select_skills`) — fast, deterministic, zero-cost.
-Skills with `admin_only=True` are skipped when `is_admin=False`.
-Skills with unmet `dependencies` (missing Python packages) are skipped via `_check_dependencies()`.
-Skills listed in `disabled_skills` (instance-level or per-user) are excluded.
-A skill is selected if ANY of these match:
+**Pass 1: Deterministic matching** (`select_skills`) — fast, zero-cost.
+
+Filters applied to every candidate before any rule fires:
+- `admin_only=True` skipped when `is_admin=False`
+- Unmet `dependencies` (missing Python packages) skipped via `_check_dependencies()`
+- Names in `disabled_skills` (instance-level + per-user, merged) skipped
+
+Selection rules (priority order, with `continue` short-circuits in `_loader.py:344-374`):
 1. `meta.always_include == True`
 2. `source_type in meta.source_types`
-3. Any `user_resource_types ∩ meta.resource_types`
-4. Any `meta.keywords` found in `prompt.lower()`
-5. Any `meta.file_types` match attachment extensions
-6. `meta.companion_skills` of already-selected skills are pulled in (respects admin_only + dependency checks)
-7. `meta.exclude_skills` of selected skills are removed from the final set (e.g., briefing excludes email)
+3. Any `meta.file_types` match attachment extensions
+4. Any `meta.keywords` found in `prompt.lower()` — additionally requires `user_resource_types ∩ meta.resource_types` if `meta.resource_types` is set
 
-**Pre-transcription**: Before skill selection, `_pre_transcribe_attachments()` in executor.py transcribes audio attachments and enriches `task.prompt` with the spoken text. This allows keyword-based skills to match on voice memo content.
+After the main loop:
+5. **Sticky skills** (`_loader.py:376-387`) — names supplied via `sticky_skills` are added (filtered by disabled/admin_only/deps). Always-include skills are not re-added.
+6. **Companion skills** — `meta.companion_skills` of already-selected skills are pulled in (respects disabled/admin_only/deps).
+7. **Exclude pass** — `meta.exclude_skills` of selected skills are removed from the final set (e.g., briefing excludes email).
+
+**Sticky skills source** (`executor.py:1761-1789`): for `talk` and `email` tasks with a `conversation_token`, the executor populates `sticky_skills` from:
+- `db.get_recent_conversation_skills(conversation_token, max_age_minutes=30, limit=2)` — skills from the last two tasks in the same conversation within the last 30 minutes
+- `parent.selected_skills` from `db.get_reply_parent_task()` when `task.reply_to_talk_id` is set (no time limit)
+
+After execution, the resolved skill set is persisted via `db.save_task_selected_skills()` so future tasks in the conversation can carry it forward.
+
+**Pre-transcription**: before skill selection, `_pre_transcribe_attachments()` (`executor.py:225`) transcribes audio attachments and enriches `task.prompt` with the spoken text so keyword rules match voice memos.
 
 **Pass 2: Semantic routing** (`classify_skills`) — LLM-based, additive to Pass 1.
-When `config.skills.semantic_routing` is enabled (default: true), a Haiku call sees the task prompt + a manifest of unselected skills and returns additional skills to load. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only.
+When `config.skills.semantic_routing` is enabled (default: true), a Haiku call sees the task prompt + a manifest of unselected skills (filtered for admin_only/disabled/deps) and returns additional skill names. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only.
+
+After the union, the executor (`executor.py:1815-1823`) re-applies `exclude_skills` because newly added skills may exclude previously-selected ones.
 
 Config: `[skills]` section — `semantic_routing` (bool), `semantic_routing_model` (str), `semantic_routing_timeout` (float).
 
@@ -84,6 +103,7 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `memory` | yes | — | — | — |
 | `scripts` | yes | — | — | — |
 | `memory_search` | yes | — | — | — |
+| `kv` | yes | — | — | — |
 | `email` | — | email, mail, send, inbox, reply, message | email_folder | email |
 | `calendar` | — | calendar, event, meeting, schedule, appointment, caldav | calendar | briefing |
 | `todos` | — | todo, task, checklist, reminder, done, complete | todo_file | — |
@@ -96,7 +116,6 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `briefing` | — | — | — | briefing |
 | `briefings_config` | — | briefing config, briefing schedule, ... | — | — |
 | `heartbeat` | — | heartbeat, monitoring, health check, alert, ... | — | — |
-| `accounting` | — | accounting, ledger, invoice, expense, tax, ... | ledger, invoicing | — |
 | `transcribe` | — | transcribe, ocr, screenshot, scan, image, ... | — | — |
 | `whisper` | — | transcribe, whisper, audio, voice, speech, dictation, ... | — | — |
 | `notes` | — | note, save, write, markdown | notes_folder | — |
@@ -108,16 +127,16 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws | — | — |
 | `moneyman` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | moneyman | — |
 
-Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skills`. Users with a `moneyman` resource get the API-based skill; users with `ledger` resources get the direct beancount skill.
+Note: `moneyman` is the sole accounting skill. It runs in dual-mode (CLI subprocess preferred, HTTP API fallback) against the standalone Moneyman service.
 
 ## Skill CLI Modules (`src/istota/skills/`)
 
-### `accounting.py` - Beancount + Invoicing CLI
-**Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `import-monarch`, `sync-monarch`, `add-transaction`, `invoice` (sub: `generate`, `list`, `paid`, `create`)
-**Env vars**: `LEDGER_PATH`, `LEDGER_PATHS` (JSON), `ACCOUNTING_CONFIG`, `INVOICING_CONFIG`, `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`
-**Key fns**: `_run_bean_check()`, `_run_bean_query()`, `cmd_sync_monarch()`, `cmd_invoice_generate()`, `cmd_invoice_list()`, `cmd_invoice_paid()`, `cmd_invoice_create()`, `cmd_add_transaction()`
+### `kv/` - Key-Value Store
+**Subcommands**: `get NAMESPACE KEY`, `set NAMESPACE KEY '<json>'`, `list NAMESPACE`, `delete NAMESPACE KEY`, `namespaces`
+**Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_TASK_ID`
+**Note**: `always_include` core skill. Persistent per-user, namespaced JSON store. Writes go through deferred-DB pattern under sandbox.
 
-### `email.py` - IMAP/SMTP
+### `email/` - IMAP/SMTP
 **Subcommands**: `send`, `output`
 **Env vars**: `IMAP_HOST/PORT/USER/PASSWORD`, `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM`, `ISTOTA_TASK_ID`, `ISTOTA_DEFERRED_DIR`
 **Key fns**: `list_emails()`, `read_email()`, `send_email()`, `reply_to_email()`, `search_emails()`, `get_newsletters()`, `delete_email()`, `cmd_output()`
@@ -132,16 +151,16 @@ Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skill
 **Env vars**: `BROWSER_API_URL` (finviz only)
 **Key fns**: `get_quotes()`, `get_futures_quotes()`, `get_index_quotes()`, `format_market_summary()`, `fetch_finviz_data()`, `format_finviz_briefing()`
 
-### `browse.py` - Headless Browser
+### `browse/` - Headless Browser
 **Subcommands**: `get`, `screenshot`, `extract`, `interact`, `close`
 **Env vars**: `BROWSER_API_URL`
 
-### `transcribe.py` - OCR
+### `transcribe/` - OCR
 **Subcommands**: `ocr`
 **Env vars**: None
 **Deps**: `pytesseract`, `PIL`
 
-### `memory_search.py` - Memory Search CLI
+### `memory_search/` - Memory Search CLI
 **Subcommands**: `search`, `index` (sub: `conversation`, `file`), `reindex`, `stats`
 **Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `NEXTCLOUD_MOUNT_PATH`, `ISTOTA_CONVERSATION_TOKEN`
 
@@ -178,12 +197,11 @@ Note: `accounting` and `moneyman` mutually exclude each other via `exclude_skill
 ### `moneyman/` - Moneyman Accounting API Client
 **Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `add-transaction`, `sync-monarch`, `import-csv`, `invoice` (sub: `generate`, `list`, `paid`, `create`), `work` (sub: `list`, `add`, `update`, `remove`)
 **Env vars**: `MONEYMAN_API_URL`, `MONEYMAN_API_KEY`
-**Note**: Dual-mode client — CLI subprocess (preferred, via `MONEYMAN_CLI_PATH`) or HTTP REST API. Mutually exclusive with `accounting` skill.
+**Note**: Dual-mode client — CLI subprocess (preferred, via `MONEYMAN_CLI_PATH`) or HTTP REST API.
 
 ### Library-Only Modules (no CLI)
-- `files.py` - Nextcloud file ops (mount-aware, rclone fallback)
-- `invoicing.py` - Invoice generation, PDF export, cash-basis income
-- `finviz.py` - FinViz scraping for market data
+- `files/` - Nextcloud file ops (mount-aware, rclone fallback)
+- `markets/finviz.py` - FinViz scraping for market data (internal helper for `markets`)
 
 ### Top-Level Library Modules (outside skills/)
 - `feeds.py` (`src/istota/feeds.py`) - Miniflux API client + HTML feed page generation (used by scheduler for periodic regen)
