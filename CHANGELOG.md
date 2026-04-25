@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-24
+
 ### Added
 - Temporal knowledge graph: entity-relationship triples with validity windows, queryable via `!memory facts` and the memory_search CLI, surfaced into prompts as relevance-filtered "Known facts."
 - Topic and entity metadata on memory chunks, with filtered search via `--topic` and `--entity`.
@@ -227,7 +229,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.6.1...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.7.0...main
+[0.7.0]: https://gitlab.com/cynium/istota/-/releases/v0.7.0
 [0.6.1]: https://gitlab.com/cynium/istota/-/releases/v0.6.1
 [0.6.0]: https://gitlab.com/cynium/istota/-/releases/v0.6.0
 [0.5.0]: https://gitlab.com/cynium/istota/-/releases/v0.5.0
