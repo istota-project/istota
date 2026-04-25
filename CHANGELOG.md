@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `agents:` markdown frontmatter convention baked into the system prompt: per-file instructions (1–3 sentence string) travel with a file and are honored on reads from trusted paths, ignored on untrusted paths.
+
 ## [0.7.0] - 2026-04-24
 
 ### Added
