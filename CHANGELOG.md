@@ -9,22 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `agents:` markdown frontmatter convention baked into the system prompt: per-file instructions (1–3 sentence string) travel with a file and are honored on reads from trusted paths, ignored on untrusted paths.
-- In-tree `money` package (formerly the standalone moneyman service): accounting CLI, business logic, REST API, and SvelteKit pages folded into the istota repo. Optional install: `pip install istota[money]`.
+- In-tree `istota.money` subpackage (formerly the standalone moneyman service): accounting CLI, business logic, REST API, and SvelteKit pages folded into istota. Optional install: `pip install istota[money]`.
 - Money web pages at `/istota/money/*` (Accounts, Transactions, Reports, Taxes, Business). Feature flag exposed via `/istota/api/me` as `features.money`; nav item appears when the user has a money resource.
 - Money skill is in-process — no API key, no HTTP round-trip. Resource type accepts both `money` and legacy `moneyman`.
-- Per-user money scheduled jobs (`monarch_sync` daily 6am, `run_scheduled` daily 8am). Seeded under a reserved `_module.money.*` name prefix; auto-removed when a user's resource or feature config disappears. Feature-gated: monarch sync only runs for users with a monarch config.
+- Per-user money scheduled jobs (`monarch_sync` daily 6am, `run_scheduled` daily 8am). Seeded under a reserved `_module.money.*` name prefix; auto-removed when a user's resource or feature config disappears. Feature-gated: monarch sync only runs for users with a monarch config. Workspace-mode users are seeded too — previously skipped.
 - Workspace-mode money config loading: `INVOICING.md` / `TAX.md` / `MONARCH.md` files (TOML in fenced code blocks) in the user's workspace `config/` dir. Legacy `*.toml` files still accepted as a fallback.
+- `EnvSpec.resource_types` — a declarative skill env spec can now match any of multiple resource types.
 - `scripts/migrate_money_workspace_config.py` — one-shot migration from legacy `*.toml` to `*.md`.
-- `scripts/extract_money_to_standalone.py` — builds a publishable moneyman tree from `src/money/` (rewrites imports, flattens frontend paths, generates `pyproject.toml`).
-- `scripts/check_money_isolation.sh` — CI guard: fails if `src/money/` imports `istota.*`.
-- Ansible role: per-user money secrets rendered to `/etc/{namespace}/secrets/{user_id}/moneyman.toml` from `istota_users[<user>].money.monarch.*`.
+- Ansible role: per-user money secrets rendered to `/etc/{namespace}/secrets/{user_id}/money.toml` from per-user money config.
 
 ### Changed
+- Money is now `src/istota/money/` instead of a top-level `src/money/` package; the standalone-extract scaffolding is gone. Web routes, skill, and scheduler all call the same in-process `istota.money.resolve_for_user(user_id, istota_config)`.
+- Money skill no longer marshals env vars for workspace mode; it resolves the user's `UserContext` in-process and injects it into Click directly. The standalone `money` CLI keeps file-based config support (`MONEY_CONFIG=...` or `-c <path>`) for terminal use.
+- Money scheduled jobs invoke `istota-skill money <cmd>` with `MONEY_USER` set, instead of `MONEY_CONFIG=… money --user X <cmd>`.
 - The `[[resources]] type = "moneyman"` rendering now emits `type = "money"` (the loader still accepts both forms).
 - Ansible: `[moneyman]` block removed from `config.toml.j2`; the moneyman nginx include is dropped; standalone moneyman cron entries are no longer used (the istota scheduler runs them per-user).
 
+### Removed
+- `money.config` module (TTL cache, `set_loader`, mtime invalidation) — replaced by direct `resolve_for_user` calls.
+- `MONEY_WORKSPACE` / `MONEY_DATA_DIR` / `MONEY_CONFIG_DIR` / `MONEY_LEDGERS` / `MONEY_DB_PATH` environment variables and the `setup_env` hook on the money skill — no longer needed once the resolver runs in-process.
+- `web_app._install_money_loader` and the SIGHUP loader-reinstall step — replaced by setting `app.state.istota_config` after each config load.
+- Public-extract tooling for moneyman (`scripts/extract_money_to_standalone.py`, `scripts/check_money_isolation.sh`, `tests/test_money_extract.py`).
+
 ### Deprecated
 - `istota_moneyman_*` ansible vars (`api_url`, `api_key`, `cli_path`, `config_path`) — kept as no-ops for inventory compatibility but no longer rendered into config. Use the per-user `[[resources]] type = "money"` entry instead.
+
+### Fixed
+- Money skill in sandboxed task runs no longer fails with "Unknown user" for workspace-mode users (resource entry without `config_path`). The unified resolver handles workspace and legacy modes uniformly across web, skill, and scheduler call sites.
 
 ## [0.7.0] - 2026-04-24
 
