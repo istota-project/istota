@@ -119,7 +119,18 @@ def _install_money_loader() -> None:
             ).lstrip("/")
             data_dir_override = r.extra.get("data_dir")
             data_dir = Path(data_dir_override) if data_dir_override else None
-            return _money_synthesize(workspace, data_dir=data_dir)
+            config_dir_override = r.extra.get("config_dir")
+            config_dir = Path(config_dir_override) if config_dir_override else None
+            db_path_override = r.extra.get("db_path")
+            db_path = Path(db_path_override) if db_path_override else None
+            ledgers = r.extra.get("ledgers")
+            return _money_synthesize(
+                workspace,
+                data_dir=data_dir,
+                config_dir=config_dir,
+                ledgers=ledgers,
+                db_path=db_path,
+            )
 
         raise _MoneyUserNotFound(f"no money resource for user '{username}'")
 

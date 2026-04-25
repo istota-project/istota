@@ -61,22 +61,45 @@ class TestSynthesizeUserContext:
         assert ctx.tax_config_path is None
         assert ctx.monarch_config_path is None
         assert ctx.data_dir == (tmp_path / "money").resolve()
-        assert ctx.db_path == ctx.data_dir / "moneyman.db"
+        assert ctx.db_path == ctx.data_dir / "data" / "moneyman.db"
+        assert ctx.ledgers == [{
+            "name": "main",
+            "path": ctx.data_dir / "ledgers" / "main.beancount",
+        }]
 
-    def test_md_files_picked_up(self, tmp_path):
-        config_dir = tmp_path / "config"
-        config_dir.mkdir()
-        (config_dir / INVOICING_FILENAME).write_text("# Inv\n```toml\nx=1\n```\n")
-        (config_dir / TAX_FILENAME).write_text("# Tax\n```toml\nx=1\n```\n")
-        (config_dir / MONARCH_FILENAME).write_text("# Mon\n```toml\nx=1\n```\n")
+    def test_md_files_in_data_dir_config(self, tmp_path):
+        # Default config search prefers {data_dir}/config/
+        data_config = tmp_path / "money" / "config"
+        data_config.mkdir(parents=True)
+        (data_config / INVOICING_FILENAME).write_text("# Inv\n```toml\nx=1\n```\n")
+        (data_config / TAX_FILENAME).write_text("# Tax\n```toml\nx=1\n```\n")
+        (data_config / MONARCH_FILENAME).write_text("# Mon\n```toml\nx=1\n```\n")
         ctx = synthesize_user_context(tmp_path)
-        assert ctx.invoicing_config_path == config_dir / INVOICING_FILENAME
-        assert ctx.tax_config_path == config_dir / TAX_FILENAME
-        assert ctx.monarch_config_path == config_dir / MONARCH_FILENAME
+        assert ctx.invoicing_config_path == data_config / INVOICING_FILENAME
+        assert ctx.tax_config_path == data_config / TAX_FILENAME
+        assert ctx.monarch_config_path == data_config / MONARCH_FILENAME
+
+    def test_md_files_in_workspace_config(self, tmp_path):
+        # Falls back to {workspace}/config/ when {data_dir}/config/ is empty
+        ws_config = tmp_path / "config"
+        ws_config.mkdir()
+        (ws_config / INVOICING_FILENAME).write_text("# Inv\n```toml\nx=1\n```\n")
+        ctx = synthesize_user_context(tmp_path)
+        assert ctx.invoicing_config_path == ws_config / INVOICING_FILENAME
+
+    def test_data_dir_config_wins_over_workspace_config(self, tmp_path):
+        ws_config = tmp_path / "config"
+        ws_config.mkdir()
+        (ws_config / INVOICING_FILENAME).write_text("# WS\n```toml\nx=1\n```\n")
+        data_config = tmp_path / "money" / "config"
+        data_config.mkdir(parents=True)
+        (data_config / INVOICING_FILENAME).write_text("# Data\n```toml\nx=2\n```\n")
+        ctx = synthesize_user_context(tmp_path)
+        assert ctx.invoicing_config_path == data_config / INVOICING_FILENAME
 
     def test_legacy_toml_fallback(self, tmp_path):
-        config_dir = tmp_path / "config"
-        config_dir.mkdir()
+        config_dir = tmp_path / "money" / "config"
+        config_dir.mkdir(parents=True)
         (config_dir / "invoicing.toml").write_text("x = 1\n")
         (config_dir / "tax.toml").write_text("x = 1\n")
         (config_dir / "monarch.toml").write_text("x = 1\n")
@@ -85,23 +108,59 @@ class TestSynthesizeUserContext:
         assert ctx.tax_config_path == config_dir / "tax.toml"
         assert ctx.monarch_config_path == config_dir / "monarch.toml"
 
-    def test_md_takes_precedence_over_legacy(self, tmp_path):
-        config_dir = tmp_path / "config"
-        config_dir.mkdir()
-        (config_dir / INVOICING_FILENAME).write_text("# Inv\n```toml\nx=1\n```\n")
-        (config_dir / "invoicing.toml").write_text("x = 2\n")
+    def test_md_takes_precedence_over_legacy_across_dirs(self, tmp_path):
+        # Even if the legacy file is in the (preferred) {data_dir}/config dir,
+        # an .md in the (lower-priority) {workspace}/config dir wins because
+        # primary filenames are searched everywhere first.
+        ws_config = tmp_path / "config"
+        ws_config.mkdir()
+        (ws_config / INVOICING_FILENAME).write_text("# Inv\n```toml\nx=1\n```\n")
+        data_config = tmp_path / "money" / "config"
+        data_config.mkdir(parents=True)
+        (data_config / "invoicing.toml").write_text("x = 2\n")
         ctx = synthesize_user_context(tmp_path)
-        assert ctx.invoicing_config_path == config_dir / INVOICING_FILENAME
+        assert ctx.invoicing_config_path == ws_config / INVOICING_FILENAME
+
+    def test_explicit_config_dir_overrides_search(self, tmp_path):
+        explicit = tmp_path / "elsewhere"
+        explicit.mkdir()
+        (explicit / INVOICING_FILENAME).write_text("# Inv\n```toml\nx=1\n```\n")
+        # Sentinel files in default dirs that should be ignored
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / INVOICING_FILENAME).write_text("# WS\n```toml\nx=2\n```\n")
+        ctx = synthesize_user_context(tmp_path, config_dir=explicit)
+        assert ctx.invoicing_config_path == explicit / INVOICING_FILENAME
 
     def test_data_dir_override(self, tmp_path):
         custom = tmp_path / "elsewhere"
         ctx = synthesize_user_context(tmp_path, data_dir=custom)
         assert ctx.data_dir == custom.resolve()
-        assert ctx.db_path == custom.resolve() / "moneyman.db"
+        assert ctx.db_path == custom.resolve() / "data" / "moneyman.db"
+
+    def test_db_path_override(self, tmp_path):
+        custom_db = tmp_path / "custom.db"
+        ctx = synthesize_user_context(tmp_path, db_path=custom_db)
+        assert ctx.db_path == custom_db
+
+    def test_ledgers_short_form_strings(self, tmp_path):
+        ctx = synthesize_user_context(tmp_path, ledgers=["cynium", "personal"])
+        data_dir = (tmp_path / "money").resolve()
+        assert ctx.ledgers == [
+            {"name": "cynium", "path": data_dir / "ledgers" / "cynium.beancount"},
+            {"name": "personal", "path": data_dir / "ledgers" / "personal.beancount"},
+        ]
+
+    def test_ledgers_explicit_dicts(self, tmp_path):
+        custom = tmp_path / "elsewhere.beancount"
+        ctx = synthesize_user_context(
+            tmp_path, ledgers=[{"name": "main", "path": str(custom)}],
+        )
+        assert ctx.ledgers == [{"name": "main", "path": custom}]
 
     def test_list_workspace_features(self, tmp_path):
-        config_dir = tmp_path / "config"
-        config_dir.mkdir()
+        # Mirror the new search order: {data_dir}/config/ preferred
+        config_dir = tmp_path / "money" / "config"
+        config_dir.mkdir(parents=True)
         (config_dir / INVOICING_FILENAME).write_text("```toml\nx=1\n```\n")
         (config_dir / "monarch.toml").write_text("x = 1\n")
         feats = list_workspace_features(tmp_path)
