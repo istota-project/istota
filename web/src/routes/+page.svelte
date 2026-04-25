@@ -43,6 +43,12 @@
 					<div class="feature-desc">GPS tracking and map</div>
 				</a>
 			{/if}
+			{#if user.features.money}
+				<a href="{base}/money" class="feature-card">
+					<div class="feature-title">Money</div>
+					<div class="feature-desc">Accounts, transactions, and reports</div>
+				</a>
+			{/if}
 			{#if user.features.google_workspace}
 				<div class="feature-card">
 					<div class="feature-title">Google Workspace</div>
