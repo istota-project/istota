@@ -288,3 +288,46 @@ class TestMigrationScript:
         mod = self._import_script()
         mod.migrate(src, dst, dry_run=True)
         assert not dst.exists() or not any(dst.iterdir())
+
+
+class TestLoadUserSecrets:
+    """load_user_secrets returns per-user money credentials.
+
+    Resolution order: MONEY_SECRETS_FILE env var, then
+    /etc/{namespace}/secrets/{user_id}/money.toml.
+    """
+
+    def _cfg(self, namespace=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(namespace=namespace)
+
+    def test_reads_from_env_var_when_set(self, monkeypatch, tmp_path):
+        from istota.money import load_user_secrets
+
+        secrets_file = tmp_path / "money.toml"
+        secrets_file.write_text('[monarch]\nsession_token = "tok-from-env"\n')
+        monkeypatch.setenv("MONEY_SECRETS_FILE", str(secrets_file))
+
+        result = load_user_secrets("alice", self._cfg())
+        assert result["monarch"]["session_token"] == "tok-from-env"
+
+    def test_falls_back_to_namespace_path(self, monkeypatch, tmp_path):
+        from istota.money import load_user_secrets
+
+        monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
+        # We can't write to /etc/ in tests; mock the path lookup instead.
+        with monkeypatch.context() as m:
+            fake_path = tmp_path / "money.toml"
+            fake_path.write_text('[monarch]\nsession_token = "tok-fallback"\n')
+            m.setattr(
+                "istota.money._loader.Path",
+                lambda p: fake_path if p.startswith("/etc/") else __import__("pathlib").Path(p),
+            )
+            result = load_user_secrets("alice", self._cfg(namespace="istota"))
+        assert result["monarch"]["session_token"] == "tok-fallback"
+
+    def test_returns_empty_when_file_missing(self, monkeypatch, tmp_path):
+        from istota.money import load_user_secrets
+
+        monkeypatch.setenv("MONEY_SECRETS_FILE", str(tmp_path / "does-not-exist.toml"))
+        assert load_user_secrets("alice", self._cfg()) == {}

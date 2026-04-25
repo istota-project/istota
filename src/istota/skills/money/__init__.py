@@ -17,21 +17,27 @@ def _run(args: list[str]) -> dict:
     from click.testing import CliRunner
 
     from istota.config import load_config
-    from istota.money import UserNotFoundError, resolve_for_user
+    from istota.money import (
+        UserNotFoundError,
+        load_user_secrets,
+        resolve_for_user,
+    )
     from istota.money.cli import Context, cli
 
     user_id = os.environ.get("MONEY_USER", "") or ""
     if not user_id:
         return {"status": "error", "error": "MONEY_USER not set"}
 
+    istota_cfg = load_config()
     try:
-        user_ctx = resolve_for_user(user_id, load_config())
+        user_ctx = resolve_for_user(user_id, istota_cfg)
     except UserNotFoundError as e:
         return {"status": "error", "error": str(e)}
 
     obj = Context()
     obj.users[user_id] = user_ctx
     obj.activate_user(user_id)
+    obj.secrets = load_user_secrets(user_id, istota_cfg) or None
 
     runner = CliRunner()
     result = runner.invoke(
