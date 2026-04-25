@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from money.core.ledger import (
+from istota.money.core.ledger import (
     run_bean_check,
     run_bean_query,
     check,
@@ -18,11 +18,11 @@ from money.core.ledger import (
     detect_wash_sales,
     wash_sales,
 )
-from money.core.models import PurchaseTransaction, SaleTransaction
+from istota.money.core.models import PurchaseTransaction, SaleTransaction
 
 
 class TestBeanCheck:
-    @patch("money.core.ledger.subprocess.run")
+    @patch("istota.money.core.ledger.subprocess.run")
     def test_success(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         success, errors = run_bean_check(Path("/test/ledger.beancount"))
@@ -30,7 +30,7 @@ class TestBeanCheck:
         assert errors == []
         assert "bean-check" in mock_run.call_args[0][0][0]
 
-    @patch("money.core.ledger.subprocess.run")
+    @patch("istota.money.core.ledger.subprocess.run")
     def test_errors(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=1,
@@ -41,13 +41,13 @@ class TestBeanCheck:
         assert len(errors) == 2
         assert "Invalid account" in errors[0]
 
-    @patch("money.core.ledger.subprocess.run")
+    @patch("istota.money.core.ledger.subprocess.run")
     def test_not_found(self, mock_run):
         mock_run.side_effect = FileNotFoundError()
         with pytest.raises(ValueError, match="bean-check not found"):
             run_bean_check(Path("/test/ledger.beancount"))
 
-    @patch("money.core.ledger.subprocess.run")
+    @patch("istota.money.core.ledger.subprocess.run")
     def test_timeout(self, mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="bean-check", timeout=60)
         with pytest.raises(ValueError, match="timed out"):
@@ -55,7 +55,7 @@ class TestBeanCheck:
 
 
 class TestBeanQuery:
-    @patch("money.core.ledger.subprocess.run")
+    @patch("istota.money.core.ledger.subprocess.run")
     def test_success(self, mock_run):
         csv_output = "account,sum(position)\nAssets:Bank,1000 USD\nExpenses:Food,500 USD\n"
         mock_run.return_value = MagicMock(returncode=0, stdout=csv_output, stderr="")
@@ -63,13 +63,13 @@ class TestBeanQuery:
         assert len(result) == 2
         assert result[0]["account"] == "Assets:Bank"
 
-    @patch("money.core.ledger.subprocess.run")
+    @patch("istota.money.core.ledger.subprocess.run")
     def test_empty_result(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         result = run_bean_query(Path("/test/ledger.beancount"), "SELECT * WHERE 1=0")
         assert result == []
 
-    @patch("money.core.ledger.subprocess.run")
+    @patch("istota.money.core.ledger.subprocess.run")
     def test_error(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Invalid query syntax")
         with pytest.raises(ValueError, match="Invalid query syntax"):
@@ -77,7 +77,7 @@ class TestBeanQuery:
 
 
 class TestCheck:
-    @patch("money.core.ledger.run_bean_check")
+    @patch("istota.money.core.ledger.run_bean_check")
     def test_success(self, mock_check, tmp_path):
         ledger = tmp_path / "ledger.beancount"
         ledger.write_text("")
@@ -86,7 +86,7 @@ class TestCheck:
         assert result["status"] == "ok"
         assert result["error_count"] == 0
 
-    @patch("money.core.ledger.run_bean_check")
+    @patch("istota.money.core.ledger.run_bean_check")
     def test_with_errors(self, mock_check, tmp_path):
         ledger = tmp_path / "ledger.beancount"
         ledger.write_text("")
@@ -102,7 +102,7 @@ class TestCheck:
 
 
 class TestBalances:
-    @patch("money.core.ledger.run_bean_query")
+    @patch("istota.money.core.ledger.run_bean_query")
     def test_all_accounts(self, mock_query):
         mock_query.return_value = [
             {"account": "Assets:Bank", "sum(position)": "1000 USD"},
@@ -112,7 +112,7 @@ class TestBalances:
         assert result["status"] == "ok"
         assert result["account_count"] == 2
 
-    @patch("money.core.ledger.run_bean_query")
+    @patch("istota.money.core.ledger.run_bean_query")
     def test_with_filter(self, mock_query):
         mock_query.return_value = [{"account": "Assets:Bank", "sum(position)": "1000 USD"}]
         result = balances(Path("/test/ledger.beancount"), account="Assets:Bank")
@@ -121,7 +121,7 @@ class TestBalances:
 
 
 class TestQuery:
-    @patch("money.core.ledger.run_bean_query")
+    @patch("istota.money.core.ledger.run_bean_query")
     def test_success(self, mock_query):
         mock_query.return_value = [{"date": "2026-01-15", "payee": "Store"}]
         result = query(Path("/test/ledger.beancount"), "SELECT date, payee LIMIT 1")
@@ -130,7 +130,7 @@ class TestQuery:
 
 
 class TestReport:
-    @patch("money.core.ledger.run_bean_query")
+    @patch("istota.money.core.ledger.run_bean_query")
     def test_income_statement(self, mock_query):
         mock_query.return_value = [
             {"account": "Income:Salary", "sum(position)": "-60000 USD"},
@@ -146,7 +146,7 @@ class TestReport:
 
 
 class TestLots:
-    @patch("money.core.ledger.run_bean_query")
+    @patch("istota.money.core.ledger.run_bean_query")
     def test_success(self, mock_query):
         mock_query.return_value = [
             {"account": "Assets:Investment", "units(position)": "10 AAPL"}

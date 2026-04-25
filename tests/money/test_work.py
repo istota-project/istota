@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from money.work import (
+from istota.money.work import (
     add_work_entry,
     assign_invoice_number,
     get_entries_for_invoice,

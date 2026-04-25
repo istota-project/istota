@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from money.core.dedup import compute_transaction_hash, parse_ledger_transactions
+from istota.money.core.dedup import compute_transaction_hash, parse_ledger_transactions
 
 
 class TestComputeTransactionHash:

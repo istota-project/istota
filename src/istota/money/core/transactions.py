@@ -175,7 +175,7 @@ def parse_monarch_config(
         secrets: Optional dict from secrets file. If present, secrets["monarch"]
                  fields override credentials from the config file.
     """
-    from money._config_io import read_toml_config
+    from istota.money._config_io import read_toml_config
     data = read_toml_config(config_path)
 
     monarch = data.get("monarch", {})
@@ -492,7 +492,7 @@ def sync_monarch(
     ledger_hashes = parse_ledger_transactions(ledger_path)
 
     if db_conn is not None:
-        from money.db import (
+        from istota.money.db import (
             is_content_hash_synced,
             is_monarch_transaction_synced,
             get_active_monarch_synced_transactions,
@@ -698,7 +698,7 @@ def sync_monarch(
 
     # Track in DB
     if db_conn is not None:
-        from money.db import (
+        from istota.money.db import (
             track_monarch_transactions_batch,
             mark_monarch_transaction_recategorized,
             update_monarch_transaction_posted_account,

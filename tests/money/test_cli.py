@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from money.cli import cli, _resolve
+from istota.money.cli import cli, _resolve
 
 
 @pytest.fixture
@@ -115,7 +115,7 @@ class TestSecretsFile:
 
         # We can verify the secrets are loaded by attempting a sync
         # (it will fail at the API call, but we can patch to check the config)
-        with patch("money.core.transactions.sync_monarch") as mock_sync:
+        with patch("istota.money.core.transactions.sync_monarch") as mock_sync:
             mock_sync.return_value = {"status": "ok", "message": "test"}
             result = runner.invoke(cli, ["-c", str(config), "sync-monarch"])
             assert result.exit_code == 0
@@ -191,7 +191,7 @@ class TestListCommand:
 
 
 class TestCheckCommand:
-    @patch("money.core.ledger.run_bean_check")
+    @patch("istota.money.core.ledger.run_bean_check")
     def test_check_success(self, mock_check, runner, config_file):
         config, ledger = config_file
         ledger.write_text("content")
@@ -203,7 +203,7 @@ class TestCheckCommand:
 
 
 class TestBalancesCommand:
-    @patch("money.core.ledger.run_bean_query")
+    @patch("istota.money.core.ledger.run_bean_query")
     def test_balances(self, mock_query, runner, config_file):
         config, _ = config_file
         mock_query.return_value = [{"account": "Assets:Bank", "sum(position)": "1000 USD"}]
@@ -214,7 +214,7 @@ class TestBalancesCommand:
 
 
 class TestQueryCommand:
-    @patch("money.core.ledger.run_bean_query")
+    @patch("istota.money.core.ledger.run_bean_query")
     def test_query(self, mock_query, runner, config_file):
         config, _ = config_file
         mock_query.return_value = []
@@ -223,7 +223,7 @@ class TestQueryCommand:
 
 
 class TestReportCommand:
-    @patch("money.core.ledger.run_bean_query")
+    @patch("istota.money.core.ledger.run_bean_query")
     def test_income_statement(self, mock_query, runner, config_file):
         config, _ = config_file
         mock_query.return_value = []
@@ -232,7 +232,7 @@ class TestReportCommand:
 
 
 class TestWashSalesCommand:
-    @patch("money.core.ledger.run_bean_query")
+    @patch("istota.money.core.ledger.run_bean_query")
     def test_wash_sales(self, mock_query, runner, config_file):
         config, _ = config_file
         mock_query.return_value = []
@@ -266,7 +266,7 @@ def invoicing_setup(tmp_path):
 
 
 class TestInvoiceCreate:
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_service_creates_db_entries(self, mock_pdf, runner, invoicing_setup):
         config, _ = invoicing_setup
         result = runner.invoke(cli, [
@@ -289,7 +289,7 @@ class TestInvoiceCreate:
         assert entry["qty"] == 8
         assert entry["invoice"] == "INV-000001"
 
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_manual_item_creates_db_entries(self, mock_pdf, runner, invoicing_setup):
         config, _ = invoicing_setup
         result = runner.invoke(cli, [
@@ -309,7 +309,7 @@ class TestInvoiceCreate:
         assert entry["amount"] == 500.0
         assert entry["invoice"] == "INV-000001"
 
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_mixed_service_and_manual(self, mock_pdf, runner, invoicing_setup):
         config, _ = invoicing_setup
         result = runner.invoke(cli, [
@@ -325,7 +325,7 @@ class TestInvoiceCreate:
         output = json.loads(result.output)
         assert output["count"] == 2
 
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_visible_in_invoice_list(self, mock_pdf, runner, invoicing_setup):
         config, _ = invoicing_setup
         runner.invoke(cli, [
@@ -341,7 +341,7 @@ class TestInvoiceCreate:
         assert output["invoices"][0]["total"] == 1200.0
         assert output["invoices"][0]["status"] == "outstanding"
 
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_increments_invoice_number(self, mock_pdf, runner, invoicing_setup):
         config, invoicing = invoicing_setup
         runner.invoke(cli, [
@@ -381,7 +381,7 @@ class TestInvoiceCreate:
 
 
 class TestInvoicePaid:
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_ledger_posting_false_skips_post(self, mock_pdf, runner, tmp_path):
         """When client has ledger_posting = false, invoice paid skips ledger entry."""
         invoicing = tmp_path / "invoicing.toml"
@@ -430,7 +430,7 @@ class TestInvoicePaid:
 
 
 class TestInvoiceVoid:
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_void_unpaid_invoice(self, mock_pdf, runner, invoicing_setup):
         config, _ = invoicing_setup
         # Create an invoice
@@ -451,7 +451,7 @@ class TestInvoiceVoid:
         output = json.loads(result.output)
         assert output["count"] == 1
 
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_void_paid_invoice_blocked(self, mock_pdf, runner, invoicing_setup):
         config, _ = invoicing_setup
         runner.invoke(cli, [
@@ -469,7 +469,7 @@ class TestInvoiceVoid:
         assert output["status"] == "error"
         assert "paid" in output["error"].lower()
 
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_void_paid_invoice_with_force(self, mock_pdf, runner, invoicing_setup):
         config, _ = invoicing_setup
         runner.invoke(cli, [
@@ -497,7 +497,7 @@ class TestInvoiceVoid:
         assert output["status"] == "error"
         assert "not found" in output["error"].lower()
 
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_void_then_reinvoice(self, mock_pdf, runner, invoicing_setup):
         config, invoicing = invoicing_setup
         # Create and void
@@ -522,7 +522,7 @@ class TestInvoiceVoid:
         assert output["invoice_number"] == "INV-000002"
 
 
-    @patch("money.core.invoicing.generate_invoice_pdf")
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_void_with_delete_pdf(self, mock_pdf, runner, invoicing_setup):
         config, _ = invoicing_setup
         runner.invoke(cli, [
@@ -557,7 +557,7 @@ class TestSyncMonarchProfiles:
             f'[[ledgers]]\nname = "default"\npath = "{ledger}"\n'
         )
 
-        with patch("money.core.transactions.sync_all_profiles") as mock_sync:
+        with patch("istota.money.core.transactions.sync_all_profiles") as mock_sync:
             mock_sync.return_value = {"status": "ok", "message": "test"}
             result = runner.invoke(cli, ["-c", str(config), "sync-monarch"])
             assert result.exit_code == 0, result.output
@@ -583,9 +583,9 @@ class TestSyncMonarchProfiles:
             f'[[ledgers]]\nname = "biz"\npath = "{biz_ledger}"\n'
         )
 
-        with patch("money.core.transactions.fetch_monarch_transactions") as mock_fetch:
+        with patch("istota.money.core.transactions.fetch_monarch_transactions") as mock_fetch:
             mock_fetch.return_value = []
-            with patch("money.core.transactions.sync_monarch") as mock_sync:
+            with patch("istota.money.core.transactions.sync_monarch") as mock_sync:
                 mock_sync.return_value = {"status": "ok", "transaction_count": 0}
                 result = runner.invoke(cli, ["-c", str(config), "sync-monarch", "-l", "biz"])
                 assert result.exit_code == 0, result.output
@@ -598,7 +598,7 @@ class TestHelp:
     def test_main_help(self, runner):
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        assert "Moneyman" in result.output
+        assert "Money" in result.output
 
     def test_work_help(self, runner):
         result = runner.invoke(cli, ["work", "--help"])
@@ -750,7 +750,7 @@ class TestMultiUserCli:
 
 class TestMultiUserLoadContext:
     def test_multi_user_context_structure(self, multi_user_config):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         config, bob_dir, alice_dir = multi_user_config
         ctx = load_context(config_path=str(config))
         assert len(ctx.users) == 2
@@ -760,7 +760,7 @@ class TestMultiUserLoadContext:
         assert ctx.users["alice"].data_dir == alice_dir
 
     def test_for_user_returns_independent_copy(self, multi_user_config):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         config, bob_dir, alice_dir = multi_user_config
         ctx = load_context(config_path=str(config))
         bob_ctx = ctx.for_user("bob")
@@ -770,14 +770,14 @@ class TestMultiUserLoadContext:
         assert bob_ctx.data_dir != alice_ctx.data_dir
 
     def test_for_user_unknown_raises(self, multi_user_config):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         config, _, _ = multi_user_config
         ctx = load_context(config_path=str(config))
         with pytest.raises(Exception, match="Unknown user"):
             ctx.for_user("nobody")
 
     def test_legacy_config_creates_default_user(self, tmp_path):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         ledger = tmp_path / "main.beancount"
         ledger.write_text("")
         config = tmp_path / "config.toml"
@@ -791,14 +791,14 @@ class TestMultiUserLoadContext:
         assert ctx.has_single_user
 
     def test_multi_user_not_single(self, multi_user_config):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         config, _, _ = multi_user_config
         ctx = load_context(config_path=str(config))
         assert not ctx.has_single_user
         assert sorted(ctx.available_users) == ["alice", "bob"]
 
     def test_invoicing_and_monarch_per_user(self, tmp_path):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         user_dir = tmp_path / "userdata"
         user_dir.mkdir()
         (user_dir / "invoicing.toml").write_text("")
@@ -816,138 +816,26 @@ class TestMultiUserLoadContext:
         assert uctx.monarch_config_path == user_dir / "monarch.toml"
 
 
-class TestWorkspaceMode:
-    """MONEY_WORKSPACE env var triggers workspace-mode synthesis.
+class TestInjectedContext:
+    """Callers (the istota money skill) build a Context and inject via obj=."""
 
-    The skill (and any non-istota standalone caller) sets MONEY_WORKSPACE to
-    point at an istota workspace dir; load_context synthesizes a UserContext
-    via money.workspace.synthesize_user_context and registers it under
-    MONEY_USER (defaulting to "default"). MONEY_CONFIG keeps precedence.
-    """
+    def test_pre_built_context_skips_load_context(self, runner, tmp_path):
+        """When obj has users, the cli() group does not try to load a config file."""
+        from istota.money.cli import Context, UserContext, cli
 
-    def test_synthesizes_user_from_workspace_env(self, monkeypatch, tmp_path):
-        from money.cli import load_context
-        workspace = tmp_path / "stefan" / "istota"
-        (workspace / "config").mkdir(parents=True)
-        (workspace / "config" / "INVOICING.md").write_text(
-            "# Invoicing\n\n```toml\nplaceholder = true\n```\n"
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("")
+        obj = Context()
+        obj.users["alice"] = UserContext(
+            data_dir=tmp_path,
+            ledgers=[{"name": "main", "path": ledger}],
         )
+        obj.activate_user("alice")
 
-        monkeypatch.delenv("MONEY_CONFIG", raising=False)
-        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
-        monkeypatch.setenv("MONEY_USER", "stefan")
-
-        ctx = load_context()
-        assert "stefan" in ctx.users
-        uctx = ctx.users["stefan"]
-        assert uctx.data_dir == workspace / "money"
-        assert uctx.invoicing_config_path == workspace / "config" / "INVOICING.md"
-
-    def test_workspace_mode_activates_user(self, monkeypatch, tmp_path):
-        from money.cli import load_context
-        workspace = tmp_path / "stefan" / "istota"
-        workspace.mkdir(parents=True)
-
-        monkeypatch.delenv("MONEY_CONFIG", raising=False)
-        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
-        monkeypatch.setenv("MONEY_USER", "stefan")
-
-        ctx = load_context()
-        assert ctx.active_user == "stefan"
-        assert ctx.data_dir == workspace / "money"
-
-    def test_workspace_mode_defaults_user_to_default(self, monkeypatch, tmp_path):
-        from money.cli import load_context
-        workspace = tmp_path / "ws"
-        workspace.mkdir()
-
-        monkeypatch.delenv("MONEY_CONFIG", raising=False)
-        monkeypatch.delenv("MONEY_USER", raising=False)
-        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
-
-        ctx = load_context()
-        assert "default" in ctx.users
-        assert ctx.active_user == "default"
-
-    def test_workspace_data_dir_override(self, monkeypatch, tmp_path):
-        from money.cli import load_context
-        workspace = tmp_path / "ws"
-        workspace.mkdir()
-        custom_data = tmp_path / "custom_data"
-        custom_data.mkdir()
-
-        monkeypatch.delenv("MONEY_CONFIG", raising=False)
-        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
-        monkeypatch.setenv("MONEY_DATA_DIR", str(custom_data))
-        monkeypatch.setenv("MONEY_USER", "alice")
-
-        ctx = load_context()
-        assert ctx.users["alice"].data_dir == custom_data
-
-    def test_workspace_ledgers_override_via_json(self, monkeypatch, tmp_path):
-        from money.cli import load_context
-        workspace = tmp_path / "ws"
-        workspace.mkdir()
-
-        monkeypatch.delenv("MONEY_CONFIG", raising=False)
-        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
-        monkeypatch.setenv("MONEY_LEDGERS", json.dumps(["personal", "business"]))
-        monkeypatch.setenv("MONEY_USER", "alice")
-
-        ctx = load_context()
-        ledgers = ctx.users["alice"].ledgers
-        assert [l["name"] for l in ledgers] == ["personal", "business"]
-        assert ledgers[0]["path"] == workspace / "money" / "ledgers" / "personal.beancount"
-
-    def test_workspace_config_dir_override(self, monkeypatch, tmp_path):
-        from money.cli import load_context
-        workspace = tmp_path / "ws"
-        workspace.mkdir()
-        explicit_config_dir = tmp_path / "explicit_cfg"
-        explicit_config_dir.mkdir()
-        (explicit_config_dir / "INVOICING.md").write_text(
-            "# x\n\n```toml\nfoo = 1\n```\n"
-        )
-
-        monkeypatch.delenv("MONEY_CONFIG", raising=False)
-        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
-        monkeypatch.setenv("MONEY_CONFIG_DIR", str(explicit_config_dir))
-        monkeypatch.setenv("MONEY_USER", "alice")
-
-        ctx = load_context()
-        assert ctx.users["alice"].invoicing_config_path == explicit_config_dir / "INVOICING.md"
-
-    def test_money_config_takes_precedence_over_workspace(self, monkeypatch, tmp_path):
-        from money.cli import load_context
-        workspace = tmp_path / "ws"
-        workspace.mkdir()
-        config = tmp_path / "config.toml"
-        config.write_text(
-            f'[users.alice]\n'
-            f'data_dir = "{tmp_path / "alice_data"}"\n'
-        )
-        (tmp_path / "alice_data").mkdir()
-
-        monkeypatch.setenv("MONEY_CONFIG", str(config))
-        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
-        monkeypatch.setenv("MONEY_USER", "alice")
-
-        ctx = load_context()
-        # Legacy mode wins: workspace-synthesized user is not present
-        assert ctx.users["alice"].data_dir == tmp_path / "alice_data"
-        assert ctx.users["alice"].data_dir != workspace / "money"
-
-    def test_workspace_command_runs_without_config(self, monkeypatch, tmp_path, runner):
-        """End-to-end: `money -u stefan list` works with only MONEY_WORKSPACE set."""
-        from money.cli import cli
-        workspace = tmp_path / "stefan" / "istota"
-        workspace.mkdir(parents=True)
-
-        monkeypatch.delenv("MONEY_CONFIG", raising=False)
-        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
-
-        result = runner.invoke(cli, ["-u", "stefan", "list"])
+        # No -c flag, no MONEY_CONFIG env var — load_context would normally
+        # find nothing, but the injected obj is preferred.
+        result = runner.invoke(cli, ["-u", "alice", "list"], obj=obj)
         assert result.exit_code == 0, result.output
         output = json.loads(result.output)
         assert output["status"] == "ok"
-        assert output["ledger_count"] == 1  # default 'main' ledger
+        assert output["ledger_count"] == 1

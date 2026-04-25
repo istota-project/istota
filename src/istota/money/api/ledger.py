@@ -5,9 +5,9 @@ from __future__ import annotations
 import click
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from money.api.deps import get_ctx, get_ledger_path
-from money.api.models import QueryRequest
-from money.cli import Context
+from istota.money.api.deps import get_ctx, get_ledger_path
+from istota.money.api.models import QueryRequest
+from istota.money.cli import Context
 
 router = APIRouter()
 
@@ -28,7 +28,7 @@ def check_ledger(
     ledger: str | None = Query(None),
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.ledger import check
+    from istota.money.core.ledger import check
 
     try:
         path = get_ledger_path(ledger, ctx)
@@ -43,7 +43,7 @@ def balances(
     ledger: str | None = Query(None),
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.ledger import balances as ledger_balances
+    from istota.money.core.ledger import balances as ledger_balances
 
     try:
         path = get_ledger_path(ledger, ctx)
@@ -57,7 +57,7 @@ def query(
     req: QueryRequest,
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.ledger import query as ledger_query
+    from istota.money.core.ledger import query as ledger_query
 
     try:
         path = get_ledger_path(req.ledger, ctx)
@@ -73,7 +73,7 @@ def report(
     ledger: str | None = Query(None),
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.ledger import report as ledger_report
+    from istota.money.core.ledger import report as ledger_report
 
     if report_type not in ("income-statement", "balance-sheet", "cash-flow"):
         raise HTTPException(status_code=400, detail=f"Unknown report type: {report_type}")
@@ -91,7 +91,7 @@ def lots(
     ledger: str | None = Query(None),
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.ledger import lots as ledger_lots
+    from istota.money.core.ledger import lots as ledger_lots
 
     try:
         path = get_ledger_path(ledger, ctx)
@@ -106,7 +106,7 @@ def wash_sales(
     ledger: str | None = Query(None),
     ctx: Context = Depends(get_ctx),
 ):
-    from money.core.ledger import wash_sales as ledger_wash_sales
+    from istota.money.core.ledger import wash_sales as ledger_wash_sales
 
     try:
         path = get_ledger_path(ledger, ctx)

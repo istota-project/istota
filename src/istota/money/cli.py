@@ -140,7 +140,7 @@ def _get_db_conn(ctx: Context):
     if not ctx.db_path:
         return None
     import sqlite3
-    from money.db import init_db
+    from istota.money.db import init_db
     ctx.db_path.parent.mkdir(parents=True, exist_ok=True)
     init_db(ctx.db_path)
     conn = sqlite3.connect(str(ctx.db_path))
@@ -156,7 +156,7 @@ def _load_invoicing_config(ctx: Context):
     that PDF writes always land inside the data directory, regardless of what
     ``accounting_path`` points to.
     """
-    from money.core.invoicing import parse_invoicing_config
+    from istota.money.core.invoicing import parse_invoicing_config
     if not ctx.invoicing_config_path:
         raise click.ClickException("No invoicing_config set in config")
     if not ctx.invoicing_config_path.exists():
@@ -220,55 +220,18 @@ def _parse_user_context(user_data: dict, config_dir: Path) -> UserContext:
     )
 
 
-def _load_workspace_context(mctx: Context, workspace: str) -> Context:
-    """Synthesize a UserContext from a workspace dir and register it under MONEY_USER.
-
-    Used when no money config file is configured but the caller (typically the
-    istota money skill) has pointed MONEY_WORKSPACE at a user's istota
-    workspace. Mirrors the workspace-mode loader used by istota.web_app.
-    """
-    import json
-    import os
-
-    from money.workspace import synthesize_user_context
-
-    user_key = os.environ.get("MONEY_USER", "") or "default"
-
-    data_dir_env = os.environ.get("MONEY_DATA_DIR", "")
-    config_dir_env = os.environ.get("MONEY_CONFIG_DIR", "")
-    ledgers_env = os.environ.get("MONEY_LEDGERS", "")
-    db_path_env = os.environ.get("MONEY_DB_PATH", "")
-
-    kwargs: dict = {}
-    if data_dir_env:
-        kwargs["data_dir"] = Path(data_dir_env)
-    if config_dir_env:
-        kwargs["config_dir"] = Path(config_dir_env)
-    if db_path_env:
-        kwargs["db_path"] = Path(db_path_env)
-    if ledgers_env:
-        kwargs["ledgers"] = json.loads(ledgers_env)
-
-    uctx = synthesize_user_context(Path(workspace), **kwargs)
-    mctx.users[user_key] = uctx
-    mctx.activate_user(user_key)
-    return mctx
-
-
 def load_context(config_path: str | None = None) -> Context:
-    """Load configuration and return a Context.
+    """Load configuration from a money config TOML file and return a Context.
 
-    Config is found via: explicit path, MONEY_CONFIG env var, MONEY_WORKSPACE
-    workspace synthesis, or ./config.toml.
+    Config is found via: explicit path, ``MONEY_CONFIG`` env var, or
+    ``./config.toml``. Returns an empty :class:`Context` when no file is
+    configured. Supports multi-user configs with a ``[users]`` section;
+    a top-level ``data_dir`` creates a single implicit ``default`` user.
 
-    Supports multi-user configs with a [users] section. When no [users] section
-    exists but a top-level data_dir is present, creates a single implicit "default"
-    user for backward compatibility.
-
-    Workspace mode: if MONEY_WORKSPACE is set (and no config file is found),
-    synthesize a UserContext from the workspace dir using money.workspace.
-    The user is registered under MONEY_USER (defaulting to "default"), and
-    MONEY_DATA_DIR / MONEY_CONFIG_DIR / MONEY_LEDGERS override the defaults.
+    Workspace-mode resolution lives in :mod:`istota.money._loader`. The
+    in-process skill resolves a UserContext there and injects it into
+    Click via ``runner.invoke(cli, args, obj=...)``, so this loader only
+    handles the standalone-CLI case.
     """
     import os
 
@@ -283,9 +246,6 @@ def load_context(config_path: str | None = None) -> Context:
         if cwd_config.exists():
             config_path = str(cwd_config)
     if not config_path:
-        workspace_env = os.environ.get("MONEY_WORKSPACE", "")
-        if workspace_env:
-            return _load_workspace_context(mctx, workspace_env)
         return mctx
 
     config_file = Path(config_path)
@@ -364,17 +324,18 @@ def load_context(config_path: str | None = None) -> Context:
 @click.option("--user", "-u", "user_key", help="User key from config (required when multiple users configured)")
 @click.pass_context
 def cli(ctx, config_path, user_key):
-    """Moneyman — standalone accounting operations."""
+    """Money — accounting operations CLI."""
+    # Callers running the CLI in-process (the istota money skill) build a
+    # Context with the resolved UserContext and inject it via
+    # CliRunner.invoke(obj=...). Skip file-based loading in that case.
+    if isinstance(ctx.obj, Context) and ctx.obj.users:
+        if user_key and user_key in ctx.obj.users:
+            ctx.obj.activate_user(user_key)
+        return
+
     ctx.ensure_object(Context)
     mctx = load_context(config_path)
     if user_key:
-        # Workspace mode synthesizes a single user under MONEY_USER (or "default").
-        # When --user is given but doesn't match, re-key to the requested name.
-        if user_key not in mctx.users and len(mctx.users) == 1:
-            existing = next(iter(mctx.users))
-            mctx.users[user_key] = mctx.users.pop(existing)
-            if mctx.active_user == existing:
-                mctx.active_user = user_key
         if user_key not in mctx.users:
             raise click.ClickException(
                 f"Unknown user: {user_key}. Available: {', '.join(mctx.available_users)}"
@@ -382,7 +343,6 @@ def cli(ctx, config_path, user_key):
         mctx.activate_user(user_key)
     elif not mctx.has_single_user and mctx.active_user is None:
         # Multi-user config with no --user: defer error to commands that need it.
-        # The 'users' command works without --user.
         pass
     ctx.obj = mctx
 
@@ -429,7 +389,7 @@ def work():
 @pass_ctx
 def work_add(ctx, entry_date, client, service, qty, amount, discount, description, entity):
     """Add a work entry."""
-    from money.work import add_work_entry
+    from istota.money.work import add_work_entry
 
     try:
         datetime.strptime(entry_date, "%Y-%m-%d")
@@ -454,7 +414,7 @@ def work_add(ctx, entry_date, client, service, qty, amount, discount, descriptio
 @pass_ctx
 def work_list(ctx, client, period, uninvoiced, invoiced):
     """List work entries."""
-    from money.work import list_work_entries
+    from istota.money.work import list_work_entries
 
     invoiced_filter = None
     if uninvoiced:
@@ -492,7 +452,7 @@ def work_list(ctx, client, period, uninvoiced, invoiced):
 @pass_ctx
 def work_remove(ctx, entry_id):
     """Remove an uninvoiced work entry."""
-    from money.work import remove_work_entry
+    from istota.money.work import remove_work_entry
 
     data_dir = _require_data_dir(ctx)
     if remove_work_entry(data_dir, entry_id):
@@ -515,7 +475,7 @@ def work_remove(ctx, entry_id):
 @pass_ctx
 def work_update(ctx, entry_id, entry_date, client, service, qty, amount, discount, description, entity, invoice):
     """Update a work entry."""
-    from money.work import update_work_entry
+    from istota.money.work import update_work_entry
 
     fields = {}
     if entry_date is not None:
@@ -573,7 +533,7 @@ def list_ledgers(ctx):
 @pass_ctx
 def check(ctx, ledger):
     """Validate ledger file."""
-    from money.core.ledger import check as ledger_check
+    from istota.money.core.ledger import check as ledger_check
     _output(ledger_check(resolve_ledger(ledger, ctx.ledgers)))
 
 
@@ -583,7 +543,7 @@ def check(ctx, ledger):
 @pass_ctx
 def balances(ctx, account, ledger):
     """Show account balances."""
-    from money.core.ledger import balances as ledger_balances
+    from istota.money.core.ledger import balances as ledger_balances
     _output(ledger_balances(resolve_ledger(ledger, ctx.ledgers), account))
 
 
@@ -593,7 +553,7 @@ def balances(ctx, account, ledger):
 @pass_ctx
 def query(ctx, bql, ledger):
     """Run a BQL query."""
-    from money.core.ledger import query as ledger_query
+    from istota.money.core.ledger import query as ledger_query
     _output(ledger_query(resolve_ledger(ledger, ctx.ledgers), bql))
 
 
@@ -604,7 +564,7 @@ def query(ctx, bql, ledger):
 @pass_ctx
 def report(ctx, report_type, year, ledger):
     """Generate financial report."""
-    from money.core.ledger import report as ledger_report
+    from istota.money.core.ledger import report as ledger_report
     _output(ledger_report(resolve_ledger(ledger, ctx.ledgers), report_type, year))
 
 
@@ -614,7 +574,7 @@ def report(ctx, report_type, year, ledger):
 @pass_ctx
 def lots(ctx, symbol, ledger):
     """Show open lots for a security."""
-    from money.core.ledger import lots as ledger_lots
+    from istota.money.core.ledger import lots as ledger_lots
     _output(ledger_lots(resolve_ledger(ledger, ctx.ledgers), symbol))
 
 
@@ -624,7 +584,7 @@ def lots(ctx, symbol, ledger):
 @pass_ctx
 def wash_sales(ctx, year, ledger):
     """Detect wash sale violations."""
-    from money.core.ledger import wash_sales as ledger_wash_sales
+    from istota.money.core.ledger import wash_sales as ledger_wash_sales
     _output(ledger_wash_sales(resolve_ledger(ledger, ctx.ledgers), year))
 
 
@@ -645,7 +605,7 @@ def wash_sales(ctx, year, ledger):
 @pass_ctx
 def add_transaction(ctx, txn_date, payee, narration, debit, credit, amount, currency, ledger):
     """Add a transaction to the ledger."""
-    from money.core.transactions import add_transaction as core_add
+    from istota.money.core.transactions import add_transaction as core_add
     try:
         parsed_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
     except ValueError:
@@ -666,7 +626,7 @@ def add_transaction(ctx, txn_date, payee, narration, debit, credit, amount, curr
 @pass_ctx
 def import_csv(ctx, file, account, tag, exclude_tag, ledger):
     """Import transactions from Monarch Money CSV export."""
-    from money.core.transactions import import_csv as core_import
+    from istota.money.core.transactions import import_csv as core_import
     db_conn = _get_db_conn(ctx)
     try:
         _output(core_import(
@@ -692,7 +652,7 @@ def sync_monarch(ctx, dry_run, ledger):
     if no profiles are defined). With --ledger, syncs only profiles targeting
     that ledger.
     """
-    from money.core.transactions import (
+    from istota.money.core.transactions import (
         parse_monarch_config,
         sync_all_profiles,
         sync_monarch as core_sync,
@@ -713,10 +673,10 @@ def sync_monarch(ctx, dry_run, ledger):
             if matching:
                 # Sync only the matching profile(s)
                 import asyncio
-                from money.core.transactions import fetch_monarch_transactions
+                from istota.money.core.transactions import fetch_monarch_transactions
                 lookback = max(p.sync.lookback_days for p in matching)
                 txns = asyncio.run(fetch_monarch_transactions(config, lookback))
-                from money.core.models import MonarchConfig as MC
+                from istota.money.core.models import MonarchConfig as MC
                 results = []
                 for profile in matching:
                     profile_config = MC(
@@ -767,7 +727,7 @@ def invoice():
 @pass_ctx
 def invoice_generate(ctx, period, client, entity, dry_run):
     """Generate invoices for uninvoiced work entries."""
-    from money.core.invoicing import generate_invoices_for_period
+    from istota.money.core.invoicing import generate_invoices_for_period
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
@@ -812,8 +772,8 @@ def invoice_generate(ctx, period, client, entity, dry_run):
 @pass_ctx
 def invoice_list(ctx, client, show_all):
     """List invoices (outstanding by default)."""
-    from money.core.invoicing import build_line_items
-    from money.work import get_invoice_numbers, get_entries_for_invoice
+    from istota.money.core.invoicing import build_line_items
+    from istota.money.work import get_invoice_numbers, get_entries_for_invoice
 
     try:
         config, _, _ = _load_invoicing_config(ctx)
@@ -876,13 +836,13 @@ def invoice_list(ctx, client, show_all):
 @pass_ctx
 def invoice_paid(ctx, invoice_number, payment_date, bank, no_post, ledger):
     """Record payment for an invoice."""
-    from money.core.invoicing import (
+    from istota.money.core.invoicing import (
         compute_income_lines, create_income_posting,
         resolve_bank_account, resolve_currency, resolve_entity,
     )
-    from money.core.transactions import append_to_ledger
-    from money.core.ledger import run_bean_check
-    from money.work import get_entries_for_invoice, record_invoice_payment
+    from istota.money.core.transactions import append_to_ledger
+    from istota.money.core.ledger import run_bean_check
+    from istota.money.work import get_entries_for_invoice, record_invoice_payment
 
     try:
         parsed_date = datetime.strptime(payment_date, "%Y-%m-%d").date()
@@ -975,13 +935,13 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
     Creates work entries with the invoice number pre-assigned and
     generates a PDF. The invoice is visible to 'invoice list' and 'invoice paid'.
     """
-    from money.core.invoicing import (
+    from istota.money.core.invoicing import (
         generate_invoice_html, generate_invoice_pdf,
         format_invoice_number, update_invoice_number,
         resolve_entity as resolve_entity_fn, build_line_items,
     )
-    from money.core.models import InvoiceLineItem, Invoice
-    from money.work import add_work_entry, get_entries_for_invoice
+    from istota.money.core.models import InvoiceLineItem, Invoice
+    from istota.money.work import add_work_entry, get_entries_for_invoice
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
@@ -1112,7 +1072,7 @@ def invoice_void(ctx, invoice_number, force, delete_pdf):
     Removes the invoice number and paid_date from all associated work entries,
     cleans up DB state (overdue notifications), and optionally deletes the PDF.
     """
-    from money.work import get_entries_for_invoice, void_invoice
+    from istota.money.work import get_entries_for_invoice, void_invoice
 
     data_dir = _require_data_dir(ctx)
     entries = get_entries_for_invoice(data_dir, invoice_number)
@@ -1135,7 +1095,7 @@ def invoice_void(ctx, invoice_number, force, delete_pdf):
     db_conn = _get_db_conn(ctx)
     if db_conn:
         try:
-            from money.db import clear_invoice_state
+            from istota.money.db import clear_invoice_state
             db_cleanup = clear_invoice_state(db_conn, invoice_number)
             db_conn.commit()
         finally:
@@ -1146,7 +1106,7 @@ def invoice_void(ctx, invoice_number, force, delete_pdf):
     if delete_pdf:
         try:
             _, _, invoice_output_dir = _load_invoicing_config(ctx)
-            from money.api.invoices import _delete_invoice_pdf
+            from istota.money.api.invoices import _delete_invoice_pdf
             pdf_deleted = _delete_invoice_pdf(invoice_output_dir, invoice_number)
         except click.ClickException:
             pass
@@ -1174,8 +1134,8 @@ def run_scheduled(ctx, dry_run):
     Meant to be called periodically by cron. Checks each client's invoicing
     schedule and generates invoices when due.
     """
-    from money.core.invoicing import check_scheduled_invoices, generate_invoices_for_period
-    from money.db import set_invoice_schedule_generation
+    from istota.money.core.invoicing import check_scheduled_invoices, generate_invoices_for_period
+    from istota.money.db import set_invoice_schedule_generation
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)

@@ -12,8 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from money.core.dedup import compute_transaction_hash, parse_ledger_transactions
-from money.core.transactions import (
+from istota.money.core.dedup import compute_transaction_hash, parse_ledger_transactions
+from istota.money.core.transactions import (
     format_beancount_transaction,
     map_monarch_category,
     append_to_ledger,
@@ -104,7 +104,7 @@ def import_transactions(
             continue
 
         if db_conn is not None:
-            from money.db import is_content_hash_synced
+            from istota.money.db import is_content_hash_synced
             if is_content_hash_synced(db_conn, content_hash):
                 content_skipped_count += 1
                 continue
@@ -157,7 +157,7 @@ def import_transactions(
 
     # Track imported hashes in DB
     if content_hashes and db_conn is not None:
-        from money.db import track_csv_transactions_batch
+        from istota.money.db import track_csv_transactions_batch
         track_csv_transactions_batch(db_conn, content_hashes, source_file)
 
     return {

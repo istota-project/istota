@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from money.cli import Context, resolve_ledger
+from istota.money.cli import Context, resolve_ledger
 
 
 def get_ctx(request: Request) -> Context:

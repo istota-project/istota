@@ -34,7 +34,7 @@ def parse_monarch_csv(
 
     Columns: Date,Merchant,Category,Account,Original Statement,Notes,Amount,Tags,Owner
     """
-    from money.core.transactions import parse_tags, filter_by_tags
+    from istota.money.core.transactions import parse_tags, filter_by_tags
 
     transactions = []
 

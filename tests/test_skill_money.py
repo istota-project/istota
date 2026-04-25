@@ -66,25 +66,30 @@ class TestMoneySkillManifest:
         assert "money" not in selected
 
     def test_env_specs(self, tmp_path):
-        """MONEY_CONFIG (legacy) and MONEY_USER are declarative;
-        MONEY_WORKSPACE is emitted by the setup_env hook."""
+        """The skill resolves UserContext in-process; only MONEY_USER is declarative."""
         from istota.skills._loader import load_skill_index
 
         index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
         meta = index["money"]
         env_vars = {spec.var for spec in meta.env_specs}
-        assert env_vars == {"MONEY_CONFIG", "MONEY_USER"}
-
-        # MONEY_CONFIG must accept both the new and legacy resource types
-        money_config_spec = next(s for s in meta.env_specs if s.var == "MONEY_CONFIG")
-        accepted = set(money_config_spec.resource_types) | (
-            {money_config_spec.resource_type} if money_config_spec.resource_type else set()
-        )
-        assert {"money", "moneyman"} <= accepted
+        assert env_vars == {"MONEY_USER"}
 
 
 class TestRunInProcess:
-    """The _run helper invokes money.cli.cli through Click's CliRunner."""
+    """The _run helper resolves UserContext in-process and invokes money.cli.cli."""
+
+    def _patch_resolver(self, user_ctx=None):
+        """Patch load_config + resolve_for_user to return a UserContext stub."""
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        stack = ExitStack()
+        stack.enter_context(patch("istota.config.load_config", return_value=MagicMock()))
+        stack.enter_context(patch(
+            "istota.money.resolve_for_user",
+            return_value=user_ctx or MagicMock(),
+        ))
+        return stack
 
     def test_run_returns_parsed_json(self):
         from istota.skills.money import _run
@@ -94,18 +99,44 @@ class TestRunInProcess:
         fake_result.exit_code = 0
         fake_result.output = '{"status": "ok", "data": [1, 2]}\n'
 
-        env = {"MONEY_CONFIG": "/etc/money/config.toml", "MONEY_USER": "alice"}
-        with patch.dict(os.environ, env, clear=True):
-            with patch("click.testing.CliRunner") as MockRunner:
-                MockRunner.return_value.invoke.return_value = fake_result
-                result = _run(["list"])
+        with patch.dict(os.environ, {"MONEY_USER": "alice"}, clear=True), \
+             self._patch_resolver(), \
+             patch("click.testing.CliRunner") as MockRunner:
+            MockRunner.return_value.invoke.return_value = fake_result
+            result = _run(["list"])
 
         assert result == {"status": "ok", "data": [1, 2]}
-        # Threaded through -c and -u
         invoke_args = MockRunner.return_value.invoke.call_args
         passed_args = invoke_args[0][1]
-        assert passed_args[:4] == ["-c", "/etc/money/config.toml", "-u", "alice"]
+        # User key flows through as -u
+        assert passed_args[:2] == ["-u", "alice"]
         assert passed_args[-1] == "list"
+        # Pre-built Context injected via obj=
+        assert "obj" in invoke_args.kwargs
+
+    def test_run_errors_when_user_not_set(self):
+        from istota.skills.money import _run
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = _run(["list"])
+
+        assert result["status"] == "error"
+        assert "MONEY_USER" in result["error"]
+
+    def test_run_errors_when_user_not_resolved(self):
+        from istota.skills.money import _run
+        from istota.money import UserNotFoundError
+
+        with patch.dict(os.environ, {"MONEY_USER": "alice"}, clear=True), \
+             patch("istota.config.load_config", return_value=MagicMock()), \
+             patch(
+                 "istota.money.resolve_for_user",
+                 side_effect=UserNotFoundError("no money for alice"),
+             ):
+            result = _run(["list"])
+
+        assert result["status"] == "error"
+        assert "no money for alice" in result["error"]
 
     def test_run_returns_error_on_nonzero_exit(self):
         from istota.skills.money import _run
@@ -115,10 +146,11 @@ class TestRunInProcess:
         fake_result.exit_code = 2
         fake_result.output = "boom\n"
 
-        with patch.dict(os.environ, {}, clear=True):
-            with patch("click.testing.CliRunner") as MockRunner:
-                MockRunner.return_value.invoke.return_value = fake_result
-                result = _run(["list"])
+        with patch.dict(os.environ, {"MONEY_USER": "alice"}, clear=True), \
+             self._patch_resolver(), \
+             patch("click.testing.CliRunner") as MockRunner:
+            MockRunner.return_value.invoke.return_value = fake_result
+            result = _run(["list"])
 
         assert result["status"] == "error"
         assert "boom" in result["error"]
@@ -131,10 +163,11 @@ class TestRunInProcess:
         fake_result.exit_code = 1
         fake_result.output = ""
 
-        with patch.dict(os.environ, {}, clear=True):
-            with patch("click.testing.CliRunner") as MockRunner:
-                MockRunner.return_value.invoke.return_value = fake_result
-                result = _run(["list"])
+        with patch.dict(os.environ, {"MONEY_USER": "alice"}, clear=True), \
+             self._patch_resolver(), \
+             patch("click.testing.CliRunner") as MockRunner:
+            MockRunner.return_value.invoke.return_value = fake_result
+            result = _run(["list"])
 
         assert result["status"] == "error"
         assert "kaboom" in result["error"]
@@ -147,10 +180,11 @@ class TestRunInProcess:
         fake_result.exit_code = 0
         fake_result.output = "not json"
 
-        with patch.dict(os.environ, {}, clear=True):
-            with patch("click.testing.CliRunner") as MockRunner:
-                MockRunner.return_value.invoke.return_value = fake_result
-                result = _run(["list"])
+        with patch.dict(os.environ, {"MONEY_USER": "alice"}, clear=True), \
+             self._patch_resolver(), \
+             patch("click.testing.CliRunner") as MockRunner:
+            MockRunner.return_value.invoke.return_value = fake_result
+            result = _run(["list"])
 
         assert result["status"] == "error"
         assert "invalid JSON" in result["error"]
@@ -234,143 +268,3 @@ class TestExecutorIntegration:
         assert "MONEY_API_KEY" not in _CREDENTIAL_SKILL_MAP
 
 
-class TestSetupEnvHook:
-    """The money skill's setup_env() hook injects MONEY_WORKSPACE for workspace mode.
-
-    The web-side loader (istota.web_app._install_money_loader) supports both
-    legacy mode (extra.config_path on the resource) and workspace mode
-    (synthesize from {nextcloud_mount}/Users/{user_id}/{bot_dir}). The CLI
-    side mirrors that: when no config_path is set, setup_env emits
-    MONEY_WORKSPACE so money.cli.load_context() can synthesize a UserContext.
-    """
-
-    def _make_ctx(self, tmp_path, *, resources=None, mount=True, user_id="stefan"):
-        from dataclasses import dataclass, field
-        from unittest.mock import MagicMock
-
-        from istota.skills._env import EnvContext
-
-        @dataclass
-        class _Cfg:
-            nextcloud_mount_path: object = None
-            bot_dir_name: str = "istota"
-
-        @dataclass
-        class _RC:
-            type: str
-            extra: dict = field(default_factory=dict)
-            path: str = ""
-            name: str = ""
-            permissions: str = "read"
-            base_url: str = ""
-            api_key: str = ""
-
-        @dataclass
-        class _UC:
-            resources: list = field(default_factory=list)
-
-        cfg = _Cfg()
-        if mount:
-            mount_path = tmp_path / "mount"
-            mount_path.mkdir()
-            cfg.nextcloud_mount_path = mount_path
-
-        return EnvContext(
-            config=cfg,
-            task=MagicMock(id=1, user_id=user_id, conversation_token=None),
-            user_resources=[],
-            user_config=_UC(resources=resources or []),
-            user_temp_dir=tmp_path / "tmp",
-            is_admin=True,
-        ), cfg, _RC
-
-    def test_emits_money_workspace_when_resource_has_no_config_path(self, tmp_path):
-        from istota.skills.money import setup_env
-
-        ctx, cfg, RC = self._make_ctx(tmp_path)
-        ctx.user_config.resources.append(RC(type="money"))
-
-        env = setup_env(ctx)
-        expected = cfg.nextcloud_mount_path / "Users" / "stefan" / "istota"
-        assert env["MONEY_WORKSPACE"] == str(expected)
-
-    def test_emits_money_workspace_for_legacy_moneyman_type(self, tmp_path):
-        from istota.skills.money import setup_env
-
-        ctx, cfg, RC = self._make_ctx(tmp_path)
-        ctx.user_config.resources.append(RC(type="moneyman"))
-
-        env = setup_env(ctx)
-        assert "MONEY_WORKSPACE" in env
-
-    def test_skips_when_no_money_resource(self, tmp_path):
-        from istota.skills.money import setup_env
-
-        ctx, _, RC = self._make_ctx(tmp_path)
-        ctx.user_config.resources.append(RC(type="karakeep"))
-
-        env = setup_env(ctx)
-        assert env == {}
-
-    def test_skips_when_resource_has_config_path(self, tmp_path):
-        """Legacy mode: config_path is set, so MONEY_CONFIG covers it; no MONEY_WORKSPACE."""
-        from istota.skills.money import setup_env
-
-        ctx, _, RC = self._make_ctx(tmp_path)
-        ctx.user_config.resources.append(
-            RC(type="money", extra={"config_path": "/etc/money/config.toml"}),
-        )
-
-        env = setup_env(ctx)
-        assert "MONEY_WORKSPACE" not in env
-
-    def test_skips_when_no_nextcloud_mount(self, tmp_path):
-        from istota.skills.money import setup_env
-
-        ctx, _, RC = self._make_ctx(tmp_path, mount=False)
-        ctx.user_config.resources.append(RC(type="money"))
-
-        env = setup_env(ctx)
-        assert "MONEY_WORKSPACE" not in env
-
-    def test_emits_data_dir_override(self, tmp_path):
-        from istota.skills.money import setup_env
-
-        ctx, _, RC = self._make_ctx(tmp_path)
-        ctx.user_config.resources.append(
-            RC(type="money", extra={"data_dir": "/srv/money/stefan"}),
-        )
-
-        env = setup_env(ctx)
-        assert env["MONEY_DATA_DIR"] == "/srv/money/stefan"
-
-    def test_emits_config_dir_override(self, tmp_path):
-        from istota.skills.money import setup_env
-
-        ctx, _, RC = self._make_ctx(tmp_path)
-        ctx.user_config.resources.append(
-            RC(type="money", extra={"config_dir": "/srv/money/stefan/config"}),
-        )
-
-        env = setup_env(ctx)
-        assert env["MONEY_CONFIG_DIR"] == "/srv/money/stefan/config"
-
-    def test_emits_ledgers_as_json(self, tmp_path):
-        from istota.skills.money import setup_env
-
-        ctx, _, RC = self._make_ctx(tmp_path)
-        ctx.user_config.resources.append(
-            RC(type="money", extra={"ledgers": ["personal", "business"]}),
-        )
-
-        env = setup_env(ctx)
-        assert json.loads(env["MONEY_LEDGERS"]) == ["personal", "business"]
-
-    def test_skips_user_config_none(self, tmp_path):
-        from istota.skills.money import setup_env
-
-        ctx, _, _ = self._make_ctx(tmp_path)
-        ctx.user_config = None
-
-        env = setup_env(ctx)
-        assert env == {}

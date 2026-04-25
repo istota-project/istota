@@ -11,7 +11,7 @@ from pathlib import Path
 
 import tomli
 
-from money.core.models import WorkEntry
+from istota.money.core.models import WorkEntry
 
 
 def _work_dir(data_dir: Path) -> Path:

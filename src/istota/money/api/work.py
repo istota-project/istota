@@ -7,9 +7,9 @@ from datetime import datetime
 import click
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from money.api.deps import get_ctx
-from money.api.models import WorkEntryRequest, WorkEntryUpdateRequest
-from money.cli import Context, _require_data_dir
+from istota.money.api.deps import get_ctx
+from istota.money.api.models import WorkEntryRequest, WorkEntryUpdateRequest
+from istota.money.cli import Context, _require_data_dir
 
 router = APIRouter()
 
@@ -22,7 +22,7 @@ def list_entries(
     invoiced: bool = Query(False),
     ctx: Context = Depends(get_ctx),
 ):
-    from money.work import list_work_entries
+    from istota.money.work import list_work_entries
 
     try:
         data_dir = _require_data_dir(ctx)
@@ -64,7 +64,7 @@ def add_entry(
     req: WorkEntryRequest,
     ctx: Context = Depends(get_ctx),
 ):
-    from money.work import add_work_entry
+    from istota.money.work import add_work_entry
 
     try:
         datetime.strptime(req.date, "%Y-%m-%d")
@@ -90,7 +90,7 @@ def update_entry(
     req: WorkEntryUpdateRequest,
     ctx: Context = Depends(get_ctx),
 ):
-    from money.work import update_work_entry
+    from istota.money.work import update_work_entry
 
     fields = {}
     if req.date is not None:
@@ -130,7 +130,7 @@ def delete_entry(
     entry_id: int,
     ctx: Context = Depends(get_ctx),
 ):
-    from money.work import remove_work_entry
+    from istota.money.work import remove_work_entry
 
     try:
         data_dir = _require_data_dir(ctx)

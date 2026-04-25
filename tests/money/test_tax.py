@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from money.core.tax import (
+from istota.money.core.tax import (
     apply_brackets,
     compute_ca_tax,
     compute_federal_tax,
@@ -14,7 +14,7 @@ from money.core.tax import (
     ADDITIONAL_MEDICARE_RATE,
     ADDITIONAL_MEDICARE_THRESHOLD,
 )
-from money.core.models import TaxConfig
+from istota.money.core.models import TaxConfig
 
 
 class TestComputeSeTax:
@@ -87,7 +87,7 @@ class TestApplyBrackets:
         # 23,850-96,950 @ 12% = 8,772
         # 96,950-200,000 = 103,050 @ 22% = 22,671
         # Total = 33,828
-        from money.core.tax import FEDERAL_BRACKETS
+        from istota.money.core.tax import FEDERAL_BRACKETS
         brackets = FEDERAL_BRACKETS[(2025, "mfj")]
         assert round(apply_brackets(200_000, brackets), 2) == 33828.00
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from money.db import (
+from istota.money.db import (
     MonarchSyncedTransaction,
     clear_invoice_state,
     clear_overdue_notification,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from money.core.models import MonarchConfig
+from istota.money.core.models import MonarchConfig
 
 
 async def fetch_monarch_transactions(

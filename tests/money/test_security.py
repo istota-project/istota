@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from money.api.auth import derive_user_key
+from istota.money.api.auth import derive_user_key
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ def authed_client(tmp_config):
     os.environ["MONEY_CONFIG"] = str(tmp_config)
     os.environ["MONEY_API_KEY"] = "test-secret-key"
 
-    from money.api.app import create_app
+    from istota.money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
@@ -53,7 +53,7 @@ def client(tmp_config):
     os.environ["MONEY_CONFIG"] = str(tmp_config)
     os.environ.pop("MONEY_API_KEY", None)
 
-    from money.api.app import create_app
+    from istota.money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
@@ -92,7 +92,7 @@ def multi_user_client(tmp_path):
     os.environ["MONEY_CONFIG"] = str(config)
     os.environ.pop("MONEY_API_KEY", None)
 
-    from money.api.app import create_app
+    from istota.money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
@@ -108,7 +108,7 @@ def multi_user_client(tmp_path):
 class TestTimingSafeAuth:
     def test_uses_hmac_compare_digest(self):
         """Verify auth module uses constant-time comparison."""
-        import money.api.auth as auth_mod
+        import istota.money.api.auth as auth_mod
         import inspect
         source = inspect.getsource(auth_mod.verify_api_key)
         assert "hmac.compare_digest" in source
@@ -160,7 +160,7 @@ def authed_multi_user_client(tmp_path):
     os.environ["MONEY_CONFIG"] = str(config)
     os.environ["MONEY_API_KEY"] = "master-secret"
 
-    from money.api.app import create_app
+    from istota.money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
@@ -246,7 +246,7 @@ class TestDerivedKeys:
 
 class TestRateLimiting:
     def test_rate_limit_after_many_failures(self, authed_client):
-        from money.api.auth import _failure_log
+        from istota.money.api.auth import _failure_log
         _failure_log.clear()
 
         for _ in range(10):
@@ -259,7 +259,7 @@ class TestRateLimiting:
 
     def test_correct_key_not_rate_limited(self, authed_client):
         """Correct key works even after failures from other attempts."""
-        from money.api.auth import _failure_log
+        from istota.money.api.auth import _failure_log
         _failure_log.clear()
 
         resp = authed_client.get("/api/health", headers={"X-API-Key": "test-secret-key"})
@@ -291,7 +291,7 @@ class TestCsvPathTraversal:
     def test_accepts_file_in_data_dir(self, client, tmp_path):
         csv_file = tmp_path / "import.csv"
         csv_file.write_text("date,amount\n2025-01-01,100\n")
-        with patch("money.core.transactions.import_csv", return_value={"status": "ok"}):
+        with patch("istota.money.core.transactions.import_csv", return_value={"status": "ok"}):
             resp = client.post("/api/transactions/import-csv", json={
                 "file": str(csv_file),
                 "account": "Assets:Bank",
@@ -306,12 +306,12 @@ class TestCsvPathTraversal:
 
 class TestBqlInjection:
     def test_balances_single_quote_escaped(self):
-        from money.core.ledger import _sanitize_bql_string
+        from istota.money.core.ledger import _sanitize_bql_string
         assert _sanitize_bql_string("Assets'") == "Assets''"
         assert _sanitize_bql_string("x' OR '1'='1") == "x'' OR ''1''=''1"
 
     def test_balances_with_injection_attempt(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[]) as mock:
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[]) as mock:
             resp = client.get("/api/balances", params={
                 "account": "x' GROUP BY 1; --"
             })
@@ -321,7 +321,7 @@ class TestBqlInjection:
             assert "'x'' GROUP BY 1; --'" in query_arg
 
     def test_lots_with_injection_attempt(self, client):
-        with patch("money.core.ledger.run_bean_query", return_value=[]) as mock:
+        with patch("istota.money.core.ledger.run_bean_query", return_value=[]) as mock:
             resp = client.get("/api/lots/A'B")
             assert resp.status_code == 200
             query_arg = mock.call_args[0][1]
@@ -373,7 +373,7 @@ class TestNoPathLeakage:
 
     def test_check_not_found_no_path(self, client, tmp_path):
         """Error for missing ledger should not leak the filesystem path."""
-        from money.core.ledger import check
+        from istota.money.core.ledger import check
         result = check(tmp_path / "nonexistent.beancount")
         assert result["status"] == "error"
         assert "/" not in result["error"]

@@ -6,8 +6,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 
-from money.api.auth import verify_api_key
-from money.cli import load_context
+from istota.money.api.auth import verify_api_key
+from istota.money.cli import load_context
 
 
 def create_app(config_path: str | None = None) -> FastAPI:
@@ -25,7 +25,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         dependencies=[Depends(verify_api_key)],
     )
 
-    from money.api import health, ledger, transactions, invoices, work
+    from istota.money.api import health, ledger, transactions, invoices, work
 
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(ledger.router, prefix="/api", tags=["ledger"])

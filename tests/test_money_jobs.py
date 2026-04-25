@@ -13,10 +13,10 @@ from istota.cron_loader import (
 )
 from istota.scheduler import _sync_money_module_jobs
 
-pytest.importorskip("money", reason="money extra not installed")
+pytest.importorskip("istota.money", reason="money extra not installed")
 pytest.importorskip("beancount", reason="money requires beancount")
 
-from money.jobs import DEFAULT_JOBS, MODULE_PREFIX, jobs_for_user
+from istota.money.jobs import DEFAULT_JOBS, MODULE_PREFIX, jobs_for_user
 
 
 def _conn(tmp_path: Path):
@@ -77,55 +77,55 @@ def _make_app_config(tmp_path: Path, users: dict[str, list[ResourceConfig]]) -> 
 
 class TestJobsForUser:
     def test_filters_monarch_when_no_monarch_config(self, tmp_path):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=False)
         ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], str(cfg), "alice")
+        jobs = jobs_for_user(ctx.users["alice"], "alice")
         names = [j["name"] for j in jobs]
         assert f"{MODULE_PREFIX}run_scheduled" in names
         assert f"{MODULE_PREFIX}monarch_sync" not in names
 
     def test_filters_invoicing_when_no_invoicing_config(self, tmp_path):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=False, with_monarch=True)
         ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], str(cfg), "alice")
+        jobs = jobs_for_user(ctx.users["alice"], "alice")
         names = [j["name"] for j in jobs]
         assert f"{MODULE_PREFIX}monarch_sync" in names
         assert f"{MODULE_PREFIX}run_scheduled" not in names
 
     def test_returns_both_when_fully_configured(self, tmp_path):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], str(cfg), "alice")
+        jobs = jobs_for_user(ctx.users["alice"], "alice")
         assert len(jobs) == 2
 
-    def test_command_includes_config_path_and_user_key(self, tmp_path):
-        from money.cli import load_context
+    def test_command_uses_istota_skill_with_money_user(self, tmp_path):
+        from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], str(cfg), "alice")
+        jobs = jobs_for_user(ctx.users["alice"], "alice")
         for j in jobs:
-            assert str(cfg) in j["command"]
-            assert "--user alice" in j["command"]
+            assert "MONEY_USER=alice" in j["command"]
+            assert "istota-skill money" in j["command"]
 
     def test_secrets_path_threaded_into_command(self, tmp_path):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         ctx = load_context(str(cfg))
         jobs = jobs_for_user(
-            ctx.users["alice"], str(cfg), "alice",
+            ctx.users["alice"], "alice",
             secrets_path="/etc/istota/secrets/alice/money.toml",
         )
         for j in jobs:
             assert "MONEY_SECRETS_FILE=/etc/istota/secrets/alice/money.toml" in j["command"]
 
     def test_no_secrets_env_when_path_omitted(self, tmp_path):
-        from money.cli import load_context
+        from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], str(cfg), "alice")
+        jobs = jobs_for_user(ctx.users["alice"], "alice")
         for j in jobs:
             assert "MONEY_SECRETS_FILE" not in j["command"]
 

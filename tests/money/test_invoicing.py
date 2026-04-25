@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from money.core.invoicing import (
+from istota.money.core.invoicing import (
     build_line_items,
     compute_income_lines,
     create_income_posting,
@@ -19,7 +19,7 @@ from money.core.invoicing import (
     resolve_entity,
     update_invoice_number,
 )
-from money.core.models import (
+from istota.money.core.models import (
     ClientConfig,
     CompanyConfig,
     Invoice,
@@ -289,8 +289,8 @@ class TestClientCaseInsensitiveMatching:
 
     def test_generate_invoices_matches_uppercase_entries(self, tmp_path):
         """Entries with uppercase client key should match lowercase config key."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = tmp_path / "invoicing.toml"
         config_file.write_text(
@@ -334,8 +334,8 @@ class TestDryRunDoesNotMutate:
         return config_file
 
     def test_dry_run_does_not_stamp_entries(self, tmp_path):
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry, get_uninvoiced_entries
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry, get_uninvoiced_entries
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -354,8 +354,8 @@ class TestDryRunDoesNotMutate:
         assert uninvoiced[0].invoice == ""
 
     def test_dry_run_does_not_update_invoice_number(self, tmp_path):
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -372,8 +372,8 @@ class TestDryRunDoesNotMutate:
         assert reloaded.next_invoice_number == 1
 
     def test_dry_run_does_not_create_pdfs(self, tmp_path):
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -390,8 +390,8 @@ class TestDryRunDoesNotMutate:
 
     def test_real_run_after_dry_run_still_finds_entries(self, tmp_path):
         """Running generate after dry-run must still find the entries."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -438,8 +438,8 @@ class TestSkipUnmatchedService:
 
     def test_unknown_service_not_stamped(self, tmp_path):
         """Entry with unknown service must not get an invoice number."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry, load_work_entries
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry, load_work_entries
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -462,8 +462,8 @@ class TestSkipUnmatchedService:
         assert entries[0].invoice == ""
 
     def test_unknown_service_dry_run_returns_empty(self, tmp_path):
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -478,8 +478,8 @@ class TestSkipUnmatchedService:
 
     def test_mixed_known_and_unknown_services(self, tmp_path):
         """Only entries with known services get invoiced."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry, load_work_entries
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry, load_work_entries
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -506,8 +506,8 @@ class TestSkipUnmatchedService:
 
     def test_invoice_number_not_bumped_for_empty(self, tmp_path):
         """Invoice number counter must not advance for skipped groups."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -543,8 +543,8 @@ class TestDryRunWithAmounts:
 
     def test_dry_run_hours_with_qty(self, tmp_path):
         """Standard hours entry with qty shows correct items and total."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -562,8 +562,8 @@ class TestDryRunWithAmounts:
 
     def test_dry_run_other_type_with_amount(self, tmp_path):
         """'other' type entry with amount shows correct items and total."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -581,8 +581,8 @@ class TestDryRunWithAmounts:
 
     def test_dry_run_hours_with_amount_no_qty(self, tmp_path):
         """Hours-type entry with amount but no qty should use amount as fallback."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -600,8 +600,8 @@ class TestDryRunWithAmounts:
 
     def test_dry_run_mixed_entries(self, tmp_path):
         """Mix of hours (with qty) and amount-only entries."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = self._make_config(tmp_path)
         config = parse_invoicing_config(config_file)
@@ -621,12 +621,12 @@ class TestDryRunWithAmounts:
 
 class TestResolve:
     def test_relative_path(self, tmp_path):
-        from money.cli import _resolve
+        from istota.money.cli import _resolve
         result = _resolve(tmp_path, "config/invoicing.toml")
         assert result == tmp_path / "config/invoicing.toml"
 
     def test_absolute_path_unchanged(self, tmp_path):
-        from money.cli import _resolve
+        from istota.money.cli import _resolve
         result = _resolve(tmp_path, "/etc/moneyman/config.toml")
         assert result == Path("/etc/moneyman/config.toml")
 
@@ -635,7 +635,7 @@ class TestLoadInvoicingConfigReturnsResolvedPaths:
     """_load_invoicing_config must return absolute paths so PDFs land in data_dir."""
 
     def _make_config(self, tmp_path, accounting_path=".", invoice_output="invoices/generated"):
-        from money.cli import Context
+        from istota.money.cli import Context
         invoicing_toml = tmp_path / "invoicing.toml"
         invoicing_toml.write_text(
             f'accounting_path = "{accounting_path}"\n'
@@ -653,7 +653,7 @@ class TestLoadInvoicingConfigReturnsResolvedPaths:
 
     def test_invoice_output_dir_resolved_relative_to_data_dir(self, tmp_path):
         """invoice_output should resolve relative to data_dir, not accounting_path."""
-        from money.cli import _load_invoicing_config
+        from istota.money.cli import _load_invoicing_config
         ctx = self._make_config(tmp_path, accounting_path="accounting", invoice_output="invoices/generated")
         _, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
         # accounting_path is data_dir / "accounting"
@@ -663,21 +663,21 @@ class TestLoadInvoicingConfigReturnsResolvedPaths:
 
     def test_invoice_output_dir_is_absolute(self, tmp_path):
         """Returned invoice_output_dir must be absolute."""
-        from money.cli import _load_invoicing_config
+        from istota.money.cli import _load_invoicing_config
         ctx = self._make_config(tmp_path)
         _, _, invoice_output_dir = _load_invoicing_config(ctx)
         assert invoice_output_dir.is_absolute()
 
     def test_accounting_path_dot_resolves_to_data_dir(self, tmp_path):
         """accounting_path='.' should resolve to data_dir itself."""
-        from money.cli import _load_invoicing_config
+        from istota.money.cli import _load_invoicing_config
         ctx = self._make_config(tmp_path, accounting_path=".")
         _, accounting_path, _ = _load_invoicing_config(ctx)
         assert accounting_path == ctx.data_dir / "."
 
     def test_fallback_without_data_dir_uses_resolve(self, tmp_path):
         """When data_dir is None, paths should still be absolute via resolve()."""
-        from money.cli import _load_invoicing_config, Context
+        from istota.money.cli import _load_invoicing_config, Context
         invoicing_toml = tmp_path / "invoicing.toml"
         invoicing_toml.write_text(
             'accounting_path = "."\n'
@@ -700,8 +700,8 @@ class TestGenerateInvoicesPdfOutputDir:
 
     def test_pdf_written_to_invoice_output_dir(self, tmp_path):
         """PDF should be written under invoice_output_dir, not under accounting_path."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         data_dir = tmp_path / "data"
         data_dir.mkdir()
@@ -738,8 +738,8 @@ class TestGenerateInvoicesPdfOutputDir:
 
     def test_fallback_to_accounting_path_when_no_output_dir(self, tmp_path):
         """Without invoice_output_dir, falls back to accounting_path / invoice_output."""
-        from money.core.invoicing import generate_invoices_for_period
-        from money.work import add_work_entry
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
 
         config_file = tmp_path / "invoicing.toml"
         config_file.write_text(
@@ -786,7 +786,7 @@ class TestCheckScheduledInvoices:
 
     def _make_db(self, tmp_path):
         import sqlite3
-        from money.db import init_db
+        from istota.money.db import init_db
         db_path = tmp_path / "money.db"
         init_db(db_path)
         conn = sqlite3.connect(str(db_path))
@@ -794,7 +794,7 @@ class TestCheckScheduledInvoices:
         return conn
 
     def test_returns_due_clients_on_schedule_day(self, tmp_path):
-        from money.core.invoicing import check_scheduled_invoices
+        from istota.money.core.invoicing import check_scheduled_invoices
 
         config_file = self._make_config(tmp_path, day=15)
         config = parse_invoicing_config(config_file)
@@ -804,7 +804,7 @@ class TestCheckScheduledInvoices:
         assert result == ["acme"]
 
     def test_returns_empty_when_not_schedule_day(self, tmp_path):
-        from money.core.invoicing import check_scheduled_invoices
+        from istota.money.core.invoicing import check_scheduled_invoices
 
         config_file = self._make_config(tmp_path, day=15)
         config = parse_invoicing_config(config_file)
@@ -814,7 +814,7 @@ class TestCheckScheduledInvoices:
         assert result == []
 
     def test_skips_on_demand_clients(self, tmp_path):
-        from money.core.invoicing import check_scheduled_invoices
+        from istota.money.core.invoicing import check_scheduled_invoices
 
         config_file = self._make_config(tmp_path, schedule="on-demand", day=15)
         config = parse_invoicing_config(config_file)
@@ -824,8 +824,8 @@ class TestCheckScheduledInvoices:
         assert result == []
 
     def test_skips_already_generated_this_month(self, tmp_path):
-        from money.core.invoicing import check_scheduled_invoices
-        from money.db import set_invoice_schedule_generation
+        from istota.money.core.invoicing import check_scheduled_invoices
+        from istota.money.db import set_invoice_schedule_generation
 
         config_file = self._make_config(tmp_path, day=15)
         config = parse_invoicing_config(config_file)
@@ -842,7 +842,7 @@ class TestCheckScheduledInvoices:
         assert result == []
 
     def test_generates_again_next_month(self, tmp_path):
-        from money.core.invoicing import check_scheduled_invoices
+        from istota.money.core.invoicing import check_scheduled_invoices
 
         config_file = self._make_config(tmp_path, day=15)
         config = parse_invoicing_config(config_file)
@@ -860,7 +860,7 @@ class TestCheckScheduledInvoices:
 
     def test_catches_up_if_past_schedule_day(self, tmp_path):
         """If the cron missed the exact day, still generate later in the month."""
-        from money.core.invoicing import check_scheduled_invoices
+        from istota.money.core.invoicing import check_scheduled_invoices
 
         config_file = self._make_config(tmp_path, day=15)
         config = parse_invoicing_config(config_file)
@@ -872,7 +872,7 @@ class TestCheckScheduledInvoices:
 
     def test_does_not_fire_before_schedule_day(self, tmp_path):
         """Before the schedule day, don't generate even if no generation this month."""
-        from money.core.invoicing import check_scheduled_invoices
+        from istota.money.core.invoicing import check_scheduled_invoices
 
         config_file = self._make_config(tmp_path, day=15)
         config = parse_invoicing_config(config_file)
@@ -883,7 +883,7 @@ class TestCheckScheduledInvoices:
 
     def test_schedule_day_end_of_month_clamped(self, tmp_path):
         """Schedule day 31 should fire on the last day of shorter months."""
-        from money.core.invoicing import check_scheduled_invoices
+        from istota.money.core.invoicing import check_scheduled_invoices
 
         config_file = self._make_config(tmp_path, day=31)
         config = parse_invoicing_config(config_file)
@@ -895,7 +895,7 @@ class TestCheckScheduledInvoices:
 
     def test_multiple_clients_mixed(self, tmp_path):
         """Multiple clients: only due ones returned."""
-        from money.core.invoicing import check_scheduled_invoices
+        from istota.money.core.invoicing import check_scheduled_invoices
 
         config_file = tmp_path / "invoicing.toml"
         config_file.write_text(
