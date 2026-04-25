@@ -620,3 +620,20 @@ def compute_income_lines(
                 break
         income_lines[income_account] = income_lines.get(income_account, 0) + item.amount
     return income_lines
+
+
+def delete_invoice_pdf(invoice_output_dir: Path, invoice_number: str) -> bool:
+    """Find and delete the PDF file for an invoice. Returns True if a file was deleted."""
+    match = re.match(r"INV-(\d+)", invoice_number)
+    if not match:
+        return False
+    num = int(match.group(1))
+    if not invoice_output_dir.exists():
+        return False
+    pattern = f"Invoice-{num:06d}-*.pdf"
+    for year_dir in invoice_output_dir.iterdir():
+        if year_dir.is_dir():
+            for pdf in year_dir.glob(pattern):
+                pdf.unlink()
+                return True
+    return False

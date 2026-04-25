@@ -1106,8 +1106,8 @@ def invoice_void(ctx, invoice_number, force, delete_pdf):
     if delete_pdf:
         try:
             _, _, invoice_output_dir = _load_invoicing_config(ctx)
-            from istota.money.api.invoices import _delete_invoice_pdf
-            pdf_deleted = _delete_invoice_pdf(invoice_output_dir, invoice_number)
+            from istota.money.core.invoicing import delete_invoice_pdf
+            pdf_deleted = delete_invoice_pdf(invoice_output_dir, invoice_number)
         except click.ClickException:
             pass
 
@@ -1183,16 +1183,6 @@ def run_scheduled(ctx, dry_run):
     finally:
         db_conn.commit()
         db_conn.close()
-
-
-@cli.command()
-@click.option("--host", default="127.0.0.1", help="Bind host")
-@click.option("--port", default=8090, type=int, help="Bind port")
-@pass_ctx
-def serve(ctx, host, port):
-    """Start the REST API server."""
-    import uvicorn
-    uvicorn.run("moneyman.api.app:app", host=host, port=port)
 
 
 if __name__ == "__main__":

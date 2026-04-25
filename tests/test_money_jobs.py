@@ -110,18 +110,9 @@ class TestJobsForUser:
             assert "MONEY_USER=alice" in j["command"]
             assert "istota-skill money" in j["command"]
 
-    def test_secrets_path_threaded_into_command(self, tmp_path):
-        from istota.money.cli import load_context
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        ctx = load_context(str(cfg))
-        jobs = jobs_for_user(
-            ctx.users["alice"], "alice",
-            secrets_path="/etc/istota/secrets/alice/money.toml",
-        )
-        for j in jobs:
-            assert "MONEY_SECRETS_FILE=/etc/istota/secrets/alice/money.toml" in j["command"]
-
-    def test_no_secrets_env_when_path_omitted(self, tmp_path):
+    def test_no_secrets_env_in_command(self, tmp_path):
+        # Credentials live on the user's resource entry now; the cron command
+        # does not need MONEY_SECRETS_FILE indirection.
         from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         ctx = load_context(str(cfg))

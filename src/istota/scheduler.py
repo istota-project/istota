@@ -2586,15 +2586,7 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
             logger.warning("Could not resolve money config for %s: %s", user_id, e)
             continue
 
-        # Per-user secrets path follows the namespace convention so the
-        # subprocess CLI reads the right credentials. Falls back to the
-        # CLI's default if the file doesn't yet exist.
-        namespace = getattr(app_config, "namespace", None) or "istota"
-        secrets_path = f"/etc/{namespace}/secrets/{user_id}/money.toml"
-
-        wanted = jobs_for_user(
-            money_ctx, user_id, secrets_path=secrets_path,
-        )
+        wanted = jobs_for_user(money_ctx, user_id)
         wanted_by_name = {j["name"]: j for j in wanted}
 
         existing_rows = list(conn.execute(

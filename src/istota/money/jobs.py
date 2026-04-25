@@ -33,39 +33,26 @@ DEFAULT_JOBS: tuple[ModuleJob, ...] = (
     ModuleJob(
         name=f"{MODULE_PREFIX}monarch_sync",
         cron="0 6 * * *",
-        command_template=(
-            "MONEY_USER={user_id}{secrets_env} "
-            "istota-skill money sync-monarch"
-        ),
+        command_template="MONEY_USER={user_id} istota-skill money sync-monarch",
         requires="monarch",
     ),
     ModuleJob(
         name=f"{MODULE_PREFIX}run_scheduled",
         cron="0 8 * * *",
-        command_template=(
-            "MONEY_USER={user_id}{secrets_env} "
-            "istota-skill money run-scheduled"
-        ),
+        command_template="MONEY_USER={user_id} istota-skill money run-scheduled",
         requires="invoicing",
     ),
 )
 
 
-def jobs_for_user(
-    user_context,
-    user_id: str,
-    *,
-    secrets_path: str | None = None,
-) -> list[dict]:
+def jobs_for_user(user_context, user_id: str) -> list[dict]:
     """Render module job definitions for a specific user.
 
     ``user_context`` is the resolved :class:`istota.money.cli.UserContext`.
     Filters jobs whose ``requires`` feature is not configured for the user.
-
-    If ``secrets_path`` is given, it's exported as ``MONEY_SECRETS_FILE``
-    so the CLI subprocess reads per-user credentials from that file.
+    Credentials live on the user's money resource entry in the istota config
+    and are loaded in-process by the skill — no env-var indirection needed.
     """
-    secrets_env = f" MONEY_SECRETS_FILE={secrets_path}" if secrets_path else ""
     out: list[dict] = []
     for j in DEFAULT_JOBS:
         if j.requires == "monarch" and not user_context.monarch_config_path:
@@ -75,9 +62,6 @@ def jobs_for_user(
         out.append({
             "name": j.name,
             "cron": j.cron,
-            "command": j.command_template.format(
-                user_id=user_id,
-                secrets_env=secrets_env,
-            ),
+            "command": j.command_template.format(user_id=user_id),
         })
     return out

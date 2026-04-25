@@ -38,21 +38,38 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
 
     Resolution order:
 
-    1. ``MONEY_SECRETS_FILE`` env var (used by the scheduler).
-    2. ``/etc/{namespace}/secrets/{user_id}/money.toml`` (the ansible-rendered
-       location).
+    1. ``MONEY_SECRETS_FILE`` env var (escape hatch for direct ``money`` CLI
+       invocations and tests).
+    2. The user's ``[[resources]] type = "money"`` entry in the istota config
+       — credentials are colocated with the resource as ``monarch_session_token``
+       / ``monarch_email`` / ``monarch_password``, the same pattern used by
+       karakeep / miniflux / overland.
 
-    Returns ``{}`` if no file is found — sync commands that require credentials
-    will surface their own error.
+    Returns ``{}`` if no credentials are configured — sync commands that
+    require them will surface their own error.
     """
     explicit = os.environ.get("MONEY_SECRETS_FILE", "")
     if explicit:
         path = Path(explicit)
-    else:
-        namespace = getattr(istota_config, "namespace", None) or "istota"
-        path = Path(f"/etc/{namespace}/secrets/{user_id}/money.toml")
-    if path.exists():
-        return tomli.loads(path.read_text())
+        if path.exists():
+            return tomli.loads(path.read_text())
+        return {}
+
+    if istota_config is None:
+        return {}
+    uc = istota_config.get_user(user_id)
+    if not uc:
+        return {}
+    for r in uc.resources:
+        if r.type not in _MONEY_RESOURCE_TYPES:
+            continue
+        extra = getattr(r, "extra", {}) or {}
+        monarch = {
+            k.removeprefix("monarch_"): v
+            for k, v in extra.items()
+            if k.startswith("monarch_") and v
+        }
+        return {"monarch": monarch} if monarch else {}
     return {}
 
 

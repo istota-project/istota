@@ -293,13 +293,20 @@ class TestMigrationScript:
 class TestLoadUserSecrets:
     """load_user_secrets returns per-user money credentials.
 
-    Resolution order: MONEY_SECRETS_FILE env var, then
-    /etc/{namespace}/secrets/{user_id}/money.toml.
+    Resolution order: MONEY_SECRETS_FILE env var (escape hatch), then the
+    user's money resource entry on the istota config (the production path).
     """
 
-    def _cfg(self, namespace=None):
-        from types import SimpleNamespace
-        return SimpleNamespace(namespace=namespace)
+    def _cfg_with_resource(self, user_id="alice", **monarch_fields):
+        from istota.config import Config, ResourceConfig, UserConfig
+
+        extra = {f"monarch_{k}": v for k, v in monarch_fields.items() if v is not None}
+        cfg = Config()
+        cfg.users[user_id] = UserConfig(
+            display_name=user_id,
+            resources=[ResourceConfig(type="money", name="Money", extra=extra)],
+        )
+        return cfg
 
     def test_reads_from_env_var_when_set(self, monkeypatch, tmp_path):
         from istota.money import load_user_secrets
@@ -308,26 +315,49 @@ class TestLoadUserSecrets:
         secrets_file.write_text('[monarch]\nsession_token = "tok-from-env"\n')
         monkeypatch.setenv("MONEY_SECRETS_FILE", str(secrets_file))
 
-        result = load_user_secrets("alice", self._cfg())
+        result = load_user_secrets("alice", self._cfg_with_resource())
         assert result["monarch"]["session_token"] == "tok-from-env"
 
-    def test_falls_back_to_namespace_path(self, monkeypatch, tmp_path):
+    def test_reads_from_resource_entry(self, monkeypatch):
         from istota.money import load_user_secrets
 
         monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
-        # We can't write to /etc/ in tests; mock the path lookup instead.
-        with monkeypatch.context() as m:
-            fake_path = tmp_path / "money.toml"
-            fake_path.write_text('[monarch]\nsession_token = "tok-fallback"\n')
-            m.setattr(
-                "istota.money._loader.Path",
-                lambda p: fake_path if p.startswith("/etc/") else __import__("pathlib").Path(p),
-            )
-            result = load_user_secrets("alice", self._cfg(namespace="istota"))
-        assert result["monarch"]["session_token"] == "tok-fallback"
+        cfg = self._cfg_with_resource(session_token="tok-resource")
+        result = load_user_secrets("alice", cfg)
+        assert result["monarch"]["session_token"] == "tok-resource"
 
-    def test_returns_empty_when_file_missing(self, monkeypatch, tmp_path):
+    def test_includes_email_and_password_when_present(self, monkeypatch):
+        from istota.money import load_user_secrets
+
+        monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
+        cfg = self._cfg_with_resource(
+            session_token="tok",
+            email="alice@example.com",
+            password="hunter2",
+        )
+        result = load_user_secrets("alice", cfg)
+        assert result["monarch"] == {
+            "session_token": "tok",
+            "email": "alice@example.com",
+            "password": "hunter2",
+        }
+
+    def test_returns_empty_when_no_resource(self, monkeypatch):
+        from istota.config import Config
+        from istota.money import load_user_secrets
+
+        monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
+        assert load_user_secrets("alice", Config()) == {}
+
+    def test_returns_empty_when_resource_has_no_creds(self, monkeypatch):
+        from istota.money import load_user_secrets
+
+        monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
+        cfg = self._cfg_with_resource()  # no monarch fields
+        assert load_user_secrets("alice", cfg) == {}
+
+    def test_returns_empty_when_env_file_missing(self, monkeypatch, tmp_path):
         from istota.money import load_user_secrets
 
         monkeypatch.setenv("MONEY_SECRETS_FILE", str(tmp_path / "does-not-exist.toml"))
-        assert load_user_secrets("alice", self._cfg()) == {}
+        assert load_user_secrets("alice", self._cfg_with_resource()) == {}

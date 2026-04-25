@@ -351,6 +351,7 @@ class BriefingDefaultsConfig:
 
 @dataclass
 class Config:
+    namespace: str = "istota"  # Install namespace (drives /etc/{namespace}/, /srv/app/{namespace}/, etc.)
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt
     model: str = ""  # Claude model to use (e.g. "sonnet", "opus"); empty = CLI default
@@ -717,6 +718,9 @@ def load_config(config_path: Path | None = None) -> Config:
         data = tomli.load(f)
 
     config = Config()
+
+    if "namespace" in data:
+        config.namespace = data["namespace"]
 
     if "bot_name" in data:
         config.bot_name = data["bot_name"]

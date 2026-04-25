@@ -89,6 +89,17 @@ db_path = "{{ resource.db_path }}"
 {% if resource.ledgers is defined and resource.ledgers %}
 ledgers = {{ resource.ledgers | to_json }}
 {% endif %}
+{# Monarch credentials live on the money resource entry — the loader reads
+   them from istota_config when building the money UserContext. #}
+{% if resource.monarch_session_token is defined and resource.monarch_session_token %}
+monarch_session_token = "{{ resource.monarch_session_token }}"
+{% endif %}
+{% if resource.monarch_email is defined and resource.monarch_email %}
+monarch_email = "{{ resource.monarch_email }}"
+{% endif %}
+{% if resource.monarch_password is defined and resource.monarch_password %}
+monarch_password = "{{ resource.monarch_password }}"
+{% endif %}
 
 {% elif resource.type == 'overland' %}
 {% if resource.ingest_token is defined and resource.ingest_token %}
