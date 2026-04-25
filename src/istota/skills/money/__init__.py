@@ -13,15 +13,15 @@ import sys
 def _run(args: list[str]) -> dict:
     """Invoke money.cli.cli in-process with the given args, return parsed JSON.
 
-    ``MONEYMAN_CONFIG`` (config file path) and ``MONEYMAN_USER`` (user key) are
+    ``MONEY_CONFIG`` (config file path) and ``MONEY_USER`` (user key) are
     threaded through to the Click CLI via ``-c`` and ``-u`` so per-user state
     resolves correctly.
     """
     from click.testing import CliRunner
     from money.cli import cli
 
-    user = os.environ.get("MONEYMAN_USER", "")
-    config = os.environ.get("MONEYMAN_CONFIG", "")
+    user = os.environ.get("MONEY_USER", "")
+    config = os.environ.get("MONEY_CONFIG", "")
 
     cli_args: list[str] = []
     if config:

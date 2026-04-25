@@ -18,7 +18,7 @@ def _output(result: dict) -> None:
         sys.exit(1)
 
 
-DEFAULT_SECRETS_FILE = Path("/etc/moneyman/secrets.toml")
+DEFAULT_SECRETS_FILE = Path("/etc/money/secrets.toml")
 
 
 @dataclass
@@ -208,7 +208,7 @@ def _parse_user_context(user_data: dict, config_dir: Path) -> UserContext:
     if user_data.get("db_path"):
         db_path = _resolve(data_dir, user_data["db_path"])
     else:
-        db_path = data_dir / "data" / "moneyman.db"
+        db_path = data_dir / "data" / "money.db"
 
     return UserContext(
         data_dir=data_dir,
@@ -223,7 +223,7 @@ def _parse_user_context(user_data: dict, config_dir: Path) -> UserContext:
 def load_context(config_path: str | None = None) -> Context:
     """Load configuration and return a Context.
 
-    Config is found via: explicit path, MONEYMAN_CONFIG env var, or ./config.toml.
+    Config is found via: explicit path, MONEY_CONFIG env var, or ./config.toml.
 
     Supports multi-user configs with a [users] section. When no [users] section
     exists but a top-level data_dir is present, creates a single implicit "default"
@@ -236,7 +236,7 @@ def load_context(config_path: str | None = None) -> Context:
     mctx = Context()
 
     if not config_path:
-        config_path = os.environ.get("MONEYMAN_CONFIG", "")
+        config_path = os.environ.get("MONEY_CONFIG", "")
     if not config_path:
         cwd_config = Path("config.toml")
         if cwd_config.exists():
@@ -250,7 +250,7 @@ def load_context(config_path: str | None = None) -> Context:
 
     # Load secrets file (credentials kept outside of data_dir / nextcloud mount)
     secrets_path = None
-    env_secrets = os.environ.get("MONEYMAN_SECRETS_FILE", "")
+    env_secrets = os.environ.get("MONEY_SECRETS_FILE", "")
     if env_secrets:
         secrets_path = Path(env_secrets)
     elif data.get("secrets_file"):
@@ -265,7 +265,7 @@ def load_context(config_path: str | None = None) -> Context:
         mctx.secrets = tomli.loads(secrets_path.read_text())
 
     # API key: env var > secrets > config
-    env_api_key = os.environ.get("MONEYMAN_API_KEY", "")
+    env_api_key = os.environ.get("MONEY_API_KEY", "")
     secrets_api_key = (mctx.secrets or {}).get("api", {}).get("api_key", "")
     config_api_key = data.get("api_key", "")
     mctx.api_key = env_api_key or secrets_api_key or config_api_key or None
@@ -299,7 +299,7 @@ def load_context(config_path: str | None = None) -> Context:
     if data.get("db_path"):
         mctx.db_path = _resolve(mctx.data_dir, data["db_path"])
     else:
-        mctx.db_path = mctx.data_dir / "data" / "moneyman.db"
+        mctx.db_path = mctx.data_dir / "data" / "money.db"
 
     # Create implicit "default" user for for_user()/for_default_user() compat
     mctx.users["default"] = UserContext(

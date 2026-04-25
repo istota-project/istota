@@ -53,21 +53,28 @@ name = "Reminders"
 # Per-user disabled skills (excluded from keyword matching and loading)
 # disabled_skills = ["browse", "whisper"]
 
-# Moneyman accounting service (replaces direct beancount access)
-# Local mode: CLI subprocess (preferred when on same host)
+# Money (accounting). The skill runs in-process — no separate service.
+# Workspace mode (preferred): the loader synthesizes a UserContext from
+# the user's istota workspace ({nextcloud}/Users/<user>/<bot_dir>/) and
+# reads INVOICING.md / TAX.md / MONARCH.md (with .toml fallback) under
+# {data_dir}/config/. Defaults: data_dir = {workspace}/money,
+# db_path = {data_dir}/data/money.db, single 'main' ledger at
+# {data_dir}/ledgers/main.beancount.
 # [[resources]]
-# type = "moneyman"
-# name = "Moneyman"
-# cli_path = "/srv/app/moneyman/app/.venv/bin/moneyman"
-# user_key = "alice"
+# type = "money"
+# name = "Money"
+# ledgers = ["personal", "business"]
+# # data_dir = "/srv/mount/.../shared/Money"   # override default
+# # db_path = "/srv/mount/.../money.db"
+# # config_dir = "/srv/mount/.../config"
 #
-# Remote mode: HTTP API (when moneyman is on a different host)
+# Legacy mode: point config_path at a money config TOML with [users.X]
+# sections; user_key defaults to the istota username when omitted.
 # [[resources]]
-# type = "moneyman"
-# name = "Moneyman"
-# base_url = "https://moneyman.example.com"
-# api_key = "your-moneyman-api-key"
-# user_key = "alice"
+# type = "money"
+# name = "Money"
+# config_path = "/path/to/money/config.toml"
+# # user_key = "alice"
 
 # Monarch Money session token (server-side only, not synced to Nextcloud)
 # Can also use [monarch] section syntax (auto-converted to resource)

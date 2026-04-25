@@ -72,7 +72,7 @@ class TestSecretsFile:
         assert result.exit_code == 0
 
     def test_secrets_file_env_var_override(self, runner, tmp_path):
-        """MONEYMAN_SECRETS_FILE env var overrides config."""
+        """MONEY_SECRETS_FILE env var overrides config."""
         secrets = tmp_path / "env-secrets.toml"
         secrets.write_text('[monarch]\nsession_token = "env-secret"\n')
         config = tmp_path / "config.toml"
@@ -83,7 +83,7 @@ class TestSecretsFile:
         (tmp_path / "main.beancount").write_text("")
         result = runner.invoke(
             cli, ["-c", str(config), "list"],
-            env={"MONEYMAN_SECRETS_FILE": str(secrets)},
+            env={"MONEY_SECRETS_FILE": str(secrets)},
         )
         assert result.exit_code == 0
 

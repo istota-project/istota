@@ -2614,7 +2614,7 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
         # subprocess CLI reads the right credentials. Falls back to the
         # CLI's default if the file doesn't yet exist.
         namespace = getattr(app_config, "namespace", None) or "istota"
-        secrets_path = f"/etc/{namespace}/secrets/{user_id}/moneyman.toml"
+        secrets_path = f"/etc/{namespace}/secrets/{user_id}/money.toml"
 
         wanted = jobs_for_user(
             money_ctx.users[user_key], str(config_path), user_key,

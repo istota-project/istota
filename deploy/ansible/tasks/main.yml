@@ -152,12 +152,12 @@
     state: present
   when: not istota_update_only and not istota_web_only and istota_browser_enabled
 
-- name: Add istota user to moneyman group (for CLI access)
+- name: Add istota user to money group (for shared filesystem access)
   user:
     name: "{{ istota_user }}"
-    groups: "{{ istota_moneyman_group }}"
+    groups: "{{ istota_money_group }}"
     append: yes
-  when: not istota_update_only and not istota_web_only and istota_moneyman_group | length > 0
+  when: not istota_update_only and not istota_web_only and istota_money_group | length > 0
   notify: Restart istota
 
 - name: Add istota user to docker group
@@ -625,7 +625,7 @@
 - name: Deploy per-user money secrets
   template:
     src: money-secrets.toml.j2
-    dest: "/etc/{{ istota_namespace }}/secrets/{{ item.key }}/moneyman.toml"
+    dest: "/etc/{{ istota_namespace }}/secrets/{{ item.key }}/money.toml"
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
     mode: "0600"
@@ -641,6 +641,15 @@
   notify:
     - "restart istota-scheduler"
     - "restart istota-web"
+
+- name: Remove obsolete per-user moneyman.toml secrets file
+  file:
+    path: "/etc/{{ istota_namespace }}/secrets/{{ item.key }}/moneyman.toml"
+    state: absent
+  loop: "{{ _istota_money_users | default([]) }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: not istota_web_only
 
 - name: Deploy secrets environment file
   template:

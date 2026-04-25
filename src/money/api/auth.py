@@ -4,8 +4,8 @@ Supports two key types:
 - Master key: full access, can impersonate any user via X-User header
 - Derived key: HMAC-SHA256(master_key, username) — scoped to a specific user
 
-Callers should prefer derived keys. The istota moneyman skill derives keys
-automatically from the master key + MONEYMAN_USER.
+Callers should prefer derived keys. The istota money skill derives keys
+automatically from the master key + MONEY_USER.
 """
 
 from __future__ import annotations

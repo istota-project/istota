@@ -193,9 +193,8 @@ enabled = true
 api_url = "http://localhost:{{ istota_browser_api_port }}"
 vnc_url = "{{ istota_browser_vnc_external_url }}"
 {% endif %}
-{# The legacy [moneyman] block (cli_path/api_url/api_key) is intentionally
-   omitted: the money skill is now in-process and resolves per-user config
-   from each user's [[resources]] entry. #}
+{# The money skill is in-process and resolves per-user config from each
+   user's [[resources]] entry — no instance-level [money] block. #}
 
 {% if istota_memory_search_enabled %}
 

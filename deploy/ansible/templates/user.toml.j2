@@ -65,7 +65,7 @@ name = "{{ resource.name | default('Money') }}"
    UserContext rooted at the user's istota workspace and reads INVOICING.md
    / TAX.md / MONARCH.md (with .toml fallback). Search order is
    {data_dir}/config/ first, then {workspace}/config/. data_dir defaults to
-   {workspace}/money, db_path to {data_dir}/data/moneyman.db, ledgers to a
+   {workspace}/money, db_path to {data_dir}/data/money.db, ledgers to a
    single 'main' ledger at {data_dir}/ledgers/main.beancount. Override via
    data_dir / db_path / config_dir / ledgers as needed.
 

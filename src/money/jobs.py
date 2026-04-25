@@ -29,7 +29,7 @@ DEFAULT_JOBS: tuple[ModuleJob, ...] = (
         name=f"{MODULE_PREFIX}monarch_sync",
         cron="0 6 * * *",
         command_template=(
-            "MONEYMAN_CONFIG={config_path}{secrets_env} "
+            "MONEY_CONFIG={config_path}{secrets_env} "
             "money --user {user_key} sync-monarch"
         ),
         requires="monarch",
@@ -38,7 +38,7 @@ DEFAULT_JOBS: tuple[ModuleJob, ...] = (
         name=f"{MODULE_PREFIX}run_scheduled",
         cron="0 8 * * *",
         command_template=(
-            "MONEYMAN_CONFIG={config_path}{secrets_env} "
+            "MONEY_CONFIG={config_path}{secrets_env} "
             "money --user {user_key} run-scheduled"
         ),
         requires="invoicing",
@@ -58,11 +58,11 @@ def jobs_for_user(
     ``user_context`` is a ``money.cli.UserContext``. Filters jobs whose
     ``requires`` feature is not configured for the user.
 
-    If ``secrets_path`` is given, it's exported as ``MONEYMAN_SECRETS_FILE``
+    If ``secrets_path`` is given, it's exported as ``MONEY_SECRETS_FILE``
     in the command so the CLI subprocess reads per-user credentials from
-    that file instead of falling back to ``/etc/moneyman/secrets.toml``.
+    that file instead of falling back to ``/etc/money/secrets.toml``.
     """
-    secrets_env = f" MONEYMAN_SECRETS_FILE={secrets_path}" if secrets_path else ""
+    secrets_env = f" MONEY_SECRETS_FILE={secrets_path}" if secrets_path else ""
     out: list[dict] = []
     for j in DEFAULT_JOBS:
         if j.requires == "monarch" and not user_context.monarch_config_path:

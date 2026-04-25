@@ -73,7 +73,7 @@ def synthesize_user_context(
 
     Defaults:
       * ``data_dir`` = ``{workspace_root}/money``
-      * ``db_path`` = ``{data_dir}/data/moneyman.db`` (matches the
+      * ``db_path`` = ``{data_dir}/data/money.db`` (matches the
         standalone ``money.cli`` convention)
       * ``ledgers`` = ``[{"name": "main", "path": "{data_dir}/ledgers/main.beancount"}]``
         when not supplied
@@ -99,7 +99,7 @@ def synthesize_user_context(
     config_dirs = _config_search_dirs(workspace_root, data_dir, config_dir)
 
     if db_path is None:
-        db_path = data_dir / "data" / "moneyman.db"
+        db_path = data_dir / "data" / "money.db"
 
     if ledgers is None:
         ledgers = [{

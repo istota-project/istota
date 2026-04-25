@@ -647,22 +647,6 @@ class TestBuildNetworkAllowlist:
         assert "feeds.alice.example.com:443" in hosts
         assert "feeds.bob.example.com:443" not in hosts
 
-    def test_moneyman_host_scoped_to_user(self):
-        """Moneyman host comes from user_config, not all users."""
-        alice_uc = UserConfig(resources=[
-            ResourceConfig(type="moneyman", base_url="https://money.alice.example.com", api_key="k"),
-        ])
-        bob_uc = UserConfig(resources=[
-            ResourceConfig(type="moneyman", base_url="https://money.bob.example.com", api_key="k"),
-        ])
-        config = Config(
-            security=SecurityConfig(network=NetworkConfig()),
-            users={"alice": alice_uc, "bob": bob_uc},
-        )
-        hosts = _build_network_allowlist(config, ["moneyman"], user_config=alice_uc)
-        assert "money.alice.example.com:443" in hosts
-        assert "money.bob.example.com:443" not in hosts
-
     def test_no_user_config_excludes_resource_hosts(self):
         """When user_config is None, no resource hosts are added."""
         config = Config(

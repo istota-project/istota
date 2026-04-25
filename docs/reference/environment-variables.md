@@ -64,8 +64,9 @@ Derived from Nextcloud credentials:
 | `MONARCH_SESSION_TOKEN` | From resource config `extra` |
 | `MINIFLUX_BASE_URL` | From resource config (type=miniflux) |
 | `MINIFLUX_API_KEY` | From resource config (type=miniflux) |
-| `MONEYMAN_API_URL` | From resource config (type=moneyman) |
-| `MONEYMAN_API_KEY` | From resource config (type=moneyman) |
+| `MONEY_CONFIG` | From the user's `money` resource (`config_path` extra) |
+| `MONEY_USER` | The istota user_id (override via `user_key` on the resource) |
+| `MONEY_SECRETS_FILE` | `/etc/{namespace}/secrets/{user_id}/money.toml`, exported by seeded scheduler jobs |
 
 ## Google Workspace
 
@@ -104,7 +105,6 @@ When `skill_proxy_enabled = true`, these variables are stripped from the subproc
 - `IMAP_PASSWORD`
 - `KARAKEEP_API_KEY`
 - `MINIFLUX_API_KEY`
-- `MONEYMAN_API_KEY`
 - `GOOGLE_WORKSPACE_CLI_TOKEN`
 - `GITLAB_TOKEN`
 - `GITHUB_TOKEN`

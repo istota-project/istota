@@ -116,10 +116,10 @@ class TestJobsForUser:
         ctx = load_context(str(cfg))
         jobs = jobs_for_user(
             ctx.users["alice"], str(cfg), "alice",
-            secrets_path="/etc/istota/secrets/alice/moneyman.toml",
+            secrets_path="/etc/istota/secrets/alice/money.toml",
         )
         for j in jobs:
-            assert "MONEYMAN_SECRETS_FILE=/etc/istota/secrets/alice/moneyman.toml" in j["command"]
+            assert "MONEY_SECRETS_FILE=/etc/istota/secrets/alice/money.toml" in j["command"]
 
     def test_no_secrets_env_when_path_omitted(self, tmp_path):
         from money.cli import load_context
@@ -127,7 +127,7 @@ class TestJobsForUser:
         ctx = load_context(str(cfg))
         jobs = jobs_for_user(ctx.users["alice"], str(cfg), "alice")
         for j in jobs:
-            assert "MONEYMAN_SECRETS_FILE" not in j["command"]
+            assert "MONEY_SECRETS_FILE" not in j["command"]
 
 
 # ---------------------------------------------------------------------------

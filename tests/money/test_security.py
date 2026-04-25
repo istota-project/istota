@@ -35,30 +35,30 @@ def tmp_config(tmp_path, tmp_ledger):
 @pytest.fixture
 def authed_client(tmp_config):
     import os
-    os.environ["MONEYMAN_CONFIG"] = str(tmp_config)
-    os.environ["MONEYMAN_API_KEY"] = "test-secret-key"
+    os.environ["MONEY_CONFIG"] = str(tmp_config)
+    os.environ["MONEY_API_KEY"] = "test-secret-key"
 
     from money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
 
-    os.environ.pop("MONEYMAN_CONFIG", None)
-    os.environ.pop("MONEYMAN_API_KEY", None)
+    os.environ.pop("MONEY_CONFIG", None)
+    os.environ.pop("MONEY_API_KEY", None)
 
 
 @pytest.fixture
 def client(tmp_config):
     import os
-    os.environ["MONEYMAN_CONFIG"] = str(tmp_config)
-    os.environ.pop("MONEYMAN_API_KEY", None)
+    os.environ["MONEY_CONFIG"] = str(tmp_config)
+    os.environ.pop("MONEY_API_KEY", None)
 
     from money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
 
-    os.environ.pop("MONEYMAN_CONFIG", None)
+    os.environ.pop("MONEY_CONFIG", None)
 
 
 @pytest.fixture
@@ -89,15 +89,15 @@ def multi_user_client(tmp_path):
         f'path = "{alice_dir / "ledgers" / "personal.beancount"}"\n'
     )
 
-    os.environ["MONEYMAN_CONFIG"] = str(config)
-    os.environ.pop("MONEYMAN_API_KEY", None)
+    os.environ["MONEY_CONFIG"] = str(config)
+    os.environ.pop("MONEY_API_KEY", None)
 
     from money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
 
-    os.environ.pop("MONEYMAN_CONFIG", None)
+    os.environ.pop("MONEY_CONFIG", None)
 
 
 # =============================================================================
@@ -157,16 +157,16 @@ def authed_multi_user_client(tmp_path):
         f'path = "{alice_dir / "ledgers" / "personal.beancount"}"\n'
     )
 
-    os.environ["MONEYMAN_CONFIG"] = str(config)
-    os.environ["MONEYMAN_API_KEY"] = "master-secret"
+    os.environ["MONEY_CONFIG"] = str(config)
+    os.environ["MONEY_API_KEY"] = "master-secret"
 
     from money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
 
-    os.environ.pop("MONEYMAN_CONFIG", None)
-    os.environ.pop("MONEYMAN_API_KEY", None)
+    os.environ.pop("MONEY_CONFIG", None)
+    os.environ.pop("MONEY_API_KEY", None)
 
 
 class TestDerivedKeys:
