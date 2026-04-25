@@ -325,17 +325,12 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # priority = 3                           # default priority (1=min, 3=default, 5=max)
 
 # ============================================================================
-# Moneyman Accounting Service
+# Money (accounting)
 # ============================================================================
-# Instance-level connection to a Moneyman service. Per-user access is
-# controlled via [[resources]] type = "moneyman" with user_key.
-# Two modes: local CLI (same host) or remote HTTP API.
-
-# [moneyman]
-# cli_path = "/srv/app/moneyman/app/.venv/bin/moneyman"  # local CLI binary
-# config_path = "/srv/app/moneyman/app/config.toml"      # moneyman config file
-# api_url = "http://localhost:8090"                       # remote HTTP API
-# api_key = ""                                            # API key for remote mode
+# The money skill runs in-process — there is no instance-level [money]
+# block. Per-user access is controlled via [[resources]] type = "money"
+# in each user's TOML. See config/users/alice.example.toml for the
+# resource fields (workspace mode, ledgers, etc.).
 
 # ============================================================================
 # Static Website Hosting

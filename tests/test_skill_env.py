@@ -282,10 +282,10 @@ class TestBuildSkillEnvUserId:
         meta = SkillMeta(
             name="money",
             description="Money",
-            env_specs=[EnvSpec(var="MONEYMAN_USER", source="user_id")],
+            env_specs=[EnvSpec(var="MONEY_USER", source="user_id")],
         )
         env = build_skill_env(["money"], {"money": meta}, ctx)
-        assert env["MONEYMAN_USER"] == "alice"
+        assert env["MONEY_USER"] == "alice"
 
     def test_skips_when_user_id_empty(self, tmp_path):
         ctx = _make_ctx(tmp_path)
@@ -293,10 +293,10 @@ class TestBuildSkillEnvUserId:
         meta = SkillMeta(
             name="money",
             description="Money",
-            env_specs=[EnvSpec(var="MONEYMAN_USER", source="user_id")],
+            env_specs=[EnvSpec(var="MONEY_USER", source="user_id")],
         )
         env = build_skill_env(["money"], {"money": meta}, ctx)
-        assert "MONEYMAN_USER" not in env
+        assert "MONEY_USER" not in env
 
 
 class TestBuildSkillEnvMultipleSkills:

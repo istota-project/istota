@@ -32,7 +32,7 @@ Linux-only. Gracefully degrades to unsandboxed on macOS or when bwrap is not fou
 When `skill_proxy_enabled = true` (default), secret env vars are stripped from Claude's environment:
 
 - `CALDAV_PASSWORD`, `NC_PASS`, `SMTP_PASSWORD`, `IMAP_PASSWORD`
-- `KARAKEEP_API_KEY`, `MINIFLUX_API_KEY`, `MONEYMAN_API_KEY`
+- `KARAKEEP_API_KEY`, `MINIFLUX_API_KEY`
 - `GITLAB_TOKEN`, `GITHUB_TOKEN`, `MONARCH_SESSION_TOKEN`
 
 Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped to the skills that need them. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.

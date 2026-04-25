@@ -4,10 +4,11 @@ Replaces the eager-load-everything-at-startup pattern. Each web request
 resolves the authenticated user's config through ``resolve_user_config``,
 which caches per user with a TTL and file-mtime invalidation.
 
-In standalone moneyman, the source is the config file pointed to by the
-``MONEYMAN_CONFIG`` environment variable (or ``./config.toml``). When this
-package is folded into istota, the loader can be replaced via
-``set_loader`` so the source becomes the istota resource entry.
+When invoked through the standalone CLI, the source is the config file
+pointed to by the ``MONEY_CONFIG`` environment variable (or
+``./config.toml``). When this package runs in istota, the loader is
+replaced via ``set_loader`` so the source becomes the istota resource
+entry.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ CACHE_TTL_SECONDS = 300
 
 
 class ConfigNotFoundError(Exception):
-    """No moneyman config file is configured."""
+    """No money config file is configured."""
 
 
 class UserNotFoundError(Exception):
@@ -46,7 +47,8 @@ _cache_lock = threading.Lock()
 
 
 # Loader: (user_id) -> UserContext. Pluggable so istota can inject its own
-# source. In standalone moneyman the default reads from MONEYMAN_CONFIG.
+# source. The default reads MONEY_CONFIG from the environment for the
+# standalone CLI path.
 Loader = Callable[[str], UserContext]
 _loader: Loader | None = None
 
@@ -59,7 +61,7 @@ def set_loader(loader: Loader | None) -> None:
 
 
 def _config_path() -> Path | None:
-    env = os.environ.get("MONEYMAN_CONFIG", "")
+    env = os.environ.get("MONEY_CONFIG", "")
     if env:
         return Path(env)
     cwd = Path("config.toml")
@@ -71,7 +73,7 @@ def _config_path() -> Path | None:
 def _default_loader(user_id: str) -> UserContext:
     config_path = _config_path()
     if config_path is None:
-        raise ConfigNotFoundError("No moneyman config found (set MONEYMAN_CONFIG)")
+        raise ConfigNotFoundError("No money config found (set MONEY_CONFIG)")
     ctx = load_context(str(config_path))
     if user_id not in ctx.users:
         raise UserNotFoundError(f"User '{user_id}' not in config")

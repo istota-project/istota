@@ -119,7 +119,7 @@
 	{:else if error && !data}
 		<div class="error-msg">{error}</div>
 	{:else if !data}
-		<div class="empty">No tax configuration found. Add a <code>tax_config</code> path to your moneyman config.</div>
+		<div class="empty">No tax configuration found. Add a <code>TAX.md</code> (or legacy <code>tax.toml</code>) to your money workspace config.</div>
 	{:else}
 		{#if error}
 			<div class="error-msg">{error}</div>

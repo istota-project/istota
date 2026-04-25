@@ -67,11 +67,11 @@ class TestBuildSkillManifest:
                 description="Email sending and response formatting",
                 keywords=["email", "mail", "send"],
             ),
-            "moneyman": SkillMeta(
-                name="moneyman",
-                description="Accounting operations via Moneyman service",
+            "money": SkillMeta(
+                name="money",
+                description="Accounting operations",
                 keywords=["accounting", "ledger", "invoice"],
-                resource_types=["moneyman"],
+                resource_types=["money"],
             ),
         }
 
@@ -81,7 +81,7 @@ class TestBuildSkillManifest:
         assert "email" not in manifest
         assert "files" not in manifest
         assert "developer" in manifest
-        assert "moneyman" in manifest
+        assert "money" in manifest
 
     def test_excludes_always_include(self):
         index = self._make_index()

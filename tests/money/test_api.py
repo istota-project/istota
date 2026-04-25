@@ -33,31 +33,31 @@ def tmp_config(tmp_path, tmp_ledger):
 def client(tmp_config):
     """TestClient with no API key configured."""
     import os
-    os.environ["MONEYMAN_CONFIG"] = str(tmp_config)
-    os.environ.pop("MONEYMAN_API_KEY", None)
+    os.environ["MONEY_CONFIG"] = str(tmp_config)
+    os.environ.pop("MONEY_API_KEY", None)
 
     from money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
 
-    os.environ.pop("MONEYMAN_CONFIG", None)
+    os.environ.pop("MONEY_CONFIG", None)
 
 
 @pytest.fixture
 def authed_client(tmp_config):
     """TestClient with API key configured on server."""
     import os
-    os.environ["MONEYMAN_CONFIG"] = str(tmp_config)
-    os.environ["MONEYMAN_API_KEY"] = "test-secret-key"
+    os.environ["MONEY_CONFIG"] = str(tmp_config)
+    os.environ["MONEY_API_KEY"] = "test-secret-key"
 
     from money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
 
-    os.environ.pop("MONEYMAN_CONFIG", None)
-    os.environ.pop("MONEYMAN_API_KEY", None)
+    os.environ.pop("MONEY_CONFIG", None)
+    os.environ.pop("MONEY_API_KEY", None)
 
 
 # =============================================================================
@@ -435,7 +435,7 @@ class TestInvoiceEndpoints:
 class TestLoadContext:
     def test_load_context_returns_context(self, tmp_config):
         import os
-        os.environ["MONEYMAN_CONFIG"] = str(tmp_config)
+        os.environ["MONEY_CONFIG"] = str(tmp_config)
         try:
             from money.cli import load_context
             ctx = load_context()
@@ -443,7 +443,7 @@ class TestLoadContext:
             assert len(ctx.ledgers) == 1
             assert ctx.ledgers[0]["name"] == "main"
         finally:
-            os.environ.pop("MONEYMAN_CONFIG", None)
+            os.environ.pop("MONEY_CONFIG", None)
 
     def test_load_context_with_path(self, tmp_config):
         from money.cli import load_context
@@ -452,7 +452,7 @@ class TestLoadContext:
 
     def test_load_context_no_config(self, tmp_path):
         import os
-        os.environ.pop("MONEYMAN_CONFIG", None)
+        os.environ.pop("MONEY_CONFIG", None)
         # Change to a dir with no config.toml
         from money.cli import load_context
         ctx = load_context(config_path=None)
@@ -461,15 +461,15 @@ class TestLoadContext:
 
     def test_api_key_from_env(self, tmp_config):
         import os
-        os.environ["MONEYMAN_CONFIG"] = str(tmp_config)
-        os.environ["MONEYMAN_API_KEY"] = "env-key-123"
+        os.environ["MONEY_CONFIG"] = str(tmp_config)
+        os.environ["MONEY_API_KEY"] = "env-key-123"
         try:
             from money.cli import load_context
             ctx = load_context()
             assert ctx.api_key == "env-key-123"
         finally:
-            os.environ.pop("MONEYMAN_CONFIG", None)
-            os.environ.pop("MONEYMAN_API_KEY", None)
+            os.environ.pop("MONEY_CONFIG", None)
+            os.environ.pop("MONEY_API_KEY", None)
 
     def test_api_key_from_secrets(self, tmp_path, tmp_ledger):
         secrets = tmp_path / "secrets.toml"
@@ -481,7 +481,7 @@ class TestLoadContext:
             f'[[ledgers]]\nname = "main"\npath = "{tmp_ledger}"\n'
         )
         import os
-        os.environ.pop("MONEYMAN_API_KEY", None)
+        os.environ.pop("MONEY_API_KEY", None)
         from money.cli import load_context
         ctx = load_context(config_path=str(config))
         assert ctx.api_key == "secret-key-456"
@@ -496,13 +496,13 @@ class TestLoadContext:
             f'[[ledgers]]\nname = "main"\npath = "{tmp_ledger}"\n'
         )
         import os
-        os.environ["MONEYMAN_API_KEY"] = "env-key"
+        os.environ["MONEY_API_KEY"] = "env-key"
         try:
             from money.cli import load_context
             ctx = load_context(config_path=str(config))
             assert ctx.api_key == "env-key"
         finally:
-            os.environ.pop("MONEYMAN_API_KEY", None)
+            os.environ.pop("MONEY_API_KEY", None)
 
 
 
@@ -580,15 +580,15 @@ def multi_user_config(tmp_path):
 def multi_user_client(multi_user_config):
     """TestClient with multi-user config, no API key."""
     import os
-    os.environ["MONEYMAN_CONFIG"] = str(multi_user_config)
-    os.environ.pop("MONEYMAN_API_KEY", None)
+    os.environ["MONEY_CONFIG"] = str(multi_user_config)
+    os.environ.pop("MONEY_API_KEY", None)
 
     from money.api.app import create_app
     app = create_app()
     with TestClient(app) as c:
         yield c
 
-    os.environ.pop("MONEYMAN_CONFIG", None)
+    os.environ.pop("MONEY_CONFIG", None)
 
 
 class TestMultiUserApi:

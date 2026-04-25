@@ -45,7 +45,7 @@ def multi_user_config(tmp_path, monkeypatch):
         f'data_dir = "{tmp_path / "bob"}"\n'
         f'ledgers = ["main"]\n'
     )
-    monkeypatch.setenv("MONEYMAN_CONFIG", str(config))
+    monkeypatch.setenv("MONEY_CONFIG", str(config))
     return config
 
 
@@ -68,7 +68,7 @@ def config_with_invoicing(tmp_path, monkeypatch):
         f'ledgers = ["main"]\n'
         f'invoicing_config = "invoicing.toml"\n'
     )
-    monkeypatch.setenv("MONEYMAN_CONFIG", str(config))
+    monkeypatch.setenv("MONEY_CONFIG", str(config))
     return config, invoicing
 
 
@@ -83,7 +83,7 @@ class TestResolve:
             resolve_user_config("eve")
 
     def test_no_config_raises(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("MONEYMAN_CONFIG", raising=False)
+        monkeypatch.delenv("MONEY_CONFIG", raising=False)
         monkeypatch.chdir(tmp_path)
         with pytest.raises(ConfigNotFoundError):
             resolve_user_config("alice")
@@ -168,11 +168,11 @@ class TestListUsers:
             f'data_dir = "{tmp_path}"\n'
             f'ledgers = [{{name = "main", path = "ledgers/main.beancount"}}]\n'
         )
-        monkeypatch.setenv("MONEYMAN_CONFIG", str(config))
+        monkeypatch.setenv("MONEY_CONFIG", str(config))
         assert list_users() == []
 
     def test_no_config_returns_empty(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("MONEYMAN_CONFIG", raising=False)
+        monkeypatch.delenv("MONEY_CONFIG", raising=False)
         monkeypatch.chdir(tmp_path)
         assert list_users() == []
 

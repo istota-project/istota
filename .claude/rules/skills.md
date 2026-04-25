@@ -125,9 +125,9 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `website` | — | website, site, publish, blog, ... | — | — |
 | `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe | miniflux | — |
 | `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws | — | — |
-| `moneyman` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | moneyman | — |
+| `money` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | money (legacy `moneyman` accepted) | — |
 
-Note: `moneyman` is the sole accounting skill. It runs in dual-mode (CLI subprocess preferred, HTTP API fallback) against the standalone Moneyman service.
+Note: `money` is the sole accounting skill. It runs in-process via the vendored `money` package (no subprocess, no HTTP).
 
 ## Skill CLI Modules (`src/istota/skills/`)
 
@@ -194,10 +194,10 @@ Note: `moneyman` is the sole accounting skill. It runs in dual-mode (CLI subproc
 **Env vars**: `GOOGLE_WORKSPACE_CLI_TOKEN` (injected via `setup_env` hook from DB OAuth tokens), `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` (writable cache dir)
 **Note**: CLI wrapper around the standalone `gws` binary. Credentials injected via skill proxy. OAuth tokens stored in `google_oauth_tokens` DB table, refreshed automatically. Scopes configurable via `[google_workspace]` config section (default: read-only).
 
-### `moneyman/` - Moneyman Accounting API Client
-**Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `add-transaction`, `sync-monarch`, `import-csv`, `invoice` (sub: `generate`, `list`, `paid`, `create`), `work` (sub: `list`, `add`, `update`, `remove`)
-**Env vars**: `MONEYMAN_API_URL`, `MONEYMAN_API_KEY`
-**Note**: Dual-mode client — CLI subprocess (preferred, via `MONEYMAN_CLI_PATH`) or HTTP REST API.
+### `money/` - Accounting (in-process)
+**Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `add-transaction`, `sync-monarch`, `import-csv`, `invoice` (sub: `generate`, `list`, `paid`, `create`, `void`), `work` (sub: `list`, `add`, `update`, `remove`)
+**Env vars**: `MONEY_CONFIG`, `MONEY_USER`
+**Note**: In-process facade — imports the vendored `money` package and invokes its Click CLI via `CliRunner`. No subprocess, no HTTP.
 
 ### Library-Only Modules (no CLI)
 - `files/` - Nextcloud file ops (mount-aware, rclone fallback)

@@ -65,14 +65,14 @@ class TestMoneySkillManifest:
         )
         assert "money" not in selected
 
-    def test_env_specs_drop_http_and_cli_path(self, tmp_path):
-        """No more MONEYMAN_API_URL / MONEYMAN_API_KEY / MONEYMAN_CLI_PATH."""
+    def test_env_specs(self, tmp_path):
+        """The in-process skill needs only MONEY_CONFIG and MONEY_USER."""
         from istota.skills._loader import load_skill_index
 
         index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
         meta = index["money"]
         env_vars = {spec.var for spec in meta.env_specs}
-        assert env_vars == {"MONEYMAN_CONFIG", "MONEYMAN_USER"}
+        assert env_vars == {"MONEY_CONFIG", "MONEY_USER"}
 
 
 class TestRunInProcess:
@@ -86,7 +86,7 @@ class TestRunInProcess:
         fake_result.exit_code = 0
         fake_result.output = '{"status": "ok", "data": [1, 2]}\n'
 
-        env = {"MONEYMAN_CONFIG": "/etc/money/config.toml", "MONEYMAN_USER": "alice"}
+        env = {"MONEY_CONFIG": "/etc/money/config.toml", "MONEY_USER": "alice"}
         with patch.dict(os.environ, env, clear=True):
             with patch("click.testing.CliRunner") as MockRunner:
                 MockRunner.return_value.invoke.return_value = fake_result
@@ -210,14 +210,17 @@ class TestCommandDispatch:
 
 
 class TestExecutorIntegration:
-    """The in-process skill no longer needs MONEYMAN_API_KEY or a network host."""
+    """The in-process skill needs neither an API-key proxy var nor a network host."""
 
-    def test_moneyman_api_key_not_in_proxy_vars(self):
+    def test_no_money_api_key_in_proxy_vars(self):
         from istota.executor import _PROXY_CREDENTIAL_VARS
 
+        # Legacy out-of-process names that used to live here.
         assert "MONEYMAN_API_KEY" not in _PROXY_CREDENTIAL_VARS
+        assert "MONEY_API_KEY" not in _PROXY_CREDENTIAL_VARS
 
-    def test_moneyman_api_key_not_in_credential_skill_map(self):
+    def test_no_money_api_key_in_credential_skill_map(self):
         from istota.executor import _CREDENTIAL_SKILL_MAP
 
         assert "MONEYMAN_API_KEY" not in _CREDENTIAL_SKILL_MAP
+        assert "MONEY_API_KEY" not in _CREDENTIAL_SKILL_MAP

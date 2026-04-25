@@ -61,7 +61,7 @@ class TestSynthesizeUserContext:
         assert ctx.tax_config_path is None
         assert ctx.monarch_config_path is None
         assert ctx.data_dir == (tmp_path / "money").resolve()
-        assert ctx.db_path == ctx.data_dir / "data" / "moneyman.db"
+        assert ctx.db_path == ctx.data_dir / "data" / "money.db"
         assert ctx.ledgers == [{
             "name": "main",
             "path": ctx.data_dir / "ledgers" / "main.beancount",
@@ -135,7 +135,7 @@ class TestSynthesizeUserContext:
         custom = tmp_path / "elsewhere"
         ctx = synthesize_user_context(tmp_path, data_dir=custom)
         assert ctx.data_dir == custom.resolve()
-        assert ctx.db_path == custom.resolve() / "data" / "moneyman.db"
+        assert ctx.db_path == custom.resolve() / "data" / "money.db"
 
     def test_db_path_override(self, tmp_path):
         custom_db = tmp_path / "custom.db"

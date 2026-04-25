@@ -182,18 +182,18 @@ istota_disabled_skills: []
 #         # and reads INVOICING.md / TAX.md / MONARCH.md (with .toml
 #         # fallback) from {data_dir}/config/ first, then {workspace}/config/.
 #         # Defaults: data_dir = {workspace}/money,
-#         #           db_path = {data_dir}/data/moneyman.db,
+#         #           db_path = {data_dir}/data/money.db,
 #         #           ledgers = single 'main' at {data_dir}/ledgers/main.beancount.
 #         # Overrides:
 #         #   data_dir: "/srv/mount/.../shared/Money"
-#         #   db_path: "/srv/mount/.../moneyman.db"
+#         #   db_path: "/srv/mount/.../money.db"
 #         #   config_dir: "/srv/mount/.../config"
 #         ledgers: ["personal", "business"]
 #         monarch_session_token: "{{ vault_alice_monarch_token }}"
 #         # Legacy mode (alternative): point config_path at a money config
 #         # TOML with [users.X] sections. user_key defaults to the istota
 #         # username when omitted.
-#         # config_path: "/srv/app/moneyman/app/config.toml"
+#         # config_path: "/srv/app/zorg/money-config.toml"
 #       - type: "overland"
 #         name: "GPS"
 #         ingest_token: "your-overland-secret"
@@ -255,16 +255,10 @@ istota_rclone_password_obscured: ""
 istota_use_nextcloud_mount: true
 istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 
-# Money (formerly Moneyman) integration. The skill is now in-process; the
-# legacy out-of-process settings (api_url/api_key/cli_path/config_path) are
-# no longer rendered into config.toml. They remain here only as a compat
-# shim so existing inventories don't break on upgrade — set them to ""
-# unless you have a custom downstream consumer.
-istota_moneyman_group: ""  # set to "money" to grant filesystem group access
-istota_moneyman_api_url: ""  # DEPRECATED — no longer rendered (in-process skill)
-istota_moneyman_api_key: ""  # DEPRECATED — no longer rendered
-istota_moneyman_cli_path: ""  # DEPRECATED — money is on PATH inside istota's venv
-istota_moneyman_config_path: ""  # DEPRECATED — per-user resource entry replaces this
+# Money integration. The skill is in-process — no separate service, no
+# api_url/api_key/cli_path/config_path. Per-user money config is declared
+# on the user's `money` resource entry (see istota_users below).
+istota_money_group: ""  # filesystem group for shared data access; empty = no group add
 
 # Per-user money configuration goes inside the istota_users dict, on the
 # money resource entry itself. Only `monarch_session_token` is needed;
@@ -280,11 +274,11 @@ istota_moneyman_config_path: ""  # DEPRECATED — per-user resource entry replac
 #           # .toml fallback). Search order: {data_dir}/config/ first, then
 #           # {workspace}/config/.
 #           # Defaults: data_dir = {workspace}/money,
-#           #           db_path = {data_dir}/data/moneyman.db,
+#           #           db_path = {data_dir}/data/money.db,
 #           #           ledgers = single 'main' at {data_dir}/ledgers/main.beancount.
 #           # Override fields are optional:
 #           #   data_dir: "/srv/mount/.../shared/Money"
-#           #   db_path:  "/srv/mount/.../moneyman.db"
+#           #   db_path:  "/srv/mount/.../money.db"
 #           #   config_dir: "/srv/mount/.../config"
 #           ledgers: ["personal", "business"]
 #           monarch_session_token: "{{ vault_alice_monarch_token }}"
@@ -292,7 +286,7 @@ istota_moneyman_config_path: ""  # DEPRECATED — per-user resource entry replac
 #           # Legacy mode (alternative): set config_path to a money config
 #           # TOML with [users.<key>] sections. user_key defaults to the
 #           # istota username when omitted.
-#           # config_path: "/srv/app/moneyman/app/config.toml"
+#           # config_path: "/srv/app/zorg/money-config.toml"
 #           # user_key: "alice"
 
 # Browser container settings (for web browsing skill)
