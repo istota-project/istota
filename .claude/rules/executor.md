@@ -87,10 +87,6 @@ def build_prompt(
 | Browser | `BROWSER_API_URL`, `BROWSER_VNC_URL` | `config.browser.*` (if enabled) |
 | Email | `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM` | `config.email.*` (`SMTP_FROM` is plus-addressed: `bot+user_id@domain`) |
 | Email | `IMAP_HOST/PORT/USER/PASSWORD` | `config.email.*` |
-| Ledger | `LEDGER_PATHS` | JSON array `[{"name": ..., "path": ...}]` |
-| Ledger | `LEDGER_PATH` | First ledger path (backward compat) |
-| Invoicing | `INVOICING_CONFIG` | Path to INVOICING.md (auto-created from template) |
-| Accounting | `ACCOUNTING_CONFIG` | Path to ACCOUNTING.md (auto-created from template) |
 | Karakeep | `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY` | From resource config `extra` |
 | Monarch | `MONARCH_SESSION_TOKEN` | From resource config `extra` |
 | Miniflux | `MINIFLUX_BASE_URL`, `MINIFLUX_API_KEY` | From resource config (type=miniflux) |
