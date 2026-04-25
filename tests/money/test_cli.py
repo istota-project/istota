@@ -814,3 +814,140 @@ class TestMultiUserLoadContext:
         uctx = ctx.users["test"]
         assert uctx.invoicing_config_path == user_dir / "invoicing.toml"
         assert uctx.monarch_config_path == user_dir / "monarch.toml"
+
+
+class TestWorkspaceMode:
+    """MONEY_WORKSPACE env var triggers workspace-mode synthesis.
+
+    The skill (and any non-istota standalone caller) sets MONEY_WORKSPACE to
+    point at an istota workspace dir; load_context synthesizes a UserContext
+    via money.workspace.synthesize_user_context and registers it under
+    MONEY_USER (defaulting to "default"). MONEY_CONFIG keeps precedence.
+    """
+
+    def test_synthesizes_user_from_workspace_env(self, monkeypatch, tmp_path):
+        from money.cli import load_context
+        workspace = tmp_path / "stefan" / "istota"
+        (workspace / "config").mkdir(parents=True)
+        (workspace / "config" / "INVOICING.md").write_text(
+            "# Invoicing\n\n```toml\nplaceholder = true\n```\n"
+        )
+
+        monkeypatch.delenv("MONEY_CONFIG", raising=False)
+        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
+        monkeypatch.setenv("MONEY_USER", "stefan")
+
+        ctx = load_context()
+        assert "stefan" in ctx.users
+        uctx = ctx.users["stefan"]
+        assert uctx.data_dir == workspace / "money"
+        assert uctx.invoicing_config_path == workspace / "config" / "INVOICING.md"
+
+    def test_workspace_mode_activates_user(self, monkeypatch, tmp_path):
+        from money.cli import load_context
+        workspace = tmp_path / "stefan" / "istota"
+        workspace.mkdir(parents=True)
+
+        monkeypatch.delenv("MONEY_CONFIG", raising=False)
+        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
+        monkeypatch.setenv("MONEY_USER", "stefan")
+
+        ctx = load_context()
+        assert ctx.active_user == "stefan"
+        assert ctx.data_dir == workspace / "money"
+
+    def test_workspace_mode_defaults_user_to_default(self, monkeypatch, tmp_path):
+        from money.cli import load_context
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        monkeypatch.delenv("MONEY_CONFIG", raising=False)
+        monkeypatch.delenv("MONEY_USER", raising=False)
+        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
+
+        ctx = load_context()
+        assert "default" in ctx.users
+        assert ctx.active_user == "default"
+
+    def test_workspace_data_dir_override(self, monkeypatch, tmp_path):
+        from money.cli import load_context
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        custom_data = tmp_path / "custom_data"
+        custom_data.mkdir()
+
+        monkeypatch.delenv("MONEY_CONFIG", raising=False)
+        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
+        monkeypatch.setenv("MONEY_DATA_DIR", str(custom_data))
+        monkeypatch.setenv("MONEY_USER", "alice")
+
+        ctx = load_context()
+        assert ctx.users["alice"].data_dir == custom_data
+
+    def test_workspace_ledgers_override_via_json(self, monkeypatch, tmp_path):
+        from money.cli import load_context
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        monkeypatch.delenv("MONEY_CONFIG", raising=False)
+        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
+        monkeypatch.setenv("MONEY_LEDGERS", json.dumps(["personal", "business"]))
+        monkeypatch.setenv("MONEY_USER", "alice")
+
+        ctx = load_context()
+        ledgers = ctx.users["alice"].ledgers
+        assert [l["name"] for l in ledgers] == ["personal", "business"]
+        assert ledgers[0]["path"] == workspace / "money" / "ledgers" / "personal.beancount"
+
+    def test_workspace_config_dir_override(self, monkeypatch, tmp_path):
+        from money.cli import load_context
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        explicit_config_dir = tmp_path / "explicit_cfg"
+        explicit_config_dir.mkdir()
+        (explicit_config_dir / "INVOICING.md").write_text(
+            "# x\n\n```toml\nfoo = 1\n```\n"
+        )
+
+        monkeypatch.delenv("MONEY_CONFIG", raising=False)
+        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
+        monkeypatch.setenv("MONEY_CONFIG_DIR", str(explicit_config_dir))
+        monkeypatch.setenv("MONEY_USER", "alice")
+
+        ctx = load_context()
+        assert ctx.users["alice"].invoicing_config_path == explicit_config_dir / "INVOICING.md"
+
+    def test_money_config_takes_precedence_over_workspace(self, monkeypatch, tmp_path):
+        from money.cli import load_context
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        config = tmp_path / "config.toml"
+        config.write_text(
+            f'[users.alice]\n'
+            f'data_dir = "{tmp_path / "alice_data"}"\n'
+        )
+        (tmp_path / "alice_data").mkdir()
+
+        monkeypatch.setenv("MONEY_CONFIG", str(config))
+        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
+        monkeypatch.setenv("MONEY_USER", "alice")
+
+        ctx = load_context()
+        # Legacy mode wins: workspace-synthesized user is not present
+        assert ctx.users["alice"].data_dir == tmp_path / "alice_data"
+        assert ctx.users["alice"].data_dir != workspace / "money"
+
+    def test_workspace_command_runs_without_config(self, monkeypatch, tmp_path, runner):
+        """End-to-end: `money -u stefan list` works with only MONEY_WORKSPACE set."""
+        from money.cli import cli
+        workspace = tmp_path / "stefan" / "istota"
+        workspace.mkdir(parents=True)
+
+        monkeypatch.delenv("MONEY_CONFIG", raising=False)
+        monkeypatch.setenv("MONEY_WORKSPACE", str(workspace))
+
+        result = runner.invoke(cli, ["-u", "stefan", "list"])
+        assert result.exit_code == 0, result.output
+        output = json.loads(result.output)
+        assert output["status"] == "ok"
+        assert output["ledger_count"] == 1  # default 'main' ledger

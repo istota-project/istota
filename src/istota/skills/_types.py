@@ -17,8 +17,11 @@ class EnvSpec:
     # For source="config"
     config_path: str = ""
     when: str = ""  # guard: dotted config path that must be truthy
-    # For source="resource" / "resource_json"
+    # For source="resource" / "resource_json" / "user_resource_config".
+    # ``resource_types`` matches any of the listed types; ``resource_type`` is
+    # the singular shortcut still supported for skills with a single type.
     resource_type: str = ""
+    resource_types: list[str] = field(default_factory=list)
     # For source="user_resource_config"
     field: str = ""
     # For source="template_file"

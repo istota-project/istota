@@ -4,7 +4,7 @@ triggers: [accounting, ledger, beancount, invoice, invoicing, expense, transacti
 description: Accounting operations (ledger, invoicing, transactions, work log) — runs in-process via the vendored money package
 cli: true
 resource_types: [money, moneyman]
-env: [{"var":"MONEY_CONFIG","from":"user_resource_config","resource_type":"money","field":"config_path"},{"var":"MONEY_USER","from":"user_id"}]
+env: [{"var":"MONEY_CONFIG","from":"user_resource_config","resource_types":["money","moneyman"],"field":"config_path"},{"var":"MONEY_USER","from":"user_id"}]
 ---
 # Money Accounting Operations
 
@@ -123,20 +123,36 @@ A wash sale occurs when you sell a security at a loss and buy substantially iden
 
 | Variable | Description |
 |---|---|
-| `MONEY_CONFIG` | Path to money config file (from the user's `money` resource) |
-| `MONEY_USER` | User key in the money config — defaults to the istota user_id |
+| `MONEY_CONFIG` | Path to a money config TOML file (legacy mode) |
+| `MONEY_WORKSPACE` | Path to the user's istota workspace (workspace mode); set automatically by the skill's `setup_env` hook when the resource has no `config_path` |
+| `MONEY_USER` | User key — defaults to the istota user_id |
+| `MONEY_DATA_DIR` | Override workspace data dir (default `{workspace}/money`) |
+| `MONEY_CONFIG_DIR` | Override config dir (default `{data_dir}/config`, then `{workspace}/config`) |
+| `MONEY_LEDGERS` | JSON-encoded list of ledger names or `{name, path}` dicts |
+| `MONEY_DB_PATH` | Override SQLite DB path (default `{data_dir}/data/money.db`) |
 
 ## Adding the money resource
 
-Add to user config (`config/users/{user}.toml`):
+Two modes are supported. Add either form to user config (`config/users/{user}.toml`).
+
+**Workspace mode (preferred):** the user's money config lives under their istota workspace as `INVOICING.md` / `TAX.md` / `MONARCH.md` (each with a fenced ```toml block).
+
+```toml
+[[resources]]
+type = "money"
+name = "Money"
+```
+
+The skill resolves `{nextcloud_mount}/Users/{user}/{bot_dir}` as the workspace and synthesizes a `UserContext` rooted there. Override `data_dir`, `config_dir`, `db_path`, or `ledgers` on the resource as extras.
+
+**Legacy mode:** point at a money config TOML with `[users.X]` sections.
 
 ```toml
 [[resources]]
 type = "money"
 name = "Money"
 config_path = "/etc/istota/money/config.toml"
+user_key = "alice"  # optional, defaults to istota user_id
 ```
-
-`MONEY_USER` defaults to the istota user_id (the per-user TOML basename). Override with `user_key = "alice"` on the resource if the money config uses a different key.
 
 The `moneyman` resource type is also accepted for backward compatibility with the legacy out-of-process integration.

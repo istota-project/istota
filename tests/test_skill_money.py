@@ -66,13 +66,21 @@ class TestMoneySkillManifest:
         assert "money" not in selected
 
     def test_env_specs(self, tmp_path):
-        """The in-process skill needs only MONEY_CONFIG and MONEY_USER."""
+        """MONEY_CONFIG (legacy) and MONEY_USER are declarative;
+        MONEY_WORKSPACE is emitted by the setup_env hook."""
         from istota.skills._loader import load_skill_index
 
         index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
         meta = index["money"]
         env_vars = {spec.var for spec in meta.env_specs}
         assert env_vars == {"MONEY_CONFIG", "MONEY_USER"}
+
+        # MONEY_CONFIG must accept both the new and legacy resource types
+        money_config_spec = next(s for s in meta.env_specs if s.var == "MONEY_CONFIG")
+        accepted = set(money_config_spec.resource_types) | (
+            {money_config_spec.resource_type} if money_config_spec.resource_type else set()
+        )
+        assert {"money", "moneyman"} <= accepted
 
 
 class TestRunInProcess:
@@ -224,3 +232,145 @@ class TestExecutorIntegration:
 
         assert "MONEYMAN_API_KEY" not in _CREDENTIAL_SKILL_MAP
         assert "MONEY_API_KEY" not in _CREDENTIAL_SKILL_MAP
+
+
+class TestSetupEnvHook:
+    """The money skill's setup_env() hook injects MONEY_WORKSPACE for workspace mode.
+
+    The web-side loader (istota.web_app._install_money_loader) supports both
+    legacy mode (extra.config_path on the resource) and workspace mode
+    (synthesize from {nextcloud_mount}/Users/{user_id}/{bot_dir}). The CLI
+    side mirrors that: when no config_path is set, setup_env emits
+    MONEY_WORKSPACE so money.cli.load_context() can synthesize a UserContext.
+    """
+
+    def _make_ctx(self, tmp_path, *, resources=None, mount=True, user_id="stefan"):
+        from dataclasses import dataclass, field
+        from unittest.mock import MagicMock
+
+        from istota.skills._env import EnvContext
+
+        @dataclass
+        class _Cfg:
+            nextcloud_mount_path: object = None
+            bot_dir_name: str = "istota"
+
+        @dataclass
+        class _RC:
+            type: str
+            extra: dict = field(default_factory=dict)
+            path: str = ""
+            name: str = ""
+            permissions: str = "read"
+            base_url: str = ""
+            api_key: str = ""
+
+        @dataclass
+        class _UC:
+            resources: list = field(default_factory=list)
+
+        cfg = _Cfg()
+        if mount:
+            mount_path = tmp_path / "mount"
+            mount_path.mkdir()
+            cfg.nextcloud_mount_path = mount_path
+
+        return EnvContext(
+            config=cfg,
+            task=MagicMock(id=1, user_id=user_id, conversation_token=None),
+            user_resources=[],
+            user_config=_UC(resources=resources or []),
+            user_temp_dir=tmp_path / "tmp",
+            is_admin=True,
+        ), cfg, _RC
+
+    def test_emits_money_workspace_when_resource_has_no_config_path(self, tmp_path):
+        from istota.skills.money import setup_env
+
+        ctx, cfg, RC = self._make_ctx(tmp_path)
+        ctx.user_config.resources.append(RC(type="money"))
+
+        env = setup_env(ctx)
+        expected = cfg.nextcloud_mount_path / "Users" / "stefan" / "istota"
+        assert env["MONEY_WORKSPACE"] == str(expected)
+
+    def test_emits_money_workspace_for_legacy_moneyman_type(self, tmp_path):
+        from istota.skills.money import setup_env
+
+        ctx, cfg, RC = self._make_ctx(tmp_path)
+        ctx.user_config.resources.append(RC(type="moneyman"))
+
+        env = setup_env(ctx)
+        assert "MONEY_WORKSPACE" in env
+
+    def test_skips_when_no_money_resource(self, tmp_path):
+        from istota.skills.money import setup_env
+
+        ctx, _, RC = self._make_ctx(tmp_path)
+        ctx.user_config.resources.append(RC(type="karakeep"))
+
+        env = setup_env(ctx)
+        assert env == {}
+
+    def test_skips_when_resource_has_config_path(self, tmp_path):
+        """Legacy mode: config_path is set, so MONEY_CONFIG covers it; no MONEY_WORKSPACE."""
+        from istota.skills.money import setup_env
+
+        ctx, _, RC = self._make_ctx(tmp_path)
+        ctx.user_config.resources.append(
+            RC(type="money", extra={"config_path": "/etc/money/config.toml"}),
+        )
+
+        env = setup_env(ctx)
+        assert "MONEY_WORKSPACE" not in env
+
+    def test_skips_when_no_nextcloud_mount(self, tmp_path):
+        from istota.skills.money import setup_env
+
+        ctx, _, RC = self._make_ctx(tmp_path, mount=False)
+        ctx.user_config.resources.append(RC(type="money"))
+
+        env = setup_env(ctx)
+        assert "MONEY_WORKSPACE" not in env
+
+    def test_emits_data_dir_override(self, tmp_path):
+        from istota.skills.money import setup_env
+
+        ctx, _, RC = self._make_ctx(tmp_path)
+        ctx.user_config.resources.append(
+            RC(type="money", extra={"data_dir": "/srv/money/stefan"}),
+        )
+
+        env = setup_env(ctx)
+        assert env["MONEY_DATA_DIR"] == "/srv/money/stefan"
+
+    def test_emits_config_dir_override(self, tmp_path):
+        from istota.skills.money import setup_env
+
+        ctx, _, RC = self._make_ctx(tmp_path)
+        ctx.user_config.resources.append(
+            RC(type="money", extra={"config_dir": "/srv/money/stefan/config"}),
+        )
+
+        env = setup_env(ctx)
+        assert env["MONEY_CONFIG_DIR"] == "/srv/money/stefan/config"
+
+    def test_emits_ledgers_as_json(self, tmp_path):
+        from istota.skills.money import setup_env
+
+        ctx, _, RC = self._make_ctx(tmp_path)
+        ctx.user_config.resources.append(
+            RC(type="money", extra={"ledgers": ["personal", "business"]}),
+        )
+
+        env = setup_env(ctx)
+        assert json.loads(env["MONEY_LEDGERS"]) == ["personal", "business"]
+
+    def test_skips_user_config_none(self, tmp_path):
+        from istota.skills.money import setup_env
+
+        ctx, _, _ = self._make_ctx(tmp_path)
+        ctx.user_config = None
+
+        env = setup_env(ctx)
+        assert env == {}
