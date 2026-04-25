@@ -177,10 +177,12 @@ istota_disabled_skills: []
 #         name: "Monarch Money"
 #         session_token: "monarch-token"
 #       - type: "money"
-#         # Workspace mode: omit config_path; the loader reads
-#         # INVOICING.md/TAX.md/MONARCH.md from the user's workspace config/.
-#         # Legacy mode: config_path = "/srv/app/moneyman/app/config.toml"
-#         # user_key = "username"   # if multi-user money config TOML
+#         # Legacy: point at an existing money config TOML.
+#         config_path: "/srv/app/moneyman/app/config.toml"
+#         monarch_session_token: "{{ vault_alice_monarch_token }}"
+#         # Workspace mode (alternative): omit config_path and let the
+#         # loader read INVOICING.md/TAX.md/MONARCH.md from the user's
+#         # workspace config/ dir. Override data_dir if needed.
 #       - type: "overland"
 #         name: "GPS"
 #         ingest_token: "your-overland-secret"
@@ -253,19 +255,25 @@ istota_moneyman_api_key: ""  # DEPRECATED — no longer rendered
 istota_moneyman_cli_path: ""  # DEPRECATED — money is on PATH inside istota's venv
 istota_moneyman_config_path: ""  # DEPRECATED — per-user resource entry replaces this
 
-# Per-user money configuration goes inside the istota_users dict, e.g.:
+# Per-user money configuration goes inside the istota_users dict, on the
+# money resource entry itself. Only `monarch_session_token` is needed;
+# `monarch_email` / `monarch_password` are optional fallbacks for reauth.
+#
 #   istota_users:
 #     alice:
 #       resources:
 #         - type: "money"
-#           # Workspace mode: omit config_path; reads INVOICING.md / TAX.md /
-#           # MONARCH.md from the user's istota workspace config/ dir.
-#           # (Legacy: set config_path to a money config TOML.)
-#       money:
-#         monarch:
-#           session_token: "{{ vault_alice_monarch_token }}"
-#           email: "alice@example.com"
-#           password: "{{ vault_alice_monarch_password }}"
+#           # Legacy mode: set config_path to a money config TOML with
+#           # [users.<key>] sections. user_key is optional — defaults to
+#           # the istota username when omitted.
+#           config_path: "/srv/app/moneyman/app/config.toml"
+#           # user_key: "alice"
+#           monarch_session_token: "{{ vault_alice_monarch_token }}"
+#           # Workspace mode (alternative): omit config_path; the loader
+#           # reads INVOICING.md / TAX.md / MONARCH.md from the user's
+#           # istota workspace config/ dir, with data_dir defaulting to
+#           # {workspace}/money. Override via:
+#           # data_dir: "/srv/mount/.../shared/Money"
 
 # Browser container settings (for web browsing skill)
 istota_browser_enabled: false

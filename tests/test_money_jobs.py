@@ -110,6 +110,25 @@ class TestJobsForUser:
             assert str(cfg) in j["command"]
             assert "--user alice" in j["command"]
 
+    def test_secrets_path_threaded_into_command(self, tmp_path):
+        from money.cli import load_context
+        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
+        ctx = load_context(str(cfg))
+        jobs = jobs_for_user(
+            ctx.users["alice"], str(cfg), "alice",
+            secrets_path="/etc/istota/secrets/alice/moneyman.toml",
+        )
+        for j in jobs:
+            assert "MONEYMAN_SECRETS_FILE=/etc/istota/secrets/alice/moneyman.toml" in j["command"]
+
+    def test_no_secrets_env_when_path_omitted(self, tmp_path):
+        from money.cli import load_context
+        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
+        ctx = load_context(str(cfg))
+        jobs = jobs_for_user(ctx.users["alice"], str(cfg), "alice")
+        for j in jobs:
+            assert "MONEYMAN_SECRETS_FILE" not in j["command"]
+
 
 # ---------------------------------------------------------------------------
 # _sync_money_module_jobs — integration with DB
