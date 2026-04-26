@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-04-26
+
 ### Changed
 - Web UI top nav collapses into a hamburger menu on mobile (≤ 640 px) so the page links no longer wrap below the "Istota" title and there's headroom for more sections. Built on `bits-ui` `DropdownMenu` for keyboard/ARIA correctness; desktop layout unchanged.
 - Sidebar toggle on mobile (≤ 768 px) is now a vertically-centered chevron tab affixed to the left edge, replacing the earlier bottom-left chip that clashed with bottom-anchored UI like the location day-summary card. Affects feeds (Sources), location (Places), money/transactions (Accounts), and money/accounts.
@@ -322,7 +324,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.7.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.8.0...main
+[0.8.0]: https://gitlab.com/cynium/istota/-/releases/v0.8.0
 [0.7.0]: https://gitlab.com/cynium/istota/-/releases/v0.7.0
 [0.6.1]: https://gitlab.com/cynium/istota/-/releases/v0.6.1
 [0.6.0]: https://gitlab.com/cynium/istota/-/releases/v0.6.0
