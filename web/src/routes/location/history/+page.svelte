@@ -7,12 +7,25 @@
 		getLocationPings,
 		getDaySummary,
 		getTrips,
+		discoverPlaces,
+		listDismissedClusters,
+		restoreDismissedCluster,
 		type LocationPing,
 		type DaySummary,
 		type DaySummaryStop,
 		type Trip,
+		type DiscoveredCluster,
+		type DismissedCluster,
 	} from '$lib/api';
-	import { locationPlaces, mapFlyTo, selectedPlaceId, onPlaceMove } from '$lib/stores/location';
+	import {
+		locationPlaces,
+		mapFlyTo,
+		selectedPlaceId,
+		onPlaceMove,
+		pickingPlace,
+		requestNewPlace,
+		discoverDirty,
+	} from '$lib/stores/location';
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
 	import StopTimeline from '$lib/components/location/StopTimeline.svelte';
 	import DayStats from '$lib/components/location/DayStats.svelte';
@@ -33,8 +46,52 @@
 	let showHeat = $state(loadSetting('location.showHeat', false));
 	let panelOpen = $state(false);
 	let activityFilter: string = $state('all');
+	let showDiscover = $state(loadSetting('location.showDiscover', false));
+	let clusters: DiscoveredCluster[] = $state([]);
+	let dismissed: DismissedCluster[] = $state([]);
+	let discoverLoading = $state(false);
 
 	$effect(() => { saveSetting('location.showHeat', showHeat); });
+	$effect(() => { saveSetting('location.showDiscover', showDiscover); });
+
+	async function loadDiscover() {
+		discoverLoading = true;
+		try {
+			const [d, dm] = await Promise.all([discoverPlaces(), listDismissedClusters()]);
+			clusters = d.clusters;
+			dismissed = dm.dismissed;
+		} catch {
+			clusters = [];
+			dismissed = [];
+		} finally {
+			discoverLoading = false;
+		}
+	}
+
+	$effect(() => {
+		if (showDiscover) {
+			$discoverDirty;
+			loadDiscover();
+		} else {
+			clusters = [];
+			dismissed = [];
+		}
+	});
+
+	function handleClusterClick(cluster: DiscoveredCluster) {
+		$requestNewPlace?.({ lat: cluster.lat, lon: cluster.lon, cluster });
+	}
+
+	async function handleDismissedClick(d: DismissedCluster) {
+		const ok = confirm('Restore this dismissed area? Future pings here may form a cluster again.');
+		if (!ok) return;
+		try {
+			await restoreDismissedCluster(d.id);
+			await loadDiscover();
+		} catch {
+			// ignore
+		}
+	}
 
 	let activeActivityTypes = $derived<Set<string> | null>(
 		activityFilter === 'all' ? null : new Set([activityFilter])
@@ -178,13 +235,19 @@
 				{/each}
 			</select>
 		{/if}
+		<Chip checked={showDiscover} onclick={() => showDiscover = !showDiscover}>
+			Discover
+			{#if showDiscover && clusters.length > 0}
+				<span class="chip-count">{clusters.length}</span>
+			{/if}
+		</Chip>
 	</div>
 
 	{#if loading}
 		<div class="center-msg">Loading...</div>
 	{:else if error}
 		<div class="center-msg error">{error}</div>
-	{:else if pings.length === 0}
+	{:else if pings.length === 0 && !showDiscover}
 		<div class="center-msg">No location data for this period</div>
 	{:else}
 		<div class="map-area">
@@ -192,19 +255,41 @@
 				bind:this={mapComponent}
 				{pings}
 				{places}
+				clusters={showDiscover ? clusters : []}
+				dismissedClusters={showDiscover ? dismissed : []}
 				showPath={!showHeat}
 				{showHeat}
 				{activeActivityTypes}
 				selectedPlaceId={$selectedPlaceId}
 				onPlaceMove={$onPlaceMove}
+				pickingLocation={$pickingPlace}
+				onMapClick={(lat, lon) => $requestNewPlace?.({ lat, lon })}
+				onClusterClick={handleClusterClick}
+				onDismissedClusterClick={handleDismissedClick}
 			/>
 		</div>
+		{#if pings.length === 0 && showDiscover}
+			<div class="discover-hint">
+				{#if discoverLoading}
+					Loading discovered places…
+				{:else if clusters.length === 0}
+					No unknown places to discover. {dismissed.length > 0 ? `${dismissed.length} dismissed area${dismissed.length === 1 ? '' : 's'} shown.` : ''}
+				{:else}
+					Click a yellow circle to name it.
+				{/if}
+			</div>
+		{/if}
 
 		<div class="stats-bar">
-			<span class="stat">{pings.length} pings</span>
-			{#if summary}
+			{#if pings.length > 0}
+				<span class="stat">{pings.length} pings</span>
+			{/if}
+			{#if summary && pings.length > 0}
 				<span class="stat">{summary.stops.length} stops</span>
 				<span class="stat">{summary.transit_pings} transit</span>
+			{/if}
+			{#if showDiscover && clusters.length > 0}
+				<span class="stat">{clusters.length} unknown</span>
 			{/if}
 			{#if !isSingleDay}
 				{@const uniquePlaces = new Set(pings.filter(p => p.place).map(p => p.place))}
@@ -366,6 +451,27 @@
 		letter-spacing: 0.04em;
 		font-weight: 500;
 		margin-bottom: 0.25rem;
+	}
+
+	.chip-count {
+		font-weight: 500;
+		opacity: 0.8;
+		margin-left: 0.25rem;
+	}
+
+	.discover-hint {
+		position: absolute;
+		bottom: 3rem;
+		left: 50%;
+		transform: translateX(-50%);
+		background: rgba(17, 17, 17, 0.9);
+		border: 1px solid var(--border-default);
+		color: var(--text-muted);
+		font-size: var(--text-xs);
+		padding: 0.35rem 0.75rem;
+		border-radius: var(--radius-pill);
+		pointer-events: none;
+		z-index: 10;
 	}
 
 	.mode-select {
