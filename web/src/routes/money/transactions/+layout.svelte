@@ -97,7 +97,7 @@
 	});
 
 	const yearOptions = $derived([
-		{ value: '', label: 'All years' },
+		{ value: '', label: 'All' },
 		...years.map((y) => ({ value: String(y), label: String(y) })),
 	]);
 

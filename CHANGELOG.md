@@ -9,8 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Web UI top nav collapses into a hamburger menu on mobile (≤ 640 px) so the page links no longer wrap below the "Istota" title and there's headroom for more sections. Built on `bits-ui` `DropdownMenu` for keyboard/ARIA correctness; desktop layout unchanged.
-- Sidebar toggle on mobile (≤ 768 px) is now a fixed bottom-left chip mirroring the bottom-right item-count badge, instead of a header pill. Affects feeds (Sources), location (Places), and money/transactions (Accounts).
+- Sidebar toggle on mobile (≤ 768 px) is now a vertically-centered chevron tab affixed to the left edge, replacing the earlier bottom-left chip that clashed with bottom-anchored UI like the location day-summary card. Affects feeds (Sources), location (Places), money/transactions (Accounts), and money/accounts.
 - Mobile sidebar can now be dismissed by tapping anywhere outside it. The toggle hides while the sidebar is open since the sidebar would obscure it.
+- Money year selectors now show "All" instead of "All years" so they fit in their intrinsic-width state on mobile (transactions, reports, accounts).
+- On the money transactions and accounts pages the year + filter inputs stay on a single row at all viewport sizes; the filter input grows to fill the space the year selector leaves.
+- Money transactions list rows now align flush with the section header above them — previously they were inset by an extra ~0.5 rem due to nested padding.
 
 ### Security
 - Deferred subtask creation now bounds prompt-injection blast radius. New `scheduler.max_subtask_depth` (default 3) refuses subtask creation when the parent chain is already at the cap — worst-case fan-out drops from unbounded to 10 + 100 + 1000. New `scheduler.max_subtask_prompt_chars` (default 8000) skips oversize prompts. The existing per-task cap of 10 is now exposed as `scheduler.max_subtasks_per_task`. INFO log on creation lists prompt prefixes for audit trail.

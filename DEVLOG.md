@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Mobile web UI — sidebar tab repositioned + money header tweaks
+
+Follow-up session on the previous mobile UI pass after testing on-device.
+
+**Sidebar toggle.** The bottom-left fixed chip clashed with other UI: notably the day-summary card on `/location` and any future bottom-anchored elements. We talked through alternatives — a compact in-header icon, an edge-affixed tab on the left, or making the page title itself the trigger. Picked the edge-affixed tab. First iteration positioned it at `top: 4.5rem` to clear the `.app-nav` + `ShellHeader`, but pages with a wrapping secondary nav (feeds with two filter rows) overlapped it. Moved to `top: 50%; transform: translateY(-50%)` — vertically centered on the viewport's left edge, clear of any header height variation and any bottom-anchored UI. Visual: small drawer-pull tab with `ChevronRight` icon, `border-radius: 0 var(--radius-card) var(--radius-card) 0`, no left border, soft shadow. Replaces the previous "Sources (129)" pill text with an icon-only affordance. Briefly considered migrating the mobile sidebar to a `bits-ui` `Dialog` (Sheet pattern) for focus trap + ESC + scroll lock, but kept the existing transparent click-outside backdrop since the immediate issue was the tab position, not the dismiss mechanism. Worth revisiting if accessibility audit catches it.
+
+**Money header on mobile.** Year selector + filter input were wrapping awkwardly on small screens. First attempt forced the input onto its own row via `flex: 1 0 100%`. User pushed back: keep them on the same line, let the filter input take whatever space the year selector leaves. Switched to `flex: 1 1 auto; min-width: 0` on the input plus `flex-wrap: nowrap; width: 100%` on the tools container. "All years" shortened to "All" in transactions, reports, and accounts so the year `<select>` fits in its intrinsic-width state on narrow viewports.
+
+**Transactions list padding.** User noticed the transaction rows were inset more than the `.money-section-header` above them. Cause: `.txn-scroll` had `0 0.5rem 0.5rem` outer padding, and the inner `.txn-row` / `.date-header` already had `0.75rem` horizontal padding — total `1.25rem` vs. the section header's `0.75rem`. Removed the outer horizontal padding from `.txn-scroll` and bumped `.result-bar` from `1rem` to `0.75rem`. Now rows align flush with the section header.
+
+**Files added/modified:**
+- `web/src/lib/components/ui/SidebarToggle.svelte` — vertically-centered left-edge tab with `ChevronRight` icon; replaces the bottom-left pill.
+- `web/src/routes/money/+layout.svelte` — mobile rule: tools row stays single-line, filter input flex-grows.
+- `web/src/routes/money/{transactions,reports,accounts}/+layout.svelte` — "All years" → "All".
+- `web/src/routes/money/transactions/+page.svelte` — `.txn-scroll` and `.result-bar` padding rebalanced so rows align with the section header.
+
 ## 2026-04-26: Mobile web UI — hamburger top nav + floating sidebar toggle
 
 User reported on iPhone that the top-level nav links (Feeds / Location / Money) sit slightly below the "Istota" title baseline and that there won't be room for more once we add features. Also flagged that the in-header `Sources (129)` toggle on the feeds page would read better as a floating fixed chip in the bottom-left, mirroring the `count / total` status badge in the bottom-right. Their guidance was to use bits-ui patterns where possible.
