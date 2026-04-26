@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Bound deferred-subtask blast radius (security audit M5)
+
+Pulled M5 off the open list from the April 5 security audit. The earlier audit pass had already pinned `conversation_token` to the parent task and capped per-task fan-out at a hardcoded 10, but two gaps remained: (1) no chain-depth limit, so a prompt-injected admin task could fan out exponentially through nested subtasks (10 → 100 → 1000 → …), and (2) no prompt-size cap, so a single injected subtask could ferry an arbitrarily large payload.
+
+The fix is two new config knobs and a tiny db helper that walks `parent_task_id`. `scheduler.max_subtask_depth` (default 3) refuses creation when the parent chain is already at-or-past the cap — bounded worst case is 10 + 100 + 1000 instead of unbounded. `scheduler.max_subtask_prompt_chars` (default 8000) skips oversize entries with a WARN log; smaller entries in the same batch still go through. The previously-hardcoded `max_subtasks = 10` is now exposed as `scheduler.max_subtasks_per_task` for symmetry, and the success INFO log now includes the first 80 chars of each created prompt for an audit trail.
+
+`db.get_subtask_depth()` walks the parent chain with a 100-step hard cap so it always terminates. The chain rarely matters in practice — typical depth is 0 or 1 — and the cap exists purely to bound the worst case from runaway recursion.
+
+The full pytest suite still has a pre-existing hang when *all* test files run together (some cross-module fixture leak — individual file groups all pass cleanly). Verified the M5 work via targeted runs: 777 passed across `test_scheduler / test_db / test_config / test_sandbox / test_executor / test_executor_streaming` plus the 9 new tests added in this session. Worth filing the suite-level hang separately.
+
+Audit doc (`Security audit 2025-04-05.md`) updated: M5 marked RESOLVED with the four mitigations + test list, and the priority matrix grew a Status column reflecting that H1–H4, M1–M3, M5, and M8 are now closed since the audit. M4, M6, M7, and the L-tier are still open.
+
+**Key changes:**
+- `scheduler.max_subtask_depth`, `scheduler.max_subtask_prompt_chars`, `scheduler.max_subtasks_per_task` — three new `SchedulerConfig` fields with conservative defaults (3, 8000, 10).
+- `db.get_subtask_depth(conn, task_id)` — walks `parent_task_id` upward, returns depth (0 = root), capped at 100 to terminate on pathological chains.
+- `_process_deferred_subtasks` enforces the depth gate (rejects whole batch when at cap) and the per-prompt size gate (skips individual oversize prompts), keeps the existing per-task fan-out cap, and now logs the prompt prefixes of created subtasks.
+
+**Files added/modified:**
+- `src/istota/config.py` — three new SchedulerConfig fields.
+- `src/istota/db.py` — `get_subtask_depth()` helper + `_SUBTASK_DEPTH_HARD_CAP = 100`.
+- `src/istota/scheduler.py` — depth/size gates and prompt-prefix audit log in `_process_deferred_subtasks`.
+- `tests/test_db.py` — `TestGetSubtaskDepth` (4 cases: root, first child, full chain, pathological-chain termination).
+- `tests/test_scheduler.py` — 5 new `TestDeferredOperations` cases covering depth-blocked, depth-allowed-at-boundary, depth=0 unlimited, oversize-skipped, and prompt-chars=0 unlimited.
+- `config/config.example.toml`, `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2` — knobs surfaced for operators.
+- `AGENTS.md`, `.claude/rules/scheduler.md` — docs updated.
+- `Security audit 2025-04-05.md` — M5 marked RESOLVED, priority matrix gained Status column.
+
 ## 2026-04-26: Skill proxy credential authorization — decouple from selection
 
 Audited the skill-proxy credential injection setup against industry patterns and Anthropic's own internal pattern (Claude Code sandboxing post, Nov 2025 — they run essentially the same shape: per-task Unix-socket credential broker, egress allowlist, no in-sandbox secrets). Conclusion: architecture is right; the recurring "implied skill not loaded → credential not available → task fails mysteriously" symptom isn't a proxy-design flaw, it's a *coupling* flaw. The same set (selected_skills) was driving both prompt content and credential authorization.

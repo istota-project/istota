@@ -193,6 +193,18 @@ email_retention_days = 7
 # Max cached talk messages per conversation (default: 200)
 talk_cache_max_per_conversation = 200
 
+# Deferred subtask creation limits (defense against prompt-injection-driven fan-out).
+# Subtasks are created when an admin task writes a deferred JSON request; these caps
+# bound how much damage a single injected task can do.
+# Max subtasks created per parent task (default: 10)
+max_subtasks_per_task = 10
+# Max chain depth — a task at depth N cannot spawn further subtasks when N >= max
+# (default: 3, set to 0 to disable). With max=3 a chain like talk → subtask → subtask
+# → subtask is allowed but no deeper.
+max_subtask_depth = 3
+# Skip deferred subtasks whose prompt exceeds this size in chars (default: 8000, 0 = unlimited)
+max_subtask_prompt_chars = 8000
+
 # Per-user worker pool settings
 # Maximum concurrent foreground (interactive) worker threads
 max_foreground_workers = 5

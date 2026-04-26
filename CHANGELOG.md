@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Deferred subtask creation now bounds prompt-injection blast radius. New `scheduler.max_subtask_depth` (default 3) refuses subtask creation when the parent chain is already at the cap — worst-case fan-out drops from unbounded to 10 + 100 + 1000. New `scheduler.max_subtask_prompt_chars` (default 8000) skips oversize prompts. The existing per-task cap of 10 is now exposed as `scheduler.max_subtasks_per_task`. INFO log on creation lists prompt prefixes for audit trail.
+
 ### Changed
 - Skill proxy credential authorization is now decoupled from skill selection. Any CLI skill whose mapped credentials are present in the user's task environment can request them at runtime — Pass 1 keyword matching and Pass 2 semantic routing only control which skill docs go into the prompt, not which credentials are accessible. Fixes the long-standing failure mode where a keyword miss would silently strand an agent without the credentials it needed.
 - Pass 2 (semantic routing) prompt now includes the user's resource types so Haiku can reason "user has miniflux configured → feeds is plausible" without keyword overlap. Each skill line in the manifest also carries a `[needs resource: …]` hint when applicable.
