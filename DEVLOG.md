@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25 (cont. 4): Sync custom system prompt with latest Claude Code
+
+Audited `config/system-prompt.md` against the extracted prompts at Piebald-AI/claude-code-system-prompts (tracking up to CC 2.1.120, 2026-04-24). The custom prompt is what we ship when `custom_system_prompt = true` — it replaces CC's default with a smaller, bot-tailored version focused on tool usage and working practices.
+
+Most of what we have still maps cleanly. Two pieces are worth pulling in:
+
+**1. New "Executing actions with care" section** (CC 2.1.78, lifted and trimmed). The CC version covers reversibility/blast radius, examples of risky ops (rm -rf, force-push, dropping tables, PRs, CI changes), investigate-before-destroy, and the rule that approving one action doesn't extend to similar later actions. We dropped the parts that overlap with `emissaries.md` ("ask before public-facing actions", data-care, "spirit and letter" prose) — emissaries owns that layer. What's left is operational: which exact ops are risky, what to do on encountering unfamiliar state, no destructive shortcuts.
+
+**2. Refined sleep guidance.** Replaced the single "avoid unnecessary sleep" line with two specific CC rules: don't sleep between commands that can run immediately, and keep the duration short if you must. Skipped the "don't poll a `run_in_background` task" rule — we don't expose background execution to the inner Claude.
+
+Cross-checked against `persona.md`: no conflicts. Persona owns the principle ("ask before taking actions that are hard to undo", "be cautious with anything outward-facing"); the system prompt now operationalizes that principle with concrete examples. The two layers' axes are complementary — persona splits *internal vs outward-facing* (visibility), system prompt splits *reversible vs irreversible* (undo cost). Together they cover both quadrants.
+
+Skipped from CC's latest:
+- `doing-tasks-software-engineering-focus` — bot tasks are mostly email/calendar/files, not code.
+- `tool-usage-subagent-guidance` + `parallel-tool-call-note` — explicit user preference against pushing parallel subagent use.
+- `communication-style` (CC 2.1.104) — interactive-mode focused; persona/guidelines own this.
+- `tone-and-style-code-references` (file_path:line_number) — niche.
+- `bash-sandbox-*` (~20 files) — we use bwrap, not CC sandbox.
+
+Token cost: ~+180 tokens added to the prompt.
+
+**Files added/modified:**
+- `config/system-prompt.md` — new "Executing actions with care" section; sleep guidance split into two specific rules.
+
 ## 2026-04-25 (cont. 3): Fix UTC/local-date drift in task prompts (ISSUE-056)
 
 Symptom: the model regularly slipped a day when reasoning about "today" — bucketing yesterday-PT activity under today's UTC date, scheduling tasks for the wrong day on late-evening PT requests, treating UTC-rendered Talk timestamps as local. Diagnosis confirmed by inspecting a live prompt: the istota header read `Current time: April 25, 2026 at 10:36 PM (America/Los_Angeles)` while Claude Code's auto-memory block (which we don't author) read `Today's date is 2026-04-26.`. Two declarative answers to the same question; the UTC one won often enough to matter.
