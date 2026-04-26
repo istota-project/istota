@@ -869,9 +869,24 @@ def _process_deferred_subtasks(
         path.unlink(missing_ok=True)
         return 0
 
-    max_subtasks = 10
+    max_subtasks = config.scheduler.max_subtasks_per_task
+    max_depth = config.scheduler.max_subtask_depth
+    max_chars = config.scheduler.max_subtask_prompt_chars
     count = 0
     with db.get_db(config.db_path) as conn:
+        # Depth gate: refuse to extend a chain that's already at or past the cap.
+        # parent_depth >= max_depth means a new child would land at depth+1 > max.
+        if max_depth > 0:
+            parent_depth = db.get_subtask_depth(conn, task.id)
+            if parent_depth >= max_depth:
+                logger.warning(
+                    "Task %d at subtask depth %d >= max_subtask_depth %d, "
+                    "refusing %d deferred subtask(s)",
+                    task.id, parent_depth, max_depth, len(data),
+                )
+                path.unlink(missing_ok=True)
+                return 0
+
         for entry in data:
             if count >= max_subtasks:
                 logger.warning(
@@ -881,6 +896,12 @@ def _process_deferred_subtasks(
                 break
             prompt = entry.get("prompt", "")
             if not prompt:
+                continue
+            if max_chars > 0 and len(prompt) > max_chars:
+                logger.warning(
+                    "Task %d deferred subtask prompt too long (%d > %d chars), skipping",
+                    task.id, len(prompt), max_chars,
+                )
                 continue
             # Pin conversation_token to parent task — deferred JSON cannot
             # override this to prevent prompt-injection-driven routing.
@@ -902,7 +923,11 @@ def _process_deferred_subtasks(
             count += 1
 
     if count:
-        logger.info("Created %d deferred subtasks for task %d", count, task.id)
+        logger.info(
+            "Created %d deferred subtasks for task %d (prompts: %s)",
+            count, task.id,
+            ", ".join(repr(e.get("prompt", "")[:80]) for e in data[:count]),
+        )
     path.unlink(missing_ok=True)
     return count
 

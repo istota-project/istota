@@ -278,6 +278,8 @@ When `skill_proxy_enabled`, secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASS
 ### Deferred DB Operations
 With sandbox, Claude writes JSON request files to temp dir (`ISTOTA_DEFERRED_DIR`). Scheduler processes after successful completion. Patterns: `task_{id}_subtasks.json`, `task_{id}_tracked_transactions.json`, `task_{id}_email_output.json`, `task_{id}_sent_emails.json`, `task_{id}_user_alerts.json`. Identity fields (`user_id`, `conversation_token`) always come from the task, not from deferred JSON — prevents spoofing via prompt injection. User alerts (`user_alerts.json`) are posted to the user's alerts channel (Talk) for suspicious inbound content (social engineering, prompt injection, exfil attempts).
 
+Subtask creation is rate-limited per task to bound prompt-injection blast radius: `scheduler.max_subtasks_per_task` (default 10) caps fan-out per parent, `scheduler.max_subtask_depth` (default 3) refuses creation when the parent chain already at-or-past the cap, and `scheduler.max_subtask_prompt_chars` (default 8000) skips oversize prompts. Subtask creation is also admin-only.
+
 ### Scheduler Robustness
 - Stale confirmations auto-cancelled after 120 min
 - Stuck/ancient tasks auto-failed

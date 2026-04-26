@@ -555,6 +555,29 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Task | None:
     return _row_to_task(row)
 
 
+_SUBTASK_DEPTH_HARD_CAP = 100
+
+
+def get_subtask_depth(conn: sqlite3.Connection, task_id: int) -> int:
+    """Walk parent_task_id chain and return how deep `task_id` sits.
+
+    A user-initiated task (no parent) returns 0; its first child returns 1, etc.
+    Capped at _SUBTASK_DEPTH_HARD_CAP to terminate on pathological chains;
+    callers should treat the cap as "very deep, refuse further work."
+    """
+    depth = 0
+    current = task_id
+    while depth < _SUBTASK_DEPTH_HARD_CAP:
+        row = conn.execute(
+            "SELECT parent_task_id FROM tasks WHERE id = ?", (current,),
+        ).fetchone()
+        if row is None or row["parent_task_id"] is None:
+            return depth
+        current = row["parent_task_id"]
+        depth += 1
+    return depth
+
+
 def update_task_status(
     conn: sqlite3.Connection,
     task_id: int,

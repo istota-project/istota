@@ -157,6 +157,9 @@ After task completion, if enabled + `auto_index_conversations`:
 | `stale_pending_fail_hours` | 2 | Ancient task auto-fail |
 | `task_retention_days` | 7 | Task cleanup |
 | `scheduled_job_max_consecutive_failures` | 5 | Auto-disable threshold |
+| `max_subtasks_per_task` | 10 | Deferred subtasks created per parent task |
+| `max_subtask_depth` | 3 | Subtask chain depth cap (0 = unlimited) |
+| `max_subtask_prompt_chars` | 8000 | Skip deferred subtasks with prompts over this size (0 = unlimited) |
 | `log_channel_show_skills` | true | Include selected skills in log channel messages |
 
 ## Other Scheduler Functions

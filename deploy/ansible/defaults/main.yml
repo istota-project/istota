@@ -86,6 +86,9 @@ istota_scheduler_max_background_workers: 3         # Instance-level background (
 istota_scheduler_user_max_foreground_workers: 2    # Global per-user fg worker default
 istota_scheduler_user_max_background_workers: 1    # Global per-user bg worker default
 istota_scheduler_scheduled_job_max_consecutive_failures: 5  # Auto-disable after N failures (0=never)
+istota_scheduler_max_subtasks_per_task: 10                  # Cap deferred subtasks created per task
+istota_scheduler_max_subtask_depth: 3                       # Max subtask chain depth (0=unlimited)
+istota_scheduler_max_subtask_prompt_chars: 8000             # Skip deferred subtasks with prompts over this size (0=unlimited)
 istota_scheduler_talk_cache_max_per_conversation: 200      # Max cached talk messages per conversation
 istota_scheduler_temp_file_retention_days: 7               # Delete temp files older than N days (0=disable)
 istota_scheduler_location_ping_retention_days: 365         # Delete location pings older than N days (0=unlimited)

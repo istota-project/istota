@@ -2473,6 +2473,153 @@ class TestDeferredOperations:
         subtask_list = [t for t in tasks if t.source_type == "subtask"]
         assert len(subtask_list) == 10
 
+    def test_process_deferred_subtasks_blocks_at_max_depth(self, db_path, tmp_path):
+        """Subtask depth limit prevents exponential fan-out via prompt injection."""
+        from istota.scheduler import _process_deferred_subtasks
+        # Default max_subtask_depth is 3. Build a chain at exactly that depth,
+        # then any further subtask should be rejected.
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            t0 = db.create_task(conn, prompt="root", user_id="alice", source_type="talk")
+            t1 = db.create_task(
+                conn, prompt="d1", user_id="alice",
+                source_type="subtask", parent_task_id=t0,
+            )
+            t2 = db.create_task(
+                conn, prompt="d2", user_id="alice",
+                source_type="subtask", parent_task_id=t1,
+            )
+            t3 = db.create_task(
+                conn, prompt="d3", user_id="alice",
+                source_type="subtask", parent_task_id=t2,
+            )
+            # t3 is at depth 3 (the configured max). Any subtask t3 emits
+            # would land at depth 4, which is over the limit.
+            t3_task = db.get_task(conn, t3)
+
+        (user_temp / f"task_{t3}_subtasks.json").write_text(
+            json.dumps([{"prompt": "should be rejected"}])
+        )
+
+        count = _process_deferred_subtasks(config, t3_task, user_temp)
+        assert count == 0
+
+        with db.get_db(db_path) as conn:
+            tasks = db.list_tasks(conn, user_id="alice")
+        # t0, t1, t2, t3 only — no new subtask
+        assert len(tasks) == 4
+        # File still cleaned up
+        assert not (user_temp / f"task_{t3}_subtasks.json").exists()
+
+    def test_process_deferred_subtasks_allows_under_max_depth(self, db_path, tmp_path):
+        """At depth < max, new subtasks should still be created."""
+        from istota.scheduler import _process_deferred_subtasks
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        # Parent at depth 2; new subtask would be at depth 3 (== max), allowed.
+        with db.get_db(db_path) as conn:
+            t0 = db.create_task(conn, prompt="root", user_id="alice", source_type="talk")
+            t1 = db.create_task(
+                conn, prompt="d1", user_id="alice",
+                source_type="subtask", parent_task_id=t0,
+            )
+            t2 = db.create_task(
+                conn, prompt="d2", user_id="alice",
+                source_type="subtask", parent_task_id=t1,
+            )
+            t2_task = db.get_task(conn, t2)
+
+        (user_temp / f"task_{t2}_subtasks.json").write_text(
+            json.dumps([{"prompt": "depth-3 subtask"}])
+        )
+
+        count = _process_deferred_subtasks(config, t2_task, user_temp)
+        assert count == 1
+
+    def test_process_deferred_subtasks_depth_zero_means_unlimited(self, db_path, tmp_path):
+        """max_subtask_depth=0 disables the depth check."""
+        from istota.scheduler import _process_deferred_subtasks
+        config = self._make_config(db_path, tmp_path)
+        config = Config(**{**config.__dict__, "scheduler": SchedulerConfig(max_subtask_depth=0)})
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            previous = db.create_task(conn, prompt="root", user_id="alice", source_type="talk")
+            # Build a chain 6 deep — would be rejected at default depth=3
+            for i in range(6):
+                previous = db.create_task(
+                    conn, prompt=f"d{i}", user_id="alice",
+                    source_type="subtask", parent_task_id=previous,
+                )
+            deep_task = db.get_task(conn, previous)
+
+        (user_temp / f"task_{previous}_subtasks.json").write_text(
+            json.dumps([{"prompt": "deep but allowed"}])
+        )
+
+        count = _process_deferred_subtasks(config, deep_task, user_temp)
+        assert count == 1
+
+    def test_process_deferred_subtasks_skips_oversize_prompt(self, db_path, tmp_path):
+        """Oversize subtask prompts are skipped; smaller ones in the same batch still go through."""
+        from istota.scheduler import _process_deferred_subtasks
+        config = self._make_config(db_path, tmp_path)
+        config = Config(
+            **{**config.__dict__, "scheduler": SchedulerConfig(max_subtask_prompt_chars=100)},
+        )
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="Parent", user_id="alice", source_type="talk",
+            )
+            parent = db.get_task(conn, parent_id)
+
+        subtasks = [
+            {"prompt": "ok"},
+            {"prompt": "x" * 500},  # over the cap
+            {"prompt": "also ok"},
+        ]
+        (user_temp / f"task_{parent_id}_subtasks.json").write_text(json.dumps(subtasks))
+
+        count = _process_deferred_subtasks(config, parent, user_temp)
+        assert count == 2
+
+        with db.get_db(db_path) as conn:
+            tasks = db.list_tasks(conn, user_id="alice")
+        subtask_list = [t for t in tasks if t.source_type == "subtask"]
+        prompts = sorted(t.prompt for t in subtask_list)
+        assert prompts == ["also ok", "ok"]
+
+    def test_process_deferred_subtasks_prompt_chars_zero_means_unlimited(self, db_path, tmp_path):
+        """max_subtask_prompt_chars=0 disables the length check."""
+        from istota.scheduler import _process_deferred_subtasks
+        config = self._make_config(db_path, tmp_path)
+        config = Config(
+            **{**config.__dict__, "scheduler": SchedulerConfig(max_subtask_prompt_chars=0)},
+        )
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(conn, prompt="Parent", user_id="alice", source_type="talk")
+            parent = db.get_task(conn, parent_id)
+
+        big_prompt = "x" * 100_000
+        (user_temp / f"task_{parent_id}_subtasks.json").write_text(
+            json.dumps([{"prompt": big_prompt}])
+        )
+
+        count = _process_deferred_subtasks(config, parent, user_temp)
+        assert count == 1
+
     def test_process_deferred_tracking_monarch(self, db_path, tmp_path):
         """Monarch synced entries should be tracked in DB."""
         from istota.scheduler import _process_deferred_tracking

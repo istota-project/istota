@@ -1286,3 +1286,52 @@ class TestKnowledgeFactsDedupMigration:
         index_names = {r[0] for r in rows}
         assert "idx_kf_unique_current" in index_names
         conn.close()
+
+
+class TestGetSubtaskDepth:
+    def test_root_task_has_depth_zero(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="root", user_id="alice")
+            assert db.get_subtask_depth(conn, task_id) == 0
+
+    def test_first_subtask_has_depth_one(self, db_path):
+        with db.get_db(db_path) as conn:
+            root = db.create_task(conn, prompt="root", user_id="alice")
+            child = db.create_task(
+                conn, prompt="child", user_id="alice",
+                source_type="subtask", parent_task_id=root,
+            )
+            assert db.get_subtask_depth(conn, child) == 1
+
+    def test_walks_full_chain(self, db_path):
+        with db.get_db(db_path) as conn:
+            t0 = db.create_task(conn, prompt="t0", user_id="alice")
+            t1 = db.create_task(
+                conn, prompt="t1", user_id="alice",
+                source_type="subtask", parent_task_id=t0,
+            )
+            t2 = db.create_task(
+                conn, prompt="t2", user_id="alice",
+                source_type="subtask", parent_task_id=t1,
+            )
+            t3 = db.create_task(
+                conn, prompt="t3", user_id="alice",
+                source_type="subtask", parent_task_id=t2,
+            )
+            assert db.get_subtask_depth(conn, t3) == 3
+
+    def test_caps_traversal_to_avoid_pathological_chains(self, db_path):
+        # A pathological self-referencing or very deep chain shouldn't loop
+        # forever — the helper caps at a sane bound and returns it as the
+        # observed depth.
+        with db.get_db(db_path) as conn:
+            previous = db.create_task(conn, prompt="root", user_id="alice")
+            for i in range(60):
+                previous = db.create_task(
+                    conn, prompt=f"level-{i}", user_id="alice",
+                    source_type="subtask", parent_task_id=previous,
+                )
+            depth = db.get_subtask_depth(conn, previous)
+            # Whatever cap is chosen, the helper must terminate and return
+            # an int >= the cap (>= 50 is enough to prove it didn't bail at 0).
+            assert depth >= 50

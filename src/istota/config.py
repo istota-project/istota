@@ -133,6 +133,9 @@ class SchedulerConfig:
     user_max_foreground_workers: int = 2  # global per-user fg worker default
     user_max_background_workers: int = 1  # global per-user bg worker default
     scheduled_job_max_consecutive_failures: int = 5  # auto-disable after N failures (0 = never)
+    max_subtasks_per_task: int = 10  # cap deferred subtask creations per task (prompt-injection blast radius)
+    max_subtask_depth: int = 3  # reject deferred subtask creation when parent chain is this deep (0 = unlimited)
+    max_subtask_prompt_chars: int = 8000  # skip deferred subtasks whose prompt exceeds this (0 = unlimited)
     talk_cache_max_per_conversation: int = 200  # max cached talk messages per conversation
     location_ping_retention_days: int = 365  # delete location pings older than this (0 = unlimited)
     config_reload_interval: int = 300  # seconds between user config file re-reads (0 = disabled)
