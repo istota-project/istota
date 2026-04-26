@@ -6,12 +6,22 @@
 		count?: number;
 		open?: boolean;
 		width?: string;
+		onClose?: () => void;
 		extras?: Snippet;
 		children: Snippet;
 	}
 
-	let { title, count, open = false, width = '220px', extras, children }: Props = $props();
+	let { title, count, open = false, width = '220px', onClose, extras, children }: Props = $props();
 </script>
+
+{#if open && onClose}
+	<button
+		class="sidebar-backdrop"
+		aria-label="Close sidebar"
+		onclick={onClose}
+		type="button"
+	></button>
+{/if}
 
 <aside class="sidebar" class:open style="--sidebar-width: {width}">
 	<div class="sidebar-header">
@@ -65,6 +75,10 @@
 	.sidebar-list::-webkit-scrollbar-track { background: transparent; }
 	.sidebar-list::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
 
+	.sidebar-backdrop {
+		display: none;
+	}
+
 	@media (max-width: 768px) {
 		.sidebar {
 			display: none;
@@ -80,6 +94,17 @@
 
 		.sidebar.open {
 			display: flex;
+		}
+
+		.sidebar-backdrop {
+			display: block;
+			position: fixed;
+			inset: 0;
+			background: transparent;
+			border: none;
+			padding: 0;
+			cursor: default;
+			z-index: 19;
 		}
 	}
 </style>

@@ -190,7 +190,12 @@
 	{/snippet}
 
 	{#snippet sidebar()}
-		<Sidebar title="Places" count={places.length} open={sidebarOpen}>
+		<Sidebar
+			title="Places"
+			count={places.length}
+			open={sidebarOpen}
+			onClose={() => (sidebarOpen = false)}
+		>
 			{#snippet extras()}
 				{#if selectedPlace && (statsLoading || placeStats)}
 					<div class="stats-panel">

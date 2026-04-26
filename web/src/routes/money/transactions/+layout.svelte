@@ -133,7 +133,12 @@
 </div>
 
 <div class="txn-body">
-	<Sidebar title="Accounts" count={accounts.length} open={sidebarOpen}>
+	<Sidebar
+		title="Accounts"
+		count={accounts.length}
+		open={sidebarOpen}
+		onClose={() => (sidebarOpen = false)}
+	>
 		{#each tree as node (node.fullName)}
 			{@render accountNode(node, 0)}
 		{/each}

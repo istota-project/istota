@@ -88,7 +88,12 @@
 	{/snippet}
 
 	{#snippet sidebar()}
-		<Sidebar title="Sources" count={feeds.length} open={sidebarOpen}>
+		<Sidebar
+			title="Sources"
+			count={feeds.length}
+			open={sidebarOpen}
+			onClose={() => (sidebarOpen = false)}
+		>
 			{#each groupedFeeds as [category, catFeeds] (category)}
 				<CategoryGroup label={category}>
 					{#each catFeeds as feed (feed.id)}

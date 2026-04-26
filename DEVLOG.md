@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Mobile web UI — hamburger top nav + floating sidebar toggle
+
+User reported on iPhone that the top-level nav links (Feeds / Location / Money) sit slightly below the "Istota" title baseline and that there won't be room for more once we add features. Also flagged that the in-header `Sources (129)` toggle on the feeds page would read better as a floating fixed chip in the bottom-left, mirroring the `count / total` status badge in the bottom-right. Their guidance was to use bits-ui patterns where possible.
+
+**Top nav.** Replaced the inline `nav-links` with a `bits-ui` `DropdownMenu.Root` on mobile only. The trigger and items both render via the `child` snippet pattern — that's the v2 way to attach the menu's ARIA/keyboard wiring to a real `<button>` / `<a>` so SvelteKit navigation and `closeOnSelect` keep working. Desktop (>= 640 px) is unchanged: `.nav-links` displays inline; the hamburger is `display: none`. Mobile hides `.nav-links` (rule lives in `app.css` next to the rest of `.app-nav`) and shows the hamburger; the username text also hides at that breakpoint to free up space, while the logout icon stays visible. We considered building this as a SvelteKit-only solution to avoid the bits-ui dependency, but the project already uses `bits-ui` for `Modal` (`Dialog`) and `Select`, so leaning on it for `DropdownMenu` keeps the primitives consistent.
+
+**Floating sidebar toggle.** `SidebarToggle.svelte` previously rendered as an inline pill in the page header tools slot. Up to 768 px it's now `position: fixed; bottom: 0.75rem; left: 0.75rem` with `#161616` background, `0.25rem` radius, soft shadow — visually mirroring the `.status-badge` already used on the feeds page bottom-right. On desktop it stays hidden (sidebar is always inline). Hidden when `open` so the chip doesn't sit underneath the open sidebar.
+
+**Tap-to-close.** Once the toggle is hidden behind the open sidebar on mobile, users have nothing to tap to close it. First pass added a dimmed (`rgba(0, 0, 0, 0.4)`) backdrop button over the rest of the viewport. User pushed back: dimming the page is overkill, just want any tap outside the sidebar to close it. Switched to `background: transparent; cursor: default` so the backdrop is invisible but still consumes the click. The backdrop is rendered only when `onClose` is provided, so opt-in per layout. Wired up in feeds, location, and money/transactions layouts.
+
+**Verification.** `npm run check` is clean for the touched files (the 15 pre-existing errors in `cash-flow/+page.svelte` and `taxes/+page.svelte` are untouched). `npm run build` succeeds in 11.4 s. Could not visually verify in the browser — the Chrome extension wasn't connected — so this needs a hands-on phone/devtools check before shipping.
+
+**Files added/modified:**
+- `web/src/routes/+layout.svelte` — `DropdownMenu` hamburger via `child` snippet pattern; mobile-only display rules; per-component menu styles via `:global()`.
+- `web/src/app.css` — `.app-nav .nav-links { display: none }` at the existing 640 px breakpoint.
+- `web/src/lib/components/ui/SidebarToggle.svelte` — fixed bottom-left chip on mobile mirroring `.status-badge`; hidden when `open`.
+- `web/src/lib/components/ui/Sidebar.svelte` — new optional `onClose` prop; transparent click-target backdrop rendered when mobile + open + `onClose` provided.
+- `web/src/routes/feeds/+layout.svelte`, `web/src/routes/location/+layout.svelte`, `web/src/routes/money/transactions/+layout.svelte` — pass `onClose` to `Sidebar`.
+
 ## 2026-04-26: Security audit follow-up — M4 + low-severity cleanup
 
 Second pass through the open items on the April 5 security audit. Two units of work in one session: a policy-level decision about M4, and a mechanical cleanup of four low-severity items (L2, L7, L8, L10).
