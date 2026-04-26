@@ -2,6 +2,7 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
+	import { LogOut } from 'lucide-svelte';
 	import { getMe, AuthError, type User } from '$lib/api';
 	import '../app.css';
 
@@ -64,7 +65,9 @@
 		</div>
 		<div class="nav-right">
 			<span>{user.display_name}</span>
-			<a href="{base}/logout">log out</a>
+			<a href="{base}/logout" class="logout-btn" title="Log out" aria-label="Log out">
+				<LogOut size={14} />
+			</a>
 		</div>
 	</nav>
 	<main class="app-content" class:app-content-fill={isActive('/location') || isActive('/feeds') || isActive('/money')}>

@@ -1,13 +1,21 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { DiscoveredCluster, Place } from '$lib/api';
+	import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
 
 	interface Props {
 		cluster?: DiscoveredCluster;
 		place?: Place;
 		initialLat?: number;
 		initialLon?: number;
-		onSave: (data: { name: string; lat: number; lon: number; radius_meters: number; category: string; notes: string }) => void;
+		onSave: (data: {
+			name: string;
+			lat: number;
+			lon: number;
+			radius_meters: number;
+			category: string;
+			notes: string;
+		}) => void;
 		onCancel: () => void;
 		onDismiss?: (data: { lat: number; lon: number; radius_meters: number }) => void;
 	}
@@ -29,11 +37,21 @@
 	let lat = $state(untrack(() => place?.lat ?? cluster?.lat ?? initialLat ?? 0));
 	let lon = $state(untrack(() => place?.lon ?? cluster?.lon ?? initialLon ?? 0));
 	let notes = $state(untrack(() => place?.notes ?? ''));
+	let open = $state(true);
 
-	const categories = [
-		'home', 'work', 'gym', 'food', 'shopping',
-		'social', 'friend', 'medical', 'hotel', 'transit', 'other',
-	];
+	const categoryOptions: SelectOption[] = [
+		'home',
+		'work',
+		'gym',
+		'food',
+		'shopping',
+		'social',
+		'friend',
+		'medical',
+		'hotel',
+		'transit',
+		'other',
+	].map((cat) => ({ value: cat, label: cat[0].toUpperCase() + cat.slice(1) }));
 
 	function handleSave() {
 		if (!name.trim()) return;
@@ -51,135 +69,92 @@
 		onDismiss?.({ lat, lon, radius_meters: radius });
 	}
 
+	function handleOpenChange(next: boolean) {
+		if (!next) onCancel();
+	}
+
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') onCancel();
 		if (e.key === 'Enter') {
 			const target = e.target as HTMLElement | null;
 			if (target?.tagName === 'TEXTAREA') return;
 			handleSave();
 		}
 	}
+
+	const title = $derived(editing ? 'Edit place' : manual ? 'New place' : 'Name this place');
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
 
-<div class="overlay">
-	<button type="button" class="backdrop" onclick={onCancel} aria-label="Close"></button>
-	<div class="form-card" role="dialog" aria-modal="true" tabindex={-1}>
-		<div class="header">{editing ? 'Edit place' : manual ? 'New place' : 'Name this place'}</div>
-		{#if cluster && !editing}
-			<div class="meta">
-				{cluster.total_pings} pings recorded here
-			</div>
-		{/if}
+<Modal bind:open {title} onOpenChange={handleOpenChange} width="320px">
+	{#if cluster && !editing}
+		<div class="meta">{cluster.total_pings} pings recorded here</div>
+	{/if}
 
-		<label class="field">
-			<span>Name</span>
-			<input type="text" bind:this={nameInput} bind:value={name} placeholder="e.g. Office, Gym..." />
-		</label>
+	<label class="field">
+		<span>Name</span>
+		<input
+			type="text"
+			bind:this={nameInput}
+			bind:value={name}
+			placeholder="e.g. Office, Gym..."
+		/>
+	</label>
 
-		<label class="field">
-			<span>Category</span>
-			<select bind:value={category}>
-				{#each categories as cat}
-					<option value={cat}>{cat[0].toUpperCase() + cat.slice(1)}</option>
-				{/each}
-			</select>
-		</label>
+	<label class="field">
+		<span>Category</span>
+		<Select bind:value={category} options={categoryOptions} ariaLabel="Category" />
+	</label>
 
-		<label class="field">
-			<span>Radius ({radius}m)</span>
-			<input type="range" min="25" max="500" step="25" bind:value={radius} />
-		</label>
+	<label class="field">
+		<span>Radius ({radius}m)</span>
+		<input type="range" min="25" max="500" step="25" bind:value={radius} />
+	</label>
 
-		{#if showCoords}
-			<div class="coords">
-				<label class="field coord">
-					<span>Lat</span>
-					<input type="number" step="0.00001" bind:value={lat} />
-				</label>
-				<label class="field coord">
-					<span>Lon</span>
-					<input type="number" step="0.00001" bind:value={lon} />
-				</label>
-			</div>
-		{/if}
-
-		<label class="field">
-			<span>Notes (optional)</span>
-			<textarea
-				bind:value={notes}
-				rows="2"
-				placeholder="Anything to remember about this place"
-			></textarea>
-		</label>
-
-		<div class="actions">
-			<button class="btn cancel" onclick={onCancel} type="button">Cancel</button>
-			{#if !editing && onDismiss}
-				<button
-					class="btn dismiss"
-					onclick={handleDismiss}
-					type="button"
-					title="Don't show this cluster again"
-				>
-					Dismiss
-				</button>
-			{/if}
-			<button class="btn save" onclick={handleSave} disabled={!name.trim()} type="button">
-				{editing ? 'Update' : 'Save'}
-			</button>
+	{#if showCoords}
+		<div class="coords">
+			<label class="field coord">
+				<span>Lat</span>
+				<input type="number" step="0.00001" bind:value={lat} />
+			</label>
+			<label class="field coord">
+				<span>Lon</span>
+				<input type="number" step="0.00001" bind:value={lon} />
+			</label>
 		</div>
-	</div>
-</div>
+	{/if}
+
+	<label class="field">
+		<span>Notes (optional)</span>
+		<textarea bind:value={notes} rows="2" placeholder="Anything to remember about this place"
+		></textarea>
+	</label>
+
+	{#snippet footer()}
+		<Button variant="ghost" onclick={onCancel}>Cancel</Button>
+		{#if !editing && onDismiss}
+			<Button variant="ghost" onclick={handleDismiss} title="Don't show this cluster again">
+				Dismiss
+			</Button>
+		{/if}
+		<Button variant="primary" onclick={handleSave} disabled={!name.trim()}>
+			{editing ? 'Update' : 'Save'}
+		</Button>
+	{/snippet}
+</Modal>
 
 <style>
-	.overlay {
-		position: fixed;
-		inset: 0;
-		z-index: 100;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.backdrop {
-		position: absolute;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.5);
-		border: none;
-		padding: 0;
-		cursor: default;
-	}
-
-	.form-card {
-		position: relative;
-		z-index: 1;
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
-		padding: 1.25rem;
-		width: 300px;
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-	}
-
-	.header {
-		font-size: var(--text-sm);
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-
 	.meta {
 		font-size: var(--text-xs);
 		color: var(--text-dim);
+		margin-bottom: 0.5rem;
 	}
 
 	.field {
 		display: flex;
 		flex-direction: column;
 		gap: 0.25rem;
+		margin-bottom: 0.75rem;
 	}
 
 	.field span {
@@ -187,11 +162,10 @@
 		color: var(--text-muted);
 	}
 
-	.field input[type="text"],
-	.field input[type="number"],
-	.field select,
+	.field input[type='text'],
+	.field input[type='number'],
 	.field textarea {
-		background: var(--surface-bg);
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		color: var(--text-primary);
 		font: inherit;
@@ -206,7 +180,7 @@
 		font-family: inherit;
 	}
 
-	.field input[type="range"] {
+	.field input[type='range'] {
 		accent-color: #ffc107;
 	}
 
@@ -222,29 +196,4 @@
 	.coord input {
 		width: 100%;
 	}
-
-	.actions {
-		display: flex;
-		gap: 0.5rem;
-		justify-content: flex-end;
-		margin-top: 0.25rem;
-	}
-
-	.btn {
-		padding: 0.3rem 0.75rem;
-		border: 1px solid var(--border-default);
-		border-radius: 0.25rem;
-		font: inherit;
-		font-size: var(--text-xs);
-		cursor: pointer;
-		background: var(--surface-card);
-		color: var(--text-primary);
-	}
-
-	.btn:hover { background: var(--surface-raised); }
-	.btn.save { background: #ffc107; color: #111; border-color: #ffc107; }
-	.btn.save:hover { background: #ffca28; }
-	.btn.save:disabled { opacity: 0.4; cursor: default; }
-	.btn.dismiss { color: var(--text-muted); }
-	.btn.dismiss:hover { color: var(--text-primary); }
 </style>

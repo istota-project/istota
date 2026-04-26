@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Reusable web UI primitives in `web/src/lib/components/ui/`: `AppShell`, `ShellHeader`, `Sidebar`, `SidebarToggle`, `CategoryGroup`, `NavLink`, `Button`, `Select` (bits-ui Select wrapper), `Modal` (bits-ui Dialog wrapper). Replaces ~400 lines of duplicated shell/sidebar CSS across the four route layouts.
+- `--chip-padding-x` and `--chip-gap` CSS variables in `app.css`; `.nav-hang` utility for hanging-pill alignment so chip text aligns with surrounding heading text.
+- `CategoryGroup` supports a `collapsible` prop with caret toggle. Location places sidebar groups now collapse like the transactions account tree.
+- Vite middleware mock (`web/vite-mock-api.ts`, gated on `VITE_MOCK_API=1`) lets `npm run dev` render the full UI with HMR without the FastAPI backend running.
+- Logout link in the top nav is now a Lucide `LogOut` icon.
 - Per-job `model` and `effort` overrides in `CRON.md`. Add `model = "claude-sonnet-4-6"` and/or `effort = "low"` to any `[[jobs]]` block to pin that one job to a specific Claude model and effort level. Per-task wins over `config.model` / `config.effort`; neither set = CLI default. Useful for downgrading volume "retrieve-and-render" jobs (briefings, transcription cron, feed digests) to Sonnet without touching the global default.
 - Loose validation on `CRON.md` load: warns (never rejects) when `model` is missing the `claude-` prefix or contains whitespace, and when `effort` isn't in `{low, medium, high, xhigh, max}`.
 - `!cron` listing now surfaces per-job `model: X` / `effort: Y` inline.
@@ -24,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Config.namespace` field — the install namespace (drives `/etc/{namespace}/`, etc.) is now a first-class config field, parsed from the TOML's top level and emitted by the ansible role.
 
 ### Changed
+- Web UI: secondary navbars across feeds / location / money standardized — same chip styling, font size (`--text-sm`), padding, gap, line-height. App nav background bumped to `#1a1a1a` to differentiate from the page bg `#111`. Sidebar default width unified to 220px.
+- `routes/location/+layout.svelte`, `routes/feeds/+layout.svelte`, `routes/money/+layout.svelte`, `routes/money/transactions/+layout.svelte` migrated onto the new shell/sidebar primitives. `lib/components/location/PlaceForm.svelte` uses `Modal` + `Select` + `Button` instead of hand-rolled overlay/backdrop/select.
+- Three raw `<select>` elements (ledger picker, transactions year picker, place category) replaced with the bits-ui-backed `Select` primitive.
 - Custom system prompt (`config/system-prompt.md`, used when `custom_system_prompt = true`) gained an "Executing actions with care" section covering reversibility, risky-op examples, investigate-before-destroy, and scoped authorization. Sleep guidance split into two specific rules. Synced against Claude Code 2.1.120's extracted prompts; pieces that duplicate `emissaries.md` / `persona.md` were intentionally left out.
 - Documentation now recommends pinning the `model` config to a full version ID (e.g. `claude-opus-4-7`) rather than an alias (`opus`), so a Claude Code update can't silently swap the model out from under us. Aliases still work but float to whatever Anthropic ships next.
 - Money is now `src/istota/money/` instead of a top-level `src/money/` package; the standalone-extract scaffolding is gone. Web routes, skill, and scheduler all call the same in-process `istota.money.resolve_for_user(user_id, istota_config)`.

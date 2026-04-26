@@ -2,6 +2,65 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Web UI shell/primitives consolidation
+
+Spent the session standardizing the SvelteKit web frontend. Started as small CSS tweaks ("app-nav background slightly brighter", "secondary navbar chip styling consistent across feeds/location/money", "tighten padding"), then snowballed into a full audit + refactor when alignment drift kept turning up across the four route layouts. Used the Explore agent to inventory duplication; the headline finding was ~400 lines of near-identical shell + sidebar CSS spread across 4 files, plus bits-ui (already a dep) being only 4% utilized — Collapsible only, despite 5 raw `<select>`s in the codebase and a hand-rolled overlay/backdrop modal in `PlaceForm`.
+
+**Built primitives in `web/src/lib/components/ui/`:**
+- `AppShell.svelte` — fullscreen flex shell with the breakout-margin trick (`margin: -1.5rem`) and the mobile breakpoint baked in. Header / optional sidebar / optional `extras` (between header and body, used by money's error panel) / children. Eliminates the per-layout `.feed-shell` / `.loc-shell` / `.money-shell` blocks.
+- `ShellHeader.svelte` — `title` + `nav` + `tools` snippets. Standardizes the secondary-nav row.
+- `Sidebar.svelte` — header (title + count) + optional `extras` + scrollable list. Mobile slide-in built in. Default width 220px (matched to transactions, the widest of the three pre-existing sidebars).
+- `SidebarToggle.svelte` — the mobile toggle button, visible only at <768px.
+- `CategoryGroup.svelte` — uppercase cat label with optional `count` and optional `collapsible` (caret rotates on open). Matches the pattern from money/transactions account tree, now reusable.
+- `NavLink.svelte` — pill-styled route link. Identical visual to `Chip`'s checked state.
+- `Button.svelte` — variants: `primary` / `pill` / `ghost` / `subtle` / `danger-icon`, sizes `sm` / `md`.
+- `Select.svelte` — bits-ui Select wrapper. Single-select, options array, `onValueChange` callback.
+- `Modal.svelte` — bits-ui Dialog wrapper. `title` / `description` / `footer` snippet / `bind:open`.
+- `index.ts` — barrel export.
+
+**Migrations:**
+- `routes/location/+layout.svelte` — 562 → 423 lines (~25% reduction). Replaced shell + sidebar + nav CSS; kept stats-panel internals.
+- `routes/feeds/+layout.svelte` — 295 → 145 lines (~50% reduction).
+- `routes/money/+layout.svelte` — uses `AppShell` (no sidebar) + `Select` for the ledger picker. The `.money-section-*` global classes stay (sub-routes still consume them).
+- `routes/money/transactions/+layout.svelte` — uses `Sidebar` for the account tree; year picker swapped to `Select`.
+- `lib/components/location/PlaceForm.svelte` — overlay/backdrop/category select/buttons all gone; uses `Modal` + `Select` + `Button`.
+
+**Alignment + spacing system:**
+- `--chip-padding-x` (0.5rem) and `--chip-gap` (0.1rem) live in `app.css`. Both `Chip` and `NavLink` consume them, so changes propagate.
+- `.nav-hang` utility = `margin-inline-start: calc(-1 * var(--chip-padding-x))`. Drop on any flex nav whose first chip is the leftmost element of a row, and chip *text* visually aligns with the heading text on the row above (the bg pill hangs left into the parent's padding — standard hanging-pill pattern). Applied globally to `.money-section-nav`, so all tertiary navs (reports, business) inherit it.
+- `Sidebar`'s `.sidebar-list` now has `padding-inline-end: 0.25rem` so item hover backgrounds don't bleed to the right edge of the sidebar.
+- App nav background bumped to `#1a1a1a` to differentiate from the page bg `#111`.
+- Top-right "log out" text link replaced with the Lucide `LogOut` icon.
+
+**Local dev workflow** — added a Vite middleware mock so `npm run dev` works without the FastAPI backend running:
+- `web/vite-mock-api.ts` — middleware plugin that intercepts `/istota/api/*` and `/istota/money/api/*`, returns minimal valid responses (auth user, empty feeds/places/pings, ledger list, accounts).
+- `web/vite.config.ts` — gated on `VITE_MOCK_API=1` env var. Without the var, the original proxy-to-localhost behavior is unchanged.
+- Run with `VITE_MOCK_API=1 npm run dev` for pure UI iteration with HMR.
+
+**Files added/modified:**
+- `web/src/lib/components/ui/AppShell.svelte` — new
+- `web/src/lib/components/ui/ShellHeader.svelte` — new
+- `web/src/lib/components/ui/Sidebar.svelte` — new
+- `web/src/lib/components/ui/SidebarToggle.svelte` — new
+- `web/src/lib/components/ui/CategoryGroup.svelte` — new
+- `web/src/lib/components/ui/NavLink.svelte` — new
+- `web/src/lib/components/ui/Button.svelte` — new
+- `web/src/lib/components/ui/Select.svelte` — new (bits-ui Select wrapper)
+- `web/src/lib/components/ui/Modal.svelte` — new (bits-ui Dialog wrapper)
+- `web/src/lib/components/ui/index.ts` — new (barrel export)
+- `web/src/lib/components/ui/Chip.svelte` — uses `--chip-padding-x`, line-height 1.2 normalization
+- `web/src/lib/components/location/PlaceForm.svelte` — converted to Modal + Select + Button
+- `web/src/routes/+layout.svelte` — log-out icon
+- `web/src/routes/location/+layout.svelte` — migrated, places groups now collapsible
+- `web/src/routes/feeds/+layout.svelte` — migrated
+- `web/src/routes/money/+layout.svelte` — migrated, ledger picker uses Select
+- `web/src/routes/money/transactions/+layout.svelte` — migrated, year picker uses Select
+- `web/src/app.css` — `--chip-padding-x`, `--chip-gap`, `.nav-hang` utility, app-nav bg
+- `web/vite-mock-api.ts` — new middleware plugin
+- `web/vite.config.ts` — wires mock plugin behind `VITE_MOCK_API=1`
+
+`npm run check` confirms primitives + migrated files are type-clean (the 14 errors that remain are pre-existing in `money/reports/cash-flow` and `money/taxes`, unrelated to this work). Production build passes.
+
 ## 2026-04-26: Per-job model + effort overrides via CRON.md
 
 Walked through with Zorg first. Question was: how do we mix Sonnet on cheap tasks with Opus on smart ones, given that we just added the global `model` and `effort` knobs? Two paths considered:

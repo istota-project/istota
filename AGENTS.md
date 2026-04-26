@@ -92,10 +92,17 @@ istota/
 │   └── .env.example         # Environment variables template
 ├── web/                     # SvelteKit frontend (adapter-static, base /istota)
 │   ├── src/
-│   │   ├── routes/          # Pages: dashboard, feeds, ledgers
-│   │   └── lib/             # API client, components (FeedCard, Lightbox)
+│   │   ├── routes/          # Pages: dashboard, feeds, location, money
+│   │   └── lib/
+│   │       ├── api.ts       # Backend API client
+│   │       └── components/
+│   │           ├── ui/      # Shared primitives: AppShell, ShellHeader, Sidebar,
+│   │           │            #   SidebarToggle, CategoryGroup, NavLink, Chip,
+│   │           │            #   Button, Select (bits-ui), Modal (bits-ui Dialog)
+│   │           └── location/ # Domain-specific (PlaceForm, LocationMap, etc.)
 │   ├── svelte.config.js     # adapter-static, base path /istota
-│   └── vite.config.ts       # Dev proxy to FastAPI
+│   ├── vite.config.ts       # Dev proxy to FastAPI; mock plugin behind VITE_MOCK_API=1
+│   └── vite-mock-api.ts     # In-process mock backend for `npm run dev` UI iteration
 ├── scripts/                 # setup.sh, scheduler.sh
 ├── tests/                   # pytest + pytest-asyncio (~2760 tests, 56 files)
 ├── schema.sql
@@ -249,6 +256,12 @@ Read tracking: IntersectionObserver marks entries as read in Miniflux after 1.5s
 User verification: `preferred_username` from OIDC must exist in `config.users`. Session rotated on login (cleared before writing user info). CSRF protection via Origin header validation on state-changing endpoints (PUT/POST/DELETE). Config: `[web]` section — `enabled`, `port`, `oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `session_secret_key`. Secrets via env vars: `ISTOTA_OIDC_CLIENT_SECRET`, `ISTOTA_WEB_SECRET_KEY`.
 
 Deploy requires Node.js for `npm run build`. Ansible handles this when `istota_web_enabled` is set.
+
+**Frontend primitives** (`web/src/lib/components/ui/`): `AppShell` (fullscreen flex shell with breakout margin + mobile breakpoint), `ShellHeader` (h1 + nav + tools), `Sidebar` (header + scrollable list, default 220px, mobile slide-in), `SidebarToggle`, `CategoryGroup` (uppercase label + optional count + optional `collapsible`), `NavLink` (pill-styled route link), `Chip` (toggleable pill button), `Button` (variants `primary`/`pill`/`ghost`/`subtle`/`danger-icon`), `Select` (bits-ui Select wrapper), `Modal` (bits-ui Dialog wrapper). All four route layouts (feeds, location, money, money/transactions) are built on these. Import via `import { AppShell, … } from '$lib/components/ui'`.
+
+**Alignment system**: chip/nav-link horizontal padding lives in `--chip-padding-x` (`app.css`); chip-row gap lives in `--chip-gap`. The `.nav-hang` utility class applies `margin-inline-start: calc(-1 * var(--chip-padding-x))` so the *text* of a leftmost chip aligns with heading text on the row above (the bg pill hangs into the parent's left padding — standard hanging-pill pattern). Applied globally to `.money-section-nav` so all tertiary navs inherit it.
+
+**Local UI dev**: `VITE_MOCK_API=1 npm run dev` runs the dev server with an in-process mock backend (`web/vite-mock-api.ts`) that intercepts `/istota/api/*` and `/istota/money/api/*`. Lets you iterate on UI tweaks with HMR without booting FastAPI / Nextcloud / Postgres. Without the env var, the original proxy-to-`localhost:8766` behavior is unchanged.
 
 ### Filesystem Sandbox (bubblewrap)
 Per-user filesystem isolation via `bwrap`. Non-admins see only their Nextcloud subtree + system libs. Admins see full mount + DB (RO by default). Graceful degradation if not Linux or bwrap not found.
