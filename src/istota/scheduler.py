@@ -570,13 +570,10 @@ def _format_log_channel_body(
     else:
         status = "⏳ Running"
     header = f"{task_prefix} {status} {count} - {source}" if source else f"{task_prefix} {status} {count}"
+    spec = " ".join(p for p in (model, effort) if p)
+    if spec:
+        header = f"{header} ({spec})"
     lines = [header]
-    if model and effort:
-        lines.append(f"(model: {model} {effort})")
-    elif model:
-        lines.append(f"(model: {model})")
-    elif effort:
-        lines.append(f"(effort: {effort})")
     if skills:
         lines.append(f"Skills: {', '.join(skills)}")
     for desc in _deduplicate_descriptions(descriptions):
