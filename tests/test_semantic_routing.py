@@ -162,6 +162,35 @@ class TestBuildSkillManifest:
         manifest = build_skill_manifest(index, exclude=set())
         assert "broken" not in manifest
 
+    def test_includes_user_resources_header(self):
+        """When user_resource_types is given, manifest opens with a resources line."""
+        index = self._make_index()
+        manifest = build_skill_manifest(
+            index, exclude=set(),
+            user_resource_types={"miniflux", "karakeep"},
+        )
+        assert manifest.startswith("User has resources: karakeep, miniflux")
+
+    def test_user_resources_omitted_when_empty(self):
+        """Without user_resource_types the original header is unchanged."""
+        index = self._make_index()
+        manifest = build_skill_manifest(index, exclude=set())
+        assert "User has resources" not in manifest
+        assert manifest.startswith("Available skills")
+
+    def test_resource_hint_in_skill_line(self):
+        """Skills with resource_types show a `[needs resource: …]` hint."""
+        index = {
+            "feeds": SkillMeta(
+                name="feeds",
+                description="RSS feeds",
+                keywords=["feed"],
+                resource_types=["miniflux"],
+            ),
+        }
+        manifest = build_skill_manifest(index, exclude=set())
+        assert "[needs resource: miniflux]" in manifest
+
 
 class TestClassifySkills:
     """Tests for the LLM-based skill classification (Pass 2)."""

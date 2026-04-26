@@ -62,8 +62,15 @@ def _run_via_proxy(sock_path: str, skill: str, args: list[str]) -> None:
         response = json.loads(data)
         if response.get("stdout"):
             print(response["stdout"], end="")
+        # Credential lookups return {"error": ..., "reason": ...} with no stderr
+        if response.get("error") and not response.get("stderr"):
+            print(response["error"], file=sys.stderr)
         if response.get("stderr"):
             print(response["stderr"], end="", file=sys.stderr)
+            # Append a trailing newline if stderr didn't end with one, so the
+            # authorized-skills line (when present) doesn't run together.
+            if not response["stderr"].endswith("\n"):
+                print("", file=sys.stderr)
         sys.exit(response.get("returncode", 1))
 
     except FileNotFoundError:

@@ -52,7 +52,7 @@ The executor builds a minimal, clean environment for the subprocess. `build_clea
 | Developer | `DEVELOPER_REPOS_DIR`, `GITLAB_URL/TOKEN`, `GITHUB_URL/TOKEN`, `GIT_CONFIG_*` |
 | Website | `WEBSITE_PATH`, `WEBSITE_URL` |
 
-When the skill proxy is enabled (default), credential vars are split out via `_split_credential_env()` and routed through a Unix socket proxy instead of being in Claude's environment.
+When the skill proxy is enabled (default), credential vars are split out via `_split_credential_env()` and routed through a Unix socket proxy instead of being in Claude's environment. The proxy is instantiated with two distinct skill sets: `allowed_skills` (the global CLI whitelist, used to reject typos) and `authorized_skills` (per-task subset returned by `_authorized_skills_from_credentials()`, used for credential scoping and informative rejection messages). The authorized set is derived from credential presence in the task env — not from skill selection — so a keyword miss in Pass 1/Pass 2 doesn't lock out a skill the user has clearly configured. See [security](../deployment/security.md#authorization-model) for the full model.
 
 See [environment variables reference](../reference/environment-variables.md) for the full mapping.
 
@@ -98,5 +98,6 @@ Malformed results are reclassified as failures and retried.
 | `build_stripped_env()` | `os.environ` minus credential vars (for heartbeat/cron commands) |
 | `build_allowed_tools()` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash"]` |
 | `_split_credential_env()` | Separates credential vars for proxy routing |
+| `_authorized_skills_from_credentials()` | Returns CLI skills authorized for credential access this task — any skill whose mapped credentials are present in the env |
 | `build_bwrap_cmd()` | Builds bubblewrap sandbox command wrapper |
 | `_build_network_allowlist()` | Builds host:port allowlist for CONNECT proxy |

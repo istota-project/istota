@@ -33,9 +33,32 @@ When `skill_proxy_enabled = true` (default), secret env vars are stripped from C
 
 - `CALDAV_PASSWORD`, `NC_PASS`, `SMTP_PASSWORD`, `IMAP_PASSWORD`
 - `KARAKEEP_API_KEY`, `MINIFLUX_API_KEY`
-- `GITLAB_TOKEN`, `GITHUB_TOKEN`, `MONARCH_SESSION_TOKEN`
+- `GITLAB_TOKEN`, `GITHUB_TOKEN`, `MONARCH_SESSION_TOKEN`, `GOOGLE_WORKSPACE_CLI_TOKEN`
 
-Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped to the skills that need them. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
+Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped per skill: `_CREDENTIAL_SKILL_MAP` maps each credential to the set of skills that may use it, so a CLI invocation only ever sees the credentials its own skill is mapped to. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
+
+### Authorization model
+
+Credential authorization is **decoupled from skill selection**. A CLI skill is authorized for credential access if any of its mapped credentials is actually present in the user's task environment — that is, if the user has the corresponding resource configured (Karakeep, Miniflux, etc.) or the relevant instance config is set (SMTP, GitLab/GitHub tokens). Selection (Pass 1 keyword matching + Pass 2 semantic routing) controls only which skill *docs* go into the prompt, not which credentials can be requested at runtime.
+
+This avoids the failure mode where a keyword miss locks a skill out: e.g. a user has a Miniflux resource configured, the prompt didn't say "feed", `feeds` wasn't selected — under the old model the proxy would refuse to inject `MINIFLUX_API_KEY` and the CLI invocation would fail mysteriously. Under the new model the credential is injectable as soon as Claude decides it needs the feeds skill, regardless of selection.
+
+Threat model is unchanged: a compromised Claude can only request credentials that already exist for this user (resources are user-scoped, instance config is operator-controlled).
+
+### Rejection observability
+
+Every proxy rejection emits a structured WARNING log:
+
+```
+proxy_rejected task_id=42 type=skill skill=evil_skill reason=unknown_skill
+proxy_rejected task_id=42 type=credential name=NC_PASS reason=not_authorized
+```
+
+Reason codes: `unknown_skill` (skill name not in the CLI whitelist), `not_authorized_credential` (credential not in this task's allowed set), `credential_not_present` (credential genuinely missing from env).
+
+Rejection responses include the structured `reason` field and, for unknown skills, an `authorized_skills` list — surfaced to the model via the client's stderr so it can adapt rather than retry blindly.
+
+Use these logs together with the Pass 1/Pass 2 selection logs (see [skills](../features/skills.md#selection-observability)) to count selection misses and decide whether the semantic-routing prompt or timeout needs tuning.
 
 ## Network isolation
 

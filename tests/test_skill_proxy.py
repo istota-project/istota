@@ -14,7 +14,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from istota.skill_proxy import SkillProxy
-from istota.executor import _split_credential_env, _PROXY_CREDENTIAL_VARS
+from istota.executor import (
+    _split_credential_env,
+    _PROXY_CREDENTIAL_VARS,
+    _authorized_skills_from_credentials,
+)
+from istota.skills._types import SkillMeta
 
 
 @pytest.fixture
@@ -124,7 +129,8 @@ class TestProxyCredentialLookup:
                 "type": "credential", "name": "NONEXISTENT",
             })
         assert "error" in resp
-        assert "Unknown credential" in resp["error"]
+        assert resp["reason"] == "credential_not_present"
+        assert resp["name"] == "NONEXISTENT"
 
     def test_does_not_leak_base_env(self, sock_path):
         """Credential lookup only returns values from credential_env, not base_env."""
@@ -188,7 +194,8 @@ class TestProxyScopedCredentials:
                 "type": "credential", "name": "NC_PASS",
             })
         assert "error" in resp
-        assert "not available" in resp["error"]
+        assert resp["reason"] == "not_authorized_credential"
+        assert resp["name"] == "NC_PASS"
 
     def test_none_allowed_credentials_allows_all(self, sock_path):
         """allowed_credentials=None means no scoping (backward compat)."""
@@ -247,6 +254,146 @@ class TestProxyScopedCredentials:
         called_env = mock_run.call_args.kwargs.get("env") or mock_run.call_args[1].get("env")
         assert called_env["SMTP_PASSWORD"] == "smtp_secret"
         assert called_env["GITLAB_TOKEN"] == "gl_secret"
+
+
+class TestAuthorizedSkillsFromCredentials:
+    """Decoupled authorization: cred-presence in env determines authorization."""
+
+    def _index(self, **cli_overrides) -> dict[str, SkillMeta]:
+        # Mirror real CLI metadata for the cred-mapped skills
+        defaults = {
+            "files": True, "calendar": True, "email": True, "bookmarks": True,
+            "feeds": True, "developer": True, "google_workspace": True,
+            "nextcloud": True, "location": True, "notes": True,
+        }
+        defaults.update(cli_overrides)
+        return {
+            name: SkillMeta(name=name, description="", cli=is_cli)
+            for name, is_cli in defaults.items()
+        }
+
+    def test_no_creds_no_authorization(self):
+        idx = self._index()
+        assert _authorized_skills_from_credentials(idx, {}) == []
+
+    def test_user_with_only_miniflux(self):
+        """User has miniflux → only `feeds` is authorized."""
+        idx = self._index()
+        result = _authorized_skills_from_credentials(idx, {"MINIFLUX_API_KEY": "x"})
+        assert result == ["feeds"]
+
+    def test_user_with_email_creds(self):
+        """SMTP+IMAP both authorize email (single skill, two cred vars)."""
+        idx = self._index()
+        result = _authorized_skills_from_credentials(idx, {
+            "SMTP_PASSWORD": "x", "IMAP_PASSWORD": "y",
+        })
+        assert result == ["email"]
+
+    def test_developer_creds_authorize_developer(self):
+        idx = self._index()
+        result = _authorized_skills_from_credentials(idx, {
+            "GITLAB_TOKEN": "x", "GITHUB_TOKEN": "y",
+        })
+        assert result == ["developer"]
+
+    def test_caldav_authorizes_calendar_and_location(self):
+        """CALDAV_PASSWORD is shared between calendar and location skills."""
+        idx = self._index()
+        result = _authorized_skills_from_credentials(idx, {"CALDAV_PASSWORD": "x"})
+        assert sorted(result) == ["calendar", "location"]
+
+    def test_admin_with_all_creds(self):
+        idx = self._index()
+        all_creds = {
+            "CALDAV_PASSWORD": "a", "NC_PASS": "b", "SMTP_PASSWORD": "c",
+            "IMAP_PASSWORD": "d", "KARAKEEP_API_KEY": "e", "MINIFLUX_API_KEY": "f",
+            "GITLAB_TOKEN": "g", "GITHUB_TOKEN": "h", "GOOGLE_WORKSPACE_CLI_TOKEN": "i",
+        }
+        result = _authorized_skills_from_credentials(idx, all_creds)
+        assert sorted(result) == [
+            "bookmarks", "calendar", "developer", "email", "feeds",
+            "google_workspace", "location", "nextcloud",
+        ]
+
+    def test_non_cli_skills_excluded(self):
+        """A skill without cli: true is never authorized even if its creds exist."""
+        idx = self._index(feeds=False)
+        result = _authorized_skills_from_credentials(idx, {"MINIFLUX_API_KEY": "x"})
+        assert result == []
+
+
+class TestProxyInformativeRejections:
+    """The proxy returns structured reason fields plus an authorized-skills list."""
+
+    def _send_request(self, sock_path, request_dict):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect(str(sock_path))
+        sock.sendall((json.dumps(request_dict) + "\n").encode())
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n" in chunk:
+                break
+        sock.close()
+        return json.loads(b"".join(chunks).decode().strip())
+
+    def test_unknown_skill_includes_authorized_list(self, sock_path):
+        with SkillProxy(
+            sock_path, {}, {"PATH": "/usr/bin"},
+            allowed_skills=frozenset({"calendar", "email"}),
+            authorized_skills=frozenset({"email"}),
+            task_id=42,
+        ):
+            resp = self._send_request(sock_path, {"skill": "evil_skill", "args": []})
+        assert resp["returncode"] == 1
+        assert resp["reason"] == "unknown_skill"
+        assert resp["skill"] == "evil_skill"
+        assert resp["authorized_skills"] == ["email"]
+        assert "Authorized skills" in resp["stderr"]
+        assert "email" in resp["stderr"]
+
+    def test_unknown_skill_falls_back_to_allowed_when_no_authorized(self, sock_path):
+        """If authorized_skills not set, error message lists all CLI skills."""
+        with SkillProxy(
+            sock_path, {}, {"PATH": "/usr/bin"},
+            allowed_skills=frozenset({"calendar", "email"}),
+        ):
+            resp = self._send_request(sock_path, {"skill": "evil_skill", "args": []})
+        assert resp["authorized_skills"] == ["calendar", "email"]
+
+    def test_credential_not_authorized_response_shape(self, sock_path):
+        with SkillProxy(
+            sock_path, {"GITLAB_TOKEN": "secret"}, {"PATH": "/usr/bin"},
+            allowed_credentials={"NC_PASS"},
+            task_id=99,
+        ):
+            resp = self._send_request(sock_path, {
+                "type": "credential", "name": "GITLAB_TOKEN",
+            })
+        assert resp["reason"] == "not_authorized_credential"
+        assert resp["name"] == "GITLAB_TOKEN"
+
+    def test_proxy_logs_warning_on_rejection(self, sock_path, caplog):
+        """Every rejection emits a structured WARNING for observability."""
+        import logging
+        with caplog.at_level(logging.WARNING, logger="istota.skill_proxy"):
+            with SkillProxy(
+                sock_path, {}, {"PATH": "/usr/bin"},
+                allowed_skills=frozenset({"calendar"}),
+                task_id=7,
+            ):
+                self._send_request(sock_path, {"skill": "feeds", "args": []})
+
+        rejection_logs = [r for r in caplog.records if "proxy_rejected" in r.message]
+        assert len(rejection_logs) == 1
+        assert "task_id=7" in rejection_logs[0].message
+        assert "skill=feeds" in rejection_logs[0].message
+        assert "reason=unknown_skill" in rejection_logs[0].message
 
 
 class TestProxyCredentialVarsCompleteness:

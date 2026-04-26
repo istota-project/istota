@@ -338,9 +338,14 @@ def select_skills(
     Skills in disabled_skills are skipped entirely (instance-wide + per-user).
     """
     selected = set()
+    reasons: dict[str, str] = {}
     prompt_lower = prompt.lower()
     attachment_extensions = _get_attachment_extensions(attachments)
     disabled = disabled_skills or set()
+
+    def _add(name: str, reason: str) -> None:
+        selected.add(name)
+        reasons.setdefault(name, reason)
 
     for name, meta in skill_index.items():
         if name in disabled:
@@ -351,28 +356,30 @@ def select_skills(
 
         if meta.always_include:
             if _check_dependencies(meta):
-                selected.add(name)
+                _add(name, "always_include")
             continue
 
         if meta.source_types and source_type in meta.source_types:
             if _check_dependencies(meta):
-                selected.add(name)
+                _add(name, f"source_type={source_type}")
             continue
 
         if meta.file_types and attachment_extensions:
-            if any(ft in attachment_extensions for ft in meta.file_types):
+            matched_ft = next((ft for ft in meta.file_types if ft in attachment_extensions), None)
+            if matched_ft is not None:
                 if _check_dependencies(meta):
-                    selected.add(name)
+                    _add(name, f"file_type={matched_ft}")
                 continue
 
         if meta.keywords:
-            if any(kw in prompt_lower for kw in meta.keywords):
+            matched_kw = next((kw for kw in meta.keywords if kw in prompt_lower), None)
+            if matched_kw is not None:
                 # If skill requires a resource type, only include if user has it
                 if meta.resource_types:
                     if not any(rt in user_resource_types for rt in meta.resource_types):
                         continue
                 if _check_dependencies(meta):
-                    selected.add(name)
+                    _add(name, f"keyword={matched_kw!r}")
 
     # Inject sticky skills from recent conversation (follow-up context)
     if sticky_skills:
@@ -385,10 +392,10 @@ def select_skills(
             if meta.always_include:
                 continue  # already selected
             if _check_dependencies(meta):
-                selected.add(name)
+                _add(name, "sticky")
 
     # Resolve companion skills (e.g., whisper pulls in reminders, schedules)
-    companions = set()
+    companions: dict[str, str] = {}
     for name in selected:
         meta = skill_index[name]
         for companion in meta.companion_skills:
@@ -397,8 +404,9 @@ def select_skills(
                 if cmeta.admin_only and not is_admin:
                     continue
                 if _check_dependencies(cmeta):
-                    companions.add(companion)
-    selected |= companions
+                    companions[companion] = f"companion_of={name}"
+    for cname, creason in companions.items():
+        _add(cname, creason)
 
     # Apply exclude_skills: selected skills can exclude others
     excluded = set()
@@ -407,11 +415,14 @@ def select_skills(
         for ex in meta.exclude_skills:
             if ex in selected:
                 excluded.add(ex)
-    selected -= excluded
+    for ex in excluded:
+        selected.discard(ex)
+        reasons.pop(ex, None)
 
     result = sorted(selected)
     if result:
-        logger.debug("Selected skills: %s", ", ".join(result))
+        trace = ", ".join(f"{n}({reasons.get(n, '?')})" for n in result)
+        logger.info("pass1_selection count=%d: %s", len(result), trace)
     return result
 
 
@@ -586,12 +597,17 @@ def build_skill_manifest(
     exclude: set[str],
     disabled_skills: set[str] | None = None,
     is_admin: bool = True,
+    user_resource_types: set[str] | None = None,
 ) -> str:
     """Build a compact manifest of available skills for LLM classification.
 
     Excludes already-selected skills, always_include skills (already loaded),
     disabled skills, admin_only skills for non-admins, and skills with
     unmet dependencies.
+
+    When user_resource_types is provided, prepends a "User resources" line so
+    the classifier can disambiguate (e.g. user has miniflux → feeds is
+    plausible even without keyword overlap).
     """
     disabled = disabled_skills or set()
     lines = []
@@ -608,8 +624,16 @@ def build_skill_manifest(
         if not _check_dependencies(meta):
             continue
         triggers = ", ".join(meta.keywords[:10]) if meta.keywords else "none"
-        lines.append(f"- {name}: {meta.description}. Triggers: {triggers}")
-    return "Available skills (not yet selected):\n" + "\n".join(lines)
+        resource_hint = (
+            f" [needs resource: {', '.join(meta.resource_types)}]"
+            if meta.resource_types else ""
+        )
+        lines.append(f"- {name}: {meta.description}. Triggers: {triggers}{resource_hint}")
+    body = "Available skills (not yet selected):\n" + "\n".join(lines)
+    if user_resource_types:
+        resources = ", ".join(sorted(user_resource_types))
+        return f"User has resources: {resources}\n\n{body}"
+    return body
 
 
 def classify_skills(
@@ -620,6 +644,7 @@ def classify_skills(
     is_admin: bool = True,
     model: str = "haiku",
     timeout: float = 3.0,
+    user_resource_types: set[str] | None = None,
 ) -> list[str]:
     """LLM-based skill classification (Pass 2).
 
@@ -630,6 +655,7 @@ def classify_skills(
     manifest = build_skill_manifest(
         skill_index, exclude=already_selected,
         disabled_skills=disabled_skills, is_admin=is_admin,
+        user_resource_types=user_resource_types,
     )
 
     # Check if there are any skills to classify
@@ -692,12 +718,17 @@ def classify_skills(
             valid_names.append(name)
 
         if valid_names:
-            logger.info("Semantic routing added skills: %s", ", ".join(valid_names))
+            logger.info("pass2_added skills=%s", ",".join(valid_names))
+        else:
+            logger.info("pass2_no_additions considered=%d", len(skill_lines))
 
         return valid_names
 
     except subprocess.TimeoutExpired:
-        logger.warning("Skill classification timed out after %.1fs", timeout)
+        logger.warning(
+            "pass2_timeout after=%.1fs considered=%d — semantic routing skipped",
+            timeout, len(skill_lines),
+        )
         return []
     except json.JSONDecodeError as e:
         logger.warning("Skill classification JSON parse error: %s", e)

@@ -150,6 +150,27 @@ class TestSelectSkills:
         result = select_skills("hello", "talk", set(), index)
         assert "files" in result
 
+    def test_pass1_logs_per_skill_reasons(self, caplog):
+        """Pass 1 emits an INFO log of skill -> reason for observability."""
+        import logging
+        index = self._make_index()
+        with caplog.at_level(logging.INFO, logger="istota.skills_loader"):
+            select_skills(
+                "send an email", "briefing", {"calendar"}, index,
+            )
+        msgs = [r.message for r in caplog.records if "pass1_selection" in r.message]
+        assert len(msgs) == 1
+        msg = msgs[0]
+        # files: always_include
+        assert "files(always_include)" in msg
+        # markets: matched briefing source_type
+        assert "markets(source_type=briefing)" in msg
+        # email: matched keyword
+        assert "email(keyword='email')" in msg
+        # calendar: matched keyword + has resource (note: prompt includes "send" not "calendar"
+        # so calendar is NOT keyword-selected here — verify it isn't)
+        assert "calendar(" not in msg
+
     def test_source_type_match(self):
         index = self._make_index()
         result = select_skills("generate briefing", "briefing", set(), index)
