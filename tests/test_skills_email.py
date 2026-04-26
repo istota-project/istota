@@ -565,6 +565,13 @@ class TestSendEmailSanitizesSubject:
         assert sent_msg["References"] == "<msg1@example.com>   <msg2@example.com>   <msg3@example.com>"
 
 
+from istota.skills.email import AND as _AND
+
+
+@pytest.mark.skipif(
+    _AND is None,
+    reason="imap_tools not installed (install with: uv sync --extra email)",
+)
 class TestDownloadAttachmentsSecurity:
     """Verify that attachment filenames are sanitized against path traversal."""
 

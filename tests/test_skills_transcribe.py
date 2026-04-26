@@ -6,7 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-PIL = pytest.importorskip("PIL", reason="Pillow not installed (install with: uv sync --extra transcribe)")
+pytest.importorskip("pytesseract", reason="pytesseract not installed (install with: uv sync --extra transcribe)")
+pytest.importorskip("PIL", reason="Pillow not installed (install with: uv sync --extra transcribe)")
 from PIL import Image
 
 from istota.skills.transcribe import (
