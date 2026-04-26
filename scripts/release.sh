@@ -49,12 +49,54 @@ PY
 sed -i.bak -E "s/^version = \".*\"/version = \"$NEW\"/" pyproject.toml
 rm pyproject.toml.bak
 
-# Extract just-published version's section as the tag body
-NOTES=$(awk -v v="$NEW" '
-  $0 ~ "^## \\[" v "\\]" {capture=1; next}
-  capture && /^## \[/ {exit}
-  capture {print}
-' CHANGELOG.md)
+# Extract just-published version's section as the tag body, consolidating
+# duplicate ### subsections (Added/Changed/Fixed/...) into one of each in
+# Keep-a-Changelog order. The CHANGELOG file itself is left chronological.
+NOTES=$(python3 - "$NEW" <<'PY'
+import re, sys, pathlib
+version = sys.argv[1]
+text = pathlib.Path("CHANGELOG.md").read_text()
+
+m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
+if not m:
+    sys.exit(f"section for {version} not found")
+section = m.group(1)
+
+# Split into (header, body) chunks. Content before the first ### (if any) is
+# kept under a None bucket and emitted first.
+parts = re.split(r"^(### .+)$", section, flags=re.M)
+buckets: dict[str | None, list[str]] = {}
+order: list[str | None] = []
+
+def add(key, body):
+    body = body.strip("\n")
+    if not body.strip():
+        return
+    if key not in buckets:
+        buckets[key] = []
+        order.append(key)
+    buckets[key].append(body)
+
+# parts[0] is preamble; then alternating header, body
+add(None, parts[0])
+for i in range(1, len(parts), 2):
+    add(parts[i].strip(), parts[i + 1])
+
+CANONICAL = ["### Added", "### Changed", "### Deprecated", "### Removed", "### Fixed", "### Security"]
+ordered_keys = [None] + [h for h in CANONICAL if h in buckets] + [k for k in order if k not in CANONICAL and k is not None]
+
+out = []
+for key in ordered_keys:
+    if key not in buckets:
+        continue
+    if key is not None:
+        out.append(key)
+        out.append("")
+    out.append("\n\n".join(buckets[key]))
+    out.append("")
+print("\n".join(out).strip("\n"))
+PY
+)
 
 if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
   echo "extracted release notes for $TAG are empty" >&2

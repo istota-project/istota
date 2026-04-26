@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Web UI: location Today now uses the same full-width bottom bar + collapsible details panel as History — current visit (place / duration / time-since / battery) is inlined, then ping/stop/transit/trip counts, then a single Show details toggle. The floating info card is gone.
 - Web UI: the standalone Places page has been removed. Place creation, discovery, and dismissal are reachable from Today and History via the shared sidebar and the Discover chip — there is no longer a separate `/location/places` view.
+- `scripts/release.sh` now consolidates duplicate `###` subsections (Added / Changed / Fixed / …) when extracting the version's notes for the git tag annotation. GitHub Releases get one of each header in Keep-a-Changelog order instead of repeating headers in dev-time chronology. The `CHANGELOG.md` file itself is left untouched.
 
 ### Fixed
 - Web UI: location map no longer crashes on initialisation when discovered clusters are present. The previous `circle-stroke-dasharray` paint property is unsupported by MapLibre and was throwing a style-validation error that dropped the WebGL context as soon as the cluster source contained any features.
