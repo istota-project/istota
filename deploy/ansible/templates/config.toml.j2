@@ -9,6 +9,9 @@ emissaries_enabled = {{ istota_emissaries_enabled | lower }}
 {% if istota_model %}
 model = "{{ istota_model }}"
 {% endif %}
+{% if istota_effort %}
+effort = "{{ istota_effort }}"
+{% endif %}
 {% if istota_custom_system_prompt %}
 custom_system_prompt = true
 {% endif %}

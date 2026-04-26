@@ -2098,6 +2098,8 @@ def execute_task(
         cmd = ["claude", "-p", "-", "--allowedTools"] + allowed + ["--disallowedTools", "Agent"]
         if config.model:
             cmd += ["--model", config.model]
+        if config.effort:
+            cmd += ["--effort", config.effort]
         if config.custom_system_prompt:
             sp_path = config.skills_dir.parent / "system-prompt.md"
             if sp_path.exists():
