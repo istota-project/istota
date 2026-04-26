@@ -529,8 +529,7 @@ class TestLogChannelShowsResolvedModelEffort:
             done=True, success=True,
             model="claude-sonnet-4-6", effort="low",
         )
-        assert "claude-sonnet-4-6" in body
-        assert "low" in body
+        assert "(claude-sonnet-4-6 low)" in body
 
     def test_finalize_log_channel_passes_resolved_values(self, tmp_path, monkeypatch):
         """_finalize_log_channel called from process_one_task should resolve task → config."""

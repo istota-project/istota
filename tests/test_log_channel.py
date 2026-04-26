@@ -139,43 +139,42 @@ class TestFormatLogChannelBody:
         )
         assert "Skills:" not in body
 
-    def test_model_and_effort_included_in_body(self):
+    def test_model_and_effort_inlined_in_header(self):
         body = _format_log_channel_body(
             ("**[#42]**", "Dev"), ["📄 Reading file.txt"],
             done=True, success=True,
             model="claude-sonnet-4-6", effort="low",
         )
-        assert "(model: claude-sonnet-4-6 low)" in body
-        # Should appear on a single dedicated line below the header
-        lines = body.split("\n")
-        spec_idx = next(i for i, l in enumerate(lines) if "claude-sonnet-4-6" in l)
-        tool_idx = next(i for i, l in enumerate(lines) if "Reading file.txt" in l)
-        assert spec_idx < tool_idx
+        # Spec appended to header line
+        first_line = body.split("\n")[0]
+        assert "(claude-sonnet-4-6 low)" in first_line
 
-    def test_model_only(self):
+    def test_model_only_in_header(self):
         body = _format_log_channel_body(
             ("**[#42]**", "Dev"), [],
             done=True, success=True,
             model="claude-opus-4-7",
         )
-        assert "(model: claude-opus-4-7)" in body
-        assert "effort" not in body.lower()
+        first_line = body.split("\n")[0]
+        assert "(claude-opus-4-7)" in first_line
 
-    def test_effort_only(self):
+    def test_effort_only_in_header(self):
         body = _format_log_channel_body(
             ("**[#42]**", "Dev"), [],
             done=True, success=True,
             effort="high",
         )
-        assert "(effort: high)" in body
+        first_line = body.split("\n")[0]
+        assert "(high)" in first_line
 
-    def test_no_model_effort_line_when_unset(self):
+    def test_no_spec_when_unset(self):
         body = _format_log_channel_body(
             ("**[#42]**", "Dev"), ["📄 Reading file.txt"],
             done=True, success=True,
         )
-        assert "model:" not in body.lower()
-        assert "effort:" not in body.lower()
+        first_line = body.split("\n")[0]
+        # No parens after the source
+        assert first_line.endswith("- Dev")
 
     def test_deduplicates_consecutive_descriptions(self):
         body = _format_log_channel_body(
