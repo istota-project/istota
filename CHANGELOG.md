@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Config.namespace` field — the install namespace (drives `/etc/{namespace}/`, etc.) is now a first-class config field, parsed from the TOML's top level and emitted by the ansible role.
 
 ### Changed
+- Custom system prompt (`config/system-prompt.md`, used when `custom_system_prompt = true`) gained an "Executing actions with care" section covering reversibility, risky-op examples, investigate-before-destroy, and scoped authorization. Sleep guidance split into two specific rules. Synced against Claude Code 2.1.120's extracted prompts; pieces that duplicate `emissaries.md` / `persona.md` were intentionally left out.
 - Money is now `src/istota/money/` instead of a top-level `src/money/` package; the standalone-extract scaffolding is gone. Web routes, skill, and scheduler all call the same in-process `istota.money.resolve_for_user(user_id, istota_config)`.
 - Money skill no longer marshals env vars for workspace mode; it resolves the user's `UserContext` in-process and injects it into Click directly. The standalone `money` CLI keeps file-based config support (`MONEY_CONFIG=...` or `-c <path>`) for terminal use.
 - Money scheduled jobs invoke `istota-skill money <cmd>` with `MONEY_USER` set, instead of `MONEY_CONFIG=… money --user X <cmd>`. `MONEY_SECRETS_FILE` is no longer exported by seeded jobs — the skill reads credentials in-process.
