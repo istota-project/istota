@@ -8,7 +8,8 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 |---|---|---|
 | `bot_name` | `"Istota"` | User-facing name (chat, emails, folder names) |
 | `emissaries_enabled` | `true` | Include emissaries.md in system prompts |
-| `model` | `""` | Claude model override (empty = CLI default) |
+| `model` | `""` | Claude model override (empty = CLI default). Pin to a version like `"claude-opus-4-7"`. |
+| `effort` | `""` | Effort level: `low`, `medium`, `high`, `xhigh`, or `max` (empty = model default) |
 | `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default |
 | `db_path` | `"data/istota.db"` | SQLite database path |
 | `rclone_remote` | `"nextcloud"` | rclone remote name |
@@ -233,14 +234,9 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 | `password` | `""` | Basic auth password |
 | `priority` | `3` | Default priority (1-5) |
 
-## `[moneyman]`
+## Money
 
-| Setting | Default | Description |
-|---|---|---|
-| `cli_path` | `""` | Local CLI binary path |
-| `config_path` | `""` | Moneyman config file path |
-| `api_url` | `""` | Remote HTTP API URL |
-| `api_key` | `""` | API key for remote mode |
+There is no instance-level `[money]` config section. Per-user access is controlled via `[[resources]] type = "money"` in each user's TOML. See `config/users/alice.example.toml` for resource fields (workspace mode, ledgers, etc.).
 
 ## `[google_workspace]`
 

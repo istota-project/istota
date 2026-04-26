@@ -59,7 +59,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI | Notes |
 |---|---|---|---|
-| `moneyman` | accounting, ledger, beancount, invoice, expense | yes -- Moneyman API client | Requires `moneyman` resource |
+| `money` | accounting, ledger, beancount, invoice, expense, money | yes -- in-process accounting (ledger, invoicing, transactions, work log) | Requires `money` resource |
 
 ## Google Workspace
 
