@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Location places — safer delete + cleaner sidebar + dynamic categories
+
+Small follow-up to the shell/primitives consolidation. The places sidebar had a delete `×` that appeared on row hover — too easy to fire by accident, and the `XXm` radius badge next to each name ate sidebar real-estate without earning it. Folded delete into the existing edit modal as a left-aligned link (with a `confirm()` guard) so it requires an explicit two-step action, and dropped the radius from the sidebar. While in `PlaceForm`, also made the category dropdown grow with the user's data: instead of a fixed list of 11 categories, options now merge the base list, every distinct category present on `$locationPlaces`, and the place's own current category, deduped and alphabetized.
+
+**Key changes:**
+- Removed hover-to-delete `×` from the places sidebar rows.
+- Removed the radius badge (`100m`, etc.) from sidebar rows — name only now.
+- `PlaceForm` accepts an optional `onDelete` prop; when set and editing, the modal footer shows a left-aligned "Delete" link guarded by `confirm("Delete \"X\"? This cannot be undone.")`.
+- `PlaceForm` category options are now `$derived` from the base list ∪ existing place categories ∪ the current value, sorted alphabetically. Reads `$locationPlaces` from the existing store — no new prop, no extra fetch.
+- `handleDeletePlace` in `routes/location/+layout.svelte` also closes the editing modal if the deleted place was being edited.
+
+**Files added/modified:**
+- `web/src/lib/components/location/PlaceForm.svelte` — `onDelete` prop, `handleDelete()` with confirm, left-aligned `.delete-link` button in footer (`margin-right: auto` so it sits opposite Cancel/Update), `$derived` `categoryOptions` reading from `locationPlaces` store.
+- `web/src/routes/location/+layout.svelte` — sidebar rows simplified to a single `.place-btn` (no row wrapper, no radius span, no delete button); `handleDeletePlace` closes `editingPlace` on match; `<PlaceForm>` editing instance receives `onDelete={handleDeletePlace}`. Dead `.place-row` / `.place-radius` / `.place-delete` styles removed.
+
 ## 2026-04-26: Web UI shell/primitives consolidation
 
 Spent the session standardizing the SvelteKit web frontend. Started as small CSS tweaks ("app-nav background slightly brighter", "secondary navbar chip styling consistent across feeds/location/money", "tighten padding"), then snowballed into a full audit + refactor when alignment drift kept turning up across the four route layouts. Used the Explore agent to inventory duplication; the headline finding was ~400 lines of near-identical shell + sidebar CSS spread across 4 files, plus bits-ui (already a dep) being only 4% utilized — Collapsible only, despite 5 raw `<select>`s in the codebase and a hand-rolled overlay/backdrop modal in `PlaceForm`.

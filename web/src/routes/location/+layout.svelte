@@ -91,6 +91,9 @@
 				selectedPlace = null;
 				placeStats = null;
 			}
+			if (editingPlace?.id === place.id) {
+				editingPlace = null;
+			}
 			await reloadPlaces();
 		} catch {
 			// ignore
@@ -248,23 +251,14 @@
 			{#each groupedPlaces as [category, catPlaces] (category)}
 				<CategoryGroup label={category} count={catPlaces.length} collapsible>
 					{#each catPlaces as place (place.id)}
-						<div class="place-row">
-							<button
-								class="place-btn"
-								class:selected={selectedPlace?.id === place.id}
-								onclick={() => handlePlaceClick(place)}
-								type="button"
-							>
-								<span class="place-name">{place.name}</span>
-								<span class="place-radius">{place.radius_meters}m</span>
-							</button>
-							<button
-								class="place-delete"
-								onclick={() => handleDeletePlace(place)}
-								type="button"
-								title="Delete place">&times;</button
-							>
-						</div>
+						<button
+							class="place-btn"
+							class:selected={selectedPlace?.id === place.id}
+							onclick={() => handlePlaceClick(place)}
+							type="button"
+						>
+							<span class="place-name">{place.name}</span>
+						</button>
 					{/each}
 				</CategoryGroup>
 			{/each}
@@ -275,7 +269,12 @@
 </AppShell>
 
 {#if editingPlace}
-	<PlaceForm place={editingPlace} onSave={handleEditSave} onCancel={() => (editingPlace = null)} />
+	<PlaceForm
+		place={editingPlace}
+		onSave={handleEditSave}
+		onDelete={handleDeletePlace}
+		onCancel={() => (editingPlace = null)}
+	/>
 {/if}
 
 <style>
@@ -364,16 +363,9 @@
 		border-top: 1px solid var(--border-subtle);
 	}
 
-	.place-row {
-		display: flex;
-		align-items: center;
-	}
-
 	.place-btn {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		flex: 1;
+		display: block;
+		width: 100%;
 		min-width: 0;
 		background: none;
 		border: none;
@@ -400,32 +392,5 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-
-	.place-radius {
-		font-size: var(--text-xs);
-		color: var(--text-dim);
-		flex-shrink: 0;
-		margin-left: 0.25rem;
-	}
-
-	.place-delete {
-		background: none;
-		border: none;
-		color: var(--text-dim);
-		font-size: var(--text-sm);
-		cursor: pointer;
-		padding: 0.2rem 0.35rem;
-		border-radius: 0.2rem;
-		opacity: 0;
-		transition: opacity var(--transition-fast), color var(--transition-fast);
-	}
-
-	.place-row:hover .place-delete {
-		opacity: 1;
-	}
-
-	.place-delete:hover {
-		color: #c66;
 	}
 </style>

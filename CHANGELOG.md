@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Location places sidebar: removed the per-row radius badge and the hover-to-delete `×`. Rows now show the place name only.
+- Place delete moved into the place edit modal as a left-aligned "Delete" link guarded by a confirmation prompt — no more accidental deletes from the sidebar.
+- Place edit modal's category dropdown now lists the base categories *plus* every distinct category in use across the user's places (deduped, alphabetized), so a category created once stays available for the next place.
+
 ### Added
 - Reusable web UI primitives in `web/src/lib/components/ui/`: `AppShell`, `ShellHeader`, `Sidebar`, `SidebarToggle`, `CategoryGroup`, `NavLink`, `Button`, `Select` (bits-ui Select wrapper), `Modal` (bits-ui Dialog wrapper). Replaces ~400 lines of duplicated shell/sidebar CSS across the four route layouts.
 - `--chip-padding-x` and `--chip-gap` CSS variables in `app.css`; `.nav-hang` utility for hanging-pill alignment so chip text aligns with surrounding heading text.

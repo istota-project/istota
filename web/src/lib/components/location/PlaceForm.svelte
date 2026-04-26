@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { DiscoveredCluster, Place } from '$lib/api';
+	import { locationPlaces } from '$lib/stores/location';
 	import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
 
 	interface Props {
@@ -18,9 +19,10 @@
 		}) => void;
 		onCancel: () => void;
 		onDismiss?: (data: { lat: number; lon: number; radius_meters: number }) => void;
+		onDelete?: (place: Place) => void;
 	}
 
-	let { cluster, place, initialLat, initialLon, onSave, onCancel, onDismiss }: Props = $props();
+	let { cluster, place, initialLat, initialLon, onSave, onCancel, onDismiss, onDelete }: Props = $props();
 
 	let nameInput: HTMLInputElement | undefined = $state();
 	$effect(() => {
@@ -39,7 +41,7 @@
 	let notes = $state(untrack(() => place?.notes ?? ''));
 	let open = $state(true);
 
-	const categoryOptions: SelectOption[] = [
+	const baseCategories = [
 		'home',
 		'work',
 		'gym',
@@ -51,7 +53,26 @@
 		'hotel',
 		'transit',
 		'other',
-	].map((cat) => ({ value: cat, label: cat[0].toUpperCase() + cat.slice(1) }));
+	];
+
+	const categoryOptions = $derived.by<SelectOption[]>(() => {
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const c of baseCategories) {
+			if (c && !seen.has(c)) { seen.add(c); out.push(c); }
+		}
+		for (const p of $locationPlaces) {
+			const c = p.category?.trim();
+			if (c && !seen.has(c)) { seen.add(c); out.push(c); }
+		}
+		if (category && !seen.has(category)) {
+			seen.add(category);
+			out.push(category);
+		}
+		return out
+			.sort((a, b) => a.localeCompare(b))
+			.map((c) => ({ value: c, label: c[0].toUpperCase() + c.slice(1) }));
+	});
 
 	function handleSave() {
 		if (!name.trim()) return;
@@ -67,6 +88,13 @@
 
 	function handleDismiss() {
 		onDismiss?.({ lat, lon, radius_meters: radius });
+	}
+
+	function handleDelete() {
+		if (!place || !onDelete) return;
+		const ok = confirm(`Delete "${place.name}"? This cannot be undone.`);
+		if (!ok) return;
+		onDelete(place);
 	}
 
 	function handleOpenChange(next: boolean) {
@@ -131,6 +159,9 @@
 	</label>
 
 	{#snippet footer()}
+		{#if editing && onDelete}
+			<button class="delete-link" type="button" onclick={handleDelete}>Delete</button>
+		{/if}
 		<Button variant="ghost" onclick={onCancel}>Cancel</Button>
 		{#if !editing && onDismiss}
 			<Button variant="ghost" onclick={handleDismiss} title="Don't show this cluster again">
@@ -195,5 +226,22 @@
 
 	.coord input {
 		width: 100%;
+	}
+
+	.delete-link {
+		margin-right: auto;
+		background: none;
+		border: none;
+		color: var(--text-dim);
+		font: inherit;
+		font-size: var(--text-sm);
+		cursor: pointer;
+		padding: 0.25rem 0.4rem;
+		border-radius: var(--radius-pill);
+		transition: color var(--transition-fast);
+	}
+
+	.delete-link:hover {
+		color: #c66;
 	}
 </style>
