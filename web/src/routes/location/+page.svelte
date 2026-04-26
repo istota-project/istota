@@ -172,8 +172,8 @@
 
 	.info-panel {
 		position: absolute;
-		top: 0.5rem;
-		right: 0.5rem;
+		bottom: 0.5rem;
+		left: 0.5rem;
 		z-index: 10;
 		background: rgba(17, 17, 17, 0.92);
 		border: 1px solid var(--border-default);
@@ -241,10 +241,7 @@
 
 	@media (max-width: 768px) {
 		.info-panel {
-			top: auto;
-			bottom: 0.5rem;
 			right: 0.5rem;
-			left: 0.5rem;
 			max-width: none;
 			max-height: 40%;
 		}
