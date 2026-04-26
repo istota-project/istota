@@ -36,7 +36,7 @@ istota resource add -u USER -t TYPE -p PATH  # Add resource
 istota resource list -u USER                  # List resources
 ```
 
-Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `reminders_file`, `shared_file`, `ledger`, `invoicing`, `karakeep`, `monarch`, `miniflux`, `moneyman`.
+Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `reminders_file`, `shared_file`, `ledger`, `invoicing`, `karakeep`, `monarch`, `miniflux`, `money` (legacy alias `moneyman` still accepted).
 
 ### Email
 

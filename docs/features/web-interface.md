@@ -35,7 +35,7 @@ uvicorn istota.web_app:app --port 8766
 
 **Feeds**: Miniflux RSS feed reader with masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox. Viewport-based read tracking marks entries as read in Miniflux after 1.5s visible. Requires a `miniflux` resource.
 
-**Ledgers**: lists beancount ledgers with links to Fava instances. Fava is reverse-proxied via nginx at `/istota/fava/{user}/{ledger}/` with `auth_request` gating.
+**Money**: accounting dashboard with ledger queries, transaction management, invoicing, and work log tracking. Backed by the in-process `money` module (no external service). Requires a `money` resource.
 
 **Location**: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover clusters, create/edit/delete, visit stats). Requires GPS tracking to be enabled.
 
@@ -56,7 +56,7 @@ uvicorn istota.web_app:app --port 8766
 | `/istota/api/google/status` | Google connection status |
 | `/istota/api/google/disconnect` | Remove Google tokens |
 | `/istota/api/feeds` | Miniflux proxy |
-| `/istota/api/moneyman/ledgers` | Moneyman API proxy |
+| `/istota/money/api/*` | Money module (ledger, transactions, invoicing) |
 | `/istota/api/location/*` | Places CRUD, pings, trips |
 
 The SvelteKit build is served as static files for all other `/istota/*` paths.
