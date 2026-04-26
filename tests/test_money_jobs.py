@@ -76,30 +76,36 @@ def _make_app_config(tmp_path: Path, users: dict[str, list[ResourceConfig]]) -> 
 
 
 class TestJobsForUser:
-    def test_filters_monarch_when_no_monarch_config(self, tmp_path):
+    def test_seeds_run_scheduled_when_only_invoicing_configured(self, tmp_path):
         from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=False)
         ctx = load_context(str(cfg))
         jobs = jobs_for_user(ctx.users["alice"], "alice")
         names = [j["name"] for j in jobs]
-        assert f"{MODULE_PREFIX}run_scheduled" in names
-        assert f"{MODULE_PREFIX}monarch_sync" not in names
+        assert names == [f"{MODULE_PREFIX}run_scheduled"]
 
-    def test_filters_invoicing_when_no_invoicing_config(self, tmp_path):
+    def test_seeds_run_scheduled_when_only_monarch_configured(self, tmp_path):
         from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=False, with_monarch=True)
         ctx = load_context(str(cfg))
         jobs = jobs_for_user(ctx.users["alice"], "alice")
         names = [j["name"] for j in jobs]
-        assert f"{MODULE_PREFIX}monarch_sync" in names
-        assert f"{MODULE_PREFIX}run_scheduled" not in names
+        assert names == [f"{MODULE_PREFIX}run_scheduled"]
 
-    def test_returns_both_when_fully_configured(self, tmp_path):
+    def test_seeds_run_scheduled_when_fully_configured(self, tmp_path):
         from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         ctx = load_context(str(cfg))
         jobs = jobs_for_user(ctx.users["alice"], "alice")
-        assert len(jobs) == 2
+        assert len(jobs) == 1
+        assert jobs[0]["name"] == f"{MODULE_PREFIX}run_scheduled"
+
+    def test_no_jobs_when_neither_feature_configured(self, tmp_path):
+        from istota.money.cli import load_context
+        cfg = _money_toml(tmp_path, with_invoicing=False, with_monarch=False)
+        ctx = load_context(str(cfg))
+        jobs = jobs_for_user(ctx.users["alice"], "alice")
+        assert jobs == []
 
     def test_command_uses_istota_skill_with_money_user(self, tmp_path):
         from istota.money.cli import load_context
@@ -127,7 +133,7 @@ class TestJobsForUser:
 
 
 class TestSyncMoneyModuleJobs:
-    def test_seeds_jobs_for_user_with_money_resource(self, tmp_path):
+    def test_seeds_run_scheduled_for_user_with_money_resource(self, tmp_path):
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         app_config = _make_app_config(
             tmp_path,
@@ -140,8 +146,7 @@ class TestSyncMoneyModuleJobs:
             ("alice",),
         ).fetchall()
         names = [r[0] for r in rows]
-        assert f"{MODULE_PREFIX}monarch_sync" in names
-        assert f"{MODULE_PREFIX}run_scheduled" in names
+        assert names == [f"{MODULE_PREFIX}run_scheduled"]
 
     def test_user_without_money_resource_has_no_module_jobs(self, tmp_path):
         app_config = _make_app_config(tmp_path, {"bob": []})
@@ -166,7 +171,7 @@ class TestSyncMoneyModuleJobs:
             "SELECT COUNT(*) FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             ("alice", f"{MODULE_PREFIX}%"),
         ).fetchone()[0]
-        assert count == 2  # exactly the two default jobs
+        assert count == 1
 
     def test_removes_module_jobs_when_resource_disappears(self, tmp_path):
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
@@ -185,8 +190,8 @@ class TestSyncMoneyModuleJobs:
         ).fetchall()
         assert rows == []
 
-    def test_removes_obsolete_job_when_feature_removed(self, tmp_path):
-        # Start with both monarch + invoicing
+    def test_removes_run_scheduled_when_both_features_removed(self, tmp_path):
+        # Start with both monarch + invoicing → run_scheduled seeded
         cfg_full = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         app_config = _make_app_config(
             tmp_path,
@@ -197,15 +202,15 @@ class TestSyncMoneyModuleJobs:
         assert conn.execute(
             "SELECT COUNT(*) FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             ("alice", f"{MODULE_PREFIX}%"),
-        ).fetchone()[0] == 2
+        ).fetchone()[0] == 1
 
-        # Now point at a config without monarch
-        cfg_inv_only_dir = tmp_path / "alt"
-        cfg_inv_only_dir.mkdir()
-        cfg_inv_only = _money_toml(cfg_inv_only_dir, with_invoicing=True, with_monarch=False)
+        # Now point at a config without monarch or invoicing
+        cfg_bare_dir = tmp_path / "alt"
+        cfg_bare_dir.mkdir()
+        cfg_bare = _money_toml(cfg_bare_dir, with_invoicing=False, with_monarch=False)
         app_config2 = _make_app_config(
             tmp_path,
-            {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg_inv_only)})]},
+            {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg_bare)})]},
         )
         _sync_money_module_jobs(conn, app_config2)
         names = [
@@ -214,7 +219,7 @@ class TestSyncMoneyModuleJobs:
                 ("alice", f"{MODULE_PREFIX}%"),
             ).fetchall()
         ]
-        assert names == [f"{MODULE_PREFIX}run_scheduled"]
+        assert names == []
 
     def test_legacy_moneyman_resource_type_accepted(self, tmp_path):
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
@@ -228,7 +233,7 @@ class TestSyncMoneyModuleJobs:
             "SELECT COUNT(*) FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             ("alice", f"{MODULE_PREFIX}%"),
         ).fetchone()[0]
-        assert count == 2
+        assert count == 1
 
 
 # ---------------------------------------------------------------------------

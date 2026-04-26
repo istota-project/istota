@@ -168,6 +168,15 @@ def cmd_import_csv(args):
     _output(_run(cli_args))
 
 
+def cmd_run_scheduled(args):
+    cli_args = ["run-scheduled"]
+    if args.dry_run:
+        cli_args.append("--dry-run")
+    if args.skip_monarch:
+        cli_args.append("--skip-monarch")
+    _output(_run(cli_args))
+
+
 # ---------------------------------------------------------------------------
 # Invoice commands
 # ---------------------------------------------------------------------------
@@ -355,6 +364,10 @@ def build_parser():
     p_csv.add_argument("--exclude-tag", "-x", action="append", help="Exclude tag")
     p_csv.add_argument("--ledger", "-l", help="Ledger name")
 
+    p_run = sub.add_parser("run-scheduled", help="Run periodic money tasks (monarch sync + invoice scheduler)")
+    p_run.add_argument("--dry-run", action="store_true", help="Preview without generating files")
+    p_run.add_argument("--skip-monarch", action="store_true", help="Skip the monarch sync step")
+
     # --- Invoice commands (nested subparser) ---
     p_inv = sub.add_parser("invoice", help="Invoice management")
     inv_sub = p_inv.add_subparsers(dest="invoice_command")
@@ -441,6 +454,7 @@ def main(argv=None):
         "add-transaction": cmd_add_transaction,
         "sync-monarch": cmd_sync_monarch,
         "import-csv": cmd_import_csv,
+        "run-scheduled": cmd_run_scheduled,
     }
 
     if args.command == "invoice":

@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Money module jobs — drop monarch_sync, fold sync into run-scheduled
+
+Two issues surfaced after the moneyman → istota merge. First, the auto-seeded `_module.money.run_scheduled` job at 8 AM was failing every day with "no tool calls": the `run-scheduled` Click subcommand exists in `istota.money.cli` (line 1128) but was never wired into the `istota-skill money` argparse wrapper (`src/istota/skills/money/__init__.py`), so cron fired, the wrapper printed help, exited 1. Second issue exposed by the first: the wrapper *also* auto-seeds `_module.money.monarch_sync` at 6 AM, which duplicates whatever prompt-based monarch sync the user has already written into CRON.md (most users want a narrated/observable sync, not a silent command).
+
+Fixed both. Wired `run-scheduled` through the wrapper, dropped `monarch_sync` from `DEFAULT_JOBS` entirely, and folded an opportunistic monarch sync into `run-scheduled` itself — so users with `monarch_config` set still get a daily sync, just bundled with the invoice scheduler instead of being its own auto-seeded job. The principle: module-job auto-seeding belongs to operations users wouldn't naturally schedule themselves (the invoice "are any clients due?" check is the canonical example); operations users *do* like to wrap in their own prompt for visibility (monarch sync) shouldn't compete with user CRON.md.
+
+`run-scheduled` now: if `monarch_config_path` set and `--skip-monarch` not passed → call shared `_run_monarch_sync` helper; then proceed with invoice schedule check. Result JSON includes a `monarch` key when the sync ran. Either half is optional — ledger-only users skip the seeded job entirely (`jobs_for_user` returns `[]`).
+
+The existing `_module.money.monarch_sync` row in production DB will be orphan-deleted automatically on the next scheduler tick by `_sync_money_module_jobs` (`scheduler.py:2631`) since it's no longer in `wanted_by_name`. No manual cleanup needed.
+
+**Key changes:**
+- `_module.money.monarch_sync` removed from `DEFAULT_JOBS`. Only `_module.money.run_scheduled` is auto-seeded now.
+- `run-scheduled` runs an opportunistic monarch sync first when `monarch_config_path` is set; new `--skip-monarch` flag for opt-out.
+- `_run_monarch_sync(ctx, dry_run, ledger)` extracted as a shared helper; `sync-monarch` is now a thin wrapper around it.
+- `jobs_for_user` skips the run-scheduled job entirely when neither monarch nor invoicing is configured (ledger-only users get no module jobs).
+- `istota-skill money run-scheduled` finally works — the argparse wrapper exposes `--dry-run` and `--skip-monarch`.
+
+**Files added/modified:**
+- `src/istota/money/jobs.py` — single-job `DEFAULT_JOBS`, simplified `jobs_for_user` (no per-job `requires` field; one feature gate at the top).
+- `src/istota/money/cli.py` — `_run_monarch_sync` helper, `sync-monarch` wraps it, `run-scheduled` calls it before the invoice check.
+- `src/istota/skills/money/__init__.py` — `cmd_run_scheduled` + `run-scheduled` subparser with `--dry-run` / `--skip-monarch`.
+- `src/istota/scheduler.py` — comment update (one job, not two).
+- `tests/test_money_jobs.py` — rewritten: 14 tests covering all four monarch×invoicing combinations plus legacy `moneyman` resource type.
+
 ## 2026-04-26: Sidebar polish — no horizontal scroll, symmetric hover bg
 
 Follow-up to the places sidebar tidy-up. Three problems surfaced once the radius badge was removed and rows tightened up: (1) long place names made the whole sidebar side-scroll, (2) the hover background looked top-heavy because the button's default `line-height: normal` left more visual breathing room above the glyph than below, and (3) the hover background was flush with the sidebar's left edge but had a 0.25rem gutter on the right — asymmetric. Fixed all three; also added mock places to `vite-mock-api.ts` so the next pass on this UI is testable without booting the FastAPI backend.

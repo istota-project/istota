@@ -2547,7 +2547,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
         except Exception as e:
             logger.error("Error syncing CRON.md for %s: %s", user_id, e)
 
-    # Sync module-managed jobs (e.g. money's monarch_sync, run_scheduled).
+    # Sync module-managed jobs (e.g. money's run_scheduled).
     # These are not user-editable via CRON.md; their definitions come from
     # the module's jobs.py and the user's istota resource entry.
     try:
