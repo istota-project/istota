@@ -64,6 +64,7 @@ class SkillProxy:
 
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server_sock.bind(str(self.socket_path))
+        os.chmod(str(self.socket_path), 0o600)
         self._server_sock.listen(8)
         self._server_sock.settimeout(1.0)  # So accept loop checks stop event
 

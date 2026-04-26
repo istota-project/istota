@@ -135,10 +135,10 @@ def _send_ntfy(
         ).decode()
         headers["Authorization"] = f"Basic {credentials}"
     if title:
-        headers["Title"] = title
+        headers["Title"] = title.replace("\r", "").replace("\n", " ")
     headers["Priority"] = str(priority if priority is not None else config.ntfy.priority)
     if tags:
-        headers["Tags"] = tags
+        headers["Tags"] = tags.replace("\r", "").replace("\n", " ")
 
     try:
         response = httpx.post(url, content=message, headers=headers, timeout=10)

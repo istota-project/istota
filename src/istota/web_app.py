@@ -1204,7 +1204,7 @@ async def api_location_create_place(request: Request, user: dict = Depends(_requ
         return result
     except Exception as e:
         logger.error("Failed to create place: %s", e)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse({"error": "failed to create place"}, status_code=400)
 
 
 @api_router.put("/location/places/{place_id}")
@@ -1285,7 +1285,7 @@ async def api_location_dismiss_cluster(
         return result
     except Exception as e:
         logger.error("Failed to dismiss cluster: %s", e)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse({"error": "failed to dismiss cluster"}, status_code=400)
 
 
 @api_router.delete("/location/dismissed-clusters/{cluster_id}")

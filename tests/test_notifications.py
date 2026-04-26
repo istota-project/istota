@@ -258,6 +258,31 @@ class TestSendNtfy:
         assert headers["Priority"] == "5"
         assert headers["Tags"] == "warning"
 
+    @patch("istota.notifications.httpx")
+    def test_strips_newlines_from_title_and_tags(self, mock_httpx):
+        """CRLF in title/tags must be stripped to prevent header injection (httpx
+        also rejects them, but we sanitize at the boundary instead of erroring)."""
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_httpx.post.return_value = mock_response
+
+        config = Config(
+            ntfy=NtfyConfig(enabled=True, topic="t"),
+            users={"alice": UserConfig()},
+        )
+        _send_ntfy(
+            config, "alice", "msg",
+            title="Alert\r\nX-Injected: evil",
+            tags="warn\nsmuggled",
+        )
+        headers = mock_httpx.post.call_args[1]["headers"]
+        assert "\r" not in headers["Title"]
+        assert "\n" not in headers["Title"]
+        assert "\r" not in headers["Tags"]
+        assert "\n" not in headers["Tags"]
+        assert "Alert" in headers["Title"]
+        assert "warn" in headers["Tags"]
+
     def test_returns_false_when_disabled(self):
         config = Config(
             ntfy=NtfyConfig(enabled=False),

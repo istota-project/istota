@@ -197,15 +197,15 @@ async def cmd_status(config, conn, user_id, conversation_token, args, client):
         if not interactive and not background:
             lines.append("No active or pending tasks.")
 
-    total_running = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
-    ).fetchone()[0]
-    total_pending = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE status = 'pending'"
-    ).fetchone()[0]
-
-    lines.append("")
-    lines.append(f"**System:** {total_running} running, {total_pending} queued")
+    if config.is_admin(user_id):
+        total_running = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+        ).fetchone()[0]
+        total_pending = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'pending'"
+        ).fetchone()[0]
+        lines.append("")
+        lines.append(f"**System:** {total_running} running, {total_pending} queued")
 
     return "\n".join(lines)
 

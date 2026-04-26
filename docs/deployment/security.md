@@ -2,6 +2,18 @@
 
 Istota isolates Claude Code invocations through layered security: clean environment, filesystem sandbox, credential proxy, and network isolation.
 
+## Supported deployment
+
+Linux with [bubblewrap](https://github.com/containers/bubblewrap) is the only supported deployment configuration. The filesystem sandbox is the boundary between users and between Claude and the host — without it, env-var scoping in the prompt is the only thing keeping one user's tasks from reading another user's data, and that boundary depends on the model following instructions.
+
+macOS and any Linux without bwrap (or where bwrap can't create user namespaces — e.g. containers without `CAP_SYS_ADMIN`) are **development configurations only**. They will run, but they provide no isolation guarantees and are not suitable for multi-user deployments. The scheduler logs a `SECURITY UNSUPPORTED CONFIGURATION` warning at startup when it detects either condition with more than one user configured.
+
+If you disable the sandbox or run on an unsupported platform, you accept that:
+
+- A prompt injection in one user's task may exfiltrate any other user's data on the same host.
+- Claude has access to the full filesystem visible to the istota service account, not just the per-user subtree.
+- The credential proxy and network proxy still run, but their effectiveness drops without the sandbox boundary (Claude can read arbitrary files, including ones holding the credentials the proxy exists to hide).
+
 ## Clean environment
 
 Every Claude Code subprocess gets a minimal environment built by `build_clean_env()`: only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). Task-specific variables (Nextcloud credentials, CalDAV, email, etc.) are added per-task.
@@ -25,7 +37,7 @@ When `sandbox_enabled = true` (default), each Claude Code invocation runs inside
 
 **Admin users additionally see**: full Nextcloud mount (read-write), database (read-only by default, writable with `sandbox_admin_db_write`), developer repos.
 
-Linux-only. Gracefully degrades to unsandboxed on macOS or when bwrap is not found. Merged-usr compatible for Debian 13+.
+Linux-only and merged-usr compatible for Debian 13+. See [Supported deployment](#supported-deployment) above for the policy on non-Linux / no-bwrap configurations.
 
 ## Credential proxy
 
