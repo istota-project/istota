@@ -5,6 +5,14 @@ from pathlib import Path
 
 import pytest
 
+
+def _skip_unless_weasyprint():
+    """Skip if weasyprint is not importable (missing module or native libs)."""
+    try:
+        import weasyprint  # noqa: F401
+    except (ImportError, OSError) as exc:
+        pytest.skip(f"weasyprint not usable: {exc}")
+
 from istota.money.core.invoicing import (
     build_line_items,
     compute_income_lines,
@@ -409,7 +417,7 @@ class TestDryRunDoesNotMutate:
         # Re-parse config since it may have been updated (it shouldn't be)
         config = parse_invoicing_config(config_file)
 
-        pytest.importorskip("weasyprint")
+        _skip_unless_weasyprint()
 
         real_results = generate_invoices_for_period(
             config=config, config_path=config_file,
@@ -447,7 +455,7 @@ class TestSkipUnmatchedService:
         # "consulting" is not a configured service — only "dev" exists
         add_work_entry(tmp_path, "2026-03-01", "acme", "consulting", qty=8)
 
-        pytest.importorskip("weasyprint")
+        _skip_unless_weasyprint()
 
         results = generate_invoices_for_period(
             config=config, config_path=config_file,
@@ -487,7 +495,7 @@ class TestSkipUnmatchedService:
         add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8)
         add_work_entry(tmp_path, "2026-03-02", "acme", "consulting", qty=4)
 
-        pytest.importorskip("weasyprint")
+        _skip_unless_weasyprint()
 
         results = generate_invoices_for_period(
             config=config, config_path=config_file,
@@ -513,7 +521,7 @@ class TestSkipUnmatchedService:
         config = parse_invoicing_config(config_file)
         add_work_entry(tmp_path, "2026-03-01", "acme", "consulting", qty=8)
 
-        pytest.importorskip("weasyprint")
+        _skip_unless_weasyprint()
 
         generate_invoices_for_period(
             config=config, config_path=config_file,
@@ -723,7 +731,7 @@ class TestGenerateInvoicesPdfOutputDir:
 
         add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=4)
 
-        pytest.importorskip("weasyprint")
+        _skip_unless_weasyprint()
 
         results = generate_invoices_for_period(
             config=config, config_path=config_file,
@@ -755,7 +763,7 @@ class TestGenerateInvoicesPdfOutputDir:
 
         add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=4)
 
-        pytest.importorskip("weasyprint")
+        _skip_unless_weasyprint()
 
         results = generate_invoices_for_period(
             config=config, config_path=config_file,
