@@ -2,13 +2,25 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import { deletePlace, updatePlace, getPlaceStats, type Place, type PlaceStats } from '$lib/api';
+	import {
+		createPlace,
+		deletePlace,
+		dismissCluster,
+		updatePlace,
+		getPlaceStats,
+		type DiscoveredCluster,
+		type Place,
+		type PlaceStats,
+	} from '$lib/api';
 	import {
 		locationPlaces,
 		reloadPlaces,
 		mapFlyTo,
 		selectedPlaceId as selectedPlaceIdStore,
 		onPlaceMove as onPlaceMoveStore,
+		pickingPlace as pickingPlaceStore,
+		requestNewPlace as requestNewPlaceStore,
+		bumpDiscoverDirty,
 	} from '$lib/stores/location';
 	import PlaceForm from '$lib/components/location/PlaceForm.svelte';
 	import {
@@ -29,6 +41,22 @@
 	let statsLoading = $state(false);
 	let editingPlace: Place | null = $state(null);
 
+	let picking = $state(false);
+	let creating: { lat: number; lon: number; cluster?: DiscoveredCluster } | null = $state(null);
+	let createError = $state('');
+
+	$effect(() => {
+		pickingPlaceStore.set(picking);
+	});
+
+	$effect(() => {
+		requestNewPlaceStore.set((args) => {
+			picking = false;
+			creating = args;
+		});
+		return () => requestNewPlaceStore.set(undefined);
+	});
+
 	function isActive(path: string): boolean {
 		return page.url.pathname.startsWith(`${base}${path}`);
 	}
@@ -36,6 +64,45 @@
 	function isExactActive(path: string): boolean {
 		const current = page.url.pathname;
 		return current === `${base}${path}` || current === `${base}${path}/`;
+	}
+
+	function startPicking() {
+		if (creating) return;
+		picking = !picking;
+		if (picking) sidebarOpen = false;
+	}
+
+	function closeCreate() {
+		creating = null;
+		createError = '';
+	}
+
+	async function handleCreate(data: {
+		name: string;
+		lat: number;
+		lon: number;
+		radius_meters: number;
+		category: string;
+		notes: string;
+	}) {
+		try {
+			await createPlace(data);
+			closeCreate();
+			await reloadPlaces();
+			bumpDiscoverDirty();
+		} catch (e) {
+			createError = e instanceof Error ? e.message : 'Failed to save place';
+		}
+	}
+
+	async function handleDismissCluster(data: { lat: number; lon: number; radius_meters: number }) {
+		try {
+			await dismissCluster(data);
+			closeCreate();
+			bumpDiscoverDirty();
+		} catch (e) {
+			createError = e instanceof Error ? e.message : 'Failed to dismiss';
+		}
 	}
 
 	async function handlePlaceClick(place: Place) {
@@ -176,7 +243,6 @@
 			{#snippet nav()}
 				<NavLink href="{base}/location" active={isExactActive('/location')}>Today</NavLink>
 				<NavLink href="{base}/location/history" active={isActive('/location/history')}>History</NavLink>
-				<NavLink href="{base}/location/places" active={isActive('/location/places')}>Places</NavLink>
 			{/snippet}
 			{#snippet tools()}
 				<SidebarToggle
@@ -197,6 +263,21 @@
 			onClose={() => (sidebarOpen = false)}
 		>
 			{#snippet extras()}
+				<div class="sidebar-actions">
+					<button
+						class="new-place-btn"
+						class:active={picking}
+						onclick={startPicking}
+						type="button"
+						title={picking ? 'Click anywhere on the map to set the location' : 'Add a new place'}
+					>
+						{picking ? 'Click on map…' : '+ New place'}
+					</button>
+					{#if createError}
+						<div class="action-error">{createError}</div>
+					{/if}
+				</div>
+
 				{#if selectedPlace && (statsLoading || placeStats)}
 					<div class="stats-panel">
 						<div class="stats-header">
@@ -282,7 +363,54 @@
 	/>
 {/if}
 
+{#if creating}
+	<PlaceForm
+		cluster={creating.cluster}
+		initialLat={creating.lat}
+		initialLon={creating.lon}
+		onSave={handleCreate}
+		onCancel={closeCreate}
+		onDismiss={creating.cluster ? handleDismissCluster : undefined}
+	/>
+{/if}
+
 <style>
+	.sidebar-actions {
+		padding: 0 0.75rem 0.5rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+		flex-shrink: 0;
+	}
+
+	.new-place-btn {
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		color: var(--text-muted);
+		font: inherit;
+		font-size: var(--text-xs);
+		padding: 0.4rem 0.6rem;
+		border-radius: var(--radius-pill);
+		cursor: pointer;
+		text-align: center;
+		transition: color var(--transition-fast), border-color var(--transition-fast);
+	}
+
+	.new-place-btn:hover {
+		color: var(--text-primary);
+		border-color: #777;
+	}
+
+	.new-place-btn.active {
+		color: #ffc107;
+		border-color: #ffc107;
+	}
+
+	.action-error {
+		font-size: var(--text-xs);
+		color: #c66;
+	}
+
 	.stats-panel {
 		border-bottom: 1px solid var(--border-subtle);
 		padding: 0.6rem 0.75rem;

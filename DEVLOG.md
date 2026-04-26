@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Location web UI — fold Places into History, add place from sidebar
+
+The Today info panel sat top-right and covered the MapLibre zoom controls; the obvious fix was to move it bottom-left to mirror mobile. That worked but exposed the bigger structural issue: the standalone `/location/places` view was the only place to discover unknown clusters or add a new place, but it was blind to actual pings/tracks (`pings={[]}` `showPath={false}`). Users couldn't see a clump on a track and act on it without page-hopping. Folded the whole route into history.
+
+**Sidebar gets the create action.** Added `+ New place` to the location layout sidebar (above the place list, in the existing `extras` snippet). Click → flips `pickingPlace` store → mobile sidebar auto-closes → maps render the crosshair cursor → next map click opens `PlaceForm` with the picked lat/lon. Two new stores in `lib/stores/location.ts`: `pickingPlace` (bool, layout writes / route maps read) and `requestNewPlace` (callback the layout sets, both pages call from `onMapClick` and from cluster clicks). Added `discoverDirty` as a tick store so the layout's create/dismiss handlers can signal History to reload its discover overlay.
+
+**History gets a Discover chip.** New chip in the controls bar; toggling it loads `discoverPlaces()` + `listDismissedClusters()` and passes them to the existing `LocationMap` props. Cluster click routes through `requestNewPlace({lat, lon, cluster})` so the same form (with cluster ping count + `Dismiss` button) opens. Dismissed circles are click-to-restore via a confirm dialog. The map continues to render even when the date range has zero pings, so Discover is useful as a pure "name unknown places" mode.
+
+**Places route deleted.** `/location/places/+page.svelte` removed; the `Places` `NavLink` is gone from the header. The `places` mention in AGENTS.md frontend section updated. No backend changes — `/istota/api/location/discover-places` and `/istota/api/location/dismissed-clusters` are still served, just consumed from a different route now.
+
+**Today refactored to match History.** User asked for the Today info panel to use the same full-width bottom-bar style as History since the data shown is largely the same. Rewrote `+page.svelte`: dropped the floating `.info-panel` card, switched `.page-fill` from `position: relative` to `flex-direction: column`, added `.stats-bar` with the current visit (place + duration + time-ago + battery) inlined as the leftmost element, then `pings · stops · transit · trips`, then the `Show details` toggle; expanded panel reuses `DayStats` + `TripList` + `StopTimeline` exactly like History's. `CurrentStatus.svelte` was the only consumer of the old card style and is now unused — deleted.
+
+**LocationMap bug uncovered by mock data.** The discovered-cluster layer used `circle-stroke-dasharray: [2, 2]` cast as `any`. MapLibre's `circle` type doesn't support stroke dashes; the layer-add was throwing a `validate_style` error and dropping the WebGL context. It only ever bit now because the previous mock returned empty clusters, so the validation path was never exercised. Dropped the property — solid yellow stroke is fine and the cluster fill already distinguishes them from places.
+
+**Mock backend made mutable.** Save was a no-op because `vite-mock-api.ts` returned static lists from POST handlers. Refactored the middleware to read JSON request bodies, dispatch to handlers with `(url, method, body)`, and threaded create/update/delete through `mockPlaces.places` and `mockDismissed.dismissed`. POST `/places` also drops any discovered cluster within `max(req.radius_meters, cluster.radius_meters)` of the new place via a Haversine helper, so the visual feedback ("yellow circle disappears after I name it") works in mock mode the same way it does against the real backend. State is in-memory; resets on dev-server restart.
+
+**Files added/modified:**
+- `web/src/routes/location/+layout.svelte` — sidebar `+ New place` button + create/dismiss handlers; `Places` `NavLink` removed; `dismissCluster` import + form `onDismiss` wiring.
+- `web/src/routes/location/+page.svelte` — full-width stats bar + collapsible details panel mirroring history; current visit inlined; floating info card removed.
+- `web/src/routes/location/history/+page.svelte` — `Discover` chip; cluster + dismissed-cluster handlers; map renders even with zero pings when discover is on; `discoverDirty` reload signal.
+- `web/src/routes/location/places/+page.svelte` — deleted (route gone).
+- `web/src/lib/stores/location.ts` — `pickingPlace`, `requestNewPlace`, `discoverDirty`, `bumpDiscoverDirty()`.
+- `web/src/lib/components/location/LocationMap.svelte` — removed unsupported `circle-stroke-dasharray`.
+- `web/src/lib/components/location/CurrentStatus.svelte` — deleted (last consumer gone).
+- `web/vite-mock-api.ts` — body-parsing middleware; place + dismissed-cluster CRUD; cluster pruning when a place is created/dismissed nearby; richer fixture data (3 clusters, 1 dismissed, 50 pings, today's stops/trips, current visit) so the new flows have something to act on.
+- `AGENTS.md` — location pages section rewritten; mock backend description notes mutable state.
+
 ## 2026-04-26: Mobile web UI — sidebar tab repositioned + money header tweaks
 
 Follow-up session on the previous mobile UI pass after testing on-device.

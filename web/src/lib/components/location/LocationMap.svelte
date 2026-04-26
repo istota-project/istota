@@ -613,8 +613,7 @@
 				'circle-color': 'rgba(255, 193, 7, 0.3)',
 				'circle-stroke-color': '#ffc107',
 				'circle-stroke-width': 2,
-				'circle-stroke-dasharray': [2, 2],
-			} as any,
+			},
 		});
 
 		// Cluster labels (ping count)

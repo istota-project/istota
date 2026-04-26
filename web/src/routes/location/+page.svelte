@@ -11,10 +11,16 @@
 		type DaySummaryStop,
 		type Trip,
 	} from '$lib/api';
-	import { locationPlaces, mapFlyTo, selectedPlaceId, onPlaceMove } from '$lib/stores/location';
+	import {
+		locationPlaces,
+		mapFlyTo,
+		selectedPlaceId,
+		onPlaceMove,
+		pickingPlace,
+		requestNewPlace,
+	} from '$lib/stores/location';
 	import { loadSetting, saveSetting } from '$lib/stores/persisted';
 	import LocationMap from '$lib/components/location/LocationMap.svelte';
-	import CurrentStatus from '$lib/components/location/CurrentStatus.svelte';
 	import StopTimeline from '$lib/components/location/StopTimeline.svelte';
 	import DayStats from '$lib/components/location/DayStats.svelte';
 	import TripList from '$lib/components/location/TripList.svelte';
@@ -27,7 +33,7 @@
 	let error = $state('');
 	let pollInterval: ReturnType<typeof setInterval> | undefined;
 	let mapComponent: LocationMap | undefined = $state();
-	let panelOpen = $state(loadSetting('location.panelOpen', true));
+	let panelOpen = $state(loadSetting('location.panelOpen', false));
 
 	$effect(() => { saveSetting('location.panelOpen', panelOpen); });
 
@@ -42,6 +48,46 @@
 		current?.last_ping
 			? { lat: current.last_ping.lat, lon: current.last_ping.lon }
 			: null
+	);
+
+	function formatDuration(minutes: number | null): string {
+		if (minutes == null) return '';
+		if (minutes < 60) return `${minutes}m`;
+		const h = Math.floor(minutes / 60);
+		const m = minutes % 60;
+		return m > 0 ? `${h}h ${m}m` : `${h}h`;
+	}
+
+	function timeAgo(timestamp: string): string {
+		const diff = Date.now() - new Date(timestamp).getTime();
+		const mins = Math.floor(diff / 60000);
+		if (mins < 1) return 'just now';
+		if (mins < 60) return `${mins}m ago`;
+		const hrs = Math.floor(mins / 60);
+		if (hrs < 24) return `${hrs}h ago`;
+		return `${Math.floor(hrs / 24)}d ago`;
+	}
+
+	let currentLabel = $derived.by(() => {
+		if (!current?.last_ping) return null;
+		const placeName =
+			current.current_visit?.place_name ?? current.last_ping.place ?? null;
+		const visitDuration = current.current_visit
+			? formatDuration(current.current_visit.duration_minutes)
+			: '';
+		return {
+			placeName,
+			visitDuration,
+			ago: timeAgo(current.last_ping.timestamp),
+			battery:
+				current.last_ping.battery != null
+					? `${Math.round(current.last_ping.battery * 100)}%`
+					: '',
+		};
+	});
+
+	let hasDetails = $derived(
+		(summary?.stops.length ?? 0) > 0 || trips.length > 0 || pings.length > 1
 	);
 
 	async function loadData() {
@@ -102,11 +148,11 @@
 
 <div class="page-fill">
 	{#if loading}
-		<div class="loading">Loading location data...</div>
+		<div class="center-msg">Loading location data...</div>
 	{:else if error}
-		<div class="error-msg">{error}</div>
+		<div class="center-msg error">{error}</div>
 	{:else}
-		<div class="map-fill">
+		<div class="map-area">
 			<LocationMap
 				bind:this={mapComponent}
 				{pings}
@@ -115,45 +161,70 @@
 				showPath={true}
 				selectedPlaceId={$selectedPlaceId}
 				onPlaceMove={$onPlaceMove}
+				pickingLocation={$pickingPlace}
+				onMapClick={(lat, lon) => $requestNewPlace?.({ lat, lon })}
 			/>
 		</div>
 
-		<div class="info-panel" class:collapsed={!panelOpen}>
-			<button class="panel-toggle" onclick={() => panelOpen = !panelOpen} type="button">
-				{panelOpen ? 'Hide' : 'Info'}
-				{#if !panelOpen && summary}
-					({summary.stops.length} stops)
-				{/if}
-			</button>
-			{#if panelOpen}
-				<div class="panel-content">
-					<CurrentStatus {current} />
-					{#if pings.length > 1}
-						<div class="section">
-							<div class="section-label">Stats</div>
-							<DayStats {pings} />
-						</div>
+		<div class="stats-bar">
+			{#if currentLabel}
+				<span class="current">
+					{#if currentLabel.placeName}
+						<span class="place">{currentLabel.placeName}</span>
+						{#if currentLabel.visitDuration}
+							<span class="stat">{currentLabel.visitDuration}</span>
+						{/if}
+					{:else}
+						<span class="place dim">No place</span>
 					{/if}
-					{#if trips.length > 0}
-						<div class="section">
-							<div class="section-label">Trips <span class="meta">{trips.length}</span></div>
-							<TripList {trips} onTripClick={handleTripClick} />
-						</div>
+					<span class="stat">{currentLabel.ago}</span>
+					{#if currentLabel.battery}
+						<span class="stat">{currentLabel.battery}</span>
 					{/if}
-					{#if summary && summary.stops.length > 0}
-						<div class="section">
-							<div class="section-label">
-								Stops
-								{#if summary.ping_count}
-									<span class="meta">{summary.ping_count} pings</span>
-								{/if}
-							</div>
-							<StopTimeline stops={summary.stops} onStopClick={handleStopClick} />
-						</div>
-					{/if}
-				</div>
+				</span>
+			{:else}
+				<span class="stat dim">No location data</span>
+			{/if}
+			{#if pings.length > 0}
+				<span class="stat">{pings.length} pings</span>
+			{/if}
+			{#if summary && summary.stops.length > 0}
+				<span class="stat">{summary.stops.length} stops</span>
+			{/if}
+			{#if summary && summary.transit_pings > 0}
+				<span class="stat">{summary.transit_pings} transit</span>
+			{/if}
+			{#if trips.length > 0}
+				<span class="stat">{trips.length} trips</span>
+			{/if}
+			{#if hasDetails}
+				<button class="stops-btn" onclick={() => panelOpen = !panelOpen} type="button">
+					{panelOpen ? 'Hide details' : 'Show details'}
+				</button>
 			{/if}
 		</div>
+
+		{#if panelOpen && hasDetails}
+			<div class="stops-panel">
+				{#if pings.length > 1}
+					<div class="panel-section">
+						<DayStats {pings} />
+					</div>
+				{/if}
+				{#if trips.length > 0}
+					<div class="panel-section">
+						<div class="panel-label">Trips</div>
+						<TripList {trips} onTripClick={handleTripClick} />
+					</div>
+				{/if}
+				{#if summary && summary.stops.length > 0}
+					<div class="panel-section">
+						<div class="panel-label">Stops</div>
+						<StopTimeline stops={summary.stops} onStopClick={handleStopClick} />
+					</div>
+				{/if}
+			</div>
+		{/if}
 	{/if}
 </div>
 
@@ -161,89 +232,106 @@
 	.page-fill {
 		flex: 1;
 		display: flex;
-		position: relative;
+		flex-direction: column;
 		min-height: 0;
 	}
 
-	.map-fill {
-		position: absolute;
-		inset: 0;
+	.map-area {
+		flex: 1;
+		min-height: 0;
+		position: relative;
 	}
 
-	.info-panel {
-		position: absolute;
-		bottom: 0.5rem;
-		left: 0.5rem;
-		z-index: 10;
-		background: rgba(17, 17, 17, 0.92);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
-		max-width: 260px;
-		max-height: calc(100% - 1rem);
+	.center-msg {
+		flex: 1;
 		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		backdrop-filter: blur(8px);
+		align-items: center;
+		justify-content: center;
+		color: var(--text-dim);
+		font-size: var(--text-sm);
 	}
 
-	.info-panel.collapsed {
-		max-width: none;
+	.center-msg.error { color: #c66; }
+
+	.stats-bar {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.4rem 0.75rem;
+		border-top: 1px solid var(--border-subtle);
+		flex-shrink: 0;
+		flex-wrap: wrap;
 	}
 
-	.panel-toggle {
+	.current {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 0.5rem;
+	}
+
+	.place {
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--text-primary);
+	}
+
+	.place.dim {
+		color: var(--text-dim);
+		font-weight: 400;
+		font-size: var(--text-xs);
+	}
+
+	.stat {
+		font-size: var(--text-xs);
+		color: var(--text-muted);
+	}
+
+	.stat.dim {
+		color: var(--text-dim);
+	}
+
+	.stops-btn {
+		margin-left: auto;
 		background: none;
 		border: none;
-		border-bottom: 1px solid var(--border-subtle);
-		color: var(--text-muted);
+		color: var(--text-dim);
 		font: inherit;
 		font-size: var(--text-xs);
-		padding: 0.35rem 0.6rem;
 		cursor: pointer;
-		text-align: left;
+		padding: 0;
+	}
+
+	.stops-btn:hover { color: var(--text-primary); }
+
+	.stops-panel {
+		max-height: 200px;
+		overflow-y: auto;
+		border-top: 1px solid var(--border-subtle);
+		padding: 0.5rem 0.75rem;
 		flex-shrink: 0;
 	}
 
-	.panel-toggle:hover { color: var(--text-primary); }
+	.stops-panel::-webkit-scrollbar { width: 3px; }
+	.stops-panel::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
 
-	.panel-content {
-		overflow-y: auto;
-		padding: 0.5rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
+	.panel-section {
+		padding-bottom: 0.5rem;
+		margin-bottom: 0.25rem;
+		border-bottom: 1px solid var(--border-subtle);
 	}
 
-	.panel-content::-webkit-scrollbar { width: 3px; }
-	.panel-content::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
-
-	.section {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
+	.panel-section:last-child {
+		border-bottom: none;
+		margin-bottom: 0;
+		padding-bottom: 0;
 	}
 
-	.section-label {
+	.panel-label {
 		font-size: var(--text-xs);
 		color: var(--text-dim);
-		font-weight: 500;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
-		display: flex;
-		align-items: baseline;
-		gap: 0.4rem;
-	}
-
-	.meta {
-		font-weight: 400;
-		text-transform: none;
-		letter-spacing: 0;
-	}
-
-	@media (max-width: 768px) {
-		.info-panel {
-			right: 0.5rem;
-			max-width: none;
-			max-height: 40%;
-		}
+		font-weight: 500;
+		margin-bottom: 0.25rem;
 	}
 </style>

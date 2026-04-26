@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Web UI: **+ New place** action in the location sidebar — works on both Today and History. Click it, then click anywhere on the map to drop a place there.
+- Web UI: **Discover** chip on the location History page overlays unknown recurring clusters and dismissed zones onto the same map, in the same spatial context as your pings and tracks. Click a yellow cluster to name it (or dismiss it); click a dimmer dismissed circle to restore.
+
+### Changed
+- Web UI: location Today now uses the same full-width bottom bar + collapsible details panel as History — current visit (place / duration / time-since / battery) is inlined, then ping/stop/transit/trip counts, then a single Show details toggle. The floating info card is gone.
+- Web UI: the standalone Places page has been removed. Place creation, discovery, and dismissal are reachable from Today and History via the shared sidebar and the Discover chip — there is no longer a separate `/location/places` view.
+
+### Fixed
+- Web UI: location map no longer crashes on initialisation when discovered clusters are present. The previous `circle-stroke-dasharray` paint property is unsupported by MapLibre and was throwing a style-validation error that dropped the WebGL context as soon as the cluster source contained any features.
+- Web UI: location Today info panel no longer covers the map zoom controls — moved to bottom-left to match the existing mobile layout.
+- Local dev: `VITE_MOCK_API=1` mock backend now actually persists place creation/edit/delete and cluster dismiss/restore in-memory across requests, so the full flows can be exercised without a live FastAPI backend.
+
 ## [0.8.0] - 2026-04-26
 
 ### Changed
