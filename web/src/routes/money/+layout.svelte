@@ -215,5 +215,15 @@
 			padding: 0.5rem 0.75rem;
 			flex-wrap: wrap;
 		}
+
+		:global(.money-section-tools) {
+			width: 100%;
+			flex-wrap: nowrap;
+		}
+
+		:global(.money-section-tools .money-control-input) {
+			flex: 1 1 auto;
+			min-width: 0;
+		}
 	}
 </style>

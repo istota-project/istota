@@ -242,7 +242,7 @@
 	}
 
 	.result-bar {
-		padding: 0.4rem 1rem;
+		padding: 0.4rem 0.75rem;
 		flex-shrink: 0;
 	}
 
@@ -254,7 +254,7 @@
 	.txn-scroll {
 		flex: 1;
 		overflow-y: auto;
-		padding: 0 0.5rem 0.5rem;
+		padding: 0 0 0.5rem;
 		transition: opacity var(--transition-fast);
 	}
 

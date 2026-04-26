@@ -26,7 +26,7 @@
 	</div>
 	<div class="money-section-tools">
 		<select class="money-control-select" value={$selectedYear || ''} onchange={handleYearChange}>
-			<option value="">All years</option>
+			<option value="">All</option>
 			{#each years as y}
 				<option value={y}>{y}</option>
 			{/each}

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { ChevronRight } from 'lucide-svelte';
+
 	interface Props {
 		open: boolean;
 		label: string;
@@ -9,8 +11,15 @@
 	let { open, label, count, onclick }: Props = $props();
 </script>
 
-<button class="sidebar-toggle" class:open {onclick} type="button">
-	{open ? 'Close' : label}{#if count !== undefined} ({count}){/if}
+<button
+	class="sidebar-toggle"
+	class:open
+	{onclick}
+	type="button"
+	aria-label={open ? `Close ${label}` : `Open ${label}${count !== undefined ? ` (${count})` : ''}`}
+	title={open ? `Close ${label}` : `${label}${count !== undefined ? ` (${count})` : ''}`}
+>
+	<ChevronRight size={16} />
 </button>
 
 <style>
@@ -20,25 +29,25 @@
 		border: none;
 		color: var(--text-muted);
 		font: inherit;
-		font-size: var(--text-sm);
-		padding: 0.25rem 0.6rem;
-		border-radius: var(--radius-pill);
 		cursor: pointer;
+		align-items: center;
+		justify-content: center;
 	}
 
 	@media (max-width: 768px) {
 		.sidebar-toggle {
-			display: block;
+			display: inline-flex;
 			position: fixed;
-			bottom: 0.75rem;
-			left: 0.75rem;
+			top: 50%;
+			left: 0;
+			transform: translateY(-50%);
+			padding: 0.5rem 0.3rem;
 			background: #161616;
 			color: var(--text-muted);
-			padding: 0.3rem 0.6rem;
-			border-radius: 0.25rem;
-			font-size: var(--text-xs);
 			border: 1px solid var(--border-subtle);
-			box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+			border-left: none;
+			border-radius: 0 var(--radius-card) var(--radius-card) 0;
+			box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
 			z-index: 30;
 		}
 
@@ -47,8 +56,8 @@
 			background: var(--surface-raised);
 		}
 
-		/* When the sidebar is open it covers the bottom-left corner; hide
-		   the floating toggle and rely on the backdrop for tap-to-close. */
+		/* Sidebar covers the left edge when open; hide the tab and rely on
+		   the transparent click-outside backdrop for dismiss. */
 		.sidebar-toggle.open {
 			display: none;
 		}
