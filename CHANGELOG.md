@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `istota-skill money run-scheduled` now works. The Click subcommand existed in the underlying `istota.money` CLI but was never wired into the `istota-skill` argparse wrapper, so the auto-seeded `_module.money.run_scheduled` cron job exited with usage help instead of running.
 - Sidebar no longer side-scrolls when child content exceeds its width. Long place names truncate with an ellipsis instead of expanding the row.
 - Place row hover background now reads symmetric top/bottom (explicit `line-height` + rebalanced padding) and left/right (matching gutter on both sides of the sidebar list).
 
@@ -31,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-tree `istota.money` subpackage (formerly the standalone moneyman service): accounting CLI, business logic, and SvelteKit pages folded into istota. Optional install: `pip install istota[money]`.
 - Money web pages at `/istota/money/*` (Accounts, Transactions, Reports, Taxes, Business). Feature flag exposed via `/istota/api/me` as `features.money`; nav item appears when the user has a money resource.
 - Money skill is in-process — no API key, no HTTP round-trip. Resource type accepts both `money` and legacy `moneyman`.
-- Per-user money scheduled jobs (`monarch_sync` daily 6am, `run_scheduled` daily 8am). Seeded under a reserved `_module.money.*` name prefix; auto-removed when a user's resource or feature config disappears. Feature-gated: monarch sync only runs for users with a monarch config. Workspace-mode users are seeded too — previously skipped.
+- Per-user money scheduled job `_module.money.run_scheduled` (daily 8 AM). Seeded under a reserved `_module.money.*` name prefix; auto-removed when a user's resource or feature config disappears. Folds in an opportunistic monarch sync (when `monarch_config` is set) followed by the invoice schedule check. Skipped entirely for ledger-only users. Workspace-mode users are seeded too — previously skipped.
 - Workspace-mode money config loading: `INVOICING.md` / `TAX.md` / `MONARCH.md` files (TOML in fenced code blocks) in the user's workspace `config/` dir. Legacy `*.toml` files still accepted as a fallback.
 - `EnvSpec.resource_types` — a declarative skill env spec can now match any of multiple resource types.
 - `scripts/migrate_money_workspace_config.py` — one-shot migration from legacy `*.toml` to `*.md`.
@@ -46,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Money is now `src/istota/money/` instead of a top-level `src/money/` package; the standalone-extract scaffolding is gone. Web routes, skill, and scheduler all call the same in-process `istota.money.resolve_for_user(user_id, istota_config)`.
 - Money skill no longer marshals env vars for workspace mode; it resolves the user's `UserContext` in-process and injects it into Click directly. The standalone `money` CLI keeps file-based config support (`MONEY_CONFIG=...` or `-c <path>`) for terminal use.
 - Money scheduled jobs invoke `istota-skill money <cmd>` with `MONEY_USER` set, instead of `MONEY_CONFIG=… money --user X <cmd>`. `MONEY_SECRETS_FILE` is no longer exported by seeded jobs — the skill reads credentials in-process.
+- `run-scheduled` now bundles an opportunistic monarch sync (when `monarch_config` is set) before the invoice check, with a new `--skip-monarch` flag for opt-out. Replaces the previously separate `monarch_sync` auto-seeded job — users who want a narrated/observable monarch sync layer their own prompt-based job in `CRON.md` on top.
 - Monarch credentials (`monarch_session_token` / `monarch_email` / `monarch_password`) now live on the user's `[[resources]] type = "money"` entry, matching the karakeep / miniflux / overland convention. The previous per-user `/etc/{namespace}/secrets/{user_id}/money.toml` file is removed.
 - The `[[resources]] type = "moneyman"` rendering now emits `type = "money"` (the loader still accepts both forms).
 - Ansible: `[moneyman]` block removed from `config.toml.j2`; the moneyman nginx include is dropped; standalone moneyman cron entries are no longer used (the istota scheduler runs them per-user).

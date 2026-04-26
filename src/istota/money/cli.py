@@ -641,16 +641,11 @@ def import_csv(ctx, file, account, tag, exclude_tag, ledger):
             db_conn.close()
 
 
-@cli.command("sync-monarch")
-@click.option("--dry-run", is_flag=True, help="Preview without writing")
-@click.option("--ledger", "-l", help="Ledger name")
-@pass_ctx
-def sync_monarch(ctx, dry_run, ledger):
-    """Sync transactions from Monarch Money API.
+def _run_monarch_sync(ctx, dry_run: bool, ledger: str | None) -> dict:
+    """Shared monarch sync implementation. Returns a result dict.
 
-    Without --ledger, syncs all configured profiles (or the default ledger
-    if no profiles are defined). With --ledger, syncs only profiles targeting
-    that ledger.
+    Used by the ``sync-monarch`` command and folded into ``run-scheduled``
+    so periodic syncs happen as part of the daily run.
     """
     from istota.money.core.transactions import (
         parse_monarch_config,
@@ -658,11 +653,9 @@ def sync_monarch(ctx, dry_run, ledger):
         sync_monarch as core_sync,
     )
     if not ctx.monarch_config_path:
-        _output({"status": "error", "error": "No monarch_config set in config"})
-        return
+        return {"status": "error", "error": "No monarch_config set in config"}
     if not ctx.monarch_config_path.exists():
-        _output({"status": "error", "error": f"Config not found: {ctx.monarch_config_path}"})
-        return
+        return {"status": "error", "error": f"Config not found: {ctx.monarch_config_path}"}
     config = parse_monarch_config(ctx.monarch_config_path, secrets=ctx.secrets)
     db_conn = _get_db_conn(ctx)
     try:
@@ -693,19 +686,33 @@ def sync_monarch(ctx, dry_run, ledger):
                     r["name"] = profile.name
                     r["ledger"] = profile.ledger
                     results.append(r)
-                _output({"status": "ok", "profiles": results})
+                return {"status": "ok", "profiles": results}
             else:
-                _output(core_sync(
+                return core_sync(
                     ledger_path, config, db_conn=db_conn, dry_run=dry_run,
-                ))
+                )
         else:
-            _output(sync_all_profiles(
+            return sync_all_profiles(
                 config, ctx.ledgers, db_conn=db_conn, dry_run=dry_run,
-            ))
+            )
     finally:
         if db_conn:
             db_conn.commit()
             db_conn.close()
+
+
+@cli.command("sync-monarch")
+@click.option("--dry-run", is_flag=True, help="Preview without writing")
+@click.option("--ledger", "-l", help="Ledger name")
+@pass_ctx
+def sync_monarch(ctx, dry_run, ledger):
+    """Sync transactions from Monarch Money API.
+
+    Without --ledger, syncs all configured profiles (or the default ledger
+    if no profiles are defined). With --ledger, syncs only profiles targeting
+    that ledger.
+    """
+    _output(_run_monarch_sync(ctx, dry_run, ledger))
 
 
 # =============================================================================
@@ -1127,21 +1134,32 @@ def invoice_void(ctx, invoice_number, force, delete_pdf):
 
 @cli.command("run-scheduled")
 @click.option("--dry-run", is_flag=True, help="Preview without generating files")
+@click.option("--skip-monarch", is_flag=True, help="Skip the monarch sync step")
 @pass_ctx
-def run_scheduled(ctx, dry_run):
-    """Check and run any scheduled jobs (invoice generation).
+def run_scheduled(ctx, dry_run, skip_monarch):
+    """Run periodic money tasks: monarch sync (if configured) + invoice schedule check.
 
-    Meant to be called periodically by cron. Checks each client's invoicing
-    schedule and generates invoices when due.
+    Meant to be called periodically by cron. The monarch sync runs first
+    when ``monarch_config`` is set; the invoice scheduler then checks each
+    client's invoicing schedule and generates invoices when due. Either
+    half is optional — users with only one feature configured get only
+    that step.
     """
     from istota.money.core.invoicing import check_scheduled_invoices, generate_invoices_for_period
     from istota.money.db import set_invoice_schedule_generation
 
+    monarch_result: dict | None = None
+    if ctx.monarch_config_path and not skip_monarch:
+        monarch_result = _run_monarch_sync(ctx, dry_run=dry_run, ledger=None)
+
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
     except click.ClickException:
-        # No invoicing config — nothing to schedule
-        _output({"status": "ok", "message": "No invoicing config; nothing to schedule"})
+        # No invoicing config — return whatever monarch did (if anything)
+        out = {"status": "ok", "message": "No invoicing config; nothing to schedule"}
+        if monarch_result is not None:
+            out["monarch"] = monarch_result
+        _output(out)
         return
 
     data_dir = _require_data_dir(ctx)
@@ -1150,9 +1168,16 @@ def run_scheduled(ctx, dry_run):
     try:
         due_clients = check_scheduled_invoices(config, db_conn)
         if not due_clients:
-            _output({"status": "ok", "message": "No scheduled invoices due", "clients_checked": len(
-                [c for c in config.clients.values() if c.schedule == "monthly"]
-            )})
+            out = {
+                "status": "ok",
+                "message": "No scheduled invoices due",
+                "clients_checked": len(
+                    [c for c in config.clients.values() if c.schedule == "monthly"]
+                ),
+            }
+            if monarch_result is not None:
+                out["monarch"] = monarch_result
+            _output(out)
             return
 
         all_results = []
@@ -1172,14 +1197,17 @@ def run_scheduled(ctx, dry_run):
         db_conn.commit()
 
         total = sum(r["total"] for r in all_results)
-        _output({
+        out = {
             "status": "ok",
             "dry_run": dry_run,
             "clients_due": due_clients,
             "invoice_count": len(all_results),
             "total": round(total, 2),
             "invoices": all_results,
-        })
+        }
+        if monarch_result is not None:
+            out["monarch"] = monarch_result
+        _output(out)
     finally:
         db_conn.commit()
         db_conn.close()

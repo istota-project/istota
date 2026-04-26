@@ -11,9 +11,10 @@ Job commands invoke the money skill through ``istota-skill``, which calls
 (``config_path``) and workspace-mode users are handled uniformly. The
 scheduler passes ``MONEY_USER`` to identify the user.
 
-A user with no money resource has no module jobs. A user with a money
-resource but no monarch config gets only the invoice scheduler. A user
-with both gets both.
+Only ``run-scheduled`` is auto-seeded; it folds in an opportunistic
+monarch sync (when configured) plus the invoice schedule check. Users
+who want narrated/observable monarch syncs add their own prompt-based
+job to CRON.md.
 """
 
 from dataclasses import dataclass
@@ -26,21 +27,13 @@ class ModuleJob:
     name: str
     cron: str
     command_template: str
-    requires: str  # "monarch", "invoicing", or "" (always present)
 
 
 DEFAULT_JOBS: tuple[ModuleJob, ...] = (
     ModuleJob(
-        name=f"{MODULE_PREFIX}monarch_sync",
-        cron="0 6 * * *",
-        command_template="MONEY_USER={user_id} istota-skill money sync-monarch",
-        requires="monarch",
-    ),
-    ModuleJob(
         name=f"{MODULE_PREFIX}run_scheduled",
         cron="0 8 * * *",
         command_template="MONEY_USER={user_id} istota-skill money run-scheduled",
-        requires="invoicing",
     ),
 )
 
@@ -49,19 +42,19 @@ def jobs_for_user(user_context, user_id: str) -> list[dict]:
     """Render module job definitions for a specific user.
 
     ``user_context`` is the resolved :class:`istota.money.cli.UserContext`.
-    Filters jobs whose ``requires`` feature is not configured for the user.
-    Credentials live on the user's money resource entry in the istota config
-    and are loaded in-process by the skill — no env-var indirection needed.
+    Skips ``run-scheduled`` entirely when neither monarch nor invoicing is
+    configured (nothing periodic to do).
     """
-    out: list[dict] = []
-    for j in DEFAULT_JOBS:
-        if j.requires == "monarch" and not user_context.monarch_config_path:
-            continue
-        if j.requires == "invoicing" and not user_context.invoicing_config_path:
-            continue
-        out.append({
+    has_periodic_work = bool(
+        user_context.monarch_config_path or user_context.invoicing_config_path
+    )
+    if not has_periodic_work:
+        return []
+    return [
+        {
             "name": j.name,
             "cron": j.cron,
             "command": j.command_template.format(user_id=user_id),
-        })
-    return out
+        }
+        for j in DEFAULT_JOBS
+    ]
