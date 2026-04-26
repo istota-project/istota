@@ -2,6 +2,43 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Per-job model + effort overrides via CRON.md
+
+Walked through with Zorg first. Question was: how do we mix Sonnet on cheap tasks with Opus on smart ones, given that we just added the global `model` and `effort` knobs? Two paths considered:
+
+1. Source-type routing in the executor (e.g. `briefing → sonnet`, `talk → opus`).
+2. Per-job override fields on each `[[jobs]]` entry in `CRON.md`.
+
+Settled on (2). Source-type routing is coarse and creates invisible state; CRON.md already declares the job's whole shape (schedule, prompt, target), so model/effort belongs alongside as another job-level knob. Scheduled work is also where the volume "retrieve-and-render" tasks live (briefings, transcription cron, feed digests) — exactly where downgrading pays off — and ad-hoc Talk invocations of the same skills are rare enough that paying Opus tax once doesn't matter. Bonus: when interactive Zorg gives a weak answer, you know it was on the global default. No "wait, did the skill silently downgrade me."
+
+Plumbed `model` (e.g. `claude-sonnet-4-6`) and `effort` (`low`/`medium`/`high`/`xhigh`/`max`) end-to-end:
+
+- `cron_loader.CronJob` — new `model` and `effort` fields, parsed from TOML, emitted back via `generate_cron_md`, round-tripped through `sync_cron_jobs_to_db` and `migrate_db_jobs_to_file`.
+- `scheduled_jobs` table — new `model` and `effort` columns + ALTER TABLE migrations in `db._run_migrations`.
+- `tasks` table — same two columns + migrations. `db.ScheduledJob` and `db.Task` dataclasses gained the fields. Updated all four scheduled-job SELECTs and the three task SELECTs (`get_task`, `claim_task` RETURNING, `get_reply_parent_task`) to project the new columns.
+- `db.create_task()` — accepts `model` / `effort` kwargs, persists empty as NULL.
+- `scheduler.check_scheduled_jobs()` — propagates `job.model` / `job.effort` into `db.create_task()` when materializing the scheduled task.
+- `executor.execute_task()` — resolves `task.model or config.model` (and same for effort) when building the `claude` subprocess command. Per-task wins, config falls back, neither set = no flag emitted (CLI default).
+- `commands.cmd_cron` — `!cron` listing now appends `model: X` / `effort: Y` inline when set on a job, so users can see at a glance which jobs deviate from the default.
+
+Validation on `CRON.md` load (warn, never reject — keep user data flowing). `_validate_model` flags strings without a `claude-` prefix or with embedded whitespace; `_validate_effort` flags values outside `{low, medium, high, xhigh, max}`. The hardcoded set was a deliberate trade — effort is small and stable, model isn't. Loose-validating model means a future `claude-opus-4-8` doesn't trigger a false alarm.
+
+**Log channel observability.** Final-state log channel post now renders `(model: claude-opus-4-7 high)` below the header (above the existing `Skills:` line) using the *resolved* values (task override or config default). When only effort is set, the prefix flips to `(effort: …)`; when only model is set, no effort token follows. When CRON-overridden Sonnet/low jobs start landing, the log channel makes that visible without having to mentally cross-reference CRON.md. `_format_log_channel_body` and `_finalize_log_channel` gained `model` / `effort` kwargs; `process_one_task` does the resolve.
+
+Defer for later (discussed but out of scope this PR): skill-frontmatter `model:` / `effort:`. Orthogonal axis — handles "this skill always runs on Sonnet regardless of caller" — but introduces precedence questions when multiple skills load with conflicting preferences. Cleaner to ship as a separate change with its own design pass.
+
+40 new tests in `test_model_override.py` + 4 in `test_log_channel.py` covering every link in the chain (parse, generate, sync, migrate, create_task, scheduler propagation, executor flag wiring, !cron listing, validation warnings, log channel resolved values). 846 tests pass across the focused suites; no regressions.
+
+**Files added/modified:**
+- `schema.sql` — `model` and `effort` TEXT columns on both `tasks` and `scheduled_jobs`.
+- `src/istota/db.py` — dataclass fields, ALTER TABLE migrations, INSERT, SELECT projections, row→object hydration.
+- `src/istota/cron_loader.py` — CronJob fields, parse/generate/sync/migrate plumbing, `_validate_model` / `_validate_effort`.
+- `src/istota/scheduler.py` — propagation in `check_scheduled_jobs`, log channel formatter and finalizer signatures, resolved-value computation in `process_one_task`.
+- `src/istota/executor.py` — task→config fallback when emitting `--model` / `--effort`.
+- `src/istota/commands.py` — `!cron` listing surfaces both fields inline.
+- `tests/test_model_override.py` — new file, 40 tests covering the full chain.
+- `tests/test_log_channel.py` — 4 new tests for resolved model/effort rendering.
+
 ## 2026-04-25 (cont. 5): Add `effort` config + recommend pinning model version
 
 Walked through Claude Code's CLI reference (up to CC 2.1.120) to see what's worth wiring up. Two things:

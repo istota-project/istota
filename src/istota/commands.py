@@ -322,6 +322,10 @@ async def cmd_cron(config, conn, user_id, conversation_token, args, client):
         status = "enabled" if job.enabled else "DISABLED"
         kind = " (cmd)" if job.command else ""
         line = f"- **{job.name}**{kind} `{job.cron_expression}` [{status}]"
+        if job.model:
+            line += f" `model: {job.model}`"
+        if job.effort:
+            line += f" `effort: {job.effort}`"
         if job.last_run_at:
             line += f" (last: {job.last_run_at[:16]})"
         if job.consecutive_failures > 0:
