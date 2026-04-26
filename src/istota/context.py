@@ -6,10 +6,27 @@ import re
 import subprocess
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .config import Config
 from .db import ConversationMessage, TalkMessage
 from .talk import clean_message_content
+
+
+def _format_created_at(created_at: str | None, user_tz: ZoneInfo | None) -> str:
+    """Format a SQLite `datetime('now')` UTC string in user_tz wall-clock time.
+
+    Falls back to a UTC-suffixed slice if parsing fails or no tz is provided.
+    """
+    if not created_at:
+        return "unknown"
+    if user_tz is None:
+        return created_at[:16]
+    try:
+        dt = datetime.strptime(created_at[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return created_at[:16]
+    return dt.replace(tzinfo=timezone.utc).astimezone(user_tz).strftime("%Y-%m-%d %H:%M")
 
 logger = logging.getLogger("istota.context")
 
@@ -196,12 +213,17 @@ Rules:
         return []
 
 
-def format_context_for_prompt(messages: list[ConversationMessage], truncation: int = 3000) -> str:
+def format_context_for_prompt(
+    messages: list[ConversationMessage],
+    truncation: int = 3000,
+    user_tz: ZoneInfo | None = None,
+) -> str:
     """Format selected context messages for inclusion in the prompt.
 
     Args:
         messages: Conversation messages to format.
         truncation: Max chars per bot response. 0 to disable truncation.
+        user_tz: If provided, render `created_at` (stored UTC) in this zone.
     """
     if not messages:
         return ""
@@ -211,8 +233,7 @@ def format_context_for_prompt(messages: list[ConversationMessage], truncation: i
 
     formatted = []
     for msg in messages:
-        # Use shorter timestamp format
-        timestamp = msg.created_at[:16] if msg.created_at else "unknown"
+        timestamp = _format_created_at(msg.created_at, user_tz)
         source_type = getattr(msg, "source_type", "talk") or "talk"
         if source_type in _SCHEDULED_SOURCE_TYPES:
             speaker = "Scheduled"
@@ -471,17 +492,23 @@ Rules:
 def format_talk_context_for_prompt(
     messages: list[TalkMessage],
     truncation: int = 3000,
+    user_tz: ZoneInfo | None = None,
 ) -> str:
     """Format Talk messages for inclusion in the prompt.
 
     Individual message format (not paired), showing all participants.
+
+    Args:
+        user_tz: If provided, render Talk message timestamps in this zone.
+            Defaults to UTC for backward compat.
     """
     if not messages:
         return ""
 
+    tz = user_tz or timezone.utc
     formatted = []
     for msg in messages:
-        ts = datetime.fromtimestamp(msg.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        ts = datetime.fromtimestamp(msg.timestamp, tz=tz).strftime("%Y-%m-%d %H:%M")
 
         if msg.is_bot:
             speaker = f"Bot (task {msg.task_id})" if msg.task_id else "Bot"

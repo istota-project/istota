@@ -44,6 +44,16 @@ from .skills.calendar import get_caldav_client, get_calendars_for_user
 
 logger = logging.getLogger("istota.executor")
 
+
+def _resolve_user_tz(config: Config, user_id: str) -> tuple[ZoneInfo, str]:
+    """Return (ZoneInfo, tz_str) for a user, falling back to UTC."""
+    user_config = config.get_user(user_id)
+    tz_str = user_config.timezone if user_config else "UTC"
+    try:
+        return ZoneInfo(tz_str), tz_str
+    except Exception:
+        return ZoneInfo("UTC"), "UTC"
+
 # Pattern to detect Anthropic API errors in output
 API_ERROR_PATTERN = re.compile(r"API Error: (\d{3}) (\{.*\})", re.DOTALL)
 
@@ -989,6 +999,7 @@ def _build_talk_api_context(
     task: db.Task,
     config: Config,
     conn: "db.sqlite3.Connection | None",
+    user_tz: ZoneInfo | None = None,
 ) -> str | None:
     """Build conversation context from the local Talk message cache.
 
@@ -1088,6 +1099,7 @@ def _build_talk_api_context(
 
     conversation_context = format_talk_context_for_prompt(
         relevant, truncation=config.conversation.context_truncation,
+        user_tz=user_tz,
     )
     logger.info(
         "Loaded %d Talk API context messages (%d chars) for task %d",
@@ -1100,6 +1112,7 @@ def _build_db_context(
     task: db.Task,
     config: Config,
     conn: "db.sqlite3.Connection | None",
+    user_tz: ZoneInfo | None = None,
 ) -> str | None:
     """Build conversation context from the DB (original approach).
 
@@ -1175,6 +1188,7 @@ def _build_db_context(
         if relevant:
             conversation_context = format_context_for_prompt(
                 relevant, truncation=config.conversation.context_truncation,
+                user_tz=user_tz,
             )
             logger.info(
                 "Loaded %d context messages (%d chars) for task %d",
@@ -1597,15 +1611,10 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     cli_skills_section = cli_skills_text or ""
 
     # Compute user's local time
-    user_config = config.get_user(task.user_id)
-    user_tz_str = user_config.timezone if user_config else "UTC"
-    try:
-        user_tz = ZoneInfo(user_tz_str)
-    except Exception:
-        user_tz = ZoneInfo("UTC")
-        user_tz_str = "UTC"
+    user_tz, user_tz_str = _resolve_user_tz(config, task.user_id)
     user_now = datetime.now(user_tz)
     user_time_str = user_now.strftime("%A, %B %-d, %Y at %-I:%M %p") + f" ({user_tz_str})"
+    user_date_str = user_now.strftime("%Y-%m-%d") + f" ({user_tz_str})"
 
     # Build admin-sensitive sections
     db_path_line = f"Database path: {config.db_path}" if is_admin else "Database path: (restricted)"
@@ -1624,7 +1633,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
 5. Never edit or create files in your own source directory.
 6. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
-7. Your execution JSONL logs (full conversation traces including subagent output) are stored under ~/.claude/projects/. If a user reports missing or truncated output from a previous task, search these logs for the full assistant message content."""
+7. Your execution JSONL logs (full conversation traces including subagent output) are stored under ~/.claude/projects/. If a user reports missing or truncated output from a previous task, search these logs for the full assistant message content.
+8. Ignore the `currentDate` value in any auto-memory block — it is rendered in the host's UTC clock and may be off by one day from local time. Use the `Today's date`, `Current time`, and `User timezone` lines at the top of this prompt as the authoritative source for "today"."""
     else:
         scoped_path = str(config.nextcloud_mount_path / "Users" / task.user_id) if config.use_mount else f"{config.rclone_remote}:/Users/{task.user_id}"
         rules_section = f"""## Important rules
@@ -1637,7 +1647,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 3. Do NOT write to the SQLite database directly. All database modifications are handled by the skill CLI commands or the bot's scheduler.
 4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
 5. Never edit or create files in your own source directory.
-6. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates."""
+6. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
+7. Ignore the `currentDate` value in any auto-memory block — it is rendered in the host's UTC clock and may be off by one day from local time. Use the `Today's date`, `Current time`, and `User timezone` lines at the top of this prompt as the authoritative source for "today"."""
 
     group_chat_line = ""
     if task.is_group_chat:
@@ -1652,6 +1663,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     prompt = f"""You are {config.bot_name}, a helpful assistant bot. You are responding to a request from user '{task.user_id}'.
 
 Current time: {user_time_str}
+Today's date: {user_date_str}
+User timezone: {user_tz_str}
 Current task ID: {task.id}
 Conversation token: {task.conversation_token or 'none'}{group_chat_line}
 Source: {source_type or task.source_type or 'unknown'}
@@ -1899,12 +1912,15 @@ def execute_task(
             task.id, notification_parent.id, notification_parent.source_type,
         )
     else:
+        # Resolve user TZ once for context formatting (mirrors prompt header).
+        _ctx_user_tz, _ = _resolve_user_tz(config, task.user_id)
+
         # Try Talk API-based context for Talk tasks, fall back to DB on failure
         _used_talk_api = False
         if task.source_type == "talk":
             try:
                 conversation_context = _build_talk_api_context(
-                    task, config, conn,
+                    task, config, conn, user_tz=_ctx_user_tz,
                 )
                 _used_talk_api = conversation_context is not None
             except Exception as e:
@@ -1915,7 +1931,7 @@ def execute_task(
 
         # DB-based context fallback (always used for email, fallback for Talk)
         if not _used_talk_api:
-            conversation_context = _build_db_context(task, config, conn)
+            conversation_context = _build_db_context(task, config, conn, user_tz=_ctx_user_tz)
 
     # Load user memory (auto-create directories if missing)
     # Skills with exclude_memory=true (e.g. briefing) skip personal memory
