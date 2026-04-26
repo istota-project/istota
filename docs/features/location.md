@@ -64,6 +64,29 @@ Place detection uses hysteresis (2 consecutive pings required) to avoid flapping
 
 Old pings are cleaned after `location_ping_retention_days` (default 365).
 
+## Network access
+
+The webhook receiver must be reachable from the Overland app on your phone. Two approaches:
+
+**Reverse proxy (recommended)**: expose the webhook endpoint through nginx or another reverse proxy with TLS. The Ansible role generates the nginx config automatically when `istota_location_enabled` is true:
+
+```nginx
+location /webhooks/ {
+    proxy_pass http://127.0.0.1:8765/webhooks/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    client_max_body_size 10m;
+}
+```
+
+This is the same reverse proxy you'd use for the web UI — if you're already running nginx for istota, location webhooks are included. Point Overland at `https://{your-hostname}/webhooks/location` with your ingest token.
+
+**VPN (alternative)**: if you don't want to expose the endpoint publicly, connect your phone to your server's network via WireGuard or Tailscale. Point Overland at the server's internal IP and webhook port directly (e.g., `http://10.0.0.5:8765/webhooks/location`). This keeps the endpoint off the public internet but requires the VPN to be active for location tracking to work.
+
+A reverse proxy is strongly recommended since it also covers the web UI and any other istota services. The Overland endpoint is authenticated per-user via the ingest token in the URL path, so public exposure is safe as long as TLS is enabled and tokens are kept secret.
+
 ## Web interface
 
 The [web interface](web-interface.md) provides location pages:
