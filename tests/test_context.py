@@ -402,3 +402,17 @@ class TestFormatContextForPrompt:
         assert "alice: q from alice" in result
         assert "bob: q from bob" in result
 
+    def test_user_tz_renders_created_at_in_local(self):
+        """ISSUE-056: created_at (UTC from sqlite) should render in user_tz when provided."""
+        from zoneinfo import ZoneInfo
+
+        # 2026-04-26 05:36:00 UTC → 2026-04-25 22:36 PT
+        msg = _msg(1, "q", "a", created_at="2026-04-26 05:36:00")
+
+        utc_result = format_context_for_prompt([msg])
+        assert "[2026-04-26 05:36]" in utc_result
+
+        pt_result = format_context_for_prompt([msg], user_tz=ZoneInfo("America/Los_Angeles"))
+        assert "[2026-04-25 22:36]" in pt_result
+        assert "[2026-04-26" not in pt_result
+

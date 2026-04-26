@@ -2,6 +2,34 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25 (cont. 3): Fix UTC/local-date drift in task prompts (ISSUE-056)
+
+Symptom: the model regularly slipped a day when reasoning about "today" — bucketing yesterday-PT activity under today's UTC date, scheduling tasks for the wrong day on late-evening PT requests, treating UTC-rendered Talk timestamps as local. Diagnosis confirmed by inspecting a live prompt: the istota header read `Current time: April 25, 2026 at 10:36 PM (America/Los_Angeles)` while Claude Code's auto-memory block (which we don't author) read `Today's date is 2026-04-26.`. Two declarative answers to the same question; the UTC one won often enough to matter.
+
+**Fix in three layers.**
+
+1. **Authoritative date in the prompt header.** `build_prompt` now emits `Today's date: YYYY-MM-DD (TZ)` and `User timezone: TZ` next to the existing `Current time:` line, all derived from a single `_resolve_user_tz(config, user_id)` helper so the formatter and context plumbing share one source.
+
+2. **Explicit override of the auto-memory `currentDate`.** Added a rules entry (rule 8 admin / rule 7 non-admin) telling the model to ignore the auto-memory `currentDate` block — Claude Code injects it in the host's UTC clock and we can't suppress it from inside the prompt — and to use the header lines as authoritative.
+
+3. **Conversation-context timestamps in user TZ.** `format_talk_context_for_prompt` and `format_context_for_prompt` gained a `user_tz` parameter. `_build_talk_api_context` and `_build_db_context` thread it through; `execute_task` resolves the zone once before context build. UTC-stored `created_at` strings (SQLite `datetime('now')`) now route through a `_format_created_at` helper that parses them as UTC and converts to the user's zone. Default behavior is unchanged when `user_tz=None` (still slices to 16 chars).
+
+The `_triage_older_talk_messages` helper still emits UTC inside its triage prompt; that string only ever feeds an internal LLM call, never the user-facing task prompt, so I left it alone.
+
+**Why "just put the TZ in the header" wasn't enough.** It was already there, and slips still happened. The TZ name only becomes useful as a label once *every other* time-bearing string in the prompt is in the same zone — at that point there's nothing to convert against and the slip mode goes away.
+
+**Key changes:**
+- New prompt header lines: `Today's date`, `User timezone`.
+- New rules entry covering the auto-memory `currentDate` override.
+- Conversation context (Talk + DB) renders timestamps in user TZ.
+- Single source for tz resolution: `_resolve_user_tz()`.
+
+**Files added/modified:**
+- `src/istota/executor.py` — added `_resolve_user_tz()`, plumbed `user_tz` into `_build_talk_api_context` / `_build_db_context`, extended prompt header, added auto-memory override rule.
+- `src/istota/context.py` — `format_talk_context_for_prompt` / `format_context_for_prompt` accept `user_tz`; new `_format_created_at` helper.
+- `tests/test_talk_context.py`, `tests/test_context.py` — coverage for `user_tz`-rendered timestamps.
+- `CHANGELOG.md` — Fixed entry.
+
 ## 2026-04-25 (cont. 2): Fix Monarch sync recategorization for income postings
 
 The user caught a real accounting bug after a `sync-monarch` run. An eBay sale that had been synced as business income (DR Owner-Drawings / CR Income:Sales) had its `#business` tag removed in Monarch. The resulting recat entry was wrong: instead of reversing the original posting, it emitted `DR Expenses:Personal-Expense / CR Income:Sales` — credited Income:Sales a *second* time (doubling the credit instead of cancelling it), introduced a phantom Personal-Expense debit, and never undid the original Owner-Drawings debit.

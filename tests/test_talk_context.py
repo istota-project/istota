@@ -415,3 +415,17 @@ class TestFormatTalkContextForPrompt:
         )
         result = format_talk_context_for_prompt([msg])
         assert "+5 more" in result
+
+    def test_uses_user_tz_for_timestamp(self):
+        """ISSUE-056: timestamps must render in user_tz, not UTC."""
+        from zoneinfo import ZoneInfo
+
+        # 2026-04-26 05:36:00 UTC == 2026-04-25 22:36 PT
+        ts = 1777181760
+        msg = TalkMessage(1, "alice", "Alice", False, "late evening", ts, None, "user", None)
+
+        utc_result = format_talk_context_for_prompt([msg])
+        assert "[2026-04-26 05:36] alice: late evening" in utc_result
+
+        pt_result = format_talk_context_for_prompt([msg], user_tz=ZoneInfo("America/Los_Angeles"))
+        assert "[2026-04-25 22:36] alice: late evening" in pt_result
