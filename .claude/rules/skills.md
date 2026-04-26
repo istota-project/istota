@@ -176,9 +176,10 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Key fns**: Uses `nextcloud_client.py` (OCS + WebDAV)
 
 ### `location/` - GPS Location + Calendar Attendance
-**Subcommands**: `current`, `history`, `places`, `learn`, `update`, `delete`, `attendance`, `reverse-geocode`, `day-summary`
+**Subcommands**: `current`, `history`, `places`, `learn`, `update`, `delete`, `attendance`, `reverse-geocode`, `day-summary`, `discover`, `dismiss-cluster`, `list-dismissed`, `restore-dismissed`, `place-stats`
 **Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`
 **Optional deps**: `caldav` (in `calendar` extra group)
+**Shared logic**: cluster discovery, dismiss-zone management, and per-place visit stats live in `istota.location_logic` (pure SQL + `geo.haversine`). Both the FastAPI web routes and this skill import the same `_location_*` helpers — the web UI's "discovered clusters", "dismissed clusters", and place-detail visit stats are now reachable from CLI parity.
 
 ### `bookmarks/` - Karakeep Bookmark Management
 **Subcommands**: `search`, `list`, `get`, `add`, `tags`, `tag`, `untag`, `lists`, `list-bookmarks`, `summarize`, `stats`

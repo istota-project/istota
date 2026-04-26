@@ -1299,6 +1299,214 @@ class TestLocationCLI:
             assert len(output) == 5
 
 
+class TestLocationDiscoverDismissCLI:
+    """CLI wrappers for discover, dismiss-cluster, list-dismissed, restore-dismissed, place-stats."""
+
+    def _seed_cluster(self, conn, user_id, lat, lon, count=15):
+        for i in range(count):
+            ts = f"2026-01-10T09:{i:02d}:00Z"
+            db.insert_location_ping(
+                conn, user_id, ts, lat + (i % 3) * 0.00002, lon,
+                accuracy=5.0, activity_type="stationary",
+            )
+
+    def _run(self, cmd, args):
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            cmd(args)
+        finally:
+            sys.stdout = old_stdout
+        return json.loads(captured.getvalue())
+
+    def test_discover_finds_unassigned_cluster(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            self._seed_cluster(conn, "alice", 34.0, -118.0)
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_discover
+
+            args = MagicMock()
+            args.min_pings = 10
+            output = self._run(cmd_discover, args)
+
+        assert len(output["clusters"]) == 1
+        assert "lat" in output["clusters"][0]
+        assert "radius_meters" in output["clusters"][0]
+
+    def test_discover_respects_min_pings(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            self._seed_cluster(conn, "alice", 34.0, -118.0, count=8)
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_discover
+
+            args = MagicMock()
+            args.min_pings = 20
+            output = self._run(cmd_discover, args)
+
+        assert output["clusters"] == []
+
+    def test_dismiss_cluster_inserts_row(self, tmp_path):
+        db_path = _init_db(tmp_path)
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_dismiss_cluster
+
+            args = MagicMock()
+            args.lat = 34.0
+            args.lon = -118.0
+            args.radius = 200
+            output = self._run(cmd_dismiss_cluster, args)
+
+        assert output["status"] == "ok"
+        assert output["lat"] == 34.0
+        assert output["lon"] == -118.0
+        assert output["radius_meters"] == 200
+        assert isinstance(output["id"], int)
+
+        with db.get_db(db_path) as conn:
+            rows = db.list_dismissed_clusters(conn, "alice")
+            assert len(rows) == 1
+
+    def test_list_dismissed_returns_inserted_rows(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.insert_dismissed_cluster(conn, "alice", 34.0, -118.0, 100)
+            db.insert_dismissed_cluster(conn, "alice", 40.0, -73.0, 150)
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_list_dismissed
+
+            args = MagicMock()
+            output = self._run(cmd_list_dismissed, args)
+
+        assert len(output["dismissed"]) == 2
+        radii = sorted(r["radius_meters"] for r in output["dismissed"])
+        assert radii == [100, 150]
+
+    def test_restore_dismissed_deletes_row(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            cid = db.insert_dismissed_cluster(conn, "alice", 34.0, -118.0, 100)
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_restore_dismissed
+
+            args = MagicMock()
+            args.cluster_id = cid
+            output = self._run(cmd_restore_dismissed, args)
+
+        assert output["status"] == "ok"
+        with db.get_db(db_path) as conn:
+            assert db.list_dismissed_clusters(conn, "alice") == []
+
+    def test_restore_dismissed_unknown_id(self, tmp_path):
+        db_path = _init_db(tmp_path)
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_restore_dismissed
+
+            args = MagicMock()
+            args.cluster_id = 9999
+            output = self._run(cmd_restore_dismissed, args)
+
+        assert output["status"] == "error"
+
+    def test_place_stats_by_id(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+            for i, ts in enumerate([
+                "2026-01-10T09:00:00Z",
+                "2026-01-10T09:05:00Z",
+                "2026-01-10T09:30:00Z",
+                "2026-01-10T10:00:00Z",
+            ]):
+                db.insert_location_ping(
+                    conn, "alice", ts, 34.0, -118.0,
+                    accuracy=5.0, activity_type="stationary",
+                )
+                last_id = conn.execute("SELECT max(id) FROM location_pings").fetchone()[0]
+                conn.execute("UPDATE location_pings SET place_id = ? WHERE id = ?", (pid, last_id))
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_place_stats
+
+            args = MagicMock()
+            args.name = None
+            args.id = pid
+            output = self._run(cmd_place_stats, args)
+
+        assert output["place_id"] == pid
+        assert output["total_visits"] == 1
+        assert output["total_duration_min"] == 60
+
+    def test_place_stats_by_name(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 34.0, -118.0, 150, "home")
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_place_stats
+
+            args = MagicMock()
+            args.name = "home"
+            args.id = None
+            output = self._run(cmd_place_stats, args)
+
+        assert output["place_id"] == pid
+        assert output["total_visits"] == 0
+
+    def test_place_stats_unknown_name(self, tmp_path):
+        db_path = _init_db(tmp_path)
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "alice"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_place_stats
+
+            args = MagicMock()
+            args.name = "ghost"
+            args.id = None
+            output = self._run(cmd_place_stats, args)
+
+        assert output["status"] == "error"
+
+    def test_place_stats_other_user_cannot_read(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 34.0, -118.0, 150, "home")
+            conn.commit()
+
+        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "bob"}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_place_stats
+
+            args = MagicMock()
+            args.name = None
+            args.id = pid
+            output = self._run(cmd_place_stats, args)
+
+        assert output["status"] == "error"
+
+
 # ===========================================================================
 # Geocode cache DB tests
 # ===========================================================================

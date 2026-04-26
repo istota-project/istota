@@ -2,6 +2,38 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: CLI vs web UI audit — skill doc fixes + location CLI parity
+
+Audited every CLI-exposing skill against the web UI and the actual subcommand surface, then fixed the gaps that mattered. Three categories of finding: (1) one stale skill doc — `money/skill.md` listed every subcommand except `run-scheduled`, which had been wired into the wrapper earlier today (commit 2344087) but not documented; (2) zero skill docs told the model to fall back to `--help` when uncertain, so future drift would silently strand an agent; (3) the web UI exposed three location operations with no CLI equivalent — `discover`, dismiss-cluster CRUD, and per-place visit stats — which meant an agent asked to "stop suggesting that abandoned coffee shop" had to direct the user to the web UI.
+
+Money write operations and feed CRUD also have web-UI gaps in the other direction (web is read-only for money, web has no feed-subscribe form), but those are deliberate and live on a separate roadmap. Out of scope here.
+
+For the location CLI parity work: the five `_location_*` helpers in `web_app.py` (`_location_place_stats`, `_location_list_dismissed`, `_location_dismiss_cluster`, `_location_restore_dismissed`, `_location_discover_places`) are pure SQL + `geo.haversine` — no FastAPI, no auth — so they extracted cleanly into a new `src/istota/location_logic.py`. `web_app.py` re-imports them under their original underscored names, which means the existing `from istota.web_app import _location_*` test imports keep working without churn (Python re-exports any module-level attribute regardless of the leading underscore). 11 existing helper tests + 10 new CLI tests all green.
+
+CLI naming: subcommand names mirror the web action verbs (`discover`, `dismiss-cluster`, `list-dismissed`, `restore-dismissed`, `place-stats`) rather than dot-namespaced sub-subparsers, matching the rest of the location skill's flat command surface. `place-stats` accepts either `--name` or `--id` (mutex group) — the same dual lookup pattern as `update`/`delete`.
+
+The `--help` discovery hint added to five skills (`money`, `bookmarks`, `location`, `memory_search`, `feeds`) is a one-liner per skill: "Run `istota-skill <name> --help` (or `istota-skill <name> <subcommand> --help`) to see the live argument list." The hand-enumerated examples stay — the hint is just insurance for when commands evolve faster than docs. Argparse/Click already render full help; nothing to maintain on the help side.
+
+Pre-existing test failures in `tests/test_skills_email.py` and `tests/test_skills_transcribe.py` (16 cases) confirmed via `git stash` to exist on `main` — they're system-level dep issues with `imap-tools` and PIL/pytesseract in this dev environment, unrelated.
+
+**Key changes:**
+- New `src/istota/location_logic.py` — extracted 5 location helpers (~250 lines) from `web_app.py` so both the FastAPI routes and the location skill subprocess use the same code.
+- Five new location CLI subcommands with web parity: `discover`, `dismiss-cluster`, `list-dismissed`, `restore-dismissed`, `place-stats`.
+- `money/skill.md` now lists `run-scheduled` (drift fix) and includes it in the concurrency-rule list.
+- `--help` discovery hint added to `money`, `bookmarks`, `location`, `memory_search`, `feeds` skill docs.
+- `location/skill.md` documents the five new commands plus example output (place-stats / discover / list-dismissed shapes).
+
+**Files added/modified:**
+- `src/istota/location_logic.py` — new shared module.
+- `src/istota/web_app.py` — `_location_*` helpers replaced with `from .location_logic import …`; helper bodies removed (267 lines).
+- `src/istota/skills/location/__init__.py` — `cmd_discover`, `cmd_dismiss_cluster`, `cmd_list_dismissed`, `cmd_restore_dismissed`, `cmd_place_stats` + parser registrations + dispatch table entries; module docstring updated.
+- `src/istota/skills/location/skill.md` — new commands and output examples.
+- `src/istota/skills/money/skill.md` — added `run-scheduled`, updated concurrency-rule list, added `--help` hint.
+- `src/istota/skills/{bookmarks,memory_search,feeds}/skill.md` — added `--help` hint.
+- `tests/test_location.py` — new `TestLocationDiscoverDismissCLI` class (10 cases: cluster discovery, min-pings filter, dismiss/list/restore round-trip, unknown-id errors, place-stats by name/id, cross-user isolation).
+- `AGENTS.md` — `location_logic.py` listed in source tree.
+- `.claude/rules/skills.md` — location skill subcommand list updated; new "Shared logic" line points at `location_logic.py`.
+
 ## 2026-04-26: Money module jobs — drop monarch_sync, fold sync into run-scheduled
 
 Two issues surfaced after the moneyman → istota merge. First, the auto-seeded `_module.money.run_scheduled` job at 8 AM was failing every day with "no tool calls": the `run-scheduled` Click subcommand exists in `istota.money.cli` (line 1128) but was never wired into the `istota-skill money` argparse wrapper (`src/istota/skills/money/__init__.py`), so cron fired, the wrapper printed help, exited 1. Second issue exposed by the first: the wrapper *also* auto-seeds `_module.money.monarch_sync` at 6 AM, which duplicates whatever prompt-based monarch sync the user has already written into CRON.md (most users want a narrated/observable sync, not a silent command).

@@ -10,6 +10,8 @@ Search across past conversations and memory files using hybrid BM25 + semantic s
 
 ## Usage
 
+Run `istota-skill memory_search --help` (or `istota-skill memory_search <subcommand> --help`) to see the live argument list.
+
 ```bash
 # Search for relevant memories
 istota-skill memory_search search "query text" [--limit 10] [--source-type TYPE]
