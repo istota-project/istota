@@ -2,6 +2,48 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Security audit follow-up — M4 + low-severity cleanup
+
+Second pass through the open items on the April 5 security audit. Two units of work in one session: a policy-level decision about M4, and a mechanical cleanup of four low-severity items (L2, L7, L8, L10).
+
+**M4 — Linux+bwrap as the only supported deployment.** The audit flagged that without bubblewrap, non-admin filesystem isolation collapses to env-var scoping in the prompt, which is "boundary = model instruction-following" — not a real boundary. Two ways to close that: (a) build a second isolation layer in the skill CLIs (path-validate every file access), or (b) declare bwrap+Linux the only supported config and warn loudly otherwise. We picked (b). The dev/macOS path still runs, just with a `SECURITY UNSUPPORTED CONFIGURATION` WARNING at startup when sandbox is unavailable or disabled with multi-user. Per-skill-CLI path validation was explicitly rejected as belt-and-braces work for an unsupported config. Docs reframed in `docs/deployment/security.md` (new "Supported deployment" section), `AGENTS.md`, and the `README.md` Docker section. The audit doc's M4 entry is now marked resolved with the policy reasoning.
+
+**Low-severity cleanup (L2, L7, L8, L10).** Triaged the L-tier into "real low-hanging fruit", "small-but-think-first", and "design call". The four wins:
+- L2: Unix sockets for skill proxy and network proxy were created with default umask permissions, so any local user could connect during a task window. Fixed with `os.chmod(str(self.socket_path), 0o600)` immediately after `bind()` in both proxies.
+- L7: Two web API endpoints (place creation, cluster dismissal) returned `JSONResponse({"error": str(e)}, ...)` to the browser, leaking internal exception text. Replaced with generic messages; full exception is still logged server-side.
+- L8: `!status` ran `SELECT COUNT(*) FROM tasks WHERE status = 'running'` with no `user_id` filter, so non-admins could see global queue depth. Wrapped the system-stats block in `if config.is_admin(user_id):`. Admins keep the full view; non-admins see only their per-user list. The default test fixture has empty `admin_users` (which means "everyone is admin"), so existing tests still pass; the new test sets `admin_users = {"someone_else"}` to force alice non-admin.
+- L10: ntfy `Title` and `Tags` headers were set without CR/LF stripping. httpx already rejects newlines so this wasn't exploitable, but we sanitize at the boundary instead of erroring downstream: `.replace("\r", "").replace("\n", " ")`.
+
+L4 (denylist→allowlist for `build_stripped_env`) and L6 (webhook query-param token) deferred — both are technically small but have real behavior implications worth a separate session. L1, L3, L9, L11 deferred as design calls. The audit priority matrix gained one row per resolved L-item plus an "Open" row covering the remaining six.
+
+Test pass: 243 in `test_commands / test_notifications / test_skill_proxy / test_network_proxy` all green, including 4 new tests.
+
+**Key changes:**
+- M4: scheduler startup warning escalated from INFO to WARNING for unsupported configs (multi-user without bwrap, or sandbox explicitly disabled). Single-user dev configs warn but with a softer "dev-only" label.
+- L2: `0o600` chmod on both proxy sockets immediately after `bind()`, before `listen()` accepts connections.
+- L7: generic error strings on two web_app endpoints; full exception still `logger.error()`-logged.
+- L8: admin gate on the two `COUNT(*) FROM tasks` queries in `cmd_status`.
+- L10: CR/LF stripped from ntfy `Title` and `Tags` at the boundary.
+
+**Files added/modified:**
+- `src/istota/scheduler.py` — security status block in `run_daemon()` reworked into a multi-user × bwrap-available matrix; WARNING for unsupported configurations.
+- `src/istota/skill_proxy.py` — chmod after bind in `SkillProxy.start()`.
+- `src/istota/network_proxy.py` — chmod after bind in `NetworkProxy.start()`, `import os` added.
+- `src/istota/web_app.py` — two `JSONResponse({"error": str(e)})` → generic message + `logger.error`.
+- `src/istota/commands.py` — admin gate on system-stats block in `cmd_status`.
+- `src/istota/notifications.py` — CR/LF stripping on Title/Tags in `_send_ntfy`.
+- `tests/test_skill_proxy.py` — `TestProxySocketPermissions::test_socket_is_owner_only`.
+- `tests/test_network_proxy.py` — `test_socket_is_owner_only` added to `TestNetworkProxyLifecycle`.
+- `tests/test_notifications.py` — `test_strips_newlines_from_title_and_tags`.
+- `tests/test_commands.py` — `test_system_stats_hidden_for_non_admin`.
+- `docs/deployment/security.md` — new "Supported deployment" section; "gracefully degrades" line replaced with a pointer.
+- `AGENTS.md` — sandbox section reframed.
+- `README.md` — Docker section now references the support policy and recommends `--cap-add SYS_ADMIN`.
+- `CHANGELOG.md` — five new bullets under Unreleased > Security.
+- The security audit doc — M4, L2, L7, L8, L10 marked RESOLVED with code refs and test names; priority matrix updated.
+
+---
+
 ## 2026-04-26: Bound deferred-subtask blast radius (security audit M5)
 
 Pulled M5 off the open list from the April 5 security audit. The earlier audit pass had already pinned `conversation_token` to the parent task and capped per-task fan-out at a hardcoded 10, but two gaps remained: (1) no chain-depth limit, so a prompt-injected admin task could fan out exponentially through nested subtasks (10 → 100 → 1000 → …), and (2) no prompt-size cap, so a single injected subtask could ferry an arbitrarily large payload.

@@ -95,6 +95,15 @@ class TestSplitCredentialEnv:
         assert "CALDAV_PASSWORD" in cred
 
 
+class TestProxySocketPermissions:
+    """Socket file must be 0o600 so other local users cannot connect."""
+
+    def test_socket_is_owner_only(self, sock_path):
+        with SkillProxy(sock_path, {}, {"PATH": "/usr/bin"}):
+            mode = sock_path.stat().st_mode & 0o777
+        assert mode == 0o600, f"expected 0o600, got 0o{mode:o}"
+
+
 class TestProxyCredentialLookup:
     """Test the credential lookup protocol extension."""
 

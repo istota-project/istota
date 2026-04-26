@@ -43,6 +43,12 @@ class TestNetworkProxyLifecycle:
         with NetworkProxy(proxy_sock, set()):
             assert proxy_sock.exists()
 
+    def test_socket_is_owner_only(self, proxy_sock):
+        """Socket must be 0o600 so other local users cannot connect."""
+        with NetworkProxy(proxy_sock, set()):
+            mode = proxy_sock.stat().st_mode & 0o777
+        assert mode == 0o600, f"expected 0o600, got 0o{mode:o}"
+
 
 class TestNetworkProxyBlocking:
     """Test that non-allowlisted hosts are blocked with 403."""

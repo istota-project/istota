@@ -315,6 +315,29 @@ class TestCmdStatus:
         assert "1 queued" in result
 
     @pytest.mark.asyncio
+    async def test_system_stats_hidden_for_non_admin(self, make_config):
+        config = make_config()
+        config.users["bob"] = UserConfig()
+        # Non-empty admin_users with alice excluded → alice is non-admin
+        config.admin_users = {"someone_else"}
+
+        with db.get_db(config.db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="Running", user_id="bob", source_type="talk"
+            )
+            db.update_task_status(conn, t1, "running")
+            db.create_task(
+                conn, prompt="Pending", user_id="bob", source_type="talk"
+            )
+
+            client = AsyncMock()
+            result = await cmd_status(config, conn, "alice", "room1", "", client)
+
+        assert "System:" not in result
+        assert "running" not in result
+        assert "queued" not in result
+
+    @pytest.mark.asyncio
     async def test_groups_interactive_and_background(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:

@@ -265,7 +265,7 @@ Deploy requires Node.js for `npm run build`. Ansible handles this when `istota_w
 **Local UI dev**: `VITE_MOCK_API=1 npm run dev` runs the dev server with an in-process mock backend (`web/vite-mock-api.ts`) that intercepts `/istota/api/*` and `/istota/money/api/*`. Lets you iterate on UI tweaks with HMR without booting FastAPI / Nextcloud / Postgres. Without the env var, the original proxy-to-`localhost:8766` behavior is unchanged.
 
 ### Filesystem Sandbox (bubblewrap)
-Per-user filesystem isolation via `bwrap`. Non-admins see only their Nextcloud subtree + system libs. Admins see full mount + DB (RO by default). Graceful degradation if not Linux or bwrap not found.
+Per-user filesystem isolation via `bwrap`. Non-admins see only their Nextcloud subtree + system libs. Admins see full mount + DB (RO by default). **Linux + bubblewrap is the only supported deployment** — non-Linux / no-bwrap setups still run but provide no isolation guarantees and are dev-only. Scheduler logs `SECURITY UNSUPPORTED CONFIGURATION` at startup when sandbox is unavailable or disabled with multiple users configured.
 
 ### Network Isolation (CONNECT Proxy)
 When `[security.network] enabled`, each task's sandbox gets `--unshare-net` (own network namespace, no external connectivity). Outbound traffic goes through a CONNECT proxy on a Unix socket (`network_proxy.py`) that only tunnels allowlisted `host:port` pairs. A TCP-to-Unix bridge script inside the sandbox listens on `127.0.0.1:18080` and forwards to the proxy socket. Claude Code sees `HTTPS_PROXY=http://127.0.0.1:18080`.

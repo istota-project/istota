@@ -66,7 +66,7 @@ docker compose restart istota
 
 The Docker deployment differs from a bare metal / Ansible installation in a few ways:
 
-- **No network proxy.** The CONNECT-based network proxy (domain allowlist) is disabled — Docker's own network isolation serves the same purpose. Bubblewrap filesystem sandboxing and the skill credential proxy are enabled and work inside the container (bubblewrap gracefully degrades if the kernel doesn't allow user namespaces — add `--cap-add SYS_ADMIN` to the istota service if needed).
+- **No network proxy.** The CONNECT-based network proxy (domain allowlist) is disabled — Docker's own network isolation serves the same purpose. Bubblewrap filesystem sandboxing and the skill credential proxy are enabled and work inside the container. Bubblewrap requires kernel support for user namespaces; in containers without `CAP_SYS_ADMIN` it cannot create namespaces and the sandbox is unavailable. Add `--cap-add SYS_ADMIN` to the istota service if you see `SECURITY UNSUPPORTED CONFIGURATION` at startup — Linux + bubblewrap is the only supported configuration (see [docs/deployment/security.md](docs/deployment/security.md#supported-deployment)).
 - **Single user.** The Docker setup provisions one human user. Additional users can be added by editing `config.toml` directly and creating them in Nextcloud.
 - **Bundled Nextcloud.** The Compose file creates a new Nextcloud instance. If you already run Nextcloud, use the bare metal installer or Ansible role instead — they connect to your existing instance without creating a second one.
 - **No backups or auto-update.** The Ansible role sets up cron-based DB backups and optional auto-update. In Docker, volume backups are your responsibility.

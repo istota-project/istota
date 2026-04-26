@@ -7,6 +7,7 @@ Only HTTPS CONNECT requests to allowlisted host:port pairs are tunneled.
 """
 
 import logging
+import os
 import socket
 import threading
 from pathlib import Path
@@ -100,6 +101,7 @@ class NetworkProxy:
 
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server_sock.bind(str(self.socket_path))
+        os.chmod(str(self.socket_path), 0o600)
         self._server_sock.listen(32)
         self._server_sock.settimeout(1.0)
 

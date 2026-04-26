@@ -2928,20 +2928,35 @@ def run_daemon(config: Config) -> None:
     logger.info("STARTUP Temp file retention: %d days", config.scheduler.temp_file_retention_days)
 
     # Security status checks
+    # Linux + bubblewrap is the only supported deployment configuration.
+    # Other configurations are for development only and provide no isolation guarantees.
     from .executor import _bwrap_available
+    multi_user = len(config.users) > 1
     if config.security.sandbox_enabled and not _bwrap_available():
-        multi_user = len(config.users) > 1
         if multi_user:
             logger.warning(
-                "SECURITY Sandbox enabled but bubblewrap unavailable — "
-                "multi-user file isolation relies on env-var scoping only (not enforced at filesystem level)"
+                "SECURITY UNSUPPORTED CONFIGURATION: sandbox_enabled but bubblewrap unavailable "
+                "with %d users configured — no filesystem isolation between users. "
+                "Linux + bubblewrap is the only supported multi-user deployment.",
+                len(config.users),
             )
         else:
-            logger.info("SECURITY Sandbox enabled but bubblewrap unavailable (single-user, low risk)")
+            logger.warning(
+                "SECURITY Sandbox enabled but bubblewrap unavailable (single-user, dev-only configuration)"
+            )
     elif config.security.sandbox_enabled:
         logger.info("SECURITY Sandbox enabled with bubblewrap")
     else:
-        logger.info("SECURITY Sandbox disabled")
+        if multi_user:
+            logger.warning(
+                "SECURITY UNSUPPORTED CONFIGURATION: sandbox_enabled=false with %d users configured — "
+                "no isolation between users. Linux + bubblewrap is the only supported multi-user deployment.",
+                len(config.users),
+            )
+        else:
+            logger.warning(
+                "SECURITY Sandbox explicitly disabled — no isolation guarantees (dev-only configuration)"
+            )
     logger.info("SECURITY Skill proxy: %s", "enabled" if config.security.skill_proxy_enabled else "disabled")
     logger.info("SECURITY Network proxy: %s", "enabled" if config.security.network.enabled else "disabled")
 
