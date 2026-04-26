@@ -30,6 +30,13 @@
 	--radius-card: 0.5rem;
 	--radius-pill: 999px;
 
+	/* Chip / pill horizontal padding — referenced by Chip + NavLink so a parent
+	   container can use `margin-inline-start: calc(-1 * var(--chip-padding-x))`
+	   to make the chip *text* align with surrounding content. */
+	--chip-padding-x: 0.5rem;
+	/* Gap between sibling chips/nav-links in a flex row. */
+	--chip-gap: 0.1rem;
+
 	/* Transitions */
 	--transition-fast: 0.15s ease;
 
@@ -59,12 +66,20 @@ body {
 a { color: #e0e0e0; }
 a:hover { color: #fff; }
 
+/* Use on a flex nav container whose first chip/link is the leftmost element of
+   its row. Pulls the row left by one chip's horizontal padding so chip TEXT
+   visually aligns with the heading text on the row above. */
+.nav-hang {
+	margin-inline-start: calc(-1 * var(--chip-padding-x));
+}
+
 /* App shell */
 .app-nav {
 	display: flex;
 	align-items: center;
 	gap: 1rem;
-	padding: 0.75rem 1.5rem;
+	padding: 0.75rem;
+	background: #1a1a1a;
 	border-bottom: 1px solid #222;
 	font-size: 0.85rem;
 }
@@ -107,6 +122,20 @@ a:hover { color: #fff; }
 }
 
 .app-nav .nav-right a:hover { color: #aaa; }
+
+.app-nav .nav-right .logout-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0.25rem;
+	border-radius: var(--radius-pill);
+	transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.app-nav .nav-right .logout-btn:hover {
+	background: var(--surface-raised);
+	color: #ddd;
+}
 
 .app-content {
 	padding: 1.5rem;

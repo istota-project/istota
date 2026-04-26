@@ -26,11 +26,12 @@
 	.chip {
 		display: inline-flex;
 		align-items: center;
-		padding: 0.25rem 0.55rem;
+		padding: 0.15rem var(--chip-padding-x);
 		border: none;
 		border-radius: var(--radius-pill);
-		font-size: var(--text-xs);
+		font-size: var(--text-sm);
 		font-family: inherit;
+		line-height: 1.2;
 		transition: all var(--transition-fast);
 		user-select: none;
 		cursor: pointer;

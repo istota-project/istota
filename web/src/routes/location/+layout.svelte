@@ -3,8 +3,22 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { deletePlace, updatePlace, getPlaceStats, type Place, type PlaceStats } from '$lib/api';
-	import { locationPlaces, reloadPlaces, mapFlyTo, selectedPlaceId as selectedPlaceIdStore, onPlaceMove as onPlaceMoveStore } from '$lib/stores/location';
+	import {
+		locationPlaces,
+		reloadPlaces,
+		mapFlyTo,
+		selectedPlaceId as selectedPlaceIdStore,
+		onPlaceMove as onPlaceMoveStore,
+	} from '$lib/stores/location';
 	import PlaceForm from '$lib/components/location/PlaceForm.svelte';
+	import {
+		AppShell,
+		ShellHeader,
+		Sidebar,
+		SidebarToggle,
+		CategoryGroup,
+		NavLink,
+	} from '$lib/components/ui';
 
 	let { children } = $props();
 
@@ -50,7 +64,14 @@
 		editingPlace = place;
 	}
 
-	async function handleEditSave(data: { name: string; lat: number; lon: number; radius_meters: number; category: string; notes: string }) {
+	async function handleEditSave(data: {
+		name: string;
+		lat: number;
+		lon: number;
+		radius_meters: number;
+		category: string;
+		notes: string;
+	}) {
 		if (!editingPlace) return;
 		try {
 			await updatePlace(editingPlace.id, data);
@@ -108,7 +129,6 @@
 		try {
 			await updatePlace(placeId, { lat, lon });
 			await reloadPlaces();
-			// Refresh stats if this is the selected place
 			if (selectedPlace?.id === placeId) {
 				placeStats = null;
 				statsLoading = true;
@@ -121,7 +141,6 @@
 				}
 			}
 		} catch {
-			// Reload to revert the marker position
 			await reloadPlaces();
 		}
 	}
@@ -148,270 +167,121 @@
 	});
 </script>
 
-<div class="loc-shell">
-	<div class="loc-header">
-		<h1>Location</h1>
-		<div class="loc-nav">
-			<a href="{base}/location" class:active={isExactActive('/location')}>Today</a>
-			<a href="{base}/location/history" class:active={isActive('/location/history')}>History</a>
-			<a href="{base}/location/places" class:active={isActive('/location/places')}>Places</a>
-		</div>
-		<button class="sidebar-toggle" onclick={() => sidebarOpen = !sidebarOpen} type="button">
-			{sidebarOpen ? 'Close' : 'Places'} ({places.length})
-		</button>
-	</div>
+<AppShell>
+	{#snippet header()}
+		<ShellHeader title="Location">
+			{#snippet nav()}
+				<NavLink href="{base}/location" active={isExactActive('/location')}>Today</NavLink>
+				<NavLink href="{base}/location/history" active={isActive('/location/history')}>History</NavLink>
+				<NavLink href="{base}/location/places" active={isActive('/location/places')}>Places</NavLink>
+			{/snippet}
+			{#snippet tools()}
+				<SidebarToggle
+					open={sidebarOpen}
+					label="Places"
+					count={places.length}
+					onclick={() => (sidebarOpen = !sidebarOpen)}
+				/>
+			{/snippet}
+		</ShellHeader>
+	{/snippet}
 
-	<div class="loc-body">
-		<aside class="loc-sidebar" class:open={sidebarOpen}>
-			<div class="sidebar-header">
-				<span class="sidebar-title">Places</span>
-				<span class="sidebar-count">{places.length}</span>
-			</div>
-			{#if selectedPlace && (statsLoading || placeStats)}
-				<div class="stats-panel">
-					<div class="stats-header">
-						<span class="stats-name">{selectedPlace.name}</span>
-						<div class="stats-actions">
-							<button class="stats-edit" onclick={() => handleEditPlace(selectedPlace!)} type="button" title="Edit place">&#9998;</button>
-							<button class="stats-close" onclick={() => { selectedPlace = null; placeStats = null; }} type="button">&times;</button>
-						</div>
-					</div>
-					{#if selectedPlace.notes}
-						<div class="stats-notes">{selectedPlace.notes}</div>
-					{/if}
-					{#if statsLoading}
-						<div class="stats-loading">Loading...</div>
-					{:else if placeStats && placeStats.total_visits > 0}
-						<div class="stats-grid">
-							<div class="stat">
-								<span class="stat-value">{placeStats.total_visits}</span>
-								<span class="stat-label">{placeStats.total_visits === 1 ? 'visit' : 'visits'}</span>
-							</div>
-							<div class="stat">
-								<span class="stat-value">{formatDuration(placeStats.avg_duration_min)}</span>
-								<span class="stat-label">avg</span>
-							</div>
-							<div class="stat">
-								<span class="stat-value">{formatDuration(placeStats.longest_visit_min)}</span>
-								<span class="stat-label">longest</span>
-							</div>
-							<div class="stat">
-								<span class="stat-value">{formatDuration(placeStats.total_duration_min)}</span>
-								<span class="stat-label">total</span>
-							</div>
-						</div>
-						<div class="stats-dates">
-							<span>First: {formatDate(placeStats.first_visit)}</span>
-							<span>Last: {formatDate(placeStats.last_visit)}</span>
-						</div>
-					{:else}
-						<div class="stats-empty">No visits recorded</div>
-					{/if}
-				</div>
-			{/if}
-
-			<div class="sidebar-list">
-				{#each groupedPlaces as [category, catPlaces]}
-					<div class="cat-group">
-						<div class="cat-label">{category}</div>
-						{#each catPlaces as place}
-							<div class="place-row">
+	{#snippet sidebar()}
+		<Sidebar title="Places" count={places.length} open={sidebarOpen}>
+			{#snippet extras()}
+				{#if selectedPlace && (statsLoading || placeStats)}
+					<div class="stats-panel">
+						<div class="stats-header">
+							<span class="stats-name">{selectedPlace.name}</span>
+							<div class="stats-actions">
 								<button
-									class="place-btn"
-									class:selected={selectedPlace?.id === place.id}
-									onclick={() => handlePlaceClick(place)}
+									class="stats-edit"
+									onclick={() => handleEditPlace(selectedPlace!)}
 									type="button"
+									title="Edit place">&#9998;</button
 								>
-									<span class="place-name">{place.name}</span>
-									<span class="place-radius">{place.radius_meters}m</span>
-								</button>
 								<button
-									class="place-delete"
-									onclick={() => handleDeletePlace(place)}
-									type="button"
-									title="Delete place"
-								>&times;</button>
+									class="stats-close"
+									onclick={() => {
+										selectedPlace = null;
+										placeStats = null;
+									}}
+									type="button">&times;</button
+								>
 							</div>
-						{/each}
+						</div>
+						{#if selectedPlace.notes}
+							<div class="stats-notes">{selectedPlace.notes}</div>
+						{/if}
+						{#if statsLoading}
+							<div class="stats-loading">Loading...</div>
+						{:else if placeStats && placeStats.total_visits > 0}
+							<div class="stats-grid">
+								<div class="stat">
+									<span class="stat-value">{placeStats.total_visits}</span>
+									<span class="stat-label">{placeStats.total_visits === 1 ? 'visit' : 'visits'}</span>
+								</div>
+								<div class="stat">
+									<span class="stat-value">{formatDuration(placeStats.avg_duration_min)}</span>
+									<span class="stat-label">avg</span>
+								</div>
+								<div class="stat">
+									<span class="stat-value">{formatDuration(placeStats.longest_visit_min)}</span>
+									<span class="stat-label">longest</span>
+								</div>
+								<div class="stat">
+									<span class="stat-value">{formatDuration(placeStats.total_duration_min)}</span>
+									<span class="stat-label">total</span>
+								</div>
+							</div>
+							<div class="stats-dates">
+								<span>First: {formatDate(placeStats.first_visit)}</span>
+								<span>Last: {formatDate(placeStats.last_visit)}</span>
+							</div>
+						{:else}
+							<div class="stats-empty">No visits recorded</div>
+						{/if}
 					</div>
-				{/each}
-			</div>
-		</aside>
+				{/if}
+			{/snippet}
 
-		<div class="loc-main">
-			{@render children()}
-		</div>
-	</div>
+			{#each groupedPlaces as [category, catPlaces] (category)}
+				<CategoryGroup label={category} count={catPlaces.length} collapsible>
+					{#each catPlaces as place (place.id)}
+						<div class="place-row">
+							<button
+								class="place-btn"
+								class:selected={selectedPlace?.id === place.id}
+								onclick={() => handlePlaceClick(place)}
+								type="button"
+							>
+								<span class="place-name">{place.name}</span>
+								<span class="place-radius">{place.radius_meters}m</span>
+							</button>
+							<button
+								class="place-delete"
+								onclick={() => handleDeletePlace(place)}
+								type="button"
+								title="Delete place">&times;</button
+							>
+						</div>
+					{/each}
+				</CategoryGroup>
+			{/each}
+		</Sidebar>
+	{/snippet}
 
-	{#if editingPlace}
-		<PlaceForm
-			place={editingPlace}
-			onSave={handleEditSave}
-			onCancel={() => editingPlace = null}
-		/>
-	{/if}
-</div>
+	{@render children()}
+</AppShell>
+
+{#if editingPlace}
+	<PlaceForm place={editingPlace} onSave={handleEditSave} onCancel={() => (editingPlace = null)} />
+{/if}
 
 <style>
-	.loc-shell {
-		display: flex;
-		flex-direction: column;
-		/* Break out of .app-content padding to fill viewport */
-		margin: -1.5rem;
-		height: calc(100vh - 42px); /* 42px = app-nav height */
-		overflow: hidden;
-	}
-
-	.loc-header {
-		display: flex;
-		align-items: baseline;
-		gap: 1rem;
-		padding: 0.75rem 1.5rem;
-		border-bottom: 1px solid var(--border-subtle);
-		flex-shrink: 0;
-	}
-
-	.loc-header h1 {
-		font-size: 1rem;
-		font-weight: 600;
-		margin: 0;
-	}
-
-	.loc-nav {
-		display: flex;
-		gap: 0.35rem;
-	}
-
-	.loc-nav a {
-		font-size: var(--text-sm);
-		color: var(--text-muted);
-		text-decoration: none;
-		padding: 0.2rem 0.55rem;
-		border-radius: var(--radius-pill);
-		transition: all var(--transition-fast);
-	}
-
-	.loc-nav a:hover { color: var(--text-primary); }
-	.loc-nav a.active {
-		background: var(--surface-raised);
-		color: var(--text-primary);
-	}
-
-	.sidebar-toggle {
-		display: none;
-		margin-left: auto;
-		background: var(--surface-card);
-		border: none;
-		color: var(--text-muted);
-		font: inherit;
-		font-size: var(--text-sm);
-		padding: 0.25rem 0.6rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
-	}
-
-	.loc-body {
-		display: flex;
-		flex: 1;
-		min-height: 0;
-	}
-
-	.loc-sidebar {
-		width: 200px;
-		flex-shrink: 0;
-		border-right: 1px solid var(--border-subtle);
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-	}
-
-	.sidebar-header {
-		display: flex;
-		align-items: baseline;
-		gap: 0.4rem;
-		padding: 0.6rem 1rem 0.6rem 1.5rem;
-		flex-shrink: 0;
-	}
-
-	.sidebar-title {
-		font-size: var(--text-sm);
-		font-weight: 500;
-		color: var(--text-dim);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-	}
-
-	.sidebar-count {
-		font-size: var(--text-xs);
-		color: var(--text-dim);
-	}
-
-	.sidebar-list {
-		flex: 1;
-		overflow-y: auto;
-		padding: 0 0.5rem 0.5rem;
-	}
-
-	.sidebar-list::-webkit-scrollbar {
-		width: 4px;
-	}
-
-	.sidebar-list::-webkit-scrollbar-track {
-		background: transparent;
-	}
-
-	.sidebar-list::-webkit-scrollbar-thumb {
-		background: var(--border-default);
-		border-radius: 2px;
-	}
-
-	.cat-group {
-		margin-bottom: 0.25rem;
-	}
-
-	.cat-label {
-		font-size: var(--text-xs);
-		color: var(--text-dim);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		font-weight: 500;
-		padding: 0.35rem 1rem 0.15rem;
-	}
-
-	.place-row {
-		display: flex;
-		align-items: center;
-	}
-
-	.place-btn {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		flex: 1;
-		min-width: 0;
-		background: none;
-		border: none;
-		color: inherit;
-		font: inherit;
-		cursor: pointer;
-		padding: 0.3rem 1rem;
-		border-radius: 0.3rem;
-		transition: background var(--transition-fast);
-		text-align: left;
-	}
-
-	.place-btn:hover {
-		background: var(--surface-raised);
-	}
-
-	.place-btn.selected {
-		background: var(--surface-raised);
-		color: var(--text-primary);
-	}
-
 	.stats-panel {
 		border-bottom: 1px solid var(--border-subtle);
-		padding: 0.6rem 1rem;
+		padding: 0.6rem 0.75rem;
 		flex-shrink: 0;
 	}
 
@@ -432,7 +302,8 @@
 		gap: 0.15rem;
 	}
 
-	.stats-edit, .stats-close {
+	.stats-edit,
+	.stats-close {
 		background: none;
 		border: none;
 		color: var(--text-dim);
@@ -442,7 +313,10 @@
 		line-height: 1;
 	}
 
-	.stats-edit:hover, .stats-close:hover { color: var(--text-muted); }
+	.stats-edit:hover,
+	.stats-close:hover {
+		color: var(--text-muted);
+	}
 
 	.stats-grid {
 		display: grid;
@@ -475,7 +349,8 @@
 		color: var(--text-dim);
 	}
 
-	.stats-loading, .stats-empty {
+	.stats-loading,
+	.stats-empty {
 		font-size: var(--text-xs);
 		color: var(--text-dim);
 	}
@@ -489,20 +364,36 @@
 		border-top: 1px solid var(--border-subtle);
 	}
 
-	.place-delete {
-		background: none;
-		border: none;
-		color: var(--text-dim);
-		font-size: var(--text-sm);
-		cursor: pointer;
-		padding: 0.2rem 0.35rem;
-		border-radius: 0.2rem;
-		opacity: 0;
-		transition: opacity var(--transition-fast), color var(--transition-fast);
+	.place-row {
+		display: flex;
+		align-items: center;
 	}
 
-	.place-row:hover .place-delete { opacity: 1; }
-	.place-delete:hover { color: #c66; }
+	.place-btn {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		flex: 1;
+		min-width: 0;
+		background: none;
+		border: none;
+		color: inherit;
+		font: inherit;
+		cursor: pointer;
+		padding: 0.3rem 0.75rem;
+		border-radius: 0.3rem;
+		transition: background var(--transition-fast);
+		text-align: left;
+	}
+
+	.place-btn:hover {
+		background: var(--surface-raised);
+	}
+
+	.place-btn.selected {
+		background: var(--surface-raised);
+		color: var(--text-primary);
+	}
 
 	.place-name {
 		font-size: var(--text-sm);
@@ -518,45 +409,23 @@
 		margin-left: 0.25rem;
 	}
 
-	.loc-main {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
+	.place-delete {
+		background: none;
+		border: none;
+		color: var(--text-dim);
+		font-size: var(--text-sm);
+		cursor: pointer;
+		padding: 0.2rem 0.35rem;
+		border-radius: 0.2rem;
+		opacity: 0;
+		transition: opacity var(--transition-fast), color var(--transition-fast);
 	}
 
-	@media (max-width: 768px) {
-		.loc-shell {
-			margin: -1rem -0.75rem;
-			height: calc(100vh - 36px);
-		}
+	.place-row:hover .place-delete {
+		opacity: 1;
+	}
 
-		.loc-header {
-			padding: 0.5rem 0.75rem;
-		}
-
-		.sidebar-toggle {
-			display: block;
-		}
-
-		.loc-sidebar {
-			display: none;
-			position: absolute;
-			top: 0;
-			left: 0;
-			bottom: 0;
-			z-index: 20;
-			width: 220px;
-			background: var(--surface-base);
-			border-right: 1px solid var(--border-default);
-		}
-
-		.loc-sidebar.open {
-			display: flex;
-		}
-
-		.loc-body {
-			position: relative;
-		}
+	.place-delete:hover {
+		color: #c66;
 	}
 </style>

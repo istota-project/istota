@@ -2,6 +2,7 @@
 	import { getAccounts, type AccountRow } from '$lib/money/api';
 	import { selectedAccount, selectedYear, filterText } from '$lib/money/stores/transactions';
 	import { selectedLedger } from '$lib/money/stores/ledger';
+	import { Sidebar, SidebarToggle, Select } from '$lib/components/ui';
 
 	let { children } = $props();
 
@@ -61,13 +62,8 @@
 	}
 
 	function selectAccount(fullName: string) {
-		selectedAccount.update(current => current === fullName ? '' : fullName);
+		selectedAccount.update((current) => (current === fullName ? '' : fullName));
 		sidebarOpen = false;
-	}
-
-	function handleYearChange(e: Event) {
-		const val = (e.target as HTMLSelectElement).value;
-		selectedYear.set(val === '' ? 0 : Number(val));
 	}
 
 	function handleFilterInput(value: string) {
@@ -88,12 +84,10 @@
 
 	let prevLedger = $state($selectedLedger);
 
-	// Reload sidebar accounts when ledger changes
 	$effect(() => {
 		loadAccounts($selectedLedger);
 	});
 
-	// Clear account filter when ledger changes (but not on initial mount)
 	$effect(() => {
 		const current = $selectedLedger;
 		if (current !== prevLedger) {
@@ -101,6 +95,13 @@
 			selectedAccount.set('');
 		}
 	});
+
+	const yearOptions = $derived([
+		{ value: '', label: 'All years' },
+		...years.map((y) => ({ value: String(y), label: String(y) })),
+	]);
+
+	const selectedYearValue = $derived($selectedYear ? String($selectedYear) : '');
 </script>
 
 <div class="money-section-header">
@@ -110,12 +111,12 @@
 		</button>
 	{/if}
 	<div class="money-section-tools">
-		<select class="money-control-select" value={$selectedYear || ''} onchange={handleYearChange}>
-			<option value="">All years</option>
-			{#each years as y}
-				<option value={y}>{y}</option>
-			{/each}
-		</select>
+		<Select
+			value={selectedYearValue}
+			options={yearOptions}
+			onValueChange={(v) => selectedYear.set(v === '' ? 0 : Number(v))}
+			ariaLabel="Year"
+		/>
 		<input
 			type="text"
 			class="money-control-input"
@@ -123,24 +124,20 @@
 			value={$filterText}
 			oninput={(e) => handleFilterInput(e.currentTarget.value)}
 		/>
-		<button class="sidebar-toggle" onclick={() => sidebarOpen = !sidebarOpen} type="button">
-			{sidebarOpen ? 'Close' : 'Accounts'}
-		</button>
+		<SidebarToggle
+			open={sidebarOpen}
+			label="Accounts"
+			onclick={() => (sidebarOpen = !sidebarOpen)}
+		/>
 	</div>
 </div>
 
 <div class="txn-body">
-	<aside class="txn-sidebar" class:open={sidebarOpen}>
-		<div class="sidebar-header">
-			<span class="sidebar-title">Accounts</span>
-			<span class="sidebar-count">{accounts.length}</span>
-		</div>
-		<div class="sidebar-list">
-			{#each tree as node (node.fullName)}
-				{@render accountNode(node, 0)}
-			{/each}
-		</div>
-	</aside>
+	<Sidebar title="Accounts" count={accounts.length} open={sidebarOpen}>
+		{#each tree as node (node.fullName)}
+			{@render accountNode(node, 0)}
+		{/each}
+	</Sidebar>
 
 	<div class="txn-main">
 		{@render children()}
@@ -150,11 +147,7 @@
 {#snippet accountNode(node: AccountNode, depth: number)}
 	<div class="acct-row" style="padding-left: {0.5 + depth * 0.75}rem">
 		{#if node.children.length > 0}
-			<button
-				class="acct-caret"
-				onclick={(e) => toggleExpand(e, node.fullName)}
-				type="button"
-			>
+			<button class="acct-caret" onclick={(e) => toggleExpand(e, node.fullName)} type="button">
 				<span class="caret" class:open={expandedSet.has(node.fullName)}>&#9654;</span>
 			</button>
 		{:else}
@@ -202,63 +195,12 @@
 		line-height: 1;
 	}
 
-	.sidebar-toggle {
-		display: none;
-		background: var(--surface-card);
-		border: none;
-		color: var(--text-muted);
-		font: inherit;
-		font-size: var(--text-sm);
-		padding: 0.25rem 0.6rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
-	}
-
 	.txn-body {
 		display: flex;
 		flex: 1;
 		min-height: 0;
+		position: relative;
 	}
-
-	.txn-sidebar {
-		width: 220px;
-		flex-shrink: 0;
-		border-right: 1px solid var(--border-subtle);
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-	}
-
-	.sidebar-header {
-		display: flex;
-		align-items: baseline;
-		gap: 0.4rem;
-		padding: 0.6rem 1rem 0.6rem 1.5rem;
-		flex-shrink: 0;
-	}
-
-	.sidebar-title {
-		font-size: var(--text-sm);
-		font-weight: 500;
-		color: var(--text-dim);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-	}
-
-	.sidebar-count {
-		font-size: var(--text-xs);
-		color: var(--text-dim);
-	}
-
-	.sidebar-list {
-		flex: 1;
-		overflow-y: auto;
-		padding: 0 0.25rem 0.5rem;
-	}
-
-	.sidebar-list::-webkit-scrollbar { width: 4px; }
-	.sidebar-list::-webkit-scrollbar-track { background: transparent; }
-	.sidebar-list::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
 
 	.acct-row {
 		display: flex;
@@ -326,32 +268,5 @@
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
-	}
-
-	@media (max-width: 768px) {
-		.sidebar-toggle {
-			display: block;
-			margin-left: auto;
-		}
-
-		.txn-sidebar {
-			display: none;
-			position: absolute;
-			top: 0;
-			left: 0;
-			bottom: 0;
-			z-index: 20;
-			width: 240px;
-			background: var(--surface-base);
-			border-right: 1px solid var(--border-default);
-		}
-
-		.txn-sidebar.open {
-			display: flex;
-		}
-
-		.txn-body {
-			position: relative;
-		}
 	}
 </style>
