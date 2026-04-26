@@ -2,6 +2,17 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Release script consolidates duplicate changelog subsections
+
+`scripts/release.sh` extracts the just-published version's section from `CHANGELOG.md` verbatim and embeds it as the git tag annotation, which the GitHub mirror's `release.yml` workflow then turns into a GitHub Release. The 0.8.0 release exposed an annoyance: during the dev cycle `[Unreleased]` had accumulated `### Changed` four times, `### Added` three times, `### Fixed` twice — appended in chronological order rather than merged into the existing subsection. The release page rendered all of them in order, so a reader sees three separate "Added" headers with unrelated bullets under each.
+
+Discussed two fixes: (1) consolidate at extraction time in `release.sh` so only the tag annotation / GitHub release is grouped, leaving the CHANGELOG itself chronological; (2) consolidate the CHANGELOG file too. Picked (1) — the file's chronological structure is sometimes useful for understanding which changes landed together, and the polished artifact is the GitHub release.
+
+Replaced the awk extraction with a Python block that splits the section on `^### ` headers, accumulates bodies per header, and emits in Keep-a-Changelog canonical order (Added, Changed, Deprecated, Removed, Fixed, Security). Originally-separate bullet groups under the same header are joined with a blank line so the dev-time grouping is still readable inside the consolidated section. Any non-canonical `###` headers (defensive) are appended after the canonical ones in original order. Verified by dry-running against the 0.8.0 entry — output collapses 4× Changed / 3× Added / 2× Fixed into one of each, bullets preserved in original sequence.
+
+**Files added/modified:**
+- `scripts/release.sh` — replaced the awk `NOTES=$(...)` extraction with a Python heredoc that groups `###` subsections by header and emits in Keep-a-Changelog order. CHANGELOG.md file itself is untouched.
+
 ## 2026-04-26: Location web UI — fold Places into History, add place from sidebar
 
 The Today info panel sat top-right and covered the MapLibre zoom controls; the obvious fix was to move it bottom-left to mirror mobile. That worked but exposed the bigger structural issue: the standalone `/location/places` view was the only place to discover unknown clusters or add a new place, but it was blind to actual pings/tracks (`pings={[]}` `showPath={false}`). Users couldn't see a clump on a track and act on it without page-hopping. Folded the whole route into history.
