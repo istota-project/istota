@@ -110,6 +110,8 @@ When `skill_proxy_enabled = true`, these variables are stripped from the subproc
 - `GITHUB_TOKEN`
 - `MONARCH_SESSION_TOKEN`
 
+The proxy injects each credential only into the skill CLIs that are mapped to it (`_CREDENTIAL_SKILL_MAP` in `executor.py`). Authorization is based on credential presence in the task env — not skill selection — so any CLI skill whose credentials the user has configured can request them at runtime. See [security: credential proxy](../deployment/security.md#credential-proxy) for the authorization model and rejection logging.
+
 ## Secret overrides
 
 These env vars override TOML config values (for use with systemd `EnvironmentFile=`):

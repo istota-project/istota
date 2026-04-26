@@ -35,7 +35,10 @@ select_skills(prompt, source_type, user_resource_types, skill_index,
 classify_skills(prompt, skill_index, already_selected,
                 disabled_skills=None, is_admin=True,
                 model="haiku", timeout=3.0) -> list[str]  # Pass 2 LLM classification
-build_skill_manifest(skill_index, exclude, disabled_skills=None, is_admin=True) -> str
+build_skill_manifest(skill_index, exclude, disabled_skills=None, is_admin=True,
+                     user_resource_types=None) -> str
+    # When user_resource_types is given, prepends "User has resources: …" header
+    # and appends [needs resource: …] hints per skill — helps Pass 2 disambiguate.
 compute_skills_fingerprint(skills_dir: Path) -> str               # SHA-256, first 12 hex chars
 load_skills_changelog(skills_dir: Path) -> str | None             # CHANGELOG.md
 load_skills(skills_dir: Path, skill_names: list[str], bot_name, bot_dir, skill_index=None, bundled_dir=None) -> str
@@ -71,13 +74,15 @@ After execution, the resolved skill set is persisted via `db.save_task_selected_
 **Pre-transcription**: before skill selection, `_pre_transcribe_attachments()` (`executor.py:225`) transcribes audio attachments and enriches `task.prompt` with the spoken text so keyword rules match voice memos.
 
 **Pass 2: Semantic routing** (`classify_skills`) — LLM-based, additive to Pass 1.
-When `config.skills.semantic_routing` is enabled (default: true), a Haiku call sees the task prompt + a manifest of unselected skills (filtered for admin_only/disabled/deps) and returns additional skill names. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only.
+When `config.skills.semantic_routing` is enabled (default: true), a Haiku call sees the task prompt + a manifest of unselected skills (filtered for admin_only/disabled/deps) plus the user's resource types (so it can reason "user has miniflux → feeds is plausible"), and returns additional skill names. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only.
 
 After the union, the executor (`executor.py:1815-1823`) re-applies `exclude_skills` because newly added skills may exclude previously-selected ones.
 
 Config: `[skills]` section — `semantic_routing` (bool), `semantic_routing_model` (str), `semantic_routing_timeout` (float).
 
 Returns sorted list of skill names.
+
+**Selection observability**: `select_skills` emits a single INFO log per task with each selected skill annotated by the rule that fired (`pass1_selection count=N: foo(always_include), bar(keyword='kw'), …`). `classify_skills` emits `pass2_added skills=…` on additions, `pass2_no_additions` when nothing was added, and `pass2_timeout after=Xs` when Haiku exceeded the timeout. Use these to reconcile selection misses against runtime proxy rejections (see executor.md).
 
 ### Skill Metadata (YAML frontmatter)
 All metadata lives in YAML frontmatter at the top of each `skill.md` file:

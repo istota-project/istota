@@ -555,6 +555,35 @@ def _split_credential_env(env: dict[str, str]) -> tuple[dict[str, str], dict[str
     return credential_env, clean_env
 
 
+def _authorized_skills_from_credentials(
+    skill_index: dict,
+    credential_env: dict[str, str],
+) -> list[str]:
+    """Skills authorized for credential access this task.
+
+    Decouples credential authorization from skill selection: a CLI skill is
+    authorized if at least one of the credentials it would use is actually
+    present in the user's environment. Skill selection (Pass 1 + Pass 2)
+    still controls which docs go in the prompt; this controls what creds
+    can be requested at runtime.
+
+    The threat model is unchanged — a compromised Claude can only request
+    credentials for resources the user has actually configured. But it
+    eliminates the failure mode where keyword matching missed a skill the
+    user obviously needs (e.g. user has miniflux configured, prompt didn't
+    say "feed", `feeds` not selected, no MINIFLUX_API_KEY available).
+    """
+    authorized = set()
+    for skill_name, meta in skill_index.items():
+        if not getattr(meta, "cli", False):
+            continue
+        for var, allowed_skills in _CREDENTIAL_SKILL_MAP.items():
+            if skill_name in allowed_skills and var in credential_env:
+                authorized.add(skill_name)
+                break
+    return sorted(authorized)
+
+
 def build_allowed_tools(is_admin: bool, skill_names: list[str]) -> list[str]:
     """Build --allowedTools list for restricted security mode.
 
@@ -1808,6 +1837,7 @@ def execute_task(
             is_admin=is_admin,
             model=config.skills.semantic_routing_model,
             timeout=config.skills.semantic_routing_timeout,
+            user_resource_types=user_resource_types,
         )
         if extra_skills:
             all_selected = set(selected_skills) | set(extra_skills)
@@ -2382,14 +2412,27 @@ def execute_task(
                 # build_bwrap_cmd() bind-mounts this file into the sandbox.
                 _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{task.id}.sock"
                 env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
-                # Only selected skills' credentials are available via the proxy.
-                # _CREDENTIAL_SKILL_MAP scopes each skill to only its creds.
-                cred_skill_names = list({s for ss in _CREDENTIAL_SKILL_MAP.values() for s in ss}
-                                        & set(selected_skills))
+                # Credential authorization is decoupled from doc-selection:
+                # any CLI skill whose credentials are actually present in the
+                # user's env is authorized, regardless of whether Pass 1 / Pass
+                # 2 selected it for the prompt. This avoids the failure mode
+                # where a keyword miss locks out a skill the user clearly
+                # configured. Threat model is unchanged — the user's env only
+                # contains creds for resources they've configured.
+                cred_skill_names = _authorized_skills_from_credentials(
+                    skill_index, credential_env,
+                )
                 allowed_creds = _allowed_credentials_for_skills(cred_skill_names)
                 skill_cred_map = _build_skill_credential_map(cred_skill_names)
                 cli_skills = frozenset(
                     name for name, meta in skill_index.items() if meta.cli
+                )
+                logger.info(
+                    "proxy_authorization task_id=%d selected=%d authorized=%d "
+                    "selected_skills=%s authorized_skills=%s",
+                    task.id, len(selected_skills), len(cred_skill_names),
+                    ",".join(sorted(selected_skills)),
+                    ",".join(cred_skill_names),
                 )
                 _proxy_ctx = SkillProxy(
                     _proxy_sock, credential_env, env,
@@ -2397,6 +2440,8 @@ def execute_task(
                     allowed_credentials=allowed_creds,
                     skill_credential_map=skill_cred_map,
                     allowed_skills=cli_skills,
+                    authorized_skills=frozenset(cred_skill_names),
+                    task_id=task.id,
                 )
 
         # Network isolation via CONNECT proxy: outbound traffic restricted

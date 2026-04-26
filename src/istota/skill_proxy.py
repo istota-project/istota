@@ -38,6 +38,8 @@ class SkillProxy:
         allowed_credentials: set[str] | None = None,
         skill_credential_map: dict[str, set[str]] | None = None,
         allowed_skills: frozenset[str] | None = None,
+        authorized_skills: frozenset[str] | None = None,
+        task_id: int | None = None,
     ):
         self.socket_path = socket_path
         self.credential_env = credential_env
@@ -46,6 +48,11 @@ class SkillProxy:
         self.allowed_credentials = allowed_credentials
         self.skill_credential_map = skill_credential_map
         self.allowed_skills = allowed_skills
+        # Skills authorized for credential access this task. None = no filter
+        # (back-compat for callers that don't pass it). Used purely for the
+        # informative-rejection list returned to the client.
+        self.authorized_skills = authorized_skills
+        self.task_id = task_id
         self._server_sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -129,12 +136,28 @@ class SkillProxy:
             if req_type == "credential":
                 name = request.get("name", "")
                 # Scope check: if allowed_credentials is set, only return
-                # credentials needed by the selected skills for this task.
+                # credentials authorized for this task.
                 if self.allowed_credentials is not None and name not in self.allowed_credentials:
-                    self._send_response(conn, {"error": f"Credential not available for this task: {name!r}"})
+                    logger.warning(
+                        "proxy_rejected task_id=%s type=credential name=%s reason=not_authorized",
+                        self.task_id, name,
+                    )
+                    self._send_response(conn, {
+                        "error": f"Credential not authorized for this task: {name!r}",
+                        "reason": "not_authorized_credential",
+                        "name": name,
+                    })
                     return
                 if name not in self.credential_env:
-                    self._send_response(conn, {"error": f"Unknown credential: {name!r}"})
+                    logger.warning(
+                        "proxy_rejected task_id=%s type=credential name=%s reason=not_present",
+                        self.task_id, name,
+                    )
+                    self._send_response(conn, {
+                        "error": f"Credential not present in environment: {name!r}",
+                        "reason": "credential_not_present",
+                        "name": name,
+                    })
                     return
                 self._send_response(conn, {"value": self.credential_env[name]})
                 return
@@ -144,12 +167,28 @@ class SkillProxy:
 
             # Validate skill name against CLI-capable skills from skill index
             if self.allowed_skills is not None and skill not in self.allowed_skills:
+                logger.warning(
+                    "proxy_rejected task_id=%s type=skill skill=%s reason=unknown_skill",
+                    self.task_id, skill,
+                )
+                authorized_list = (
+                    sorted(self.authorized_skills)
+                    if self.authorized_skills is not None
+                    else sorted(self.allowed_skills)
+                )
                 self._send_response(conn, {
                     "stdout": "",
-                    "stderr": f"Unknown skill: {skill!r}",
+                    "stderr": (
+                        f"Unknown skill: {skill!r}.\n"
+                        f"Authorized skills for this task: {', '.join(authorized_list)}"
+                    ),
                     "returncode": 1,
+                    "reason": "unknown_skill",
+                    "skill": skill,
+                    "authorized_skills": authorized_list,
                 })
                 return
+
 
             # Build command
             cmd = [sys.executable, "-m", f"istota.skills.{skill}"] + args

@@ -2,6 +2,38 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Skill proxy credential authorization — decouple from selection
+
+Audited the skill-proxy credential injection setup against industry patterns and Anthropic's own internal pattern (Claude Code sandboxing post, Nov 2025 — they run essentially the same shape: per-task Unix-socket credential broker, egress allowlist, no in-sandbox secrets). Conclusion: architecture is right; the recurring "implied skill not loaded → credential not available → task fails mysteriously" symptom isn't a proxy-design flaw, it's a *coupling* flaw. The same set (selected_skills) was driving both prompt content and credential authorization.
+
+Split that coupling. Skill selection (Pass 1 keyword + Pass 2 semantic routing) still controls which skill *docs* go into the prompt — that's the genuine token-budget trade-off. Credential authorization is now derived purely from credential presence in the task env: if `MINIFLUX_API_KEY` is in the env (because the user has a miniflux resource configured), the `feeds` skill is authorized to request it, regardless of whether the prompt happened to say "feed". The threat model is unchanged because `credential_env` already only contains creds the user has actually configured.
+
+Cleanest formulation turned out to be much simpler than the spec note's "user_has_resources_for(skill)" — credential presence in env is a unifying signal that already accounts for both per-user resources (Karakeep, Miniflux, etc.) and instance-level config (SMTP, GitLab/GitHub tokens). One ~20-line helper (`_authorized_skills_from_credentials`) replaces the previous selection-driven derivation.
+
+Also landed: structured WARNING logs on every proxy rejection (`proxy_rejected task_id=… type=skill|credential reason=…`) keyed by task and reason code, plus per-rule INFO logs on Pass 1 skill selection (`pass1_selection count=N: foo(always_include), bar(keyword='kw'), …`). These are the data we'd want before deciding whether semantic-routing's 3-second timeout or prompt is too tight — observability *first*, tune later.
+
+Pass 2 prompt enrichment was the smallest of the four changes: `build_skill_manifest()` now takes an optional `user_resource_types` set and prepends "User has resources: …" plus appends `[needs resource: …]` hints per skill. Lets Haiku reason "user has miniflux → feeds is plausible" without keyword overlap.
+
+Audit note (`/Users/stefan/Dust/Notes/Projects/Istota/Skill proxy credential injection audit.md`) records the architecture comparison, the alternative-network-proxy analysis (TLS implications: it works only when the proxy is the originating TLS client, like 1Password Connect or Vault Agent — not as a transparent forward proxy), and the recommendation sequence.
+
+**Key changes:**
+- `_authorized_skills_from_credentials(skill_index, credential_env)` — new helper in `executor.py`; returns CLI skills authorized for credential access based on credential presence in env, not skill selection.
+- `SkillProxy` constructor accepts `task_id` and `authorized_skills`; rejection responses now include structured `reason`, `name`/`skill`, and `authorized_skills` fields. Stderr message lists authorized skills so the model can adapt rather than retry blindly.
+- `select_skills()` records the matching rule per skill and emits a single INFO log: `pass1_selection count=N: foo(always_include), bar(keyword='kw'), …`.
+- `classify_skills()` emits `pass2_added`, `pass2_no_additions`, `pass2_timeout` (WARNING) — same shape, easy to grep/aggregate.
+- `build_skill_manifest()` and `classify_skills()` accept `user_resource_types`; manifest prepends "User has resources: …" and per-skill `[needs resource: …]` hints.
+- 14 new tests across `_authorized_skills_from_credentials`, structured rejection responses, the WARNING log, manifest enrichment, and Pass 1 reason logging. 486 tests green across the touched modules.
+
+**Files added/modified:**
+- `src/istota/executor.py` — `_authorized_skills_from_credentials()` helper, replaced `cred_skill_names` derivation, pass `task_id` + `authorized_skills` to `SkillProxy`, added `proxy_authorization` startup INFO log, threaded `user_resource_types` into `classify_skills()`.
+- `src/istota/skill_proxy.py` — `task_id` + `authorized_skills` constructor params; structured rejection responses with `reason` codes; WARNING logs on every rejection.
+- `src/istota/skill_client.py` — surfaces credential-lookup `error` field; ensures stderr ends with newline so the authorized-skills line doesn't run together.
+- `src/istota/skills/_loader.py` — `select_skills()` tracks per-skill match reasons; `build_skill_manifest()` + `classify_skills()` accept `user_resource_types`; `pass2_*` log lines.
+- `tests/test_skill_proxy.py` — `TestAuthorizedSkillsFromCredentials` (7 cases) + `TestProxyInformativeRejections` (4 cases). Updated two existing tests for new error wording.
+- `tests/test_semantic_routing.py` — three new manifest-enrichment cases.
+- `tests/test_skills_loader.py` — `test_pass1_logs_per_skill_reasons`.
+- `AGENTS.md`, `.claude/rules/executor.md`, `.claude/rules/skills.md`, `docs/features/skills.md`, `docs/deployment/security.md`, `docs/architecture/executor.md`, `docs/reference/environment-variables.md` — documentation updated for the decoupled authorization model + observability hooks.
+
 ## 2026-04-26: CLI vs web UI audit — skill doc fixes + location CLI parity
 
 Audited every CLI-exposing skill against the web UI and the actual subcommand surface, then fixed the gaps that mattered. Three categories of finding: (1) one stale skill doc — `money/skill.md` listed every subcommand except `run-scheduled`, which had been wired into the wrapper earlier today (commit 2344087) but not documented; (2) zero skill docs told the model to fall back to `--help` when uncertain, so future drift would silently strand an agent; (3) the web UI exposed three location operations with no CLI equivalent — `discover`, dismiss-cluster CRUD, and per-place visit stats — which meant an agent asked to "stop suggesting that abandoned coffee shop" had to direct the user to the web UI.

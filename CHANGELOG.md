@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Skill proxy credential authorization is now decoupled from skill selection. Any CLI skill whose mapped credentials are present in the user's task environment can request them at runtime — Pass 1 keyword matching and Pass 2 semantic routing only control which skill docs go into the prompt, not which credentials are accessible. Fixes the long-standing failure mode where a keyword miss would silently strand an agent without the credentials it needed.
+- Pass 2 (semantic routing) prompt now includes the user's resource types so Haiku can reason "user has miniflux configured → feeds is plausible" without keyword overlap. Each skill line in the manifest also carries a `[needs resource: …]` hint when applicable.
+
+### Added
+- Structured WARNING logs on every skill-proxy rejection, keyed by task and reason code (`proxy_rejected task_id=… type=skill|credential reason=unknown_skill|not_authorized_credential|credential_not_present`). Companion INFO logs from skill selection (`pass1_selection count=N: foo(always_include), bar(keyword='kw'), …` and `pass2_added` / `pass2_no_additions` / `pass2_timeout`) make it possible to count selection misses vs. real abuse attempts.
+- Skill-proxy rejection responses now include `reason`, `name`/`skill`, and `authorized_skills` fields. The `istota-skill` client surfaces the authorized-skills list to the model via stderr so it can adapt rather than retry blindly.
+
 ### Added
 - Five new `istota-skill location` subcommands matching the web UI: `discover` (find unknown recurring clusters), `dismiss-cluster` / `list-dismissed` / `restore-dismissed` (manage zones the discover view should skip), and `place-stats` (visit count, first/last/longest visit, total time spent — derived from pings).
 
