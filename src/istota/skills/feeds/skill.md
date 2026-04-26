@@ -12,6 +12,8 @@ Manage RSS feed subscriptions via Miniflux. Supports listing, adding, and removi
 
 ## CLI
 
+Run `istota-skill feeds --help` (or `istota-skill feeds <subcommand> --help`) to see the live argument list.
+
 ```bash
 istota-skill feeds list                              # List all subscribed feeds
 istota-skill feeds add --url URL [--category NAME]   # Subscribe to a feed

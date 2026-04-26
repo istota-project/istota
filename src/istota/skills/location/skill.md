@@ -16,10 +16,22 @@ Places (named geofences) are stored in the database. Full CRUD via CLI:
 - **`learn`** — save current GPS position as a named place
 - **`update`** — modify an existing place (category, name, radius, coordinates, notes)
 - **`delete`** — remove a place (also clears place assignment from historical pings)
+- **`place-stats`** — visit count, first/last/longest visit, total time spent (derived from pings)
 
 Changes take effect on the next incoming GPS ping (no restart needed).
 
+## Discover and dismiss
+
+The web UI surfaces "discovered clusters" — recurring locations that aren't yet saved as named places. The same flow is available via CLI:
+
+- **`discover`** — find clusters of stationary pings not assigned to any place. Filters out clusters near existing places or inside dismissed zones.
+- **`dismiss-cluster`** — record a lat/lon/radius zone so future `discover` calls skip it (use when the user doesn't want a place suggested again).
+- **`list-dismissed`** — list dismissed cluster zones with their ids.
+- **`restore-dismissed`** — un-dismiss a zone by id (so it can surface again).
+
 ## CLI
+
+Run `istota-skill location --help` (or `istota-skill location <subcommand> --help`) to see the live argument list.
 
 All commands output JSON. The `ISTOTA_DB_PATH` and `ISTOTA_USER_ID` environment variables are set automatically.
 
@@ -68,6 +80,21 @@ istota-skill location reverse-geocode --lat 34.05 --lon -118.25
 # or reverse geocoding, filters transit, merges consecutive same-location stops
 istota-skill location day-summary --date 2026-03-08
 istota-skill location day-summary --date 2026-03-08 --tz America/New_York
+
+# Visit statistics for a place (by name or id)
+istota-skill location place-stats --name "home"
+istota-skill location place-stats --id 42
+
+# Find unknown recurring clusters
+istota-skill location discover
+istota-skill location discover --min-pings 20
+
+# Dismiss a cluster zone so it stops surfacing in discover
+istota-skill location dismiss-cluster --lat 34.05 --lon -118.4 --radius 200
+
+# List / un-dismiss
+istota-skill location list-dismissed
+istota-skill location restore-dismissed 7
 ```
 
 ## Output Examples
@@ -160,6 +187,53 @@ istota-skill location day-summary --date 2026-03-08 --tz America/New_York
 {
   "status": "ok",
   "deleted": "coffee shop"
+}
+```
+
+### place-stats
+
+```json
+{
+  "place_id": 42,
+  "total_visits": 12,
+  "first_visit": "2026-01-08T09:00:00Z",
+  "last_visit": "2026-04-22T18:30:00Z",
+  "avg_duration_min": 75,
+  "total_duration_min": 902,
+  "longest_visit_min": 210
+}
+```
+
+### discover
+
+```json
+{
+  "clusters": [
+    {
+      "lat": 34.0612,
+      "lon": -118.4055,
+      "total_pings": 38,
+      "first_seen": "2026-03-01T08:00:00Z",
+      "last_seen": "2026-04-25T17:30:00Z",
+      "radius_meters": 75
+    }
+  ]
+}
+```
+
+### list-dismissed
+
+```json
+{
+  "dismissed": [
+    {
+      "id": 7,
+      "lat": 34.05,
+      "lon": -118.4,
+      "radius_meters": 100,
+      "dismissed_at": "2026-04-20T12:00:00Z"
+    }
+  ]
 }
 ```
 

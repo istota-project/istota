@@ -9,6 +9,11 @@ CLI:
     python -m istota.skills.location delete (--name NAME | --id ID)
     python -m istota.skills.location reverse-geocode --lat N --lon N
     python -m istota.skills.location day-summary --date YYYY-MM-DD [--tz TZ]
+    python -m istota.skills.location discover [--min-pings N]
+    python -m istota.skills.location dismiss-cluster --lat N --lon N [--radius M]
+    python -m istota.skills.location list-dismissed
+    python -m istota.skills.location restore-dismissed CLUSTER_ID
+    python -m istota.skills.location place-stats (--name NAME | --id ID)
 """
 
 import argparse
@@ -706,6 +711,96 @@ def cmd_day_summary(args):
     conn.close()
 
 
+def cmd_discover(args):
+    """Find clusters of stationary pings not assigned to any place."""
+    from istota.location_logic import _location_discover_places
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path:
+        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
+        sys.exit(1)
+    user_id = _get_user_id()
+    min_pings = getattr(args, "min_pings", None) or 10
+    result = _location_discover_places(db_path, user_id, min_pings=min_pings)
+    print(json.dumps(result, indent=2))
+
+
+def cmd_dismiss_cluster(args):
+    """Mark a cluster zone as dismissed so it stops surfacing in discover."""
+    from istota.location_logic import _location_dismiss_cluster
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path:
+        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
+        sys.exit(1)
+    user_id = _get_user_id()
+    radius = getattr(args, "radius", None) or 100
+    result = _location_dismiss_cluster(
+        db_path, user_id,
+        {"lat": args.lat, "lon": args.lon, "radius_meters": radius},
+    )
+    print(json.dumps({"status": "ok", **result}, indent=2))
+
+
+def cmd_list_dismissed(args):
+    """List all dismissed cluster zones."""
+    from istota.location_logic import _location_list_dismissed
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path:
+        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
+        sys.exit(1)
+    user_id = _get_user_id()
+    result = _location_list_dismissed(db_path, user_id)
+    print(json.dumps(result, indent=2))
+
+
+def cmd_restore_dismissed(args):
+    """Un-dismiss a cluster zone by id (so it can be discovered again)."""
+    from istota.location_logic import _location_restore_dismissed
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path:
+        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
+        sys.exit(1)
+    user_id = _get_user_id()
+    deleted = _location_restore_dismissed(db_path, user_id, args.cluster_id)
+    if not deleted:
+        print(json.dumps({"status": "error", "error": "dismissed cluster not found"}))
+        return
+    print(json.dumps({"status": "ok", "id": args.cluster_id}, indent=2))
+
+
+def cmd_place_stats(args):
+    """Visit statistics for a place, derived from ping data."""
+    from istota.location_logic import _location_place_stats
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path:
+        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
+        sys.exit(1)
+    user_id = _get_user_id()
+
+    place_id = getattr(args, "id", None)
+    if place_id is None:
+        from istota import db as _db
+        conn = _get_conn()
+        try:
+            place = _db.get_place_by_name(conn, user_id, args.name)
+        finally:
+            conn.close()
+        if not place:
+            print(json.dumps({"status": "error", "error": f"place '{args.name}' not found"}))
+            return
+        place_id = place.id
+
+    result = _location_place_stats(db_path, user_id, place_id)
+    if result is None:
+        print(json.dumps({"status": "error", "error": "place not found or not owned by user"}))
+        return
+    print(json.dumps(result, indent=2))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Location tracking CLI")
     sub = parser.add_subparsers(dest="command")
@@ -753,6 +848,25 @@ def build_parser():
     dsum.add_argument("--date", help="Date (YYYY-MM-DD, default: today)")
     dsum.add_argument("--tz", help="Timezone (default: TZ env var or America/Los_Angeles)")
 
+    disc = sub.add_parser("discover", help="Find unknown clusters of stationary pings")
+    disc.add_argument("--min-pings", dest="min_pings", type=int, default=10,
+                      help="Minimum pings for a cluster to surface (default 10)")
+
+    dismiss = sub.add_parser("dismiss-cluster", help="Dismiss a cluster zone so it stops appearing in discover")
+    dismiss.add_argument("--lat", type=float, required=True)
+    dismiss.add_argument("--lon", type=float, required=True)
+    dismiss.add_argument("--radius", type=int, default=100, help="Dismissal radius in meters (default 100)")
+
+    sub.add_parser("list-dismissed", help="List dismissed cluster zones")
+
+    restore = sub.add_parser("restore-dismissed", help="Un-dismiss a cluster zone by id")
+    restore.add_argument("cluster_id", type=int, help="Dismissed cluster id")
+
+    pstats = sub.add_parser("place-stats", help="Visit statistics for a place")
+    pstats_target = pstats.add_mutually_exclusive_group(required=True)
+    pstats_target.add_argument("--name", help="Place name")
+    pstats_target.add_argument("--id", type=int, help="Place ID")
+
     return parser
 
 
@@ -770,6 +884,11 @@ def main():
         "attendance": cmd_attendance,
         "reverse-geocode": cmd_reverse_geocode,
         "day-summary": cmd_day_summary,
+        "discover": cmd_discover,
+        "dismiss-cluster": cmd_dismiss_cluster,
+        "list-dismissed": cmd_list_dismissed,
+        "restore-dismissed": cmd_restore_dismissed,
+        "place-stats": cmd_place_stats,
     }
 
     if args.command in commands:

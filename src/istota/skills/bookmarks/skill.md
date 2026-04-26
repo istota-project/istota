@@ -12,6 +12,8 @@ Search, browse, and manage bookmarks from the user's Karakeep vault.
 
 ## Commands
 
+Run `istota-skill bookmarks --help` (or `istota-skill bookmarks <subcommand> --help`) to see the live argument list.
+
 ```bash
 # Search bookmarks (full-text, ranked by relevance)
 istota-skill bookmarks search "machine learning papers"

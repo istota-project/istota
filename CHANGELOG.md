@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Five new `istota-skill location` subcommands matching the web UI: `discover` (find unknown recurring clusters), `dismiss-cluster` / `list-dismissed` / `restore-dismissed` (manage zones the discover view should skip), and `place-stats` (visit count, first/last/longest visit, total time spent — derived from pings).
+
+### Changed
+- Skill docs (`money`, `bookmarks`, `location`, `memory_search`, `feeds`) now point at `istota-skill <name> --help` for the live argument list, alongside the existing hand-enumerated examples.
+- `money/skill.md` lists `run-scheduled` (previously omitted) and includes it in the mutation/concurrency rule.
+
 ### Fixed
 - `istota-skill money run-scheduled` now works. The Click subcommand existed in the underlying `istota.money` CLI but was never wired into the `istota-skill` argparse wrapper, so the auto-seeded `_module.money.run_scheduled` cron job exited with usage help instead of running.
 - Sidebar no longer side-scrolls when child content exceeds its width. Long place names truncate with an ellipsis instead of expanding the row.

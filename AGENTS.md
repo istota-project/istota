@@ -28,6 +28,7 @@ istota/
 │   ├── nextcloud_client.py  # Shared Nextcloud HTTP plumbing (OCS + WebDAV)
 │   ├── notifications.py     # Central notification dispatcher (Talk, Email, ntfy)
 │   ├── feeds.py             # Miniflux API client + HTML feed page generation
+│   ├── location_logic.py    # Place stats, cluster discovery, dismiss-zone helpers (shared web ⇄ skill)
 │   ├── scheduler.py         # Task processor, briefing scheduler, all polling
 │   ├── shared_file_organizer.py # Auto-organize files shared with bot
 │   ├── sleep_cycle.py       # Nightly memory extraction

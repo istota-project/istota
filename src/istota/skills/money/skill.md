@@ -16,6 +16,8 @@ Multiple ledgers can be configured. Use `--ledger NAME` to select which ledger t
 
 ## CLI commands
 
+Run `istota-skill money --help` (or `istota-skill money <subcommand> --help`) to see the live argument list — the examples below cover the common cases but flags evolve.
+
 ```bash
 # List available ledgers
 istota-skill money list
@@ -47,11 +49,14 @@ istota-skill money sync-monarch [--dry-run] [--ledger NAME]
 
 # Import from CSV
 istota-skill money import-csv /path/to/export.csv --account Assets:Bank:Checking [--tag TAG] [--exclude-tag TAG] [--ledger NAME]
+
+# Run periodic money tasks (Monarch sync + invoice scheduler) — invoked by cron, but usable ad hoc
+istota-skill money run-scheduled [--dry-run] [--skip-monarch]
 ```
 
 All output is JSON with `status: ok|error`.
 
-**Concurrency rule:** mutation commands (`add-transaction`, `sync-monarch`, `import-csv`, `work add/update/remove`, `invoice generate/paid/void/create`) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`) are safe to parallelize.
+**Concurrency rule:** mutation commands (`add-transaction`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/void/create`) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`) are safe to parallelize.
 
 ## Adding transactions
 
