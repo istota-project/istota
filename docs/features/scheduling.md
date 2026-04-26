@@ -58,6 +58,8 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `once` | no | Auto-delete after successful execution |
 | `silent_unless_action` | no | Suppress output unless response has `ACTION:` prefix |
 | `skip_log_channel` | no | Suppress log channel output for frequent jobs |
+| `model` | no | Claude model override for this job (e.g. `"claude-sonnet-4-6"`) |
+| `effort` | no | Effort override: `low`, `medium`, `high`, `xhigh`, or `max` |
 
 ## Failure handling
 

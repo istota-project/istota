@@ -48,7 +48,9 @@ Named geofences stored in the `places` DB table. Manage via CLI or web UI:
 - **CLI**: `learn`, `update`, `delete` subcommands via `python -m istota.skills.location`
 - **Web UI**: create from discovered clusters, edit form, drag-to-reposition on map
 
-Place detection uses hysteresis (2 consecutive pings required) to avoid flapping at geofence boundaries. Updating a place's location or radius triggers automatic ping reassignment.
+Places have an optional `notes` text field for free-form annotations.
+
+Place detection uses hysteresis (2 consecutive pings required) to avoid flapping at geofence boundaries. Pings with horizontal accuracy above `accuracy_threshold_m` (default 100 m) are stored but skipped for place matching. A periodic reconciler re-derives closed visits from stored pings so historical visits recover from state-machine drift. Updating a place's location or radius triggers automatic ping reassignment.
 
 ## Database tables
 
@@ -58,6 +60,7 @@ Place detection uses hysteresis (2 consecutive pings required) to avoid flapping
 | `places` | Named geofences with coordinates and radius |
 | `visits` | Detected place visits (arrival/departure) |
 | `location_state` | Per-user tracking state |
+| `dismissed_clusters` | Clusters the user chose not to save as places |
 
 Old pings are cleaned after `location_ping_retention_days` (default 365).
 
@@ -67,4 +70,4 @@ The [web interface](web-interface.md) provides location pages:
 
 - **Today view**: current position, day summary, trips
 - **History**: date picker, activity filter, heatmap
-- **Places**: discover unknown clusters, create/edit/delete places, visit statistics
+- **Places**: discover unknown clusters (with dismiss option), create/edit/delete places, visit statistics
