@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-25 (cont. 5): Add `effort` config + recommend pinning model version
+
+Walked through Claude Code's CLI reference (up to CC 2.1.120) to see what's worth wiring up. Two things:
+
+**1. New `--effort` flag for adaptive reasoning.** Opus 4.7, Opus 4.6, and Sonnet 4.6 take an effort level (`low`, `medium`, `high`, `xhigh`, `max`). Opus 4.7 supports all five and defaults to `xhigh`; the others top out at `high`/`max`. Added a top-level `effort: str` to `Config`, parsed from `[top]` of the TOML, and threaded into the `claude` subprocess command in `executor.py` next to the existing `--model` line. Empty string = model default, same convention as `model`. Wired through Ansible: new `istota_effort: ""` default in `defaults/main.yml` and a conditional emit block in `config.toml.j2`.
+
+**2. Pin model version, don't ride aliases.** This is the bigger operational point. Today `config.model` is documented as `"sonnet"` or `"opus"` — those are aliases that float. Right now `opus` resolves to Opus 4.7 on the Anthropic API, but next time Anthropic ships a new Opus the alias will silently move us. We won't notice — there's no log of which exact model handled a task. The CC docs explicitly say: "Aliases point to the recommended version for your provider and update over time. To pin to a specific version, use the full model name (for example, `claude-opus-4-7`)."
+
+Updated the inline comments in `config.example.toml`, `defaults/main.yml`, the `Config` dataclass, and the rules doc to recommend pinning (`claude-opus-4-7`, `claude-sonnet-4-6`) rather than aliases. No code change needed — `--model` already accepts full names; this is purely a documentation/operational nudge.
+
+Defaults stay empty so existing instances keep using the CLI default unless an operator opts in. To take effort, set both `model` (so the model is one that supports it) and `effort` in `config.toml`, or `istota_model` + `istota_effort` in your Ansible inventory.
+
+**Files added/modified:**
+- `src/istota/config.py` — `Config.effort: str = ""` + parser hook.
+- `src/istota/executor.py` — `--effort` CLI arg when `config.effort` is set.
+- `config/config.example.toml` — documented `effort`, rewrote model comment to recommend pinning.
+- `deploy/ansible/defaults/main.yml` — `istota_effort: ""`, updated `istota_model` comment.
+- `deploy/ansible/templates/config.toml.j2` — conditional `effort = …` block.
+- `.claude/rules/config.md` — `Config` dataclass entry updated.
+
 ## 2026-04-25 (cont. 4): Sync custom system prompt with latest Claude Code
 
 Audited `config/system-prompt.md` against the extracted prompts at Piebald-AI/claude-code-system-prompts (tracking up to CC 2.1.120, 2026-04-24). The custom prompt is what we ship when `custom_system_prompt = true` — it replaces CC's default with a smaller, bot-tailored version focused on tool usage and working practices.

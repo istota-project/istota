@@ -7,8 +7,16 @@ bot_name = "Istota"
 # Include emissaries.md (constitutional principles) in system prompts (default: true)
 # emissaries_enabled = true
 
-# Claude model to use (e.g. "sonnet", "opus"). Empty or omitted = CLI default.
-# model = "sonnet"
+# Claude model to use. Pin to a specific version so a Claude Code update doesn't
+# silently move you to a new model. Use "claude-opus-4-7" not "opus", "claude-sonnet-4-6"
+# not "sonnet". Aliases ("opus", "sonnet", "haiku") still work but float to the latest.
+# Empty or omitted = CLI default.
+# model = "claude-opus-4-7"
+
+# Effort level (Opus 4.7, Opus 4.6, Sonnet 4.6 only): low, medium, high, xhigh, max.
+# Opus 4.7 supports all five and defaults to xhigh. Other models top out at high (or max).
+# Empty or omitted = model default.
+# effort = "high"
 
 # Use config/system-prompt.md instead of Claude Code's default system prompt.
 # The custom prompt is minimal, focused on tool usage and working practices.

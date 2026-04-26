@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `effort` config field (top-level in `config.toml`, `istota_effort` in Ansible) wires Claude Code's `--effort` flag for adaptive reasoning. Accepts `low`, `medium`, `high`, `xhigh`, `max`. Supported on Opus 4.7, Opus 4.6, Sonnet 4.6. Empty = model default.
 - `agents:` markdown frontmatter convention baked into the system prompt: per-file instructions (1–3 sentence string) travel with a file and are honored on reads from trusted paths, ignored on untrusted paths.
 - In-tree `istota.money` subpackage (formerly the standalone moneyman service): accounting CLI, business logic, and SvelteKit pages folded into istota. Optional install: `pip install istota[money]`.
 - Money web pages at `/istota/money/*` (Accounts, Transactions, Reports, Taxes, Business). Feature flag exposed via `/istota/api/me` as `features.money`; nav item appears when the user has a money resource.
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Custom system prompt (`config/system-prompt.md`, used when `custom_system_prompt = true`) gained an "Executing actions with care" section covering reversibility, risky-op examples, investigate-before-destroy, and scoped authorization. Sleep guidance split into two specific rules. Synced against Claude Code 2.1.120's extracted prompts; pieces that duplicate `emissaries.md` / `persona.md` were intentionally left out.
+- Documentation now recommends pinning the `model` config to a full version ID (e.g. `claude-opus-4-7`) rather than an alias (`opus`), so a Claude Code update can't silently swap the model out from under us. Aliases still work but float to whatever Anthropic ships next.
 - Money is now `src/istota/money/` instead of a top-level `src/money/` package; the standalone-extract scaffolding is gone. Web routes, skill, and scheduler all call the same in-process `istota.money.resolve_for_user(user_id, istota_config)`.
 - Money skill no longer marshals env vars for workspace mode; it resolves the user's `UserContext` in-process and injects it into Click directly. The standalone `money` CLI keeps file-based config support (`MONEY_CONFIG=...` or `-c <path>`) for terminal use.
 - Money scheduled jobs invoke `istota-skill money <cmd>` with `MONEY_USER` set, instead of `MONEY_CONFIG=… money --user X <cmd>`. `MONEY_SECRETS_FILE` is no longer exported by seeded jobs — the skill reads credentials in-process.

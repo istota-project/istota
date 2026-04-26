@@ -27,8 +27,11 @@ istota_group: "{{ istota_namespace }}"
 istota_bot_name: ""
 # Include emissaries.md (constitutional principles) in system prompts
 istota_emissaries_enabled: true
-# Claude model (e.g. "sonnet", "opus"); empty = CLI default
+# Claude model. Pin to a version like "claude-opus-4-7" rather than the alias "opus" so
+# Claude Code updates don't silently switch us to a newer model. Empty = CLI default.
 istota_model: ""
+# Effort level (Opus 4.7, Opus 4.6, Sonnet 4.6): low, medium, high, xhigh, max. Empty = model default.
+istota_effort: ""
 # Use config/system-prompt.md instead of Claude Code's default system prompt
 istota_custom_system_prompt: true
 
