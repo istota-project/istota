@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Sidebar no longer side-scrolls when child content exceeds its width. Long place names truncate with an ellipsis instead of expanding the row.
+- Place row hover background now reads symmetric top/bottom (explicit `line-height` + rebalanced padding) and left/right (matching gutter on both sides of the sidebar list).
+
 ### Changed
 - Location places sidebar: removed the per-row radius badge and the hover-to-delete `×`. Rows now show the place name only.
 - Place delete moved into the place edit modal as a left-aligned "Delete" link guarded by a confirmation prompt — no more accidental deletes from the sidebar.

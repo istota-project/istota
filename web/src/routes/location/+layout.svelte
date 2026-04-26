@@ -367,15 +367,21 @@
 		display: block;
 		width: 100%;
 		min-width: 0;
+		max-width: 100%;
 		background: none;
 		border: none;
 		color: inherit;
 		font: inherit;
+		font-size: var(--text-sm);
+		line-height: 1.5;
 		cursor: pointer;
-		padding: 0.3rem 0.75rem;
+		padding: 0.2rem 0.75rem;
 		border-radius: 0.3rem;
 		transition: background var(--transition-fast);
 		text-align: left;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.place-btn:hover {
@@ -388,8 +394,7 @@
 	}
 
 	.place-name {
-		font-size: var(--text-sm);
-		white-space: nowrap;
+		display: block;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
