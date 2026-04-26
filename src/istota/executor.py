@@ -2096,10 +2096,12 @@ def execute_task(
         use_streaming = on_progress is not None
         allowed = build_allowed_tools(is_admin, selected_skills)
         cmd = ["claude", "-p", "-", "--allowedTools"] + allowed + ["--disallowedTools", "Agent"]
-        if config.model:
-            cmd += ["--model", config.model]
-        if config.effort:
-            cmd += ["--effort", config.effort]
+        model = (task.model or "").strip() or config.model
+        if model:
+            cmd += ["--model", model]
+        effort = (task.effort or "").strip() or config.effort
+        if effort:
+            cmd += ["--effort", effort]
         if config.custom_system_prompt:
             sp_path = config.skills_dir.parent / "system-prompt.md"
             if sp_path.exists():

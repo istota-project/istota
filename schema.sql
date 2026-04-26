@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Skill selection tracking (JSON array of skill names)
     selected_skills TEXT,
 
+    -- Per-task model override (e.g. "claude-sonnet-4-6"); empty = use config default
+    model TEXT,
+    -- Per-task effort override (low/medium/high/xhigh/max); empty = use config default
+    effort TEXT,
+
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
 );
 
@@ -194,6 +199,8 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     last_success_at TEXT,
     once INTEGER DEFAULT 0,                 -- One-time job: auto-removed after successful execution
     skip_log_channel INTEGER DEFAULT 0,     -- Suppress log channel output for tasks from this job
+    model TEXT,                             -- Per-job model override; empty = use config default
+    effort TEXT,                            -- Per-job effort override; empty = use config default
     UNIQUE(user_id, name)
 );
 

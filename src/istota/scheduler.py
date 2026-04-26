@@ -556,6 +556,7 @@ def _format_log_channel_body(
     prefix: str | tuple[str, str], descriptions: list[str], *, done: bool = False,
     success: bool = True, error: str | None = None,
     skills: list[str] | None = None,
+    model: str | None = None, effort: str | None = None,
 ) -> str:
     """Format a log channel message with accumulated tool descriptions."""
     if isinstance(prefix, tuple):
@@ -570,6 +571,12 @@ def _format_log_channel_body(
         status = "⏳ Running"
     header = f"{task_prefix} {status} {count} - {source}" if source else f"{task_prefix} {status} {count}"
     lines = [header]
+    if model and effort:
+        lines.append(f"(model: {model} {effort})")
+    elif model:
+        lines.append(f"(model: {model})")
+    elif effort:
+        lines.append(f"(effort: {effort})")
     if skills:
         lines.append(f"Skills: {', '.join(skills)}")
     for desc in _deduplicate_descriptions(descriptions):
@@ -632,6 +639,7 @@ def _finalize_log_channel(
     config: Config, task: db.Task, log_channel: str, prefix: str,
     log_callback, success: bool, error: str | None = None,
     skills: list[str] | None = None,
+    model: str | None = None, effort: str | None = None,
 ):
     """Post/edit the final summary to the log channel."""
     descriptions = getattr(log_callback, "all_descriptions", []) if log_callback else []
@@ -639,7 +647,7 @@ def _finalize_log_channel(
 
     body = _format_log_channel_body(
         prefix, descriptions, done=True, success=success, error=error,
-        skills=skills,
+        skills=skills, model=model, effort=effort,
     )
 
     try:
@@ -1660,10 +1668,13 @@ def process_one_task(
                         selected_skills = json.loads(refreshed.selected_skills)
             except Exception:
                 pass
+        resolved_model = (task.model or "").strip() or config.model or None
+        resolved_effort = (task.effort or "").strip() or config.effort or None
         _finalize_log_channel(
             config, task, log_channel, log_channel_prefix,
             log_callback, success, error=error_msg,
             skills=selected_skills,
+            model=resolved_model, effort=resolved_effort,
         )
 
     # Deduplicate: strip text already sent as progress from the final result.
@@ -2721,6 +2732,8 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     scheduled_job_id=job.id,
                     command=job.command,
                     queue="background",
+                    model=job.model or None,
+                    effort=job.effort or None,
                 )
                 db.set_scheduled_job_last_run(conn, job.id)
                 created_tasks.append(task_id)

@@ -139,6 +139,44 @@ class TestFormatLogChannelBody:
         )
         assert "Skills:" not in body
 
+    def test_model_and_effort_included_in_body(self):
+        body = _format_log_channel_body(
+            ("**[#42]**", "Dev"), ["📄 Reading file.txt"],
+            done=True, success=True,
+            model="claude-sonnet-4-6", effort="low",
+        )
+        assert "(model: claude-sonnet-4-6 low)" in body
+        # Should appear on a single dedicated line below the header
+        lines = body.split("\n")
+        spec_idx = next(i for i, l in enumerate(lines) if "claude-sonnet-4-6" in l)
+        tool_idx = next(i for i, l in enumerate(lines) if "Reading file.txt" in l)
+        assert spec_idx < tool_idx
+
+    def test_model_only(self):
+        body = _format_log_channel_body(
+            ("**[#42]**", "Dev"), [],
+            done=True, success=True,
+            model="claude-opus-4-7",
+        )
+        assert "(model: claude-opus-4-7)" in body
+        assert "effort" not in body.lower()
+
+    def test_effort_only(self):
+        body = _format_log_channel_body(
+            ("**[#42]**", "Dev"), [],
+            done=True, success=True,
+            effort="high",
+        )
+        assert "(effort: high)" in body
+
+    def test_no_model_effort_line_when_unset(self):
+        body = _format_log_channel_body(
+            ("**[#42]**", "Dev"), ["📄 Reading file.txt"],
+            done=True, success=True,
+        )
+        assert "model:" not in body.lower()
+        assert "effort:" not in body.lower()
+
     def test_deduplicates_consecutive_descriptions(self):
         body = _format_log_channel_body(
             ("**[#42]**", "Dev"),

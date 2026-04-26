@@ -45,6 +45,8 @@ class Task:
     queue: str = "foreground"
     confirmed_at: str | None = None
     selected_skills: str | None = None  # JSON array of skill names
+    model: str | None = None  # Per-task model override; empty/None = use config default
+    effort: str | None = None  # Per-task effort override; empty/None = use config default
 
 
 @dataclass
@@ -127,6 +129,8 @@ class ScheduledJob:
     last_error: str | None = None
     last_success_at: str | None = None
     once: bool = False
+    model: str | None = None  # Per-job model override; empty/None = use config default
+    effort: str | None = None  # Per-job effort override; empty/None = use config default
 
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
@@ -147,6 +151,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("actions_taken", "TEXT"),
         ("execution_trace", "TEXT"),
         ("selected_skills", "TEXT"),
+        ("model", "TEXT"),
+        ("effort", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
@@ -162,6 +168,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("last_success_at", "TEXT"),
         ("once", "INTEGER DEFAULT 0"),
         ("skip_log_channel", "INTEGER DEFAULT 0"),
+        ("model", "TEXT"),
+        ("effort", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE scheduled_jobs ADD COLUMN {col} {col_type}")
@@ -277,6 +285,8 @@ def create_task(
     scheduled_job_id: int | None = None,
     command: str | None = None,
     queue: str = "foreground",
+    model: str | None = None,
+    effort: str | None = None,
 ) -> int:
     """Create a new task and return its ID."""
     # Guard against duplicate Talk messages (race between overlapping poll cycles)
@@ -299,8 +309,8 @@ def create_task(
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
-            heartbeat_silent, skip_log_channel, scheduled_job_id, queue
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            heartbeat_silent, skip_log_channel, scheduled_job_id, queue, model, effort
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -322,6 +332,8 @@ def create_task(
             1 if skip_log_channel else 0,
             scheduled_job_id,
             queue,
+            model or None,
+            effort or None,
         ),
     )
     task_id = cursor.fetchone()[0]
@@ -363,6 +375,8 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         queue=row["queue"] if "queue" in row.keys() else "foreground",
         confirmed_at=row["confirmed_at"] if "confirmed_at" in row.keys() else None,
         selected_skills=row["selected_skills"] if "selected_skills" in row.keys() else None,
+        model=row["model"] if "model" in row.keys() else None,
+        effort=row["effort"] if "effort" in row.keys() else None,
     )
 
 
@@ -495,7 +509,7 @@ def claim_task(
                   output_target, talk_message_id, talk_response_id,
                   reply_to_talk_id, reply_to_content,
                   heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
-                  confirmed_at, confirmation_prompt
+                  confirmed_at, confirmation_prompt, model, effort
         """,
         params,
     )
@@ -529,7 +543,7 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Task | None:
                created_at, scheduled_for, output_target,
                talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
                heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
-               confirmed_at, selected_skills
+               confirmed_at, selected_skills, model, effort
         FROM tasks WHERE id = ?
         """,
         (task_id,),
@@ -1325,7 +1339,7 @@ def get_reply_parent_task(
                created_at, scheduled_for, output_target,
                talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
                heartbeat_silent, actions_taken, scheduled_job_id, queue,
-               selected_skills
+               selected_skills, model, effort
         FROM tasks
         WHERE conversation_token = ?
         AND (talk_message_id = ? OR talk_response_id = ?)
@@ -1913,7 +1927,7 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once
+               once, model, effort
         FROM scheduled_jobs
         WHERE enabled = 1
         """
@@ -1929,7 +1943,7 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once
+               once, model, effort
         FROM scheduled_jobs
         WHERE user_id = ?
         ORDER BY name
@@ -1959,6 +1973,8 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
         last_error=row["last_error"] if "last_error" in row.keys() else None,
         last_success_at=row["last_success_at"] if "last_success_at" in row.keys() else None,
         once=bool(row["once"]) if "once" in row.keys() else False,
+        model=row["model"] if "model" in row.keys() else None,
+        effort=row["effort"] if "effort" in row.keys() else None,
     )
 
 
@@ -2023,7 +2039,7 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once
+               once, model, effort
         FROM scheduled_jobs
         WHERE id = ?
         """,
@@ -2068,7 +2084,7 @@ def get_scheduled_job_by_name(
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once
+               once, model, effort
         FROM scheduled_jobs
         WHERE user_id = ? AND name = ?
         """,

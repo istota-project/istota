@@ -18,6 +18,38 @@ _TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
 # are not subject to CRON.md orphan deletion.
 _MODULE_JOB_PREFIX = "_module."
 
+# Effort levels accepted by Claude Code's --effort flag. Loose check — warn,
+# don't reject — so a future addition doesn't silently break user CRON.md.
+_KNOWN_EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
+
+
+def _validate_model(name: str, user_id: str, model: str) -> None:
+    """Warn on suspicious model names; never reject.
+
+    Catches obvious typos (no claude- prefix, embedded whitespace) without
+    hardcoding a model allowlist that goes stale every release.
+    """
+    if not model.startswith("claude-"):
+        logger.warning(
+            "Job '%s' (user %s): model %r doesn't start with 'claude-' — likely a typo",
+            name, user_id, model,
+        )
+        return
+    if any(c.isspace() for c in model):
+        logger.warning(
+            "Job '%s' (user %s): model %r contains whitespace — likely a typo",
+            name, user_id, model,
+        )
+
+
+def _validate_effort(name: str, user_id: str, effort: str) -> None:
+    """Warn when effort isn't in the known set; never reject."""
+    if effort not in _KNOWN_EFFORT_VALUES:
+        logger.warning(
+            "Job '%s' (user %s): effort %r not in known set %s",
+            name, user_id, effort, sorted(_KNOWN_EFFORT_VALUES),
+        )
+
 
 @dataclass
 class CronJob:
@@ -32,6 +64,8 @@ class CronJob:
     silent_unless_action: bool = False
     skip_log_channel: bool = False
     once: bool = False
+    model: str = ""  # Per-job Claude model override; empty = use config default
+    effort: str = ""  # Per-job effort override (low/medium/high/xhigh/max); empty = use config default
 
 
 def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
@@ -100,6 +134,12 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
                 name, user_id,
             )
             continue
+        model = j.get("model", "").strip()
+        effort = j.get("effort", "").strip()
+        if model:
+            _validate_model(name, user_id, model)
+        if effort:
+            _validate_effort(name, user_id, effort)
         jobs.append(CronJob(
             name=name,
             cron=cron,
@@ -112,6 +152,8 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
             silent_unless_action=j.get("silent_unless_action", False),
             skip_log_channel=j.get("skip_log_channel", False),
             once=j.get("once", False),
+            model=model,
+            effort=effort,
         ))
 
     return jobs
@@ -152,6 +194,10 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
             lines.append("skip_log_channel = true")
         if job.once:
             lines.append("once = true")
+        if job.model:
+            lines.append(f'model = "{job.model}"')
+        if job.effort:
+            lines.append(f'effort = "{job.effort}"')
 
     lines.append("```")
     lines.append("")
@@ -193,6 +239,8 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
                 "silent_unless_action": 1 if fj.silent_unless_action else 0,
                 "skip_log_channel": 1 if fj.skip_log_channel else 0,
                 "once": 1 if fj.once else 0,
+                "model": fj.model or None,
+                "effort": fj.effort or None,
             }
             # File is authoritative for enabled state (symmetric sync)
             updates["enabled"] = 1 if fj.enabled else 0
@@ -223,8 +271,8 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
                 """INSERT INTO scheduled_jobs
                    (user_id, name, cron_expression, prompt, command,
                     conversation_token, output_target, enabled, silent_unless_action,
-                    skip_log_channel, once)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    skip_log_channel, once, model, effort)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id, fj.name, fj.cron, fj.prompt,
                     fj.command or None,
@@ -233,6 +281,8 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
                     1 if fj.silent_unless_action else 0,
                     1 if fj.skip_log_channel else 0,
                     1 if fj.once else 0,
+                    fj.model or None,
+                    fj.effort or None,
                 ),
             )
 
@@ -284,6 +334,8 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             silent_unless_action=j.silent_unless_action,
             skip_log_channel=j.skip_log_channel,
             once=j.once,
+            model=j.model or "",
+            effort=j.effort or "",
         )
         for j in db_jobs
     ]

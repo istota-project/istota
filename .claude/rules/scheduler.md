@@ -182,13 +182,13 @@ After task completion, if enabled + `auto_index_conversations`:
 
 | Table | Dataclass | Key Columns |
 |---|---|---|
-| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, actions_taken, execution_trace |
+| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, actions_taken, execution_trace, model, effort |
 | `user_resources` | `UserResource` | id, user_id, resource_type, resource_path, display_name, permissions |
 | `briefing_configs` | `BriefingConfig` | id, user_id, name, cron_expression, conversation_token, components (JSON), enabled |
 | `briefing_state` | — | user_id, briefing_name, last_run_at |
 | `processed_emails` | `ProcessedEmail` | id, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method |
 | `istota_file_tasks` | `IstotaFileTask` | id, user_id, content_hash, original_line, normalized_content, status, task_id, file_path |
-| `scheduled_jobs` | `ScheduledJob` | id, user_id, name, cron_expression, prompt, conversation_token, output_target, enabled, silent_unless_action, consecutive_failures |
+| `scheduled_jobs` | `ScheduledJob` | id, user_id, name, cron_expression, prompt, conversation_token, output_target, enabled, silent_unless_action, consecutive_failures, model, effort |
 | `talk_poll_state` | — | conversation_token, last_known_message_id |
 | `sleep_cycle_state` | — | user_id, last_run_at, last_processed_task_id |
 | `channel_sleep_cycle_state` | — | conversation_token, last_run_at, last_processed_task_id |
