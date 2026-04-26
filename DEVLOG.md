@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Sidebar polish — no horizontal scroll, symmetric hover bg
+
+Follow-up to the places sidebar tidy-up. Three problems surfaced once the radius badge was removed and rows tightened up: (1) long place names made the whole sidebar side-scroll, (2) the hover background looked top-heavy because the button's default `line-height: normal` left more visual breathing room above the glyph than below, and (3) the hover background was flush with the sidebar's left edge but had a 0.25rem gutter on the right — asymmetric. Fixed all three; also added mock places to `vite-mock-api.ts` so the next pass on this UI is testable without booting the FastAPI backend.
+
+**Key changes:**
+- `Sidebar.svelte`: `.sidebar-list` gained `min-width: 0` and `overflow-x: hidden` — the sidebar no longer side-scrolls regardless of child content. Bottom padding made symmetric: `padding: 0 0.25rem 0.5rem` (was `0 0.25rem 0.5rem 0`), so hover backgrounds sit inside an equal gutter on both sides.
+- `routes/location/+layout.svelte`: `.place-btn` now truncates on the button itself (`white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%`) instead of relying on the inner `<span>` (which couldn't ellipsize as inline content). Padding tightened to `0.2rem 0.75rem` and explicit `line-height: 1.5` set so the hover bg reads symmetric top/bottom.
+- `vite-mock-api.ts`: 12 mock places spanning home/work/social/gym/shopping/food/family/medical/hotel/friend categories, with two intentionally long names ("Berghain Boiler Room (Side Entrance)" and "Café around the corner with the wifi password on the wall") to verify truncation. Added a `/places/{id}/stats` handler returning empty stats so clicking a row in dev mode doesn't 404.
+
+**Files added/modified:**
+- `web/src/lib/components/ui/Sidebar.svelte` — overflow-x hidden, min-width 0, symmetric horizontal padding on `.sidebar-list`.
+- `web/src/routes/location/+layout.svelte` — `.place-btn` ellipsis on the button, explicit line-height, padding rebalance.
+- `web/vite-mock-api.ts` — 12 mock places with varied categories and two long names; `/places/{id}/stats` handler.
+
 ## 2026-04-26: Location places — safer delete + cleaner sidebar + dynamic categories
 
 Small follow-up to the shell/primitives consolidation. The places sidebar had a delete `×` that appeared on row hover — too easy to fire by accident, and the `XXm` radius badge next to each name ate sidebar real-estate without earning it. Folded delete into the existing edit modal as a left-aligned link (with a `confirm()` guard) so it requires an explicit two-step action, and dropped the radius from the sidebar. While in `PlaceForm`, also made the category dropdown grow with the user's data: instead of a fixed list of 11 categories, options now merge the base list, every distinct category present on `$locationPlaces`, and the place's own current category, deduped and alphabetized.

@@ -55,8 +55,10 @@
 
 	.sidebar-list {
 		flex: 1;
+		min-width: 0;
+		overflow-x: hidden;
 		overflow-y: auto;
-		padding: 0 0.25rem 0.5rem 0;
+		padding: 0 0.25rem 0.5rem;
 	}
 
 	.sidebar-list::-webkit-scrollbar { width: 4px; }

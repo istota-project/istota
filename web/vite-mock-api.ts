@@ -17,7 +17,22 @@ const user = {
 };
 
 const emptyFeeds = { feeds: [], entries: [], total: 0 };
-const emptyPlaces = { places: [] };
+const mockPlaces = {
+	places: [
+		{ id: 1, name: 'Home', lat: 52.5200, lon: 13.4050, radius_meters: 80, category: 'home', notes: '' },
+		{ id: 2, name: 'Office', lat: 52.5074, lon: 13.3904, radius_meters: 60, category: 'work', notes: '' },
+		{ id: 3, name: 'Berghain Boiler Room (Side Entrance)', lat: 52.5111, lon: 13.4430, radius_meters: 50, category: 'social', notes: '' },
+		{ id: 4, name: 'Climbing Gym', lat: 52.5300, lon: 13.4150, radius_meters: 40, category: 'gym', notes: '' },
+		{ id: 5, name: 'Sunday Farmers Market on Maybachufer', lat: 52.4920, lon: 13.4280, radius_meters: 75, category: 'shopping', notes: '' },
+		{ id: 6, name: 'Pizza Place', lat: 52.5180, lon: 13.4100, radius_meters: 30, category: 'food', notes: '' },
+		{ id: 7, name: "Mom's", lat: 52.5400, lon: 13.4500, radius_meters: 100, category: 'family', notes: '' },
+		{ id: 8, name: 'Co-working Spot', lat: 52.5050, lon: 13.3850, radius_meters: 45, category: 'work', notes: '' },
+		{ id: 9, name: 'Dentist', lat: 52.5260, lon: 13.4020, radius_meters: 35, category: 'medical', notes: '' },
+		{ id: 10, name: 'Café around the corner with the wifi password on the wall', lat: 52.5210, lon: 13.4080, radius_meters: 30, category: 'food', notes: '' },
+		{ id: 11, name: 'Hotel Adlon', lat: 52.5163, lon: 13.3789, radius_meters: 50, category: 'hotel', notes: '' },
+		{ id: 12, name: 'Friend Anna', lat: 52.5350, lon: 13.4200, radius_meters: 80, category: 'friend', notes: '' },
+	],
+};
 const emptyDismissed = { dismissed: [] };
 const emptyDiscover = { clusters: [] };
 const emptyPings = { pings: [], count: 0 };
@@ -46,7 +61,20 @@ const handlers: MockHandler[] = [
 	({ url }) => (url === '/istota/api/me' ? user : undefined),
 	({ url }) => (url.startsWith('/istota/api/feeds') ? emptyFeeds : undefined),
 	({ url }) => (url.startsWith('/istota/api/location/current') ? emptyCurrent : undefined),
-	({ url }) => (url.startsWith('/istota/api/location/places') ? emptyPlaces : undefined),
+	({ url }) => {
+		const m = url.match(/\/istota\/api\/location\/places\/(\d+)\/stats/);
+		if (!m) return undefined;
+		return {
+			place_id: Number(m[1]),
+			total_visits: 0,
+			first_visit: null,
+			last_visit: null,
+			avg_duration_min: null,
+			total_duration_min: null,
+			longest_visit_min: null,
+		};
+	},
+	({ url }) => (url.startsWith('/istota/api/location/places') ? mockPlaces : undefined),
 	({ url }) => (url.startsWith('/istota/api/location/dismissed-clusters') ? emptyDismissed : undefined),
 	({ url }) => (url.startsWith('/istota/api/location/discover-places') ? emptyDiscover : undefined),
 	({ url }) => (url.startsWith('/istota/api/location/pings') ? emptyPings : undefined),
