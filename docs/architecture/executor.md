@@ -1,6 +1,6 @@
 # Executor
 
-The executor (`executor.py`) is responsible for assembling prompts and managing the Claude Code subprocess.
+The executor (`executor.py`) is responsible for assembling prompts, building the per-task environment, and orchestrating a pluggable Brain implementation. The Brain owns model invocation (subprocess or HTTP), stream parsing, and transient-API retry; the executor stays focused on per-task orchestration. See [brain](brain.md) for the protocol and the bundled `ClaudeCodeBrain`.
 
 ## Prompt assembly
 
@@ -24,18 +24,20 @@ The prompt is built in a specific order, each section adding context for Claude:
 16. **Skills changelog**: "what's new" if skills updated since last interaction
 17. **Skills documentation**: concatenated skill `.md` files, selectively loaded
 
-## Subprocess invocation
+## Brain invocation
+
+Once the prompt and env are built, the executor composes a `BrainRequest` and calls `make_brain(config.brain).execute(req)`. The request bundles the prompt, allowed tools, working directory (`config.temp_dir`), env, timeout (`task_timeout_minutes * 60`), model/effort overrides, optional custom system prompt path (when `custom_system_prompt` is enabled), and the callbacks the brain needs: `on_progress`, `cancel_check`, `on_pid`, and `sandbox_wrap` (a closure that wraps the brain's raw cmd in bubblewrap when the sandbox is enabled — the brain itself stays sandbox-agnostic).
+
+The brain returns a `BrainResult` carrying `(success, result_text, actions_taken, execution_trace, stop_reason)`. The executor then runs result composition (see below) and downstream cleanup (malformed-output detection, deferred file processing).
+
+`ClaudeCodeBrain`, the default and only Phase 1 brain, builds and invokes:
 
 ```
-claude -p <prompt> --allowedTools Read Write Edit Grep Glob Bash \
+claude -p - --allowedTools Read Write Edit Grep Glob Bash --disallowedTools Agent \
   --output-format stream-json --verbose
 ```
 
-When `custom_system_prompt` is enabled, a `--system-prompt-file` flag points to `config/system-prompt.md`.
-
-Working directory: `config.temp_dir` (default `/tmp/istota`).
-
-Timeout: `task_timeout_minutes * 60` (default 30 min).
+with optional `--model`, `--effort`, and `--system-prompt-file` flags. See [brain](brain.md) for the full implementation.
 
 ## Environment variables
 
@@ -56,18 +58,18 @@ When the skill proxy is enabled (default), credential vars are split out via `_s
 
 See [environment variables reference](../reference/environment-variables.md) for the full mapping.
 
-## Streaming execution
+## Streaming events
 
-The executor reads Claude Code's stdout line-by-line, parsing `stream-json` events:
+The brain emits `StreamEvent`s (defined in `src/istota/brain/_events.py`) which the executor's `on_progress` closure filters and forwards to the scheduler's progress callback:
 
-- **ToolUseEvent** -- forwarded as progress updates to Talk
-- **TextEvent** -- forwarded as progress (lower priority)
-- **ResultEvent** -- the final result (success or error)
-- **ContextManagementEvent** -- marks a context management boundary in the trace
+- **ToolUseEvent** — forwarded as progress updates to Talk (gated by `progress_show_tool_use`)
+- **TextEvent** — forwarded as progress with `italicize=False` (gated by `progress_show_text`)
+- **ResultEvent** — final result (handled internally by the brain, surfaces as `BrainResult.result_text`)
+- **ContextManagementEvent** — marks a context management boundary in the trace (the brain records it as a `cm_boundary` entry)
 
-Cancellation is checked on each event via `db.is_task_cancelled()`.
+Cancellation is polled between events via the `cancel_check` callback, which calls `db.is_task_cancelled()`. The brain kills its subprocess and returns `stop_reason="cancelled"` when the check returns True.
 
-### Result composition
+## Result composition
 
 The result goes through `_compose_full_result()`, which has two modes:
 
@@ -79,7 +81,7 @@ Result priority: ResultEvent > result file > stderr > fallback error.
 
 ## API retry logic
 
-Transient API errors (status codes 500, 502, 503, 504, 529, 429) are retried up to 3 times with 5s fixed delay. These retries don't count against task attempts. Pattern matching: `API Error: (\d{3}) (\{.*\})`.
+Transient API errors (status codes 500, 502, 503, 504, 529, 429) are retried inside the brain up to 3 times with a 5 s fixed delay. These retries don't count against task attempts. Pattern: `API Error: (\d{3}) (\{.*\})`. The helpers (`parse_api_error`, `is_transient_api_error`, `API_RETRY_*`, `TRANSIENT_STATUS_CODES`) live in `src/istota/brain/claude_code.py` and are re-exported from `executor.py` for `scheduler.py` and tests.
 
 ## Output validation
 

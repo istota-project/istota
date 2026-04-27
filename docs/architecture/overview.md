@@ -1,16 +1,16 @@
 # Architecture overview
 
-Istota is a self-hosted AI assistant that runs as a regular Nextcloud user. It uses Anthropic's Claude Code CLI as the execution engine, invoked as a subprocess for each task. Messages arrive from Nextcloud Talk, email, file-based task queues, scheduled jobs, or the CLI. They flow through a SQLite task queue, get claimed by per-user worker threads, and produce responses delivered back to the originating channel.
+Istota is a self-hosted AI assistant that runs as a regular Nextcloud user. It dispatches each task to a pluggable **Brain** — Phase 1 ships only `ClaudeCodeBrain`, which wraps Anthropic's Claude Code CLI as a subprocess; future brains (OpenRouter, Anthropic-direct) drop in behind the same protocol without touching executor orchestration. Messages arrive from Nextcloud Talk, email, file-based task queues, scheduled jobs, or the CLI. They flow through a SQLite task queue, get claimed by per-user worker threads, and produce responses delivered back to the originating channel.
 
 ```
 Talk (polling) ──────►┐
-Email (IMAP) ────────►├─► SQLite queue ──► Scheduler ──► Claude Code ──► Talk / Email
-TASKS.md (file) ─────►│                    (WorkerPool)   (subprocess)
+Email (IMAP) ────────►├─► SQLite queue ──► Scheduler ──► Brain ──► Talk / Email
+TASKS.md (file) ─────►│                    (WorkerPool)  (pluggable)
 CLI (direct) ────────►│
 CRON.md (scheduled) ─►┘
 ```
 
-Istota is not an agent framework. It doesn't implement tool calling, function dispatch, or agent loops. It constructs prompts and invokes the existing Claude Code CLI. New Claude Code capabilities (tool use, model improvements) are automatically available.
+Istota is not an agent framework. It doesn't implement custom tool calling, function dispatch, or agent loops — that's the brain's job. The executor constructs prompts and hands them to the brain. With `ClaudeCodeBrain` (the default), new Claude Code capabilities (tool use, model improvements) are automatically available.
 
 ## Core data flow
 
@@ -21,8 +21,8 @@ Every interaction follows the same path:
 3. The **scheduler** dispatches a `UserWorker` thread for the task's user
 4. The worker **claims** the task (atomic `UPDATE...RETURNING`, setting status to `locked` then `running`)
 5. The **executor** assembles the prompt: persona + resources + memory + context + skills + guidelines + the actual request
-6. **Claude Code** runs as a subprocess (`claude -p <prompt> --output-format stream-json`)
-7. The **result** is parsed from the stream, stored in the DB, and delivered to the originating channel
+6. The executor builds a `BrainRequest` and calls `make_brain(config.brain).execute(req)`. The default `ClaudeCodeBrain` invokes `claude -p - --output-format stream-json` as a subprocess
+7. The brain returns a `BrainResult`; the executor composes the final text (CM-aware), stores it in the DB, and delivers it to the originating channel
 8. Post-completion: conversation indexed for memory search, deferred DB operations processed, scheduled job counters reset
 
 Task lifecycle: `pending` -> `locked` -> `running` -> `completed` | `failed` | `pending_confirmation` -> `cancelled`
@@ -44,10 +44,11 @@ Task lifecycle: `pending` -> `locked` -> `running` -> `completed` | `failed` | `
 | Module | Purpose |
 |---|---|
 | `scheduler.py` | Main loop: daemon mode (long-running with WorkerPool) and single-pass mode |
-| `executor.py` | Builds prompts, constructs subprocess environment, invokes Claude Code, parses results |
+| `executor.py` | Builds prompts, constructs the per-task environment, orchestrates a `Brain`, composes results |
+| `brain/` | Pluggable model-invocation backend: `Brain` Protocol + `make_brain` factory, `BrainRequest`/`BrainResult` types, stream events, `ClaudeCodeBrain` (subprocess + stream-json + transient-API retry). Future brains drop in here. |
 | `context.py` | Selects relevant conversation history using hybrid recent + LLM-triaged approach |
 | `skills/_loader.py` | Loads skill documentation selectively based on keywords, resources, source types |
-| `stream_parser.py` | Parses Claude Code's `stream-json` output into typed events |
+| `stream_parser.py` | Backward-compat shim — re-exports stream event types from `brain/_events.py` |
 
 ### Storage and state
 

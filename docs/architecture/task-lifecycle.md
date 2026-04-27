@@ -55,9 +55,8 @@ For all other tasks, `execute_task()` handles the full pipeline:
 4. **Context loading** (Talk message cache or email thread)
 5. **Memory loading** (USER.md, CHANNEL.md, dated memories, recalled memories)
 6. **Prompt assembly** (see [executor docs](executor.md) for section order)
-7. **Subprocess launch** (`claude -p <prompt> --output-format stream-json`)
-8. **Stream parsing** — tool use and text events forwarded to progress callbacks
-9. **Result composition** — handles context management boundaries and terse results
+7. **Brain execution** — the executor builds a `BrainRequest` and calls `brain.execute(req)`. The default `ClaudeCodeBrain` spawns `claude -p - --output-format stream-json` and parses the stream. Other brains (Phase 2+) speak HTTP. See [brain](brain.md).
+8. **Result composition** (still in executor) — `_compose_full_result(text, trace)` handles context-management boundaries and terse-result recovery; both brains produce the same `(result_text, execution_trace)` shape.
 
 The executor returns `(success, result_text, actions_taken_json, execution_trace_json)`.
 
