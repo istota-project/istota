@@ -588,26 +588,25 @@ def update_task_status(
     execution_trace: str | None = None,
 ) -> None:
     """Update task status and optionally result/error."""
-    now = datetime.now().isoformat()
     if status == "running":
         conn.execute(
-            "UPDATE tasks SET status = ?, started_at = ?, updated_at = ? WHERE id = ?",
-            (status, now, now, task_id),
+            "UPDATE tasks SET status = ?, started_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+            (status, task_id),
         )
     elif status == "completed":
         conn.execute(
-            "UPDATE tasks SET status = ?, completed_at = ?, result = ?, actions_taken = ?, execution_trace = ?, updated_at = ? WHERE id = ?",
-            (status, now, result, actions_taken, execution_trace, now, task_id),
+            "UPDATE tasks SET status = ?, completed_at = datetime('now'), result = ?, actions_taken = ?, execution_trace = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, result, actions_taken, execution_trace, task_id),
         )
     elif status == "failed":
         conn.execute(
-            "UPDATE tasks SET status = ?, completed_at = ?, error = ?, updated_at = ? WHERE id = ?",
-            (status, now, error, now, task_id),
+            "UPDATE tasks SET status = ?, completed_at = datetime('now'), error = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, error, task_id),
         )
     else:
         conn.execute(
-            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-            (status, now, task_id),
+            "UPDATE tasks SET status = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, task_id),
         )
 
 
@@ -1905,30 +1904,29 @@ def update_istota_file_task_status(
     error_message: str | None = None,
 ) -> None:
     """Update the status of a TASKS.md file task."""
-    now = datetime.now().isoformat()
     if status == "in_progress":
         conn.execute(
-            "UPDATE istota_file_tasks SET status = ?, started_at = ? WHERE id = ?",
-            (status, now, istota_task_id),
+            "UPDATE istota_file_tasks SET status = ?, started_at = datetime('now') WHERE id = ?",
+            (status, istota_task_id),
         )
     elif status == "completed":
         conn.execute(
             """
             UPDATE istota_file_tasks
-            SET status = ?, completed_at = ?, result_summary = ?
+            SET status = ?, completed_at = datetime('now'), result_summary = ?
             WHERE id = ?
             """,
-            (status, now, result_summary, istota_task_id),
+            (status, result_summary, istota_task_id),
         )
     elif status == "failed":
         conn.execute(
             """
             UPDATE istota_file_tasks
-            SET status = ?, completed_at = ?, error_message = ?,
+            SET status = ?, completed_at = datetime('now'), error_message = ?,
                 attempt_count = attempt_count + 1
             WHERE id = ?
             """,
-            (status, now, error_message, istota_task_id),
+            (status, error_message, istota_task_id),
         )
     else:
         conn.execute(
