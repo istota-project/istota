@@ -168,7 +168,8 @@ After task completion, if enabled + `auto_index_conversations`:
 |---|---|
 | `get_worker_id()` | `{hostname}-{pid}[-{user_id}]` |
 | `_make_talk_progress_callback()` | Rate-limited progress to Talk |
-| `post_result_to_talk()` | Send result to Talk conversation |
+| `post_result_to_talk()` | Send result to Talk conversation. Optional `target_token` overrides `task.conversation_token` for the actual post — used when the task's stored token isn't a real Talk room. |
+| `_talk_target_for_delivery()` | Resolve the Talk room for a task's notifications. Email-source tasks with a synthetic 16-char hex thread hash in `conversation_token` (the case for plus_address / sender_match / inherited-from-inbound thread_match routing) fall back to `resolve_conversation_token` (alerts → briefing → auto-DM). All other tasks pass through. Heuristic; proper structural fix tracked in `_ISSUES.md` ISSUE-057 (separate `talk_delivery_token` column). |
 | `_parse_email_output()` | Parse JSON email response (legacy fallback) |
 | `_load_deferred_email_output()` | Load structured email output from deferred file |
 | `_process_deferred_sent_emails()` | Record outbound emails for emissary thread matching |
