@@ -79,9 +79,13 @@ Failed tasks retry with exponential backoff: 1 min, 4 min, 16 min (up to `max_at
 
 With the bubblewrap sandbox, the DB is read-only inside the subprocess. Claude and skill CLIs write JSON files to a writable temp dir. The scheduler processes these after successful completion:
 
+- `task_{id}_pending_send.json` -- outbound recipient gate (Layer A); processed first, transitions task to `pending_confirmation` and short-circuits the rest of the deferred batch when present
 - `task_{id}_subtasks.json` -- subtask creation (admin-only)
 - `task_{id}_tracked_transactions.json` -- transaction dedup tracking
 - `task_{id}_sent_emails.json` -- outbound email tracking for emissary thread matching
+- `task_{id}_kv_ops.json` -- KV store set/delete
+- `task_{id}_user_alerts.json` -- suspicious-content alerts to the user's alerts channel
+- `task_{id}_email_output.json` -- deferred email replies (scheduler sends post-task)
 
 Identity fields (`user_id`, `conversation_token`) always come from the task, not from the JSON, to prevent spoofing.
 

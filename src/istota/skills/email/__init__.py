@@ -621,6 +621,83 @@ def _write_deferred_sent_email(message_id: str, to_addr: str, subject: str) -> N
     path.write_text(json.dumps(existing, ensure_ascii=False))
 
 
+def _is_recipient_allowed(to_addr: str) -> bool:
+    """Check the recipient against the executor-supplied allowlist.
+
+    The executor sets ISTOTA_KNOWN_RECIPIENTS (newline-separated lowercase
+    addresses) and ISTOTA_TRUSTED_RECIPIENT_PATTERNS (newline-separated fnmatch
+    globs) for outbound gating. If neither var is present we fail open — that
+    only happens in direct CLI use or when the operator has disabled the gate.
+    """
+    addr = (to_addr or "").strip().lower()
+    if not addr:
+        return False
+
+    known_raw = os.environ.get("ISTOTA_KNOWN_RECIPIENTS", "")
+    patterns_raw = os.environ.get("ISTOTA_TRUSTED_RECIPIENT_PATTERNS", "")
+
+    if not known_raw and not patterns_raw:
+        return True
+
+    if known_raw:
+        known = {line.strip().lower() for line in known_raw.split("\n") if line.strip()}
+        if addr in known:
+            return True
+
+    if patterns_raw:
+        import fnmatch
+        for pat in patterns_raw.split("\n"):
+            pat = pat.strip().lower()
+            if pat and fnmatch.fnmatch(addr, pat):
+                return True
+
+    return False
+
+
+def _defer_send(to_addr: str, subject: str, body: str, content_type: str) -> dict:
+    """Queue a send to an unknown recipient as a deferred file.
+
+    The scheduler picks this up post-task and holds the task in
+    pending_confirmation until the user approves via the alerts channel.
+    """
+    task_id = os.environ.get("ISTOTA_TASK_ID", "")
+    deferred_dir = os.environ.get("ISTOTA_DEFERRED_DIR", "")
+    if not task_id or not deferred_dir:
+        raise ValueError(
+            "Cannot defer send to unknown recipient: ISTOTA_TASK_ID and "
+            "ISTOTA_DEFERRED_DIR must be set when the gate is active."
+        )
+
+    entry = {
+        "to": to_addr,
+        "subject": subject,
+        "body": body,
+        "content_type": content_type,
+    }
+    path = Path(deferred_dir) / f"task_{task_id}_pending_send.json"
+    existing: list = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            existing = []
+    existing.append(entry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(existing, ensure_ascii=False))
+
+    return {
+        "status": "pending_confirmation",
+        "to": to_addr,
+        "reason": "unknown_recipient",
+        "queued": len(existing),
+        "message": (
+            f"Recipient {to_addr} is not in your known-contacts list. "
+            "The send has been queued for your approval. End your turn — "
+            "the user will see a confirmation prompt and decide."
+        ),
+    }
+
+
 def cmd_send(args):
     """Send an email via CLI."""
     config = _config_from_env()
@@ -635,6 +712,9 @@ def cmd_send(args):
         raise ValueError("Either --body or --body-file is required")
 
     content_type = "html" if args.html else "plain"
+
+    if not _is_recipient_allowed(args.to):
+        return _defer_send(args.to, args.subject, body, content_type)
 
     message_id = send_email(
         to=args.to,

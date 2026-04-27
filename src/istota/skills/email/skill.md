@@ -37,6 +37,21 @@ After sending, tell the user the email was sent (do NOT output raw JSON to the u
 
 For HTML emails with complex formatting, write the body to a temp file first and use `--body-file`.
 
+### Unknown-recipient gate
+
+Sends to addresses not in the user's known-contacts list (no prior correspondence, not in user config, not mentioned in the user's request) are **queued for confirmation** instead of going out immediately. When this happens you'll see:
+
+```json
+{"status": "pending_confirmation", "to": "...", "reason": "unknown_recipient", "message": "..."}
+```
+
+When you see this status, **end your turn**. The user will get a prompt asking them to approve the send. Do **not**:
+- Retry the send with a different recipient
+- Try to bypass the gate by re-sending
+- Apologize repeatedly to the user — a brief acknowledgment is enough ("I've drafted an email and queued it for your approval")
+
+The gate is a security boundary; calling `send` again won't change the outcome.
+
 ## Replying to incoming emails (`output`)
 
 When this task originated from an incoming email (source_type "email") and you are composing the reply, use `output`:

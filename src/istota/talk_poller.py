@@ -1,6 +1,7 @@
 """Talk conversation polling and task creation."""
 
 import asyncio
+import json
 import logging
 import time
 from pathlib import Path
@@ -502,13 +503,32 @@ async def handle_confirmation_reply(
     if pending_task.user_id != actor_id:
         return False
 
+    # Detect outbound-recipient gate: presence of pending_send.json in the
+    # user's temp dir means this is a Layer-A "unknown recipient" confirmation.
+    from .executor import get_user_temp_dir
+    pending_send_path = (
+        get_user_temp_dir(config, pending_task.user_id)
+        / f"task_{pending_task.id}_pending_send.json"
+    )
+    pending_send_recipients: list[str] = []
+    if pending_send_path.exists():
+        try:
+            entries = json.loads(pending_send_path.read_text())
+            pending_send_recipients = [
+                (e.get("to") or "").strip().lower()
+                for e in entries
+                if e.get("to")
+            ]
+        except (json.JSONDecodeError, OSError):
+            pending_send_recipients = []
+
     if affirmative:
         # Confirm the task - return to pending status for execution
         db.confirm_task(conn, pending_task.id)
         db.log_task(conn, pending_task.id, "info", "User confirmed task")
 
-        # Trust the sender if requested and this is an email task
-        if trust_sender and pending_task.source_type == "email":
+        # Trust the sender if requested and this is an inbound-email gate
+        if trust_sender and pending_task.source_type == "email" and not pending_send_recipients:
             email_record = db.get_email_for_task(conn, pending_task.id)
             if email_record:
                 db.add_trusted_sender(conn, actor_id, email_record.sender_email)
@@ -524,10 +544,35 @@ async def handle_confirmation_reply(
                     )
                 except Exception:
                     pass
+
+        # Trust the recipient(s) for outbound-recipient gate
+        if trust_sender and pending_send_recipients:
+            added = []
+            for addr in pending_send_recipients:
+                if db.add_trusted_sender(conn, actor_id, addr):
+                    added.append(addr)
+            if added:
+                db.log_task(
+                    conn, pending_task.id, "info",
+                    f"Trusted recipients: {', '.join(added)}",
+                )
+                try:
+                    client = TalkClient(config)
+                    await client.send_message(
+                        conversation_token,
+                        f"Trusted {', '.join(added)} — future sends to these "
+                        "addresses will not require confirmation.",
+                    )
+                except Exception:
+                    pass
     else:
         # Cancel the task
         db.cancel_task(conn, pending_task.id)
         db.log_task(conn, pending_task.id, "info", "User cancelled task")
+
+        # Clean up the pending_send file so the rejected draft doesn't linger
+        if pending_send_path.exists():
+            pending_send_path.unlink(missing_ok=True)
 
         # Notify user
         try:
