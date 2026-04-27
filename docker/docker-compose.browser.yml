@@ -7,9 +7,6 @@ services:
     ports:
       - "127.0.0.1:9223:9223"  # API (localhost only)
       - "0.0.0.0:6080:6080"    # noVNC (external for captcha solving)
-    dns:
-      - 9.9.9.9
-      - 149.112.112.112
     shm_size: 2gb
     volumes:
       - browser-profile:/data/browser-profile
