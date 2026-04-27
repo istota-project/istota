@@ -264,3 +264,40 @@ class TestExecutorAllowlistEnv:
         env = mock_run.call_args[1]["env"]
         known = set(env["ISTOTA_KNOWN_RECIPIENTS"].split("\n"))
         assert "approved@elsewhere.com" in known
+
+    @patch("istota.executor.subprocess.run")
+    def test_confirmation_rerun_injects_draft_into_prompt(self, mock_run, tmp_path):
+        """When pending_send.json exists on re-run, the executor should inject
+        the structured draft into the confirmation_context so the agent sends
+        the exact body the user approved (no body re-improvisation)."""
+        config = self._make_config(tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            (user_temp / f"task_{task.id}_pending_send.json").write_text(json.dumps([
+                {
+                    "to": "approved@elsewhere.com",
+                    "subject": "Quarterly update",
+                    "body": "Hi team — here is the Q2 summary you asked for. ...",
+                    "content_type": "plain",
+                },
+            ]))
+            db.set_task_confirmation(conn, task.id, "draft preview only")
+            db.confirm_task(conn, task.id)
+            task = db.get_task(conn, task.id)
+
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        # The prompt is passed to claude via stdin (input=...) since -p is "-".
+        prompt = mock_run.call_args[1]["input"]
+        # The structured draft should be in the prompt (not just a preview)
+        assert "approved@elsewhere.com" in prompt
+        assert "Quarterly update" in prompt
+        assert "here is the Q2 summary you asked for" in prompt
+        assert "istota-skill email send" in prompt
+        # And the original textual context is replaced
+        assert "draft preview only" not in prompt

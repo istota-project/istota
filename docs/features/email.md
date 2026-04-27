@@ -57,15 +57,37 @@ Sends to addresses not in the user's known-recipients list are held for explicit
 
 For email-sourced tasks the prompt is the inbound message body, so its embedded addresses are deliberately *not* added to the allowlist — otherwise an attacker could include their own address in the email they send the bot.
 
-When the gate fires, a confirmation prompt is posted to your alerts channel (the same channel used by the inbound gate). Reply with:
+When the gate fires, a confirmation prompt is posted in your **main conversation** (the same chat you were already having with the bot). The format matches the agent's confirmation style for other sensitive actions like file deletion:
+
+```
+I need your confirmation to proceed:
+
+Action: Send email to stranger@example.com
+Subject: About the project
+Content: Hi, I'm writing on behalf of …
+
+Reply "yes" to confirm, "yes trust" to also remember this address, or "no" to cancel.
+```
+
+Reply with:
 
 - `yes` — send the queued draft
 - `yes trust` — send and add the recipient to `trusted_email_senders` so future sends to that address skip the gate
 - `no` — discard the draft and cancel the task
 
+For tasks without a conversation (CLI, scheduled jobs, cron) the prompt falls back to your alerts channel.
+
 This is Layer A of the adversarial-defense plan. It closes the most realistic exfiltration path for a prompt-injected agent: being steered into mailing your data to an attacker.
 
 The gate is on by default. To disable (e.g. during a rollback), set `outbound_gate_email = false` in the `[security]` section.
+
+### Relationship to the sensitive_actions confirmation flow
+
+Other sensitive actions — deleting files, deleting calendar events, sharing files externally — are confirmed by the **agent** in natural language: it produces a `"I need your confirmation to proceed: ..."` message instead of executing, and the scheduler intercepts that text via a regex. This works well for actions where the gate logic is contextual and best left to the agent's judgement.
+
+For email, the gate is **system-enforced** (Layer A): the email skill checks every recipient against the deterministic allowlist, and the system produces the confirmation prompt directly. The agent does not pre-confirm email sends — it just calls `email send` and acts on the response. The unified UX (same `"I need your confirmation"` format, same main-conversation channel, same `yes`/`yes trust`/`no` reply vocabulary) means you can't tell from the user side which path produced any given confirmation, but the email path has a deterministic recipient check and durable trust persistence that the agent-narrated path doesn't.
+
+If you ever see the agent narrate an email confirmation request itself (instead of just calling send), that's a regression — it means the `sensitive_actions` skill's email exception isn't taking effect. Check that the skill is loaded and that the email skill's `pending_confirmation` response wording hasn't been changed.
 
 ## Emissary threads
 
