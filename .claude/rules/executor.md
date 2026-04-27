@@ -28,10 +28,11 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 10. **Build prompt**: includes `confirmation_context` when set
 11. **Dry run check**: return prompt text
 12. **Write prompt file**: `task_{id}_prompt.txt`
-13. **Build command**: `--allowedTools` whitelist, optional `--model` override, optional `--system-prompt-file` (when `custom_system_prompt` enabled)
-14. **Build env**: see env var table below; credential vars split via `_split_credential_env()` when proxy enabled
-15. **Execute**: streaming or simple
-16. **Update fingerprint**: on success, interactive only
+13. **Build env**: see env var table below; credential vars split via `_split_credential_env()` when proxy enabled
+14. **Build BrainRequest**: prompt + allowed_tools + env + model/effort + sandbox_wrap closure + on_progress/cancel_check/on_pid callbacks
+15. **Execute**: `make_brain(config.brain).execute(req)` — see `.claude/rules/brain.md`
+16. **Compose result**: `_compose_full_result(result, trace)` reconciles result-text vs trace (CM-aware + terse-result recovery)
+17. **Update fingerprint**: on success, interactive only
 
 ## `build_prompt()`
 ```python
@@ -102,34 +103,55 @@ def build_prompt(
 | Developer | `GITHUB_API_CMD` | Path to API wrapper script (if enabled + token set) |
 | Developer | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth (if enabled + token set) |
 
-## Popen Command
-```python
-cmd = ["claude", "-p", prompt, "--allowedTools", "Read", "Write", "Edit", "Grep", "Glob", "Bash"]
-# If custom system prompt enabled and file exists:
-cmd += ["--system-prompt-file", str(config.skills_dir.parent / "system-prompt.md")]
-# If streaming (on_progress provided):
-cmd += ["--output-format", "stream-json", "--verbose"]
-```
-- Working dir: `str(config.temp_dir)`
-- Timeout: `config.scheduler.task_timeout_minutes * 60`
-- Env: `build_clean_env(config)` + task-specific vars (always minimal env)
+## Brain invocation
+The executor no longer spawns `claude` directly — it composes a `BrainRequest`
+and calls `make_brain(config.brain).execute(req)`. The brain owns command
+construction, sandboxing (via the supplied `sandbox_wrap` callback),
+subprocess/HTTP, stream parsing, and transient-API retries. Phase 1 ships
+only `ClaudeCodeBrain`; details in `.claude/rules/brain.md`.
 
-## API Retry Logic
+Per-task BrainRequest fields the executor populates:
+- `prompt`, `allowed_tools` (from `build_allowed_tools`), `cwd=config.temp_dir`,
+  `env` (built per task), `timeout_seconds=config.scheduler.task_timeout_minutes * 60`
+- `model = (task.model or config.model)`, `effort = (task.effort or config.effort)`
+- `custom_system_prompt_path = config/system-prompt.md` when `custom_system_prompt = true`
+- `streaming = on_progress is not None`
+- `on_progress`: closure that filters `StreamEvent` by `progress_show_tool_use`
+  / `progress_show_text` and forwards `(message, italicize=False)` to the
+  scheduler's progress callback
+- `cancel_check`: closure that polls `db.is_task_cancelled()`
+- `on_pid`: closure that calls `db.update_task_pid()` for `!stop` support
+- `sandbox_wrap`: closure over `build_bwrap_cmd(...)` so the brain can wrap
+  its raw cmd without knowing anything about bwrap; no-op when sandbox disabled
+- `result_file = {user_temp_dir}/task_{task_id}_result.txt`
+
+After `brain.execute()` returns, the executor:
+1. Calls `_compose_full_result(result_text, trace)` on success to reconcile
+   the final ResultEvent text against substantial intermediate text blocks
+   (CM-aware + terse-result recovery — same logic both brains will need).
+2. Updates the user skills fingerprint when interactive task succeeded.
+3. Returns `(success, result, actions_taken_json, execution_trace_json)` —
+   shape unchanged from before the refactor.
+
+## Result composition (`_compose_full_result`)
+Stays in the executor (not the brain) because it operates on the
+brain-agnostic `(result_text, execution_trace)` pair. Two modes:
+1. **CM-aware** (ISSUE-026): when `cm_boundary` entries exist in trace,
+   segments by CM boundaries and uses the last segment with substantial
+   text (>= 200 chars). Falls back to `result_text` if no substantial
+   segment (real response may only exist in CM replay events).
+2. **Terse-result recovery** (ISSUE-025): when no CM, detects substantial
+   text blocks emitted as intermediate text but missing from the final
+   ResultEvent, and prepends them.
+
+## API retry constants (re-exported from brain.claude_code)
 - `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` + `429`
 - `API_RETRY_MAX_ATTEMPTS = 3`
 - `API_RETRY_DELAY_SECONDS = 5` (fixed, not exponential)
 - Pattern: `API Error: (\d{3}) (\{.*\})`
 - Retries do NOT count against task attempts
-
-## Stream Parsing (`_execute_streaming_once`)
-- Line-by-line from stdout via `parse_stream_line()`
-- Events: `ResultEvent` → final result, `ToolUseEvent` → progress + execution trace, `TextEvent` → progress + execution trace, `ContextManagementEvent` → `cm_boundary` marker in trace (not streamed as progress)
-- Cancellation checked on each event via `db.is_task_cancelled()`
-- Result composition: `_compose_full_result()` has two modes:
-  1. **CM-aware** (ISSUE-026): when `cm_boundary` entries exist in trace, segments by CM boundaries and uses the last segment with substantial text (>= 200 chars). Falls back to `result_text` if no substantial segment (real response may only exist in CM replay events).
-  2. **Terse-result recovery** (ISSUE-025): when no CM, detects substantial text blocks emitted as intermediate text but missing from `ResultEvent`, and prepends them.
-- Both ResultEvent path and result file fallback go through `_compose_full_result()`
-- Result priority: ResultEvent > result file > stderr > fallback error
+- `parse_api_error`, `is_transient_api_error` re-exported from `executor`
+  for `scheduler.py` and tests; canonical home is `brain/claude_code.py`.
 
 ## Key Constants
 - Background task types excluded from context: `["scheduled", "briefing"]`

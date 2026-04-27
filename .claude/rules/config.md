@@ -102,6 +102,13 @@ semantic_routing_model: str = "haiku"  # model for classification
 semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
 ```
 
+### `BrainConfig`
+```
+kind: str = "claude_code"  # "claude_code" (Phase 1 only); future: "openrouter", "anthropic"
+```
+Selects which `Brain` implementation handles model invocation. See
+`.claude/rules/brain.md` for the protocol and ClaudeCodeBrain internals.
+
 ### `BriefingConfig`
 ```
 name: str                    cron: str                   conversation_token: str = ""
@@ -167,6 +174,7 @@ email: EmailConfig                  conversation: ConversationConfig
 scheduler: SchedulerConfig          browser: BrowserConfig
 ntfy: NtfyConfig                    logging: LoggingConfig
 briefing_defaults: BriefingDefaultsConfig   skills: SkillsConfig
+brain: BrainConfig                          # selects model-invocation backend
 security: SecurityConfig
 memory_search: MemorySearchConfig   sleep_cycle: SleepCycleConfig
 channel_sleep_cycle: ChannelSleepCycleConfig

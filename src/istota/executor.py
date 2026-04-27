@@ -8,8 +8,8 @@ import re
 import subprocess
 import sys
 import tempfile
-import threading
-import time
+import threading  # noqa: F401  — kept for `mock.patch("istota.executor.threading.Timer")` compat
+import time  # noqa: F401  — kept for `mock.patch("istota.executor.time.sleep")` compat
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -33,13 +33,7 @@ from .storage import (
     read_dated_memories,
     read_user_memory_v2,
 )
-from .stream_parser import (
-    ContextManagementEvent,
-    ResultEvent,
-    TextEvent,
-    ToolUseEvent,
-    make_stream_parser,
-)
+from .brain import StreamEvent, TextEvent, ToolUseEvent
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 
 logger = logging.getLogger("istota.executor")
@@ -54,15 +48,17 @@ def _resolve_user_tz(config: Config, user_id: str) -> tuple[ZoneInfo, str]:
     except Exception:
         return ZoneInfo("UTC"), "UTC"
 
-# Pattern to detect Anthropic API errors in output
-API_ERROR_PATTERN = re.compile(r"API Error: (\d{3}) (\{.*\})", re.DOTALL)
-
-# Transient HTTP status codes that warrant retry
-TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}  # 529 = overloaded
-
-# Retry configuration for transient API errors
-API_RETRY_MAX_ATTEMPTS = 3
-API_RETRY_DELAY_SECONDS = 5
+# API error detection / retry policy moved into brain.claude_code; re-exported
+# here for backward compatibility with callers (scheduler.py) and tests that
+# import these symbols from istota.executor.
+from .brain.claude_code import (  # noqa: E402  (kept after module docstring)
+    API_ERROR_PATTERN,
+    API_RETRY_DELAY_SECONDS,
+    API_RETRY_MAX_ATTEMPTS,
+    TRANSIENT_STATUS_CODES,
+    is_transient_api_error,
+    parse_api_error,
+)
 
 # Audio extensions eligible for pre-transcription (matches whisper skill file_types)
 _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"})
@@ -283,35 +279,6 @@ def _pre_transcribe_attachments(
     transcribed_text = " ".join(transcribed_parts)
     filenames = ", ".join(Path(p).name for p in audio_paths)
     return f"Transcribed voice message: {transcribed_text}\n\n(Original audio: {filenames})"
-
-
-def parse_api_error(text: str) -> dict | None:
-    """
-    Parse API error string into structured data.
-
-    Returns dict with status_code, message, request_id on match, or None.
-    """
-    match = API_ERROR_PATTERN.search(text)
-    if not match:
-        return None
-    status_code = int(match.group(1))
-    try:
-        payload = json.loads(match.group(2))
-        return {
-            "status_code": status_code,
-            "message": payload.get("error", {}).get("message", "Unknown error"),
-            "request_id": payload.get("request_id"),
-        }
-    except json.JSONDecodeError:
-        return {"status_code": status_code, "message": "Unknown error", "request_id": None}
-
-
-def is_transient_api_error(text: str) -> bool:
-    """Check if the error text represents a transient API error worth retrying."""
-    parsed = parse_api_error(text)
-    if not parsed:
-        return False
-    return parsed["status_code"] in TRANSIENT_STATUS_CODES or parsed["status_code"] == 429
 
 
 def get_user_temp_dir(config: Config, user_id: str) -> Path:
@@ -2122,22 +2089,8 @@ def execute_task(
         result_file.unlink()
 
     try:
-        # Build command
         use_streaming = on_progress is not None
         allowed = build_allowed_tools(is_admin, selected_skills)
-        cmd = ["claude", "-p", "-", "--allowedTools"] + allowed + ["--disallowedTools", "Agent"]
-        model = (task.model or "").strip() or config.model
-        if model:
-            cmd += ["--model", model]
-        effort = (task.effort or "").strip() or config.effort
-        if effort:
-            cmd += ["--effort", effort]
-        if config.custom_system_prompt:
-            sp_path = config.skills_dir.parent / "system-prompt.md"
-            if sp_path.exists():
-                cmd += ["--system-prompt-file", str(sp_path)]
-        if use_streaming:
-            cmd += ["--output-format", "stream-json", "--verbose"]
 
         env = build_clean_env(config)
         env.update({
@@ -2469,28 +2422,98 @@ def execute_task(
         # Collect extra paths to RO bind-mount into the sandbox
         _extra_ro_binds: list[Path] = []
 
-        def _build_and_run():
-            nonlocal cmd
-            # Wrap in bwrap sandbox if enabled (after proxy start so socket exists)
-            if config.security.sandbox_enabled:
-                cmd = build_bwrap_cmd(
-                    cmd, config, task, is_admin, user_resources,
-                    Path(user_temp_dir), proxy_sock=_proxy_sock,
-                    net_proxy_sock=_net_proxy_sock,
-                    extra_ro_binds=_extra_ro_binds,
-                )
-            if use_streaming:
-                return _execute_streaming(cmd, env, config, task, on_progress, result_file, prompt)
-            else:
-                s, r, a = _execute_simple(cmd, env, config, task, result_file, prompt)
-                return s, r, a, None
+        # Sandbox wrapper closure — captures the per-task bind config so the
+        # brain can wrap its raw cmd without knowing anything about bwrap.
+        def _sandbox_wrap(raw_cmd: list[str]) -> list[str]:
+            if not config.security.sandbox_enabled:
+                return raw_cmd
+            return build_bwrap_cmd(
+                raw_cmd, config, task, is_admin, user_resources,
+                Path(user_temp_dir), proxy_sock=_proxy_sock,
+                net_proxy_sock=_net_proxy_sock,
+                extra_ro_binds=_extra_ro_binds,
+            )
+
+        # Adapt the brain's StreamEvent stream to the executor's str-based
+        # progress callback (and to scheduler config for which event types
+        # to surface).
+        show_tool_use = config.scheduler.progress_show_tool_use
+        show_text = config.scheduler.progress_show_text
+
+        def _on_event(event: StreamEvent) -> None:
+            if on_progress is None:
+                return
+            if isinstance(event, ToolUseEvent) and show_tool_use:
+                try:
+                    on_progress(event.description)
+                except Exception:
+                    pass
+            elif isinstance(event, TextEvent) and show_text:
+                try:
+                    on_progress(event.text, italicize=False)
+                except Exception:
+                    pass
+
+        def _on_pid(pid: int) -> None:
+            try:
+                with db.get_db(config.db_path) as pid_conn:
+                    db.update_task_pid(pid_conn, task.id, pid)
+            except Exception:
+                pass  # non-critical
+
+        def _cancel_check() -> bool:
+            try:
+                with db.get_db(config.db_path) as cancel_conn:
+                    return db.is_task_cancelled(cancel_conn, task.id)
+            except Exception:
+                return False
+
+        # Custom system prompt path (claude_code-only knob; brain ignores
+        # if the file is missing)
+        sp_path: Path | None = None
+        if config.custom_system_prompt:
+            sp_path = config.skills_dir.parent / "system-prompt.md"
+
+        from .brain import BrainRequest, make_brain
+        brain = make_brain(config.brain)
+        req = BrainRequest(
+            prompt=prompt,
+            allowed_tools=allowed,
+            cwd=Path(config.temp_dir),
+            env=env,
+            timeout_seconds=config.scheduler.task_timeout_minutes * 60,
+            model=(task.model or "").strip() or config.model,
+            effort=(task.effort or "").strip() or config.effort,
+            custom_system_prompt_path=sp_path,
+            streaming=use_streaming,
+            on_progress=_on_event if use_streaming else None,
+            cancel_check=_cancel_check,
+            on_pid=_on_pid,
+            sandbox_wrap=_sandbox_wrap,
+            result_file=result_file,
+        )
 
         with contextlib.ExitStack() as stack:
             if _proxy_ctx is not None:
                 stack.enter_context(_proxy_ctx)
             if _net_proxy_ctx is not None:
                 stack.enter_context(_net_proxy_ctx)
-            success, result, actions, trace = _build_and_run()
+            brain_result = brain.execute(req)
+
+        success = brain_result.success
+        result = brain_result.result_text
+        actions = brain_result.actions_taken
+        trace = brain_result.execution_trace
+
+        # CM-aware / terse-result composition: reconcile result_text with
+        # the trace so substantial intermediate text isn't lost when the
+        # final ResultEvent is terse. Same logic both brains will need.
+        if success and trace:
+            try:
+                trace_list = json.loads(trace)
+                result = _compose_full_result(result, trace_list)
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         # Update skills fingerprint after successful interactive execution
         if success and _is_interactive:
@@ -2507,310 +2530,8 @@ def execute_task(
 
         return success, result, actions, trace
 
-    except FileNotFoundError:
-        return False, "Claude Code CLI not found. Is it installed and in PATH?", None, None
     except Exception as e:
         return False, f"Execution error: {e}", None, None
-
-
-def _execute_simple_once(
-    cmd: list[str],
-    env: dict,
-    config: Config,
-    task: db.Task,
-    result_file: Path,
-    prompt: str = "",
-) -> tuple[bool, str, str | None]:
-    """Execute Claude Code once with subprocess.run (no streaming).
-
-    Prompt is passed via stdin to avoid E2BIG errors from large CLI arguments.
-    """
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        timeout=config.scheduler.task_timeout_minutes * 60,
-        cwd=str(config.temp_dir),
-        env=env,
-    )
-
-    output = result.stdout.strip()
-
-    if result.returncode == -9:
-        return False, "Claude Code was killed (likely out of memory)", None
-
-    if result.returncode == 0 and output:
-        return True, output, None
-    elif result.returncode == 0 and result_file.exists():
-        return True, result_file.read_text().strip(), None
-    elif output:
-        return False, output, None
-    elif result.stderr.strip():
-        return False, result.stderr.strip(), None
-    else:
-        return False, f"Claude Code produced no output (rc={result.returncode})", None
-
-
-def _execute_simple(
-    cmd: list[str],
-    env: dict,
-    config: Config,
-    task: db.Task,
-    result_file: Path,
-    prompt: str = "",
-) -> tuple[bool, str, str | None]:
-    """Execute Claude Code with subprocess.run, with auto-retry for transient API errors."""
-    last_error = ""
-
-    for attempt in range(API_RETRY_MAX_ATTEMPTS):
-        success, result, actions = _execute_simple_once(cmd, env, config, task, result_file, prompt)
-
-        if success:
-            return True, result, actions
-
-        # Check if this is a transient API error worth retrying
-        if not is_transient_api_error(result):
-            return False, result, None
-
-        last_error = result
-        parsed = parse_api_error(result)
-        request_id = parsed.get("request_id", "unknown") if parsed else "unknown"
-
-        if attempt < API_RETRY_MAX_ATTEMPTS - 1:
-            logger.warning(
-                "Task %d: transient API error (attempt %d/%d, request_id=%s), retrying in %ds...",
-                task.id, attempt + 1, API_RETRY_MAX_ATTEMPTS, request_id, API_RETRY_DELAY_SECONDS,
-            )
-            time.sleep(API_RETRY_DELAY_SECONDS)
-        else:
-            logger.error(
-                "Task %d: transient API error persisted after %d attempts (request_id=%s)",
-                task.id, API_RETRY_MAX_ATTEMPTS, request_id,
-            )
-
-    return False, last_error, None
-
-
-def _execute_streaming_once(
-    cmd: list[str],
-    env: dict,
-    config: Config,
-    task: db.Task,
-    on_progress: Callable[[str], None] | None,
-    result_file: Path,
-    prompt: str = "",
-) -> tuple[bool, str, str | None, str | None]:
-    """Execute Claude Code once with Popen + stream-json parsing for progress updates.
-
-    Prompt is passed via stdin to avoid E2BIG errors from large CLI arguments.
-    Returns (success, result_text, actions_taken_json, execution_trace_json).
-    """
-    show_tool_use = config.scheduler.progress_show_tool_use
-    show_text = config.scheduler.progress_show_text
-
-    # Accumulate tool use descriptions for actions_taken
-    actions_descriptions: list[str] = []
-    # Interleaved execution trace (tool calls + assistant text)
-    execution_trace: list[dict] = []
-
-    # Capture stderr in a thread to avoid deadlock when both pipes are full
-    stderr_lines = []
-
-    process = subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=str(config.temp_dir),
-        env=env,
-    )
-
-    # Write prompt to stdin and close to signal EOF
-    try:
-        process.stdin.write(prompt)
-        process.stdin.close()
-    except BrokenPipeError:
-        pass  # process may have exited early
-
-    # Store PID in DB for !stop command
-    try:
-        with db.get_db(config.db_path) as pid_conn:
-            db.update_task_pid(pid_conn, task.id, process.pid)
-    except Exception:
-        pass  # non-critical
-
-    def _read_stderr():
-        for line in process.stderr:
-            stderr_lines.append(line)
-
-    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
-    stderr_thread.start()
-
-    # Timeout via timer
-    timed_out = threading.Event()
-
-    def _kill():
-        timed_out.set()
-        process.kill()
-
-    timeout_secs = config.scheduler.task_timeout_minutes * 60
-    timer = threading.Timer(timeout_secs, _kill)
-    timer.start()
-
-    final_result = None
-    raw_stdout_lines = []
-    cancelled = False
-    parse_line = make_stream_parser()
-
-    try:
-        for line in process.stdout:
-            raw_stdout_lines.append(line)
-            event = parse_line(line)
-            if event is None:
-                continue
-
-            if isinstance(event, ResultEvent):
-                final_result = event
-            elif isinstance(event, ContextManagementEvent):
-                execution_trace.append({"type": "cm_boundary"})
-                continue  # don't stream CM markers as progress
-            elif isinstance(event, ToolUseEvent):
-                actions_descriptions.append(event.description)
-                execution_trace.append({"type": "tool", "text": event.description})
-            elif isinstance(event, TextEvent):
-                execution_trace.append({"type": "text", "text": event.text})
-            if isinstance(event, ToolUseEvent) and show_tool_use and on_progress:
-                try:
-                    on_progress(event.description)
-                except Exception:
-                    pass  # never affect task execution
-            elif isinstance(event, TextEvent) and show_text and on_progress:
-                try:
-                    on_progress(event.text, italicize=False)
-                except Exception:
-                    pass
-
-            # Check cancellation flag periodically (on each parsed event)
-            if isinstance(event, (ToolUseEvent, TextEvent)):
-                try:
-                    with db.get_db(config.db_path) as cancel_conn:
-                        if db.is_task_cancelled(cancel_conn, task.id):
-                            logger.info("Task %d cancelled by user, killing subprocess", task.id)
-                            process.kill()
-                            cancelled = True
-                            break
-                except Exception:
-                    pass  # non-critical
-
-        process.wait()
-        stderr_thread.join(timeout=5)
-    finally:
-        timer.cancel()
-
-    # Build actions JSON from collected descriptions
-    actions_json = json.dumps(actions_descriptions) if actions_descriptions else None
-    trace_json = json.dumps(execution_trace) if execution_trace else None
-
-    # Also check DB flag — SIGTERM from !stop may kill the process before the
-    # in-loop cancellation check runs, leaving `cancelled` False.
-    if not cancelled:
-        try:
-            with db.get_db(config.db_path) as cancel_conn:
-                if db.is_task_cancelled(cancel_conn, task.id):
-                    cancelled = True
-        except Exception:
-            pass
-
-    if cancelled:
-        return False, "Cancelled by user", None, None
-
-    if timed_out.is_set():
-        return False, f"Task execution timed out after {config.scheduler.task_timeout_minutes} minutes", None, None
-
-    if process.returncode == -9:
-        return False, "Claude Code was killed (likely out of memory)", None, None
-
-    stderr_output = "".join(stderr_lines).strip()
-
-    # Extract result: prefer ResultEvent, fall back to result file, then stderr.
-    if final_result is not None:
-        result_text = final_result.text.strip()
-        if final_result.success:
-            # Check for substantial text blocks in the trace that were emitted
-            # before more tool calls — the model may have produced the real
-            # response as intermediate text and the ResultEvent only captured
-            # a terse closing line.
-            result_text = _compose_full_result(result_text, execution_trace)
-            return True, result_text, actions_json, trace_json
-        else:
-            return False, result_text or stderr_output or "Unknown error", None, trace_json
-
-    # Fallback: result file
-    if result_file.exists():
-        output = result_file.read_text()
-        if process.returncode == 0:
-            output = _compose_full_result(output.strip(), execution_trace)
-            return True, output, actions_json, trace_json
-        return False, output.strip(), None, trace_json
-
-    # No ResultEvent and no result file — Claude Code likely errored
-    logger.warning(
-        "No ResultEvent parsed from stream-json for task %d (rc=%s, stderr=%s, stdout_lines=%d)",
-        task.id, process.returncode, stderr_output[:200] if stderr_output else "(empty)", len(raw_stdout_lines),
-    )
-
-    if stderr_output:
-        return False, stderr_output, None, trace_json
-    elif raw_stdout_lines:
-        return False, f"Stream parsing failed (rc={process.returncode}, {len(raw_stdout_lines)} lines)", None, trace_json
-    else:
-        return False, f"Claude Code produced no output (rc={process.returncode})", None, None
-
-
-def _execute_streaming(
-    cmd: list[str],
-    env: dict,
-    config: Config,
-    task: db.Task,
-    on_progress: Callable[[str], None],
-    result_file: Path,
-    prompt: str = "",
-) -> tuple[bool, str, str | None, str | None]:
-    """Execute Claude Code with Popen + stream-json parsing, with auto-retry for transient API errors."""
-    last_error = ""
-    last_trace = None
-
-    for attempt in range(API_RETRY_MAX_ATTEMPTS):
-        success, result, actions, trace = _execute_streaming_once(cmd, env, config, task, on_progress, result_file, prompt)
-
-        if success:
-            return True, result, actions, trace
-
-        last_trace = trace
-
-        # Check if this is a transient API error worth retrying
-        if not is_transient_api_error(result):
-            return False, result, None, trace
-
-        last_error = result
-        parsed = parse_api_error(result)
-        request_id = parsed.get("request_id", "unknown") if parsed else "unknown"
-
-        if attempt < API_RETRY_MAX_ATTEMPTS - 1:
-            logger.warning(
-                "Task %d: transient API error (attempt %d/%d, request_id=%s), retrying in %ds...",
-                task.id, attempt + 1, API_RETRY_MAX_ATTEMPTS, request_id, API_RETRY_DELAY_SECONDS,
-            )
-            time.sleep(API_RETRY_DELAY_SECONDS)
-        else:
-            logger.error(
-                "Task %d: transient API error persisted after %d attempts (request_id=%s)",
-                task.id, API_RETRY_MAX_ATTEMPTS, request_id,
-            )
-
-    return False, last_error, None, last_trace
 
 
 def execute_task_interactive(

@@ -22,8 +22,9 @@ from istota.executor import (
     API_RETRY_MAX_ATTEMPTS,
     API_RETRY_DELAY_SECONDS,
     TRANSIENT_STATUS_CODES,
-    _execute_streaming,
 )
+from istota.brain import BrainRequest, ClaudeCodeBrain
+from istota.brain._types import BrainResult
 from pathlib import Path
 
 from istota.config import Config, DeveloperConfig, EmailConfig as AppEmailConfig, NextcloudConfig, ResourceConfig, SchedulerConfig, SecurityConfig, SiteConfig, UserConfig
@@ -190,209 +191,131 @@ class TestRetryConfiguration:
 
 
 class TestExecuteStreamingRetry:
-    def _make_config(self, tmp_path):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        return Config(
-            db_path=db_path,
-            scheduler=SchedulerConfig(task_timeout_minutes=1),
-            temp_dir=tmp_path / "temp",
+    """Retry logic for transient API errors lives in ClaudeCodeBrain.
+
+    Tests use the static _execute_streaming_once method as the mock target
+    and drive the public _execute_streaming wrapper, which is the same
+    layering the executor used to have.
+    """
+
+    def _make_request(self, tmp_path: Path) -> BrainRequest:
+        return BrainRequest(
+            prompt="test",
+            allowed_tools=["Bash"],
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=60,
+            streaming=True,
+            result_file=tmp_path / "result.txt",
         )
 
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="testuser", source_type="cli")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor._execute_streaming_once")
-    @patch("istota.executor.time.sleep")
+    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
+    @patch("istota.brain.claude_code.time.sleep")
     def test_retries_on_transient_error(self, mock_sleep, mock_exec_once, tmp_path):
         """Should retry on transient 500 errors before giving up."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp").mkdir(exist_ok=True)
-        result_file = tmp_path / "result.txt"
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-
-        # First call fails with 500, second succeeds
         error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_123"}'
         mock_exec_once.side_effect = [
-            (False, error_500, None, None),
-            (True, "Success after retry", None, None),
+            BrainResult(False, error_500, stop_reason="error"),
+            BrainResult(True, "Success after retry"),
         ]
 
-        success, result, actions, trace = _execute_streaming(
-            ["claude", "-p", "test"],
-            {},
-            config,
-            task,
-            None,
-            result_file,
-        )
+        brain = ClaudeCodeBrain()
+        result = brain._execute_streaming([], self._make_request(tmp_path))
 
-        assert success is True
-        assert result == "Success after retry"
+        assert result.success is True
+        assert result.result_text == "Success after retry"
         assert mock_exec_once.call_count == 2
         mock_sleep.assert_called_once_with(API_RETRY_DELAY_SECONDS)
 
-    @patch("istota.executor._execute_streaming_once")
-    @patch("istota.executor.time.sleep")
+    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
+    @patch("istota.brain.claude_code.time.sleep")
     def test_no_retry_on_permanent_error(self, mock_sleep, mock_exec_once, tmp_path):
         """Should not retry on permanent 401 errors."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp").mkdir(exist_ok=True)
-        result_file = tmp_path / "result.txt"
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-
         error_401 = 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid API key"}}'
-        mock_exec_once.return_value = (False, error_401, None, None)
+        mock_exec_once.return_value = BrainResult(False, error_401, stop_reason="error")
 
-        success, result, actions, trace = _execute_streaming(
-            ["claude", "-p", "test"],
-            {},
-            config,
-            task,
-            None,
-            result_file,
-        )
+        brain = ClaudeCodeBrain()
+        result = brain._execute_streaming([], self._make_request(tmp_path))
 
-        assert success is False
-        assert "401" in result
+        assert result.success is False
+        assert "401" in result.result_text
         assert mock_exec_once.call_count == 1
         mock_sleep.assert_not_called()
 
-    @patch("istota.executor._execute_streaming_once")
-    @patch("istota.executor.time.sleep")
+    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
+    @patch("istota.brain.claude_code.time.sleep")
     def test_no_retry_on_non_api_error(self, mock_sleep, mock_exec_once, tmp_path):
         """Should not retry on non-API errors like OOM."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp").mkdir(exist_ok=True)
-        result_file = tmp_path / "result.txt"
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-
-        mock_exec_once.return_value = (False, "Claude Code was killed (likely out of memory)", None, None)
-
-        success, result, actions, trace = _execute_streaming(
-            ["claude", "-p", "test"],
-            {},
-            config,
-            task,
-            None,
-            result_file,
+        mock_exec_once.return_value = BrainResult(
+            False, "Claude Code was killed (likely out of memory)", stop_reason="oom",
         )
 
-        assert success is False
-        assert "out of memory" in result
+        brain = ClaudeCodeBrain()
+        result = brain._execute_streaming([], self._make_request(tmp_path))
+
+        assert result.success is False
+        assert "out of memory" in result.result_text
         assert mock_exec_once.call_count == 1
         mock_sleep.assert_not_called()
 
-    @patch("istota.executor._execute_streaming_once")
-    @patch("istota.executor.time.sleep")
+    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
+    @patch("istota.brain.claude_code.time.sleep")
     def test_gives_up_after_max_retries(self, mock_sleep, mock_exec_once, tmp_path):
         """Should give up after max retry attempts."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp").mkdir(exist_ok=True)
-        result_file = tmp_path / "result.txt"
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-
         error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}'
-        mock_exec_once.return_value = (False, error_500, None, None)
+        mock_exec_once.return_value = BrainResult(False, error_500, stop_reason="error")
 
-        success, result, actions, trace = _execute_streaming(
-            ["claude", "-p", "test"],
-            {},
-            config,
-            task,
-            None,
-            result_file,
-        )
+        brain = ClaudeCodeBrain()
+        result = brain._execute_streaming([], self._make_request(tmp_path))
 
-        assert success is False
-        assert "500" in result
+        assert result.success is False
+        assert "500" in result.result_text
         assert mock_exec_once.call_count == API_RETRY_MAX_ATTEMPTS
         assert mock_sleep.call_count == API_RETRY_MAX_ATTEMPTS - 1
 
-    @patch("istota.executor._execute_streaming_once")
+    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
     def test_success_on_first_try_no_retry(self, mock_exec_once, tmp_path):
         """Should not retry if first attempt succeeds."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp").mkdir(exist_ok=True)
-        result_file = tmp_path / "result.txt"
+        mock_exec_once.return_value = BrainResult(True, "Immediate success")
 
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
+        brain = ClaudeCodeBrain()
+        result = brain._execute_streaming([], self._make_request(tmp_path))
 
-        mock_exec_once.return_value = (True, "Immediate success", None, None)
-
-        success, result, actions, trace = _execute_streaming(
-            ["claude", "-p", "test"],
-            {},
-            config,
-            task,
-            None,
-            result_file,
-        )
-
-        assert success is True
-        assert result == "Immediate success"
+        assert result.success is True
+        assert result.result_text == "Immediate success"
         assert mock_exec_once.call_count == 1
 
-    @patch("istota.executor._execute_streaming_once")
+    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
     def test_actions_taken_passed_through(self, mock_exec_once, tmp_path):
         """Should pass through actions_taken from _execute_streaming_once."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp").mkdir(exist_ok=True)
-        result_file = tmp_path / "result.txt"
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-
         actions = '["📄 Reading file.py", "✏️ Editing file.py"]'
-        mock_exec_once.return_value = (True, "Done", actions, '[]')
-
-        success, result, actions_taken, trace = _execute_streaming(
-            ["claude", "-p", "test"],
-            {},
-            config,
-            task,
-            None,
-            result_file,
+        mock_exec_once.return_value = BrainResult(
+            True, "Done", actions_taken=actions, execution_trace='[]',
         )
 
-        assert success is True
-        assert result == "Done"
-        assert actions_taken == actions
+        brain = ClaudeCodeBrain()
+        result = brain._execute_streaming([], self._make_request(tmp_path))
 
-    @patch("istota.executor._execute_streaming_once")
-    @patch("istota.executor.time.sleep")
+        assert result.success is True
+        assert result.result_text == "Done"
+        assert result.actions_taken == actions
+
+    @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
+    @patch("istota.brain.claude_code.time.sleep")
     def test_actions_taken_from_successful_retry(self, mock_sleep, mock_exec_once, tmp_path):
         """On retry, should use actions_taken from the successful attempt."""
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp").mkdir(exist_ok=True)
-        result_file = tmp_path / "result.txt"
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-
         error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"err"},"request_id":"req_1"}'
         actions = '["📄 Reading config"]'
         mock_exec_once.side_effect = [
-            (False, error_500, None, None),
-            (True, "ok", actions, None),
+            BrainResult(False, error_500, stop_reason="error"),
+            BrainResult(True, "ok", actions_taken=actions),
         ]
 
-        success, result, actions_taken, trace = _execute_streaming(
-            ["claude", "-p", "test"], {}, config, task, None, result_file,
-        )
+        brain = ClaudeCodeBrain()
+        result = brain._execute_streaming([], self._make_request(tmp_path))
 
-        assert success is True
-        assert actions_taken == actions
+        assert result.success is True
+        assert result.actions_taken == actions
 
 
 # ---------------------------------------------------------------------------

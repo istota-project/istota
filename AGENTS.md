@@ -15,7 +15,12 @@ istota/
 │   ├── context.py           # Conversation context selection (Sonnet-based)
 │   ├── db.py                # SQLite operations (all tables)
 │   ├── email_poller.py      # Email polling and task creation
-│   ├── executor.py          # Claude Code execution wrapper (Popen + stream-json)
+│   ├── executor.py          # Per-task orchestration (memory, skills, sandbox); delegates model invocation to a Brain
+│   ├── brain/               # Brain abstraction — model invocation behind a single protocol
+│   │   ├── __init__.py        # Brain protocol + factory (`make_brain`)
+│   │   ├── _types.py          # BrainRequest, BrainResult, BrainConfig
+│   │   ├── _events.py         # StreamEvent types + Claude Code stream-json parser
+│   │   └── claude_code.py     # ClaudeCodeBrain — wraps `claude` CLI subprocess
 │   ├── skill_proxy.py       # Unix socket proxy for credential-isolated skill CLI calls
 │   ├── skill_client.py      # istota-skill console script (proxy client + direct fallback)
 │   ├── network_proxy.py     # CONNECT proxy for network isolation (domain allowlist)
@@ -33,7 +38,7 @@ istota/
 │   ├── shared_file_organizer.py # Auto-organize files shared with bot
 │   ├── sleep_cycle.py       # Nightly memory extraction
 │   ├── storage.py           # Bot-managed Nextcloud storage
-│   ├── stream_parser.py     # Parse stream-json events
+│   ├── stream_parser.py     # Backward-compat shim (re-exports from brain/_events.py)
 │   ├── commands.py          # !command dispatch (help, stop, status, memory, cron, skills, check, export, more, search)
 │   ├── talk.py              # Nextcloud Talk API client (user API)
 │   ├── talk_poller.py       # Talk conversation polling
@@ -106,7 +111,7 @@ istota/
 │   ├── vite.config.ts       # Dev proxy to FastAPI; mock plugin behind VITE_MOCK_API=1
 │   └── vite-mock-api.ts     # In-process mock backend for `npm run dev` UI iteration
 ├── scripts/                 # setup.sh, scheduler.sh
-├── tests/                   # pytest + pytest-asyncio (~2760 tests, 56 files)
+├── tests/                   # pytest + pytest-asyncio (~3450 tests, 65 files)
 ├── schema.sql
 └── pyproject.toml
 ```
@@ -128,7 +133,8 @@ Web App ──► Nextcloud OIDC → Session → Dashboard / Feed pages
 - **Email poller**: Polls INBOX via imap-tools. Routing precedence: (1) recipient plus-address (`bot+user_id@domain`), (2) sender match against user `email_addresses`, (3) thread match against `sent_emails`. Plus-addressing enables external contacts to email a specific user's agent directly. Outbound `SMTP_FROM` uses plus-addressed `bot+user_id@domain` so replies route back correctly. `routing_method` column in `processed_emails` tracks how each email was routed. **Confirmation gate**: plus-addressed emails from untrusted senders (not in `trusted_email_senders` or user's own `email_addresses`) are held in `pending_confirmation` — deterministic, non-LLM gate. Confirmation prompt posted to user's Talk channel; user replies yes/no.
 - **Task queue** (`db.py`): Atomic locking with `user_id` filter, retry logic (exponential backoff: 1, 4, 16 min)
 - **Scheduler**: Per-user threaded worker pool. Three-tier concurrency: instance-level fg/bg caps, per-user limits. Workers keyed by `(user_id, queue_type, slot)`.
-- **Executor**: Builds prompts (resources + skills + context + memory), invokes Claude Code via `Popen` with `--output-format stream-json`. Auto-retries transient API errors (5xx, 429) up to 3 times. Validates output for malformed model responses (leaked tool-call XML) and collects execution traces for post-hoc inspection.
+- **Executor**: Builds prompts (resources + skills + context + memory), composes a `BrainRequest`, and hands it to a `Brain` for model invocation. Validates output for malformed model responses (leaked tool-call XML), composes the final result from streaming events (CM-aware), and processes deferred files. The brain owns the subprocess/HTTP call, stream parsing, and transient-error retries.
+- **Brain**: Pluggable model-invocation backend in `src/istota/brain/`. Selected via `[brain] kind = "..."` in config. Phase 1 ships `claude_code` (wraps the `claude` CLI subprocess with `--output-format stream-json`, auto-retries 5xx/429 up to 3 times). Future brains (`openrouter`, `anthropic`) will share the same `Brain` protocol so swapping them touches no executor code.
 - **Context** (`context.py`): Hybrid triage — recent N messages always included, older messages selected by LLM
 - **Storage** (`storage.py`): Bot-owned Nextcloud directories and user memory files
 
@@ -288,7 +294,7 @@ Subtask creation is rate-limited per task to bound prompt-injection blast radius
 
 ## Testing
 
-TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~2750 tests across 54 files.
+TDD with pytest + pytest-asyncio, class-based tests, `unittest.mock`. Real SQLite via `tmp_path`. Integration tests marked `@pytest.mark.integration`. Current: ~3450 tests across 65 files.
 
 ```bash
 uv run pytest tests/ -v                              # Unit tests
