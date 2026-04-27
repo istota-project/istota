@@ -4,6 +4,7 @@ triggers: [calendar,  cal , event, meeting, schedule, appointment, caldav]
 description: Calendar operations with CalDAV
 cli: true
 source_types: [briefing]
+companion_skills: [untrusted_input]
 dependencies: [caldav, icalendar]
 ---
 # Calendar Operations
