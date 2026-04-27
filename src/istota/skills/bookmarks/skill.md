@@ -4,6 +4,7 @@ triggers: [bookmark, bookmarks, karakeep, saved, reading list, favourited, favor
 description: Karakeep bookmark search, browsing, and management
 cli: true
 resource_types: [karakeep]
+companion_skills: [untrusted_input]
 env: [{"var":"KARAKEEP_BASE_URL","from":"user_resource_config","resource_type":"karakeep","field":"base_url"},{"var":"KARAKEEP_API_KEY","from":"user_resource_config","resource_type":"karakeep","field":"api_key"}]
 ---
 # Karakeep Bookmarks

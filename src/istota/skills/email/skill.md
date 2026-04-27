@@ -4,6 +4,7 @@ triggers: [email, mail, send, inbox, reply, message]
 description: Email sending and response formatting
 cli: true
 source_types: [email]
+companion_skills: [untrusted_input]
 dependencies: [imap_tools]
 ---
 ## Which command to use: `send` vs `output`

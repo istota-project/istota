@@ -4,7 +4,7 @@ triggers: [transcribe, ocr, screenshot, text in image, handwriting, scan, extrac
 description: OCR transcription for images with text
 cli: true
 file_types: [png, jpg, jpeg, gif, webp, bmp, tiff, tif, heic]
-companion_skills: [notes]
+companion_skills: [notes, untrusted_input]
 dependencies: [pytesseract]
 ---
 # Image Transcription with OCR

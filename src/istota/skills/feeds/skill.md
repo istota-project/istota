@@ -4,6 +4,7 @@ triggers: [feed, feeds, rss, subscribe, subscription, add feed, remove feed, uns
 description: RSS feed management via Miniflux
 cli: true
 resource_types: [miniflux]
+companion_skills: [untrusted_input]
 env: [{"var":"MINIFLUX_BASE_URL","from":"user_resource_config","resource_type":"miniflux","field":"base_url"},{"var":"MINIFLUX_API_KEY","from":"user_resource_config","resource_type":"miniflux","field":"api_key"}]
 ---
 # Feeds (Miniflux RSS)

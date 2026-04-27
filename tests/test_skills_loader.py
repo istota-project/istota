@@ -1362,3 +1362,74 @@ class TestParseFrontmatter:
         md.write_text("---\n# comment\nname: test\n---\n")
         result = _parse_frontmatter(md)
         assert result == {"name": "test"}
+
+
+class TestUntrustedInputCompanion:
+    """The untrusted_input skill loads alongside skills that ingest external content.
+
+    This is the trust-boundary doc paired with `sensitive_actions`: the latter
+    governs outbound actions, this one governs how inbound content should be
+    read. Wiring is via `companion_skills` on each ingest-shaped skill so it
+    only loads when there's actual untrusted input in the task.
+    """
+
+    def _bundled_index(self) -> dict[str, SkillMeta]:
+        """Load the real bundled skill index (no isolation) to test wiring."""
+        bundled_dir = Path(__file__).parent.parent / "src" / "istota" / "skills"
+        return load_skill_index(bundled_dir, bundled_dir=bundled_dir)
+
+    def test_untrusted_input_skill_exists(self):
+        index = self._bundled_index()
+        assert "untrusted_input" in index
+
+    def test_untrusted_input_is_doc_only(self):
+        index = self._bundled_index()
+        meta = index["untrusted_input"]
+        assert meta.cli is False
+        assert meta.always_include is False  # source-scoped via companions
+
+    def test_email_lists_untrusted_input_as_companion(self):
+        index = self._bundled_index()
+        assert "untrusted_input" in index["email"].companion_skills
+
+    def test_browse_lists_untrusted_input_as_companion(self):
+        index = self._bundled_index()
+        assert "untrusted_input" in index["browse"].companion_skills
+
+    def test_calendar_lists_untrusted_input_as_companion(self):
+        index = self._bundled_index()
+        assert "untrusted_input" in index["calendar"].companion_skills
+
+    def test_whisper_lists_untrusted_input_as_companion(self):
+        index = self._bundled_index()
+        assert "untrusted_input" in index["whisper"].companion_skills
+
+    def test_feeds_lists_untrusted_input_as_companion(self):
+        index = self._bundled_index()
+        assert "untrusted_input" in index["feeds"].companion_skills
+
+    def test_bookmarks_lists_untrusted_input_as_companion(self):
+        index = self._bundled_index()
+        assert "untrusted_input" in index["bookmarks"].companion_skills
+
+    def test_transcribe_lists_untrusted_input_as_companion(self):
+        # transcribe also keeps its prior companion (notes); both should remain
+        index = self._bundled_index()
+        assert "untrusted_input" in index["transcribe"].companion_skills
+        assert "notes" in index["transcribe"].companion_skills
+
+    def test_browse_keyword_pulls_in_untrusted_input(self):
+        index = self._bundled_index()
+        result = select_skills(
+            "fetch the page from this url", "talk", set(), index,
+        )
+        assert "browse" in result
+        assert "untrusted_input" in result
+
+    def test_no_ingest_skill_no_untrusted_input(self):
+        # A plain Talk task with no ingest-skill keywords should not load it.
+        index = self._bundled_index()
+        result = select_skills(
+            "what's 2 + 2", "talk", set(), index,
+        )
+        assert "untrusted_input" not in result
