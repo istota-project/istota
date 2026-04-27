@@ -141,7 +141,6 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `sandbox_admin_db_write` | `false` | Allow admin DB writes in sandbox |
 | `skill_proxy_enabled` | `true` | Credential proxy via Unix socket |
 | `skill_proxy_timeout` | `300` | Proxy command timeout (seconds) |
-| `outbound_gate_email` | `true` | Hold sends to unknown email recipients for user confirmation (Layer A) |
 | `passthrough_env_vars` | `["LANG", "LC_ALL", "LC_CTYPE", "TZ"]` | Extra env vars for subprocess |
 
 ### `[security.network]`

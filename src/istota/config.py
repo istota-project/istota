@@ -310,10 +310,6 @@ class SecurityConfig:
     ])
     sandbox_ro_paths: list[str] = field(default_factory=lambda: ["/srv/app"])
     network: NetworkConfig = field(default_factory=NetworkConfig)
-    # Layer-A outbound gate: hold sends to unknown email recipients for
-    # user confirmation. Disable to fall back to send-anywhere behavior
-    # (e.g. during a rollback or when migrating recipient history).
-    outbound_gate_email: bool = True
 
 
 @dataclass
@@ -1028,7 +1024,6 @@ def load_config(config_path: Path | None = None) -> Config:
             sandbox_admin_db_write=sec.get("sandbox_admin_db_write", False),
             skill_proxy_enabled=sec.get("skill_proxy_enabled", True),
             skill_proxy_timeout=sec.get("skill_proxy_timeout", 300),
-            outbound_gate_email=sec.get("outbound_gate_email", True),
             network=network_config,
             **({
                 "passthrough_env_vars": sec["passthrough_env_vars"]

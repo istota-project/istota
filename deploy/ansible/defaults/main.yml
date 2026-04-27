@@ -471,7 +471,6 @@ istota_security_sandbox_ro_paths:                  # extra RO bind-mounts in san
 istota_security_network_enabled: true              # --unshare-net + CONNECT proxy (requires sandbox)
 istota_security_network_allow_pypi: true           # add pypi.org + files.pythonhosted.org to allowlist
 istota_security_network_extra_hosts: []            # operator-specific additions
-istota_security_outbound_gate_email: true          # Layer A: hold sends to unknown email recipients for user confirmation
 # When true, secrets are loaded from /etc/<namespace>/secrets.env via EnvironmentFile=
 # and omitted from config.toml (config.py reads them from env vars)
 istota_use_environment_file: true
