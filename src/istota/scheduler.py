@@ -1036,6 +1036,76 @@ def _process_deferred_sent_emails(
     return count
 
 
+def _process_deferred_pending_sends(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> bool:
+    """Process queued unknown-recipient sends from the email skill's gate.
+
+    The email skill's recipient gate writes task_{id}_pending_send.json when
+    it refuses to send to an address not on the user's known-recipients list.
+    We hold the task in pending_confirmation, prompt the user via the alerts
+    channel, and let the existing confirmation-reply machinery resume the task.
+
+    The deferred file is intentionally NOT deleted here — the executor reads
+    it on confirmation re-run to populate the per-task allowlist for the
+    approved recipients. It's cleared after a successful re-run send.
+
+    Returns True if a confirmation was queued (task is now pending_confirmation).
+    """
+    path = user_temp_dir / f"task_{task.id}_pending_send.json"
+    if not path.exists():
+        return False
+
+    # Confirmation re-run: the file is leftover from the original gate trigger.
+    # The user already approved, the executor populated the per-task allowlist,
+    # and the re-run's send call went through normally. Clean up and exit.
+    if task.confirmed_at:
+        path.unlink(missing_ok=True)
+        return False
+
+    try:
+        queued = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Bad deferred pending_send file for task %d: %s", task.id, e)
+        path.unlink(missing_ok=True)
+        return False
+
+    if not isinstance(queued, list) or not queued:
+        path.unlink(missing_ok=True)
+        return False
+
+    lines = ["Bot wants to send email to unknown recipient(s):"]
+    for entry in queued:
+        to_addr = entry.get("to", "?")
+        subject = entry.get("subject", "(no subject)")
+        body = entry.get("body", "") or ""
+        preview = body[:200].replace("\n", " ")
+        if len(body) > 200:
+            preview += "…"
+        lines.append(f"  → {to_addr} | Subject: {subject}\n    {preview}")
+    lines.append(
+        "\nReply 'yes' to send, 'yes trust' to send and trust these "
+        "addresses for future tasks, or 'no' to discard."
+    )
+    confirmation_msg = "\n".join(lines)
+
+    with db.get_db(config.db_path) as conn:
+        db.set_task_confirmation(conn, task.id, confirmation_msg)
+
+    from .notifications import resolve_conversation_token, send_talk_confirmation
+    alerts_token = resolve_conversation_token(config, task.user_id) or task.conversation_token
+    msg_id = send_talk_confirmation(config, task.user_id, confirmation_msg, alerts_token)
+    if msg_id:
+        with db.get_db(config.db_path) as conn:
+            db.update_talk_response_id(conn, task.id, msg_id)
+
+    logger.info(
+        "Queued %d unknown-recipient send(s) for confirmation (task %d)",
+        len(queued), task.id,
+    )
+    return True
+
+
 def _process_deferred_kv_ops(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> int:
@@ -1627,13 +1697,27 @@ def process_one_task(
     ):
         from .executor import get_user_temp_dir
         user_temp_dir = get_user_temp_dir(config, task.user_id)
-        _process_deferred_subtasks(config, task, user_temp_dir)
-        _process_deferred_tracking(config, task, user_temp_dir)
-        _process_deferred_sent_emails(config, task, user_temp_dir)
-        _process_deferred_kv_ops(config, task, user_temp_dir)
-        _process_deferred_user_alerts(config, task, user_temp_dir)
-        _deliver_deferred_email_output(config, task, user_temp_dir)
-        _notify_confirmed_email_result(config, task, result)
+
+        # Check unknown-recipient sends first — if queued, the task transitions
+        # to pending_confirmation and we skip remaining deferred ops (no point
+        # recording sent_emails for mail that wasn't actually sent). The
+        # confirmation prompt posted to the alerts channel replaces the
+        # agent's normal result delivery.
+        pending_send_queued = _process_deferred_pending_sends(
+            config, task, user_temp_dir,
+        )
+
+        if pending_send_queued:
+            post_talk_message = None
+            post_email = False
+        else:
+            _process_deferred_subtasks(config, task, user_temp_dir)
+            _process_deferred_tracking(config, task, user_temp_dir)
+            _process_deferred_sent_emails(config, task, user_temp_dir)
+            _process_deferred_kv_ops(config, task, user_temp_dir)
+            _process_deferred_user_alerts(config, task, user_temp_dir)
+            _deliver_deferred_email_output(config, task, user_temp_dir)
+            _notify_confirmed_email_result(config, task, result)
 
     # Save briefing digest for deduplication in the next run
     if success and task.source_type == "briefing":

@@ -68,7 +68,7 @@ All variables with defaults are in `deploy/ansible/defaults/main.yml`. Key group
 
 - **Core**: `istota_namespace`, `istota_home`, `istota_repo_url`
 - **Nextcloud**: `istota_nextcloud_url`, `istota_nextcloud_username`, `istota_nextcloud_app_password`
-- **Security**: `istota_security_sandbox_enabled`, `istota_use_environment_file`
+- **Security**: `istota_security_sandbox_enabled`, `istota_security_skill_proxy_enabled`, `istota_security_outbound_gate_email`, `istota_use_environment_file`
 - **Users**: `istota_users` (dict), `istota_admin_users` (list)
 - **Scheduler**: `istota_scheduler_*` (poll intervals, worker limits, timeouts)
 

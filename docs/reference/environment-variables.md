@@ -47,6 +47,8 @@ Derived from Nextcloud credentials:
 | `IMAP_PORT` | `config.email.imap_port` |
 | `IMAP_USER` | `config.email.imap_user` |
 | `IMAP_PASSWORD` | `config.email.imap_password` |
+| `ISTOTA_KNOWN_RECIPIENTS` | Newline-separated lowercase addresses for the Layer A outbound recipient gate. Built from sent + received history, trusted senders, user's own addresses, and (for trusted task sources) addresses extracted from the task prompt. |
+| `ISTOTA_TRUSTED_RECIPIENT_PATTERNS` | Newline-separated fnmatch globs (e.g. `*@company.com`) from the user's `trusted_email_senders` config. |
 
 ## Browser
 

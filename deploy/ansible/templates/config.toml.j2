@@ -42,6 +42,7 @@ sandbox_enabled = {{ istota_security_sandbox_enabled | lower }}
 sandbox_admin_db_write = {{ istota_security_sandbox_admin_db_write | lower }}
 skill_proxy_enabled = {{ istota_security_skill_proxy_enabled | lower }}
 skill_proxy_timeout = {{ istota_security_skill_proxy_timeout }}
+outbound_gate_email = {{ istota_security_outbound_gate_email | lower }}
 {% if istota_security_sandbox_ro_paths %}
 sandbox_ro_paths = {{ istota_security_sandbox_ro_paths | to_json }}
 {% endif %}
