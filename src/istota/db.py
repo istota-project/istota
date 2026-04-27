@@ -588,25 +588,26 @@ def update_task_status(
     execution_trace: str | None = None,
 ) -> None:
     """Update task status and optionally result/error."""
+    now = datetime.now().isoformat()
     if status == "running":
         conn.execute(
-            "UPDATE tasks SET status = ?, started_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-            (status, task_id),
+            "UPDATE tasks SET status = ?, started_at = ?, updated_at = ? WHERE id = ?",
+            (status, now, now, task_id),
         )
     elif status == "completed":
         conn.execute(
-            "UPDATE tasks SET status = ?, completed_at = datetime('now'), result = ?, actions_taken = ?, execution_trace = ?, updated_at = datetime('now') WHERE id = ?",
-            (status, result, actions_taken, execution_trace, task_id),
+            "UPDATE tasks SET status = ?, completed_at = ?, result = ?, actions_taken = ?, execution_trace = ?, updated_at = ? WHERE id = ?",
+            (status, now, result, actions_taken, execution_trace, now, task_id),
         )
     elif status == "failed":
         conn.execute(
-            "UPDATE tasks SET status = ?, completed_at = datetime('now'), error = ?, updated_at = datetime('now') WHERE id = ?",
-            (status, error, task_id),
+            "UPDATE tasks SET status = ?, completed_at = ?, error = ?, updated_at = ? WHERE id = ?",
+            (status, now, error, now, task_id),
         )
     else:
         conn.execute(
-            "UPDATE tasks SET status = ?, updated_at = datetime('now') WHERE id = ?",
-            (status, task_id),
+            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+            (status, now, task_id),
         )
 
 
@@ -1691,44 +1692,6 @@ def is_sender_trusted_in_db(
     return cursor.fetchone() is not None
 
 
-def get_known_recipients_for_user(
-    conn: sqlite3.Connection,
-    user_id: str,
-    user_email_addresses: list[str] | None = None,
-) -> set[str]:
-    """Return the lowercased set of known email addresses for outbound gating.
-
-    Union of: addresses we've previously sent to, addresses that have written
-    to us, runtime trusted senders, and the user's own addresses. Used by the
-    email skill's recipient gate to decide whether to send immediately or
-    defer for user confirmation.
-    """
-    known: set[str] = set()
-
-    cursor = conn.execute(
-        "SELECT DISTINCT LOWER(to_addr) AS addr FROM sent_emails WHERE user_id = ?",
-        (user_id,),
-    )
-    known.update(row["addr"] for row in cursor if row["addr"])
-
-    cursor = conn.execute(
-        "SELECT DISTINCT LOWER(sender_email) AS addr FROM processed_emails WHERE user_id = ?",
-        (user_id,),
-    )
-    known.update(row["addr"] for row in cursor if row["addr"])
-
-    cursor = conn.execute(
-        "SELECT LOWER(sender_email) AS addr FROM trusted_email_senders WHERE user_id = ?",
-        (user_id,),
-    )
-    known.update(row["addr"] for row in cursor if row["addr"])
-
-    if user_email_addresses:
-        known.update(addr.strip().lower() for addr in user_email_addresses if addr.strip())
-
-    return known
-
-
 # ============================================================================
 # Key-Value Store
 # ============================================================================
@@ -1942,29 +1905,30 @@ def update_istota_file_task_status(
     error_message: str | None = None,
 ) -> None:
     """Update the status of a TASKS.md file task."""
+    now = datetime.now().isoformat()
     if status == "in_progress":
         conn.execute(
-            "UPDATE istota_file_tasks SET status = ?, started_at = datetime('now') WHERE id = ?",
-            (status, istota_task_id),
+            "UPDATE istota_file_tasks SET status = ?, started_at = ? WHERE id = ?",
+            (status, now, istota_task_id),
         )
     elif status == "completed":
         conn.execute(
             """
             UPDATE istota_file_tasks
-            SET status = ?, completed_at = datetime('now'), result_summary = ?
+            SET status = ?, completed_at = ?, result_summary = ?
             WHERE id = ?
             """,
-            (status, result_summary, istota_task_id),
+            (status, now, result_summary, istota_task_id),
         )
     elif status == "failed":
         conn.execute(
             """
             UPDATE istota_file_tasks
-            SET status = ?, completed_at = datetime('now'), error_message = ?,
+            SET status = ?, completed_at = ?, error_message = ?,
                 attempt_count = attempt_count + 1
             WHERE id = ?
             """,
-            (status, error_message, istota_task_id),
+            (status, now, error_message, istota_task_id),
         )
     else:
         conn.execute(

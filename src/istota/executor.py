@@ -319,38 +319,6 @@ def get_user_temp_dir(config: Config, user_id: str) -> Path:
     return config.temp_dir / user_id
 
 
-# Sources whose `prompt` field can be trusted as user-authored input.
-# Addresses appearing in such prompts are added to the per-task email allowlist
-# so the agent can mail recipients the user explicitly named. Email-sourced
-# tasks are excluded — their prompt is the inbound message body (untrusted).
-TRUSTED_PROMPT_SOURCES = frozenset({"cli", "talk", "scheduled", "subtask"})
-
-_EMAIL_ADDRESS_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-
-
-def _extract_addresses_from_prompt(text: str) -> set[str]:
-    """Pull email addresses out of a verbatim user prompt."""
-    if not text:
-        return set()
-    return {m.group(0).lower() for m in _EMAIL_ADDRESS_RE.finditer(text)}
-
-
-def _read_pending_send_recipients(user_temp_dir: Path, task_id: int) -> set[str]:
-    """Read recipients from a previously-queued pending_send.json (if present).
-
-    Used on confirmation re-run so the executor can add the addresses the user
-    just approved into the per-task allowlist for this run only.
-    """
-    path = user_temp_dir / f"task_{task_id}_pending_send.json"
-    if not path.exists():
-        return set()
-    try:
-        entries = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return set()
-    return {(e.get("to") or "").strip().lower() for e in entries if e.get("to")}
-
-
 # Credential-related env var patterns to strip from subprocess environments
 _CREDENTIAL_ENV_PATTERNS = frozenset({
     "PASSWORD", "SECRET", "TOKEN", "API_KEY",
@@ -2216,30 +2184,6 @@ def execute_task(
             env["IMAP_PORT"] = str(config.email.imap_port)
             env["IMAP_USER"] = config.email.imap_user
             env["IMAP_PASSWORD"] = config.email.imap_password
-
-            # Outbound recipient allowlist for the email skill's gate.
-            # Built from prior correspondence + user config + (for trusted-source
-            # tasks) addresses the user typed verbatim in the prompt + (on
-            # confirmation re-run) addresses the user just approved.
-            # Skip when the gate is disabled — the skill then fails open
-            # because no env vars are set.
-            if config.security.outbound_gate_email:
-                if conn is not None:
-                    _known = db.get_known_recipients_for_user(conn, task.user_id, user_email_addresses)
-                else:
-                    with db.get_db(config.db_path) as _temp_conn:
-                        _known = db.get_known_recipients_for_user(_temp_conn, task.user_id, user_email_addresses)
-
-                if task.source_type in TRUSTED_PROMPT_SOURCES:
-                    _known |= _extract_addresses_from_prompt(task.prompt)
-
-                if task.confirmed_at and task.confirmation_prompt:
-                    _known |= _read_pending_send_recipients(user_temp_dir, task.id)
-
-                env["ISTOTA_KNOWN_RECIPIENTS"] = "\n".join(sorted(_known))
-
-                _patterns = list(user_config.trusted_email_senders) if user_config else []
-                env["ISTOTA_TRUSTED_RECIPIENT_PATTERNS"] = "\n".join(_patterns)
 
         # Karakeep bookmarks (per-user API credentials from resource config)
         if user_config:

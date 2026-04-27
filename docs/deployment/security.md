@@ -100,21 +100,8 @@ With the sandbox making the DB read-only, skills write JSON request files to the
 - `task_{id}_kv_ops.json` -- KV store set/delete operations
 - `task_{id}_user_alerts.json` -- suspicious email alerts posted to user's alerts channel
 - `task_{id}_email_output.json` -- deferred email sends (SMTP delivery after task completion)
-- `task_{id}_pending_send.json` -- outbound recipient gate (Layer A); the queued draft for an unknown recipient awaiting user confirmation
 
 Identity fields (`user_id`, `conversation_token`) come from the task, not the JSON, preventing spoofing via prompt injection.
-
-## Outbound recipient gate (email)
-
-Layer A of the adversarial-defense plan. Closes the most realistic exfiltration channel for a prompt-injected agent: being steered into mailing user data to an attacker. The skill proxy keeps SMTP credentials out of the agent's env, but the agent can still call `istota-skill email send --to <anywhere>` and the proxy injects the credentials into the skill subprocess.
-
-The executor builds a per-user "known recipients" set (sent + received addresses, runtime trusted senders, the user's own addresses, plus addresses extracted from the verbatim task prompt for trusted task sources only — not for email-sourced tasks where the prompt is the inbound body). The set is passed via `ISTOTA_KNOWN_RECIPIENTS` (newline-separated) and `ISTOTA_TRUSTED_RECIPIENT_PATTERNS` (fnmatch globs). The skill checks `--to` against both before sending; on miss it writes `task_{id}_pending_send.json` and exits with `{"status": "pending_confirmation", ...}`.
-
-The scheduler picks up the deferred file post-task, transitions to `pending_confirmation` with a body-preview prompt posted to the user's alerts channel, and the existing three-path Talk reply matcher handles `yes` / `yes trust` / `no`. On approval the task re-runs with the previously-blocked recipients added to the per-task allowlist; on `yes trust` the recipients are added to `trusted_email_senders` (semantics are bidirectional). On `no` the file is unlinked.
-
-Fail-open when env vars unset (preserves direct CLI use). Operator kill switch: `outbound_gate_email = false`.
-
-See [features/email.md](../features/email.md#outbound-recipient-gate) for the user-facing description.
 
 ## Configuration
 
@@ -124,7 +111,6 @@ sandbox_enabled = true
 sandbox_admin_db_write = false
 skill_proxy_enabled = true
 skill_proxy_timeout = 300
-outbound_gate_email = true
 passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 
 [security.network]
