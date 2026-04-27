@@ -1145,6 +1145,33 @@ def _process_deferred_user_alerts(
     return count
 
 
+def _talk_target_for_delivery(config: Config, task: db.Task) -> str | None:
+    """Resolve the Talk room to deliver this task's notifications to.
+
+    Email-source tasks store a synthetic SHA-hash thread identifier in
+    `conversation_token` when the chain originated outside Talk (plus_address
+    or sender_match routing in email_poller). That value is not a real Talk
+    room, so posting to it silently no-ops. Fall back to the user's resolved
+    notification channel (alerts > briefing > auto-detected DM) in that case.
+
+    Talk-originated email tasks (where conversation_token was inherited from
+    a sent_email record whose origin task ran in Talk) keep the original
+    token — the user expects follow-ups in the room where the chain started.
+
+    Heuristic: compute_thread_id() returns a 16-character hex string. Tokens
+    matching that shape on email-source tasks are treated as synthetic.
+    """
+    token = task.conversation_token
+    if task.source_type != "email" or not token:
+        return token
+    is_synthetic = len(token) == 16 and all(c in "0123456789abcdef" for c in token)
+    if not is_synthetic:
+        return token
+    from .notifications import resolve_conversation_token
+    resolved = resolve_conversation_token(config, task.user_id)
+    return resolved or token
+
+
 def _notify_confirmed_email_result(
     config: Config, task: db.Task, result: str,
 ) -> bool:
@@ -1416,6 +1443,12 @@ def process_one_task(
             task, config, user_resources, dry_run=dry_run, on_progress=progress_callback,
         )
 
+    # Resolve the Talk room for delivering this task's notifications.
+    # For email-source tasks with a synthetic thread-hash conversation_token,
+    # this falls back to the user's resolved alerts/DM channel — otherwise
+    # follow-up notifications would silently no-op.
+    talk_token = _talk_target_for_delivery(config, task)
+
     # Track if we need to call istota_file handler after db connection closes
     call_file_handler = False
     file_handler_success = False
@@ -1474,7 +1507,7 @@ def process_one_task(
             # Check if the result is a confirmation request
             is_confirmation_request = (
                 target in ("talk", "both")
-                and task.conversation_token
+                and talk_token
                 and CONFIRMATION_PATTERN.search(result)
             )
 
@@ -1504,7 +1537,7 @@ def process_one_task(
                     should_post, result_to_post = _strip_action_prefix(result)
                     if should_post:
                         db.log_task(conn, task_id, "info", "Silent scheduled job: action taken")
-                        if task.conversation_token:
+                        if talk_token:
                             post_talk_message = result_to_post
                     else:
                         db.log_task(conn, task_id, "info", "Silent scheduled job: no action needed")
@@ -1520,7 +1553,7 @@ def process_one_task(
                             delivery_result = strip_briefing_preamble(result)
                     else:
                         delivery_result = result
-                    if target in ("talk", "both", "all") and task.conversation_token:
+                    if target in ("talk", "both", "all") and talk_token:
                         post_talk_message = delivery_result
                     if target in ("email", "both", "all"):
                         post_email = True
@@ -1590,7 +1623,7 @@ def process_one_task(
                     # Suppress user-facing error delivery for automated tasks.
                     # Errors are logged to DB and log_channel; no need to confuse users.
                     db.log_task(conn, task_id, "info", "Suppressed error delivery for automated task")
-                elif target in ("talk", "both", "all") and task.conversation_token:
+                elif target in ("talk", "both", "all") and talk_token:
                     # Use user-friendly error message, not raw error
                     friendly_error = _format_error_for_user(result)
                     post_talk_message = f"🐙 {friendly_error}"
@@ -1622,7 +1655,7 @@ def process_one_task(
     # Process deferred operations (subtasks, transaction tracking) on success
     if success and not (
         target in ("talk", "both")
-        and task.conversation_token
+        and talk_token
         and CONFIRMATION_PATTERN.search(result)
     ):
         from .executor import get_user_temp_dir
@@ -1745,6 +1778,7 @@ def process_one_task(
             response_msg_id = asyncio.run(post_result_to_talk(
                 config, task, post_talk_message, use_reply_threading=True,
                 reference_id=f"istota:task:{task.id}:result",
+                target_token=talk_token,
             ))
             parts = []  # skip overflow posting
         # Post any overflow parts as new messages
@@ -1752,11 +1786,13 @@ def process_one_task(
             asyncio.run(post_result_to_talk(
                 config, task, part,
                 reference_id=f"istota:task:{task.id}:result",
+                target_token=talk_token,
             ))
     elif post_talk_message:
         response_msg_id = asyncio.run(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
             reference_id=f"istota:task:{task.id}:result",
+            target_token=talk_token,
         ))
     # Store bot's response message ID for reply tracking
     if response_msg_id and not is_failure_notify:
@@ -1776,7 +1812,7 @@ def process_one_task(
     if not cache_msg_id and progress_callback and hasattr(progress_callback, "last_progress_msg_id"):
         cache_msg_id = progress_callback.last_progress_msg_id[0]
 
-    if success and task.conversation_token and not is_failure_notify and cache_msg_id:
+    if success and talk_token and not is_failure_notify and cache_msg_id:
         try:
             with db.get_db(config.db_path) as conn:
                 cache_msg = {
@@ -1791,7 +1827,7 @@ def process_one_task(
                     "referenceId": f"istota:task:{task.id}:result",
                     "deleted": False,
                 }
-                db.upsert_talk_messages(conn, task.conversation_token, [cache_msg])
+                db.upsert_talk_messages(conn, talk_token, [cache_msg])
         except Exception as e:
             logger.warning("Failed to cache result message for task %d: %s", task_id, e)
     if post_email:
@@ -1823,12 +1859,18 @@ async def post_result_to_talk(
     config: Config, task: db.Task, message: str,
     *, use_reply_threading: bool = False,
     reference_id: str | None = None,
+    target_token: str | None = None,
 ) -> int | None:
     """Post a result message to Talk. Returns the Talk message ID of the last sent message.
 
     Long messages are split into multiple parts sent sequentially.
+
+    `target_token` overrides `task.conversation_token` for the actual post —
+    use it when the task's stored token isn't a real Talk room (see
+    `_talk_target_for_delivery` for the email-source synthetic-token case).
     """
-    if not config.nextcloud.url or not task.conversation_token:
+    token = target_token or task.conversation_token
+    if not config.nextcloud.url or not token:
         return None
 
     try:
@@ -1845,7 +1887,7 @@ async def post_result_to_talk(
                 reply_to = task.talk_message_id
                 part = f"@{task.user_id} {part}"
             response = await client.send_message(
-                task.conversation_token, part, reply_to=reply_to,
+                token, part, reply_to=reply_to,
                 reference_id=reference_id,
             )
             msg_id = response.get("ocs", {}).get("data", {}).get("id")
