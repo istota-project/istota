@@ -1074,27 +1074,54 @@ def _process_deferred_pending_sends(
         path.unlink(missing_ok=True)
         return False
 
-    lines = ["Bot wants to send email to unknown recipient(s):"]
-    for entry in queued:
+    # Format matches the sensitive_actions self-confirmation style so the user
+    # sees one consistent confirmation experience whether the agent narrates
+    # the gate (file-delete, calendar-delete, external-share) or the system
+    # produces it (this case, for email).
+    if len(queued) == 1:
+        entry = queued[0]
         to_addr = entry.get("to", "?")
         subject = entry.get("subject", "(no subject)")
         body = entry.get("body", "") or ""
-        preview = body[:200].replace("\n", " ")
-        if len(body) > 200:
+        preview = body[:300].replace("\n", " ")
+        if len(body) > 300:
             preview += "…"
-        lines.append(f"  → {to_addr} | Subject: {subject}\n    {preview}")
-    lines.append(
-        "\nReply 'yes' to send, 'yes trust' to send and trust these "
-        "addresses for future tasks, or 'no' to discard."
-    )
-    confirmation_msg = "\n".join(lines)
+        confirmation_msg = (
+            "I need your confirmation to proceed:\n\n"
+            f"Action: Send email to {to_addr}\n"
+            f"Subject: {subject}\n"
+            f"Content: {preview}\n\n"
+            "Reply \"yes\" to confirm, \"yes trust\" to also remember this address, "
+            "or \"no\" to cancel."
+        )
+    else:
+        lines = ["I need your confirmation to proceed:\n"]
+        lines.append(f"Action: Send {len(queued)} emails to unknown recipients:")
+        for entry in queued:
+            to_addr = entry.get("to", "?")
+            subject = entry.get("subject", "(no subject)")
+            body = entry.get("body", "") or ""
+            preview = body[:160].replace("\n", " ")
+            if len(body) > 160:
+                preview += "…"
+            lines.append(f"  - {to_addr} — {subject}: {preview}")
+        lines.append(
+            "\nReply \"yes\" to send all, \"yes trust\" to also remember these "
+            "addresses, or \"no\" to cancel."
+        )
+        confirmation_msg = "\n".join(lines)
 
     with db.get_db(config.db_path) as conn:
         db.set_task_confirmation(conn, task.id, confirmation_msg)
 
+    # Post in the user's main conversation when available — same UX as the
+    # sensitive_actions self-confirmation flow. Fall back to the alerts channel
+    # only for tasks without a conversation (CLI, cron, scheduled jobs).
     from .notifications import resolve_conversation_token, send_talk_confirmation
-    alerts_token = resolve_conversation_token(config, task.user_id) or task.conversation_token
-    msg_id = send_talk_confirmation(config, task.user_id, confirmation_msg, alerts_token)
+    target_token = task.conversation_token or resolve_conversation_token(
+        config, task.user_id,
+    )
+    msg_id = send_talk_confirmation(config, task.user_id, confirmation_msg, target_token)
     if msg_id:
         with db.get_db(config.db_path) as conn:
             db.update_talk_response_id(conn, task.id, msg_id)

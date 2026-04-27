@@ -2109,10 +2109,41 @@ def execute_task(
     cli_skills_text = format_cli_skills(skill_index)
 
     # Build prompt
-    # Detect confirmed tasks — pass their previous output as confirmation context
+    # Detect confirmed tasks — pass their previous output as confirmation context.
+    # Layer A re-run path: when a Layer-A pending_send.json exists for a confirmed
+    # task, replace the textual context with the structured draft from the file
+    # so the agent re-executes the exact send the user approved (no body re-improv).
     _confirmation_context = None
     if task.confirmed_at and task.confirmation_prompt:
         _confirmation_context = task.confirmation_prompt
+        _pending_send_path = user_temp_dir / f"task_{task.id}_pending_send.json"
+        if _pending_send_path.exists():
+            try:
+                _queued = json.loads(_pending_send_path.read_text())
+                if isinstance(_queued, list) and _queued:
+                    _lines = [
+                        "The user approved sending the email(s) below. "
+                        "Call `istota-skill email send` once for each, with these exact arguments:",
+                    ]
+                    for _entry in _queued:
+                        _to = _entry.get("to", "")
+                        _subject = _entry.get("subject", "")
+                        _body = _entry.get("body", "") or ""
+                        _ctype = _entry.get("content_type", "plain")
+                        _html_flag = " --html" if _ctype == "html" else ""
+                        _lines.append(
+                            f"\n- To: {_to}\n  Subject: {_subject}\n  Body:\n{_body}\n  "
+                            f"Command: `istota-skill email send --to {_to!r} "
+                            f"--subject {_subject!r} --body-file <path>{_html_flag}` "
+                            f"(write the body to a temp file first; use the body shown above verbatim)"
+                        )
+                    _lines.append(
+                        "\nDo not paraphrase, summarize, or re-draft the body. "
+                        "After sending, give the user a one-sentence confirmation."
+                    )
+                    _confirmation_context = "\n".join(_lines)
+            except (json.JSONDecodeError, OSError):
+                pass  # Fall back to textual context
 
     prompt = build_prompt(
         task, user_resources, config, skills_doc, conversation_context, user_memory,

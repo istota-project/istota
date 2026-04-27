@@ -45,12 +45,14 @@ Sends to addresses not in the user's known-contacts list (no prior correspondenc
 {"status": "pending_confirmation", "to": "...", "reason": "unknown_recipient", "message": "..."}
 ```
 
-When you see this status, **end your turn**. The user will get a prompt asking them to approve the send. Do **not**:
-- Retry the send with a different recipient
-- Try to bypass the gate by re-sending
-- Apologize repeatedly to the user — a brief acknowledgment is enough ("I've drafted an email and queued it for your approval")
+When you see this status, give the user a **brief one-sentence acknowledgment** and **end your turn**. Example: `"Drafted — waiting for your approval."` Nothing more. Specifically, do **not**:
 
-The gate is a security boundary; calling `send` again won't change the outcome.
+- Repeat the recipient address, subject, or body (the system has already shown them — repeating is noisy)
+- Re-narrate the draft as your own confirmation request (the system already produced one)
+- Retry the send with a different recipient or call send again (the gate is a security boundary, not a hint to try again)
+- Apologize at length — a single short sentence is enough
+
+If the user later replies "yes", your task will re-execute with the approved recipient on a per-task allowlist; call `send` once with the same args and it goes through.
 
 ## Replying to incoming emails (`output`)
 

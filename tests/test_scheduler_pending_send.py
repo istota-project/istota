@@ -1,8 +1,10 @@
 """Tests for the scheduler's deferred pending-send handler (Layer A).
 
 When the email skill's recipient gate writes task_{id}_pending_send.json, the
-scheduler holds the task in pending_confirmation, posts to the alerts channel,
-and lets the existing confirmation-reply machinery resume.
+scheduler holds the task in pending_confirmation, posts a confirmation prompt
+in the user's main conversation (falling back to the alerts channel only when
+the task has no conversation_token), and lets the existing confirmation-reply
+machinery resume the task on approval.
 """
 
 from __future__ import annotations
@@ -56,7 +58,7 @@ class TestProcessDeferredPendingSends:
         mock_send.assert_not_called()
 
     @patch("istota.notifications.send_talk_confirmation")
-    def test_queues_confirmation(self, mock_send, db_path, tmp_path):
+    def test_queues_confirmation_to_main_conversation(self, mock_send, db_path, tmp_path):
         mock_send.return_value = 12345  # talk message id
         config = _make_config(db_path, tmp_path, alerts_channel="alerts-room")
         user_temp = tmp_path / "temp" / "alice"
@@ -82,16 +84,18 @@ class TestProcessDeferredPendingSends:
         result = _process_deferred_pending_sends(config, task, user_temp)
         assert result is True
 
-        # Talk confirmation was posted to the alerts channel
+        # Confirmation posted to main conversation, not alerts channel
         mock_send.assert_called_once()
         args = mock_send.call_args
         token_arg = args[0][3] if len(args[0]) >= 4 else args.kwargs.get("conversation_token")
-        assert token_arg == "alerts-room"
+        assert token_arg == "main-room"
 
+        # Format matches the natural-language sensitive_actions style
         prompt_arg = args[0][2]
-        assert "stranger@elsewhere.com" in prompt_arg
-        assert "About the project" in prompt_arg
-        assert "yes" in prompt_arg.lower()
+        assert "I need your confirmation to proceed" in prompt_arg
+        assert "Action: Send email to stranger@elsewhere.com" in prompt_arg
+        assert "Subject: About the project" in prompt_arg
+        assert "yes trust" in prompt_arg
 
         # Task is pending_confirmation with the prompt stored
         with db.get_db(db_path) as conn:
@@ -103,6 +107,32 @@ class TestProcessDeferredPendingSends:
 
         # File is intentionally NOT deleted — needed on re-run
         assert (user_temp / f"task_{task_id}_pending_send.json").exists()
+
+    @patch("istota.notifications.send_talk_confirmation")
+    def test_falls_back_to_alerts_when_no_conversation(self, mock_send, db_path, tmp_path):
+        """Scheduled jobs / CLI tasks have no conversation_token — fall back to alerts."""
+        mock_send.return_value = 1
+        config = _make_config(db_path, tmp_path, alerts_channel="alerts-room")
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="x", user_id="alice", source_type="scheduled",
+                # no conversation_token
+            )
+            task = db.get_task(conn, task_id)
+
+        (user_temp / f"task_{task_id}_pending_send.json").write_text(json.dumps([
+            {"to": "x@y.com", "subject": "s", "body": "b", "content_type": "plain"},
+        ]))
+
+        result = _process_deferred_pending_sends(config, task, user_temp)
+        assert result is True
+
+        args = mock_send.call_args
+        token_arg = args[0][3] if len(args[0]) >= 4 else args.kwargs.get("conversation_token")
+        assert token_arg == "alerts-room"
 
     @patch("istota.notifications.send_talk_confirmation")
     def test_confirmation_rerun_cleans_up_file(self, mock_send, db_path, tmp_path):
@@ -152,7 +182,10 @@ class TestProcessDeferredPendingSends:
         user_temp.mkdir(parents=True)
 
         with db.get_db(db_path) as conn:
-            task_id = db.create_task(conn, prompt="x", user_id="alice", source_type="talk")
+            task_id = db.create_task(
+                conn, prompt="x", user_id="alice", source_type="talk",
+                conversation_token="main-room",
+            )
             task = db.get_task(conn, task_id)
 
         (user_temp / f"task_{task_id}_pending_send.json").write_text(json.dumps([
@@ -164,5 +197,7 @@ class TestProcessDeferredPendingSends:
         assert result is True
 
         prompt = mock_send.call_args[0][2]
+        assert "I need your confirmation to proceed" in prompt
+        assert "Send 2 emails" in prompt
         assert "a@x.com" in prompt
         assert "b@y.com" in prompt

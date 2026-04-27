@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-27: Layer A — unify with existing sensitive_actions confirmation flow
+
+Production smoke test of Layer A surfaced an integration problem: the agent self-confirmed every external email send via the `sensitive_actions` skill (always-included, instructs the agent to emit `"I need your confirmation to proceed: Action: ..."` text for external addresses), and that text tripped the existing `CONFIRMATION_PATTERN` regex in `scheduler.py` *before* `email send` was ever called. The deferred-processing batch was short-circuited (because `CONFIRMATION_PATTERN` matched the agent's text), so Layer A's `_process_deferred_pending_sends` never ran, no `pending_send.json` was written, and the user's `yes trust` reply had no recipient to add to `trusted_email_senders` — `handle_confirmation_reply` saw no file and fell into the inbound-gate branch which only fires for `source_type == "email"`.
+
+Two competing confirmation paths, two formats, broken trust. Worked through three integration approaches: (A) make Layer A produce the natural-language format and post to the main conversation; (B) make `sensitive_actions` aware of the recipient set so it doesn't pre-confirm known recipients; (C) make `sensitive_actions` defer to Layer A entirely for email. C+A combined: the cleanest because there's a single source of truth for both the gate logic (Layer A → DB query) and the trust persistence (`pending_send.json` always written when the gate fires). The agent stays the actor, the system stays the gate.
+
+Implementation:
+
+- **`scheduler.py:_process_deferred_pending_sends`** — rewrote the prompt format to match the existing `"I need your confirmation to proceed: Action: Send email to X / Subject: Y / Content: Z / Reply yes / yes trust / no"` style. Single-recipient and multi-recipient variants. Posts to `task.conversation_token` (main conversation), falls back to `resolve_conversation_token` (alerts channel) only when no token exists (CLI / scheduled / cron source).
+- **`sensitive_actions/skill.md`** — removed "Sending emails to external addresses" from the requires-confirmation list. Added an explicit "Email sends" section telling the agent to call `email send` directly and respond to a `pending_confirmation` status with a one-sentence acknowledgment ("Drafted — waiting for your approval"). Updated the example response format from an email example to a file-delete example so the agent doesn't pattern-match on the old example.
+- **`email/skill.md`** — tightened the gated-response wording to reinforce: brief one-sentence ack, do not repeat recipient/subject/body, do not re-narrate as a confirmation request, do not retry.
+- **`executor.py:execute_task`** — on confirmation re-run, when `task_{id}_pending_send.json` exists, the executor replaces the textual `confirmation_context` (which was the previous-output preview) with a structured directive containing the exact `to` / `subject` / `body` from the file and a command snippet. The agent then re-sends the exact draft the user approved with no body re-improvisation.
+- **Tests** — `test_queues_confirmation` renamed to `test_queues_confirmation_to_main_conversation`, asserts the natural-language format and main-conversation routing. New `test_falls_back_to_alerts_when_no_conversation` covers the CLI/cron source case. New `test_confirmation_rerun_injects_draft_into_prompt` covers the executor's structured-draft injection (verifies the body appears verbatim in the prompt passed to claude via stdin, that the textual context is replaced, that the command snippet is present). Multi-recipient test updated to assert the new format.
+
+The end state: one gate for email (deterministic, persistent trust, natural voice in main thread), agent-driven gates for other sensitive actions (unchanged). Same `"I need your confirmation"` wording from both paths so the user-side experience is consistent. 36 Layer A tests pass, full suite (3356 tests) green.
+
+**Files added/modified:**
+- `src/istota/scheduler.py` — natural-language format in `_process_deferred_pending_sends`, main-conversation routing
+- `src/istota/skills/sensitive_actions/skill.md` — email exception, file-delete example
+- `src/istota/skills/email/skill.md` — tightened gated-response wording
+- `src/istota/executor.py` — structured-draft injection into `confirmation_context` on re-run with `pending_send.json` present
+- `tests/test_scheduler_pending_send.py` — format + channel assertions, fallback test
+- `tests/test_executor_recipient_allowlist.py` — draft-injection test
+- `docs/features/email.md`, `docs/deployment/security.md`, `AGENTS.md` — coordination-with-sensitive_actions sections
+
 ## 2026-04-26: Fix timezone + format mismatch in task timestamps
 
 Four `TestClaimTaskChannelGate` tests were failing on a US-Pacific dev machine but passing on the UTC production server. Investigation traced it to `db.update_task_status()` writing `started_at` / `completed_at` / `updated_at` as `datetime.now().isoformat()` (Python local time, `T`-separator, microseconds) while `claim_task()` and friends compare those columns against SQLite's `datetime('now', '...')` (UTC, space-separator, no microseconds).
