@@ -65,6 +65,7 @@ istota/
 │       ├── tasks/           # Subtask/queue reference (doc-only)
 │       ├── todos/           # Todo list reference (doc-only)
 │       ├── transcribe/      # OCR transcription via Tesseract
+│       ├── untrusted_input/  # How to read content from outside the trust boundary (doc-only, companion)
 │       ├── website/         # Website management reference (doc-only)
 │       ├── google_workspace/ # Google Workspace CLI wrapper (Drive, Gmail, Calendar, Sheets, Docs)
 │       ├── location/       # GPS location tracking + calendar attendance (Overland)

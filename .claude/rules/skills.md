@@ -131,8 +131,11 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe | miniflux | — |
 | `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws | — | — |
 | `money` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | money (legacy `moneyman` accepted) | — |
+| `untrusted_input` | — | — | — | — |
 
 Note: `money` is the sole accounting skill. It runs in-process via the vendored `money` package (no subprocess, no HTTP).
+
+`untrusted_input` is a doc-only companion skill — no triggers, no source_types, never selected directly. It loads via `companion_skills` declarations on the seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`) so its rules ride along whenever a task is processing content from outside the trust boundary. Paired with `sensitive_actions`: outbound rules in that one, inbound-reading rules here, per-action authorization principle stated in both.
 
 ## Skill CLI Modules (`src/istota/skills/`)
 
