@@ -16,12 +16,6 @@ effort = "{{ istota_effort }}"
 custom_system_prompt = true
 {% endif %}
 
-[brain]
-# Which model-invocation backend the executor uses.
-# "claude_code" wraps the `claude` CLI subprocess (Phase 1 default + only option).
-# Future: "openrouter", "anthropic" for direct-HTTP brains.
-kind = "{{ istota_brain_kind | default('claude_code', true) }}"
-
 # Database path
 db_path = "{{ istota_home }}/data/{{ istota_namespace }}.db"
 
@@ -42,6 +36,12 @@ disabled_skills = {{ istota_disabled_skills | to_json }}
 
 # Temporary directory
 temp_dir = "{{ istota_home }}/tmp"
+
+[brain]
+# Which model-invocation backend the executor uses.
+# "claude_code" wraps the `claude` CLI subprocess (Phase 1 default + only option).
+# Future: "openrouter", "anthropic" for direct-HTTP brains.
+kind = "{{ istota_brain_kind | default('claude_code', true) }}"
 
 [security]
 sandbox_enabled = {{ istota_security_sandbox_enabled | lower }}

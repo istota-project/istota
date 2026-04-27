@@ -1528,3 +1528,49 @@ class TestMemorySystemConfigLoading:
         assert cfg.memory_search.auto_recall is False
         assert cfg.memory_search.auto_recall_limit == 5
         assert cfg.max_memory_chars == 0
+
+
+class TestConfigToplevelKeyOrdering:
+    """Regression: a table header in the rendered config or example file must
+    not appear above top-level keys, or those keys get parsed as members of
+    the table (TOML rule). This bit us once — `[brain]` placed above
+    `db_path` in the Ansible template silently nested `db_path` under
+    `brain`, causing the scheduler to fall back to the default DB path and
+    log "unable to open database file" forever.
+    """
+
+    def test_example_config_db_path_at_root(self, tmp_path, monkeypatch):
+        """Loading config/config.example.toml must yield root-level db_path,
+        temp_dir, skills_dir — not nested under any table."""
+        import tomli
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        example = Path(__file__).resolve().parent.parent / "config" / "config.example.toml"
+        with open(example, "rb") as f:
+            data = tomli.load(f)
+        # These must be at the root, not under [brain] or any other table.
+        for key in ("db_path", "temp_dir", "skills_dir", "rclone_remote"):
+            assert key in data, f"{key} not at root in config.example.toml"
+        # And they must NOT be inside the brain table.
+        if "brain" in data:
+            for key in ("db_path", "temp_dir", "skills_dir", "rclone_remote"):
+                assert key not in data["brain"], (
+                    f"{key} ended up under [brain] — table header is positioned wrong"
+                )
+
+    def test_ansible_template_brain_below_toplevel_keys(self):
+        """Verify the [brain] header in deploy/ansible/templates/config.toml.j2
+        appears AFTER all top-level key assignments (db_path, temp_dir, etc.).
+        TOML places every key after a table header into that table.
+        """
+        template = Path(__file__).resolve().parent.parent / "deploy" / "ansible" / "templates" / "config.toml.j2"
+        text = template.read_text()
+        brain_idx = text.find("\n[brain]\n")
+        assert brain_idx >= 0, "[brain] section missing from Ansible template"
+        # Top-level keys that must be defined before any table header.
+        for key in ("db_path", "temp_dir", "skills_dir", "rclone_remote"):
+            key_idx = text.find(f"\n{key} = ")
+            assert key_idx >= 0, f"{key} assignment missing from template"
+            assert key_idx < brain_idx, (
+                f"{key} is defined AFTER [brain] in the Ansible template — "
+                "it will be parsed as brain.{key}, breaking config loading"
+            )
