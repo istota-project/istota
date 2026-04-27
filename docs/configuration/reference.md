@@ -159,6 +159,14 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `semantic_routing_model` | `"haiku"` | Model for classification |
 | `semantic_routing_timeout` | `3.0` | Seconds, falls back to Pass 1 |
 
+## `[brain]`
+
+Selects which model-invocation backend the executor uses. See [architecture/brain](../architecture/brain.md) for the protocol.
+
+| Setting | Default | Description |
+|---|---|---|
+| `kind` | `"claude_code"` | Brain implementation. `"claude_code"` wraps the `claude` CLI subprocess (only Phase 1 option). Future values: `"openrouter"`, `"anthropic"`. |
+
 ## `[sleep_cycle]`
 
 | Setting | Default | Description |
