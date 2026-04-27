@@ -345,6 +345,16 @@ class SkillsConfig:
 
 
 @dataclass
+class BrainConfig:
+    """Selects which brain implementation handles model invocation.
+
+    Phase 1 ships only "claude_code" (the existing CLI subprocess wrapper).
+    Future phases add "openrouter" (direct HTTP) and "anthropic" (Messages API).
+    """
+    kind: str = "claude_code"
+
+
+@dataclass
 class BriefingDefaultsConfig:
     """Admin-level defaults for briefing components (expanded when user sets boolean)."""
     markets: dict = field(default_factory=dict)
@@ -372,6 +382,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefing_defaults: BriefingDefaultsConfig = field(default_factory=BriefingDefaultsConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
+    brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
     sleep_cycle: SleepCycleConfig = field(default_factory=SleepCycleConfig)
     channel_sleep_cycle: ChannelSleepCycleConfig = field(default_factory=ChannelSleepCycleConfig)
@@ -886,6 +897,12 @@ def load_config(config_path: Path | None = None) -> Config:
             semantic_routing=sk.get("semantic_routing", True),
             semantic_routing_model=sk.get("semantic_routing_model", "haiku"),
             semantic_routing_timeout=sk.get("semantic_routing_timeout", 3.0),
+        )
+
+    if "brain" in data:
+        br = data["brain"]
+        config.brain = BrainConfig(
+            kind=br.get("kind", "claude_code"),
         )
 
     if "briefing_defaults" in data:

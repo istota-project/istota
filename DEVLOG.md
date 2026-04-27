@@ -2,6 +2,47 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-27: Phase 1 of the switchable-brain refactor — extract ClaudeCodeBrain
+
+Drew the long-planned boundary between executor orchestration (memory, skills, sandbox, deferred DB writes) and model invocation (subprocess, stream parsing, retry). The executor used to spawn `claude -p -` directly and parse `--output-format stream-json` inline; now it builds a typed `BrainRequest` and hands it to a `Brain` implementation. Phase 1 ships only `ClaudeCodeBrain` (current behavior, default). Phases 2–3 add an OpenRouter brain and an Anthropic-direct brain on the same protocol — see the switchable-brain plan in Notes for the full destination (Path C: converge on a single in-process harness, retire the CLI wrapper).
+
+The reason for doing the refactor as its own commit (and not bundling it with Phase 2) is to lock in the boundary before the new brain exists. Adding OpenRouter on top of an executor that still inlines subprocess code produces two parallel execution paths forever; doing the protocol extraction first means the OpenRouter work is purely additive. No behavior change for current users — `Config.brain.kind` defaults to `"claude_code"`.
+
+The boundary cut: the brain owns everything between "we have a prompt and an env" and "we have a result + trace". Specifically: command construction, sandbox-wrap (via a caller-supplied closure so the brain doesn't know about bubblewrap), subprocess spawn, stream parsing, transient-API retry, cancel/timeout/oom handling. What stays in the executor: prompt building, env building, skill selection, conversation context, memory loading, deferred file processing, malformed-output detection, and `_compose_full_result` (the CM-aware/terse-result reconciliation, since it's brain-agnostic). Both brains will produce `(result_text, execution_trace)` and need the same downstream cleanup.
+
+Two design calls that diverged from the spec sketch:
+
+- **`BrainRequest` dataclass over positional kwargs.** The spec proposed `Brain.execute(prompt, allowed_tools, cwd, env, timeout_seconds, on_progress, cancel_check)`. Reality has more wiring — `model`/`effort`/`custom_system_prompt_path`/`streaming`/`on_pid`/`sandbox_wrap`/`result_file` — and putting it all positionally would have made every future field a breaking change. The dataclass is a strict superset and makes per-task overrides obvious.
+- **Callbacks for cross-cutting concerns instead of passing the task/config in.** Cancellation polling, PID write-back, and progress streaming each became a `Callable` on the request. The brain has no `task` or `config` reference and no DB knowledge — pure inputs and outputs. Same pattern Hermes Agent uses for its `IterationBudget`; gives us a path to in-process brains without restructuring callbacks later.
+
+Backward-compat surface kept deliberately wide: `parse_api_error`, `is_transient_api_error`, retry constants, and `API_ERROR_PATTERN` are re-exported from `executor.py` for `scheduler.py` and tests. `stream_parser.py` is now a thin re-export shim of `brain/_events.py`. `subprocess`, `threading`, `time` imports stay in executor.py with `# noqa: F401` because tests patch `istota.executor.subprocess.run` etc. — Python's stdlib modules are shared module objects, so those patches still intercept the brain's calls. Verified by 3433 tests still passing.
+
+Mulder + Scully review caught two real issues:
+
+- **PID write timing regression** — old code wrote the subprocess PID to the DB *before* `process.stdin.write(req.prompt)`; new code did it after. For prompts under 64 KB the stdin write doesn't block, so the window is microseconds, but a `!stop` arriving in that window would no-op. Fixed by moving the `on_pid` call to immediately after `Popen`.
+- **No stack trace on bare-except in brain** — `ClaudeCodeBrain.execute()`'s catch-all stringified the exception but lost the traceback. Old executor swallowed the same way (status-quo, not a regression), but added `logger.exception(...)` since we were here anyway.
+
+Scully also flagged that there were no unit tests for the factory itself (`make_brain` + `BrainConfig` parsing) — added `tests/test_brain.py` with 10 tests covering the factory contract, protocol conformance, TOML parsing (with and without `[brain]` section, unknown kind loads but rejects at `make_brain`), and BrainRequest/BrainResult defaults.
+
+Ansible role grew one variable: `istota_brain_kind: "claude_code"` (default), rendered into a `[brain]` block in `config.toml.j2`.
+
+**Files added/modified:**
+- `src/istota/brain/__init__.py` — `Brain` Protocol re-exports + `make_brain` factory.
+- `src/istota/brain/_types.py` — `BrainRequest`, `BrainResult`, `BrainConfig`, `Brain` Protocol.
+- `src/istota/brain/_events.py` — `StreamEvent` types + Claude Code stream-json parser, moved from `stream_parser.py`.
+- `src/istota/brain/claude_code.py` — `ClaudeCodeBrain` with subprocess + stream parsing + transient API retry + PID write before stdin.
+- `src/istota/executor.py` — `execute_task()` now composes a `BrainRequest` and calls `make_brain(config.brain).execute(req)`. Old `_execute_simple{,_once}` and `_execute_streaming{,_once}` deleted. `_compose_full_result()` now invoked on the brain's returned trace JSON. Re-exports kept for scheduler and test compat.
+- `src/istota/stream_parser.py` — reduced to a re-export shim.
+- `src/istota/config.py` — new `BrainConfig` dataclass; `Config.brain` field; `[brain]` TOML parsing.
+- `tests/test_executor.py` — `TestExecuteStreamingRetry` rewritten to drive `ClaudeCodeBrain._execute_streaming` and patch its `_execute_streaming_once`.
+- `tests/test_brain.py` — new file, 10 tests for factory + protocol + TOML parsing.
+- `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2` — `istota_brain_kind` variable + `[brain]` section.
+- `config/config.example.toml` — commented `[brain] kind = "claude_code"` example.
+- `AGENTS.md` — brain/ subtree added; Executor and Brain bullets rewritten; test count refreshed (~3450 across 65 files).
+- `.claude/rules/executor.md` — Popen/stream-parsing sections replaced with the BrainRequest contract; result composition kept.
+- `.claude/rules/brain.md` — new file documenting the protocol, BrainRequest/BrainResult, ClaudeCodeBrain internals, and how to add a new brain.
+- `.claude/rules/config.md` — `BrainConfig` block + Config field added.
+
 ## 2026-04-26: New `untrusted_input` companion skill for ingest-shaped skills
 
 Drafted a doc-only `untrusted_input` skill that loads alongside skills which ingest content from outside the trust boundary: `email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`. Pairs with `sensitive_actions` — that one governs outbound; this one governs how inbound content should be *read*. Source-scoped via `companion_skills`, not `always_include`, so there's no prompt cost on tasks without ingest content.

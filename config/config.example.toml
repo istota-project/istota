@@ -22,6 +22,13 @@ bot_name = "Istota"
 # The custom prompt is minimal, focused on tool usage and working practices.
 # custom_system_prompt = true
 
+# Brain — selects the model-invocation backend. Phase 1 ships only "claude_code"
+# (wraps the `claude` CLI). Future values: "openrouter", "anthropic" for
+# direct-HTTP brains. The Brain protocol lives in src/istota/brain/ so swapping
+# backends doesn't touch executor orchestration (memory, skills, sandbox, etc.).
+# [brain]
+# kind = "claude_code"
+
 # Database path (relative to working directory or absolute)
 db_path = "data/istota.db"
 

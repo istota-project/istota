@@ -35,6 +35,13 @@ istota_effort: ""
 # Use config/system-prompt.md instead of Claude Code's default system prompt
 istota_custom_system_prompt: true
 
+# Brain — selects which model-invocation backend the executor uses.
+# "claude_code" wraps the `claude` CLI subprocess (the only Phase 1 option).
+# Future values: "openrouter", "anthropic". The Brain protocol lives in
+# src/istota/brain/ and lets us swap backends without touching executor
+# orchestration (memory, skills, sandbox, deferred DB writes).
+istota_brain_kind: "claude_code"
+
 # Claude CLI authentication
 # Preferred: generate a token locally with `claude setup-token`, store in vault
 # Fallback: authenticate manually with `sudo -u <namespace> claude login`
