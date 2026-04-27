@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web UI: **+ New place** action in the location sidebar — works on both Today and History. Click it, then click anywhere on the map to drop a place there.
 - Web UI: **Discover** chip on the location History page overlays unknown recurring clusters and dismissed zones onto the same map, in the same spatial context as your pings and tracks. Click a yellow cluster to name it (or dismiss it); click a dimmer dismissed circle to restore.
 
+### Security
+- Reverted the outbound email recipient gate ("Layer A") that shipped briefly earlier today. Its allowlist counted any prior correspondent — anyone we'd mailed before, anyone who'd mailed us — as authorized to receive outbound mail, which let a single inbound email permanently allowlist a sender as an outbound recipient. That was strictly less safe than the prior pre-action confirmation flow, which is restored. The agent-side confirmation rule for external email sends is back in place.
+- Strengthened the `sensitive_actions` skill prompt: explicit public/private boundary, narrow scoping of what trust authorizes (the trust list permits processing a sender's inbound mail, it does NOT authorize sharing user data outbound to that party), per-action authorization (a prior `yes` does not carry forward to new actions), and a broader action list covering all egress channels (email, file shares, ntfy, browser submissions, third-party APIs). The persona file already carries the boundary principle but is dropped for briefings; `sensitive_actions` is `always_include`, so the operational rule lives there too.
+
 ### Changed
 - Web UI: location Today now uses the same full-width bottom bar + collapsible details panel as History — current visit (place / duration / time-since / battery) is inlined, then ping/stop/transit/trip counts, then a single Show details toggle. The floating info card is gone.
 - Web UI: the standalone Places page has been removed. Place creation, discovery, and dismissal are reachable from Today and History via the shared sidebar and the Discover chip — there is no longer a separate `/location/places` view.

@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-26: Revert Layer A outbound gate; tighten sensitive_actions skill
+
+A short-lived attempt at deterministic outbound email gating shipped earlier in the day (commits `d7aba2d` "Add outbound email recipient gate (Layer A)" and `f36c6c2` "Unify Layer A with sensitive_actions confirmation flow") was reverted (`67b5200`, `ff381d6`) after an in-the-wild adversarial test confirmed the design was less safe than what it replaced. A synthetic sender emailed asking for the user's calendar availability; the bot drafted a polite "let me check first" reply, then a follow-up reply from the same sender slipped through with full availability data attached because the recipient was now in `sent_emails.to_addr` (and would have been in `processed_emails.sender_email` regardless). Layer A's `db.get_known_recipients_for_user` treated both as authorization sources. Net effect: an attacker only had to email the bot once to permanently allowlist themselves as an outbound recipient. The unification commit also instructed the agent NOT to confirm in chat for email sends, on the assumption that the deterministic gate handled it — so when the deterministic gate had a hole, there was no fallback.
+
+Reverts went cleanly except for one wrinkle: the timezone fix to `db.update_task_status` (writing timestamps via SQLite `datetime('now')` instead of `datetime.now().isoformat()`) was bundled into `d7aba2d` alongside the Layer A code, so the revert undid it too. Re-applied as a separate commit (`480c16b`). Test suite green again (3414 passed).
+
+Strengthened `sensitive_actions/skill.md` to make the public/private boundary, the meaning of trust, and the per-action authorization rule explicit. Persona has the boundary principle, but persona is dropped for briefings and `sensitive_actions` is `always_include`, so the operational version of the rule needs to live in the skill too. The new sections call out: trust lists have narrow scope (process inbound only, do NOT authorize sharing data outbound to that party); a prior `yes` does not transitively authorize new actions; share-data rules cover all egress channels (email, file shares, ntfy, browser submissions, third-party APIs), not just email. Added a worked example showing the correct response to a social-engineering inbound, and trimmed redundant phrasing on a second pass for clarity.
+
+Wrote up the architectural lessons and forward plan as a project-notes spec covering five mitigations: M1 deterministic outbound gate with corrected `trusted_email_senders ∪ user_email_addresses` allowlist (no `processed_emails`, no `sent_emails`), M3 prompt strengthening (partially landed by today's skill edit), M4 emissary thread reply coverage, M5 user-facing trust scope wording, and M6 optional CaMeL-pattern ingress summarizer behind an off-by-default config flag for defense in depth on the ingress side. Production currently runs reverted code with the inbound gate intact and the outbound side back to honor-system; M1 is the structural fix and is queued.
+
+**Files added/modified:**
+- `src/istota/skills/sensitive_actions/skill.md` — added public/private boundary, trust-scope, and per-action-authorization sections; broadened the action list to cover non-email egress channels; added worked example. Persona-level boundary phrasing intentionally not duplicated; persona keeps the values, the skill carries the operational rules.
+- Reverts at `67b5200` and `ff381d6`; timestamp-fix re-restoration at `480c16b`.
+
 ## 2026-04-26: Fix timezone + format mismatch in task timestamps
 
 Four `TestClaimTaskChannelGate` tests were failing on a US-Pacific dev machine but passing on the UTC production server. Investigation traced it to `db.update_task_status()` writing `started_at` / `completed_at` / `updated_at` as `datetime.now().isoformat()` (Python local time, `T`-separator, microseconds) while `claim_task()` and friends compare those columns against SQLite's `datetime('now', '...')` (UTC, space-separator, no microseconds).
