@@ -1,6 +1,6 @@
 # Istota
 
-The octopus-shaped, self-hosted AI agent that lives in your Nextcloud. ([istota.xyz](https://istota.xyz))
+An octopus-shaped, self-hosted AI agent that lives in your Nextcloud. ([istota.xyz](https://istota.xyz))
 
 ## Quick start (Docker)
 
