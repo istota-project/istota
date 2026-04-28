@@ -142,7 +142,7 @@ In practice this means:
 - **Self-hosted end to end.** Your data stays on your Nextcloud server and the VM running Istota. No external services required beyond the Claude API.
 - **User self-service.** Config files (persona, briefings, cron jobs, heartbeat checks) live in the user's shared Nextcloud folder. Users edit them with any text editor or the Nextcloud web UI, no CLI access needed.
 
-Istota is built around Nextcloud — it uses your files, calendars, contacts, and chat directly rather than wrapping them in API adapters. This tight integration is by design: your assistant lives where your data already is. That said, like any agent, it can be extended with skills to connect to Google Workspace, Microsoft 365, or other services as needed.
+Istota is built around Nextcloud — it uses your files, calendars, contacts, and chat directly rather than wrapping them in API adapters. This tight integration is by design: your assistant lives where your data already is. That said, like any agent, it integrates with outside services where useful — a Google Workspace skill (Drive, Gmail, Calendar, Sheets, Docs) ships in the box, and skills for Microsoft 365 or other services can be added the same way.
 
 ## Vs OpenClaw
 
