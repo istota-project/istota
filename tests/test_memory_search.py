@@ -842,3 +842,76 @@ class TestCleanupOldChunks:
         assert deleted == 1
         rows = conn.execute("SELECT source_type FROM memory_chunks").fetchall()
         assert {r[0] for r in rows} == {"memory_file"}
+
+    def test_production_write_path_timestamp_format(self, tmp_path):
+        """Regression for the SQLite/Python ISO format mismatch.
+
+        Production INSERTs rely on the `created_at` column default
+        (`datetime('now')`), which writes ``'YYYY-MM-DD HH:MM:SS'`` — SPACE
+        separator. A cutoff using Python's ``isoformat()`` would use ``'T'``
+        and lex-compare as GREATER than the space form on the same date,
+        deleting rows up to 24h newer than the retention boundary.
+
+        This test exercises the real write path (no explicit created_at) +
+        ages rows via SQLite's own ``datetime('now', '-N days')``, then asserts
+        that a row aged inside the retention window is preserved.
+        """
+        import hashlib
+        conn = _init_db(tmp_path / "test.db")
+        # Insert via the column default (mirrors production INSERTs in
+        # _insert_chunks). No created_at supplied.
+        h = hashlib.sha256(b"young content").hexdigest()
+        cur = conn.execute(
+            "INSERT INTO memory_chunks (user_id, source_type, source_id, chunk_index, content, content_hash) "
+            "VALUES (?, ?, ?, 0, ?, ?)",
+            ("alice", "conversation", "t1", "young content", h),
+        )
+        young_id = cur.lastrowid
+        # Backdate to 30 days ago, again using SQLite's datetime() so the
+        # stored format matches the column default exactly.
+        conn.execute(
+            "UPDATE memory_chunks SET created_at = datetime('now', '-30 days') WHERE id = ?",
+            (young_id,),
+        )
+        h2 = hashlib.sha256(b"old content").hexdigest()
+        cur = conn.execute(
+            "INSERT INTO memory_chunks (user_id, source_type, source_id, chunk_index, content, content_hash) "
+            "VALUES (?, ?, ?, 0, ?, ?)",
+            ("alice", "conversation", "t2", "old content", h2),
+        )
+        old_id = cur.lastrowid
+        conn.execute(
+            "UPDATE memory_chunks SET created_at = datetime('now', '-200 days') WHERE id = ?",
+            (old_id,),
+        )
+        conn.commit()
+
+        # Retention 90 days: young (30d) survives, old (200d) deleted.
+        deleted = cleanup_old_chunks(conn, "alice", retention_days=90)
+        assert deleted == 1
+        surviving = {r[0] for r in conn.execute("SELECT id FROM memory_chunks").fetchall()}
+        assert young_id in surviving
+        assert old_id not in surviving
+
+    def test_same_date_boundary_not_overdeleted(self, tmp_path):
+        """A row aged just under the retention boundary stays — even when
+        its date prefix matches the cutoff date. This is the exact failure
+        mode of the prior ISO-format mismatch (space < 'T' on same date)."""
+        import hashlib
+        conn = _init_db(tmp_path / "test.db")
+        # Row aged 89 days (1 day inside a 90-day window).
+        h = hashlib.sha256(b"borderline").hexdigest()
+        cur = conn.execute(
+            "INSERT INTO memory_chunks (user_id, source_type, source_id, chunk_index, content, content_hash) "
+            "VALUES (?, ?, ?, 0, ?, ?)",
+            ("alice", "conversation", "t", "borderline", h),
+        )
+        rid = cur.lastrowid
+        conn.execute(
+            "UPDATE memory_chunks SET created_at = datetime('now', '-89 days') WHERE id = ?",
+            (rid,),
+        )
+        conn.commit()
+        deleted = cleanup_old_chunks(conn, "alice", retention_days=90)
+        assert deleted == 0
+        assert conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0] == 1

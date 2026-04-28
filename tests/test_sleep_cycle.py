@@ -689,6 +689,38 @@ class TestCurateUserMemory:
         assert "- Likes vim" in text
         assert "- Prefers Python over JS" in text
 
+    @patch("istota.memory.search.index_file")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_all_noop_ops_does_not_rewrite_even_with_drift(
+        self, mock_run, mock_index, mount_config, db_path
+    ):
+        """USER.md with formatting drift (trailing whitespace on heading) +
+        an op that dedups to a no-op must NOT trigger a write — otherwise
+        the parse/serialize round-trip would silently rewrite the file
+        every night until it matches the canonical form.
+        """
+        mount_config.sleep_cycle.curate_user_memory = True
+        # Note the trailing whitespace on the heading and the missing trailing
+        # newline — both formatting quirks the serializer normalizes away.
+        drift_md = "## Preferences  \n- Likes vim"
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md=drift_md
+        )
+        # The op deduplicates against the existing bullet → noop_dup outcome.
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"ops": [{"op": "append", "heading": "Preferences", "line": "- Likes vim"}]}',
+            stderr="",
+        )
+        with db.get_db(db_path) as conn:
+            result = curate_user_memory(mount_config, "alice", conn=conn)
+
+        assert result is False
+        # File untouched (still has the drift)
+        assert (config_dir / "USER.md").read_text() == drift_md
+        # No re-index either
+        mock_index.assert_not_called()
+
     @patch("istota.sleep_cycle.subprocess.run")
     def test_empty_ops_response_does_not_touch_file(self, mock_run, mount_config):
         mount_config.sleep_cycle.curate_user_memory = True

@@ -135,6 +135,64 @@ class TestAppend:
         assert applied == []
         assert rejected[0]["reason"] == "line_starts_with_hash"
 
+    def test_append_bullet_with_internal_hash_accepted(self):
+        # Hashtags / footnote markers / code-comment-style notes have a `#`
+        # but aren't heading-shaped (no whitespace after the hash run). They
+        # should NOT be rejected.
+        doc = _doc("## Pref\n- Foo\n")
+        new_doc, applied, rejected = apply_ops(
+            doc,
+            [
+                {"op": "append", "heading": "Pref", "line": "- #hashtag content"},
+                {"op": "append", "heading": "Pref", "line": "#footnote-1 reference"},
+                {"op": "append", "heading": "Pref", "line": "- See issue #42"},
+            ],
+        )
+        assert rejected == []
+        assert all(a["outcome"] == "applied" for a in applied)
+        section = new_doc.find("Pref")
+        assert "- #hashtag content" in section.lines
+        assert "- #footnote-1 reference" in section.lines
+        assert "- See issue #42" in section.lines
+
+    def test_append_heading_shaped_alt_levels_rejected(self):
+        # Each `#`-run-followed-by-whitespace shape is heading-like and rejected.
+        doc = _doc("## Pref\n- Foo\n")
+        for shape in ("# h1", "### h3", "###### h6"):
+            _, applied, rejected = apply_ops(
+                doc, [{"op": "append", "heading": "Pref", "line": shape}]
+            )
+            assert rejected and rejected[0]["reason"] == "line_starts_with_hash", shape
+
+    def test_append_after_paragraph_inserts_blank_gap(self):
+        # A new bullet appended after a trailing paragraph should not fuse
+        # onto it visually. The applier inserts a blank line in between.
+        doc = _doc("## Pref\nthis is a free-form paragraph note\n")
+        new_doc, applied, rejected = apply_ops(
+            doc, [{"op": "append", "heading": "Pref", "line": "- new bullet"}]
+        )
+        assert applied and applied[0]["outcome"] == "applied"
+        section = new_doc.find("Pref")
+        # Find the paragraph and the bullet, confirm a blank between them.
+        para_idx = section.lines.index("this is a free-form paragraph note")
+        bullet_idx = section.lines.index("- new bullet")
+        assert bullet_idx == para_idx + 2
+        assert section.lines[para_idx + 1] == ""
+
+    def test_append_after_bullet_does_not_add_gap(self):
+        # Bullet-to-bullet stays adjacent — that's the expected list shape.
+        doc = _doc("## Pref\n- existing\n")
+        new_doc, _, _ = apply_ops(
+            doc, [{"op": "append", "heading": "Pref", "line": "- new"}]
+        )
+        section = new_doc.find("Pref")
+        existing_idx = section.lines.index("- existing")
+        new_idx = section.lines.index("- new")
+        assert new_idx == existing_idx + 1
+        # No blank line between consecutive bullets
+        between = section.lines[existing_idx + 1: new_idx]
+        assert between == []
+
 
 class TestAddHeading:
     def test_add_heading_appends_at_end_of_doc(self):

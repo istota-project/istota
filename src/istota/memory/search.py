@@ -321,12 +321,16 @@ def cleanup_old_chunks(
     if not source_types:
         return 0
 
-    # SQLite's `datetime('now')` (used by the column default) writes a tz-naive
-    # UTC ISO string. Match that shape so lexicographic comparison works.
+    # SQLite's `datetime('now')` (used by the `created_at` column default)
+    # produces `'YYYY-MM-DD HH:MM:SS'` — SPACE separator, second precision.
+    # Python's `isoformat()` would use a `'T'` separator with microseconds,
+    # which lex-compares as GREATER than the space form for any same-date row
+    # (`' '` < `'T'`), so up to 24 hours of rows on the cutoff day get
+    # incorrectly classified as "old". Use `strftime` to match SQLite exactly.
     cutoff = (
         (datetime.now(timezone.utc) - timedelta(days=retention_days))
         .replace(tzinfo=None)
-        .isoformat()
+        .strftime("%Y-%m-%d %H:%M:%S")
     )
 
     placeholders = ",".join("?" * len(source_types))
@@ -339,13 +343,14 @@ def cleanup_old_chunks(
     if not chunk_ids:
         return 0
 
-    # Cascade to vec table (no trigger exists for memory_chunks_vec).
+    # Cascade to vec table (no trigger exists for memory_chunks_vec). Catch
+    # per-row so a single failure doesn't silently skip the rest.
     if enable_vec_extension(conn):
-        try:
-            for cid in chunk_ids:
+        for cid in chunk_ids:
+            try:
                 conn.execute("DELETE FROM memory_chunks_vec WHERE chunk_id = ?", (cid,))
-        except Exception:
-            pass  # vec table may not exist on older deployments
+            except Exception:
+                pass  # vec table may not exist on older deployments
 
     id_placeholders = ",".join("?" * len(chunk_ids))
     conn.execute(
