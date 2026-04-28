@@ -24,7 +24,10 @@ istota/
 │   ├── skill_proxy.py       # Unix socket proxy for credential-isolated skill CLI calls
 │   ├── skill_client.py      # istota-skill console script (proxy client + direct fallback)
 │   ├── network_proxy.py     # CONNECT proxy for network isolation (domain allowlist)
-│   ├── knowledge_graph.py   # Temporal entity-relationship triples
+│   ├── memory/              # Memory subsystem
+│   │   ├── search.py          # Hybrid BM25 + vector search over conversations/memories
+│   │   ├── knowledge_graph.py # Temporal entity-relationship triples
+│   │   └── curation/          # Op-based USER.md curation (types/parser/ops/prompt/audit)
 │   ├── heartbeat.py         # Heartbeat monitoring system
 │   ├── web_app.py            # Authenticated web interface (Nextcloud OIDC)
 │   ├── webhook_receiver.py   # FastAPI webhook receiver (Overland GPS, etc.)
@@ -43,7 +46,6 @@ istota/
 │   ├── talk.py              # Nextcloud Talk API client (user API)
 │   ├── talk_poller.py       # Talk conversation polling
 │   ├── tasks_file_poller.py # TASKS.md file monitoring
-│   ├── memory_search.py     # Hybrid BM25 + vector search over conversations/memories
 │   └── skills/              # Self-contained skill directories (skill.md with YAML frontmatter + optional Python)
 │       ├── _types.py        # SkillMeta, EnvSpec dataclasses
 │       ├── _loader.py       # Skill discovery, manifest loading, doc resolution
