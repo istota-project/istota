@@ -255,7 +255,7 @@ class TestProcessChannelSleepCycle:
             db.update_task_status(conn, t, "running")
             db.update_task_status(conn, t, "completed", result="Done")
 
-            with patch("istota.memory_search.index_file") as mock_index:
+            with patch("istota.memory.search.index_file") as mock_index:
                 process_channel_sleep_cycle(mount_config, conn, "room123")
 
                 # Should have been called with channel user_id

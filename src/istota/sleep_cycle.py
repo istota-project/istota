@@ -499,7 +499,7 @@ def process_user_sleep_cycle(
     # Insert extracted facts into knowledge graph (non-critical)
     if extracted_facts:
         try:
-            from .knowledge_graph import ensure_table, add_fact
+            from .memory.knowledge_graph import ensure_table, add_fact
             ensure_table(conn)
             inserted = 0
             for fact in extracted_facts:
@@ -532,7 +532,7 @@ def process_user_sleep_cycle(
     # Index memory file for semantic search (non-critical)
     if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
         try:
-            from .memory_search import index_file as _index_file
+            from .memory.search import index_file as _index_file
             _index_file(conn, user_id, str(memory_file), memories_text, "memory_file",
                        topic=_index_topic)
         except Exception as e:
@@ -636,7 +636,7 @@ def curate_user_memory(config: Config, user_id: str, conn: "db.sqlite3.Connectio
     # Load knowledge graph facts (non-critical)
     kg_text = None
     try:
-        from .knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
+        from .memory.knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
         if conn is not None:
             ensure_table(conn)
             kg_facts = get_current_facts(conn, user_id)
@@ -694,6 +694,21 @@ def curate_user_memory(config: Config, user_id: str, conn: "db.sqlite3.Connectio
     memory_path.parent.mkdir(parents=True, exist_ok=True)
     memory_path.write_text(output + "\n")
     logger.info("Updated USER.md for %s (%d chars)", user_id, len(output))
+
+    # Refresh the search index for USER.md (non-critical). Without this the
+    # memory_chunks rows for source_type='user_memory' silently go stale and
+    # searches return the pre-curation content until manual reindex.
+    if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
+        try:
+            from .memory.search import index_file as _index_file
+            if conn is not None:
+                _index_file(conn, user_id, str(memory_path), output, "user_memory")
+            else:
+                with db.get_db(config.db_path) as temp_conn:
+                    _index_file(temp_conn, user_id, str(memory_path), output, "user_memory")
+        except Exception as e:
+            logger.debug("USER.md re-index failed for %s: %s", user_id, e)
+
     return True
 
 
@@ -1021,7 +1036,7 @@ def process_channel_sleep_cycle(
     channel_user_id = f"channel:{conversation_token}"
     if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
         try:
-            from .memory_search import index_file as _index_file
+            from .memory.search import index_file as _index_file
 
             _index_file(
                 conn,

@@ -43,6 +43,7 @@ from istota.config import (
     UserConfig,
     BriefingConfig,
     EmailConfig,
+    MemorySearchConfig,
     ResourceConfig,
 )
 from istota import db
@@ -1755,6 +1756,125 @@ class TestSilentScheduledJob:
         result = process_one_task(config)
         assert result is not None
         assert mock_arun.call_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# TestAutoIndexGate — silent scheduled jobs skip memory_search indexing
+# ---------------------------------------------------------------------------
+
+
+class TestAutoIndexGate:
+    """Conversation indexing should skip silent scheduled jobs.
+
+    Silent scheduled jobs (`silent_unless_action = true` in CRON.md, surfaces
+    as `task.heartbeat_silent`) are typically high-volume retrieve-and-render
+    crons whose conversations carry no recall value. Indexing them inflates
+    memory_chunks (and the vec/FTS indexes derived from it) without paying
+    back at search time. See follow-up to ISSUE-059 / DB-size analysis.
+    """
+
+    def _make_config(self, db_path, tmp_path, **kwargs):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        defaults = dict(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example.com", username="istota", app_password="secret"),
+            talk=TalkConfig(enabled=True, bot_username="istota"),
+            email=EmailConfig(enabled=False),
+            scheduler=SchedulerConfig(),
+            memory_search=MemorySearchConfig(enabled=True, auto_index_conversations=True),
+            nextcloud_mount_path=mount,
+            temp_dir=tmp_path / "temp",
+        )
+        defaults.update(kwargs)
+        return Config(**defaults)
+
+    @patch("istota.memory.search.index_conversation")
+    @patch("istota.scheduler.execute_task", return_value=(True, "NO_ACTION: nothing", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_silent_scheduled_task_skips_indexing(self, mock_arun, mock_exec, mock_index, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn,
+                prompt="Daily check",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                heartbeat_silent=True,
+            )
+        process_one_task(config)
+        mock_index.assert_not_called()
+
+    @patch("istota.memory.search.index_conversation")
+    @patch("istota.scheduler.execute_task", return_value=(True, "ACTION: report", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_silent_scheduled_with_action_still_skips_indexing(self, mock_arun, mock_exec, mock_index, db_path, tmp_path):
+        """Even when a silent job did report ACTION, its conversation isn't recall-relevant."""
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn,
+                prompt="Daily check",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                heartbeat_silent=True,
+            )
+        process_one_task(config)
+        mock_index.assert_not_called()
+
+    @patch("istota.memory.search.index_conversation")
+    @patch("istota.scheduler.execute_task", return_value=(True, "Briefing for today", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_non_silent_scheduled_task_still_indexes(self, mock_arun, mock_exec, mock_index, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn,
+                prompt="Daily briefing",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                heartbeat_silent=False,
+            )
+        process_one_task(config)
+        assert mock_index.call_count >= 1
+
+    @patch("istota.memory.search.index_conversation")
+    @patch("istota.scheduler.execute_task", return_value=(True, "Hi there", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_talk_task_indexes(self, mock_arun, mock_exec, mock_index, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn,
+                prompt="Hello",
+                user_id="alice",
+                source_type="talk",
+                conversation_token="room1",
+            )
+        process_one_task(config)
+        assert mock_index.call_count >= 1
+
+    @patch("istota.memory.search.index_conversation")
+    @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_indexing_disabled_by_config_skips_all(self, mock_arun, mock_exec, mock_index, db_path, tmp_path):
+        config = self._make_config(
+            db_path, tmp_path,
+            memory_search=MemorySearchConfig(enabled=False, auto_index_conversations=True),
+        )
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn,
+                prompt="Hello",
+                user_id="alice",
+                source_type="talk",
+                conversation_token="room1",
+            )
+        process_one_task(config)
+        mock_index.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

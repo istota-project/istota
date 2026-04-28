@@ -719,6 +719,74 @@ class TestCurateUserMemory:
         result = curate_user_memory(mount_config, "alice")
         assert result is False
 
+    @patch("istota.memory.search.index_file")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_reindexes_user_md_after_rewrite(self, mock_run, mock_index, mount_config, db_path):
+        """After curation rewrites USER.md, the search index for source_type='user_memory'
+        must be refreshed — otherwise searches return stale chunks of the old file."""
+        mount_config.sleep_cycle.curate_user_memory = True
+        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- Prefers Python")
+
+        config_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        config_dir.mkdir(parents=True)
+        new_content = "# Alice\n\n## Preferences\n- Prefers Python over JS\n"
+        mock_run.return_value = MagicMock(returncode=0, stdout=new_content, stderr="")
+
+        with db.get_db(db_path) as conn:
+            result = curate_user_memory(mount_config, "alice", conn=conn)
+        assert result is True
+
+        # Verify index_file was called with the new USER.md content + correct source_type
+        assert mock_index.called, "index_file should be called after curation rewrites USER.md"
+        call_kwargs = mock_index.call_args
+        # Positional or keyword: (conn, user_id, file_path, content, source_type, ...)
+        args = call_kwargs.args
+        kwargs = call_kwargs.kwargs
+        assert args[1] == "alice" or kwargs.get("user_id") == "alice"
+        passed_source_type = args[4] if len(args) > 4 else kwargs.get("source_type")
+        assert passed_source_type == "user_memory"
+        passed_content = args[3] if len(args) > 3 else kwargs.get("content")
+        assert "Prefers Python over JS" in passed_content
+
+    @patch("istota.memory.search.index_file")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_no_reindex_when_no_changes_needed(self, mock_run, mock_index, mount_config, db_path):
+        """If curation says NO_CHANGES_NEEDED, USER.md is not rewritten and re-index must not fire."""
+        mount_config.sleep_cycle.curate_user_memory = True
+        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- Memory")
+        mock_run.return_value = MagicMock(returncode=0, stdout=NO_CHANGES_NEEDED, stderr="")
+
+        with db.get_db(db_path) as conn:
+            curate_user_memory(mount_config, "alice", conn=conn)
+        mock_index.assert_not_called()
+
+    @patch("istota.memory.search.index_file")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_reindex_failure_does_not_break_curation(self, mock_run, mock_index, mount_config, db_path):
+        """A failure in re-indexing must not propagate — USER.md update is the load-bearing op."""
+        mount_config.sleep_cycle.curate_user_memory = True
+        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories_dir / f"{today}.md").write_text("- Memory")
+        config_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        config_dir.mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="# New content\n", stderr="")
+        mock_index.side_effect = Exception("vec extension borked")
+
+        with db.get_db(db_path) as conn:
+            result = curate_user_memory(mount_config, "alice", conn=conn)
+        # Curation still reports success — the file write is what matters
+        assert result is True
+        # And the file was actually written
+        assert (config_dir / "USER.md").read_text().startswith("# New content")
+
     @patch("istota.sleep_cycle.subprocess.run")
     def test_curation_called_from_sleep_cycle(self, mock_run, mount_config, db_path):
         """Verify curate_user_memory is called when enabled in process_user_sleep_cycle."""

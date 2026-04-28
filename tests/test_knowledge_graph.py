@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.knowledge_graph import (
+from istota.memory.knowledge_graph import (
     KnowledgeFact,
     SINGLE_VALUED_PREDICATES,
     TEMPORARY_PREDICATES,
@@ -151,7 +151,7 @@ class TestAddFactRaceCondition:
         (because another writer inserted the same triple in between),
         add_fact must return None rather than raising IntegrityError.
         """
-        import istota.knowledge_graph as kg
+        import istota.memory.knowledge_graph as kg
 
         inserted = {"done": False}
 

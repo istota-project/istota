@@ -88,8 +88,8 @@ class TestCmdSearch:
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
-            from istota.memory_search import _insert_chunks
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            from istota.memory.search import _insert_chunks
             _insert_chunks(conn, "alice", "conversation", "1", ["Python programming guide"], None)
         conn.close()
 
@@ -103,7 +103,7 @@ class TestCmdSearch:
         args.topic = None
         args.entity = None
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             result = cmd_search(args)
 
         assert result["status"] == "ok"
@@ -126,7 +126,7 @@ class TestCmdSearch:
         args.topic = None
         args.entity = None
 
-        with patch("istota.memory_search.search") as mock_search:
+        with patch("istota.memory.search.search") as mock_search:
             mock_search.return_value = []
             result = cmd_search(args)
 
@@ -148,7 +148,7 @@ class TestCmdSearch:
         args.topic = None
         args.entity = None
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             result = cmd_search(args)
 
         assert result["status"] == "ok"
@@ -172,7 +172,7 @@ class TestCmdIndexConversation:
         args = MagicMock()
         args.task_id = 1
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             result = cmd_index_conversation(args)
 
         assert result["status"] == "ok"
@@ -207,8 +207,8 @@ class TestCmdIndexFile:
         args.path = str(file_path)
         args.source_type = None
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False), \
-             patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
             result = cmd_index_file(args)
 
         assert result["status"] == "ok"
@@ -247,7 +247,7 @@ class TestCmdReindex:
         args = MagicMock()
         args.lookback_days = 90
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             result = cmd_reindex(args)
 
         assert result["status"] == "ok"
@@ -259,8 +259,8 @@ class TestCmdStats:
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
-            from istota.memory_search import _insert_chunks
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            from istota.memory.search import _insert_chunks
             _insert_chunks(conn, "alice", "conversation", "1", ["test chunk"], None)
         conn.close()
 
@@ -269,7 +269,7 @@ class TestCmdStats:
 
         args = MagicMock()
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.enable_vec_extension", return_value=False):
             result = cmd_stats(args)
 
         assert result["status"] == "ok"
@@ -281,8 +281,8 @@ class TestConversationTokenEnvVar:
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
-            from istota.memory_search import _insert_chunks
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            from istota.memory.search import _insert_chunks
             _insert_chunks(conn, "alice", "conversation", "1", ["user data"], None)
             _insert_chunks(conn, "channel:room123", "channel_memory", "f1", ["channel decision about GraphQL"], None)
         conn.close()
@@ -298,7 +298,7 @@ class TestConversationTokenEnvVar:
         args.topic = None
         args.entity = None
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             result = cmd_search(args)
 
         assert result["status"] == "ok"
@@ -309,8 +309,8 @@ class TestConversationTokenEnvVar:
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
-            from istota.memory_search import _insert_chunks
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            from istota.memory.search import _insert_chunks
             _insert_chunks(conn, "channel:room123", "channel_memory", "f1", ["channel only content"], None)
         conn.close()
 
@@ -325,7 +325,7 @@ class TestConversationTokenEnvVar:
         args.topic = None
         args.entity = None
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             result = cmd_search(args)
 
         assert result["count"] == 0
@@ -334,8 +334,8 @@ class TestConversationTokenEnvVar:
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
-            from istota.memory_search import _insert_chunks
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            from istota.memory.search import _insert_chunks
             _insert_chunks(conn, "alice", "conversation", "1", ["user chunk"], None)
             _insert_chunks(conn, "channel:room456", "channel_memory", "f1", ["channel chunk"], None)
         conn.close()
@@ -346,7 +346,7 @@ class TestConversationTokenEnvVar:
 
         args = MagicMock()
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.enable_vec_extension", return_value=False):
             result = cmd_stats(args)
 
         assert result["status"] == "ok"
@@ -361,7 +361,7 @@ class TestMain:
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             main(["search", "hello"])
 
         output = json.loads(capsys.readouterr().out)
@@ -374,7 +374,7 @@ class TestMain:
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.enable_vec_extension", return_value=False):
             main(["stats"])
 
         output = json.loads(capsys.readouterr().out)
@@ -450,7 +450,7 @@ class TestCmdFacts:
     def test_facts_with_data(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         ensure_table(conn)
         add_fact(conn, "alice", "stefan", "knows", "python")
         add_fact(conn, "alice", "stefan", "works_at", "acme")
@@ -471,7 +471,7 @@ class TestCmdFacts:
     def test_facts_filter_by_subject(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         ensure_table(conn)
         add_fact(conn, "alice", "stefan", "knows", "python")
         add_fact(conn, "alice", "istota", "uses_tech", "svelte")
@@ -493,7 +493,7 @@ class TestCmdFacts:
     def test_facts_as_of(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         ensure_table(conn)
         add_fact(conn, "alice", "stefan", "works_at", "acme", valid_from="2025-01-01")
         add_fact(conn, "alice", "stefan", "works_at", "globex", valid_from="2026-04-01")
@@ -517,7 +517,7 @@ class TestCmdTimeline:
     def test_timeline(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         ensure_table(conn)
         add_fact(conn, "alice", "stefan", "works_at", "acme", valid_from="2025-01-01")
         add_fact(conn, "alice", "stefan", "works_at", "globex", valid_from="2026-04-01")
@@ -570,7 +570,7 @@ class TestCmdAddFact:
     def test_add_duplicate(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         ensure_table(conn)
         add_fact(conn, "alice", "stefan", "knows", "python")
         conn.commit()
@@ -594,7 +594,7 @@ class TestCmdInvalidateFact:
     def test_invalidate(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         ensure_table(conn)
         fact_id = add_fact(conn, "alice", "stefan", "knows", "python")
         conn.commit()
@@ -629,7 +629,7 @@ class TestCmdDeleteFact:
     def test_delete(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         ensure_table(conn)
         fact_id = add_fact(conn, "alice", "stefan", "knows", "python")
         conn.commit()
@@ -662,7 +662,7 @@ class TestStatsIncludesKG:
     def test_stats_includes_knowledge_facts(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         conn = _init_db(db_path)
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         ensure_table(conn)
         add_fact(conn, "alice", "stefan", "knows", "python")
         add_fact(conn, "alice", "stefan", "works_at", "acme")
@@ -674,7 +674,7 @@ class TestStatsIncludesKG:
 
         args = MagicMock()
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.enable_vec_extension", return_value=False):
             result = cmd_stats(args)
 
         assert result["status"] == "ok"

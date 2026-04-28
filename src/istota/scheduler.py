@@ -1521,10 +1521,17 @@ def process_one_task(
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")
 
-                # Index conversation for memory search (non-critical)
-                if config.memory_search.enabled and config.memory_search.auto_index_conversations:
+                # Index conversation for memory search (non-critical).
+                # Skip silent scheduled jobs: high-volume retrieve-and-render
+                # crons whose conversations have no recall value but inflate
+                # memory_chunks (and the vec/FTS indexes derived from it).
+                if (
+                    config.memory_search.enabled
+                    and config.memory_search.auto_index_conversations
+                    and not task.heartbeat_silent
+                ):
                     try:
-                        from .memory_search import index_conversation as _index_conv
+                        from .memory.search import index_conversation as _index_conv
                         _index_conv(conn, task.user_id, task_id, task.prompt, result)
                         # Also index under channel namespace if in a channel
                         if task.conversation_token:

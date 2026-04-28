@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota.memory_search import (
+from istota.memory.search import (
     SearchResult,
     _content_hash,
     _escape_fts5_query,
@@ -126,12 +126,12 @@ class TestSerializeEmbedding:
 
 
 class TestEmbedding:
-    @patch("istota.memory_search._get_model")
+    @patch("istota.memory.search._get_model")
     def test_embed_text_returns_none_when_no_model(self, mock_model):
         mock_model.return_value = None
         assert embed_text("hello") is None
 
-    @patch("istota.memory_search._get_model")
+    @patch("istota.memory.search._get_model")
     def test_embed_text_with_model(self, mock_model):
         np = pytest.importorskip("numpy")
         mock = MagicMock()
@@ -142,16 +142,16 @@ class TestEmbedding:
         assert len(result) == 3
         mock.encode.assert_called_once_with("hello", normalize_embeddings=True)
 
-    @patch("istota.memory_search._get_model")
+    @patch("istota.memory.search._get_model")
     def test_embed_batch_returns_none_when_no_model(self, mock_model):
         mock_model.return_value = None
         assert embed_batch(["hello", "world"]) is None
 
-    @patch("istota.memory_search._get_model")
+    @patch("istota.memory.search._get_model")
     def test_embed_batch_empty_list(self, mock_model):
         assert embed_batch([]) == []
 
-    @patch("istota.memory_search._get_model")
+    @patch("istota.memory.search._get_model")
     def test_embed_batch_with_model(self, mock_model):
         np = pytest.importorskip("numpy")
         mock = MagicMock()
@@ -167,7 +167,7 @@ class TestInsertAndSearch:
 
     def test_insert_and_bm25_search(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["Hello world from Alice"], {"task_id": "1"})
             _insert_chunks(conn, "alice", "conversation", "2", ["Python programming is fun"], {"task_id": "2"})
 
@@ -178,7 +178,7 @@ class TestInsertAndSearch:
 
     def test_dedup_by_content_hash(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             n1 = _insert_chunks(conn, "alice", "conversation", "1", ["Hello world"], None)
             n2 = _insert_chunks(conn, "alice", "conversation", "2", ["Hello world"], None)  # same content
 
@@ -190,7 +190,7 @@ class TestInsertAndSearch:
 
     def test_user_isolation(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["Alice secret data"], None)
             _insert_chunks(conn, "bob", "conversation", "2", ["Bob private info"], None)
 
@@ -203,7 +203,7 @@ class TestInsertAndSearch:
 
     def test_source_type_filter(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["Machine learning topic"], None)
             _insert_chunks(conn, "alice", "memory_file", "/mem.md", ["Machine learning notes"], None)
 
@@ -214,14 +214,14 @@ class TestInsertAndSearch:
 
     def test_delete_source_chunks(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False), \
-             patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
             _insert_chunks(conn, "alice", "memory_file", "/f.md", ["Chunk one", "Chunk two"], None)
 
         count = conn.execute("SELECT COUNT(*) FROM memory_chunks WHERE user_id = 'alice'").fetchone()[0]
         assert count == 2
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.enable_vec_extension", return_value=False):
             deleted = _delete_source_chunks(conn, "alice", "memory_file", "/f.md")
         assert deleted == 2
 
@@ -233,7 +233,7 @@ class TestInsertAndSearch:
 class TestIndexConversation:
     def test_basic_indexing(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             n = index_conversation(conn, "alice", 42, "What is Python?", "Python is a programming language.")
 
         assert n > 0
@@ -243,7 +243,7 @@ class TestIndexConversation:
 
     def test_empty_prompt_and_result(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             n = index_conversation(conn, "alice", 99, "", "")
         assert n == 0
         conn.close()
@@ -252,8 +252,8 @@ class TestIndexConversation:
 class TestIndexFile:
     def test_file_indexing_replaces_existing(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False), \
-             patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
             index_file(conn, "alice", "/mem.md", "Original content about cats")
             index_file(conn, "alice", "/mem.md", "Replacement content about dogs")
 
@@ -314,10 +314,10 @@ class TestSearch:
     def test_bm25_only_fallback(self, tmp_path):
         """When vec search returns empty, falls back to BM25-only."""
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["Quantum computing research"], None)
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             results = search(conn, "alice", "quantum computing", limit=5)
 
         assert len(results) > 0
@@ -327,7 +327,7 @@ class TestSearch:
     def test_hybrid_search_with_mock_vec(self, tmp_path):
         """When vec results are available, RRF fusion is used."""
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["Neural network training"], None)
 
         # Get the chunk_id that was inserted
@@ -338,7 +338,7 @@ class TestSearch:
             chunk_id=chunk_id, content="Neural network training",
             score=0.95, source_type="conversation", source_id="1",
         )
-        with patch("istota.memory_search._search_vec", return_value=[mock_vec_result]):
+        with patch("istota.memory.search._search_vec", return_value=[mock_vec_result]):
             results = search(conn, "alice", "neural network", limit=5)
 
         assert len(results) > 0
@@ -348,12 +348,12 @@ class TestSearch:
 class TestGetStats:
     def test_stats_with_data(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["chunk one"], None)
             _insert_chunks(conn, "alice", "conversation", "2", ["chunk two"], None)
             _insert_chunks(conn, "alice", "memory_file", "/f.md", ["chunk three"], None)
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.enable_vec_extension", return_value=False):
             stats = get_stats(conn, "alice")
 
         assert stats["total_chunks"] == 3
@@ -364,7 +364,7 @@ class TestGetStats:
 
     def test_stats_empty(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.enable_vec_extension", return_value=False):
             stats = get_stats(conn, "alice")
         assert stats["total_chunks"] == 0
         conn.close()
@@ -385,7 +385,7 @@ class TestReindexAll:
         config = MagicMock()
         config.nextcloud_mount_path = None
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             stats = reindex_all(conn, config, "alice", lookback_days=1)
 
         assert stats["conversations"] >= 1
@@ -403,8 +403,8 @@ class TestReindexAll:
         config = MagicMock()
         config.nextcloud_mount_path = tmp_path / "mount"
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False), \
-             patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
             stats = reindex_all(conn, config, "alice", lookback_days=1)
 
         assert stats["memory_files"] >= 1
@@ -421,8 +421,8 @@ class TestReindexAll:
         config = MagicMock()
         config.nextcloud_mount_path = tmp_path / "mount"
 
-        with patch("istota.memory_search.ensure_vec_table", return_value=False), \
-             patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
             stats = reindex_all(conn, config, "alice", lookback_days=1)
 
         assert stats.get("channel_memories", 0) >= 1
@@ -434,11 +434,11 @@ class TestIncludeUserIds:
 
     def test_search_bm25_includes_channel(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["user data"], None)
             _insert_chunks(conn, "channel:room123", "channel_memory", "f1", ["channel decision"], None)
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             results = search(
                 conn, "alice", "decision",
                 limit=5, include_user_ids=["channel:room123"],
@@ -451,11 +451,11 @@ class TestIncludeUserIds:
     def test_search_bm25_without_include_user_ids(self, tmp_path):
         """Without include_user_ids, only user's own chunks are returned."""
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["user data"], None)
             _insert_chunks(conn, "channel:room123", "channel_memory", "f1", ["channel decision"], None)
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             results = search(conn, "alice", "decision", limit=5)
 
         contents = [r.content for r in results]
@@ -464,11 +464,11 @@ class TestIncludeUserIds:
 
     def test_stats_includes_channel(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["user chunk"], None)
             _insert_chunks(conn, "channel:room123", "channel_memory", "f1", ["channel chunk"], None)
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.enable_vec_extension", return_value=False):
             stats = get_stats(conn, "alice", include_user_ids=["channel:room123"])
 
         assert stats["total_chunks"] == 2
@@ -477,11 +477,11 @@ class TestIncludeUserIds:
 
     def test_stats_without_include_user_ids(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["user chunk"], None)
             _insert_chunks(conn, "channel:room123", "channel_memory", "f1", ["channel chunk"], None)
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.enable_vec_extension", return_value=False):
             stats = get_stats(conn, "alice")
 
         assert stats["total_chunks"] == 1
@@ -493,7 +493,7 @@ class TestChunkMetadata:
 
     def test_insert_with_topic(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1",
                           ["Python programming"], None, topic="tech")
 
@@ -503,7 +503,7 @@ class TestChunkMetadata:
 
     def test_insert_with_entities(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1",
                           ["Stefan uses Python"], None, entities=["stefan", "python"])
 
@@ -514,7 +514,7 @@ class TestChunkMetadata:
 
     def test_insert_without_metadata_defaults_null(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1", ["plain chunk"], None)
 
         row = conn.execute("SELECT topic, entities FROM memory_chunks WHERE user_id = 'alice'").fetchone()
@@ -524,7 +524,7 @@ class TestChunkMetadata:
 
     def test_index_conversation_with_metadata(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             n = index_conversation(conn, "alice", 1, "What is FastAPI?", "A web framework",
                                   topic="tech", entities=["fastapi"])
 
@@ -535,8 +535,8 @@ class TestChunkMetadata:
 
     def test_index_file_with_metadata(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False), \
-             patch("istota.memory_search.enable_vec_extension", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
             n = index_file(conn, "alice", "/path/mem.md", "Some content",
                           topic="personal", entities=["stefan"])
 
@@ -551,13 +551,13 @@ class TestFilteredSearch:
 
     def test_search_filter_by_topic(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1",
                           ["Python web framework discussion"], None, topic="tech")
             _insert_chunks(conn, "alice", "conversation", "2",
                           ["Python for data analysis at work"], None, topic="work")
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             results = search(conn, "alice", "Python", topics=["tech"])
 
         # Should get tech chunk + not the work chunk (unless it has NULL topic)
@@ -569,13 +569,13 @@ class TestFilteredSearch:
     def test_search_topic_filter_includes_null(self, tmp_path):
         """Chunks with NULL topic are always included in filtered searches."""
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1",
                           ["Python programming guide"], None, topic="tech")
             _insert_chunks(conn, "alice", "conversation", "2",
                           ["Python legacy chunk without topic"], None)  # NULL topic
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             results = search(conn, "alice", "Python", topics=["tech"])
 
         source_ids = [r.source_id for r in results]
@@ -585,7 +585,7 @@ class TestFilteredSearch:
 
     def test_search_filter_by_entity(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1",
                           ["Stefan works on Istota project"], None,
                           entities=["stefan", "istota"])
@@ -593,7 +593,7 @@ class TestFilteredSearch:
                           ["Alice works on Hermes project"], None,
                           entities=["alice", "hermes"])
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             results = search(conn, "alice", "works on", entities=["stefan"])
 
         source_ids = [r.source_id for r in results]
@@ -603,13 +603,13 @@ class TestFilteredSearch:
 
     def test_search_no_filter_returns_all(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1",
                           ["tech stuff"], None, topic="tech")
             _insert_chunks(conn, "alice", "conversation", "2",
                           ["work stuff"], None, topic="work")
 
-        with patch("istota.memory_search._search_vec", return_value=[]):
+        with patch("istota.memory.search._search_vec", return_value=[]):
             results = search(conn, "alice", "stuff")
 
         assert len(results) == 2
@@ -618,7 +618,7 @@ class TestFilteredSearch:
     def test_bm25_topic_filter(self, tmp_path):
         """Direct test of _search_bm25 with topic filter."""
         conn = _init_db(tmp_path / "test.db")
-        with patch("istota.memory_search.ensure_vec_table", return_value=False):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1",
                           ["Machine learning project"], None, topic="tech")
             _insert_chunks(conn, "alice", "conversation", "2",
@@ -660,8 +660,8 @@ class TestVecAdaptiveK:
         conn_no, ks_no = self._capture_execute([[self._make_row(i) for i in range(10)]])
         conn_filt, ks_filt = self._capture_execute([[self._make_row(i) for i in range(10)]])
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
-             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+        with patch("istota.memory.search.enable_vec_extension", return_value=True), \
+             patch("istota.memory.search.embed_text", return_value=[0.0] * 384):
             _search_vec(conn_no, "alice", "q", limit=10)
             _search_vec(conn_filt, "alice", "q", limit=10, topics=["tech"])
 
@@ -675,8 +675,8 @@ class TestVecAdaptiveK:
         second = [self._make_row(i) for i in (1, 2, 3, 4, 5, 6, 7, 8)]
         conn, ks = self._capture_execute([first, second])
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
-             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+        with patch("istota.memory.search.enable_vec_extension", return_value=True), \
+             patch("istota.memory.search.embed_text", return_value=[0.0] * 384):
             results = _search_vec(conn, "alice", "q", limit=5, topics=["tech"])
 
         assert len(ks) == 2
@@ -692,8 +692,8 @@ class TestVecAdaptiveK:
         second = [self._make_row(i) for i in (1, 2)]
         conn, ks = self._capture_execute([first, second, [self._make_row(99)]])
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
-             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+        with patch("istota.memory.search.enable_vec_extension", return_value=True), \
+             patch("istota.memory.search.embed_text", return_value=[0.0] * 384):
             results = _search_vec(conn, "alice", "q", limit=10, topics=["tech"])
 
         # Should have stopped after the 2nd call (no new rows), not tried 3rd.
@@ -706,8 +706,8 @@ class TestVecAdaptiveK:
         batches = [[self._make_row(i)] for i in range(20)]
         conn, ks = self._capture_execute(batches)
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
-             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+        with patch("istota.memory.search.enable_vec_extension", return_value=True), \
+             patch("istota.memory.search.embed_text", return_value=[0.0] * 384):
             _search_vec(conn, "alice", "q", limit=10, topics=["tech"])
 
         assert ks[-1] == _VEC_MAX_K
@@ -720,8 +720,8 @@ class TestVecAdaptiveK:
         rows = [self._make_row(i) for i in range(50)]
         conn, ks = self._capture_execute([rows])
 
-        with patch("istota.memory_search.enable_vec_extension", return_value=True), \
-             patch("istota.memory_search.embed_text", return_value=[0.0] * 384):
+        with patch("istota.memory.search.enable_vec_extension", return_value=True), \
+             patch("istota.memory.search.embed_text", return_value=[0.0] * 384):
             results = _search_vec(conn, "alice", "q", limit=10)
 
         assert len(ks) == 1

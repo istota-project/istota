@@ -48,7 +48,7 @@ def _get_channel_user_ids() -> list[str] | None:
 
 def cmd_search(args) -> dict:
     """Search memory chunks."""
-    from istota.memory_search import search
+    from istota.memory.search import search
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -86,7 +86,7 @@ def cmd_search(args) -> dict:
 
 def cmd_index_conversation(args) -> dict:
     """Index a specific conversation by task ID."""
-    from istota.memory_search import index_conversation
+    from istota.memory.search import index_conversation
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -108,7 +108,7 @@ def cmd_index_conversation(args) -> dict:
 
 def cmd_index_file(args) -> dict:
     """Index a file."""
-    from istota.memory_search import index_file
+    from istota.memory.search import index_file
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -129,7 +129,7 @@ def cmd_index_file(args) -> dict:
 def cmd_reindex(args) -> dict:
     """Reindex all conversations and memory files."""
     from types import SimpleNamespace
-    from istota.memory_search import reindex_all
+    from istota.memory.search import reindex_all
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -145,8 +145,8 @@ def cmd_reindex(args) -> dict:
 
 def cmd_stats(args) -> dict:
     """Get memory search stats."""
-    from istota.memory_search import get_stats
-    from istota.knowledge_graph import ensure_table, get_fact_count
+    from istota.memory.search import get_stats
+    from istota.memory.knowledge_graph import ensure_table, get_fact_count
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -165,7 +165,7 @@ def cmd_stats(args) -> dict:
 
 def cmd_facts(args) -> dict:
     """Query knowledge graph facts."""
-    from istota.knowledge_graph import (
+    from istota.memory.knowledge_graph import (
         ensure_table, get_current_facts, get_facts_as_of, format_facts_for_prompt,
     )
 
@@ -202,7 +202,7 @@ def cmd_facts(args) -> dict:
 
 def cmd_timeline(args) -> dict:
     """Get entity timeline."""
-    from istota.knowledge_graph import ensure_table, get_entity_timeline
+    from istota.memory.knowledge_graph import ensure_table, get_entity_timeline
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -232,7 +232,7 @@ def cmd_timeline(args) -> dict:
 
 def cmd_add_fact(args) -> dict:
     """Manually add a fact."""
-    from istota.knowledge_graph import ensure_table, add_fact
+    from istota.memory.knowledge_graph import ensure_table, add_fact
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -253,7 +253,7 @@ def cmd_add_fact(args) -> dict:
 
 def cmd_invalidate_fact(args) -> dict:
     """Invalidate a fact."""
-    from istota.knowledge_graph import ensure_table, invalidate_fact
+    from istota.memory.knowledge_graph import ensure_table, invalidate_fact
 
     conn = _get_conn()
     ensure_table(conn)
@@ -270,7 +270,7 @@ def cmd_invalidate_fact(args) -> dict:
 
 def cmd_delete_fact(args) -> dict:
     """Hard delete a fact."""
-    from istota.knowledge_graph import ensure_table, delete_fact
+    from istota.memory.knowledge_graph import ensure_table, delete_fact
 
     conn = _get_conn()
     ensure_table(conn)
