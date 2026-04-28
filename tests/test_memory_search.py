@@ -27,6 +27,7 @@ from istota.memory.search import (
     search,
     _search_bm25,
     _search_vec,
+    cleanup_old_chunks,
 )
 
 
@@ -726,3 +727,118 @@ class TestVecAdaptiveK:
 
         assert len(ks) == 1
         assert len(results) == 10
+
+
+# ---------------------------------------------------------------------------
+# TestCleanupOldChunks (Item 4: unified memory retention)
+# ---------------------------------------------------------------------------
+
+
+from datetime import datetime, timedelta, timezone
+
+
+def _insert_chunk_with_age(
+    conn,
+    user_id: str,
+    source_type: str,
+    source_id: str,
+    content: str,
+    age_days: int,
+) -> int:
+    """Insert a memory_chunk with a backdated created_at."""
+    import hashlib
+    h = hashlib.sha256(content.encode()).hexdigest()
+    when = (
+        (datetime.now(timezone.utc) - timedelta(days=age_days))
+        .replace(tzinfo=None)
+        .isoformat()
+    )
+    cur = conn.execute(
+        "INSERT INTO memory_chunks (user_id, source_type, source_id, chunk_index, content, content_hash, created_at) "
+        "VALUES (?, ?, ?, 0, ?, ?, ?)",
+        (user_id, source_type, source_id, content, h, when),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+class TestCleanupOldChunks:
+    def test_deletes_ephemeral_chunks_older_than_retention(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        old = _insert_chunk_with_age(conn, "alice", "conversation", "task1", "old conv", age_days=120)
+        recent = _insert_chunk_with_age(conn, "alice", "conversation", "task2", "recent", age_days=10)
+
+        deleted = cleanup_old_chunks(conn, "alice", retention_days=90)
+        assert deleted == 1
+        rows = conn.execute("SELECT id FROM memory_chunks").fetchall()
+        ids = {r[0] for r in rows}
+        assert old not in ids
+        assert recent in ids
+
+    def test_preserves_chunks_newer_than_retention(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunk_with_age(conn, "alice", "memory_file", "f1", "young", age_days=30)
+        deleted = cleanup_old_chunks(conn, "alice", retention_days=90)
+        assert deleted == 0
+        assert conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0] == 1
+
+    def test_preserves_user_memory_chunks_regardless_of_age(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunk_with_age(conn, "alice", "user_memory", "USER.md", "durable", age_days=999)
+        deleted = cleanup_old_chunks(conn, "alice", retention_days=90)
+        assert deleted == 0
+        assert conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0] == 1
+
+    def test_retention_zero_is_noop(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunk_with_age(conn, "alice", "conversation", "t", "ancient", age_days=10000)
+        deleted = cleanup_old_chunks(conn, "alice", retention_days=0)
+        assert deleted == 0
+        assert conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0] == 1
+
+    def test_retention_negative_is_noop(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunk_with_age(conn, "alice", "conversation", "t", "ancient", age_days=10000)
+        deleted = cleanup_old_chunks(conn, "alice", retention_days=-5)
+        assert deleted == 0
+
+    def test_user_id_scoped(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunk_with_age(conn, "alice", "conversation", "t1", "alice old", age_days=200)
+        _insert_chunk_with_age(conn, "bob", "conversation", "t2", "bob old", age_days=200)
+        deleted = cleanup_old_chunks(conn, "alice", retention_days=90)
+        assert deleted == 1
+        rows = conn.execute("SELECT user_id FROM memory_chunks").fetchall()
+        assert {r[0] for r in rows} == {"bob"}
+
+    def test_default_source_types_include_channel_memory(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunk_with_age(conn, "channel:abc", "channel_memory", "/p/2025-01-01.md", "old chan", age_days=200)
+        deleted = cleanup_old_chunks(conn, "channel:abc", retention_days=90)
+        assert deleted == 1
+
+    def test_fts_rows_cleared_via_trigger(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        cid = _insert_chunk_with_age(conn, "alice", "conversation", "t", "needle in haystack", age_days=200)
+        # Confirm FTS row exists pre-cleanup
+        fts_before = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks_fts WHERE rowid = ?", (cid,)
+        ).fetchone()[0]
+        assert fts_before == 1
+        cleanup_old_chunks(conn, "alice", retention_days=90)
+        fts_after = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks_fts WHERE rowid = ?", (cid,)
+        ).fetchone()[0]
+        assert fts_after == 0
+
+    def test_custom_source_types_filter(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunk_with_age(conn, "alice", "conversation", "t1", "conv", age_days=200)
+        _insert_chunk_with_age(conn, "alice", "memory_file", "f1", "memfile", age_days=200)
+        # Only sweep "conversation"
+        deleted = cleanup_old_chunks(
+            conn, "alice", retention_days=90, source_types=("conversation",)
+        )
+        assert deleted == 1
+        rows = conn.execute("SELECT source_type FROM memory_chunks").fetchall()
+        assert {r[0] for r in rows} == {"memory_file"}

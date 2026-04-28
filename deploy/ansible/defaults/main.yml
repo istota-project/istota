@@ -383,7 +383,8 @@ istota_sleep_cycle_cron: "0 2 * * *"
 istota_sleep_cycle_lookback_hours: 24
 istota_sleep_cycle_memory_retention_days: 0  # 0 = unlimited
 istota_sleep_cycle_auto_load_dated_days: 3   # auto-load N days of dated memories (0 = disabled)
-istota_sleep_cycle_curate_user_memory: false  # nightly USER.md curation from dated memories
+istota_sleep_cycle_curate_user_memory: false  # nightly USER.md curation (op-based: append/add_heading/remove)
+istota_sleep_cycle_curation_log_summary: true  # post one-line summary to user log_channel after applied ops
 
 # Channel sleep cycle settings (shared channel memory extraction)
 istota_channel_sleep_cycle_enabled: true

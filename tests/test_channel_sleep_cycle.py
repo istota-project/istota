@@ -357,6 +357,55 @@ class TestCleanupOldChannelMemoryFiles:
         assert (memories_dir / f"{old_date}.md").exists()
 
 
+class TestChannelSleepCycleChunkCleanup:
+    """Item 4: nightly channel sleep cycle prunes old channel_memory chunks."""
+
+    @patch("istota.memory.search.cleanup_old_chunks")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_chunk_cleanup_called_when_retention_set(
+        self, mock_run, mock_cleanup, mount_config, db_path
+    ):
+        mount_config.channel_sleep_cycle.memory_retention_days = 90
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="- mem (alice, 2026-04-08)\n", stderr=""
+        )
+        mock_cleanup.return_value = 0
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="x", user_id="alice", conversation_token="room123"
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="r")
+            process_channel_sleep_cycle(mount_config, conn, "room123")
+        assert mock_cleanup.called
+        args = mock_cleanup.call_args.args
+        kwargs = mock_cleanup.call_args.kwargs
+        # signature: cleanup_old_chunks(conn, channel_user_id, retention, source_types=...)
+        assert args[1] == "channel:room123"
+        assert args[2] == 90
+        # source_types restricted to channel_memory only
+        st = kwargs.get("source_types") or (args[3] if len(args) > 3 else None)
+        assert st == ("channel_memory",)
+
+    @patch("istota.memory.search.cleanup_old_chunks")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_chunk_cleanup_skipped_when_retention_zero(
+        self, mock_run, mock_cleanup, mount_config, db_path
+    ):
+        mount_config.channel_sleep_cycle.memory_retention_days = 0
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="- mem (alice, 2026-04-08)\n", stderr=""
+        )
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="x", user_id="alice", conversation_token="room123"
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="r")
+            process_channel_sleep_cycle(mount_config, conn, "room123")
+        mock_cleanup.assert_not_called()
+
+
 class TestCheckChannelSleepCycles:
     def test_returns_empty_when_disabled(self, mount_config, db_path):
         mount_config.channel_sleep_cycle.enabled = False

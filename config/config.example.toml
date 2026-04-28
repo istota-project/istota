@@ -268,10 +268,13 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # [sleep_cycle]
 # enabled = true                       # enabled by default
 # cron = "0 2 * * *"                  # 2am in user's timezone
-# memory_retention_days = 0            # 0 = unlimited, or set days to auto-delete old files
+# memory_retention_days = 0            # 0 = unlimited; >0 nightly deletes both dated memory FILES and
+#                                      # ephemeral memory_chunks (conversation, memory_file, channel_memory)
+#                                      # older than N days. Durable user_memory chunks are not swept.
 # lookback_hours = 24                  # how far back to look for interactions
 # auto_load_dated_days = 3             # auto-load N days of dated memories into prompts (0 = disabled)
-# curate_user_memory = false           # nightly USER.md curation from dated memories
+# curate_user_memory = false           # nightly USER.md curation (op-based: append/add_heading/remove)
+# curation_log_summary = true          # post one-line "USER.md curated: +N appended, ..." to user log_channel
 
 # ============================================================================
 # Channel Sleep Cycle (shared channel memory extraction)
@@ -284,7 +287,8 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # enabled = true                    # enabled by default
 # cron = "0 3 * * *"               # 3am UTC (after user sleep cycles at 2am)
 # lookback_hours = 24               # how far back to look for interactions
-# memory_retention_days = 0           # 0 = unlimited, or set days to auto-delete old files
+# memory_retention_days = 0           # 0 = unlimited; >0 nightly deletes dated channel memory files
+#                                     # and channel_memory chunks older than N days
 
 # ============================================================================
 # Developer Skill (Git + GitLab/GitHub Workflows)
