@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 from . import db
-from . import memory_search as memory_search_mod
+from .memory import search as memory_search_mod
 from .config import Config
 from .nextcloud_client import ocs_get
 from .talk import TalkClient, clean_message_content, split_message
@@ -239,7 +239,7 @@ async def cmd_memory(config, conn, user_id, conversation_token, args, client):
 
     if target == "facts":
         try:
-            from .knowledge_graph import ensure_table, get_current_facts, get_fact_count, format_facts_for_prompt
+            from .memory.knowledge_graph import ensure_table, get_current_facts, get_fact_count, format_facts_for_prompt
             ensure_table(conn)
             counts = get_fact_count(conn, user_id)
             total = counts["current"]
@@ -267,7 +267,7 @@ async def cmd_memory(config, conn, user_id, conversation_token, args, client):
         if not entity:
             return "Usage: `!memory facts <entity>`"
         try:
-            from .knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
+            from .memory.knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
             ensure_table(conn)
             facts = get_current_facts(conn, user_id, subject=entity)
             if facts:

@@ -1278,7 +1278,7 @@ def _recall_memories(
         return None
 
     try:
-        from .memory_search import search
+        from .memory.search import search
     except ImportError:
         return None
 
@@ -2003,7 +2003,7 @@ def execute_task(
     knowledge_facts_text = None
     if not _skip_memory:
         try:
-            from .knowledge_graph import (
+            from .memory.knowledge_graph import (
                 ensure_table, get_current_facts, select_relevant_facts,
                 format_facts_for_prompt,
             )

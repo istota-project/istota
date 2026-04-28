@@ -2526,7 +2526,7 @@ class TestRecallMemories:
         task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
         assert _recall_memories(config, None, task, skip_memory=True) is None
 
-    @patch("istota.memory_search.search")
+    @patch("istota.memory.search.search")
     def test_formats_results(self, mock_search):
         from istota.executor import _recall_memories
         from istota.config import MemorySearchConfig
@@ -2548,7 +2548,7 @@ class TestRecallMemories:
         assert "[memory_file]" in result
         assert "User likes Python" in result
 
-    @patch("istota.memory_search.search")
+    @patch("istota.memory.search.search")
     def test_returns_none_when_no_results(self, mock_search):
         from istota.executor import _recall_memories
         from istota.config import MemorySearchConfig
@@ -2561,7 +2561,7 @@ class TestRecallMemories:
         task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
         assert _recall_memories(config, MagicMock(), task) is None
 
-    @patch("istota.memory_search.search")
+    @patch("istota.memory.search.search")
     def test_includes_channel_in_search(self, mock_search):
         from istota.executor import _recall_memories
         from istota.config import MemorySearchConfig

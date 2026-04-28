@@ -641,7 +641,7 @@ class TestCmdMemory:
     async def test_facts_with_few(self, make_config):
         """Small fact sets show all facts inline."""
         config = make_config()
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         with db.get_db(config.db_path) as conn:
             ensure_table(conn)
             add_fact(conn, "alice", "alice", "works_at", "acme")
@@ -658,7 +658,7 @@ class TestCmdMemory:
     async def test_facts_large_set_summarizes(self, make_config):
         """Large fact sets show entity summary instead of all facts."""
         config = make_config()
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         with db.get_db(config.db_path) as conn:
             ensure_table(conn)
             for i in range(25):
@@ -676,7 +676,7 @@ class TestCmdMemory:
     async def test_facts_entity_filter(self, make_config):
         """!memory facts <entity> shows facts for that entity only."""
         config = make_config()
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         with db.get_db(config.db_path) as conn:
             ensure_table(conn)
             add_fact(conn, "alice", "alice", "works_at", "acme")
@@ -691,7 +691,7 @@ class TestCmdMemory:
     @pytest.mark.asyncio
     async def test_facts_entity_not_found(self, make_config):
         config = make_config()
-        from istota.knowledge_graph import ensure_table
+        from istota.memory.knowledge_graph import ensure_table
         with db.get_db(config.db_path) as conn:
             ensure_table(conn)
             client = AsyncMock()
@@ -703,7 +703,7 @@ class TestCmdMemory:
         """Facts come from DB, not filesystem — works without mount."""
         config = make_config()
         config.nextcloud_mount_path = None
-        from istota.knowledge_graph import ensure_table, add_fact
+        from istota.memory.knowledge_graph import ensure_table, add_fact
         with db.get_db(config.db_path) as conn:
             ensure_table(conn)
             add_fact(conn, "alice", "alice", "speaks", "polish")
@@ -1832,7 +1832,7 @@ class TestSearchMemory:
 
     def test_maps_search_results_to_dicts(self, make_config, db_path):
         from istota.commands import _search_memory
-        from istota.memory_search import SearchResult
+        from istota.memory.search import SearchResult
 
         config = make_config()
         mock_results = [
@@ -1877,7 +1877,7 @@ class TestSearchMemory:
     def test_skips_results_without_task(self, make_config, db_path):
         """Memory results whose source_id doesn't map to a task should still work."""
         from istota.commands import _search_memory
-        from istota.memory_search import SearchResult
+        from istota.memory.search import SearchResult
 
         config = make_config()
         mock_results = [
