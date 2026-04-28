@@ -485,6 +485,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kf_unique_current
     ON knowledge_facts(user_id, subject, predicate, object)
     WHERE valid_until IS NULL;
 
+-- Audit trail for knowledge_facts mutations. Captures inserts,
+-- supersessions, fuzzy-dedup skips, invalidations, and deletes so users can
+-- inspect why a fact arrived or disappeared. Pruned on the unified retention
+-- sweep at 4x the user memory retention window.
+CREATE TABLE IF NOT EXISTS knowledge_facts_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    fact_id INTEGER,
+    op TEXT NOT NULL,
+    before_json TEXT,
+    after_json TEXT,
+    source_task_id INTEGER,
+    source_type TEXT,
+    ts TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_kfa_user_ts ON knowledge_facts_audit(user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_kfa_fact_id ON knowledge_facts_audit(fact_id);
+
 -- Dismissed cluster zones (suppress detected unknown places without saving them)
 CREATE TABLE IF NOT EXISTS dismissed_clusters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

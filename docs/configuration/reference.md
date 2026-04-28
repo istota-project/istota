@@ -173,10 +173,11 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 |---|---|---|
 | `enabled` | `true` | Enable nightly memory extraction |
 | `cron` | `"0 2 * * *"` | Schedule (user's timezone) |
-| `memory_retention_days` | `0` | Auto-delete old files (0 = unlimited) |
-| `lookback_hours` | `24` | How far back to look |
-| `auto_load_dated_days` | `3` | Days of dated memories to auto-load |
-| `curate_user_memory` | `false` | Nightly USER.md curation |
+| `lookback_hours` | `24` | How far back to gather day data |
+| `memory_retention_days` | `0` | Prune dated memory files **and** ephemeral `memory_chunks` rows (`conversation`, `memory_file`, `channel_memory`) older than N days. Durable `user_memory` chunks are not touched. 0 = unlimited |
+| `auto_load_dated_days` | `3` | Days of dated memories injected into prompts; 0 disables |
+| `curate_user_memory` | `false` | Run op-based USER.md curation after extraction |
+| `curation_log_summary` | `true` | Post a one-line summary to the user's `log_channel` after applied curation ops |
 
 ## `[channel_sleep_cycle]`
 
@@ -184,8 +185,8 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 |---|---|---|
 | `enabled` | `true` | Enable channel memory extraction |
 | `cron` | `"0 3 * * *"` | Schedule (UTC) |
-| `lookback_hours` | `24` | How far back to look |
-| `memory_retention_days` | `0` | Auto-delete old files (0 = unlimited) |
+| `lookback_hours` | `24` | How far back to gather channel data |
+| `memory_retention_days` | `0` | Prune dated channel files and `channel_memory` chunks older than N days. 0 = unlimited |
 
 ## `[memory_search]`
 

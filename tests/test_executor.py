@@ -2268,7 +2268,7 @@ class TestNotificationReplyContextScoping:
             reply_task = db.get_task(conn, reply_id)
 
             with patch("istota.executor._build_talk_api_context") as mock_talk_ctx:
-                mock_talk_ctx.return_value = None  # Fall through to DB context
+                mock_talk_ctx.return_value = (None, set())  # Fall through to DB context
                 from istota.executor import execute_task
                 execute_task(reply_task, config, [], conn=conn)
                 # Normal context path should be attempted

@@ -58,9 +58,12 @@ nav:
     - getting-started/post-install.md
   - Architecture:
     - architecture/overview.md
+    - architecture/task-lifecycle.md
     - architecture/scheduler.md
     - architecture/executor.md
+    - architecture/brain.md
     - architecture/context.md
+    - architecture/memory.md
     - architecture/database.md
   - Features:
     - features/talk.md

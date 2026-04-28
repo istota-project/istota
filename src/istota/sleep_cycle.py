@@ -2,8 +2,8 @@
 
 import json
 import logging
+import os
 import re
-import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -11,12 +11,14 @@ from zoneinfo import ZoneInfo
 from croniter import croniter
 
 from . import db
+from .brain import BrainRequest, make_brain
 from .config import Config
 from .storage import (
     _get_mount_path,
     get_user_memories_path,
     get_user_memory_path,
     get_channel_memories_path,
+    get_channel_memory_path,
     read_user_memory_v2,
     read_dated_memories,
     read_channel_memory,
@@ -61,6 +63,92 @@ SUGGESTED_PREDICATES = {
 
 # Sentinel output from Claude indicating nothing worth saving
 NO_NEW_MEMORIES = "NO_NEW_MEMORIES"
+
+# Pattern for `ref:N` markers in dated memory bullets — used to attach
+# per-task topics (from the extraction's TOPICS section) to the chunk that
+# contains the bullet, rather than collapsing to a single dominant topic
+# per file.
+_REF_PATTERN = re.compile(r"\bref:(\d+)\b")
+
+
+def _topics_per_chunk(
+    chunks: list[str], extracted_topics: dict[str, str]
+) -> list[str | None]:
+    """Return per-chunk topics derived from ref:N markers inside each chunk.
+
+    Each chunk inherits the topic of the first `ref:N` token it contains.
+    Chunks without a ref get None — NULL-topic chunks are always returned
+    in topic-filtered searches by design, so a missing ref doesn't hide
+    content. If a chunk straddles two refs (long bullets crossing chunk
+    boundaries), the first ref wins.
+    """
+    out: list[str | None] = []
+    for chunk in chunks:
+        topic: str | None = None
+        for m in _REF_PATTERN.finditer(chunk):
+            key = f"ref:{m.group(1)}"
+            t = extracted_topics.get(key)
+            if t:
+                topic = t
+                break
+        out.append(topic)
+    return out
+
+# Sleep-cycle Claude calls run unsandboxed, with no tools, no streaming,
+# no skill proxy. The prompt does all the work — model returns text/JSON.
+_SLEEP_CYCLE_TIMEOUT_SECONDS = 120
+
+
+def _run_sleep_cycle_brain(
+    config: Config, prompt: str, model: str, label: str
+) -> tuple[bool, str]:
+    """Run a privileged text-only model call through the configured brain.
+
+    Returns (success, output). On failure, output is an error description.
+
+    The sleep cycle is privileged orchestration: no tools, no streaming, no
+    sandbox, no progress callbacks, no PID tracking. The brain handles
+    transient API retries; everything else stays text-only by construction
+    (empty allowed_tools).
+    """
+    req = BrainRequest(
+        prompt=prompt,
+        allowed_tools=[],
+        cwd=Path(config.temp_dir) if config.temp_dir else Path("/tmp"),
+        env=dict(os.environ),
+        timeout_seconds=_SLEEP_CYCLE_TIMEOUT_SECONDS,
+        model=model,
+        streaming=False,
+        on_progress=None,
+        cancel_check=None,
+        on_pid=None,
+        sandbox_wrap=None,
+        result_file=None,
+    )
+    try:
+        result = make_brain(config.brain).execute(req)
+    except FileNotFoundError:
+        logger.error("Brain CLI not found for %s", label)
+        return False, ""
+    except Exception as e:
+        logger.error("%s brain error: %s", label, e)
+        return False, ""
+
+    if result.stop_reason == "timeout":
+        logger.error("%s timed out", label)
+        return False, ""
+    if result.stop_reason == "not_found":
+        logger.error("Brain CLI not found for %s", label)
+        return False, ""
+    if not result.success:
+        logger.error(
+            "%s failed (stop_reason=%s): %s",
+            label,
+            result.stop_reason,
+            (result.result_text or "")[:200],
+        )
+        return False, ""
+    return True, (result.result_text or "").strip()
 
 
 def _excerpt(text: str, budget: int) -> str:
@@ -431,41 +519,26 @@ def process_user_sleep_cycle(
     # Load existing memory to avoid duplication
     existing_memory = read_user_memory_v2(config, user_id)
 
-    # Build extraction prompt
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    # Build extraction prompt — date_str follows the user's timezone so
+    # filenames and bullet timestamps match the user's calendar day, not the
+    # server's. Falls back to UTC for unknown tz strings.
+    user_cfg = config.users.get(user_id)
+    tz_name = user_cfg.timezone if user_cfg and user_cfg.timezone else "UTC"
+    try:
+        user_tz = ZoneInfo(tz_name)
+    except Exception:
+        user_tz = ZoneInfo("UTC")
+    date_str = datetime.now(user_tz).strftime("%Y-%m-%d")
     prompt = build_memory_extraction_prompt(
         user_id, day_data, existing_memory, date_str
     )
 
-    # Call Claude CLI (like context.py does)
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "-", "--model", "sonnet"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-
-        if result.returncode != 0:
-            logger.error(
-                "Sleep cycle extraction failed for %s (rc=%d): %s",
-                user_id,
-                result.returncode,
-                result.stderr[:200] if result.stderr else "",
-            )
-            return False
-
-        output = result.stdout.strip()
-
-    except subprocess.TimeoutExpired:
-        logger.error("Sleep cycle extraction timed out for %s", user_id)
-        return False
-    except FileNotFoundError:
-        logger.error("Claude CLI not found for sleep cycle extraction")
-        return False
-    except Exception as e:
-        logger.error("Sleep cycle extraction error for %s: %s", user_id, e)
+    ok, output = _run_sleep_cycle_brain(
+        config, prompt,
+        model=sleep_config.extraction_model,
+        label=f"Sleep cycle extraction for {user_id}",
+    )
+    if not ok:
         return False
 
     # Check for sentinel
@@ -519,22 +592,27 @@ def process_user_sleep_cycle(
         except Exception as e:
             logger.debug("Knowledge graph insertion failed for %s: %s", user_id, e)
 
-    # Determine dominant topic from extracted topics (for indexing)
-    _index_topic = None
-    if extracted_topics:
-        # Use the most common topic across refs
-        topic_counts: dict[str, int] = {}
-        for t in extracted_topics.values():
-            topic_counts[t] = topic_counts.get(t, 0) + 1
-        if topic_counts:
-            _index_topic = max(topic_counts, key=topic_counts.get)  # type: ignore[arg-type]
-
-    # Index memory file for semantic search (non-critical)
+    # Index memory file for semantic search (non-critical). Per-chunk topics
+    # are derived from the bullets each chunk contains: each bullet's
+    # `ref:N` marker maps via `extracted_topics` to a topic, and the chunk
+    # inherits the topic of its first ref. Bullets without a ref leave the
+    # chunk's topic NULL — NULL-topic chunks are always returned in
+    # topic-filtered searches by design.
     if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
         try:
-            from .memory.search import index_file as _index_file
-            _index_file(conn, user_id, str(memory_file), memories_text, "memory_file",
-                       topic=_index_topic)
+            from .memory.search import (
+                chunk_text as _chunk_text,
+                index_file as _index_file,
+            )
+            chunks = _chunk_text(memories_text)
+            topic_per_chunk = (
+                _topics_per_chunk(chunks, extracted_topics)
+                if extracted_topics else None
+            )
+            _index_file(
+                conn, user_id, str(memory_file), memories_text, "memory_file",
+                topic_per_chunk=topic_per_chunk,
+            )
         except Exception as e:
             logger.debug("Memory search indexing failed for %s: %s", memory_file.name, e)
 
@@ -555,6 +633,18 @@ def process_user_sleep_cycle(
                 logger.info("Pruned %d ephemeral memory chunks for %s", n, user_id)
         except Exception as e:
             logger.debug("memory_chunks cleanup failed for %s: %s", user_id, e)
+
+        # Knowledge graph audit gets a generous 4x window — debugging "why is
+        # this fact here?" benefits from history, and rows are tiny.
+        try:
+            from .memory.knowledge_graph import cleanup_old_audit_rows, ensure_table
+            ensure_table(conn)
+            audit_days = sleep_config.memory_retention_days * 4
+            n = cleanup_old_audit_rows(conn, user_id, audit_days)
+            if n:
+                logger.info("Pruned %d KG audit rows for %s", n, user_id)
+        except Exception as e:
+            logger.debug("KG audit cleanup failed for %s: %s", user_id, e)
 
     # Curate USER.md if enabled
     if sleep_config.curate_user_memory:
@@ -591,6 +681,48 @@ def _load_kg_facts_text(
             return format_facts_for_prompt(facts) if facts else None
     except Exception:
         return None
+
+
+# Phase A observability for USER.md growth. Warning fires once the file
+# crosses ~8 KB — somewhere around where it starts pushing other prompt
+# sections out under typical max_memory_chars budgets. Tunable via config
+# in phase B; for now it's a hard-coded soft threshold.
+USER_MEMORY_SOFT_WARN_BYTES = 8 * 1024
+
+
+def _maybe_warn_usermd_size(config: Config, user_id: str, size_bytes: int) -> None:
+    """Post a one-line warning to log_channel when USER.md crosses 8 KB.
+
+    Phase A: visibility only. No truncation, no failure. The audit log
+    captures the size on every curation run regardless; this is the
+    in-the-moment notice so users see the growth before it bites.
+    """
+    if size_bytes < USER_MEMORY_SOFT_WARN_BYTES:
+        return
+    user_cfg = config.users.get(user_id)
+    log_channel = getattr(user_cfg, "log_channel", "") if user_cfg else ""
+    if not log_channel:
+        logger.info(
+            "USER.md size warning for %s: %d bytes (no log_channel configured)",
+            user_id, size_bytes,
+        )
+        return
+    msg = (
+        f"USER.md is {size_bytes:,} bytes — over the {USER_MEMORY_SOFT_WARN_BYTES:,} byte "
+        "soft threshold. Consider reviewing for stale entries before it crowds out "
+        "recall and KG facts in prompts."
+    )
+    try:
+        from .notifications import send_notification
+        send_notification(
+            config,
+            user_id,
+            msg,
+            surface="talk",
+            conversation_token=log_channel,
+        )
+    except Exception as e:
+        logger.debug("USER.md size warning post failed for %s: %s", user_id, e)
 
 
 def _post_curation_summary(
@@ -675,34 +807,15 @@ def curate_user_memory(
     kg_text = _load_kg_facts_text(config, conn, user_id)
     prompt = build_op_curation_prompt(user_id, doc, dated, kg_text)
 
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "-", "--model", "sonnet"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("USER.md curation timed out for %s", user_id)
-        return False
-    except FileNotFoundError:
-        logger.error("Claude CLI not found for USER.md curation")
-        return False
-    except Exception as e:
-        logger.error("USER.md curation subprocess error for %s: %s", user_id, e)
+    ok, output = _run_sleep_cycle_brain(
+        config, prompt,
+        model=config.sleep_cycle.curation_model,
+        label=f"USER.md curation for {user_id}",
+    )
+    if not ok:
         return False
 
-    if result.returncode != 0:
-        logger.error(
-            "USER.md curation failed for %s (rc=%d): %s",
-            user_id,
-            result.returncode,
-            (result.stderr or "")[:200],
-        )
-        return False
-
-    raw = strip_json_fences(result.stdout)
+    raw = strip_json_fences(output)
     try:
         payload = json.loads(raw)
         ops = payload.get("ops", [])
@@ -721,7 +834,10 @@ def curate_user_memory(
     if not applied and not rejected:
         return False  # truly nothing happened — no audit, no write
     if not applied:
-        write_audit_log(config, user_id, applied=[], rejected=rejected)
+        write_audit_log(
+            config, user_id, applied=[], rejected=rejected,
+            user_md_size_bytes=len(current.encode("utf-8")),
+        )
         return False
 
     # Skip the write if every applied op was a no-op (dedup, no_match). Decide
@@ -731,7 +847,10 @@ def curate_user_memory(
     # the round-trip normalizes away, leading to spurious nightly rewrites.
     real_changes = any(a.get("outcome") == "applied" for a in applied)
     if not real_changes:
-        write_audit_log(config, user_id, applied=applied, rejected=rejected)
+        write_audit_log(
+            config, user_id, applied=applied, rejected=rejected,
+            user_md_size_bytes=len(current.encode("utf-8")),
+        )
         return False
 
     new_text = serialize_sectioned_doc(new_doc)
@@ -744,7 +863,17 @@ def curate_user_memory(
         len(applied),
         len(rejected),
     )
-    write_audit_log(config, user_id, applied=applied, rejected=rejected)
+    new_size_bytes = len(new_text.encode("utf-8"))
+    write_audit_log(
+        config, user_id, applied=applied, rejected=rejected,
+        user_md_size_bytes=new_size_bytes,
+    )
+
+    # Phase A — observability only. Warn to log_channel when USER.md crosses
+    # a soft threshold so growth is visible before it starts displacing
+    # recall and KG facts in interactive prompts. Active size pressure is
+    # phase B, deferred until we have data.
+    _maybe_warn_usermd_size(config, user_id, new_size_bytes)
 
     if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
         try:
@@ -1010,47 +1139,19 @@ def process_channel_sleep_cycle(
     # Load existing channel memory to avoid duplication
     existing_memory = read_channel_memory(config, conversation_token)
 
-    # Build extraction prompt
+    # Build extraction prompt — channel sleep cycle stays UTC because
+    # channels span timezones.
     date_str = datetime.now().strftime("%Y-%m-%d")
     prompt = build_channel_memory_extraction_prompt(
         conversation_token, day_data, existing_memory, date_str
     )
 
-    # Call Claude CLI
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "-", "--model", "sonnet"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-
-        if result.returncode != 0:
-            logger.error(
-                "Channel sleep cycle extraction failed for %s (rc=%d): %s",
-                conversation_token,
-                result.returncode,
-                result.stderr[:200] if result.stderr else "",
-            )
-            return False
-
-        output = result.stdout.strip()
-
-    except subprocess.TimeoutExpired:
-        logger.error(
-            "Channel sleep cycle extraction timed out for %s", conversation_token
-        )
-        return False
-    except FileNotFoundError:
-        logger.error("Claude CLI not found for channel sleep cycle extraction")
-        return False
-    except Exception as e:
-        logger.error(
-            "Channel sleep cycle extraction error for %s: %s",
-            conversation_token,
-            e,
-        )
+    ok, output = _run_sleep_cycle_brain(
+        config, prompt,
+        model=csc.extraction_model,
+        label=f"Channel sleep cycle extraction for {conversation_token}",
+    )
+    if not ok:
         return False
 
     # Check for sentinel
@@ -1103,6 +1204,11 @@ def process_channel_sleep_cycle(
                 e,
             )
 
+    # Re-index CHANNEL.md as durable channel memory. Done unconditionally each
+    # channel sleep cycle (the file is small, embedding is fast) which also
+    # covers the case where humans edit CHANNEL.md directly via Nextcloud.
+    _reindex_channel_durable(config, conn, conversation_token)
+
     # Update state
     _update_channel_state(config, conn, conversation_token, last_task_id)
 
@@ -1112,8 +1218,8 @@ def process_channel_sleep_cycle(
     )
 
     # Clean up old ephemeral memory_chunks for this channel (channel_memory
-    # source_type only; durable CHANNEL.md is not indexed today, but if it ever
-    # is, it must use a separate source_type to stay durable).
+    # source_type only). channel_memory_durable (CHANNEL.md) is intentionally
+    # excluded — it refreshes on edit, like USER.md.
     if csc.memory_retention_days > 0:
         try:
             from .memory.search import cleanup_old_chunks
@@ -1134,6 +1240,49 @@ def process_channel_sleep_cycle(
             )
 
     return True
+
+
+def _reindex_channel_durable(
+    config: Config,
+    conn: "db.sqlite3.Connection",
+    conversation_token: str,
+) -> None:
+    """Re-index CHANNEL.md under source_type=channel_memory_durable.
+
+    Like USER.md indexing — durable, refreshed on file edit (or here, on each
+    channel sleep cycle). Excluded from EPHEMERAL_SOURCE_TYPES so retention
+    never deletes it. No-op if the file doesn't exist or memory search is
+    disabled.
+    """
+    if not (config.memory_search.enabled and config.memory_search.auto_index_memory_files):
+        return
+    if not config.use_mount:
+        return
+    try:
+        channel_md = _get_mount_path(config, get_channel_memory_path(conversation_token))
+    except Exception:
+        return
+    if not channel_md.is_file():
+        return
+    try:
+        content = channel_md.read_text()
+    except Exception:
+        return
+    if not content.strip():
+        return
+    try:
+        from .memory.search import index_file as _index_file
+        _index_file(
+            conn,
+            f"channel:{conversation_token}",
+            str(channel_md),
+            content,
+            "channel_memory_durable",
+        )
+    except Exception as e:
+        logger.debug(
+            "CHANNEL.md durable indexing failed for %s: %s", conversation_token, e
+        )
 
 
 def _update_channel_state(

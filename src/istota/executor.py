@@ -1010,13 +1010,15 @@ def _build_talk_api_context(
     config: Config,
     conn: "db.sqlite3.Connection | None",
     user_tz: ZoneInfo | None = None,
-) -> str | None:
+) -> tuple[str | None, set[int]]:
     """Build conversation context from the local Talk message cache.
 
     Reads cached messages (populated by the poller), enriches bot messages with
     task metadata from the DB, and formats for the prompt.
 
-    Returns formatted context string, or None if no relevant messages found.
+    Returns (formatted_context, task_ids_included). task_ids_included is the
+    set of DB task IDs whose results appear in the returned context — callers
+    use it to deduplicate against memory recall.
     """
     from .context import _parse_reference_id
 
@@ -1031,8 +1033,8 @@ def _build_talk_api_context(
         logger.info("No messages from Talk API for token %s", task.conversation_token)
         # Fall through to reply-to fallback
         if task.reply_to_talk_id and task.reply_to_content:
-            return f"(In reply to: {task.reply_to_content})"
-        return None
+            return f"(In reply to: {task.reply_to_content})", set()
+        return None, set()
 
     # Collect task IDs from referenceIds for batch metadata lookup
     task_ids = []
@@ -1059,8 +1061,8 @@ def _build_talk_api_context(
     if not talk_messages:
         logger.info("No relevant Talk messages after filtering for task %d", task.id)
         if task.reply_to_talk_id and task.reply_to_content:
-            return f"(In reply to: {task.reply_to_content})"
-        return None
+            return f"(In reply to: {task.reply_to_content})", set()
+        return None, set()
 
     # Cap at lookback_count, then apply recency window
     lookback = config.conversation.lookback_count
@@ -1105,7 +1107,7 @@ def _build_talk_api_context(
 
     if not relevant:
         logger.info("No relevant Talk context selected from %d messages", len(talk_messages))
-        return None
+        return None, set()
 
     conversation_context = format_talk_context_for_prompt(
         relevant, truncation=config.conversation.context_truncation,
@@ -1115,7 +1117,8 @@ def _build_talk_api_context(
         "Loaded %d Talk API context messages (%d chars) for task %d",
         len(relevant), len(conversation_context), task.id,
     )
-    return conversation_context
+    included_task_ids = {m.task_id for m in relevant if m.task_id}
+    return conversation_context, included_task_ids
 
 
 def _build_db_context(
@@ -1123,10 +1126,14 @@ def _build_db_context(
     config: Config,
     conn: "db.sqlite3.Connection | None",
     user_tz: ZoneInfo | None = None,
-) -> str | None:
+) -> tuple[str | None, set[int]]:
     """Build conversation context from the DB (original approach).
 
     Used for email tasks and as fallback when Talk API is unavailable.
+
+    Returns (formatted_context, task_ids_included). task_ids_included is the
+    set of DB task IDs whose results appear in the returned context — callers
+    use it to deduplicate against memory recall.
     """
     # Exclude background task types from conversation context
     _exclude_types = ["scheduled", "briefing"]
@@ -1204,17 +1211,18 @@ def _build_db_context(
                 "Loaded %d context messages (%d chars) for task %d",
                 len(relevant), len(conversation_context), task.id,
             )
-            return conversation_context
+            included_task_ids = {msg.id for msg in relevant}
+            return conversation_context, included_task_ids
         else:
             logger.info("No relevant context selected from %d messages", len(history))
     else:
         if task.reply_to_talk_id and task.reply_to_content:
             logger.info("Using inline reply context for task %d (no history)", task.id)
-            return f"(In reply to: {task.reply_to_content})"
+            return f"(In reply to: {task.reply_to_content})", set()
         else:
             logger.info("No conversation history found for token %s", task.conversation_token)
 
-    return None
+    return None, set()
 
 
 def _apply_bot_name(content: str, config: Config) -> str:
@@ -1270,8 +1278,14 @@ def _recall_memories(
     conn: "db.sqlite3.Connection | None",
     task: db.Task,
     skip_memory: bool = False,
+    exclude_task_ids: set[int] | None = None,
 ) -> str | None:
-    """BM25 search using task prompt as query. Independent of context triage."""
+    """BM25 search using task prompt as query. Independent of context triage.
+
+    `exclude_task_ids` is the set of task IDs already included as conversation
+    history; recall drops conversation chunks for those tasks so the same
+    content doesn't appear twice in the prompt.
+    """
     if not config.memory_search.enabled or not config.memory_search.auto_recall:
         return None
     if skip_memory:
@@ -1283,24 +1297,30 @@ def _recall_memories(
         return None
 
     include_ids: list[str] = []
+    source_types = ["memory_file", "conversation"]
     if task.conversation_token:
         include_ids.append(f"channel:{task.conversation_token}")
+        # Channel namespace also has dated channel_memory and durable
+        # channel_memory_durable (from CHANNEL.md). Include both.
+        source_types += ["channel_memory", "channel_memory_durable"]
 
     try:
         if conn is not None:
             results = search(
                 conn, task.user_id, task.prompt,
                 limit=config.memory_search.auto_recall_limit,
-                source_types=["memory_file", "conversation"],
+                source_types=source_types,
                 include_user_ids=include_ids or None,
+                exclude_conversation_task_ids=exclude_task_ids or None,
             )
         else:
             with db.get_db(config.db_path) as temp_conn:
                 results = search(
                     temp_conn, task.user_id, task.prompt,
                     limit=config.memory_search.auto_recall_limit,
-                    source_types=["memory_file", "conversation"],
+                    source_types=source_types,
                     include_user_ids=include_ids or None,
+                    exclude_conversation_task_ids=exclude_task_ids or None,
                 )
     except Exception:
         logger.debug("Memory recall search failed", exc_info=True)
@@ -1894,6 +1914,7 @@ def execute_task(
 
     # Get conversation context if enabled
     conversation_context = None
+    context_task_ids: set[int] = set()
     notification_parent = _detect_notification_reply(task, config, conn)
     context_skip_reason = None
     if not use_context:
@@ -1930,7 +1951,7 @@ def execute_task(
         _used_talk_api = False
         if task.source_type == "talk":
             try:
-                conversation_context = _build_talk_api_context(
+                conversation_context, context_task_ids = _build_talk_api_context(
                     task, config, conn, user_tz=_ctx_user_tz,
                 )
                 _used_talk_api = conversation_context is not None
@@ -1942,7 +1963,9 @@ def execute_task(
 
         # DB-based context fallback (always used for email, fallback for Talk)
         if not _used_talk_api:
-            conversation_context = _build_db_context(task, config, conn, user_tz=_ctx_user_tz)
+            conversation_context, context_task_ids = _build_db_context(
+                task, config, conn, user_tz=_ctx_user_tz,
+            )
 
     # Load user memory (auto-create directories if missing)
     # Skills with exclude_memory=true (e.g. briefing) skip personal memory
@@ -1996,8 +2019,13 @@ def execute_task(
             pass  # Graceful degradation
     user_config = config.get_user(task.user_id)
 
-    # Auto-recall memories via BM25 search
-    recalled_memories = _recall_memories(config, conn, task, skip_memory=_skip_memory)
+    # Auto-recall memories via BM25 search. Exclude task IDs already included
+    # as conversation history so the same chunk doesn't appear twice.
+    recalled_memories = _recall_memories(
+        config, conn, task,
+        skip_memory=_skip_memory,
+        exclude_task_ids=context_task_ids or None,
+    )
 
     # Load knowledge graph facts (filtered by relevance to prompt)
     knowledge_facts_text = None

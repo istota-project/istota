@@ -13,6 +13,7 @@ from istota.memory.knowledge_graph import (
     _fact_similarity,
     _tokenize,
     add_fact,
+    cleanup_old_audit_rows,
     delete_fact,
     ensure_table,
     format_facts_for_prompt,
@@ -21,6 +22,7 @@ from istota.memory.knowledge_graph import (
     get_fact,
     get_fact_count,
     get_facts_as_of,
+    get_fact_history,
     invalidate_fact,
     select_relevant_facts,
 )
@@ -588,17 +590,14 @@ class TestFuzzyDedup:
         assert id1 is not None
         assert id2 is None
 
-    def test_near_duplicate_skipped(self, conn):
-        """Similar predicate+object for same subject is skipped."""
+    def test_near_duplicate_with_word_variant_inserts(self, conn):
+        """`tree nut` and `tree nuts` are different tokens — not deduped."""
         id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
-        # Very similar — "allergic_to tree nuts" vs "allergic_to tree nut"
         id2 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nut")
         assert id1 is not None
-        # Jaccard of {"allergic_to", "tree", "nuts"} vs {"allergic_to", "tree", "nut"}
-        # = 2/4 = 0.5 — below threshold, so this is NOT deduped
-        # Actually let's check: the normalized forms are "allergic_to tree nuts" and "allergic_to tree nut"
-        # Words: {allergic_to, tree, nuts} vs {allergic_to, tree, nut} → intersection=2, union=4 → 0.5
-        # Below 0.7 threshold, so it inserts
+        # Tokens {tree, nut} vs {tree, nuts} — neither is a subset, Jaccard
+        # 1/3 < 0.6 → both insert. Word-boundary precision is the trade-off
+        # for the tighter token-subset rule.
         assert id2 is not None
 
     def test_high_overlap_deduped(self, conn):
@@ -665,6 +664,49 @@ class TestFuzzyDedup:
         invalidate_fact(conn, id1, ended="2026-01-01")
         # Re-add same fact — should succeed since the old one is invalidated
         id2 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        assert id2 is not None
+
+    def test_substring_object_collapses_refined_value(self, conn):
+        """Same predicate, refined object — substring fast-path catches it."""
+        id1 = add_fact(conn, "user1", "stefan", "uses_tech", "python")
+        id2 = add_fact(conn, "user1", "stefan", "uses_tech", "python 3")
+        assert id1 is not None
+        assert id2 is None  # "python" ⊂ "python 3" (same predicate)
+
+    def test_substring_object_collapses_added_qualifier(self, conn):
+        # Use a multi-valued predicate so substring fires before supersession.
+        id1 = add_fact(conn, "user1", "stefan", "owns", "acme")
+        id2 = add_fact(conn, "user1", "stefan", "owns", "acme corp")
+        assert id1 is not None
+        assert id2 is None  # "acme" ⊂ "acme corp" (same predicate)
+
+    def test_morning_vs_weekly_briefings_does_not_merge(self, conn):
+        """Spec example: ("morning briefings", "weekly briefings") — must NOT merge.
+
+        Tokens (incl. predicate): {prefers, morning, briefings} vs
+        {prefers, weekly, briefings}. Jaccard = 2/4 = 0.5 < 0.6.
+        """
+        id1 = add_fact(conn, "user1", "stefan", "prefers", "morning briefings")
+        id2 = add_fact(conn, "user1", "stefan", "prefers", "weekly briefings")
+        assert id1 is not None
+        assert id2 is not None
+
+    def test_substring_does_not_merge_unrelated(self, conn):
+        """Genuinely different objects don't merge."""
+        id1 = add_fact(conn, "user1", "stefan", "prefers", "morning briefings")
+        id2 = add_fact(conn, "user1", "stefan", "prefers", "evening summaries")
+        assert id1 is not None
+        # No shared content tokens; Jaccard 1/4 = 0.25 < 0.6 → inserted.
+        assert id2 is not None
+
+    def test_substring_scoped_to_predicate(self, conn):
+        """Different predicates must not substring-merge even if objects share text."""
+        id1 = add_fact(conn, "user1", "stefan", "allergic_to", "tree nuts")
+        # Different predicate ("is_allergic_to" was the spec's example): the
+        # substring path is scoped to identical predicates, so this is
+        # judged by Jaccard alone.
+        id2 = add_fact(conn, "user1", "stefan", "is_allergic_to", "tree nuts")
+        assert id1 is not None
         assert id2 is not None
 
 
@@ -760,7 +802,10 @@ class TestSelectRelevantFacts:
         result = select_relevant_facts([], "some prompt", "stefan")
         assert result == []
 
-    def test_max_facts_caps_total(self):
+    def test_max_facts_does_not_truncate_identity(self):
+        """Identity facts are anchors — never truncated, even when over cap.
+        Matched facts (subject/object in prompt) get cut instead.
+        """
         facts = [
             self._make_fact("stefan", "knows", "python", created_at="2026-01-01"),
             self._make_fact("stefan", "knows", "go", created_at="2026-02-01"),
@@ -769,7 +814,9 @@ class TestSelectRelevantFacts:
         result = select_relevant_facts(
             facts, "anything", "stefan", max_facts=2,
         )
-        assert len(result) == 2
+        # All 3 identity facts kept — cap is a soft target when identity exceeds it.
+        assert len(result) == 3
+        assert all(f.subject == "stefan" for f in result)
 
     def test_max_facts_prioritizes_identity_over_matched(self):
         facts = [
@@ -780,7 +827,7 @@ class TestSelectRelevantFacts:
         result = select_relevant_facts(
             facts, "project_alpha update", "stefan", max_facts=2,
         )
-        # 2 identity facts take priority, project_alpha gets cut
+        # 2 identity facts saturate the cap; project_alpha is dropped.
         assert len(result) == 2
         assert all(f.subject == "stefan" for f in result)
 
@@ -838,3 +885,81 @@ class TestSelectRelevantFacts:
         non_identity = [f for f in result if f.subject != "stefan"]
         assert len(non_identity) == 1
         assert non_identity[0].subject == "project_new"
+
+
+class TestKnowledgeFactsAudit:
+    def test_insert_writes_audit_row(self, conn):
+        fact_id = add_fact(conn, "alice", "stefan", "uses_tech", "python")
+        rows = get_fact_history(conn, "alice")
+        assert len(rows) == 1
+        assert rows[0].op == "insert"
+        assert rows[0].fact_id == fact_id
+        assert rows[0].before_json is None
+        assert rows[0].after_json is not None
+        assert "python" in rows[0].after_json
+
+    def test_supersede_writes_audit_row(self, conn):
+        a = add_fact(conn, "alice", "stefan", "works_at", "acme")
+        b = add_fact(conn, "alice", "stefan", "works_at", "globex")
+        ops = [r.op for r in get_fact_history(conn, "alice")]
+        # Two inserts + one supersede on the prior row.
+        assert ops.count("insert") == 2
+        assert ops.count("supersede") == 1
+        # Supersede row points at the old fact.
+        sup = next(r for r in get_fact_history(conn, "alice") if r.op == "supersede")
+        assert sup.fact_id == a
+        assert sup.before_json is not None
+        assert "acme" in sup.before_json
+
+    def test_fuzzy_dedup_skip_writes_audit_row(self, conn):
+        # 3-of-4 token overlap → Jaccard 0.75 ≥ 0.7 threshold. Use a
+        # multi-valued predicate so fuzzy fires before supersession.
+        first = add_fact(conn, "alice", "stefan", "uses_tech", "python java")
+        second = add_fact(conn, "alice", "stefan", "uses_tech", "python java rust")
+        # First inserted, second skipped via fuzzy dedup.
+        assert first is not None
+        assert second is None
+        ops = [r.op for r in get_fact_history(conn, "alice")]
+        assert "fuzzy_dedup_skip" in ops
+        skip = next(r for r in get_fact_history(conn, "alice") if r.op == "fuzzy_dedup_skip")
+        # Audit row points at the existing fact it collided with.
+        assert skip.fact_id == first
+
+    def test_invalidate_writes_audit_row(self, conn):
+        fact_id = add_fact(conn, "alice", "stefan", "uses_tech", "python")
+        invalidate_fact(conn, fact_id, ended="2026-04-01")
+        ops = [r.op for r in get_fact_history(conn, "alice")]
+        assert "invalidate" in ops
+
+    def test_delete_writes_audit_row(self, conn):
+        fact_id = add_fact(conn, "alice", "stefan", "uses_tech", "python")
+        delete_fact(conn, fact_id)
+        ops = [r.op for r in get_fact_history(conn, "alice")]
+        assert "delete" in ops
+
+    def test_history_filter_by_entity(self, conn):
+        add_fact(conn, "alice", "stefan", "uses_tech", "python")
+        add_fact(conn, "alice", "felix", "lives_in", "warsaw")
+        rows = get_fact_history(conn, "alice", entity="felix")
+        assert len(rows) == 1
+        assert "felix" in (rows[0].after_json or "")
+
+    def test_cleanup_old_audit_rows_skips_when_zero(self, conn):
+        add_fact(conn, "alice", "stefan", "uses_tech", "python")
+        n = cleanup_old_audit_rows(conn, "alice", 0)
+        assert n == 0
+        # Row still there.
+        assert len(get_fact_history(conn, "alice")) == 1
+
+    def test_cleanup_old_audit_rows_deletes_old(self, conn):
+        # Insert audit row directly with a synthetic ts in the far past.
+        ensure_table(conn)
+        conn.execute(
+            "INSERT INTO knowledge_facts_audit "
+            "(user_id, fact_id, op, before_json, after_json, ts) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("alice", 999, "insert", None, "{}", "2020-01-01 00:00:00"),
+        )
+        conn.commit()
+        n = cleanup_old_audit_rows(conn, "alice", retention_days=1)
+        assert n == 1

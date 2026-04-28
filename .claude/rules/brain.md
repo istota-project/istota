@@ -28,7 +28,7 @@ class Brain(Protocol):
 | Field | Notes |
 |---|---|
 | `prompt: str` | Fully composed prompt (emissaries+persona+memory+skills+context+request) |
-| `allowed_tools: list[str]` | From `executor.build_allowed_tools()` — ["Read","Write","Edit","Grep","Glob","Bash"] |
+| `allowed_tools: list[str]` | From `executor.build_allowed_tools()` — ["Read","Write","Edit","Grep","Glob","Bash"]. Empty list = text-only invocation; ClaudeCodeBrain skips `--allowedTools`/`--disallowedTools` entirely (sleep-cycle path). |
 | `cwd: Path` | Subprocess working dir (`config.temp_dir`) |
 | `env: dict[str,str]` | Per-task env (already credential-stripped if proxy enabled) |
 | `timeout_seconds: int` | `config.scheduler.task_timeout_minutes * 60` |

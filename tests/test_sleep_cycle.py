@@ -12,6 +12,7 @@ from istota.config import Config, SleepCycleConfig, UserConfig
 from istota.sleep_cycle import (
     _excerpt,
     _parse_structured_extraction,
+    _topics_per_chunk,
     _validate_fact,
     gather_day_data,
     build_memory_extraction_prompt,
@@ -383,13 +384,9 @@ class TestProcessUserSleepCycle:
             result = process_user_sleep_cycle(mount_config, conn, "alice")
         assert result is False
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_writes_memory_file(self, mock_run, mount_config, db_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="- Discussed project Alpha (2026-01-28)\n",
-            stderr="",
-        )
+        mock_run.return_value = (True, "- Discussed project Alpha (2026-01-28)\n")
 
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="Tell me about project Alpha", user_id="alice")
@@ -400,20 +397,17 @@ class TestProcessUserSleepCycle:
 
         assert result is True
 
-        # Verify file was written
+        # Verify file was written. Filename uses user-local date; this
+        # fixture has no configured user, so the sleep cycle falls back to UTC.
         context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
         memory_file = context_dir / f"{date_str}.md"
         assert memory_file.exists()
         assert "project Alpha" in memory_file.read_text()
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_no_file_when_no_new_memories(self, mock_run, mount_config, db_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=NO_NEW_MEMORIES,
-            stderr="",
-        )
+        mock_run.return_value = (True, NO_NEW_MEMORIES)
 
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="Hello", user_id="alice")
@@ -429,13 +423,9 @@ class TestProcessUserSleepCycle:
             for f in memories_dir.iterdir()
         )
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_updates_state(self, mock_run, mount_config, db_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="- New memory (2026-01-28)\n",
-            stderr="",
-        )
+        mock_run.return_value = (True, "- New memory (2026-01-28)\n")
 
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="Test", user_id="alice")
@@ -448,13 +438,9 @@ class TestProcessUserSleepCycle:
             assert last_run is not None
             assert last_task == t
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_handles_cli_failure(self, mock_run, mount_config, db_path):
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr="Error occurred",
-        )
+        mock_run.return_value = (False, "")
 
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="Test", user_id="alice")
@@ -465,10 +451,10 @@ class TestProcessUserSleepCycle:
 
         assert result is False
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_handles_timeout(self, mock_run, mount_config, db_path):
-        import subprocess
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=120)
+        # Brain helper returns (False, "") for any failure incl. timeout.
+        mock_run.return_value = (False, "")
 
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="Test", user_id="alice")
@@ -478,6 +464,52 @@ class TestProcessUserSleepCycle:
             result = process_user_sleep_cycle(mount_config, conn, "alice")
 
         assert result is False
+
+    def test_extraction_routes_through_make_brain(self, mount_config, db_path):
+        """The user sleep cycle must invoke `make_brain(config.brain).execute(req)`,
+        not bypass it with a direct subprocess call."""
+        from istota.brain import BrainResult
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Test", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Done")
+
+            with patch("istota.sleep_cycle.make_brain") as mock_make_brain:
+                mock_make_brain.return_value.execute.return_value = BrainResult(
+                    success=True,
+                    result_text="- A memory\n",
+                )
+                process_user_sleep_cycle(mount_config, conn, "alice")
+                mock_make_brain.assert_called()
+                # The BrainRequest should have empty allowed_tools (no tools, no
+                # streaming) to keep the call privileged + text-only.
+                req = mock_make_brain.return_value.execute.call_args[0][0]
+                assert req.allowed_tools == []
+                assert req.streaming is False
+                assert req.sandbox_wrap is None
+                assert req.on_progress is None
+                assert req.cancel_check is None
+
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    def test_dated_filename_uses_user_timezone(self, mock_run, mount_config, db_path):
+        """Filename should reflect the user's calendar day, not the server's."""
+        mock_run.return_value = (True, "- A memory\n")
+        # Configure a user in a far-east tz so server-local UTC and user-local
+        # date differ for some hours of the day. This test asserts that the
+        # written file name matches the user-local date, regardless of when
+        # the test happens to run.
+        mount_config.users["alice"] = UserConfig(timezone="Pacific/Kiritimati")  # UTC+14
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Test", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Done")
+
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        expected_date = datetime.now(ZoneInfo("Pacific/Kiritimati")).strftime("%Y-%m-%d")
+        assert (context_dir / f"{expected_date}.md").exists()
 
 
 class TestCleanupOldMemoryFiles:
@@ -533,12 +565,12 @@ class TestSleepCycleChunkCleanup:
     """Item 4: nightly user sleep cycle prunes old ephemeral memory_chunks."""
 
     @patch("istota.memory.search.cleanup_old_chunks")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_chunk_cleanup_called_when_retention_set(
         self, mock_run, mock_cleanup, mount_config, db_path
     ):
         mount_config.sleep_cycle.memory_retention_days = 90
-        mock_run.return_value = MagicMock(returncode=0, stdout="- mem\n", stderr="")
+        mock_run.return_value = (True, "- mem\n")
         mock_cleanup.return_value = 0
 
         with db.get_db(db_path) as conn:
@@ -554,12 +586,12 @@ class TestSleepCycleChunkCleanup:
         assert args[2] == 90
 
     @patch("istota.memory.search.cleanup_old_chunks")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_chunk_cleanup_skipped_when_retention_zero(
         self, mock_run, mock_cleanup, mount_config, db_path
     ):
         mount_config.sleep_cycle.memory_retention_days = 0
-        mock_run.return_value = MagicMock(returncode=0, stdout="- mem\n", stderr="")
+        mock_run.return_value = (True, "- mem\n")
 
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="x", user_id="alice")
@@ -671,17 +703,13 @@ def _setup_curation_fixture(mount_config, *, existing_user_md: str | None = None
 
 
 class TestCurateUserMemory:
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_writes_updated_user_md_when_ops_applied(self, mock_run, mount_config):
         mount_config.sleep_cycle.curate_user_memory = True
         config_dir, _ = _setup_curation_fixture(
             mount_config, existing_user_md="## Preferences\n- Likes vim\n"
         )
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"ops": [{"op": "append", "heading": "Preferences", "line": "- Prefers Python over JS"}]}',
-            stderr="",
-        )
+        mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "Preferences", "line": "- Prefers Python over JS"}]}')
 
         result = curate_user_memory(mount_config, "alice")
         assert result is True
@@ -690,7 +718,7 @@ class TestCurateUserMemory:
         assert "- Prefers Python over JS" in text
 
     @patch("istota.memory.search.index_file")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_all_noop_ops_does_not_rewrite_even_with_drift(
         self, mock_run, mock_index, mount_config, db_path
     ):
@@ -707,11 +735,7 @@ class TestCurateUserMemory:
             mount_config, existing_user_md=drift_md
         )
         # The op deduplicates against the existing bullet → noop_dup outcome.
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"ops": [{"op": "append", "heading": "Preferences", "line": "- Likes vim"}]}',
-            stderr="",
-        )
+        mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "Preferences", "line": "- Likes vim"}]}')
         with db.get_db(db_path) as conn:
             result = curate_user_memory(mount_config, "alice", conn=conn)
 
@@ -721,78 +745,70 @@ class TestCurateUserMemory:
         # No re-index either
         mock_index.assert_not_called()
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_empty_ops_response_does_not_touch_file(self, mock_run, mount_config):
         mount_config.sleep_cycle.curate_user_memory = True
         config_dir, _ = _setup_curation_fixture(
             mount_config, existing_user_md="## Preferences\n- Likes vim\n"
         )
         original = (config_dir / "USER.md").read_text()
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"ops": []}', stderr="")
+        mock_run.return_value = (True, '{"ops": []}')
 
         result = curate_user_memory(mount_config, "alice")
         assert result is False
         assert (config_dir / "USER.md").read_text() == original
 
     @patch("istota.memory.search.index_file")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_empty_ops_response_does_not_reindex(
         self, mock_run, mock_index, mount_config, db_path
     ):
         mount_config.sleep_cycle.curate_user_memory = True
         _setup_curation_fixture(mount_config, existing_user_md="## A\n- a\n")
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"ops": []}', stderr="")
+        mock_run.return_value = (True, '{"ops": []}')
 
         with db.get_db(db_path) as conn:
             curate_user_memory(mount_config, "alice", conn=conn)
         mock_index.assert_not_called()
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_invalid_json_returns_false(self, mock_run, mount_config):
         mount_config.sleep_cycle.curate_user_memory = True
         config_dir, _ = _setup_curation_fixture(
             mount_config, existing_user_md="## A\n- a\n"
         )
-        mock_run.return_value = MagicMock(returncode=0, stdout="garbage not json", stderr="")
+        mock_run.return_value = (True, "garbage not json")
         result = curate_user_memory(mount_config, "alice")
         assert result is False
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_json_with_fences_is_unwrapped(self, mock_run, mount_config):
         mount_config.sleep_cycle.curate_user_memory = True
         config_dir, _ = _setup_curation_fixture(
             mount_config, existing_user_md="## Preferences\n- Likes vim\n"
         )
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='```json\n{"ops": [{"op": "append", "heading": "Preferences", "line": "- New thing"}]}\n```',
-            stderr="",
-        )
+        mock_run.return_value = (True, '```json\n{"ops": [{"op": "append", "heading": "Preferences", "line": "- New thing"}]}\n```')
         result = curate_user_memory(mount_config, "alice")
         assert result is True
         assert "- New thing" in (config_dir / "USER.md").read_text()
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_subprocess_timeout_returns_false(self, mock_run, mount_config):
-        import subprocess as sp
         mount_config.sleep_cycle.curate_user_memory = True
         _setup_curation_fixture(mount_config, existing_user_md="## A\n- a\n")
-        mock_run.side_effect = sp.TimeoutExpired(cmd="claude", timeout=120)
+        # Brain helper collapses timeouts (and other failures) into (False, "").
+        mock_run.return_value = (False, "")
         result = curate_user_memory(mount_config, "alice")
         assert result is False
 
     @patch("istota.memory.search.index_file")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_reindexes_user_md_when_ops_applied(
         self, mock_run, mock_index, mount_config, db_path
     ):
         mount_config.sleep_cycle.curate_user_memory = True
         _setup_curation_fixture(mount_config, existing_user_md="## Preferences\n- old\n")
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"ops": [{"op": "append", "heading": "Preferences", "line": "- New durable fact"}]}',
-            stderr="",
-        )
+        mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "Preferences", "line": "- New durable fact"}]}')
         with db.get_db(db_path) as conn:
             result = curate_user_memory(mount_config, "alice", conn=conn)
         assert result is True
@@ -808,7 +824,7 @@ class TestCurateUserMemory:
         assert "New durable fact" in passed_content
 
     @patch("istota.memory.search.index_file")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_reindex_failure_does_not_break_curation(
         self, mock_run, mock_index, mount_config, db_path
     ):
@@ -816,28 +832,20 @@ class TestCurateUserMemory:
         config_dir, _ = _setup_curation_fixture(
             mount_config, existing_user_md="## A\n- a\n"
         )
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}',
-            stderr="",
-        )
+        mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}')
         mock_index.side_effect = Exception("vec extension borked")
         with db.get_db(db_path) as conn:
             result = curate_user_memory(mount_config, "alice", conn=conn)
         assert result is True
         assert "- new" in (config_dir / "USER.md").read_text()
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_audit_log_written_for_applied_ops(self, mock_run, mount_config):
         mount_config.sleep_cycle.curate_user_memory = True
         config_dir, _ = _setup_curation_fixture(
             mount_config, existing_user_md="## A\n- a\n"
         )
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}',
-            stderr="",
-        )
+        mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}')
         curate_user_memory(mount_config, "alice")
         audit_path = config_dir / "USER.md.audit.jsonl"
         assert audit_path.exists()
@@ -848,35 +856,27 @@ class TestCurateUserMemory:
         assert any(a["op"]["op"] == "append" for a in entry["applied"])
 
     @patch("istota.sleep_cycle._post_curation_summary")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_log_channel_summary_posted_when_ops_applied_and_configured(
         self, mock_run, mock_post, mount_config
     ):
         mount_config.sleep_cycle.curate_user_memory = True
         mount_config.sleep_cycle.curation_log_summary = True
         _setup_curation_fixture(mount_config, existing_user_md="## A\n- a\n")
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}',
-            stderr="",
-        )
+        mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}')
         result = curate_user_memory(mount_config, "alice")
         assert result is True
         assert mock_post.called
 
     @patch("istota.sleep_cycle._post_curation_summary")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_log_channel_summary_skipped_when_disabled(
         self, mock_run, mock_post, mount_config
     ):
         mount_config.sleep_cycle.curate_user_memory = True
         mount_config.sleep_cycle.curation_log_summary = False
         _setup_curation_fixture(mount_config, existing_user_md="## A\n- a\n")
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}',
-            stderr="",
-        )
+        mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}')
         curate_user_memory(mount_config, "alice")
         mock_post.assert_not_called()
 
@@ -884,14 +884,14 @@ class TestCurateUserMemory:
         result = curate_user_memory(mount_config, "alice")
         assert result is False
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_curation_called_from_sleep_cycle(self, mock_run, mount_config, db_path):
         """Verify curate_user_memory is called when enabled in process_user_sleep_cycle."""
         mount_config.sleep_cycle.curate_user_memory = True
         # First call: extraction, second call: curation
         mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="- Memory from today\n", stderr=""),
-            MagicMock(returncode=0, stdout='{"ops": []}', stderr=""),
+            (True, "- Memory from today\n"),
+            (True, '{"ops": []}'),
         ]
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="Test", user_id="alice")
@@ -901,11 +901,11 @@ class TestCurateUserMemory:
         # Should have been called twice: once for extraction, once for curation
         assert mock_run.call_count == 2
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_curation_not_called_when_disabled(self, mock_run, mount_config, db_path):
         """Verify curate_user_memory is NOT called when disabled."""
         mount_config.sleep_cycle.curate_user_memory = False
-        mock_run.return_value = MagicMock(returncode=0, stdout="- Memory\n", stderr="")
+        mock_run.return_value = (True, "- Memory\n")
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="Test", user_id="alice")
             db.update_task_status(conn, t, "running")
@@ -1141,3 +1141,77 @@ class TestValidateFact:
 
     def test_predicate_case_insensitive(self):
         assert _validate_fact({"subject": "stefan", "predicate": "Works_At", "object": "acme"})
+
+
+class TestTopicsPerChunk:
+    def test_first_ref_wins_per_chunk(self):
+        chunks = [
+            "- Project Alpha is going great (2026-01-28, ref:1234)\n"
+            "- Felix prefers vim (ref:1235)",
+            "- Stefan likes hiking (ref:1236)",
+        ]
+        topics = {"ref:1234": "tech", "ref:1235": "personal", "ref:1236": "personal"}
+        assert _topics_per_chunk(chunks, topics) == ["tech", "personal"]
+
+    def test_chunk_without_ref_gets_none(self):
+        chunks = ["- Some bullet without a ref"]
+        assert _topics_per_chunk(chunks, {"ref:1234": "tech"}) == [None]
+
+    def test_unknown_ref_gets_none(self):
+        chunks = ["- A bullet (ref:9999)"]
+        assert _topics_per_chunk(chunks, {"ref:1234": "tech"}) == [None]
+
+    def test_empty_topics_dict(self):
+        chunks = ["- A bullet (ref:1234)"]
+        assert _topics_per_chunk(chunks, {}) == [None]
+
+
+class TestUserMemoryObservability:
+    def test_warn_below_threshold_is_silent(self, mount_config):
+        """Below 8 KB, no notification fires."""
+        from istota.sleep_cycle import _maybe_warn_usermd_size, USER_MEMORY_SOFT_WARN_BYTES
+        mount_config.users["alice"] = UserConfig(log_channel="logroom")
+        with patch("istota.notifications.send_notification") as mock_send:
+            _maybe_warn_usermd_size(mount_config, "alice", USER_MEMORY_SOFT_WARN_BYTES - 1)
+            mock_send.assert_not_called()
+
+    def test_warn_at_or_above_threshold_posts_to_log_channel(self, mount_config):
+        from istota.sleep_cycle import _maybe_warn_usermd_size, USER_MEMORY_SOFT_WARN_BYTES
+        mount_config.users["alice"] = UserConfig(log_channel="logroom")
+        with patch("istota.notifications.send_notification") as mock_send:
+            _maybe_warn_usermd_size(mount_config, "alice", USER_MEMORY_SOFT_WARN_BYTES + 1)
+            mock_send.assert_called_once()
+
+    def test_warn_silent_without_log_channel(self, mount_config):
+        """No log_channel → no notification, but logger still records."""
+        from istota.sleep_cycle import _maybe_warn_usermd_size, USER_MEMORY_SOFT_WARN_BYTES
+        mount_config.users["alice"] = UserConfig()  # no log_channel
+        with patch("istota.notifications.send_notification") as mock_send:
+            _maybe_warn_usermd_size(mount_config, "alice", USER_MEMORY_SOFT_WARN_BYTES + 1)
+            mock_send.assert_not_called()
+
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    def test_audit_log_records_user_md_size(self, mock_run, mount_config):
+        """The curation audit JSONL records USER.md size for growth tracking."""
+        mount_config.sleep_cycle.curate_user_memory = True
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md="## Preferences\n- Likes vim\n",
+        )
+        mock_run.return_value = (
+            True,
+            '{"ops": [{"op": "append", "heading": "Preferences", "line": "- Prefers Python over JS"}]}',
+        )
+        curate_user_memory(mount_config, "alice")
+
+        audit_path = config_dir / "USER.md.audit.jsonl"
+        assert audit_path.exists()
+        entries = [
+            __import__("json").loads(line)
+            for line in audit_path.read_text().splitlines()
+            if line.strip()
+        ]
+        assert entries
+        last = entries[-1]
+        assert "user_md_size_bytes" in last
+        assert isinstance(last["user_md_size_bytes"], int)
+        assert last["user_md_size_bytes"] > 0

@@ -30,8 +30,13 @@ def write_audit_log(
     user_id: str,
     applied: list[dict],
     rejected: list[dict],
+    user_md_size_bytes: int | None = None,
 ) -> None:
-    """Append a single JSONL entry. No-op when both lists are empty."""
+    """Append a single JSONL entry. No-op when both lists are empty.
+
+    `user_md_size_bytes`, when provided, records USER.md size at the time of
+    the curation run so growth curves are inspectable from the audit alone.
+    """
     if not applied and not rejected:
         return
 
@@ -44,6 +49,8 @@ def write_audit_log(
             "applied": applied,
             "rejected": rejected,
         }
+        if user_md_size_bytes is not None:
+            entry["user_md_size_bytes"] = user_md_size_bytes
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError as e:
