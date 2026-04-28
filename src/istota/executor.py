@@ -286,6 +286,20 @@ def get_user_temp_dir(config: Config, user_id: str) -> Path:
     return config.temp_dir / user_id
 
 
+def _resolve_effort(task, config: Config) -> str:
+    """Resolve the effort flag for a task.
+
+    Why: a per-job model override (e.g. cron job pinned to Haiku) shouldn't
+    inherit `config.effort` set for the default model — Haiku doesn't accept
+    --effort and would fail the subprocess.
+    """
+    task_model = (task.model or "").strip()
+    task_effort = (task.effort or "").strip()
+    if task_model and not task_effort:
+        return ""
+    return task_effort or config.effort
+
+
 # Credential-related env var patterns to strip from subprocess environments
 _CREDENTIAL_ENV_PATTERNS = frozenset({
     "PASSWORD", "SECRET", "TOKEN", "API_KEY",
@@ -2483,7 +2497,7 @@ def execute_task(
             env=env,
             timeout_seconds=config.scheduler.task_timeout_minutes * 60,
             model=(task.model or "").strip() or config.model,
-            effort=(task.effort or "").strip() or config.effort,
+            effort=_resolve_effort(task, config),
             custom_system_prompt_path=sp_path,
             streaming=use_streaming,
             on_progress=_on_event if use_streaming else None,

@@ -2,6 +2,19 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-27: Per-job effort no longer inherits config.effort under a model override
+
+A user testing the per-job model override (`model = "claude-haiku-4-5"` in CRON.md) realized that `config.effort = "high"` — set globally for the default Opus model — would still flow through to the Haiku subprocess. Haiku doesn't accept `--effort`, so the job would just fail. The previous resolution was a flat `(task.effort or "").strip() or config.effort`, which couples the two configs in the wrong direction: a per-job *model* override is making an editorial choice about the model, and the default-model effort doesn't transfer.
+
+Fix is small and asymmetric. New `_resolve_effort(task, config)` helper in `executor.py`: when `task.model` is set but `task.effort` isn't, return `""` (no `--effort` flag). Otherwise behave as before — explicit task effort wins, else fall back to `config.effort`. This preserves backwards compat for the common case (no per-job model, config defaults apply) while making per-job overrides effectively a coupled pair: if you want Haiku-with-low-effort, set both fields; if you just say `model = "claude-haiku-4-5"`, you get the model's default behavior.
+
+Same helper imported in `scheduler.py` for the log-channel `(model effort)` annotation so the displayed line matches what actually got passed to the CLI.
+
+**Files modified:**
+- `src/istota/executor.py` — added `_resolve_effort()`, switched `BrainRequest.effort` resolution to use it.
+- `src/istota/scheduler.py` — log-channel resolution path uses the same helper.
+- `tests/test_model_override.py` — added `test_no_effort_when_task_overrides_model_only` and `test_task_overrides_both_model_and_effort`. Existing `test_falls_back_to_config_effort` (no per-task overrides → config.effort applies) still passes.
+
 ## 2026-04-27: Phase 1 of the switchable-brain refactor — extract ClaudeCodeBrain
 
 Drew the long-planned boundary between executor orchestration (memory, skills, sandbox, deferred DB writes) and model invocation (subprocess, stream parsing, retry). The executor used to spawn `claude -p -` directly and parse `--output-format stream-json` inline; now it builds a typed `BrainRequest` and hands it to a `Brain` implementation. Phase 1 ships only `ClaudeCodeBrain` (current behavior, default). Phases 2–3 add an OpenRouter brain and an Anthropic-direct brain on the same protocol — see the switchable-brain plan in Notes for the full destination (Path C: converge on a single in-process harness, retire the CLI wrapper).

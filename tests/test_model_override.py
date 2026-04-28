@@ -495,6 +495,44 @@ class TestExecutorEffortArg:
         idx = cmd.index("--effort")
         assert cmd[idx + 1] == "high"
 
+    @patch("istota.executor.subprocess.run")
+    def test_no_effort_when_task_overrides_model_only(self, mock_run, tmp_path):
+        """Per-job model override (e.g. Haiku) must not inherit config.effort."""
+        config = self._make_config(tmp_path, model="claude-opus-4-7", effort="high")
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="t", user_id="alice",
+                source_type="scheduled", model="claude-haiku-4-5",
+            )
+            task = db.get_task(conn, task_id)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+        cmd = mock_run.call_args[0][0]
+        assert "--effort" not in cmd
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "claude-haiku-4-5"
+
+    @patch("istota.executor.subprocess.run")
+    def test_task_overrides_both_model_and_effort(self, mock_run, tmp_path):
+        """Explicit per-job effort still applies alongside model override."""
+        config = self._make_config(tmp_path, model="claude-opus-4-7", effort="high")
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="t", user_id="alice",
+                source_type="scheduled",
+                model="claude-sonnet-4-6", effort="medium",
+            )
+            task = db.get_task(conn, task_id)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+        cmd = mock_run.call_args[0][0]
+        idx = cmd.index("--effort")
+        assert cmd[idx + 1] == "medium"
+
 
 class TestCmdCronShowsEffort:
     @pytest.mark.asyncio

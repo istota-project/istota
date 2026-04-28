@@ -1724,8 +1724,9 @@ def process_one_task(
                         selected_skills = json.loads(refreshed.selected_skills)
             except Exception:
                 pass
+        from .executor import _resolve_effort
         resolved_model = (task.model or "").strip() or config.model or None
-        resolved_effort = (task.effort or "").strip() or config.effort or None
+        resolved_effort = _resolve_effort(task, config) or None
         _finalize_log_channel(
             config, task, log_channel, log_channel_prefix,
             log_callback, success, error=error_msg,
