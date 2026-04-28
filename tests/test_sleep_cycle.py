@@ -560,6 +560,28 @@ class TestCleanupOldMemoryFiles:
         assert deleted == 0
         assert (context_dir / f"{old_date}.md").exists()
 
+    def test_cutoff_uses_user_timezone(self, mount_config):
+        # Sleep cycle writes filenames in the user's tz; cleanup must use
+        # the same tz when computing the cutoff or the boundary day can
+        # be evicted ~1 day too early/late.
+        mount_config.users["alice"] = UserConfig(timezone="Pacific/Kiritimati")
+        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir.mkdir(parents=True)
+
+        user_tz = ZoneInfo("Pacific/Kiritimati")
+        # `today` in the user's tz must NOT be deleted with retention=1.
+        today_user = datetime.now(user_tz).strftime("%Y-%m-%d")
+        (context_dir / f"{today_user}.md").write_text("today")
+        # A clearly-old file should still be deleted.
+        old_date = (datetime.now(user_tz) - timedelta(days=10)).strftime("%Y-%m-%d")
+        (context_dir / f"{old_date}.md").write_text("old")
+
+        deleted = cleanup_old_memory_files(mount_config, "alice", 1)
+
+        assert deleted == 1
+        assert (context_dir / f"{today_user}.md").exists()
+        assert not (context_dir / f"{old_date}.md").exists()
+
 
 class TestSleepCycleChunkCleanup:
     """Item 4: nightly user sleep cycle prunes old ephemeral memory_chunks."""
@@ -591,6 +613,50 @@ class TestSleepCycleChunkCleanup:
         self, mock_run, mock_cleanup, mount_config, db_path
     ):
         mount_config.sleep_cycle.memory_retention_days = 0
+        mock_run.return_value = (True, "- mem\n")
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="x", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="r")
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        mock_cleanup.assert_not_called()
+
+
+class TestSleepCycleKGAuditCleanup:
+    """KG audit pruning runs on its own knob, not memory_retention_days."""
+
+    @patch("istota.memory.knowledge_graph.cleanup_old_audit_rows")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    def test_audit_cleanup_runs_when_memory_retention_zero(
+        self, mock_run, mock_cleanup, mount_config, db_path
+    ):
+        # Default deployments have memory_retention_days=0 (unlimited),
+        # but the KG audit table must still be pruned.
+        mount_config.sleep_cycle.memory_retention_days = 0
+        mount_config.sleep_cycle.knowledge_graph_audit_retention_days = 365
+        mock_run.return_value = (True, "- mem\n")
+        mock_cleanup.return_value = 0
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="x", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="r")
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        assert mock_cleanup.called
+        args = mock_cleanup.call_args.args
+        assert args[1] == "alice"
+        assert args[2] == 365
+
+    @patch("istota.memory.knowledge_graph.cleanup_old_audit_rows")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    def test_audit_cleanup_skipped_when_audit_retention_zero(
+        self, mock_run, mock_cleanup, mount_config, db_path
+    ):
+        mount_config.sleep_cycle.memory_retention_days = 90
+        mount_config.sleep_cycle.knowledge_graph_audit_retention_days = 0
         mock_run.return_value = (True, "- mem\n")
 
         with db.get_db(db_path) as conn:

@@ -634,13 +634,17 @@ def process_user_sleep_cycle(
         except Exception as e:
             logger.debug("memory_chunks cleanup failed for %s: %s", user_id, e)
 
-        # Knowledge graph audit gets a generous 4x window — debugging "why is
-        # this fact here?" benefits from history, and rows are tiny.
+    # Knowledge graph audit pruning runs on its own knob, independent of
+    # memory_retention_days. Audit rows are tiny but accumulate several
+    # per night per user; tying them to the (often-unset) memory knob
+    # would let the table grow unbounded by default.
+    if sleep_config.knowledge_graph_audit_retention_days > 0:
         try:
             from .memory.knowledge_graph import cleanup_old_audit_rows, ensure_table
             ensure_table(conn)
-            audit_days = sleep_config.memory_retention_days * 4
-            n = cleanup_old_audit_rows(conn, user_id, audit_days)
+            n = cleanup_old_audit_rows(
+                conn, user_id, sleep_config.knowledge_graph_audit_retention_days
+            )
             if n:
                 logger.info("Pruned %d KG audit rows for %s", n, user_id)
         except Exception as e:
@@ -930,7 +934,15 @@ def cleanup_old_memory_files(
     if not context_dir.exists():
         return 0
 
-    cutoff = datetime.now() - timedelta(days=retention_days)
+    # Cutoff in the user's timezone — filenames are user-local
+    # YYYY-MM-DD, so a server-tz cutoff can be off by a day either way.
+    user_cfg = config.users.get(user_id)
+    tz_name = user_cfg.timezone if user_cfg and user_cfg.timezone else "UTC"
+    try:
+        user_tz = ZoneInfo(tz_name)
+    except Exception:
+        user_tz = ZoneInfo("UTC")
+    cutoff = datetime.now(user_tz) - timedelta(days=retention_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
     deleted = 0
@@ -1140,8 +1152,9 @@ def process_channel_sleep_cycle(
     existing_memory = read_channel_memory(config, conversation_token)
 
     # Build extraction prompt — channel sleep cycle stays UTC because
-    # channels span timezones.
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    # channels span timezones. (`datetime.now()` is server-local, so go
+    # via ZoneInfo("UTC") explicitly.)
+    date_str = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
     prompt = build_channel_memory_extraction_prompt(
         conversation_token, day_data, existing_memory, date_str
     )
@@ -1330,7 +1343,9 @@ def cleanup_old_channel_memory_files(
     if not memories_dir.exists():
         return 0
 
-    cutoff = datetime.now() - timedelta(days=retention_days)
+    # Channel filenames are written in UTC (channels span timezones); cutoff
+    # follows the same convention to stay aligned.
+    cutoff = datetime.now(ZoneInfo("UTC")) - timedelta(days=retention_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
     deleted = 0

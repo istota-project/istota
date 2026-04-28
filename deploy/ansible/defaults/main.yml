@@ -385,6 +385,9 @@ istota_sleep_cycle_memory_retention_days: 0  # 0 = unlimited
 istota_sleep_cycle_auto_load_dated_days: 3   # auto-load N days of dated memories (0 = disabled)
 istota_sleep_cycle_curate_user_memory: false  # nightly USER.md curation (op-based: append/add_heading/remove)
 istota_sleep_cycle_curation_log_summary: true  # post one-line summary to user log_channel after applied ops
+# KG audit retention is independent of memory_retention_days so default
+# deployments still prune the audit table. 0 = unlimited.
+istota_sleep_cycle_kg_audit_retention_days: 365
 
 # Channel sleep cycle settings (shared channel memory extraction)
 istota_channel_sleep_cycle_enabled: true

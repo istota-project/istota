@@ -549,6 +549,22 @@ class TestDatedMemories:
         result = read_dated_memories(config, "alice")
         assert result is None
 
+    def test_cutoff_uses_user_timezone(self, mount_config):
+        # Sleep cycle writes filenames in the user's tz; the read path
+        # must compute its cutoff in the same tz so today's freshly
+        # written file isn't lost when server-tz and user-tz disagree
+        # on the calendar day.
+        from zoneinfo import ZoneInfo as _ZI
+        from istota.config import UserConfig
+        mount_config.users["alice"] = UserConfig(timezone="Pacific/Kiritimati")
+        memories_dir = self._make_memories_dir(mount_config)
+        today_user = datetime.now(_ZI("Pacific/Kiritimati")).strftime("%Y-%m-%d")
+        (memories_dir / f"{today_user}.md").write_text("- Today")
+
+        result = read_dated_memories(mount_config, "alice", max_days=1)
+        assert result is not None
+        assert today_user in result
+
 
 class TestChannelMemory:
     """Tests for channel memory storage functions."""

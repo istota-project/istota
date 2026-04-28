@@ -40,6 +40,12 @@ class TestClassifyLine:
         # `-foo` without a space after the dash isn't a bullet
         assert classify_line("-foo") == "paragraph"
 
+    def test_indented_hashes_are_paragraph_not_subheading(self):
+        # Only line-leading `###` is a real subheading. Indented `### foo`
+        # is body text (e.g. a code-comment marker) and stays a paragraph.
+        assert classify_line("   ### footnote") == "paragraph"
+        assert classify_line("\t### tabbed") == "paragraph"
+
 
 class TestNormalizeBulletText:
     def test_strips_dash_marker_and_whitespace(self):

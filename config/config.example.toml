@@ -275,6 +275,9 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # auto_load_dated_days = 3             # auto-load N days of dated memories into prompts (0 = disabled)
 # curate_user_memory = false           # nightly USER.md curation (op-based: append/add_heading/remove)
 # curation_log_summary = true          # post one-line "USER.md curated: +N appended, ..." to user log_channel
+# knowledge_graph_audit_retention_days = 365  # prune knowledge_facts_audit older than N days
+#                                              # (independent of memory_retention_days so default
+#                                              # deployments still prune; 0 = unlimited)
 
 # ============================================================================
 # Channel Sleep Cycle (shared channel memory extraction)

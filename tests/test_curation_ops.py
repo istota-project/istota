@@ -54,6 +54,23 @@ class TestAppend:
         assert applied and not rejected
         assert "- Bar" in new_doc.find("Pref").lines
 
+    def test_append_into_section_with_no_top_region_separates_from_subheading(self):
+        # Section starts immediately with a `### subheading` (top region empty).
+        # The new bullet must land before the subheading AND a blank line must
+        # separate them — otherwise the bullet visually fuses onto the heading.
+        doc = _doc("## Pref\n### Sub\n- existing\n")
+        new_doc, applied, rejected = apply_ops(
+            doc, [{"op": "append", "heading": "Pref", "line": "new"}]
+        )
+        assert applied and applied[0]["outcome"] == "applied"
+        assert rejected == []
+        section = new_doc.find("Pref")
+        idx_bullet = section.lines.index("- new")
+        idx_sub = section.lines.index("### Sub")
+        # Blank line between the new bullet and the subheading
+        assert idx_bullet + 1 < idx_sub
+        assert section.lines[idx_bullet + 1] == ""
+
     def test_append_normalizes_dash_marker(self):
         doc = _doc("## Pref\n- Foo\n")
         new_doc, _, _ = apply_ops(
@@ -317,14 +334,38 @@ class TestRemove:
         assert "- the foo bullet" not in section.lines
 
     def test_remove_does_not_descend_into_subsections(self):
-        # A bullet under a subsection isn't visible to remove ops.
+        # A bullet under a subsection isn't editable; surface it as a
+        # reject (match_in_subsection) so the model knows the attempt was
+        # noticed instead of silently treating it like a clean miss.
         doc = _doc("## Pref\n- top bullet\n### Sub\n- sub foo bullet\n")
-        new_doc, applied, _ = apply_ops(
+        new_doc, applied, rejected = apply_ops(
             doc, [{"op": "remove", "heading": "Pref", "match": "foo"}]
         )
-        assert applied and applied[0]["outcome"] == "noop_no_match"
+        assert applied == []
+        assert rejected and rejected[0]["reason"] == "match_in_subsection"
         # Subsection content untouched
         assert "- sub foo bullet" in new_doc.find("Pref").lines
+
+    def test_remove_true_miss_still_noop_when_subsections_present(self):
+        # If the match is absent from BOTH top region and subsections, the
+        # remove is the usual quiet no-op (not a reject).
+        doc = _doc("## Pref\n- top bullet\n### Sub\n- sub bullet\n")
+        _, applied, rejected = apply_ops(
+            doc, [{"op": "remove", "heading": "Pref", "match": "missing"}]
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "noop_no_match"
+
+    def test_remove_in_section_with_no_top_region_is_match_in_subsection(self):
+        # Section starts immediately with a `### subheading` — top region
+        # is empty. A bullet under that subheading must still produce
+        # `match_in_subsection`, not a silent noop_no_match.
+        doc = _doc("## Pref\n### Sub\n- sub foo bullet\n")
+        _, applied, rejected = apply_ops(
+            doc, [{"op": "remove", "heading": "Pref", "match": "foo"}]
+        )
+        assert applied == []
+        assert rejected and rejected[0]["reason"] == "match_in_subsection"
 
 
 class TestBatch:
