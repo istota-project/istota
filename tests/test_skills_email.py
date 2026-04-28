@@ -15,6 +15,7 @@ from istota.skills.email import (
     _config_from_env,
     _parse_email_date,
     _sanitize_header,
+    _write_deferred_sent_email,
     cmd_output,
     cmd_send,
     list_emails,
@@ -297,6 +298,7 @@ class TestCmdSend:
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
     def test_send_basic(self, mock_send, mock_config):
+        mock_send.return_value = "<msg-id@test.com>"
         mock_config.return_value = EmailConfig(
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587, bot_email="bot@test.com",
@@ -322,6 +324,7 @@ class TestCmdSend:
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
     def test_send_html(self, mock_send, mock_config):
+        mock_send.return_value = "<msg-id@test.com>"
         mock_config.return_value = EmailConfig(
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587,
@@ -341,6 +344,7 @@ class TestCmdSend:
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
     def test_send_body_file(self, mock_send, mock_config, tmp_path):
+        mock_send.return_value = "<msg-id@test.com>"
         mock_config.return_value = EmailConfig(
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587,
@@ -381,6 +385,7 @@ class TestEmailCLIMain:
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
     def test_main_send(self, mock_send, mock_config, capsys):
+        mock_send.return_value = "<msg-id@test.com>"
         mock_config.return_value = EmailConfig(
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587,
@@ -475,6 +480,67 @@ class TestEmailCLIMain:
                 main(["output", "--body", "test"])
         output = json.loads(capsys.readouterr().out)
         assert output["status"] == "error"
+
+
+# --- _write_deferred_sent_email tests ---
+
+
+class TestWriteDeferredSentEmail:
+    def test_skips_when_env_vars_missing(self, tmp_path):
+        with patch.dict("os.environ", {}, clear=True):
+            _write_deferred_sent_email("<id@x>", "alice@example.com", "Hi")
+        # Nothing should have been written anywhere
+        assert list(tmp_path.iterdir()) == []
+
+    def test_writes_entry(self, tmp_path):
+        env = {
+            "ISTOTA_TASK_ID": "42",
+            "ISTOTA_DEFERRED_DIR": str(tmp_path),
+            "ISTOTA_USER_ID": "alice",
+            "ISTOTA_CONVERSATION_TOKEN": "tok123",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg-1@test.com>", "bob@example.com", "Hello")
+
+        out_file = tmp_path / "task_42_sent_emails.json"
+        assert out_file.exists()
+        data = json.loads(out_file.read_text())
+        assert data == [
+            {
+                "message_id": "<msg-1@test.com>",
+                "to_addr": "bob@example.com",
+                "subject": "Hello",
+                "conversation_token": "tok123",
+                "user_id": "alice",
+            }
+        ]
+
+    def test_appends_multiple_entries(self, tmp_path):
+        env = {
+            "ISTOTA_TASK_ID": "42",
+            "ISTOTA_DEFERRED_DIR": str(tmp_path),
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg-1@x>", "a@example.com", "First")
+            _write_deferred_sent_email("<msg-2@x>", "b@example.com", "Second")
+
+        data = json.loads((tmp_path / "task_42_sent_emails.json").read_text())
+        assert [e["message_id"] for e in data] == ["<msg-1@x>", "<msg-2@x>"]
+        assert [e["to_addr"] for e in data] == ["a@example.com", "b@example.com"]
+
+    def test_recovers_from_corrupt_existing_file(self, tmp_path):
+        env = {
+            "ISTOTA_TASK_ID": "42",
+            "ISTOTA_DEFERRED_DIR": str(tmp_path),
+        }
+        (tmp_path / "task_42_sent_emails.json").write_text("not json")
+
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "a@example.com", "Subj")
+
+        data = json.loads((tmp_path / "task_42_sent_emails.json").read_text())
+        assert len(data) == 1
+        assert data[0]["message_id"] == "<msg@x>"
 
 
 # --- _sanitize_header tests ---
