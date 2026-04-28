@@ -2372,6 +2372,405 @@ class TestClusterPings:
         assert result[0]["ping_count"] == 20
 
 
+class TestDedupeNearDuplicatePings:
+    """Tests for dedupe_near_duplicate_pings() — strips dual-source artifacts.
+
+    The phone (Overland/iOS) sometimes reports two location fixes within a few
+    seconds: one high-accuracy GPS fix and one low-accuracy cell/Wi-Fi fix
+    anchored elsewhere. The cell/Wi-Fi ping typically has activity_type=None.
+    See ISSUE-059.
+    """
+
+    def test_empty_input(self):
+        from istota.geo import dedupe_near_duplicate_pings
+
+        assert dedupe_near_duplicate_pings([]) == []
+
+    def test_single_ping_passes_through(self):
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [{"timestamp": "2026-04-28T03:23:53Z", "lat": 34.1, "lon": -118.3,
+                  "accuracy": 6.0, "activity_type": "walking"}]
+        assert dedupe_near_duplicate_pings(pings) == pings
+
+    def test_pings_more_than_5s_apart_both_kept(self):
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:00Z", "lat": 34.1, "lon": -118.3,
+             "accuracy": 60.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:23:10Z", "lat": 34.1, "lon": -118.3,
+             "accuracy": 6.0, "activity_type": "walking"},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 2
+
+    def test_one_set_one_null_drops_null(self):
+        """The most common case: cell/Wi-Fi ping has activity_type=None."""
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10434, "lon": -118.30830,
+             "accuracy": 63.0, "activity_type": "walking"},
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10274, "lon": -118.30598,
+             "accuracy": 56.0, "activity_type": None},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 1
+        assert result[0]["activity_type"] == "walking"
+
+    def test_one_null_one_set_drops_null_regardless_of_order(self):
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10274, "lon": -118.30598,
+             "accuracy": 56.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10434, "lon": -118.30830,
+             "accuracy": 63.0, "activity_type": "walking"},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 1
+        assert result[0]["activity_type"] == "walking"
+
+    def test_one_set_keeps_tagged_even_if_accuracy_worse(self):
+        """activity_type wins over accuracy — confirmed by issue example
+        20061/20062: null had 40m, walking had 55m, but walking is the real fix."""
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:27:21Z", "lat": 34.10456, "lon": -118.30962,
+             "accuracy": 40.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:27:21Z", "lat": 34.10436, "lon": -118.30992,
+             "accuracy": 55.0, "activity_type": "walking"},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 1
+        assert result[0]["activity_type"] == "walking"
+
+    def test_both_null_picks_better_accuracy(self):
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 55.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 14.0, "activity_type": None},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 1
+        assert result[0]["accuracy"] == 14.0
+
+    def test_both_null_equal_accuracy_keeps_both(self):
+        """No way to distinguish — preserve raw data rather than guess."""
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 30.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.11, "lon": -118.31,
+             "accuracy": 30.0, "activity_type": None},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 2
+
+    def test_both_set_equal_accuracy_keeps_both(self):
+        """Per design: rare case (18/204 in prod), keep both rather than drop a real fix."""
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 10.0, "activity_type": "driving"},
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.11, "lon": -118.31,
+             "accuracy": 10.0, "activity_type": "driving"},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 2
+
+    def test_both_set_unequal_accuracy_keeps_better(self):
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 14.0, "activity_type": "walking"},
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 5.0, "activity_type": "walking"},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 1
+        assert result[0]["accuracy"] == 5.0
+
+    def test_chain_of_three_within_window(self):
+        """Three pings each within 5s of the next — chain dedup."""
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            # walking at the actual position
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10434, "lon": -118.30830,
+             "accuracy": 63.0, "activity_type": "walking"},
+            # cell/Wi-Fi anchor near home — 1s later
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10274, "lon": -118.30598,
+             "accuracy": 56.0, "activity_type": None},
+            # high-quality GPS — 11s after first, but only 10s after second
+            # (still within 5s of nothing in kept set; should be kept)
+            {"timestamp": "2026-04-28T03:23:53Z", "lat": 34.10428, "lon": -118.30889,
+             "accuracy": 6.0, "activity_type": "walking"},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        # First two collapse to walking; third is 10s later → stays
+        assert len(result) == 2
+        assert all(p["activity_type"] == "walking" for p in result)
+
+    def test_window_boundary_5s_inclusive(self):
+        """A pair at exactly 5s apart should be deduped."""
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:00Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 60.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:23:05Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 6.0, "activity_type": "walking"},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 1
+        assert result[0]["activity_type"] == "walking"
+
+    def test_window_boundary_just_over_5s_keeps_both(self):
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:00Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 60.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:23:06Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 6.0, "activity_type": "walking"},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 2
+
+    def test_zigzag_walk_collapses_cleanly(self):
+        """Reproduces the 2026-04-27 issue example.
+
+        Five pings at LA: real walking + cell/Wi-Fi anchor + real walking +
+        place-matched ping pair. Expected: 3 walking pings survive (one per
+        timestamp cluster), the cell anchors are dropped.
+        """
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.1043368,
+             "lon": -118.3082973, "accuracy": 63.0, "activity_type": "walking"},
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10274185,
+             "lon": -118.30598, "accuracy": 56.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:23:53Z", "lat": 34.104277,
+             "lon": -118.3088875, "accuracy": 6.0, "activity_type": "walking"},
+            {"timestamp": "2026-04-28T03:27:21Z", "lat": 34.10456,
+             "lon": -118.30962, "accuracy": 40.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:27:21Z", "lat": 34.10436,
+             "lon": -118.30992, "accuracy": 55.0, "activity_type": "walking"},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        # Pair 1 (42-43): walking wins → 1 ping
+        # 53s ping: 10s after pair 1's winner → keeps standalone
+        # Pair 3 (27:21 dup): walking wins → 1 ping
+        assert len(result) == 3
+        assert all(p["activity_type"] == "walking" for p in result)
+
+    def test_missing_accuracy_treated_as_tie(self):
+        """If both are null-activity and one lacks accuracy, can't compare → keep both."""
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": None, "activity_type": None},
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 14.0, "activity_type": None},
+        ]
+        result = dedupe_near_duplicate_pings(pings)
+        assert len(result) == 2
+
+    def test_does_not_mutate_input(self):
+        from istota.geo import dedupe_near_duplicate_pings
+
+        pings = [
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 60.0, "activity_type": None},
+            {"timestamp": "2026-04-28T03:23:43Z", "lat": 34.10, "lon": -118.30,
+             "accuracy": 6.0, "activity_type": "walking"},
+        ]
+        original_len = len(pings)
+        dedupe_near_duplicate_pings(pings)
+        assert len(pings) == original_len
+
+
+class TestClusterPlacePropagation:
+    """D': cluster carries place_id/place_name from any member ping, not just pings[0].
+
+    A ping at the cluster's edge may fall outside the saved place's radius at
+    ingest time even though the user is genuinely there. Inheriting place_id
+    from any tagged ping in the cluster lets filter_transit_clusters() see
+    the place match. See ISSUE-059.
+    """
+
+    def test_place_from_middle_ping(self):
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.1043368, "lon": -118.3082973, "timestamp": "2026-04-28T03:23:42Z"},
+            {"lat": 34.104277, "lon": -118.3088875, "timestamp": "2026-04-28T03:23:53Z"},
+            {"lat": 34.10436, "lon": -118.30992, "timestamp": "2026-04-28T03:27:21Z",
+             "place_id": 1398, "place_name": "Lazy Acres"},
+        ]
+        result = cluster_pings(pings, radius_m=250)
+        assert len(result) == 1
+        assert result[0]["place_id"] == 1398
+        assert result[0]["place_name"] == "Lazy Acres"
+
+    def test_place_from_last_ping(self):
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z"},
+            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:30Z",
+             "place_id": 7, "place_name": "X"},
+        ]
+        result = cluster_pings(pings, radius_m=250)
+        assert len(result) == 1
+        assert result[0]["place_id"] == 7
+        assert result[0]["place_name"] == "X"
+
+    def test_place_from_first_ping_still_works(self):
+        """Backward compat: if pings[0] has place_id, behavior unchanged."""
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z",
+             "place_id": 5, "place_name": "Y"},
+            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:30Z"},
+        ]
+        result = cluster_pings(pings, radius_m=250)
+        assert len(result) == 1
+        assert result[0]["place_id"] == 5
+        assert result[0]["place_name"] == "Y"
+
+    def test_no_place_when_no_pings_have_place(self):
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z"},
+            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:30Z"},
+        ]
+        result = cluster_pings(pings, radius_m=250)
+        assert len(result) == 1
+        assert result[0]["place_id"] is None
+        assert result[0]["place_name"] is None
+
+    def test_first_nonnull_wins_when_multiple_places(self):
+        """If a cluster spans pings with different place_ids (rare boundary case),
+        take the first non-null."""
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z"},
+            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:30Z",
+             "place_id": 5, "place_name": "Y"},
+            {"lat": 34.10002, "lon": -118.30002, "timestamp": "2026-04-28T03:24:00Z",
+             "place_id": 6, "place_name": "Z"},
+        ]
+        result = cluster_pings(pings, radius_m=250)
+        assert len(result) == 1
+        assert result[0]["place_id"] == 5
+        assert result[0]["place_name"] == "Y"
+
+
+class TestValidateClusterPlaces:
+    """Phantom-stop guard for D': drop place tags from clusters whose centroid
+    is outside the saved place radius. Prevents a single grazing ping during
+    transit from promoting the whole cluster to a fake stop. See ISSUE-059.
+    """
+
+    def test_centroid_inside_radius_keeps_place(self):
+        from istota.geo import validate_cluster_places
+
+        clusters = [
+            {"lat": 34.1044, "lon": -118.3097, "place_id": 1398,
+             "place_name": "Lazy Acres", "ping_count": 3},
+        ]
+        places = {1398: {"id": 1398, "name": "Lazy Acres",
+                         "lat": 34.1044, "lon": -118.3097, "radius_meters": 75}}
+        result = validate_cluster_places(clusters, places)
+        assert result[0]["place_id"] == 1398
+        assert result[0]["place_name"] == "Lazy Acres"
+
+    def test_centroid_outside_radius_clears_place(self):
+        """Drive-by case: cluster centroid on the road, one ping grazed the place radius."""
+        from istota.geo import validate_cluster_places
+
+        clusters = [
+            # Centroid 200m+ from place center (way outside 75m radius)
+            {"lat": 34.1024, "lon": -118.3097, "place_id": 1398,
+             "place_name": "Lazy Acres", "ping_count": 5},
+        ]
+        places = {1398: {"id": 1398, "name": "Lazy Acres",
+                         "lat": 34.1044, "lon": -118.3097, "radius_meters": 75}}
+        result = validate_cluster_places(clusters, places)
+        assert result[0]["place_id"] is None
+        assert result[0]["place_name"] is None
+
+    def test_no_place_id_unchanged(self):
+        from istota.geo import validate_cluster_places
+
+        clusters = [
+            {"lat": 34.10, "lon": -118.30, "place_id": None,
+             "place_name": None, "ping_count": 3},
+        ]
+        result = validate_cluster_places(clusters, {})
+        assert result[0]["place_id"] is None
+
+    def test_unknown_place_id_left_alone(self):
+        """If the cluster references a place we don't have metadata for, leave it."""
+        from istota.geo import validate_cluster_places
+
+        clusters = [
+            {"lat": 34.10, "lon": -118.30, "place_id": 9999,
+             "place_name": "Unknown", "ping_count": 3},
+        ]
+        result = validate_cluster_places(clusters, {})
+        assert result[0]["place_id"] == 9999
+        assert result[0]["place_name"] == "Unknown"
+
+    def test_centroid_just_inside_radius_keeps_place(self):
+        """A centroid clearly inside the boundary survives."""
+        from istota.geo import haversine, validate_cluster_places
+
+        place_lat, place_lon = 34.1044, -118.3097
+        # ~67m north of center
+        clusters = [
+            {"lat": place_lat + 0.0006, "lon": place_lon, "place_id": 1398,
+             "place_name": "Lazy Acres", "ping_count": 3},
+        ]
+        places = {1398: {"id": 1398, "name": "Lazy Acres",
+                         "lat": place_lat, "lon": place_lon, "radius_meters": 75}}
+        d = haversine(place_lat + 0.0006, place_lon, place_lat, place_lon)
+        assert d < 75
+        result = validate_cluster_places(clusters, places)
+        assert result[0]["place_id"] == 1398
+
+    def test_multiple_clusters_independent(self):
+        from istota.geo import validate_cluster_places
+
+        clusters = [
+            # One inside, one outside
+            {"lat": 34.1044, "lon": -118.3097, "place_id": 1398,
+             "place_name": "Lazy Acres", "ping_count": 3},
+            {"lat": 34.1024, "lon": -118.3097, "place_id": 1398,
+             "place_name": "Lazy Acres", "ping_count": 5},
+        ]
+        places = {1398: {"id": 1398, "name": "Lazy Acres",
+                         "lat": 34.1044, "lon": -118.3097, "radius_meters": 75}}
+        result = validate_cluster_places(clusters, places)
+        assert result[0]["place_id"] == 1398
+        assert result[1]["place_id"] is None
+
+
 # ===========================================================================
 # reverse-geocode CLI command tests
 # ===========================================================================
@@ -2447,6 +2846,154 @@ class TestCmdReverseGeocode:
 # ===========================================================================
 # day-summary CLI command tests
 # ===========================================================================
+
+
+class TestLocationQueryTripsGapSegmentation:
+    """C: time-gap-based trip segmentation in _location_query_trips().
+
+    Two non-stationary pings separated by a long gap (>20 min) belong to
+    separate trips even when no stationary pings appear in the gap.
+    Without this, a quiet 2-hour break between outings produces one giant
+    trip spanning both. See ISSUE-059.
+    """
+
+    def _insert_pings(self, db_path, pings, user_id="alice"):
+        with db.get_db(db_path) as conn:
+            for p in pings:
+                db.insert_location_ping(
+                    conn, user_id, p["timestamp"], p["lat"], p["lon"],
+                    accuracy=p.get("accuracy", 5.0),
+                    speed=p.get("speed"),
+                    activity_type=p.get("activity_type"),
+                )
+            conn.commit()
+
+    def test_long_gap_splits_trip(self, tmp_path):
+        from istota.web_app import _location_query_trips
+
+        db_path = _init_db(tmp_path)
+        # Two walks ~2.5h apart on 2026-04-27 PT (= 04-28 UTC)
+        pings = [
+            # First walk near 5:55 PM PT
+            {"timestamp": "2026-04-28T00:55:42Z", "lat": 34.10, "lon": -118.30,
+             "activity_type": "walking", "speed": 1.0},
+            {"timestamp": "2026-04-28T01:00:49Z", "lat": 34.101, "lon": -118.301,
+             "activity_type": "walking", "speed": 1.0},
+            # 2h22m gap, no pings
+            # Second walk near 8:23 PM PT
+            {"timestamp": "2026-04-28T03:23:42Z", "lat": 34.105, "lon": -118.310,
+             "activity_type": "walking", "speed": 1.0},
+            {"timestamp": "2026-04-28T03:27:21Z", "lat": 34.104, "lon": -118.309,
+             "activity_type": "walking", "speed": 1.0},
+        ]
+        self._insert_pings(db_path, pings)
+
+        result = _location_query_trips(
+            str(db_path), "alice", "America/Los_Angeles", "2026-04-27",
+        )
+        assert len(result["trips"]) == 2
+
+    def test_short_gap_keeps_single_trip(self, tmp_path):
+        from istota.web_app import _location_query_trips
+
+        db_path = _init_db(tmp_path)
+        # Two walking pings 10 minutes apart — same trip (red light, brief stop)
+        pings = [
+            {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
+             "activity_type": "walking", "speed": 1.0},
+            {"timestamp": "2026-04-28T01:10:00Z", "lat": 34.101, "lon": -118.301,
+             "activity_type": "walking", "speed": 1.0},
+        ]
+        self._insert_pings(db_path, pings)
+
+        result = _location_query_trips(
+            str(db_path), "alice", "America/Los_Angeles", "2026-04-27",
+        )
+        assert len(result["trips"]) == 1
+
+    def test_gap_threshold_boundary(self, tmp_path):
+        """A gap of exactly 60 minutes should not split (threshold is exclusive)."""
+        from istota.web_app import _location_query_trips
+
+        db_path = _init_db(tmp_path)
+        pings = [
+            {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
+             "activity_type": "walking", "speed": 1.0},
+            {"timestamp": "2026-04-28T02:00:00Z", "lat": 34.101, "lon": -118.301,
+             "activity_type": "walking", "speed": 1.0},
+        ]
+        self._insert_pings(db_path, pings)
+        result = _location_query_trips(
+            str(db_path), "alice", "America/Los_Angeles", "2026-04-27",
+        )
+        assert len(result["trips"]) == 1
+
+    def test_just_over_threshold_splits(self, tmp_path):
+        from istota.web_app import _location_query_trips
+
+        db_path = _init_db(tmp_path)
+        pings = [
+            {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
+             "activity_type": "walking", "speed": 1.0},
+            {"timestamp": "2026-04-28T02:00:30Z", "lat": 34.101, "lon": -118.301,
+             "activity_type": "walking", "speed": 1.0},
+        ]
+        self._insert_pings(db_path, pings)
+        result = _location_query_trips(
+            str(db_path), "alice", "America/Los_Angeles", "2026-04-27",
+        )
+        assert len(result["trips"]) == 2
+
+    def test_30_minute_gap_does_not_split(self, tmp_path):
+        """30 min gap (subway tunnel, traffic, suspended app) should not split."""
+        from istota.web_app import _location_query_trips
+
+        db_path = _init_db(tmp_path)
+        pings = [
+            {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
+             "activity_type": "walking", "speed": 1.0},
+            {"timestamp": "2026-04-28T01:30:00Z", "lat": 34.101, "lon": -118.301,
+             "activity_type": "walking", "speed": 1.0},
+        ]
+        self._insert_pings(db_path, pings)
+        result = _location_query_trips(
+            str(db_path), "alice", "America/Los_Angeles", "2026-04-27",
+        )
+        assert len(result["trips"]) == 1
+
+    def test_stationary_closure_still_works(self, tmp_path):
+        """Original stationary-based closure path remains functional."""
+        from istota.web_app import _location_query_trips
+
+        db_path = _init_db(tmp_path)
+        pings = [
+            {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
+             "activity_type": "walking", "speed": 1.0},
+            {"timestamp": "2026-04-28T01:01:00Z", "lat": 34.101, "lon": -118.301,
+             "activity_type": "walking", "speed": 1.0},
+            {"timestamp": "2026-04-28T01:05:00Z", "lat": 34.101, "lon": -118.301,
+             "activity_type": "stationary"},
+            {"timestamp": "2026-04-28T01:06:00Z", "lat": 34.101, "lon": -118.301,
+             "activity_type": "stationary"},
+            {"timestamp": "2026-04-28T01:07:00Z", "lat": 34.101, "lon": -118.301,
+             "activity_type": "stationary"},
+            {"timestamp": "2026-04-28T01:15:00Z", "lat": 34.110, "lon": -118.310,
+             "activity_type": "walking", "speed": 1.0},
+        ]
+        self._insert_pings(db_path, pings)
+        result = _location_query_trips(
+            str(db_path), "alice", "America/Los_Angeles", "2026-04-27",
+        )
+        assert len(result["trips"]) == 2
+
+    def test_no_pings_no_trips(self, tmp_path):
+        from istota.web_app import _location_query_trips
+
+        db_path = _init_db(tmp_path)
+        result = _location_query_trips(
+            str(db_path), "alice", "America/Los_Angeles", "2026-04-27",
+        )
+        assert result["trips"] == []
 
 
 @_needs_geopy

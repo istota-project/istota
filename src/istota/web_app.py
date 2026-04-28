@@ -788,8 +788,8 @@ def _location_query_pings(
 def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: str | None) -> dict:
     from zoneinfo import ZoneInfo
     from .geo import (
-        cluster_pings, reverse_geocode, haversine,
-        filter_transit_clusters, merge_consecutive_stops,
+        cluster_pings, dedupe_near_duplicate_pings, reverse_geocode, haversine,
+        filter_transit_clusters, merge_consecutive_stops, validate_cluster_places,
     )
 
     try:
@@ -823,15 +823,17 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
             return {"date": target_date, "timezone": tz_name, "stops": [], "ping_count": 0, "transit_pings": 0}
 
         pings = [dict(r) for r in rows]
+        pings = dedupe_near_duplicate_pings(pings)
         clusters = cluster_pings(pings, radius_m=250)
 
-        stops, transit_pings = filter_transit_clusters(clusters)
-
-        saved_places = conn.execute(
-            "SELECT name, lat, lon, radius_meters FROM places WHERE user_id = ?",
+        saved_places_rows = conn.execute(
+            "SELECT id, name, lat, lon, radius_meters FROM places WHERE user_id = ?",
             (user_id,),
         ).fetchall()
-        saved_places = [dict(r) for r in saved_places]
+        saved_places = [dict(r) for r in saved_places_rows]
+        validate_cluster_places(clusters, {p["id"]: p for p in saved_places})
+
+        stops, transit_pings = filter_transit_clusters(clusters)
 
         for stop in stops:
             if stop["place_name"]:
@@ -1053,7 +1055,7 @@ def _location_delete_place(db_path: str, user_id: str, place_id: int) -> bool:
 def _location_query_trips(db_path: str, user_id: str, tz_name: str, date: str | None) -> dict:
     """Detect trips: sequences of non-stationary pings between stationary periods."""
     from zoneinfo import ZoneInfo
-    from .geo import haversine
+    from .geo import _timestamp_gap_seconds, dedupe_near_duplicate_pings, haversine
 
     tz = ZoneInfo(tz_name)
     now = datetime.now(tz)
@@ -1074,16 +1076,33 @@ def _location_query_trips(db_path: str, user_id: str, tz_name: str, date: str | 
             (user_id, since, until),
         ).fetchall()
 
+        deduped_rows = dedupe_near_duplicate_pings([dict(r) for r in rows])
+
         trips: list[dict] = []
         current_trip: list[dict] = []
 
         stationary_count = 0
         STATIONARY_THRESHOLD = 3  # consecutive stationary pings to end a trip
+        # Quiet gap (no pings at all) that closes an open trip. The phone
+        # stops reporting when the user goes indoors / parks, so a long gap
+        # between two non-stationary pings signals a real boundary even
+        # without any stationary pings in between. See ISSUE-059.
+        TRIP_GAP_THRESHOLD_SECONDS = 60 * 60
+        prev_ts: str | None = None
 
-        for r in rows:
+        for r in deduped_rows:
             activity = r["activity_type"] or "stationary"
             ping = {"timestamp": r["timestamp"], "lat": r["lat"], "lon": r["lon"],
                     "activity_type": activity, "speed": r["speed"]}
+
+            if (
+                current_trip
+                and prev_ts is not None
+                and (_timestamp_gap_seconds(prev_ts, r["timestamp"]) > TRIP_GAP_THRESHOLD_SECONDS)
+            ):
+                trips.append(_build_trip(current_trip))
+                current_trip = []
+                stationary_count = 0
 
             if activity == "stationary":
                 stationary_count += 1
@@ -1094,6 +1113,8 @@ def _location_query_trips(db_path: str, user_id: str, tz_name: str, date: str | 
             else:
                 stationary_count = 0
                 current_trip.append(ping)
+
+            prev_ts = r["timestamp"]
 
         # Close any remaining trip
         if current_trip:
