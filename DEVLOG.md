@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-27: Dual git remote push (gitlab + github) and README refresh
+
+Added the public github mirror at `istota-project/istota` and wired `origin` to push to both gitlab and github on every `git push`. Implemented as two `pushurl =` entries on `[remote "origin"]` in `.git/config` rather than a second named remote — that way plain `git push` covers both destinations and there's nothing extra to remember. Fetch URL is unchanged; gitlab stays canonical for `git pull`.
+
+The github mirror used to auto-sync from gitlab; that pipeline is gone, so the dual-push setup replaces it without introducing a manual mirroring step.
+
+README also got a long-overdue refresh covering features that landed since the last edit. The motivation was the lowercase `git/gitlab/github` cleanup, but it turned into a broader pass once we noticed the README was still describing skills and structure from a couple of major refactors ago.
+
+**Key changes:**
+- New feature sections: **Email routing** (plus-addressing, emissary thread tracking, untrusted-sender confirmation gate), **Web interface** (SvelteKit + FastAPI dashboard at `/istota` with feeds / location / money), **Pluggable model backend** (Brain protocol).
+- Skills section rewritten to mention two-pass selection (deterministic + Haiku semantic routing) and sticky-skills carryover; inline list updated to reflect current reality (`money` in-process replaces the old accounting/moneyman wording, `google_workspace` added, `git/gitlab/github` lowercased throughout).
+- Per-job `model` / `effort` overrides documented under Scheduling.
+- OpenClaw comparison table: skill count ~20 → ~28, added sticky-skills carryover.
+- Workspace tree expanded to include `inbox/`, `memories/`, `shared/`, `scripts/`, plus a note about the per-channel `/Channels/{token}/` namespace.
+- Test count: ~2960 → ~3450.
+- Copyright line replaced with `© 2026 Stefan Kubicki • Developed at CYNIUM Labs` (kept the existing markdown links).
+
+**Files modified:**
+- `.git/config` — two `pushurl` entries added to `[remote "origin"]`; standalone `github` remote removed.
+- `README.md` — feature additions, skills list refresh, lowercase prose, copyright.
+
 ## 2026-04-27: Per-job effort no longer inherits config.effort under a model override
 
 A user testing the per-job model override (`model = "claude-haiku-4-5"` in CRON.md) realized that `config.effort = "high"` — set globally for the default Opus model — would still flow through to the Haiku subprocess. Haiku doesn't accept `--effort`, so the job would just fail. The previous resolution was a flat `(task.effort or "").strip() or config.effort`, which couples the two configs in the wrong direction: a per-job *model* override is making an editorial choice about the model, and the default-model effort doesn't transfer.
