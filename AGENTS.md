@@ -16,7 +16,7 @@ For module-specific internals, see `.claude/rules/`:
 ```
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
-├── memory/               # search.py, knowledge_graph.py, curation/
+├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── skills/               # 28 self-contained skills (skill.md + optional CLI)
 ├── cli.py                # Local CLI (task, resource, run, etc.)
 ├── config.py             # TOML config + per-user overrides
@@ -24,7 +24,6 @@ src/istota/
 ├── db.py                 # SQLite operations (all tables)
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
 ├── scheduler.py          # Task processor, briefings, all polling
-├── sleep_cycle.py        # Nightly memory extraction
 ├── email_poller.py       # IMAP polling + plus-address routing
 ├── talk_poller.py        # Nextcloud Talk long-polling
 ├── tasks_file_poller.py  # TASKS.md monitoring
@@ -94,7 +93,7 @@ Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped m
 - Knowledge graph (`knowledge_facts`) — temporal subject/predicate/object triples, freeform predicates, fuzzy dedup, audited.
 - Memory recall (BM25 + vector) — opt-in via `auto_recall`.
 - Briefings exclude all personal memory.
-- Subsystem lives under `src/istota/memory/`; `sleep_cycle.py` orchestrates.
+- Subsystem lives under `src/istota/memory/`; `memory/sleep_cycle.py` orchestrates.
 
 ### Nextcloud Layout
 ```

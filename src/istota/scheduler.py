@@ -2854,7 +2854,7 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
 
         # Check sleep cycles
         try:
-            from .sleep_cycle import check_sleep_cycles
+            from .memory.sleep_cycle import check_sleep_cycles
             sleep_users = check_sleep_cycles(conn, config)
             if sleep_users:
                 logger.info("Ran sleep cycle for %d user(s): %s", len(sleep_users), ", ".join(sleep_users))
@@ -2863,7 +2863,7 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
 
         # Check channel sleep cycles
         try:
-            from .sleep_cycle import check_channel_sleep_cycles
+            from .memory.sleep_cycle import check_channel_sleep_cycles
             channel_tokens = check_channel_sleep_cycles(conn, config)
             if channel_tokens:
                 logger.info("Ran channel sleep cycle for %d channel(s): %s", len(channel_tokens), ", ".join(channel_tokens))
@@ -3096,7 +3096,7 @@ def run_daemon(config: Config) -> None:
         # Check sleep cycles periodically (same interval as briefings)
         if now - last_sleep_cycle_check >= config.scheduler.briefing_check_interval:
             try:
-                from .sleep_cycle import check_sleep_cycles
+                from .memory.sleep_cycle import check_sleep_cycles
                 with db.get_db(config.db_path) as conn:
                     sleep_users = check_sleep_cycles(conn, config)
                     if sleep_users:
@@ -3108,7 +3108,7 @@ def run_daemon(config: Config) -> None:
         # Check channel sleep cycles periodically (same interval as briefings)
         if now - last_channel_sleep_cycle_check >= config.scheduler.briefing_check_interval:
             try:
-                from .sleep_cycle import check_channel_sleep_cycles
+                from .memory.sleep_cycle import check_channel_sleep_cycles
                 with db.get_db(config.db_path) as conn:
                     channel_tokens = check_channel_sleep_cycles(conn, config)
                     if channel_tokens:

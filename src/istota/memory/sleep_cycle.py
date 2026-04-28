@@ -10,10 +10,10 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
-from . import db
-from .brain import BrainRequest, make_brain
-from .config import Config
-from .storage import (
+from .. import db
+from ..brain import BrainRequest, make_brain
+from ..config import Config
+from ..storage import (
     _get_mount_path,
     get_user_memories_path,
     get_user_memory_path,
@@ -49,6 +49,8 @@ SUGGESTED_PREDICATES = {
     # Temporary (coexist with permanent facts, auto-flagged)
     "staying_in": "temporary location like a trip or hotel (temporary, use valid_from/valid_until for dates)",
     "visiting": "short visit to a place (temporary, use valid_from/valid_until for dates)",
+    "traveled_to": "completed trip or visit to a location (use valid_from/valid_until for dates)",
+    "has_appointment": "scheduled medical or professional appointment (use valid_from for the date)",
     # Multi-valued (concurrent facts allowed)
     "works_on": "project, product, or initiative",
     "uses_tech": "software, programming language, or digital tool (not physical objects)",
@@ -58,8 +60,16 @@ SUGGESTED_PREDICATES = {
     "allergic_to": "allergy or intolerance",
     "owns": "vehicle, property, or significant possession",
     "relates_to": "relationship between entities (use when no specific predicate fits)",
+    "has_family_member": "family relationship — object encodes both kind and name, e.g. 'brother: max'",
+    "interested_in": "topic, film, book, or creative interest the user has expressed",
+    "completed": "finished project, task, or milestone — pair with valid_from for the completion date",
     "decided": "explicit decision or commitment",
 }
+
+# Hard cap on object length. Long objects make fuzzy dedup unreliable and
+# crowd out other prompt context when current facts are loaded back in.
+# Matches the prompt instruction ("under 10 words / 100 chars").
+MAX_FACT_OBJECT_CHARS = 100
 
 # Sentinel output from Claude indicating nothing worth saving
 NO_NEW_MEMORIES = "NO_NEW_MEMORIES"
@@ -69,6 +79,16 @@ NO_NEW_MEMORIES = "NO_NEW_MEMORIES"
 # contains the bullet, rather than collapsing to a single dominant topic
 # per file.
 _REF_PATTERN = re.compile(r"\bref:(\d+)\b")
+
+# Used by the post-extraction sanity check — real memory output is a list of
+# `- ` bullets. Anything else (process narration, error messages, single
+# paragraphs) is treated as malformed.
+_BULLET_PATTERN = re.compile(r"(?m)^\s*-\s+\S")
+
+
+def _has_bullet_points(text: str) -> bool:
+    """True if `text` contains at least one markdown bullet line."""
+    return bool(_BULLET_PATTERN.search(text or ""))
 
 
 def _topics_per_chunk(
@@ -270,6 +290,7 @@ def build_memory_extraction_prompt(
     day_data: str,
     existing_memory: str | None,
     date_str: str,
+    existing_facts: str | None = None,
 ) -> str:
     """
     Build the prompt that instructs Claude to extract memories from the day's interactions.
@@ -279,6 +300,10 @@ def build_memory_extraction_prompt(
         day_data: Concatenated interaction data from the day
         existing_memory: Current contents of memory.md (to avoid duplication)
         date_str: Date string for the memory file (e.g. "2026-01-28")
+        existing_facts: Formatted current knowledge-graph facts (one per line),
+            or None when the graph is empty / unavailable. When provided, the
+            LLM is instructed to skip re-emitting these and only output
+            updates/refinements.
     """
     existing_section = ""
     if existing_memory:
@@ -291,6 +316,19 @@ Do NOT repeat any of this information in your output.
 {existing_memory}
 """
 
+    kg_section = ""
+    if existing_facts:
+        kg_section = f"""
+## Existing knowledge graph facts
+
+These facts are already stored. Do NOT re-emit them. Only emit a fact if today's
+data contradicts, refines, or supersedes an existing one — in which case emit
+the updated version (with valid_from set to today, or valid_until set to close
+out a stale fact).
+
+{existing_facts}
+"""
+
     predicates_str = "\n".join(
         f"  - {pred}: {hint}" for pred, hint in SUGGESTED_PREDICATES.items()
     )
@@ -298,7 +336,7 @@ Do NOT repeat any of this information in your output.
     return f"""You are extracting important memories from a day of interactions with user '{user_id}'.
 
 Date: {date_str}
-{existing_section}
+{existing_section}{kg_section}
 ## Today's interactions
 
 {day_data}
@@ -373,6 +411,9 @@ FACTS:
 (JSON array of entity-relationship triples extracted from the interactions)
 Each triple: {{"subject": "entity", "predicate": "relationship", "object": "value"}}
 Optional temporal fields: "valid_from" and "valid_until" (YYYY-MM-DD) for time-bounded facts.
+Optional traceability field: "source_ref" — the integer task ID (from a "Task NNN" header
+or "ref:NNN" marker in the interaction above) where the fact was stated. Attach this
+whenever a single task clearly supports the fact; omit when the evidence is diffuse.
 
 Suggested predicates (with usage guidance):
 {predicates_str}
@@ -385,7 +426,14 @@ fields — NOT in the object string. Example:
   {{"subject": "felix", "predicate": "visiting", "object": "japan", "valid_from": "2026-04-14", "valid_until": "2026-04-24"}}
 NOT: {{"subject": "felix", "predicate": "visiting", "object": "japan, april 14-24 2026"}}
 
-Normalize entity names to lowercase. Keep object values concise — a few words, not a sentence.
+Normalize entity names to lowercase. Object values MUST be under 10 words (max 100 characters)
+— put context, reasoning, and detail in MEMORIES, not in fact objects. Long objects break
+fuzzy dedup.
+
+When a `decided` fact is about a one-time action (a cancellation, a purchase, a specific
+short-lived task), set `valid_until` to a date a few weeks out so the decision ages out
+of the current-fact view automatically. Durable decisions (lifestyle, direction, policy)
+have no `valid_until`.
 
 Subject constraints:
 - For user preferences, habits, and decisions, the subject should be "{user_id}"
@@ -424,6 +472,9 @@ def _validate_fact(fact: dict) -> bool:
 
     Predicates are freeform — any non-empty string is accepted. The knowledge
     graph handles unknown predicates as multi-valued by default.
+
+    Object length is capped at MAX_FACT_OBJECT_CHARS — long sentences in the
+    object slot break fuzzy dedup and crowd out other prompt content.
     """
     if not isinstance(fact, dict):
         return False
@@ -431,14 +482,23 @@ def _validate_fact(fact: dict) -> bool:
         return False
     if not fact["subject"].strip() or not fact["predicate"].strip() or not fact["object"].strip():
         return False
+    if len(fact["object"].strip()) > MAX_FACT_OBJECT_CHARS:
+        return False
     return True
 
 
 def _normalize_fact(fact: dict) -> dict:
-    """Normalize fact values to lowercase/stripped."""
+    """Normalize fact values to lowercase/stripped. Preserves source_ref when it
+    parses as a positive int."""
     fact["subject"] = fact["subject"].strip().lower()
     fact["predicate"] = fact["predicate"].strip().lower()
     fact["object"] = fact["object"].strip().lower()
+    if "source_ref" in fact:
+        try:
+            ref = int(fact["source_ref"])
+            fact["source_ref"] = ref if ref > 0 else None
+        except (TypeError, ValueError):
+            fact["source_ref"] = None
     return fact
 
 
@@ -519,6 +579,11 @@ def process_user_sleep_cycle(
     # Load existing memory to avoid duplication
     existing_memory = read_user_memory_v2(config, user_id)
 
+    # Load current KG facts — passed to the extraction LLM so it can skip
+    # re-emitting facts the graph already has and produce informed
+    # supersession/refinement updates instead.
+    existing_facts = _load_kg_facts_text(config, conn, user_id)
+
     # Build extraction prompt — date_str follows the user's timezone so
     # filenames and bullet timestamps match the user's calendar day, not the
     # server's. Falls back to UTC for unknown tz strings.
@@ -530,7 +595,8 @@ def process_user_sleep_cycle(
         user_tz = ZoneInfo("UTC")
     date_str = datetime.now(user_tz).strftime("%Y-%m-%d")
     prompt = build_memory_extraction_prompt(
-        user_id, day_data, existing_memory, date_str
+        user_id, day_data, existing_memory, date_str,
+        existing_facts=existing_facts,
     )
 
     ok, output = _run_sleep_cycle_brain(
@@ -556,6 +622,20 @@ def process_user_sleep_cycle(
         _update_state(config, conn, user_id, last_task_id)
         return False
 
+    # Sanity check: real memory output is a list of `- ...` bullets. When the
+    # model narrates its process instead ("Memory extraction complete..."),
+    # the output passes the empty/sentinel checks but contains no bullets.
+    # Treat that as malformed: don't write the file, don't insert facts, do
+    # advance state so we don't reprocess the same window forever.
+    if not _has_bullet_points(memories_text):
+        logger.warning(
+            "Sleep cycle for %s: extraction output had no bullet points "
+            "(treating as malformed). First 200 chars: %r",
+            user_id, memories_text[:200],
+        )
+        _update_state(config, conn, user_id, last_task_id)
+        return False
+
     # Write dated memory file (only the human-readable memories)
     if not config.use_mount:
         logger.warning("Sleep cycle requires mount mode, skipping file write for %s", user_id)
@@ -572,7 +652,7 @@ def process_user_sleep_cycle(
     # Insert extracted facts into knowledge graph (non-critical)
     if extracted_facts:
         try:
-            from .memory.knowledge_graph import ensure_table, add_fact
+            from .knowledge_graph import ensure_table, add_fact
             ensure_table(conn)
             inserted = 0
             for fact in extracted_facts:
@@ -583,6 +663,7 @@ def process_user_sleep_cycle(
                     object_val=fact["object"],
                     valid_from=fact.get("valid_from"),
                     valid_until=fact.get("valid_until"),
+                    source_task_id=fact.get("source_ref"),
                     source_type="extracted",
                 )
                 if fact_id is not None:
@@ -600,7 +681,7 @@ def process_user_sleep_cycle(
     # topic-filtered searches by design.
     if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
         try:
-            from .memory.search import (
+            from .search import (
                 chunk_text as _chunk_text,
                 index_file as _index_file,
             )
@@ -627,7 +708,7 @@ def process_user_sleep_cycle(
     # so users have a single knob.
     if sleep_config.memory_retention_days > 0:
         try:
-            from .memory.search import cleanup_old_chunks
+            from .search import cleanup_old_chunks
             n = cleanup_old_chunks(conn, user_id, sleep_config.memory_retention_days)
             if n:
                 logger.info("Pruned %d ephemeral memory chunks for %s", n, user_id)
@@ -640,7 +721,7 @@ def process_user_sleep_cycle(
     # would let the table grow unbounded by default.
     if sleep_config.knowledge_graph_audit_retention_days > 0:
         try:
-            from .memory.knowledge_graph import cleanup_old_audit_rows, ensure_table
+            from .knowledge_graph import cleanup_old_audit_rows, ensure_table
             ensure_table(conn)
             n = cleanup_old_audit_rows(
                 conn, user_id, sleep_config.knowledge_graph_audit_retention_days
@@ -670,7 +751,7 @@ def _load_kg_facts_text(
     structure even when this returns None.
     """
     try:
-        from .memory.knowledge_graph import (
+        from .knowledge_graph import (
             ensure_table,
             format_facts_for_prompt,
             get_current_facts,
@@ -717,7 +798,7 @@ def _maybe_warn_usermd_size(config: Config, user_id: str, size_bytes: int) -> No
         "recall and KG facts in prompts."
     )
     try:
-        from .notifications import send_notification
+        from ..notifications import send_notification
         send_notification(
             config,
             user_id,
@@ -763,7 +844,7 @@ def _post_curation_summary(
         f"+{n_headings} new headings"
     )
     try:
-        from .notifications import send_notification  # late import to avoid cycles in tests
+        from ..notifications import send_notification  # late import to avoid cycles in tests
         send_notification(
             config,
             user_id,
@@ -789,7 +870,7 @@ def curate_user_memory(
     """
     import json
 
-    from .memory.curation import (
+    from .curation import (
         apply_ops,
         build_op_curation_prompt,
         parse_sectioned_doc,
@@ -881,7 +962,7 @@ def curate_user_memory(
 
     if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
         try:
-            from .memory.search import index_file as _index_file
+            from .search import index_file as _index_file
             if conn is not None:
                 _index_file(conn, user_id, str(memory_path), new_text, "user_memory")
             else:
@@ -1201,7 +1282,7 @@ def process_channel_sleep_cycle(
     channel_user_id = f"channel:{conversation_token}"
     if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
         try:
-            from .memory.search import index_file as _index_file
+            from .search import index_file as _index_file
 
             _index_file(
                 conn,
@@ -1235,7 +1316,7 @@ def process_channel_sleep_cycle(
     # excluded — it refreshes on edit, like USER.md.
     if csc.memory_retention_days > 0:
         try:
-            from .memory.search import cleanup_old_chunks
+            from .search import cleanup_old_chunks
             channel_user_id = f"channel:{conversation_token}"
             n = cleanup_old_chunks(
                 conn,
@@ -1284,7 +1365,7 @@ def _reindex_channel_durable(
     if not content.strip():
         return
     try:
-        from .memory.search import index_file as _index_file
+        from .search import index_file as _index_file
         _index_file(
             conn,
             f"channel:{conversation_token}",

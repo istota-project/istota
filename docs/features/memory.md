@@ -5,21 +5,20 @@ Istota's memory subsystem is a layered system covering durable per-user notes, p
 ## Where it lives
 
 ```
-src/istota/
-├── sleep_cycle.py            # Nightly orchestration (user + channel)
-└── memory/
-    ├── __init__.py             # Public re-exports
-    ├── search.py               # Hybrid BM25 + vector search, indexing, retention
-    ├── knowledge_graph.py      # Temporal entity-relationship triples
-    └── curation/               # Op-based USER.md curation
-        ├── types.py              # SectionedDoc / Section dataclasses
-        ├── parser.py             # Markdown ⇄ SectionedDoc round-trip
-        ├── ops.py                # apply_ops() with validation
-        ├── prompt.py             # Prompt builder + JSON-fence stripper
-        └── audit.py              # USER.md.audit.jsonl writer
+src/istota/memory/
+├── __init__.py             # Public re-exports
+├── sleep_cycle.py          # Nightly orchestration (user + channel)
+├── search.py               # Hybrid BM25 + vector search, indexing, retention
+├── knowledge_graph.py      # Temporal entity-relationship triples
+└── curation/               # Op-based USER.md curation
+    ├── types.py              # SectionedDoc / Section dataclasses
+    ├── parser.py             # Markdown ⇄ SectionedDoc round-trip
+    ├── ops.py                # apply_ops() with validation
+    ├── prompt.py             # Prompt builder + JSON-fence stripper
+    └── audit.py              # USER.md.audit.jsonl writer
 ```
 
-`sleep_cycle.py` is the cron pipeline that drives the subsystem each night; the `memory/` package is the subsystem proper. In-repo callers import explicitly (`from istota.memory.search import ...`); the `__init__.py` re-exports exist for back-compat. The `search()` function is intentionally not re-exported because it would shadow the `search` submodule.
+`memory/sleep_cycle.py` is the cron pipeline that drives the subsystem each night. In-repo callers import explicitly (`from istota.memory.search import ...`); the `__init__.py` re-exports exist for back-compat. The `search()` function is intentionally not re-exported because it would shadow the `search` submodule.
 
 ## The five layers
 
@@ -97,7 +96,7 @@ istota-skill memory_search delete-fact <id>          # permanent removal
 
 ## Sleep cycle
 
-The user sleep cycle (`process_user_sleep_cycle()` in `sleep_cycle.py`) runs nightly per user in their local timezone:
+The user sleep cycle (`process_user_sleep_cycle()` in `memory/sleep_cycle.py`) runs nightly per user in their local timezone:
 
 1. **Load state.** `sleep_cycle_state` records the last processed task ID per user.
 2. **Gather day data.** Tasks completed since the last run, partitioned into INTERACTIVE (`talk`, `email`, `cli`) and AUTOMATED (`cron`, `briefing`, `subtask`). Interactive sources get 80% of a 50,000-char budget; tasks within a conversation are grouped; per-task allocation is proportional to content length with tail-biased truncation (40% head + 60% tail) so conclusions survive.
