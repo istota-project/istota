@@ -544,6 +544,18 @@ def process_user_sleep_cycle(
     # Clean up old memory files
     cleanup_old_memory_files(config, user_id, sleep_config.memory_retention_days)
 
+    # Clean up old ephemeral memory_chunks (conversation, memory_file,
+    # channel_memory). Reuses the same retention setting as the file cleanup
+    # so users have a single knob.
+    if sleep_config.memory_retention_days > 0:
+        try:
+            from .memory.search import cleanup_old_chunks
+            n = cleanup_old_chunks(conn, user_id, sleep_config.memory_retention_days)
+            if n:
+                logger.info("Pruned %d ephemeral memory chunks for %s", n, user_id)
+        except Exception as e:
+            logger.debug("memory_chunks cleanup failed for %s: %s", user_id, e)
+
     # Curate USER.md if enabled
     if sleep_config.curate_user_memory:
         try:
@@ -554,104 +566,114 @@ def process_user_sleep_cycle(
     return True
 
 
-# Sentinel output from Claude indicating no curation changes needed
-NO_CHANGES_NEEDED = "NO_CHANGES_NEEDED"
+def _load_kg_facts_text(
+    config: Config, conn: "db.sqlite3.Connection | None", user_id: str
+) -> str | None:
+    """Load formatted knowledge graph facts for the curation prompt.
+
+    Returns None on any failure (graceful degradation). The KG section is
+    optional — the model still gets the dated memories and current USER.md
+    structure even when this returns None.
+    """
+    try:
+        from .memory.knowledge_graph import (
+            ensure_table,
+            format_facts_for_prompt,
+            get_current_facts,
+        )
+        if conn is not None:
+            ensure_table(conn)
+            facts = get_current_facts(conn, user_id)
+            return format_facts_for_prompt(facts) if facts else None
+        with db.get_db(config.db_path) as temp_conn:
+            ensure_table(temp_conn)
+            facts = get_current_facts(temp_conn, user_id)
+            return format_facts_for_prompt(facts) if facts else None
+    except Exception:
+        return None
 
 
-def build_curation_prompt(
-    user_id: str,
-    current_memory: str | None,
-    dated_memories: str,
-    knowledge_facts_text: str | None = None,
-) -> str:
-    """Build the prompt that instructs Claude to curate USER.md from dated memories."""
-    current_section = ""
-    if current_memory:
-        current_section = f"""
-## Current USER.md
+def _post_curation_summary(
+    config: Config, user_id: str, applied: list[dict], rejected: list[dict]
+) -> None:
+    """Post a one-line summary of an applied curation run to the user's log channel.
 
-{current_memory}
-"""
-    else:
-        current_section = """
-## Current USER.md
+    No-op when no log channel is configured or when nothing was applied.
+    """
+    if not applied:
+        return
+    user_cfg = config.users.get(user_id)
+    log_channel = getattr(user_cfg, "log_channel", "") if user_cfg else ""
+    if not log_channel:
+        return
 
-(Empty — no existing memory file)
-"""
-
-    kg_section = ""
-    if knowledge_facts_text:
-        kg_section = f"""
-## Structured knowledge graph
-
-The following facts are tracked in the structured knowledge graph.
-You do NOT need to duplicate these in USER.md — they are already stored separately.
-If USER.md contains entries that are now covered by the knowledge graph, you can remove them.
-
-{knowledge_facts_text}
-"""
-
-    return f"""You are curating the persistent memory file (USER.md) for user '{user_id}'.
-
-{current_section}{kg_section}
-## Recent dated memories
-
-The following memories were extracted from recent conversations:
-
-{dated_memories}
-
-## Instructions
-
-Update USER.md by:
-1. Promoting durable facts from the dated memories (preferences, projects, people, decisions)
-2. Removing entries that are outdated or contradicted by newer information
-3. Keeping the file concise and well-organized under clear headings
-4. Preserving the existing structure and headings where possible
-5. When adding new information that doesn't fit under any existing heading, create a new
-   appropriately-named heading for it. Never append unrelated information under an existing heading.
-
-Do NOT include:
-- Temporary or time-bound information (e.g., "meeting tomorrow")
-- Task references (ref:NNNN) — those belong in dated memories only
-- Redundant entries — if info is already in USER.md, don't duplicate it
-- Facts already tracked in the knowledge graph (listed above) — those are stored separately.
-  Before promoting a dated memory bullet, check whether its core information is already
-  captured as a knowledge graph fact. If so, skip it — the KG is the authoritative store.
-
-If USER.md is already up to date and no changes are needed, respond with exactly: {NO_CHANGES_NEEDED}
-
-Otherwise, output the COMPLETE updated USER.md content. No preamble, no explanation — just the file content."""
+    n_appended = sum(
+        1
+        for a in applied
+        if a.get("op", {}).get("op") == "append" and a.get("outcome") == "applied"
+    )
+    n_removed = sum(
+        1
+        for a in applied
+        if a.get("op", {}).get("op") == "remove" and a.get("outcome") == "applied"
+    )
+    n_headings = sum(
+        1
+        for a in applied
+        if a.get("op", {}).get("op") == "add_heading" and a.get("outcome") == "applied"
+    )
+    msg = (
+        f"USER.md curated: +{n_appended} appended, -{n_removed} removed, "
+        f"+{n_headings} new headings"
+    )
+    try:
+        from .notifications import send_notification  # late import to avoid cycles in tests
+        send_notification(
+            config,
+            user_id,
+            msg,
+            surface="talk",
+            conversation_token=log_channel,
+        )
+    except Exception as e:
+        logger.debug("curation summary post failed for %s: %s", user_id, e)
 
 
-def curate_user_memory(config: Config, user_id: str, conn: "db.sqlite3.Connection | None" = None) -> bool:
-    """Second pass: update USER.md based on accumulated dated memories.
+def curate_user_memory(
+    config: Config, user_id: str, conn: "db.sqlite3.Connection | None" = None
+) -> bool:
+    """Op-based USER.md curation.
+
+    Reads current USER.md + last 3 days of dated memories + KG facts, asks
+    Sonnet to emit a JSON list of small ops (append / add_heading / remove),
+    validates and applies them against a parsed `SectionedDoc`, writes the
+    result back, and audit-logs the run.
 
     Returns True if USER.md was updated.
     """
-    current_memory = read_user_memory_v2(config, user_id)
-    dated = read_dated_memories(config, user_id, max_days=30, max_chars=12000)
+    import json
+
+    from .memory.curation import (
+        apply_ops,
+        build_op_curation_prompt,
+        parse_sectioned_doc,
+        serialize_sectioned_doc,
+        strip_json_fences,
+        write_audit_log,
+    )
+
+    current = read_user_memory_v2(config, user_id) or ""
+    dated = read_dated_memories(config, user_id, max_days=3, max_chars=8000)
     if not dated:
-        return False  # Nothing to curate from
+        return False
 
-    # Load knowledge graph facts (non-critical)
-    kg_text = None
-    try:
-        from .memory.knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
-        if conn is not None:
-            ensure_table(conn)
-            kg_facts = get_current_facts(conn, user_id)
-            if kg_facts:
-                kg_text = format_facts_for_prompt(kg_facts)
-        else:
-            with db.get_db(config.db_path) as temp_conn:
-                ensure_table(temp_conn)
-                kg_facts = get_current_facts(temp_conn, user_id)
-                if kg_facts:
-                    kg_text = format_facts_for_prompt(kg_facts)
-    except Exception:
-        pass  # Graceful degradation
+    if not config.use_mount:
+        logger.warning("USER.md curation requires mount mode, skipping for %s", user_id)
+        return False
 
-    prompt = build_curation_prompt(user_id, current_memory, dated, knowledge_facts_text=kg_text)
+    doc = parse_sectioned_doc(current)
+    kg_text = _load_kg_facts_text(config, conn, user_id)
+    prompt = build_op_curation_prompt(user_id, doc, dated, kg_text)
 
     try:
         result = subprocess.run(
@@ -661,17 +683,6 @@ def curate_user_memory(config: Config, user_id: str, conn: "db.sqlite3.Connectio
             text=True,
             timeout=120,
         )
-
-        if result.returncode != 0:
-            logger.error(
-                "USER.md curation failed for %s (rc=%d): %s",
-                user_id, result.returncode,
-                result.stderr[:200] if result.stderr else "",
-            )
-            return False
-
-        output = result.stdout.strip()
-
     except subprocess.TimeoutExpired:
         logger.error("USER.md curation timed out for %s", user_id)
         return False
@@ -679,35 +690,70 @@ def curate_user_memory(config: Config, user_id: str, conn: "db.sqlite3.Connectio
         logger.error("Claude CLI not found for USER.md curation")
         return False
     except Exception as e:
-        logger.error("USER.md curation error for %s: %s", user_id, e)
+        logger.error("USER.md curation subprocess error for %s: %s", user_id, e)
         return False
 
-    if output == NO_CHANGES_NEEDED:
-        logger.info("USER.md curation for %s: no changes needed", user_id)
+    if result.returncode != 0:
+        logger.error(
+            "USER.md curation failed for %s (rc=%d): %s",
+            user_id,
+            result.returncode,
+            (result.stderr or "")[:200],
+        )
         return False
 
-    if not config.use_mount:
-        logger.warning("USER.md curation requires mount mode, skipping for %s", user_id)
+    raw = strip_json_fences(result.stdout)
+    try:
+        payload = json.loads(raw)
+        ops = payload.get("ops", [])
+        if not isinstance(ops, list):
+            raise ValueError("ops must be a list")
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(
+            "USER.md curation JSON parse failed for %s: %s; raw=%r",
+            user_id,
+            e,
+            raw[:200],
+        )
+        return False
+
+    new_doc, applied, rejected = apply_ops(doc, ops)
+    if not applied and not rejected:
+        return False  # truly nothing happened — no audit, no write
+    if not applied:
+        write_audit_log(config, user_id, applied=[], rejected=rejected)
+        return False
+
+    new_text = serialize_sectioned_doc(new_doc)
+    if new_text == current:
+        # All applied ops were no-ops (dedup, no_match) — log audit, skip write
+        write_audit_log(config, user_id, applied=applied, rejected=rejected)
         return False
 
     memory_path = _get_mount_path(config, get_user_memory_path(user_id, config.bot_dir_name))
     memory_path.parent.mkdir(parents=True, exist_ok=True)
-    memory_path.write_text(output + "\n")
-    logger.info("Updated USER.md for %s (%d chars)", user_id, len(output))
+    memory_path.write_text(new_text)
+    logger.info(
+        "Updated USER.md for %s (+%d ops, %d rejected)",
+        user_id,
+        len(applied),
+        len(rejected),
+    )
+    write_audit_log(config, user_id, applied=applied, rejected=rejected)
 
-    # Refresh the search index for USER.md (non-critical). Without this the
-    # memory_chunks rows for source_type='user_memory' silently go stale and
-    # searches return the pre-curation content until manual reindex.
     if config.memory_search.enabled and config.memory_search.auto_index_memory_files:
         try:
             from .memory.search import index_file as _index_file
             if conn is not None:
-                _index_file(conn, user_id, str(memory_path), output, "user_memory")
+                _index_file(conn, user_id, str(memory_path), new_text, "user_memory")
             else:
                 with db.get_db(config.db_path) as temp_conn:
-                    _index_file(temp_conn, user_id, str(memory_path), output, "user_memory")
+                    _index_file(temp_conn, user_id, str(memory_path), new_text, "user_memory")
         except Exception as e:
             logger.debug("USER.md re-index failed for %s: %s", user_id, e)
+
+    if getattr(config.sleep_cycle, "curation_log_summary", True):
+        _post_curation_summary(config, user_id, applied, rejected)
 
     return True
 
@@ -1059,6 +1105,28 @@ def process_channel_sleep_cycle(
     cleanup_old_channel_memory_files(
         config, conversation_token, csc.memory_retention_days
     )
+
+    # Clean up old ephemeral memory_chunks for this channel (channel_memory
+    # source_type only; durable CHANNEL.md is not indexed today, but if it ever
+    # is, it must use a separate source_type to stay durable).
+    if csc.memory_retention_days > 0:
+        try:
+            from .memory.search import cleanup_old_chunks
+            channel_user_id = f"channel:{conversation_token}"
+            n = cleanup_old_chunks(
+                conn,
+                channel_user_id,
+                csc.memory_retention_days,
+                source_types=("channel_memory",),
+            )
+            if n:
+                logger.info(
+                    "Pruned %d channel memory chunks for %s", n, conversation_token
+                )
+        except Exception as e:
+            logger.debug(
+                "channel memory_chunks cleanup failed for %s: %s", conversation_token, e
+            )
 
     return True
 

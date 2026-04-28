@@ -18,10 +18,8 @@ from istota.sleep_cycle import (
     process_user_sleep_cycle,
     cleanup_old_memory_files,
     check_sleep_cycles,
-    build_curation_prompt,
     curate_user_memory,
     NO_NEW_MEMORIES,
-    NO_CHANGES_NEEDED,
     MAX_DAY_DATA_CHARS,
     INTERACTIVE_SOURCE_TYPES,
     SUGGESTED_PREDICATES,
@@ -531,6 +529,47 @@ class TestCleanupOldMemoryFiles:
         assert (context_dir / f"{old_date}.md").exists()
 
 
+class TestSleepCycleChunkCleanup:
+    """Item 4: nightly user sleep cycle prunes old ephemeral memory_chunks."""
+
+    @patch("istota.memory.search.cleanup_old_chunks")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_chunk_cleanup_called_when_retention_set(
+        self, mock_run, mock_cleanup, mount_config, db_path
+    ):
+        mount_config.sleep_cycle.memory_retention_days = 90
+        mock_run.return_value = MagicMock(returncode=0, stdout="- mem\n", stderr="")
+        mock_cleanup.return_value = 0
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="x", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="r")
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        assert mock_cleanup.called
+        # Args: (conn, user_id, retention_days)
+        args = mock_cleanup.call_args.args
+        assert args[1] == "alice"
+        assert args[2] == 90
+
+    @patch("istota.memory.search.cleanup_old_chunks")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_chunk_cleanup_skipped_when_retention_zero(
+        self, mock_run, mock_cleanup, mount_config, db_path
+    ):
+        mount_config.sleep_cycle.memory_retention_days = 0
+        mock_run.return_value = MagicMock(returncode=0, stdout="- mem\n", stderr="")
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="x", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="r")
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        mock_cleanup.assert_not_called()
+
+
 class TestCheckSleepCycles:
     def test_skips_when_disabled(self, mount_config, db_path):
         mount_config.sleep_cycle = SleepCycleConfig(enabled=False)
@@ -614,197 +653,219 @@ class TestMemoryProvenance:
 
 
 # ---------------------------------------------------------------------------
-# TestBuildCurationPrompt
+# TestCurateUserMemory (op-based curation)
 # ---------------------------------------------------------------------------
 
 
-class TestBuildCurationPrompt:
-    def test_includes_current_memory(self):
-        prompt = build_curation_prompt("alice", "- Likes Python", "- New fact from today")
-        assert "Likes Python" in prompt
-        assert "Current USER.md" in prompt
-
-    def test_includes_dated_memories(self):
-        prompt = build_curation_prompt("alice", None, "- Prefers dark mode")
-        assert "Prefers dark mode" in prompt
-        assert "Recent dated memories" in prompt
-
-    def test_empty_memory_shows_placeholder(self):
-        prompt = build_curation_prompt("alice", None, "- Some memory")
-        assert "Empty" in prompt or "no existing" in prompt.lower()
-
-    def test_includes_no_changes_sentinel(self):
-        prompt = build_curation_prompt("alice", "existing", "new")
-        assert NO_CHANGES_NEEDED in prompt
-
-    def test_includes_user_id(self):
-        prompt = build_curation_prompt("bob", None, "data")
-        assert "bob" in prompt
-
-
-# ---------------------------------------------------------------------------
-# TestCurateUserMemory
-# ---------------------------------------------------------------------------
+def _setup_curation_fixture(mount_config, *, existing_user_md: str | None = None) -> tuple:
+    """Create dated memories + (optionally) an existing USER.md. Returns (config_dir, memories_dir)."""
+    memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+    memories_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    (memories_dir / f"{today}.md").write_text("- Prefers Python over JS\n")
+    config_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    if existing_user_md is not None:
+        (config_dir / "USER.md").write_text(existing_user_md)
+    return config_dir, memories_dir
 
 
 class TestCurateUserMemory:
     @patch("istota.sleep_cycle.subprocess.run")
-    def test_writes_updated_memory(self, mock_run, mount_config):
+    def test_writes_updated_user_md_when_ops_applied(self, mock_run, mount_config):
         mount_config.sleep_cycle.curate_user_memory = True
-        # Create existing dated memories
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- Prefers Python over JS")
-
-        # Create config dir for USER.md
-        config_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
-        config_dir.mkdir(parents=True)
-
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md="## Preferences\n- Likes vim\n"
+        )
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="# Alice\n\n## Preferences\n- Prefers Python over JS\n",
+            stdout='{"ops": [{"op": "append", "heading": "Preferences", "line": "- Prefers Python over JS"}]}',
             stderr="",
         )
 
         result = curate_user_memory(mount_config, "alice")
         assert result is True
-
-        # Verify USER.md was written
-        memory_path = config_dir / "USER.md"
-        assert memory_path.exists()
-        assert "Prefers Python" in memory_path.read_text()
+        text = (config_dir / "USER.md").read_text()
+        assert "- Likes vim" in text
+        assert "- Prefers Python over JS" in text
 
     @patch("istota.sleep_cycle.subprocess.run")
-    def test_no_changes_needed_returns_false(self, mock_run, mount_config):
+    def test_empty_ops_response_does_not_touch_file(self, mock_run, mount_config):
         mount_config.sleep_cycle.curate_user_memory = True
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- Some memory")
-
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=NO_CHANGES_NEEDED,
-            stderr="",
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md="## Preferences\n- Likes vim\n"
         )
+        original = (config_dir / "USER.md").read_text()
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"ops": []}', stderr="")
 
         result = curate_user_memory(mount_config, "alice")
         assert result is False
+        assert (config_dir / "USER.md").read_text() == original
+
+    @patch("istota.memory.search.index_file")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_empty_ops_response_does_not_reindex(
+        self, mock_run, mock_index, mount_config, db_path
+    ):
+        mount_config.sleep_cycle.curate_user_memory = True
+        _setup_curation_fixture(mount_config, existing_user_md="## A\n- a\n")
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"ops": []}', stderr="")
+
+        with db.get_db(db_path) as conn:
+            curate_user_memory(mount_config, "alice", conn=conn)
+        mock_index.assert_not_called()
+
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_invalid_json_returns_false(self, mock_run, mount_config):
+        mount_config.sleep_cycle.curate_user_memory = True
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md="## A\n- a\n"
+        )
+        mock_run.return_value = MagicMock(returncode=0, stdout="garbage not json", stderr="")
+        result = curate_user_memory(mount_config, "alice")
+        assert result is False
+
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_json_with_fences_is_unwrapped(self, mock_run, mount_config):
+        mount_config.sleep_cycle.curate_user_memory = True
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md="## Preferences\n- Likes vim\n"
+        )
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='```json\n{"ops": [{"op": "append", "heading": "Preferences", "line": "- New thing"}]}\n```',
+            stderr="",
+        )
+        result = curate_user_memory(mount_config, "alice")
+        assert result is True
+        assert "- New thing" in (config_dir / "USER.md").read_text()
+
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_subprocess_timeout_returns_false(self, mock_run, mount_config):
+        import subprocess as sp
+        mount_config.sleep_cycle.curate_user_memory = True
+        _setup_curation_fixture(mount_config, existing_user_md="## A\n- a\n")
+        mock_run.side_effect = sp.TimeoutExpired(cmd="claude", timeout=120)
+        result = curate_user_memory(mount_config, "alice")
+        assert result is False
+
+    @patch("istota.memory.search.index_file")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_reindexes_user_md_when_ops_applied(
+        self, mock_run, mock_index, mount_config, db_path
+    ):
+        mount_config.sleep_cycle.curate_user_memory = True
+        _setup_curation_fixture(mount_config, existing_user_md="## Preferences\n- old\n")
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"ops": [{"op": "append", "heading": "Preferences", "line": "- New durable fact"}]}',
+            stderr="",
+        )
+        with db.get_db(db_path) as conn:
+            result = curate_user_memory(mount_config, "alice", conn=conn)
+        assert result is True
+        assert mock_index.called
+        call = mock_index.call_args
+        args = call.args
+        kwargs = call.kwargs
+        # signature: index_file(conn, user_id, file_path, content, source_type)
+        assert (args[1] if len(args) > 1 else kwargs.get("user_id")) == "alice"
+        passed_source_type = args[4] if len(args) > 4 else kwargs.get("source_type")
+        assert passed_source_type == "user_memory"
+        passed_content = args[3] if len(args) > 3 else kwargs.get("content")
+        assert "New durable fact" in passed_content
+
+    @patch("istota.memory.search.index_file")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_reindex_failure_does_not_break_curation(
+        self, mock_run, mock_index, mount_config, db_path
+    ):
+        mount_config.sleep_cycle.curate_user_memory = True
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md="## A\n- a\n"
+        )
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}',
+            stderr="",
+        )
+        mock_index.side_effect = Exception("vec extension borked")
+        with db.get_db(db_path) as conn:
+            result = curate_user_memory(mount_config, "alice", conn=conn)
+        assert result is True
+        assert "- new" in (config_dir / "USER.md").read_text()
+
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_audit_log_written_for_applied_ops(self, mock_run, mount_config):
+        mount_config.sleep_cycle.curate_user_memory = True
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md="## A\n- a\n"
+        )
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}',
+            stderr="",
+        )
+        curate_user_memory(mount_config, "alice")
+        audit_path = config_dir / "USER.md.audit.jsonl"
+        assert audit_path.exists()
+        import json as _json
+        line = audit_path.read_text().strip().splitlines()[0]
+        entry = _json.loads(line)
+        assert entry["user_id"] == "alice"
+        assert any(a["op"]["op"] == "append" for a in entry["applied"])
+
+    @patch("istota.sleep_cycle._post_curation_summary")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_log_channel_summary_posted_when_ops_applied_and_configured(
+        self, mock_run, mock_post, mount_config
+    ):
+        mount_config.sleep_cycle.curate_user_memory = True
+        mount_config.sleep_cycle.curation_log_summary = True
+        _setup_curation_fixture(mount_config, existing_user_md="## A\n- a\n")
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}',
+            stderr="",
+        )
+        result = curate_user_memory(mount_config, "alice")
+        assert result is True
+        assert mock_post.called
+
+    @patch("istota.sleep_cycle._post_curation_summary")
+    @patch("istota.sleep_cycle.subprocess.run")
+    def test_log_channel_summary_skipped_when_disabled(
+        self, mock_run, mock_post, mount_config
+    ):
+        mount_config.sleep_cycle.curate_user_memory = True
+        mount_config.sleep_cycle.curation_log_summary = False
+        _setup_curation_fixture(mount_config, existing_user_md="## A\n- a\n")
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}',
+            stderr="",
+        )
+        curate_user_memory(mount_config, "alice")
+        mock_post.assert_not_called()
 
     def test_returns_false_when_no_dated_memories(self, mount_config):
         result = curate_user_memory(mount_config, "alice")
         assert result is False
 
     @patch("istota.sleep_cycle.subprocess.run")
-    def test_returns_false_on_cli_failure(self, mock_run, mount_config):
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- Memory")
-
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Error")
-        result = curate_user_memory(mount_config, "alice")
-        assert result is False
-
-    @patch("istota.sleep_cycle.subprocess.run")
-    def test_returns_false_on_timeout(self, mock_run, mount_config):
-        import subprocess
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- Memory")
-
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=120)
-        result = curate_user_memory(mount_config, "alice")
-        assert result is False
-
-    @patch("istota.memory.search.index_file")
-    @patch("istota.sleep_cycle.subprocess.run")
-    def test_reindexes_user_md_after_rewrite(self, mock_run, mock_index, mount_config, db_path):
-        """After curation rewrites USER.md, the search index for source_type='user_memory'
-        must be refreshed — otherwise searches return stale chunks of the old file."""
-        mount_config.sleep_cycle.curate_user_memory = True
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- Prefers Python")
-
-        config_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
-        config_dir.mkdir(parents=True)
-        new_content = "# Alice\n\n## Preferences\n- Prefers Python over JS\n"
-        mock_run.return_value = MagicMock(returncode=0, stdout=new_content, stderr="")
-
-        with db.get_db(db_path) as conn:
-            result = curate_user_memory(mount_config, "alice", conn=conn)
-        assert result is True
-
-        # Verify index_file was called with the new USER.md content + correct source_type
-        assert mock_index.called, "index_file should be called after curation rewrites USER.md"
-        call_kwargs = mock_index.call_args
-        # Positional or keyword: (conn, user_id, file_path, content, source_type, ...)
-        args = call_kwargs.args
-        kwargs = call_kwargs.kwargs
-        assert args[1] == "alice" or kwargs.get("user_id") == "alice"
-        passed_source_type = args[4] if len(args) > 4 else kwargs.get("source_type")
-        assert passed_source_type == "user_memory"
-        passed_content = args[3] if len(args) > 3 else kwargs.get("content")
-        assert "Prefers Python over JS" in passed_content
-
-    @patch("istota.memory.search.index_file")
-    @patch("istota.sleep_cycle.subprocess.run")
-    def test_no_reindex_when_no_changes_needed(self, mock_run, mock_index, mount_config, db_path):
-        """If curation says NO_CHANGES_NEEDED, USER.md is not rewritten and re-index must not fire."""
-        mount_config.sleep_cycle.curate_user_memory = True
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- Memory")
-        mock_run.return_value = MagicMock(returncode=0, stdout=NO_CHANGES_NEEDED, stderr="")
-
-        with db.get_db(db_path) as conn:
-            curate_user_memory(mount_config, "alice", conn=conn)
-        mock_index.assert_not_called()
-
-    @patch("istota.memory.search.index_file")
-    @patch("istota.sleep_cycle.subprocess.run")
-    def test_reindex_failure_does_not_break_curation(self, mock_run, mock_index, mount_config, db_path):
-        """A failure in re-indexing must not propagate — USER.md update is the load-bearing op."""
-        mount_config.sleep_cycle.curate_user_memory = True
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        memories_dir.mkdir(parents=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (memories_dir / f"{today}.md").write_text("- Memory")
-        config_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
-        config_dir.mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="# New content\n", stderr="")
-        mock_index.side_effect = Exception("vec extension borked")
-
-        with db.get_db(db_path) as conn:
-            result = curate_user_memory(mount_config, "alice", conn=conn)
-        # Curation still reports success — the file write is what matters
-        assert result is True
-        # And the file was actually written
-        assert (config_dir / "USER.md").read_text().startswith("# New content")
-
-    @patch("istota.sleep_cycle.subprocess.run")
     def test_curation_called_from_sleep_cycle(self, mock_run, mount_config, db_path):
         """Verify curate_user_memory is called when enabled in process_user_sleep_cycle."""
         mount_config.sleep_cycle.curate_user_memory = True
-
         # First call: extraction, second call: curation
         mock_run.side_effect = [
             MagicMock(returncode=0, stdout="- Memory from today\n", stderr=""),
-            MagicMock(returncode=0, stdout=NO_CHANGES_NEEDED, stderr=""),
+            MagicMock(returncode=0, stdout='{"ops": []}', stderr=""),
         ]
-
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="Test", user_id="alice")
             db.update_task_status(conn, t, "running")
             db.update_task_status(conn, t, "completed", result="Done")
-
             process_user_sleep_cycle(mount_config, conn, "alice")
-
         # Should have been called twice: once for extraction, once for curation
         assert mock_run.call_count == 2
 
@@ -812,18 +873,12 @@ class TestCurateUserMemory:
     def test_curation_not_called_when_disabled(self, mock_run, mount_config, db_path):
         """Verify curate_user_memory is NOT called when disabled."""
         mount_config.sleep_cycle.curate_user_memory = False
-
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="- Memory\n", stderr="",
-        )
-
+        mock_run.return_value = MagicMock(returncode=0, stdout="- Memory\n", stderr="")
         with db.get_db(db_path) as conn:
             t = db.create_task(conn, prompt="Test", user_id="alice")
             db.update_task_status(conn, t, "running")
             db.update_task_status(conn, t, "completed", result="Done")
-
             process_user_sleep_cycle(mount_config, conn, "alice")
-
         # Only one call: extraction. No curation.
         assert mock_run.call_count == 1
 

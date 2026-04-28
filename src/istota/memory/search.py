@@ -293,6 +293,69 @@ def _delete_source_chunks(
     return len(chunk_ids)
 
 
+# Default ephemeral source types swept by cleanup_old_chunks. user_memory and
+# any future channel-durable type are intentionally excluded — those refresh
+# on file edit, not by age.
+EPHEMERAL_SOURCE_TYPES: tuple[str, ...] = ("conversation", "memory_file", "channel_memory")
+
+
+def cleanup_old_chunks(
+    conn: sqlite3.Connection,
+    user_id: str,
+    retention_days: int,
+    source_types: tuple[str, ...] | None = None,
+) -> int:
+    """Delete ephemeral memory_chunks rows older than `retention_days`.
+
+    `retention_days <= 0` is a no-op (matches the existing convention used by
+    `cleanup_old_memory_files`). FTS5 rows are cleared via the existing
+    AFTER DELETE trigger on `memory_chunks`. Vec rows are cleared manually
+    because the vec table has no trigger.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if retention_days <= 0:
+        return 0
+    if source_types is None:
+        source_types = EPHEMERAL_SOURCE_TYPES
+    if not source_types:
+        return 0
+
+    # SQLite's `datetime('now')` (used by the column default) writes a tz-naive
+    # UTC ISO string. Match that shape so lexicographic comparison works.
+    cutoff = (
+        (datetime.now(timezone.utc) - timedelta(days=retention_days))
+        .replace(tzinfo=None)
+        .isoformat()
+    )
+
+    placeholders = ",".join("?" * len(source_types))
+    rows = conn.execute(
+        f"SELECT id FROM memory_chunks "
+        f"WHERE user_id = ? AND source_type IN ({placeholders}) AND created_at < ?",
+        (user_id, *source_types, cutoff),
+    ).fetchall()
+    chunk_ids = [r[0] for r in rows]
+    if not chunk_ids:
+        return 0
+
+    # Cascade to vec table (no trigger exists for memory_chunks_vec).
+    if enable_vec_extension(conn):
+        try:
+            for cid in chunk_ids:
+                conn.execute("DELETE FROM memory_chunks_vec WHERE chunk_id = ?", (cid,))
+        except Exception:
+            pass  # vec table may not exist on older deployments
+
+    id_placeholders = ",".join("?" * len(chunk_ids))
+    conn.execute(
+        f"DELETE FROM memory_chunks WHERE id IN ({id_placeholders})",
+        chunk_ids,
+    )
+    conn.commit()
+    return len(chunk_ids)
+
+
 def index_conversation(
     conn: sqlite3.Connection,
     user_id: str,

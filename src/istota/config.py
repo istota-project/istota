@@ -151,6 +151,7 @@ class SleepCycleConfig:
     lookback_hours: int = 24
     auto_load_dated_days: int = 3  # auto-load N days of dated memories into prompts (0 = disabled)
     curate_user_memory: bool = False  # nightly USER.md curation from dated memories
+    curation_log_summary: bool = True  # post one-line summary to user's log_channel after applied ops
 
 
 @dataclass
@@ -942,6 +943,7 @@ def load_config(config_path: Path | None = None) -> Config:
             lookback_hours=sc.get("lookback_hours", 24),
             auto_load_dated_days=sc.get("auto_load_dated_days", 3),
             curate_user_memory=sc.get("curate_user_memory", False),
+            curation_log_summary=sc.get("curation_log_summary", True),
         )
 
     if "channel_sleep_cycle" in data:
