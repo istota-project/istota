@@ -53,7 +53,7 @@ The browser container requires an x86-64 host (Chrome has no ARM packages).
 
 ### Configuration
 
-The `.env` file exposes most of the same settings available in the Ansible role: scheduler intervals, conversation context tuning, progress updates, sleep cycle, memory search, email (IMAP/SMTP), ntfy notifications, developer skill (GitLab/GitHub), and per-user overrides. See `.env.example` for the full list with defaults.
+The `.env` file exposes most of the same settings available in the Ansible role: scheduler intervals, conversation context tuning, progress updates, sleep cycle, memory search, email (IMAP/SMTP), ntfy notifications, developer skill (git/gitlab/github), and per-user overrides. See `.env.example` for the full list with defaults.
 
 The config file at `/data/config/config.toml` inside the container is generated on first start and not overwritten on subsequent starts. To change settings after initial setup, either delete the config and restart (it regenerates from env vars), or edit it directly:
 
@@ -106,11 +106,11 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 
 **Messaging** — Nextcloud Talk (DMs and multi-user rooms with @mention support), email (IMAP/SMTP with threading), TASKS.md file polling, CLI.
 
-**Skills** — Loaded on demand based on prompt keywords, resource types, and source types. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/GitLab/GitHub workflows, accounting (beancount ledger, invoicing, transactions, work log), GPS location tracking (Overland), Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), Miniflux RSS feed management, and more. Skills are a curated standard library, not a plugin marketplace.
+**Skills** — Two-pass selection: deterministic keyword/resource matching, then optional Haiku-based semantic routing for the unselected manifest. Sticky skills carry the previous turn's set into follow-ups in the same conversation. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/gitlab/github workflows, money (in-process beancount ledger, invoicing, transactions, work log), Google Workspace (Drive, Gmail, Calendar, Sheets, Docs), GPS location tracking (Overland), Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), Miniflux RSS feed management, and more. Skills are a curated standard library, not a plugin marketplace.
 
 **Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Temporal knowledge graph stores structured facts as entity-relationship triples with validity windows — freeform predicates, automatic supersession for single-valued relations, fuzzy dedup. Configurable memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files.
 
-**Scheduling** — Cron jobs via CRON.md (AI prompts or shell commands), natural-language reminders as one-shot cron entries, scheduled briefings with calendar/markets/headlines/news/todos components.
+**Scheduling** — Cron jobs via CRON.md (AI prompts, prompt files, or shell commands), per-job model and effort overrides for cheap retrieve-and-render runs, natural-language reminders as one-shot cron entries, scheduled briefings with calendar/markets/headlines/news/todos components.
 
 **Briefings** — Configurable morning/evening summaries. Components include calendar events, market data (futures, indices via yfinance + FinViz), headlines (pre-fetched frontpages from AP, Reuters, Guardian, FT, Al Jazeera, Le Monde, Der Spiegel), email newsletter digests, todos, and reminders. Output to Talk, email, or both.
 
@@ -119,6 +119,12 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 **Multi-user** — Per-user config files, resource permissions, worker pools, and filesystem sandboxing. Admin/non-admin isolation. Each user gets their own Nextcloud workspace with config files, exports, and memory. Multiple bot instances can coexist on the same Nextcloud, each running as its own Nextcloud user with a separate namespace, and they can interact with each other through Talk rooms like any other participant.
 
 **Security** — Bubblewrap sandbox per invocation (PID namespace, restricted mounts, credential isolation). Non-admin users can't see the database, other users' files, or system config. Deferred DB writes via JSON files for sandboxed operations. Credential stripping from subprocess environments.
+
+**Email routing** — Plus-addressed inbound (`bot+user_id@domain`) so external contacts can email a specific user's agent directly. Outbound emails are tracked so external replies thread back to the originating Talk conversation, where the bot drafts a response and asks the user to confirm before sending. Untrusted senders to plus-addresses go through a deterministic confirmation gate before any task runs.
+
+**Web interface** — Authenticated SvelteKit dashboard at `/istota` (Nextcloud OIDC). Includes a Miniflux feed reader with viewport-based read tracking, a GPS location/places page with map, cluster discovery, dismiss-zones, and per-place visit stats, plus money pages backed by the same in-process accounting code the skill uses.
+
+**Pluggable model backend** — A `Brain` protocol (`[brain] kind = "claude_code"`) sits between the executor and the model invocation. Phase 1 wraps the `claude` CLI with stream-json parsing and transient-API retries; future brains (anthropic, openrouter) drop in without touching the executor.
 
 **Constitution** — An [Emissaries](https://commontask.org/emissaries/) layer defines how the agent reasons about data, handles the boundary between private and public action, and what it owes to people beyond its operator. Per-user persona customization sits on top.
 
@@ -151,7 +157,7 @@ Istota is built around Nextcloud — it uses your files, calendars, contacts, an
 | Storage | Nextcloud (WebDAV/rclone mount), includes files, calendars, contacts | Local filesystem |
 | Memory | USER.md + dated memories + channel memory + knowledge graph (temporal triples) + nightly curation + BM25/vector search + memory cap | Daily logs + MEMORY.md + hybrid search + pre-compaction flush |
 | Scheduling | CRON.md + briefings + heartbeats | Built-in cron + webhooks + Gmail Pub/Sub |
-| Skills | ~20 built-in skills with YAML frontmatter manifests, two-pass selection (keyword + semantic) | 5,700+ community skills via ClawHub registry, three tiers |
+| Skills | ~28 built-in skills with YAML frontmatter manifests, two-pass selection (keyword + semantic), sticky-skills carryover | 5,700+ community skills via ClawHub registry, three tiers |
 | Security | Bubblewrap filesystem sandbox, credential stripping, admin/non-admin isolation, deferred DB writes | DM pairing policy; community skills are an acknowledged risk vector |
 | Voice | Whisper transcription (input only) | ElevenLabs TTS + always-on speech wake |
 | Browser | Dockerized Playwright with bot-detection countermeasures | Built-in Chrome DevTools Protocol |
@@ -163,26 +169,33 @@ OpenClaw connects to many messaging platforms and has a large community skill re
 
 ## User workspace
 
-Each user gets a shared Nextcloud folder:
+Each user gets a Nextcloud workspace:
 
 ```
-/Users/alice/istota/
-├── config/
-│   ├── USER.md          # Persistent memory
-│   ├── TASKS.md         # File-based task queue
-│   ├── PERSONA.md       # Personality customization
-│   ├── BRIEFINGS.md     # Briefing schedule
-│   ├── CRON.md          # Scheduled jobs
-│   └── HEARTBEAT.md     # Health monitoring config
-├── exports/             # Bot-generated files
-└── examples/            # Reference documentation
+/Users/alice/
+├── istota/              # Shared with the user
+│   ├── config/
+│   │   ├── USER.md          # Persistent memory
+│   │   ├── PERSONA.md       # Personality customization
+│   │   ├── TASKS.md         # File-based task queue
+│   │   ├── BRIEFINGS.md     # Briefing schedule
+│   │   ├── CRON.md          # Scheduled jobs
+│   │   └── HEARTBEAT.md     # Health monitoring config
+│   ├── exports/         # Bot-generated files
+│   ├── scripts/         # User-authored reusable scripts
+│   └── examples/        # Reference documentation
+├── inbox/               # Drop files here for the bot to process
+├── memories/            # Nightly-extracted dated memories (YYYY-MM-DD.md)
+└── shared/              # Auto-organized files shared with the bot
 ```
+
+Channels (Talk rooms) get their own `/Channels/{token}/` namespace with `CHANNEL.md` and dated channel memories.
 
 ## Development
 
 ```bash
 uv sync --extra all                        # Install all dependencies
-uv run pytest tests/ -v                    # Run tests (~2960 unit tests)
+uv run pytest tests/ -v                    # Run tests (~3450 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
@@ -212,6 +225,6 @@ Skills with missing dependencies are automatically excluded from prompt selectio
 [MIT](LICENSE)
 
 ***
-© 2026 [Stefan Kubicki](https://kubicki.org) • a [CYNIUM](https://cynium.com) release • shipped from the [Atoll](https://kubicki.org/atoll)
+© 2026 [Stefan Kubicki](https://kubicki.org) • Developed at [CYNIUM Labs](https://cynium.com)
 ***
 Canonical URL: https://forge.cynium.com/cynium/istota

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- README refresh: added Email routing, Web interface, and Pluggable model backend sections; updated Skills (two-pass selection + sticky-skills carryover, current inline skill list including `money` in-process and Google Workspace); per-job model/effort overrides under Scheduling; comparison table skill count updated to ~28; workspace tree expanded; lowercase `git/gitlab/github` throughout prose.
+- Project now publishes to a github mirror at `istota-project/istota` in addition to the gitlab canonical repo. Mirror is push-driven (no auto-sync); see DEVLOG for the dual-`pushurl` setup.
+
 ### Added
 - Pluggable `Brain` abstraction in `src/istota/brain/` separates model invocation (subprocess, stream parsing, retry) from executor orchestration (memory, skills, sandbox, deferred DB writes). Selected via new `[brain] kind = "..."` config section; defaults to `"claude_code"` (current behavior) so existing deployments need no changes. Lays the groundwork for in-process brains (OpenRouter, Anthropic-direct) without a parallel execution path.
 - New `untrusted_input` skill (doc-only) loads alongside skills that ingest content from outside the trust boundary — `email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks` — via `companion_skills`. Pairs with `sensitive_actions`: that one governs outbound, this one governs how inbound is *read*. Covers nine concrete injection patterns (instruction injection, fake system framing, impersonation, pre-authorization claims, encoded payloads, hidden HTML, reply-chain quote injection, entity-name probes, gradual escalation) and re-states the per-action authorization rule so it travels with whichever side of the boundary the model is reading from.
