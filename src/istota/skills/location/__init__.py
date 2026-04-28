@@ -583,8 +583,8 @@ def cmd_reverse_geocode(args):
 
 def cmd_day_summary(args):
     from istota.geo import (
-        reverse_geocode, cluster_pings, haversine,
-        filter_transit_clusters, merge_consecutive_stops,
+        reverse_geocode, cluster_pings, dedupe_near_duplicate_pings, haversine,
+        filter_transit_clusters, merge_consecutive_stops, validate_cluster_places,
     )
 
     conn = _get_conn()
@@ -624,16 +624,18 @@ def cmd_day_summary(args):
         return
 
     pings = [dict(r) for r in rows]
+    pings = dedupe_near_duplicate_pings(pings)
     clusters = cluster_pings(pings, radius_m=250)
-
-    stops, transit_pings = filter_transit_clusters(clusters)
 
     # Load saved places for proximity matching
     saved_places = conn.execute(
-        "SELECT name, lat, lon, radius_meters FROM places WHERE user_id = ?",
+        "SELECT id, name, lat, lon, radius_meters FROM places WHERE user_id = ?",
         (user_id,),
     ).fetchall()
     saved_places = [dict(r) for r in saved_places]
+    validate_cluster_places(clusters, {p["id"]: p for p in saved_places})
+
+    stops, transit_pings = filter_transit_clusters(clusters)
 
     # Resolve location names
     for stop in stops:

@@ -80,6 +80,65 @@ def _timestamp_gap_seconds(ts_a: str, ts_b: str) -> float:
     return abs((_parse_ts(ts_b) - _parse_ts(ts_a)).total_seconds())
 
 
+def dedupe_near_duplicate_pings(
+    pings: list[dict],
+    window_seconds: float = 5.0,
+) -> list[dict]:
+    """Drop dual-source artifacts where the phone reports two fixes within seconds.
+
+    Overland on iOS occasionally emits one high-accuracy GPS fix plus one
+    low-accuracy cell/Wi-Fi fix within a few seconds. The cell/Wi-Fi fix is
+    typically anchored away from the real position (e.g., near home/cell tower)
+    and can carry ``activity_type=None``. Left in, these create zigzag patterns
+    that fragment clusters and break trip detection.
+
+    For each pair of consecutive pings within ``window_seconds``:
+      1. If exactly one has ``activity_type`` set → keep it.
+      2. Else if one has smaller ``accuracy`` → keep it.
+      3. Else (ambiguous) → keep both. We'd rather preserve a real fix than
+         drop one based on a guess.
+
+    Pings must be sorted by timestamp ascending. Input is not mutated.
+    See ISSUE-059 for the data analysis behind these rules.
+    """
+    if not pings:
+        return []
+
+    kept: list[dict] = [pings[0]]
+    for current in pings[1:]:
+        prev = kept[-1]
+        try:
+            dt = _timestamp_gap_seconds(prev["timestamp"], current["timestamp"])
+        except Exception:
+            kept.append(current)
+            continue
+
+        if dt > window_seconds:
+            kept.append(current)
+            continue
+
+        prev_act = prev.get("activity_type")
+        curr_act = current.get("activity_type")
+        if prev_act and not curr_act:
+            continue  # drop current
+        if curr_act and not prev_act:
+            kept[-1] = current
+            continue
+
+        prev_acc = prev.get("accuracy")
+        curr_acc = current.get("accuracy")
+        if prev_acc is not None and curr_acc is not None:
+            if prev_acc < curr_acc:
+                continue  # prev is better, drop current
+            if curr_acc < prev_acc:
+                kept[-1] = current
+                continue
+
+        kept.append(current)
+
+    return kept
+
+
 def cluster_pings(
     pings: list[dict],
     radius_m: float = 200,
@@ -141,15 +200,52 @@ def _finalize_cluster(cluster: dict) -> dict:
     n = len(cluster["pings"])
     lat = cluster["lat_sum"] / n
     lon = cluster["lon_sum"] / n
+    place_id = None
+    place_name = None
+    for p in cluster["pings"]:
+        pid = p.get("place_id")
+        if pid is not None:
+            place_id = pid
+            place_name = p.get("place_name")
+            break
     return {
         "lat": lat,
         "lon": lon,
         "ping_count": n,
         "first_ts": cluster["pings"][0]["timestamp"],
         "last_ts": cluster["pings"][-1]["timestamp"],
-        "place_id": cluster["pings"][0].get("place_id"),
-        "place_name": cluster["pings"][0].get("place_name"),
+        "place_id": place_id,
+        "place_name": place_name,
     }
+
+
+def validate_cluster_places(
+    clusters: list[dict],
+    places_by_id: dict,
+) -> list[dict]:
+    """Strip place tags from clusters whose centroid is outside the place radius.
+
+    With ``_finalize_cluster`` propagating ``place_id`` from any member ping,
+    a cluster can inherit a place tag from a single grazing ping during a
+    drive-by — promoting transit into a phantom stop downstream because
+    ``filter_transit_clusters`` bypasses min-pings/min-dwell filters for
+    place-matched clusters. This guard requires the cluster centroid itself
+    to be within the place's radius, not just one stray ping. See ISSUE-059.
+
+    ``places_by_id`` maps place_id → dict with at least ``lat``, ``lon``,
+    ``radius_meters``. Clusters referencing unknown place_ids are left alone
+    (we only invalidate when we can prove the centroid is outside).
+    Mutates clusters in place and returns them.
+    """
+    for c in clusters:
+        pid = c.get("place_id")
+        if pid is None or pid not in places_by_id:
+            continue
+        place = places_by_id[pid]
+        if haversine(c["lat"], c["lon"], place["lat"], place["lon"]) > place["radius_meters"]:
+            c["place_id"] = None
+            c["place_name"] = None
+    return clusters
 
 
 # Max transit pings between same-location stops before they're treated as
