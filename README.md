@@ -1,6 +1,6 @@
-# > istota
+# Istota
 
-A self-hosted AI agent that lives in your Nextcloud instance. Powered by Claude Code. ([istota.xyz](https://istota.xyz))
+The octopus-shaped, self-hosted AI agent that lives in your Nextcloud. ([istota.xyz](https://istota.xyz))
 
 ## Quick start (Docker)
 
@@ -218,13 +218,11 @@ Skills with missing dependencies are automatically excluded from prompt selectio
 
 - [Documentation](https://istota.xyz/docs) — full docs (also buildable locally with `mkdocs serve`)
 - [CHANGELOG.md](CHANGELOG.md) — release notes
-- [DEVLOG.md](DEVLOG.md) — verbose development journal
+- [DEVLOG.md](DEVLOG.md) — development journal
 
 ## License
 
 [MIT](LICENSE)
 
 ***
-© 2026 [Stefan Kubicki](https://kubicki.org) • Developed at [CYNIUM Labs](https://cynium.com)
-***
-Canonical URL: https://forge.cynium.com/cynium/istota
+© 2026 [Stefan Kubicki](https://kubicki.org) • A [CYNIUM](https://cynium.com) Lamplight Release
