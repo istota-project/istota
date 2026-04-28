@@ -345,6 +345,42 @@ class TestSearch:
         assert len(results) > 0
         conn.close()
 
+    def test_exclude_conversation_task_ids_drops_matching(self, tmp_path):
+        """Conversation chunks already in context are filtered out of recall."""
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "100", ["Recurrent neural networks"], None)
+            _insert_chunks(conn, "alice", "conversation", "101", ["Convolutional neural networks"], None)
+
+        with patch("istota.memory.search._search_vec", return_value=[]):
+            results = search(
+                conn, "alice", "neural networks", limit=5,
+                exclude_conversation_task_ids={100},
+            )
+
+        assert all(r.source_id != "100" for r in results)
+        assert any(r.source_id == "101" for r in results)
+        conn.close()
+
+    def test_exclude_conversation_task_ids_keeps_other_source_types(self, tmp_path):
+        """Exclude only applies to conversation chunks, not memory_file."""
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "100", ["Quantum entanglement"], None)
+            _insert_chunks(conn, "alice", "memory_file", "100", ["Quantum entanglement notes"], None)
+
+        with patch("istota.memory.search._search_vec", return_value=[]):
+            results = search(
+                conn, "alice", "quantum entanglement", limit=5,
+                exclude_conversation_task_ids={100},
+            )
+
+        # The memory_file chunk with source_id "100" should still appear.
+        kinds = {(r.source_type, r.source_id) for r in results}
+        assert ("memory_file", "100") in kinds
+        assert ("conversation", "100") not in kinds
+        conn.close()
+
 
 class TestGetStats:
     def test_stats_with_data(self, tmp_path):

@@ -217,10 +217,21 @@ def _insert_chunks(
     metadata: dict | None = None,
     topic: str | None = None,
     entities: list[str] | None = None,
+    topic_per_chunk: list[str | None] | None = None,
 ) -> int:
-    """Insert chunks with embeddings. Returns number of chunks inserted."""
+    """Insert chunks with embeddings. Returns number of chunks inserted.
+
+    `topic_per_chunk`, when provided, overrides `topic` per-chunk. The list
+    must have the same length as `chunks`. Entries may be None for chunks
+    whose topic could not be determined; NULL-topic chunks are still
+    returned in topic-filtered searches by design.
+    """
     if not chunks:
         return 0
+    if topic_per_chunk is not None and len(topic_per_chunk) != len(chunks):
+        raise ValueError(
+            f"topic_per_chunk length {len(topic_per_chunk)} != chunks length {len(chunks)}"
+        )
 
     metadata_json = json.dumps(metadata) if metadata else None
     entities_json = json.dumps(entities) if entities else None
@@ -234,13 +245,14 @@ def _insert_chunks(
     inserted = 0
     for i, chunk in enumerate(chunks):
         ch = _content_hash(chunk)
+        chunk_topic = topic_per_chunk[i] if topic_per_chunk is not None else topic
         try:
             cursor = conn.execute(
                 "INSERT INTO memory_chunks "
                 "(user_id, source_type, source_id, chunk_index, content, content_hash, metadata_json, topic, entities) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(user_id, content_hash) DO NOTHING",
-                (user_id, source_type, source_id, i, chunk, ch, metadata_json, topic, entities_json),
+                (user_id, source_type, source_id, i, chunk, ch, metadata_json, chunk_topic, entities_json),
             )
             if cursor.rowcount > 0:
                 inserted += 1
@@ -400,18 +412,27 @@ def index_file(
     source_type: str = "memory_file",
     topic: str | None = None,
     entities: list[str] | None = None,
+    topic_per_chunk: list[str | None] | None = None,
 ) -> int:
     """Index a file's content, replacing any existing chunks for that source.
 
     Returns number of chunks inserted.
+
+    `topic_per_chunk` (when provided) overrides `topic` per-chunk. Length
+    must match the chunk count produced by `chunk_text(content)` — callers
+    that build per-chunk topics should chunk first, then pass the resulting
+    aligned list. Used by the sleep cycle to attach per-task topics derived
+    from `ref:N` markers to their containing chunks.
     """
     # Delete existing chunks for this source
     _delete_source_chunks(conn, user_id, source_type, file_path)
 
     chunks = chunk_text(content)
     meta = {"file_path": file_path}
-    return _insert_chunks(conn, user_id, source_type, file_path, chunks, meta,
-                          topic=topic, entities=entities)
+    return _insert_chunks(
+        conn, user_id, source_type, file_path, chunks, meta,
+        topic=topic, entities=entities, topic_per_chunk=topic_per_chunk,
+    )
 
 
 def reindex_all(
@@ -466,11 +487,12 @@ def reindex_all(
                 if n > 0:
                     stats["chunks"] += n
 
-    # Reindex channel memory files
+    # Reindex channel memory files (dated + durable CHANNEL.md)
     if config.nextcloud_mount_path:
         channels_dir = config.nextcloud_mount_path / "Channels"
         if channels_dir.is_dir():
             stats["channel_memories"] = 0
+            stats["channel_durable"] = 0
             for token_dir in sorted(channels_dir.iterdir()):
                 if not token_dir.is_dir():
                     continue
@@ -491,6 +513,21 @@ def reindex_all(
                             if n > 0:
                                 stats["channel_memories"] += 1
                                 stats["chunks"] += n
+                # Durable CHANNEL.md — durable like USER.md, refreshed on edit.
+                channel_md = token_dir / "CHANNEL.md"
+                if channel_md.is_file():
+                    content = channel_md.read_text()
+                    if content.strip():
+                        n = index_file(
+                            conn,
+                            channel_user_id,
+                            str(channel_md),
+                            content,
+                            "channel_memory_durable",
+                        )
+                        if n > 0:
+                            stats["channel_durable"] += 1
+                            stats["chunks"] += n
 
     return stats
 
@@ -757,6 +794,7 @@ def search(
     since: str | None = None,
     topics: list[str] | None = None,
     entities: list[str] | None = None,
+    exclude_conversation_task_ids: set[int] | None = None,
 ) -> list[SearchResult]:
     """Hybrid search: BM25 + vector with RRF fusion.
 
@@ -768,6 +806,11 @@ def search(
         since: ISO date string (e.g., "2026-03-25"). Only return chunks created on or after this date.
         topics: Filter to chunks with these topics (NULL-topic chunks always included).
         entities: Filter to chunks mentioning these entities (JSON array containment).
+        exclude_conversation_task_ids: Task IDs already injected as conversation
+            history. Chunks with source_type="conversation" whose source_id matches
+            one of these are dropped from the results so recall doesn't duplicate
+            the context selection. source_id is stored as a string; ints are
+            cast to str for comparison.
     """
     # Fetch more from each source for fusion
     fetch_limit = limit * 3
@@ -779,12 +822,21 @@ def search(
 
     if vec_results:
         fused = _rrf_fusion(bm25_results, vec_results, k=rrf_k)
-        return fused[:limit]
+        results = fused
     else:
         # BM25-only fallback
         for rank, r in enumerate(bm25_results, 1):
             r.bm25_rank = rank
-        return bm25_results[:limit]
+        results = bm25_results
+
+    if exclude_conversation_task_ids:
+        excluded = {str(tid) for tid in exclude_conversation_task_ids}
+        results = [
+            r for r in results
+            if not (r.source_type == "conversation" and r.source_id in excluded)
+        ]
+
+    return results[:limit]
 
 
 def get_stats(

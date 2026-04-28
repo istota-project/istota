@@ -152,6 +152,8 @@ class SleepCycleConfig:
     auto_load_dated_days: int = 3  # auto-load N days of dated memories into prompts (0 = disabled)
     curate_user_memory: bool = False  # nightly USER.md curation from dated memories
     curation_log_summary: bool = True  # post one-line summary to user's log_channel after applied ops
+    extraction_model: str = "sonnet"  # model for nightly memory extraction (passed to brain)
+    curation_model: str = "sonnet"  # model for op-based USER.md curation
 
 
 @dataclass
@@ -161,6 +163,7 @@ class ChannelSleepCycleConfig:
     cron: str = "0 3 * * *"  # UTC (after user sleep cycles)
     lookback_hours: int = 24
     memory_retention_days: int = 0  # 0 = unlimited retention
+    extraction_model: str = "sonnet"  # model for channel memory extraction
 
 
 @dataclass
@@ -371,7 +374,7 @@ class Config:
     model: str = ""  # Claude model to use; pin to a version like "claude-opus-4-7" rather than "opus" so updates don't silently switch us. Empty = CLI default
     effort: str = ""  # Effort level: low, medium, high, xhigh, max. Empty = model default. Supported on Opus 4.7, Opus 4.6, Sonnet 4.6
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
-    max_knowledge_facts: int = 0  # cap knowledge graph facts per prompt (0 = unlimited)
+    max_knowledge_facts: int = 50  # cap knowledge graph facts per prompt (0 = unlimited)
     db_path: Path = field(default_factory=lambda: Path("data/istota.db"))
     nextcloud: NextcloudConfig = field(default_factory=NextcloudConfig)
     talk: TalkConfig = field(default_factory=TalkConfig)

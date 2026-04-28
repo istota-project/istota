@@ -167,13 +167,9 @@ class TestProcessChannelSleepCycle:
             result = process_channel_sleep_cycle(mount_config, conn, "room123")
         assert result is False
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_writes_memory_file(self, mock_run, mount_config, db_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="- Decided to use GraphQL (alice, 2026-02-07)\n",
-            stderr="",
-        )
+        mock_run.return_value = (True, "- Decided to use GraphQL (alice, 2026-02-07)\n")
 
         with db.get_db(db_path) as conn:
             t = db.create_task(
@@ -193,13 +189,9 @@ class TestProcessChannelSleepCycle:
         assert memory_file.exists()
         assert "GraphQL" in memory_file.read_text()
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_no_file_when_no_new_memories(self, mock_run, mount_config, db_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=NO_NEW_MEMORIES,
-            stderr="",
-        )
+        mock_run.return_value = (True, NO_NEW_MEMORIES)
 
         with db.get_db(db_path) as conn:
             t = db.create_task(
@@ -213,13 +205,9 @@ class TestProcessChannelSleepCycle:
 
         assert result is False
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_updates_state(self, mock_run, mount_config, db_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="- New channel memory (2026-02-07)\n",
-            stderr="",
-        )
+        mock_run.return_value = (True, "- New channel memory (2026-02-07)\n")
 
         with db.get_db(db_path) as conn:
             t = db.create_task(
@@ -235,17 +223,13 @@ class TestProcessChannelSleepCycle:
             assert last_run is not None
             assert last_task == t
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_indexes_into_memory_search(self, mock_run, mount_config, db_path):
         mount_config.memory_search = MemorySearchConfig(
             enabled=True,
             auto_index_memory_files=True,
         )
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="- Channel decision (2026-02-07)\n",
-            stderr="",
-        )
+        mock_run.return_value = (True, "- Channel decision (2026-02-07)\n")
 
         with db.get_db(db_path) as conn:
             t = db.create_task(
@@ -264,10 +248,43 @@ class TestProcessChannelSleepCycle:
                 assert call_args[0][1] == "channel:room123"
                 assert call_args[0][4] == "channel_memory"
 
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    def test_indexes_durable_channel_md(self, mock_run, mount_config, db_path):
+        """CHANNEL.md is re-indexed under channel_memory_durable each cycle."""
+        mount_config.memory_search = MemorySearchConfig(
+            enabled=True,
+            auto_index_memory_files=True,
+        )
+        # Seed a CHANNEL.md so the durable indexer has something to write.
+        channel_dir = mount_config.nextcloud_mount_path / "Channels" / "room123"
+        channel_dir.mkdir(parents=True, exist_ok=True)
+        (channel_dir / "CHANNEL.md").write_text("# Project status\n- using GraphQL\n")
+
+        mock_run.return_value = (True, "- Channel decision (2026-02-07)\n")
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="Test", user_id="alice",
+                conversation_token="room123",
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Done")
+
+            with patch("istota.memory.search.index_file") as mock_index:
+                process_channel_sleep_cycle(mount_config, conn, "room123")
+
+            source_types = [c[0][4] for c in mock_index.call_args_list]
+            assert "channel_memory_durable" in source_types
+            # Verify the call used channel: prefix as user_id
+            durable_call = next(
+                c for c in mock_index.call_args_list if c[0][4] == "channel_memory_durable"
+            )
+            assert durable_call[0][1] == "channel:room123"
+
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_handles_timeout(self, mock_run, mount_config, db_path):
-        import subprocess
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=120)
+        # Brain helper returns (False, "") for any failure incl. timeout.
+        mock_run.return_value = (False, "")
 
         with db.get_db(db_path) as conn:
             t = db.create_task(
@@ -296,12 +313,8 @@ class TestProcessChannelSleepCycle:
             db.update_task_status(conn, t, "running")
             db.update_task_status(conn, t, "completed", result="Done")
 
-            with patch("istota.sleep_cycle.subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0,
-                    stdout="- Memory (2026-02-07)\n",
-                    stderr="",
-                )
+            with patch("istota.sleep_cycle._run_sleep_cycle_brain") as mock_run:
+                mock_run.return_value = (True, "- Memory (2026-02-07)\n")
                 result = process_channel_sleep_cycle(config, conn, "room123")
 
             # State must be updated even without mount, to avoid infinite reprocessing
@@ -361,14 +374,12 @@ class TestChannelSleepCycleChunkCleanup:
     """Item 4: nightly channel sleep cycle prunes old channel_memory chunks."""
 
     @patch("istota.memory.search.cleanup_old_chunks")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_chunk_cleanup_called_when_retention_set(
         self, mock_run, mock_cleanup, mount_config, db_path
     ):
         mount_config.channel_sleep_cycle.memory_retention_days = 90
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="- mem (alice, 2026-04-08)\n", stderr=""
-        )
+        mock_run.return_value = (True, "- mem (alice, 2026-04-08)\n")
         mock_cleanup.return_value = 0
         with db.get_db(db_path) as conn:
             t = db.create_task(
@@ -388,14 +399,12 @@ class TestChannelSleepCycleChunkCleanup:
         assert st == ("channel_memory",)
 
     @patch("istota.memory.search.cleanup_old_chunks")
-    @patch("istota.sleep_cycle.subprocess.run")
+    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
     def test_chunk_cleanup_skipped_when_retention_zero(
         self, mock_run, mock_cleanup, mount_config, db_path
     ):
         mount_config.channel_sleep_cycle.memory_retention_days = 0
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="- mem (alice, 2026-04-08)\n", stderr=""
-        )
+        mock_run.return_value = (True, "- mem (alice, 2026-04-08)\n")
         with db.get_db(db_path) as conn:
             t = db.create_task(
                 conn, prompt="x", user_id="alice", conversation_token="room123"

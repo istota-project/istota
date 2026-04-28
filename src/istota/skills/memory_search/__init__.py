@@ -158,9 +158,32 @@ def cmd_stats(args) -> dict:
     fact_counts = get_fact_count(conn, user_id)
     stats["knowledge_facts"] = fact_counts
 
+    # USER.md size — phase A observability for #3 (USER.md growth). Reported
+    # in bytes so growth curves over time are easy to plot. None when the
+    # file doesn't exist yet, which is distinct from 0 bytes.
+    user_md_size = _user_md_size_bytes(user_id)
+    stats["user_md_size_bytes"] = user_md_size
+
     conn.close()
 
     return {"status": "ok", **stats}
+
+
+def _user_md_size_bytes(user_id: str) -> int | None:
+    """Return USER.md size in bytes via the mount, or None if unavailable."""
+    mount = os.environ.get("NEXTCLOUD_MOUNT_PATH")
+    if not mount:
+        return None
+    # Bot dir name unknown to the skill — accept either common case.
+    base = os.path.join(mount, "Users", user_id)
+    for candidate_dir in os.listdir(base) if os.path.isdir(base) else []:
+        config_md = os.path.join(base, candidate_dir, "config", "USER.md")
+        if os.path.isfile(config_md):
+            try:
+                return os.path.getsize(config_md)
+            except OSError:
+                return None
+    return None
 
 
 def cmd_facts(args) -> dict:
@@ -285,6 +308,40 @@ def cmd_delete_fact(args) -> dict:
     return {"status": "ok", "fact_id": args.fact_id}
 
 
+def cmd_fact_history(args) -> dict:
+    """Show audit history for knowledge graph mutations."""
+    from istota.memory.knowledge_graph import ensure_table, get_fact_history
+
+    user_id = os.environ.get("ISTOTA_USER_ID", "default")
+    conn = _get_conn()
+    ensure_table(conn)
+    rows = get_fact_history(
+        conn, user_id,
+        entity=args.entity,
+        since=args.since,
+        limit=args.limit,
+    )
+    conn.close()
+    return {
+        "status": "ok",
+        "user_id": user_id,
+        "count": len(rows),
+        "rows": [
+            {
+                "id": r.id,
+                "fact_id": r.fact_id,
+                "op": r.op,
+                "ts": r.ts,
+                "source_task_id": r.source_task_id,
+                "source_type": r.source_type,
+                "before": r.before_json,
+                "after": r.after_json,
+            }
+            for r in rows
+        ],
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m istota.skills.memory_search",
@@ -345,6 +402,18 @@ def build_parser() -> argparse.ArgumentParser:
     del_p = sub.add_parser("delete-fact", help="Hard delete a fact")
     del_p.add_argument("fact_id", type=int, help="Fact ID")
 
+    # fact-history command — audit log of KG mutations
+    hist_p = sub.add_parser(
+        "fact-history",
+        help="Show audit history of knowledge graph mutations",
+    )
+    hist_p.add_argument(
+        "--entity",
+        help="Filter rows whose snapshot mentions this entity (subject or object)",
+    )
+    hist_p.add_argument("--since", help="ISO date/datetime; rows on or after this ts")
+    hist_p.add_argument("--limit", type=int, default=50, help="Max rows (default: 50)")
+
     return parser
 
 
@@ -362,6 +431,7 @@ def main(argv=None):
         "add-fact": cmd_add_fact,
         "invalidate": cmd_invalidate_fact,
         "delete-fact": cmd_delete_fact,
+        "fact-history": cmd_fact_history,
     }
 
     try:

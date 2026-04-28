@@ -62,8 +62,12 @@ Task lifecycle: `pending` -> `locked` -> `running` -> `completed` | `failed` | `
 
 | Module | Purpose |
 |---|---|
-| `sleep_cycle.py` | Nightly memory extraction from completed tasks, writes dated memory files |
-| `memory_search.py` | Hybrid BM25 + vector search over conversations and memory files |
+| `sleep_cycle.py` | Nightly orchestration: extracts memories from completed tasks, writes dated files, drives curation and retention |
+| `memory/search.py` | Hybrid BM25 + vector search, indexing, and unified chunk retention |
+| `memory/knowledge_graph.py` | Temporal entity-relationship triples with validity windows |
+| `memory/curation/` | Op-based USER.md curation (parser, ops, prompt, audit) |
+
+See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md, dated memories, recall, knowledge graph) and how each layer enters prompts.
 
 ### Output
 

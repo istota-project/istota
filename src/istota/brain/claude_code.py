@@ -100,9 +100,12 @@ class ClaudeCodeBrain:
 
     @staticmethod
     def _build_command(req: BrainRequest) -> list[str]:
-        cmd = ["claude", "-p", "-", "--allowedTools"] + req.allowed_tools + [
-            "--disallowedTools", "Agent",
-        ]
+        cmd = ["claude", "-p", "-"]
+        # Empty allowed_tools means text-only invocation (e.g. sleep cycle):
+        # skip the tool flags entirely so claude's defaults stay out of the
+        # equation. The prompt itself is what keeps the call text-only.
+        if req.allowed_tools:
+            cmd += ["--allowedTools"] + req.allowed_tools + ["--disallowedTools", "Agent"]
         if req.model:
             cmd += ["--model", req.model]
         if req.effort:
