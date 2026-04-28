@@ -118,8 +118,8 @@ class UserWorker(threading.Thread):
 | Shared files | `discover_and_organize_shared_files()` (shared_file_organizer.py) | `shared_file_check_interval` | `user_resources` |
 | Briefings | `check_briefings()` | `briefing_check_interval` | `briefing_state` |
 | Scheduled jobs | `check_scheduled_jobs()` | `briefing_check_interval` | `scheduled_jobs` |
-| Sleep cycle | `check_sleep_cycles()` (sleep_cycle.py) | `briefing_check_interval` | `sleep_cycle_state` |
-| Channel sleep | `check_channel_sleep_cycles()` (sleep_cycle.py) | `briefing_check_interval` | `channel_sleep_cycle_state` |
+| Sleep cycle | `check_sleep_cycles()` (memory/sleep_cycle.py) | `briefing_check_interval` | `sleep_cycle_state` |
+| Channel sleep | `check_channel_sleep_cycles()` (memory/sleep_cycle.py) | `briefing_check_interval` | `channel_sleep_cycle_state` |
 
 ## Cleanup (`run_cleanup_checks`)
 1. Expire stale confirmations → notify user via Talk

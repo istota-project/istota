@@ -1,4 +1,4 @@
-"""Tests for channel sleep cycle functionality in istota.sleep_cycle."""
+"""Tests for channel sleep cycle functionality in istota.memory.sleep_cycle."""
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,7 +9,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, ChannelSleepCycleConfig, MemorySearchConfig
-from istota.sleep_cycle import (
+from istota.memory.sleep_cycle import (
     gather_channel_data,
     build_channel_memory_extraction_prompt,
     process_channel_sleep_cycle,
@@ -167,7 +167,7 @@ class TestProcessChannelSleepCycle:
             result = process_channel_sleep_cycle(mount_config, conn, "room123")
         assert result is False
 
-    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_writes_memory_file(self, mock_run, mount_config, db_path):
         mock_run.return_value = (True, "- Decided to use GraphQL (alice, 2026-02-07)\n")
 
@@ -189,7 +189,7 @@ class TestProcessChannelSleepCycle:
         assert memory_file.exists()
         assert "GraphQL" in memory_file.read_text()
 
-    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_no_file_when_no_new_memories(self, mock_run, mount_config, db_path):
         mock_run.return_value = (True, NO_NEW_MEMORIES)
 
@@ -205,7 +205,7 @@ class TestProcessChannelSleepCycle:
 
         assert result is False
 
-    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_updates_state(self, mock_run, mount_config, db_path):
         mock_run.return_value = (True, "- New channel memory (2026-02-07)\n")
 
@@ -223,7 +223,7 @@ class TestProcessChannelSleepCycle:
             assert last_run is not None
             assert last_task == t
 
-    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_indexes_into_memory_search(self, mock_run, mount_config, db_path):
         mount_config.memory_search = MemorySearchConfig(
             enabled=True,
@@ -248,7 +248,7 @@ class TestProcessChannelSleepCycle:
                 assert call_args[0][1] == "channel:room123"
                 assert call_args[0][4] == "channel_memory"
 
-    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_indexes_durable_channel_md(self, mock_run, mount_config, db_path):
         """CHANNEL.md is re-indexed under channel_memory_durable each cycle."""
         mount_config.memory_search = MemorySearchConfig(
@@ -281,7 +281,7 @@ class TestProcessChannelSleepCycle:
             )
             assert durable_call[0][1] == "channel:room123"
 
-    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_handles_timeout(self, mock_run, mount_config, db_path):
         # Brain helper returns (False, "") for any failure incl. timeout.
         mock_run.return_value = (False, "")
@@ -313,7 +313,7 @@ class TestProcessChannelSleepCycle:
             db.update_task_status(conn, t, "running")
             db.update_task_status(conn, t, "completed", result="Done")
 
-            with patch("istota.sleep_cycle._run_sleep_cycle_brain") as mock_run:
+            with patch("istota.memory.sleep_cycle._run_sleep_cycle_brain") as mock_run:
                 mock_run.return_value = (True, "- Memory (2026-02-07)\n")
                 result = process_channel_sleep_cycle(config, conn, "room123")
 
@@ -374,7 +374,7 @@ class TestChannelSleepCycleChunkCleanup:
     """Item 4: nightly channel sleep cycle prunes old channel_memory chunks."""
 
     @patch("istota.memory.search.cleanup_old_chunks")
-    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_chunk_cleanup_called_when_retention_set(
         self, mock_run, mock_cleanup, mount_config, db_path
     ):
@@ -399,7 +399,7 @@ class TestChannelSleepCycleChunkCleanup:
         assert st == ("channel_memory",)
 
     @patch("istota.memory.search.cleanup_old_chunks")
-    @patch("istota.sleep_cycle._run_sleep_cycle_brain")
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_chunk_cleanup_skipped_when_retention_zero(
         self, mock_run, mock_cleanup, mount_config, db_path
     ):
@@ -435,7 +435,7 @@ class TestCheckChannelSleepCycles:
             # Use always-due cron so it runs
             mount_config.channel_sleep_cycle.cron = "* * * * *"
 
-            with patch("istota.sleep_cycle.process_channel_sleep_cycle") as mock_process:
+            with patch("istota.memory.sleep_cycle.process_channel_sleep_cycle") as mock_process:
                 mock_process.return_value = True
                 result = check_channel_sleep_cycles(conn, mount_config)
 
@@ -457,12 +457,12 @@ class TestCheckChannelSleepCycles:
             # Use a specific hour cron
             mount_config.channel_sleep_cycle.cron = "0 3 * * *"
 
-            with patch("istota.sleep_cycle.process_channel_sleep_cycle") as mock_process:
+            with patch("istota.memory.sleep_cycle.process_channel_sleep_cycle") as mock_process:
                 check_channel_sleep_cycles(conn, mount_config)
 
             # Whether it ran depends on current time, but no error raised
 
-    @patch("istota.sleep_cycle.process_channel_sleep_cycle")
+    @patch("istota.memory.sleep_cycle.process_channel_sleep_cycle")
     def test_handles_process_error_gracefully(self, mock_process, mount_config, db_path):
         mock_process.side_effect = Exception("Something went wrong")
 
@@ -493,7 +493,7 @@ class TestCheckChannelSleepCycles:
 
             mount_config.channel_sleep_cycle.cron = "* * * * *"  # always due
 
-            with patch("istota.sleep_cycle.process_channel_sleep_cycle") as mock_process:
+            with patch("istota.memory.sleep_cycle.process_channel_sleep_cycle") as mock_process:
                 mock_process.return_value = True
                 result = check_channel_sleep_cycles(conn, mount_config)
 

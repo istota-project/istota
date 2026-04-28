@@ -1,20 +1,19 @@
 # Memory subsystem
 
-The memory subsystem lives under `src/istota/memory/`, with the nightly orchestrator in `src/istota/sleep_cycle.py` at the top level. This page describes how the subsystem is wired into the rest of Istota — the executor (read path), the scheduler (write path), and the on-disk storage layout. For the conceptual layering and configuration, see [Memory](../features/memory.md).
+The memory subsystem lives under `src/istota/memory/`. This page describes how the subsystem is wired into the rest of Istota — the executor (read path), the scheduler (write path), and the on-disk storage layout. For the conceptual layering and configuration, see [Memory](../features/memory.md).
 
 ```
-src/istota/
-├── sleep_cycle.py            # Cron pipeline (user + channel extraction, curation, retention)
-└── memory/
-    ├── __init__.py
-    ├── search.py             # Hybrid BM25 + vector index, retention sweep
-    ├── knowledge_graph.py    # Temporal triples (subject, predicate, object)
-    └── curation/
-        ├── types.py          # SectionedDoc / Section
-        ├── parser.py         # parse / serialize markdown sections
-        ├── ops.py            # apply_ops with validation
-        ├── prompt.py         # curation prompt + JSON-fence stripper
-        └── audit.py          # USER.md.audit.jsonl writer
+src/istota/memory/
+├── __init__.py
+├── sleep_cycle.py        # Cron pipeline (user + channel extraction, curation, retention)
+├── search.py             # Hybrid BM25 + vector index, retention sweep
+├── knowledge_graph.py    # Temporal triples (subject, predicate, object)
+└── curation/
+    ├── types.py          # SectionedDoc / Section
+    ├── parser.py         # parse / serialize markdown sections
+    ├── ops.py            # apply_ops with validation
+    ├── prompt.py         # curation prompt + JSON-fence stripper
+    └── audit.py          # USER.md.audit.jsonl writer
 ```
 
 `memory/__init__.py` re-exports the public surface for back-compat. In-repo callers import explicitly (`from istota.memory.search import ...`). The `search()` function is intentionally not re-exported because it would shadow the `search` submodule.
@@ -56,7 +55,7 @@ Two filters apply before indexing:
 
 ### Nightly extraction (sleep cycle)
 
-`check_sleep_cycles()` and `check_channel_sleep_cycles()` run from the scheduler's main loop on `briefing_check_interval` (default 60 s). Each evaluates a per-user (or per-channel) cron expression and calls into `sleep_cycle.py` when due.
+`check_sleep_cycles()` and `check_channel_sleep_cycles()` run from the scheduler's main loop on `briefing_check_interval` (default 60 s). Each evaluates a per-user (or per-channel) cron expression and calls into `memory/sleep_cycle.py` when due.
 
 `process_user_sleep_cycle()`:
 
