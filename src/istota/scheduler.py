@@ -573,9 +573,10 @@ def _format_log_channel_body(
     spec = " ".join(p for p in (model, effort) if p)
     if spec:
         header = f"{header} ({spec})"
-    lines = [header]
+    lines = [header, ""]
     if skills:
         lines.append(f"Skills: {', '.join(skills)}")
+        lines.append("")
     for desc in _deduplicate_descriptions(descriptions):
         lines.append(desc)
     if done and error:
