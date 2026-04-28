@@ -7,6 +7,7 @@ import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from .config import Config
@@ -1006,7 +1007,17 @@ def read_dated_memories(
     if not context_dir.exists():
         return None
 
-    cutoff = datetime.now() - timedelta(days=max_days)
+    # Cutoff is computed in the user's timezone so it lines up with the
+    # filenames the sleep cycle writes (which are user-local YYYY-MM-DD).
+    # Falling back to UTC matches the historical behavior for callers
+    # without a configured user timezone.
+    user_cfg = config.users.get(user_id) if hasattr(config, "users") else None
+    tz_name = user_cfg.timezone if user_cfg and user_cfg.timezone else "UTC"
+    try:
+        user_tz = ZoneInfo(tz_name)
+    except Exception:
+        user_tz = ZoneInfo("UTC")
+    cutoff = datetime.now(user_tz) - timedelta(days=max_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
     # Find matching files

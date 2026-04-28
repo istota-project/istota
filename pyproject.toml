@@ -92,6 +92,7 @@ packages = ["src/istota"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["tests"]
 markers = [
     "integration: tests requiring external services (deselected by default)",
 ]

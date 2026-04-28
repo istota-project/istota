@@ -178,6 +178,7 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 | `auto_load_dated_days` | `3` | Days of dated memories injected into prompts; 0 disables |
 | `curate_user_memory` | `false` | Run op-based USER.md curation after extraction |
 | `curation_log_summary` | `true` | Post a one-line summary to the user's `log_channel` after applied curation ops |
+| `knowledge_graph_audit_retention_days` | `365` | Prune `knowledge_facts_audit` rows older than N days. Independent of `memory_retention_days`. 0 = unlimited |
 
 ## `[channel_sleep_cycle]`
 

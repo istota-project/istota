@@ -154,6 +154,10 @@ class SleepCycleConfig:
     curation_log_summary: bool = True  # post one-line summary to user's log_channel after applied ops
     extraction_model: str = "sonnet"  # model for nightly memory extraction (passed to brain)
     curation_model: str = "sonnet"  # model for op-based USER.md curation
+    # Independent of memory_retention_days so default deployments still
+    # prune the audit table — KG audit rows are tiny but accumulate
+    # several per night per user. 0 = unlimited.
+    knowledge_graph_audit_retention_days: int = 365
 
 
 @dataclass

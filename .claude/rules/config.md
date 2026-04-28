@@ -53,9 +53,12 @@ See `.claude/rules/scheduler.md` for full table of fields and defaults.
 
 ### `SleepCycleConfig`
 ```
-enabled: bool = True         cron: str = "0 2 * * *"
+enabled: bool = True               cron: str = "0 2 * * *"
 memory_retention_days: int = 0     lookback_hours: int = 24
 auto_load_dated_days: int = 3      curate_user_memory: bool = False
+curation_log_summary: bool = True
+extraction_model: str = "sonnet"   curation_model: str = "sonnet"
+knowledge_graph_audit_retention_days: int = 365  # KG audit pruning; independent of memory_retention_days
 ```
 
 ### `ChannelSleepCycleConfig`

@@ -42,11 +42,15 @@ class SectionedDoc:
 
 
 def classify_line(line: str) -> str:
-    """Return one of: 'bullet', 'subheading', 'blank', 'paragraph'."""
+    """Return one of: 'bullet', 'subheading', 'blank', 'paragraph'.
+
+    A `### …` token is only a subheading when it sits at the start of the
+    line. Indented `### …` is body text (e.g. a code-comment marker pasted
+    into a bullet) and stays a paragraph.
+    """
     if not line.strip():
         return "blank"
-    stripped = line.lstrip()
-    if stripped.startswith("###"):
+    if line.startswith("###"):
         return "subheading"
     if _BULLET_RE.match(line):
         return "bullet"

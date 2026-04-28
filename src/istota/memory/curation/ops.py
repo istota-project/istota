@@ -19,7 +19,8 @@ Outcomes (kept on each entry of `applied`):
 Reject reasons (kept on each entry of `rejected`):
 - "unknown_op", "missing_field", "heading_missing", "heading_exists",
   "empty_line", "empty_lines", "empty_heading", "empty_match",
-  "line_starts_with_hash", "heading_starts_with_hash", "multiple_matches"
+  "line_starts_with_hash", "heading_starts_with_hash", "multiple_matches",
+  "match_in_subsection"
 """
 
 from __future__ import annotations
@@ -138,6 +139,18 @@ def _apply_append(doc: SectionedDoc, op: dict) -> str:
     # If the top region is entirely empty (e.g. just blank lines or empty),
     # insert_at remains at start — that's correct.
     section.lines.insert(insert_at, new_bullet)
+    # Special case: section had NO top region (started immediately with a
+    # `### subheading`). The new bullet now sits directly above that
+    # subheading; add a blank line so it doesn't visually fuse onto the
+    # heading. Other layouts (bullet → subheading) keep their tight
+    # spacing — that's the established convention.
+    if start == end:
+        after = insert_at + 1
+        if (
+            after < len(section.lines)
+            and classify_line(section.lines[after]) == "subheading"
+        ):
+            section.lines.insert(after, "")
     return "applied"
 
 
@@ -191,6 +204,17 @@ def _apply_remove(doc: SectionedDoc, op: dict) -> str:
             matches.append(i)
 
     if len(matches) == 0:
+        # Distinguish a true miss from "match exists but lives under a
+        # `### subheading`". Subsections are opaque to ops, so we must not
+        # touch them — but a silent no-op trains the model that its remove
+        # was accepted. Surface it as a reject so the audit log captures
+        # the attempt and the model can stop trying.
+        for i in range(end, len(section.lines)):
+            if classify_line(section.lines[i]) != "bullet":
+                continue
+            bullet_text = normalize_bullet_text(section.lines[i]).lower()
+            if needle in bullet_text:
+                return "match_in_subsection"
         return "noop_no_match"
     if len(matches) > 1:
         return "multiple_matches"
