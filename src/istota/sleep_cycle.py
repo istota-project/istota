@@ -724,12 +724,17 @@ def curate_user_memory(
         write_audit_log(config, user_id, applied=[], rejected=rejected)
         return False
 
-    new_text = serialize_sectioned_doc(new_doc)
-    if new_text == current:
-        # All applied ops were no-ops (dedup, no_match) — log audit, skip write
+    # Skip the write if every applied op was a no-op (dedup, no_match). Decide
+    # this from outcomes rather than text comparison — comparing serialized
+    # output against `current` is brittle when USER.md has formatting drift
+    # (trailing whitespace on headings, missing trailing newline, CRLF) that
+    # the round-trip normalizes away, leading to spurious nightly rewrites.
+    real_changes = any(a.get("outcome") == "applied" for a in applied)
+    if not real_changes:
         write_audit_log(config, user_id, applied=applied, rejected=rejected)
         return False
 
+    new_text = serialize_sectioned_doc(new_doc)
     memory_path = _get_mount_path(config, get_user_memory_path(user_id, config.bot_dir_name))
     memory_path.parent.mkdir(parents=True, exist_ok=True)
     memory_path.write_text(new_text)

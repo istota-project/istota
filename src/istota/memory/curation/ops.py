@@ -25,9 +25,15 @@ Reject reasons (kept on each entry of `rejected`):
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 from .types import Section, SectionedDoc, classify_line, normalize_bullet_text, top_region_indices
+
+# Matches actual heading-shaped tokens (`# `, `## `, ..., up to `###### `).
+# Not a bare `#` followed by non-space (which is plausible content like a
+# hashtag, footnote marker, or section reference).
+_HEADING_SHAPED_RE = re.compile(r"^#{1,6}(\s|$)")
 
 _REQUIRED_FIELDS = {
     "append": ("heading", "line"),
@@ -74,16 +80,18 @@ def _normalize_to_bullet(text: str) -> str:
 
 
 def _validate_appendable_line(line: str) -> str | None:
-    """Return None if line is OK, else a reject reason."""
+    """Return None if line is OK, else a reject reason.
+
+    Heading-like content (`#` runs followed by whitespace or EOL) is rejected
+    because it would alter the section structure on the next parse. A bullet
+    whose body merely contains `#` (hashtags, footnote markers, code-comment
+    notes) is allowed — only `# `, `## `, ... shapes are blocked.
+    """
     if not line or not line.strip():
         return "empty_line"
     stripped = line.lstrip()
-    # Reject lines whose body (after stripping any bullet marker) starts with `#`.
     body = normalize_bullet_text(line)
-    if body.startswith("#") or stripped.startswith("#"):
-        # Differentiate: a bare `## foo` would-be heading vs. a bullet whose
-        # text starts with `#`. Both are rejected; the prompt rules disallow
-        # heading-like content as bullet text.
+    if _HEADING_SHAPED_RE.match(body) or _HEADING_SHAPED_RE.match(stripped):
         return "line_starts_with_hash"
     return None
 
@@ -116,6 +124,16 @@ def _apply_append(doc: SectionedDoc, op: dict) -> str:
         cls = classify_line(section.lines[i])
         if cls != "blank" and cls != "subheading":
             insert_at = i + 1
+
+    # If the line just before the insertion point is a paragraph, add a blank
+    # gap so the new bullet doesn't visually fuse onto the paragraph. (Bullet
+    # → bullet adjacency is the expected list shape, no gap needed.)
+    if (
+        insert_at > 0
+        and classify_line(section.lines[insert_at - 1]) == "paragraph"
+    ):
+        section.lines.insert(insert_at, "")
+        insert_at += 1
 
     # If the top region is entirely empty (e.g. just blank lines or empty),
     # insert_at remains at start — that's correct.
