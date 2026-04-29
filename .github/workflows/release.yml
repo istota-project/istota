@@ -33,14 +33,57 @@ jobs:
           ref: ${{ steps.tag.outputs.tag }}
 
       - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          awk -v v="${{ steps.tag.outputs.version }}" '
-            $0 ~ "^## \\[" v "\\]" {capture=1; next}
-            capture && /^## \[/ {exit}
-            capture {print}
-          ' CHANGELOG.md > /tmp/release-notes.md
+          # Extract the version's section and consolidate duplicate ###
+          # subsections (Added/Changed/Fixed/...) into one of each in
+          # Keep-a-Changelog order. Mirrors the logic in scripts/release.sh
+          # so the GitHub Release body matches the consolidated tag annotation
+          # rather than the chronological CHANGELOG.md layout.
+          python3 - <<'PY' > /tmp/release-notes.md
+          import os, re, sys, pathlib
+          version = os.environ["VERSION"]
+          text = pathlib.Path("CHANGELOG.md").read_text()
+
+          m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
+          if not m:
+              sys.exit(f"No section for [{version}] in CHANGELOG.md")
+          section = m.group(1)
+
+          parts = re.split(r"^(### .+)$", section, flags=re.M)
+          buckets: dict[str | None, list[str]] = {}
+          order: list[str | None] = []
+
+          def add(key, body):
+              body = body.strip("\n")
+              if not body.strip():
+                  return
+              if key not in buckets:
+                  buckets[key] = []
+                  order.append(key)
+              buckets[key].append(body)
+
+          add(None, parts[0])
+          for i in range(1, len(parts), 2):
+              add(parts[i].strip(), parts[i + 1])
+
+          CANONICAL = ["### Added", "### Changed", "### Deprecated", "### Removed", "### Fixed", "### Security"]
+          ordered_keys = [None] + [h for h in CANONICAL if h in buckets] + [k for k in order if k not in CANONICAL and k is not None]
+
+          out = []
+          for key in ordered_keys:
+              if key not in buckets:
+                  continue
+              if key is not None:
+                  out.append(key)
+                  out.append("")
+              out.append("\n\n".join(buckets[key]))
+              out.append("")
+          print("\n".join(out).strip("\n"))
+          PY
           if [ ! -s /tmp/release-notes.md ]; then
-            echo "::error::No section for [${{ steps.tag.outputs.version }}] in CHANGELOG.md"
+            echo "::error::No section for [${VERSION}] in CHANGELOG.md"
             exit 1
           fi
           echo "----- Release notes -----"
