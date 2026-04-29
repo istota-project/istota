@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-04-29
+
 ### Fixed
 - **Visit reconciliation no longer creates phantom duplicates on sliding windows (ISSUE-064).** `db.reconcile_visits()` runs every minute over a 6h sliding window. The previous DELETE clause filtered on `entered_at >= since AND entered_at < until`, so once `since` advanced past a visit's first ping but `until` still covered its last ping, the prior reconciler output was never cleaned up — the new run produced a fresh visit record with a later `entered_at` (because the read window had also slid past the early pings) while the original record persisted. A single ~11 min stop accumulated 7 phantom rows over the hour following the visit. Fix: read pings from `since - 24h` so visits straddling `since` are reconstructed in full, keep only segments whose last ping is in `[since, until)`, and switch the DELETE to overlap-aware (`exited_at >= since AND entered_at < until`). The reconciler is now idempotent across sliding windows; existing phantoms are cleaned up on the next nightly pass.
 
@@ -398,7 +400,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.8.1...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.8.2...main
+[0.8.2]: https://gitlab.com/cynium/istota/-/releases/v0.8.2
 [0.8.1]: https://gitlab.com/cynium/istota/-/releases/v0.8.1
 [0.8.0]: https://gitlab.com/cynium/istota/-/releases/v0.8.0
 [0.7.0]: https://gitlab.com/cynium/istota/-/releases/v0.7.0
