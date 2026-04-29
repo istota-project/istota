@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-04-29
+
 ### Added
 - **Knowledge graph extraction now sees the existing facts.** The nightly extraction prompt includes the user's current KG facts so the model can skip re-emission and produce informed updates (refinements, supersessions) instead of letting mechanical dedup quietly drop duplicates. Closes the loop between the LLM and `add_fact()`'s dedup logic.
 - **Fact provenance via `source_ref`.** Extracted facts can attach a `source_ref` integer task id pointing at the conversation that supports them; the value flows through to `add_fact(source_task_id=...)` so the KG audit trail is now traceable to a specific task. Optional — omit when the evidence is diffuse.
@@ -393,7 +395,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.8.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.8.1...main
+[0.8.1]: https://gitlab.com/cynium/istota/-/releases/v0.8.1
 [0.8.0]: https://gitlab.com/cynium/istota/-/releases/v0.8.0
 [0.7.0]: https://gitlab.com/cynium/istota/-/releases/v0.7.0
 [0.6.1]: https://gitlab.com/cynium/istota/-/releases/v0.6.1
