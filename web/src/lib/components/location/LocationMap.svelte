@@ -292,21 +292,19 @@
 
 	// A single ping whose `place` differs from both neighbours is GPS noise
 	// (bounce-back into a geofence on departure, drive-by past a saved place,
-	// stray cell/Wi-Fi fix). Null its `place` so isGap doesn't see a phantom
-	// place transition and render the edge as a dashed gap. Real visits
+	// stray cell/Wi-Fi fix). Drop it: its coordinate is wrong (often metres
+	// inside a geofence the user has already left), so leaving it in the
+	// path produces a phantom vertex that detours the track. Real visits
 	// always produce 2+ consecutive pings at the same place; a lone ping
 	// never does.
 	function stripIsolatedPlacePings(pings: LocationPing[]): LocationPing[] {
 		if (pings.length < 3) return pings;
-		return pings.map((p, i) => {
-			if (i === 0 || i === pings.length - 1) return p;
-			if (p.place == null) return p;
+		return pings.filter((p, i) => {
+			if (i === 0 || i === pings.length - 1) return true;
+			if (p.place == null) return true;
 			const prevPlace = pings[i - 1].place ?? null;
 			const nextPlace = pings[i + 1].place ?? null;
-			if (prevPlace !== p.place && nextPlace !== p.place) {
-				return { ...p, place: null };
-			}
-			return p;
+			return !(prevPlace !== p.place && nextPlace !== p.place);
 		});
 	}
 
