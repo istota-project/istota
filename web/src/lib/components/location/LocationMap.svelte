@@ -292,19 +292,25 @@
 
 	// A single ping whose `place` differs from both neighbours is GPS noise
 	// (bounce-back into a geofence on departure, drive-by past a saved place,
-	// stray cell/Wi-Fi fix). Drop it: its coordinate is wrong (often metres
-	// inside a geofence the user has already left), so leaving it in the
-	// path produces a phantom vertex that detours the track. Real visits
-	// always produce 2+ consecutive pings at the same place; a lone ping
-	// never does.
+	// stray cell/Wi-Fi fix). Null its place so the place-crossing gap rule in
+	// isGap doesn't fire — but keep the ping in the time series so its
+	// timestamp prevents a dwell-duration false-positive gap (ISSUE-066).
+	// Real visits always produce 2+ consecutive pings at the same place; a
+	// lone ping never does. The coords may be ~100m off (cached cell/Wi-Fi
+	// fix), but a small spatial wobble is preferable to a missing segment.
+	// Returns a clone-on-edit copy so other consumers of `pings` (e.g. the
+	// points layer at buildPingPointsGeoJSON) keep the original `place`.
 	function stripIsolatedPlacePings(pings: LocationPing[]): LocationPing[] {
 		if (pings.length < 3) return pings;
-		return pings.filter((p, i) => {
-			if (i === 0 || i === pings.length - 1) return true;
-			if (p.place == null) return true;
+		return pings.map((p, i) => {
+			if (i === 0 || i === pings.length - 1) return p;
+			if (p.place == null) return p;
 			const prevPlace = pings[i - 1].place ?? null;
 			const nextPlace = pings[i + 1].place ?? null;
-			return !(prevPlace !== p.place && nextPlace !== p.place);
+			if (prevPlace !== p.place && nextPlace !== p.place) {
+				return { ...p, place: null };
+			}
+			return p;
 		});
 	}
 
