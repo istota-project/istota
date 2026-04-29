@@ -196,18 +196,44 @@ def cluster_pings(
     return clusters
 
 
+# Min pings tagged with the same place_id required to attribute a cluster to
+# that place. The webhook tags a ping with place_id only when the ping falls
+# inside the geofence; at the typical 10s ping cadence, 3 tagged pings means
+# the user spent ≥20s inside the geofence — enough to rule out drive-bys
+# (a 30 mph car traverses a 150m-diameter geofence in ~12s, producing 1-2
+# tagged pings) while still capturing brief legitimate stops. See ISSUE-062.
+MIN_PLACE_PINGS = 3
+
+
 def _finalize_cluster(cluster: dict) -> dict:
     n = len(cluster["pings"])
     lat = cluster["lat_sum"] / n
     lon = cluster["lon_sum"] / n
-    place_id = None
-    place_name = None
+
+    # Place attribution by majority vote: tally place_id occurrences across
+    # member pings and require at least MIN_PLACE_PINGS to attribute the
+    # cluster to a place. Using per-ping geofence matches as ground truth
+    # sidesteps centroid contamination — walking legs and crosswalk waits
+    # can drag the centroid outside a place's radius (ISSUE-062), but the
+    # pings inside the geofence still carry the correct place_id.
+    counts: dict[int, int] = {}
+    names: dict[int, str] = {}
     for p in cluster["pings"]:
         pid = p.get("place_id")
-        if pid is not None:
-            place_id = pid
-            place_name = p.get("place_name")
-            break
+        if pid is None:
+            continue
+        counts[pid] = counts.get(pid, 0) + 1
+        if pid not in names and p.get("place_name"):
+            names[pid] = p["place_name"]
+
+    place_id = None
+    place_name = None
+    if counts:
+        best_pid, best_count = max(counts.items(), key=lambda kv: kv[1])
+        if best_count >= MIN_PLACE_PINGS:
+            place_id = best_pid
+            place_name = names.get(best_pid)
+
     return {
         "lat": lat,
         "lon": lon,
@@ -217,35 +243,6 @@ def _finalize_cluster(cluster: dict) -> dict:
         "place_id": place_id,
         "place_name": place_name,
     }
-
-
-def validate_cluster_places(
-    clusters: list[dict],
-    places_by_id: dict,
-) -> list[dict]:
-    """Strip place tags from clusters whose centroid is outside the place radius.
-
-    With ``_finalize_cluster`` propagating ``place_id`` from any member ping,
-    a cluster can inherit a place tag from a single grazing ping during a
-    drive-by — promoting transit into a phantom stop downstream because
-    ``filter_transit_clusters`` bypasses min-pings/min-dwell filters for
-    place-matched clusters. This guard requires the cluster centroid itself
-    to be within the place's radius, not just one stray ping. See ISSUE-059.
-
-    ``places_by_id`` maps place_id → dict with at least ``lat``, ``lon``,
-    ``radius_meters``. Clusters referencing unknown place_ids are left alone
-    (we only invalidate when we can prove the centroid is outside).
-    Mutates clusters in place and returns them.
-    """
-    for c in clusters:
-        pid = c.get("place_id")
-        if pid is None or pid not in places_by_id:
-            continue
-        place = places_by_id[pid]
-        if haversine(c["lat"], c["lon"], place["lat"], place["lon"]) > place["radius_meters"]:
-            c["place_id"] = None
-            c["place_name"] = None
-    return clusters
 
 
 # Max transit pings between same-location stops before they're treated as

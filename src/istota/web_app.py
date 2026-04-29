@@ -789,7 +789,7 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
     from zoneinfo import ZoneInfo
     from .geo import (
         cluster_pings, dedupe_near_duplicate_pings, reverse_geocode, haversine,
-        filter_transit_clusters, merge_consecutive_stops, validate_cluster_places,
+        filter_transit_clusters, merge_consecutive_stops,
     )
 
     try:
@@ -831,7 +831,6 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
             (user_id,),
         ).fetchall()
         saved_places = [dict(r) for r in saved_places_rows]
-        validate_cluster_places(clusters, {p["id"]: p for p in saved_places})
 
         stops, transit_pings = filter_transit_clusters(clusters)
 
