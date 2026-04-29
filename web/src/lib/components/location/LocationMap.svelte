@@ -290,8 +290,30 @@
 		return current;
 	}
 
+	// A single ping whose `place` differs from both neighbours is GPS noise
+	// (bounce-back into a geofence on departure, drive-by past a saved place,
+	// stray cell/Wi-Fi fix). Null its `place` so isGap doesn't see a phantom
+	// place transition and render the edge as a dashed gap. Real visits
+	// always produce 2+ consecutive pings at the same place; a lone ping
+	// never does.
+	function stripIsolatedPlacePings(pings: LocationPing[]): LocationPing[] {
+		if (pings.length < 3) return pings;
+		return pings.map((p, i) => {
+			if (i === 0 || i === pings.length - 1) return p;
+			if (p.place == null) return p;
+			const prevPlace = pings[i - 1].place ?? null;
+			const nextPlace = pings[i + 1].place ?? null;
+			if (prevPlace !== p.place && nextPlace !== p.place) {
+				return { ...p, place: null };
+			}
+			return p;
+		});
+	}
+
 	function buildEdges(pings: LocationPing[]): Edge[] {
-		const filtered = dropOutlierPings(excludeDwellPings(filteredPings(pings)));
+		const filtered = stripIsolatedPlacePings(
+			dropOutlierPings(excludeDwellPings(filteredPings(pings))),
+		);
 		if (filtered.length < 2) return [];
 
 		const edges: Edge[] = [];
