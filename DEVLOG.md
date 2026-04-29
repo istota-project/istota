@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-29: stripIsolatedPlacePings nulls instead of removes (ISSUE-066)
+
+A continuous walking trip (Home → Trails Cafe) showed a dashed-gap segment across several hundred metres of normal walking on the web map. Every other filter looked correct in isolation, so the bug was in the interaction.
+
+**Mechanism.** Ping 20488 was a stale Wi-Fi/cell bounce-back into Home (place_id=5169, accuracy 11m, no speed/activity) — same shape as ISSUE-061. `dropOutlierPings` didn't catch it: AB distance 117m barely crosses the 100m floor and the path ratio (1.78) sits well under the 3.0 threshold, so the ping survived. `stripIsolatedPlacePings` correctly identified it as an isolated place ping (`Home` between two `null` neighbours) but *removed* it via `.filter()`. That eliminated the only data point between pings 20487 and 20489, opening a 315 s time gap. `isGap` then fired on `timeDeltaS (315) >= DWELL_MIN_DURATION_S (300)` and the edge rendered as a dashed gap, even though the implied speed across the gap was 0.81 m/s (2.9 km/h) — clearly continuous walking, not a dwell.
+
+The irony: `stripIsolatedPlacePings` was added to fix a place-crossing gap (ISSUE-061). By removing the ping rather than relabeling it, it traded one gap type for another.
+
+**Fix.** Change `stripIsolatedPlacePings` from `.filter()` to `.map()` and, for an isolated ping, return a clone with `place: null`. The ping stays in the time series so `isGap`'s dwell-duration rule sees no discontinuity; the place-crossing rule still doesn't fire because both sides are now `null`. The clone matters because the same ping objects feed `buildPingPointsGeoJSON` (line 388 reads `p.place` for the points layer) — mutating in place would silently strip place labels from the dot tooltips.
+
+The ping's lat/lon is still ~100m off (it points at a stale Home position), so the rendered track will show a small spatial wobble at the bounce point. Acceptable: barely visible at normal zoom and far better than a missing segment. The coords are honest about what the phone reported.
+
+**Why null instead of a downstream speed gate in `isGap`.** A speed gate (`dist / timeDeltaS < 0.5`) on the dwell-duration check would also paper over this case, but the time series would still have a hole and every future consumer of the ping stream would have to know about the same workaround. Fixing the upstream removal keeps the time series complete for `isGap`, distance accumulators, and any future track analysis.
+
+**No new tests.** The web/ tree has no Vitest setup yet (only the maplibre vendor's own tests live in node_modules); `stripIsolatedPlacePings` is private to LocationMap.svelte. `npm run check` passes against this file (the 16 errors it reports are all in unrelated routes).
+
+**Files modified:**
+- `web/src/lib/components/location/LocationMap.svelte` — `stripIsolatedPlacePings` switched from filter to map+clone+null-place; comment block updated.
+- `CHANGELOG.md`, `DEVLOG.md`, `_ISSUES.md` — issue closed.
+
 ## 2026-04-29: Visit reconciliation idempotent across sliding windows (ISSUE-064)
 
 The Lazy Acres verification surfaced a second location bug, distinct from ISSUE-062's clustering attribution. A single 11-minute stop produced 7 visit rows in the DB (IDs 3390–3400, all with the same `exited_at`, staggered `entered_at`, no pings linked). The user's initial guess in the issue write-up was that the day-summary clustering pipeline was running multiple passes, but day-summary clustering only emits JSON for the dashboard — it never writes visits. The actual culprit is `db.reconcile_visits()`.

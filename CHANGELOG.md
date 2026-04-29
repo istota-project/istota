@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Continuous walking tracks no longer break into false dwell-gap segments (ISSUE-066).** `stripIsolatedPlacePings` in `LocationMap.svelte` deleted isolated bounce-back pings (e.g. a stale Wi-Fi/cell fix into Home while walking away from it) instead of just nulling their place. Removing the ping created a 5+ minute time hole between its surviving neighbours, which then tripped `isGap`'s `timeDeltaS >= DWELL_MIN_DURATION_S` rule and rendered a dashed gap segment across normal walking. Fix: relabel the ping to `place: null` on a clone (so other consumers like `buildPingPointsGeoJSON` keep the original `place`) — the place-crossing gap rule still doesn't fire on it, but the ping's timestamp stays in the time series so the dwell-duration rule sees no discontinuity. The coords may show a small spatial wobble (~100m) at the bounce point — preferable to a missing track segment.
+
 ## [0.8.2] - 2026-04-29
 
 ### Fixed
