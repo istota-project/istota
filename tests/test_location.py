@@ -2285,10 +2285,13 @@ class TestClusterPings:
     def test_cluster_carries_place_info(self):
         from istota.geo import cluster_pings
 
+        # 3 tagged pings meets MIN_PLACE_PINGS threshold for attribution
         pings = [
             {"lat": 34.05, "lon": -118.25, "timestamp": "2026-03-08T10:00:00Z",
              "place_id": 42, "place_name": "home"},
             {"lat": 34.05001, "lon": -118.25001, "timestamp": "2026-03-08T10:05:00Z",
+             "place_id": 42, "place_name": "home"},
+            {"lat": 34.05002, "lon": -118.25002, "timestamp": "2026-03-08T10:10:00Z",
              "place_id": 42, "place_name": "home"},
         ]
         result = cluster_pings(pings)
@@ -2601,30 +2604,16 @@ class TestDedupeNearDuplicatePings:
         assert len(pings) == original_len
 
 
-class TestClusterPlacePropagation:
-    """D': cluster carries place_id/place_name from any member ping, not just pings[0].
-
-    A ping at the cluster's edge may fall outside the saved place's radius at
-    ingest time even though the user is genuinely there. Inheriting place_id
-    from any tagged ping in the cluster lets filter_transit_clusters() see
-    the place match. See ISSUE-059.
+class TestClusterPlaceAttribution:
+    """Place-aware clustering (option 6, ISSUE-062): a cluster is attributed to
+    a place by counting per-ping place_id matches, not by the centroid. This
+    sidesteps centroid contamination from walking legs and crosswalk waits and
+    weeds out drive-by grazing pings via a minimum-count threshold.
     """
 
-    def test_place_from_middle_ping(self):
-        from istota.geo import cluster_pings
-
-        pings = [
-            {"lat": 34.1043368, "lon": -118.3082973, "timestamp": "2026-04-28T03:23:42Z"},
-            {"lat": 34.104277, "lon": -118.3088875, "timestamp": "2026-04-28T03:23:53Z"},
-            {"lat": 34.10436, "lon": -118.30992, "timestamp": "2026-04-28T03:27:21Z",
-             "place_id": 1398, "place_name": "Lazy Acres"},
-        ]
-        result = cluster_pings(pings, radius_m=250)
-        assert len(result) == 1
-        assert result[0]["place_id"] == 1398
-        assert result[0]["place_name"] == "Lazy Acres"
-
-    def test_place_from_last_ping(self):
+    def test_single_tagged_ping_does_not_anchor_place(self):
+        """Drive-by: one grazing ping with place_id should not promote the
+        cluster to a place — that's the phantom-stop scenario."""
         from istota.geo import cluster_pings
 
         pings = [
@@ -2634,22 +2623,100 @@ class TestClusterPlacePropagation:
         ]
         result = cluster_pings(pings, radius_m=250)
         assert len(result) == 1
+        assert result[0]["place_id"] is None
+        assert result[0]["place_name"] is None
+
+    def test_two_tagged_pings_below_threshold(self):
+        """Two grazing pings still below threshold — slow drive-by territory."""
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z",
+             "place_id": 7, "place_name": "X"},
+            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:10Z",
+             "place_id": 7, "place_name": "X"},
+            {"lat": 34.10002, "lon": -118.30002, "timestamp": "2026-04-28T03:23:20Z"},
+        ]
+        result = cluster_pings(pings, radius_m=250)
+        assert len(result) == 1
+        assert result[0]["place_id"] is None
+        assert result[0]["place_name"] is None
+
+    def test_three_tagged_pings_meets_threshold(self):
+        """At MIN_PLACE_PINGS (3), the cluster takes on the place_id."""
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z",
+             "place_id": 7, "place_name": "X"},
+            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:10Z",
+             "place_id": 7, "place_name": "X"},
+            {"lat": 34.10002, "lon": -118.30002, "timestamp": "2026-04-28T03:23:20Z",
+             "place_id": 7, "place_name": "X"},
+        ]
+        result = cluster_pings(pings, radius_m=250)
+        assert len(result) == 1
         assert result[0]["place_id"] == 7
         assert result[0]["place_name"] == "X"
 
-    def test_place_from_first_ping_still_works(self):
-        """Backward compat: if pings[0] has place_id, behavior unchanged."""
+    def test_lazy_acres_scenario(self):
+        """Walking legs contaminate the centroid past the place radius, but the
+        17 stationary pings inside the geofence still drive attribution.
+        Reproduces the ISSUE-062 case: real-time webhook fired correct
+        arrival/departure, day-summary should match."""
+        from istota.geo import cluster_pings, haversine
+
+        # 5 walk-in pings drifting east toward the store, no place_id
+        # 17 stationary pings at the store (within the 75m geofence)
+        # 19 walk-out pings drifting east, no place_id
+        # Total: 41 pings, 17 tagged with Lazy Acres
+        pings = []
+        # Walk-in
+        for i in range(5):
+            pings.append({
+                "lat": 34.1042, "lon": -118.3085 - 0.0001 * (5 - i),
+                "timestamp": f"2026-04-28T03:38:{i * 10:02d}Z",
+            })
+        # At the store
+        for i in range(17):
+            pings.append({
+                "lat": 34.1044, "lon": -118.3097,
+                "timestamp": f"2026-04-28T03:39:{i * 10:02d}Z" if i < 6 else f"2026-04-28T03:{40 + (i - 6) // 6:02d}:{((i - 6) % 6) * 10:02d}Z",
+                "place_id": 1398, "place_name": "Lazy Acres",
+            })
+        # Walk-out
+        for i in range(19):
+            pings.append({
+                "lat": 34.1041, "lon": -118.3085 - 0.0001 * i,
+                "timestamp": f"2026-04-28T03:{43 + i // 6:02d}:{(i % 6) * 10:02d}Z",
+            })
+
+        result = cluster_pings(pings, radius_m=250)
+        # All 41 pings land in one cluster (intentional — that's the bug).
+        # The fix: even though the centroid is contaminated, the 17 tagged
+        # pings still attribute the cluster to Lazy Acres.
+        attributed = [c for c in result if c["place_id"] == 1398]
+        assert attributed, "expected at least one cluster attributed to Lazy Acres"
+
+    def test_majority_wins_when_multiple_places(self):
+        """If a cluster spans pings tagged with different place_ids, the
+        most-counted one wins — provided it meets the threshold."""
         from istota.geo import cluster_pings
 
         pings = [
             {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z",
              "place_id": 5, "place_name": "Y"},
-            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:30Z"},
+            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:10Z",
+             "place_id": 6, "place_name": "Z"},
+            {"lat": 34.10002, "lon": -118.30002, "timestamp": "2026-04-28T03:23:20Z",
+             "place_id": 6, "place_name": "Z"},
+            {"lat": 34.10003, "lon": -118.30003, "timestamp": "2026-04-28T03:23:30Z",
+             "place_id": 6, "place_name": "Z"},
         ]
         result = cluster_pings(pings, radius_m=250)
         assert len(result) == 1
-        assert result[0]["place_id"] == 5
-        assert result[0]["place_name"] == "Y"
+        assert result[0]["place_id"] == 6
+        assert result[0]["place_name"] == "Z"
 
     def test_no_place_when_no_pings_have_place(self):
         from istota.geo import cluster_pings
@@ -2662,113 +2729,6 @@ class TestClusterPlacePropagation:
         assert len(result) == 1
         assert result[0]["place_id"] is None
         assert result[0]["place_name"] is None
-
-    def test_first_nonnull_wins_when_multiple_places(self):
-        """If a cluster spans pings with different place_ids (rare boundary case),
-        take the first non-null."""
-        from istota.geo import cluster_pings
-
-        pings = [
-            {"lat": 34.10, "lon": -118.30, "timestamp": "2026-04-28T03:23:00Z"},
-            {"lat": 34.10001, "lon": -118.30001, "timestamp": "2026-04-28T03:23:30Z",
-             "place_id": 5, "place_name": "Y"},
-            {"lat": 34.10002, "lon": -118.30002, "timestamp": "2026-04-28T03:24:00Z",
-             "place_id": 6, "place_name": "Z"},
-        ]
-        result = cluster_pings(pings, radius_m=250)
-        assert len(result) == 1
-        assert result[0]["place_id"] == 5
-        assert result[0]["place_name"] == "Y"
-
-
-class TestValidateClusterPlaces:
-    """Phantom-stop guard for D': drop place tags from clusters whose centroid
-    is outside the saved place radius. Prevents a single grazing ping during
-    transit from promoting the whole cluster to a fake stop. See ISSUE-059.
-    """
-
-    def test_centroid_inside_radius_keeps_place(self):
-        from istota.geo import validate_cluster_places
-
-        clusters = [
-            {"lat": 34.1044, "lon": -118.3097, "place_id": 1398,
-             "place_name": "Lazy Acres", "ping_count": 3},
-        ]
-        places = {1398: {"id": 1398, "name": "Lazy Acres",
-                         "lat": 34.1044, "lon": -118.3097, "radius_meters": 75}}
-        result = validate_cluster_places(clusters, places)
-        assert result[0]["place_id"] == 1398
-        assert result[0]["place_name"] == "Lazy Acres"
-
-    def test_centroid_outside_radius_clears_place(self):
-        """Drive-by case: cluster centroid on the road, one ping grazed the place radius."""
-        from istota.geo import validate_cluster_places
-
-        clusters = [
-            # Centroid 200m+ from place center (way outside 75m radius)
-            {"lat": 34.1024, "lon": -118.3097, "place_id": 1398,
-             "place_name": "Lazy Acres", "ping_count": 5},
-        ]
-        places = {1398: {"id": 1398, "name": "Lazy Acres",
-                         "lat": 34.1044, "lon": -118.3097, "radius_meters": 75}}
-        result = validate_cluster_places(clusters, places)
-        assert result[0]["place_id"] is None
-        assert result[0]["place_name"] is None
-
-    def test_no_place_id_unchanged(self):
-        from istota.geo import validate_cluster_places
-
-        clusters = [
-            {"lat": 34.10, "lon": -118.30, "place_id": None,
-             "place_name": None, "ping_count": 3},
-        ]
-        result = validate_cluster_places(clusters, {})
-        assert result[0]["place_id"] is None
-
-    def test_unknown_place_id_left_alone(self):
-        """If the cluster references a place we don't have metadata for, leave it."""
-        from istota.geo import validate_cluster_places
-
-        clusters = [
-            {"lat": 34.10, "lon": -118.30, "place_id": 9999,
-             "place_name": "Unknown", "ping_count": 3},
-        ]
-        result = validate_cluster_places(clusters, {})
-        assert result[0]["place_id"] == 9999
-        assert result[0]["place_name"] == "Unknown"
-
-    def test_centroid_just_inside_radius_keeps_place(self):
-        """A centroid clearly inside the boundary survives."""
-        from istota.geo import haversine, validate_cluster_places
-
-        place_lat, place_lon = 34.1044, -118.3097
-        # ~67m north of center
-        clusters = [
-            {"lat": place_lat + 0.0006, "lon": place_lon, "place_id": 1398,
-             "place_name": "Lazy Acres", "ping_count": 3},
-        ]
-        places = {1398: {"id": 1398, "name": "Lazy Acres",
-                         "lat": place_lat, "lon": place_lon, "radius_meters": 75}}
-        d = haversine(place_lat + 0.0006, place_lon, place_lat, place_lon)
-        assert d < 75
-        result = validate_cluster_places(clusters, places)
-        assert result[0]["place_id"] == 1398
-
-    def test_multiple_clusters_independent(self):
-        from istota.geo import validate_cluster_places
-
-        clusters = [
-            # One inside, one outside
-            {"lat": 34.1044, "lon": -118.3097, "place_id": 1398,
-             "place_name": "Lazy Acres", "ping_count": 3},
-            {"lat": 34.1024, "lon": -118.3097, "place_id": 1398,
-             "place_name": "Lazy Acres", "ping_count": 5},
-        ]
-        places = {1398: {"id": 1398, "name": "Lazy Acres",
-                         "lat": 34.1044, "lon": -118.3097, "radius_meters": 75}}
-        result = validate_cluster_places(clusters, places)
-        assert result[0]["place_id"] == 1398
-        assert result[1]["place_id"] is None
 
 
 # ===========================================================================

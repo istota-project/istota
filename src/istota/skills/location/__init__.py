@@ -584,7 +584,7 @@ def cmd_reverse_geocode(args):
 def cmd_day_summary(args):
     from istota.geo import (
         reverse_geocode, cluster_pings, dedupe_near_duplicate_pings, haversine,
-        filter_transit_clusters, merge_consecutive_stops, validate_cluster_places,
+        filter_transit_clusters, merge_consecutive_stops,
     )
 
     conn = _get_conn()
@@ -633,7 +633,6 @@ def cmd_day_summary(args):
         (user_id,),
     ).fetchall()
     saved_places = [dict(r) for r in saved_places]
-    validate_cluster_places(clusters, {p["id"]: p for p in saved_places})
 
     stops, transit_pings = filter_transit_clusters(clusters)
 
