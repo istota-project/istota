@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-29: Place-aware clustering for day-summary (ISSUE-062)
+
+Day-summary clustering was reporting "Serrano Avenue" instead of "Lazy Acres" even though the real-time webhook had correctly fired arrival/departure for the place. Root cause: `cluster_pings()` had no concept of stopped vs. moving, so 21 walking-leg pings (approach + departure, no place_id) got absorbed into the same cluster as the 17 stationary pings inside the geofence. The contaminated centroid landed ~110 m from the place center — outside the 75 m match radius. The old `validate_cluster_places` band-aid then made it worse: it stripped the (correct) place tag because the centroid was outside the radius, exactly the wrong direction.
+
+Picked option 6 from the issue write-up over the speed pre-filter. The webhook's per-ping geofence match is already ground truth — there's no reason to re-derive place identity from a centroid when the pings themselves carry the correct `place_id`. Threshold-based majority vote sidesteps centroid contamination entirely for named places, and (unlike a speed filter) handles the addendum's crosswalk-wait scenario where genuinely stationary pings are not part of the visit.
+
+**Threshold rationale:** at the typical 10 s ping cadence, 3 tagged pings = ≥20 s inside the geofence. That rules out drive-bys (a 30 mph car traverses a 150 m-diameter geofence in ~12 s, producing 1-2 tagged pings) while still capturing brief legitimate stops. Slow drives at 15 mph through the geofence (~22 s, 2-3 pings) sit at the boundary; if that becomes a problem in practice the next iteration would add a dwell gate (first-to-last tagged-ping span ≥ 30 s), but starting simple per the issue's suggestion.
+
+**Key changes:**
+- `_finalize_cluster()` now tallies `place_id` occurrences across member pings and inherits the majority `place_id` only when at least `MIN_PLACE_PINGS = 3` pings carry it. Previously took the first non-null `place_id` it found.
+- `validate_cluster_places()` deleted along with both call sites in the day-summary path. The threshold-based propagation in `_finalize_cluster()` already prevents the phantom-tag scenario the validator was guarding against, and the validator now actively works against us in the Lazy Acres case.
+- Tests rewritten: `TestClusterPlacePropagation` and `TestValidateClusterPlaces` removed; new `TestClusterPlaceAttribution` covers single-ping (drive-by — no attribution), two pings (still below threshold), three pings (at threshold), majority-wins across multiple place_ids, the no-place baseline, and a Lazy Acres reproduction case where 17 stationary tagged pings survive contamination from 24 walking-leg pings.
+
+**Files added/modified:**
+- `src/istota/geo.py` — `MIN_PLACE_PINGS = 3` constant; `_finalize_cluster()` rewritten for majority-vote attribution; `validate_cluster_places()` removed.
+- `src/istota/web_app.py`, `src/istota/skills/location/__init__.py` — drop `validate_cluster_places` import + call from the day-summary path.
+- `tests/test_location.py` — `TestClusterPlaceAttribution` class replaces `TestClusterPlacePropagation` and `TestValidateClusterPlaces`. `TestClusterPings.test_cluster_carries_place_info` updated to use 3 pings (the threshold).
+
 ## 2026-04-28: KG extraction prompt improvements + sleep_cycle relocated under memory/
 
 Followed the analysis in `Notes/Projects/Istota/KG sleep cycle analysis and improvement plan.md`. Items 1–6 from its priority list shipped; items 7 (weekly LLM-assisted pruning) and 8 (mechanical auto-expiry) deferred until we see how the new prompt affects fact yield and staleness. While in the file, moved `sleep_cycle.py` into `src/istota/memory/` — it already imported the three sibling modules and AGENTS.md already framed it as the memory subsystem orchestrator.
