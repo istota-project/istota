@@ -3679,3 +3679,140 @@ class TestReconcileVisits:
             assert visits[0].id != stale_id  # stale row deleted
             assert visits[0].entered_at == "2026-04-21T10:00:00Z"
             assert visits[0].exited_at == "2026-04-21T10:28:00Z"
+
+    def test_idempotent_across_sliding_windows(self, tmp_path):
+        """ISSUE-064: sliding window must not accumulate phantom visits.
+
+        The daemon runs reconcile_visits every minute over a sliding window.
+        When `since` advances past a visit's first ping but the last ping is
+        still in window, prior runs must be cleaned up — not duplicated.
+        """
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "lazy_acres", 32.78, -117.18)
+            # 20 sparse pings over 11 minutes (Lazy Acres pattern)
+            ping_times = [
+                "2026-04-29T03:38:00Z", "2026-04-29T03:38:30Z",
+                "2026-04-29T03:39:00Z", "2026-04-29T03:39:30Z",
+                "2026-04-29T03:40:15Z", "2026-04-29T03:40:50Z",
+                "2026-04-29T03:41:30Z", "2026-04-29T03:42:10Z",
+                "2026-04-29T03:42:50Z", "2026-04-29T03:43:30Z",
+                "2026-04-29T03:44:10Z", "2026-04-29T03:44:55Z",
+                "2026-04-29T03:45:40Z", "2026-04-29T03:46:20Z",
+                "2026-04-29T03:47:00Z", "2026-04-29T03:47:40Z",
+                "2026-04-29T03:48:10Z", "2026-04-29T03:48:40Z",
+                "2026-04-29T03:49:00Z", "2026-04-29T03:49:30Z",
+            ]
+            for ts in ping_times:
+                self._ping(conn, "alice", ts, pid)
+            conn.commit()
+
+            # Three reconciler runs with `since` sliding past the visit's
+            # first ping but `until` still after the last ping.
+            for since, until in [
+                ("2026-04-29T03:30:00Z", "2026-04-29T03:50:00Z"),
+                ("2026-04-29T03:40:00Z", "2026-04-29T03:56:00Z"),
+                ("2026-04-29T03:43:00Z", "2026-04-29T04:03:00Z"),
+            ]:
+                db.reconcile_visits(
+                    conn, "alice", since=since, until=until,
+                    grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+                    accuracy_threshold_m=100.0,
+                )
+                conn.commit()
+
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 1, (
+                f"Expected 1 visit after sliding-window runs, got {len(visits)}: "
+                f"{[(v.id, v.entered_at, v.exited_at) for v in visits]}"
+            )
+            assert visits[0].entered_at == "2026-04-29T03:38:00Z"
+            assert visits[0].exited_at == "2026-04-29T03:49:30Z"
+            assert visits[0].ping_count == 20
+
+    def test_visit_straddling_since_not_truncated(self, tmp_path):
+        """A visit whose first ping is before `since` must be reconstructed in full."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            # Visit pings span 09:50 - 10:10; reconcile window starts at 10:00.
+            for m in range(50, 60, 2):
+                self._ping(conn, "alice", f"2026-04-21T09:{m:02d}:00Z", pid)
+            for m in range(0, 12, 2):
+                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid)
+            conn.commit()
+
+            db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-21T10:00:00Z", until="2026-04-21T11:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+                accuracy_threshold_m=100.0,
+            )
+            conn.commit()
+
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 1
+            assert visits[0].entered_at == "2026-04-21T09:50:00Z", (
+                "Read-back must find the visit's true first ping outside the window"
+            )
+            assert visits[0].exited_at == "2026-04-21T10:10:00Z"
+
+    def test_visit_entirely_before_window_untouched(self, tmp_path):
+        """A closed visit that ended before `since` must be left alone."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+            # Pre-existing closed visit from earlier in the day
+            old_id = db.insert_visit(conn, "alice", pid, "home", "2026-04-21T08:00:00Z")
+            db.close_visit(conn, old_id, "2026-04-21T08:30:00Z")
+            # Pings for a different, later visit that we will reconcile
+            for m in range(0, 12, 2):
+                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid)
+            conn.commit()
+
+            db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-21T09:00:00Z", until="2026-04-21T11:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+                accuracy_threshold_m=100.0,
+            )
+            conn.commit()
+
+            visits = sorted(db.get_visits(conn, "alice"), key=lambda v: v.entered_at)
+            assert len(visits) == 2
+            assert visits[0].id == old_id
+            assert visits[0].entered_at == "2026-04-21T08:00:00Z"
+            assert visits[1].entered_at == "2026-04-21T10:00:00Z"
+
+    def test_cleans_up_phantoms_from_prior_buggy_runs(self, tmp_path):
+        """Pre-existing duplicate visits (from the bug) must be replaced by one."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            pid = db.insert_place(conn, "alice", "lazy_acres", 32.78, -117.18)
+            # Three phantom visits with staggered entries, identical exits, no pings linked
+            for entry in ("2026-04-29T03:38:00Z",
+                          "2026-04-29T03:40:15Z",
+                          "2026-04-29T03:43:30Z"):
+                vid = db.insert_visit(conn, "alice", pid, "lazy_acres", entry)
+                db.close_visit(conn, vid, "2026-04-29T03:49:30Z")
+            # Real pings (would be linked to a different visit_id in production)
+            for ts in (
+                "2026-04-29T03:38:00Z", "2026-04-29T03:39:00Z",
+                "2026-04-29T03:42:00Z", "2026-04-29T03:45:00Z",
+                "2026-04-29T03:47:00Z", "2026-04-29T03:49:30Z",
+            ):
+                self._ping(conn, "alice", ts, pid)
+            conn.commit()
+
+            db.reconcile_visits(
+                conn, "alice",
+                since="2026-04-29T03:00:00Z", until="2026-04-29T04:30:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+                accuracy_threshold_m=100.0,
+            )
+            conn.commit()
+
+            visits = db.get_visits(conn, "alice")
+            assert len(visits) == 1
+            assert visits[0].entered_at == "2026-04-29T03:38:00Z"
+            assert visits[0].exited_at == "2026-04-29T03:49:30Z"

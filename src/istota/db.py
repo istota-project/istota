@@ -3613,8 +3613,9 @@ def reconcile_visits(
     min_pings: int = 3,
     min_dwell_sec: int = 60,
     accuracy_threshold_m: float | None = None,
+    read_lookback_hours: float = 24.0,
 ) -> int:
-    """Re-derive closed visits from location_pings in the window [since, until).
+    """Re-derive closed visits that overlap the window [since, until).
 
     Walks pings ordered by timestamp. A candidate visit starts on the first
     ping at a place and extends while subsequent pings are at the same place
@@ -3627,27 +3628,34 @@ def reconcile_visits(
     accuracy are treated as unassigned (place_id=NULL) for reconciliation
     so historical bad-accuracy pings don't pin visits to the wrong place.
 
-    Only closed visits in the window are replaced. The currently-open visit
-    (``exited_at IS NULL``) is never touched so the live state machine stays
-    consistent. Returns the number of visits written.
+    Pings are read from ``since - read_lookback_hours`` so a visit that
+    began before ``since`` is reconstructed in full. Only segments that
+    extend into the window are kept and persisted. Closed visits whose
+    [entered_at, exited_at] overlaps the window are deleted before insert
+    — this is the criterion that makes the routine idempotent across
+    sliding windows. The currently-open visit is never touched.
+    Returns the number of visits written.
     """
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     def _parse(ts: str) -> datetime:
         if ts.endswith("Z"):
             ts = ts[:-1] + "+00:00"
         return datetime.fromisoformat(ts)
 
+    read_since_dt = _parse(since) - timedelta(hours=read_lookback_hours)
+    read_since = read_since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
     if accuracy_threshold_m is None:
         place_expr = "place_id"
-        params: tuple = (user_id, since, until)
+        params: tuple = (user_id, read_since, until)
     else:
         # Treat low-accuracy pings as unassigned regardless of their stored place_id
         place_expr = (
             "CASE WHEN accuracy IS NOT NULL AND accuracy > ? "
             "THEN NULL ELSE place_id END"
         )
-        params = (accuracy_threshold_m, user_id, since, until)
+        params = (accuracy_threshold_m, user_id, read_since, until)
 
     all_rows = conn.execute(
         f"""
@@ -3713,12 +3721,17 @@ def reconcile_visits(
     if current is not None:
         segments.append(current)
 
-    # Filter walk-bys
+    # Filter walk-bys, then keep only segments that extend into the
+    # reconciliation window. Segments fully before ``since`` belong to a
+    # prior reconciliation pass and are not our responsibility to rewrite.
     kept: list[dict] = []
     for seg in segments:
         dur_sec = (_parse(seg["last_ts"]) - _parse(seg["first_ts"])).total_seconds()
-        if seg["ping_count"] >= min_pings and dur_sec >= min_dwell_sec:
-            kept.append(seg)
+        if seg["ping_count"] < min_pings or dur_sec < min_dwell_sec:
+            continue
+        if seg["last_ts"] < since:
+            continue
+        kept.append(seg)
 
     place_names = {
         r["id"]: r["name"]
@@ -3727,14 +3740,16 @@ def reconcile_visits(
         ).fetchall()
     }
 
-    # Delete closed visits entirely within the window. Keep any open visit
-    # and any visit that began before ``since`` (outside our scope).
+    # Delete closed visits whose [entered_at, exited_at] overlaps the window.
+    # Overlap-aware DELETE is what makes reconciliation idempotent under a
+    # sliding window: a prior run's output whose entered_at is now before
+    # ``since`` still gets cleaned up so the current run can replace it.
     conn.execute(
         """
         DELETE FROM visits
         WHERE user_id = ?
           AND exited_at IS NOT NULL
-          AND entered_at >= ?
+          AND exited_at >= ?
           AND entered_at < ?
         """,
         (user_id, since, until),
