@@ -2,6 +2,34 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-04-29: Visit reconciliation idempotent across sliding windows (ISSUE-064)
+
+The Lazy Acres verification surfaced a second location bug, distinct from ISSUE-062's clustering attribution. A single 11-minute stop produced 7 visit rows in the DB (IDs 3390–3400, all with the same `exited_at`, staggered `entered_at`, no pings linked). The user's initial guess in the issue write-up was that the day-summary clustering pipeline was running multiple passes, but day-summary clustering only emits JSON for the dashboard — it never writes visits. The actual culprit is `db.reconcile_visits()`.
+
+**Mechanism.** The scheduler calls `_reconcile_visits_for_all_users` every `briefing_check_interval` (60 s) over a sliding window `[now − reconcile_lookback_hours − reconcile_buffer_minutes, now − reconcile_buffer_minutes)`. Each run was supposed to be idempotent: DELETE the closed visits in the window, then re-derive them from pings. Two coupled bugs broke that:
+
+1. The DELETE filter was `entered_at >= since AND entered_at < until`. Once `since` slid past a visit's first ping, the previous run's output (with `entered_at` now < `since`) was no longer caught by the DELETE.
+2. The ping read query used the same `[since, until)` bounds. Once `since` slid past the visit's first at-place ping, the new segment's `first_ts` shifted forward, producing a record with a later `entered_at`. Combined with (1), each minute of sliding produced a fresh phantom row alongside the surviving prior ones, all sharing the same `exited_at` (the visit's last ping, which stayed in the window until the very end).
+
+For Lazy Acres, the window slid past the visit's pings over roughly the hour following 03:49 UTC; ~7 phantoms accumulated before the last ping fell out and segment generation went silent.
+
+**Reproducer.** Three sequential `reconcile_visits` calls with `since` advancing past the visit's first ping while `until` stayed past the last ping. Confirmed: 1 visit → 2 → 3, all with identical `exited_at` and pings remaining on their original `visit_id` (the reconciler never updates pings).
+
+**Fix.**
+- Read pings from `since - read_lookback_hours` (default 24 h) so a visit whose first ping is before `since` is reconstructed in full and the new segment's `entered_at` matches the prior run's.
+- After segmentation, drop segments whose `last_ts < since` — those belong to an older window and aren't our responsibility this pass.
+- DELETE uses overlap on the closed-visit interval: `exited_at IS NOT NULL AND exited_at >= since AND entered_at < until`. Catches phantoms from prior buggy runs (whose `entered_at` is now before `since`) and matches the new segment-keep filter so the routine is idempotent.
+
+The open visit is still untouched (DELETE excludes `exited_at IS NULL`; the existing "skip segments overlapping the open visit" loop is preserved). 24 h read lookback is comfortably more than any plausible single visit; pings are indexed on `(user_id, timestamp)` so the wider read is cheap.
+
+**Why the existing tests didn't catch this.** Every test in `TestReconcileVisits` ran a single reconcile call over a window that fully contained the visit's pings. The bug only manifests after multiple sequential runs with `since` advancing past `entered_at` — the case the daemon actually runs. Added `test_idempotent_across_sliding_windows`, `test_visit_straddling_since_not_truncated`, `test_visit_entirely_before_window_untouched`, and `test_cleans_up_phantoms_from_prior_buggy_runs`. The first two failed before the fix; all four pass after.
+
+**Production cleanup.** A targeted SQL pass on `zorg-01.cynium:/srv/app/zorg/data/zorg.db` removes existing phantom rows during deploy. (The deployed fix would also delete them on the next nightly pass via the new overlap-aware DELETE — running it manually shortens the window where the dashboard shows duplicates.)
+
+**Files modified:**
+- `src/istota/db.py` — `reconcile_visits` reads pings from `since - read_lookback_hours`, filters segments by `last_ts >= since`, DELETE switched to overlap-aware. New `read_lookback_hours` parameter (default 24).
+- `tests/test_location.py` — four new tests in `TestReconcileVisits` covering sliding-window idempotency, straddling visits, history visits, and pre-existing phantoms.
+
 ## 2026-04-29: Place-aware clustering for day-summary (ISSUE-062)
 
 Day-summary clustering was reporting "Serrano Avenue" instead of "Lazy Acres" even though the real-time webhook had correctly fired arrival/departure for the place. Root cause: `cluster_pings()` had no concept of stopped vs. moving, so 21 walking-leg pings (approach + departure, no place_id) got absorbed into the same cluster as the 17 stationary pings inside the geofence. The contaminated centroid landed ~110 m from the place center — outside the 75 m match radius. The old `validate_cluster_places` band-aid then made it worse: it stripped the (correct) place tag because the centroid was outside the radius, exactly the wrong direction.
