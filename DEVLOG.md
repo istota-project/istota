@@ -2,6 +2,51 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-02: Native feeds module — replacing Miniflux + bridger + PostgreSQL VM
+
+Folded the entire RSS pipeline into Istota. The previous architecture ran an external Miniflux instance backed by PostgreSQL plus an `rss-bridger` FastAPI service on a dedicated VM that translated Tumblr / Are.na API responses into RSS-shaped XML for Miniflux to ingest. With the SvelteKit reader UI already owning the hard part (grid/list views, image extraction, lightbox, infinite scroll, batched mark-read), three external services to push entries into a local SQLite is pure cost. The new module owns polling, storage, read state, subscription management, and the FastAPI surface in-process.
+
+Implemented across four phases (1–3 staged earlier in this branch but never committed; phase 4 landed in this session):
+
+**Phase 1 — module foundation.** New package `src/istota/feeds/` with `models.py` (FeedsContext, FeedRecord, FetchedItem, EntryRecord), `db.py` (per-user SQLite, no `user_id` columns — identity is which DB you opened), `_config_io.py` (FEEDS.toml read/write — also accepts FEEDS.md with a fenced toml block, mirroring CRON.md / BRIEFINGS.md / INVOICING.md), `workspace.py` (synthesises a context from the user's bot workspace dir), `_loader.py` (`resolve_for_user()`), `poller.py` (RSS via `feedparser`, conditional GET, exponential backoff doubling poll interval to a 24h cap), `sanitize.py` (bleach allowlist + html_to_text + image extraction; regex fallback if bleach is missing), `opml.py` (round-trip + automatic rewriting of bridger URLs `localhost:8900/{provider}/{id}/feed.xml` → bare `{provider}:{id}` form), and `providers/{tumblr,arena}.py` vendored from a sibling repo with the Atom-XML wrapping discarded — providers now return `FetchedItem` directly to the poller. Provider-prefixed URLs (`tumblr:foo`, `arena:bar`) round-trip through the whole stack via `detect_source_type` / `provider_identifier` helpers in `models.py`.
+
+**Phase 2 — CLI, skill rewrite, scheduler.** `istota.feeds.cli` (Click) with `list`, `categories`, `entries`, `add`, `remove`, `refresh`, `poll`, `import-opml`, `export-opml`, `run-scheduled`. The `entries` filters mirror what the HTTP API in phase 3 needs (status, feed_id, category, before, limit/offset, order/direction) so the CLI and routes stay parallel. Convention: every command that reads from the DB calls `_sync_config_to_db(ctx)` first, so a freshly-edited FEEDS.toml is reflected without an explicit "reload" step — cheap, idempotent, keeps the FEEDS.toml-as-source-of-truth invariant load-bearing. The skill at `src/istota/skills/feeds/__init__.py` was rewritten from a 176-line Miniflux HTTP wrapper into a `CliRunner` facade over `feeds.cli` (same pattern as `src/istota/skills/money/`); skill metadata switched from `resource_types: [miniflux]` + Miniflux env spec to `resource_types: [feeds]` + `FEEDS_USER` env. `feeds/jobs.py` exposes `jobs_for_user(ctx, user_id)` returning the single `_module.feeds.run_scheduled` job (`*/15 * * * *`); the scheduler grew `_sync_feeds_module_jobs(conn, app_config)` next to `_sync_money_module_jobs`, idempotent insert/update/delete by `_module.feeds.*` prefix, with stale jobs swept when a user removes their feeds resource.
+
+**Phase 3 — native API + backend flag.** `feeds/routes.py` exposes `GET /feeds`, `PUT /feeds/entries/{id}`, `PUT /feeds/entries/batch`, `GET/PUT /feeds/config`, `GET /feeds/export-opml`, `POST /feeds/import-opml`. Auth follows the money pattern: `app.dependency_overrides[require_auth] = _require_api_auth`. `[feeds] backend = "miniflux" | "native"` in config.py picks at module-import time which router gets mounted under `/istota/api/feeds` — both surfaces use identical JSON shape so the SvelteKit reader is backend-agnostic. The legacy proxy handlers in `web_app.py` were extracted to a `miniflux_proxy_router` so the include/skip is a single conditional. `_user_has_feeds()` drives the `/me` features dict for both backends. Briefing client gained `istota.feeds._native_briefing.fetch_native_entries`, with `fetch_briefing_entries(user_id, istota_config, limit)` dispatching on the backend flag — legacy `fetch_miniflux_entries` is unchanged. Unknown backend values raise `ValueError` at config-load time so a typo doesn't silently fall back.
+
+**Phase 4 — settings UI.** Sprocket icon (`Cog` from lucide) added to the feeds layout's `tools` snippet between the grid/list view chips and the Sources toggle. New route `web/src/routes/feeds/settings/+page.svelte`: diagnostics card (subs / entries / unread / errors / last poll), default poll interval input, categories table with rename + reorder + delete, subscriptions table with type pill, title, URL, category, interval, last fetch + last error column, edit + delete actions. Modal-based add/edit forms reuse `Modal`/`Button` primitives; confirm-delete modal for both feeds and categories — deleting a category detaches its feeds rather than cascading. OPML import (multipart upload, hits `/feeds/import-opml`) + export (download link). Edits buffer locally; explicit "Save changes" button PUTs the whole `FEEDS.toml` back. API helpers + types (`getFeedsConfig`, `putFeedsConfig`, `importOpml`, `exportOpmlUrl`, `FeedsConfigPayload`, `FeedsConfigResponse`, `FeedsDiagnostics`, `FeedsFeedState`, `FeedsImportResult`) added to `web/src/lib/api.ts`. `web/vite-mock-api.ts` got stateful GET/PUT for the config endpoint plus a stubbed POST for import-opml so the page is usable in `VITE_MOCK_API=1` offline-dev mode.
+
+**Decisions worth recording:**
+
+- **Whole-document save vs. per-row PUTs.** Settings page buffers edits and saves with one button. The API is `PUT /feeds/config` (whole-document), and the resync step has visible side effects (categories created, feeds upserted) that benefit from a single atomic confirmation.
+- **Tumblr API key is read-only in the UI.** The spec asked for a writable input that round-tripped to `extra.tumblr_api_key` on the user resource. That would require a new endpoint mutating the user config from a web request — meaningfully larger surface and an API-key write surface to threat-model. The settings page surfaces an info card explaining precedence (`extra.tumblr_api_key` → `TUMBLR_API_KEY` env) instead, which matches the "set once during deploy" reality. If UI-managed rotation is ever needed, the cleanest path is to teach `_loader.py` to also read `[settings].tumblr_api_key` from `FEEDS.toml`.
+- **Backend flag flip requires a process restart.** Native and legacy routers share the `/istota/api/feeds` prefix and are mutually exclusive — we pick at import time. Matches the Ansible deploy model.
+- **Provider boundary.** Providers return `FetchedItem`; the poller maps to `EntryRecord`; persistence is the brain-agnostic boundary. Keeps the Atom-XML wrapping out of the data path entirely.
+
+**Why this matters.** Eliminates an entire VM whose only job was RSS, three external processes (Miniflux + PostgreSQL + bridger), and a double-hop for 105 of 129 feeds (Tumblr/Are.na were going `API → bridger Atom XML → Miniflux fetch → Miniflux DB → proxy → reader`). The new path is `API → in-process → SQLite → reader`. Preserves the SvelteKit reader unchanged, which is where the design effort lived.
+
+**Phase 5 — production cutover** (export OPML from Miniflux, import via the settings UI on the production deploy, flip `[feeds] backend = "native"` in Ansible, decommission the dedicated VM, retire the bridger repo) is left for a session running on the production server.
+
+**Tests.** 114 feeds tests across `test_feeds_db.py`, `test_feeds_workspace.py`, `test_feeds_opml.py`, `test_feeds_poller.py`, `test_feeds_cli.py`, `test_feeds_jobs.py`, `test_feeds_skill.py`, `test_feeds_routes.py`, `test_feeds_config.py`, all green. Pre-existing `test_feeds.py` continues to cover the legacy Miniflux briefing client through a re-export shim.
+
+**Files added:**
+- `src/istota/feeds/{__init__,_loader,_miniflux,_native_briefing,_config_io,cli,db,jobs,models,opml,poller,routes,sanitize,workspace}.py`
+- `src/istota/feeds/providers/{__init__,tumblr,arena}.py`
+- `tests/test_feeds_{cli,config,db,jobs,opml,poller,routes,workspace}.py`
+- `web/src/routes/feeds/settings/+page.svelte`
+
+**Files modified:**
+- `src/istota/feeds.py` — deleted; replaced by the package, with `_miniflux.py` holding the legacy briefing client.
+- `src/istota/config.py` — added `FeedsConfig(backend="miniflux")`, `[feeds]` TOML section, validation.
+- `src/istota/scheduler.py` — added `_sync_feeds_module_jobs()` next to `_sync_money_module_jobs()`.
+- `src/istota/skills/feeds/__init__.py` — Miniflux HTTP wrapper rewritten as a `CliRunner` facade.
+- `src/istota/skills/feeds/skill.md` — frontmatter updated (`resource_types`, env spec); body documents URL schemes and the in-process pipeline.
+- `src/istota/web_app.py` — extracted `miniflux_proxy_router`, added `_user_has_feeds`, conditionally mounts `istota.feeds.routes` based on backend flag.
+- `tests/test_feeds_skill.py` — old Miniflux-client tests removed; replaced with facade end-to-end tests.
+- `pyproject.toml` / `uv.lock` — new `feeds` extra (`feedparser>=6.0.0`, `bleach>=6.0.0`, `click>=8.0`); folded into `all`.
+- `web/src/lib/api.ts`, `web/src/routes/feeds/+layout.svelte`, `web/vite-mock-api.ts`.
+- `.claude/rules/skills.md`, `AGENTS.md`, `README.md` — doc updates.
+
 ## 2026-04-29: stripIsolatedPlacePings nulls instead of removes (ISSUE-066)
 
 A continuous walking trip (Home → Trails Cafe) showed a dashed-gap segment across several hundred metres of normal walking on the web map. Every other filter looked correct in isolation, so the bug was in the interaction.

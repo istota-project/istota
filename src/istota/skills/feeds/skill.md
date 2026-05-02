@@ -1,40 +1,49 @@
 ---
 name: feeds
-triggers: [feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe]
-description: RSS feed management via Miniflux
+triggers: [feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe, opml]
+description: Native RSS/Atom/Tumblr/Are.na feed manager (in-tree, no Miniflux)
 cli: true
-resource_types: [miniflux]
+resource_types: [feeds]
 companion_skills: [untrusted_input]
-env: [{"var":"MINIFLUX_BASE_URL","from":"user_resource_config","resource_type":"miniflux","field":"base_url"},{"var":"MINIFLUX_API_KEY","from":"user_resource_config","resource_type":"miniflux","field":"api_key"}]
+env: [{"var":"FEEDS_USER","from":"user_id"}]
 ---
-# Feeds (Miniflux RSS)
+# Feeds (native)
 
-Manage RSS feed subscriptions via Miniflux. Supports listing, adding, and removing feeds, browsing entries, and triggering refreshes.
+Manage RSS/Atom/Tumblr/Are.na feed subscriptions through the in-tree feeds module. Per-user SQLite under `{workspace}/feeds/data/feeds.db`; subscriptions live in `FEEDS.toml` (or `FEEDS.md` with a fenced toml block).
 
 ## CLI
 
-Run `istota-skill feeds --help` (or `istota-skill feeds <subcommand> --help`) to see the live argument list.
+Run `istota-skill feeds --help` for the live list. Output is JSON.
 
 ```bash
-istota-skill feeds list                              # List all subscribed feeds
-istota-skill feeds add --url URL [--category NAME]   # Subscribe to a feed
-istota-skill feeds remove --id ID                    # Unsubscribe from a feed
-istota-skill feeds categories                        # List categories
-istota-skill feeds entries [--feed-id ID] [--status unread|read|removed] [--limit N] [--search QUERY]
-istota-skill feeds refresh [--feed-id ID]            # Trigger feed refresh
+istota-skill feeds list                                  # List subscriptions (DB view)
+istota-skill feeds categories                            # List categories
+istota-skill feeds entries [--status unread|read|removed] [--feed-id N] [--category SLUG] [--limit N] [--offset N] [--before UNIX_TS]
+istota-skill feeds add --url URL [--title T] [--category SLUG] [--poll-interval-minutes N]
+istota-skill feeds remove --url URL                      # or --id N
+istota-skill feeds refresh [--id N]                      # Clear next_poll_at to mark feeds due now
+istota-skill feeds poll [--limit N]                      # Poll every feed whose next_poll_at is past
+istota-skill feeds run-scheduled [--limit N]             # Wrapper used by the scheduler module-job
+istota-skill feeds import-opml PATH [--no-write-config]  # Import OPML; rewrites bridger URLs
+istota-skill feeds export-opml [--output PATH]           # Export as OPML 2.0
 ```
+
+## URL schemes
+
+- `https?://...` — RSS/Atom feed (parsed via `feedparser`).
+- `tumblr:USERNAME` — Tumblr blog via the API v2 provider.
+- `arena:CHANNEL_SLUG` — Are.na channel via the Are.na API provider.
+
+OPML imports automatically rewrite bridger URLs (`http://127.0.0.1:8900/{provider}/{id}/feed.xml`) to the bare `{provider}:{id}` form so the same FEEDS.toml works after the bridger VM is decommissioned.
 
 ## Environment variables
 
 | Variable | Description |
 |---|---|
-| `MINIFLUX_BASE_URL` | Miniflux instance URL (e.g. `https://flux.cynium.com`) |
-| `MINIFLUX_API_KEY` | Miniflux API key for authentication |
+| `FEEDS_USER` | Istota user id (set by the executor) |
+| `TUMBLR_API_KEY` | Tumblr API v2 key (optional). Can also be set via `extra.tumblr_api_key` on the user's `[[resources]] type = "feeds"` entry — context value wins, env var is a fallback for the migration window when the production deploy still has the key in the bridger systemd unit. |
 
 ## Notes
 
-- All output is JSON for easy parsing
-- Feed IDs are integers assigned by Miniflux
-- Categories group feeds for organization
-- Entry status values: `unread`, `read`, `removed`
-- Use `refresh` to force an immediate poll of a specific feed or all feeds
+- Subscriptions and categories are stored in `FEEDS.toml`; entries + read state live only in SQLite. `FEEDS.toml` is the source of truth — `add` / `remove` mutate it and re-sync.
+- `run-scheduled` runs every 15 minutes via the `_module.feeds.run_scheduled` job that the scheduler auto-seeds when the user has a `[[resources]] type = "feeds"` entry.

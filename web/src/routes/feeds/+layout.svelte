@@ -1,5 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { base } from '$app/paths';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { getFeeds, type Feed } from '$lib/api';
 	import {
 		feedsList,
@@ -18,12 +21,19 @@
 		CategoryGroup,
 		Chip,
 	} from '$lib/components/ui';
-	import { LayoutGrid, List } from 'lucide-svelte';
+	import { LayoutGrid, List, Cog } from 'lucide-svelte';
 
 	let { children } = $props();
 
 	let feeds: Feed[] = $state([]);
 	let sidebarOpen = $state(false);
+
+	let onSettings = $derived(page.url.pathname.startsWith(`${base}/feeds/settings`));
+
+	function toggleSettings() {
+		if (onSettings) goto(`${base}/feeds`);
+		else goto(`${base}/feeds/settings`);
+	}
 
 	let groupedFeeds = $derived.by(() => {
 		const groups: Record<string, Feed[]> = {};
@@ -41,6 +51,7 @@
 	function handleFeedClick(feedId: number) {
 		selectedFeedId.set($selectedFeedId === feedId ? 0 : feedId);
 		sidebarOpen = false;
+		if (onSettings) goto(`${base}/feeds`);
 	}
 
 	onMount(async () => {
@@ -77,6 +88,9 @@
 						<List size={14} />
 					</Chip>
 				</div>
+				<Chip icon checked={onSettings} onclick={toggleSettings} title="Feed settings">
+					<Cog size={14} />
+				</Chip>
 				<SidebarToggle
 					open={sidebarOpen}
 					label="Sources"

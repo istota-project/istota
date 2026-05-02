@@ -345,6 +345,18 @@ class MoneymanConfig:
 
 
 @dataclass
+class FeedsConfig:
+    """Selects the feeds backend served at ``/istota/api/feeds``.
+
+    ``"miniflux"`` keeps the legacy proxy in ``web_app.py`` (HTTP to a Miniflux
+    instance from the user's resource config). ``"native"`` mounts
+    :mod:`istota.feeds.routes`, which reads the per-user workspace SQLite
+    populated by the native poller.
+    """
+    backend: str = "miniflux"
+
+
+@dataclass
 class SkillsConfig:
     """Skill routing configuration."""
     semantic_routing: bool = True  # enable LLM-based Pass 2 skill classification
@@ -399,6 +411,7 @@ class Config:
     site: SiteConfig = field(default_factory=SiteConfig)
     location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
     moneyman: MoneymanConfig = field(default_factory=MoneymanConfig)
+    feeds: FeedsConfig = field(default_factory=FeedsConfig)
     google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
     web: WebConfig = field(default_factory=WebConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
@@ -993,6 +1006,15 @@ def load_config(config_path: Path | None = None) -> Config:
             api_url=mm.get("api_url", ""),
             api_key=mm.get("api_key", ""),
         )
+
+    if "feeds" in data:
+        fd = data["feeds"]
+        backend = fd.get("backend", "miniflux")
+        if backend not in ("miniflux", "native"):
+            raise ValueError(
+                f"[feeds] backend must be 'miniflux' or 'native', got {backend!r}"
+            )
+        config.feeds = FeedsConfig(backend=backend)
 
     if "google_workspace" in data:
         gw = data["google_workspace"]

@@ -1,168 +1,232 @@
-"""Miniflux RSS feed management CLI."""
+"""Feeds skill — in-process facade for the native feeds CLI.
+
+Resolves the user's :class:`FeedsContext` via
+:func:`istota.feeds.resolve_for_user` and invokes
+:mod:`istota.feeds.cli` through Click's ``CliRunner``. No subprocess,
+no HTTP, no Miniflux. Mirrors :mod:`istota.skills.money`.
+"""
 
 import argparse
 import json
 import os
 import sys
 
-import httpx
 
+def _run(args: list[str]) -> dict:
+    """Resolve the user's FeedsContext, invoke feeds.cli.cli, return parsed JSON."""
+    from click.testing import CliRunner
 
-def _client() -> httpx.Client:
-    base_url = os.environ.get("MINIFLUX_BASE_URL", "")
-    api_key = os.environ.get("MINIFLUX_API_KEY", "")
-    if not base_url or not api_key:
-        print(json.dumps({"error": "MINIFLUX_BASE_URL and MINIFLUX_API_KEY must be set"}))
-        sys.exit(1)
-    return httpx.Client(
-        base_url=base_url.rstrip("/"),
-        headers={"X-Auth-Token": api_key},
-        timeout=30.0,
+    from istota.config import load_config
+    from istota.feeds import UserNotFoundError, resolve_for_user
+    from istota.feeds.cli import cli
+
+    user_id = os.environ.get("FEEDS_USER", "") or ""
+    if not user_id:
+        return {"status": "error", "error": "FEEDS_USER not set"}
+
+    istota_cfg = load_config()
+    try:
+        feeds_ctx = resolve_for_user(user_id, istota_cfg)
+    except UserNotFoundError as e:
+        return {"status": "error", "error": str(e)}
+
+    feeds_ctx.ensure_dirs()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["-u", user_id, *args],
+        obj=feeds_ctx,
+        standalone_mode=False,
+        catch_exceptions=True,
     )
+
+    if result.exception is not None and not isinstance(result.exception, SystemExit):
+        return {
+            "status": "error",
+            "error": f"{type(result.exception).__name__}: {result.exception}",
+        }
+    if result.exit_code not in (0, None):
+        return {
+            "status": "error",
+            "error": (result.output or f"exit {result.exit_code}").strip(),
+        }
+
+    output = (result.output or "").strip()
+    if not output:
+        return {"status": "error", "error": "no output from feeds CLI"}
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError:
+        # Some commands (export-opml without --output) emit raw OPML on stdout.
+        return {"status": "ok", "raw": output}
+
+
+def _output(data) -> None:
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+# ---------------------------------------------------------------------------
+# Subcommand handlers
+# ---------------------------------------------------------------------------
 
 
 def cmd_list(args):
-    with _client() as client:
-        resp = client.get("/v1/feeds")
-        resp.raise_for_status()
-        feeds = resp.json()
-        result = [
-            {
-                "id": f["id"],
-                "title": f.get("title", ""),
-                "feed_url": f.get("feed_url", ""),
-                "site_url": f.get("site_url", ""),
-                "category": f.get("category", {}).get("title", ""),
-                "parsing_error_count": f.get("parsing_error_count", 0),
-            }
-            for f in feeds
-        ]
-        print(json.dumps(result, indent=2))
-
-
-def cmd_add(args):
-    payload = {"feed_url": args.url}
-    if args.category:
-        # Look up category ID by name, create if needed
-        with _client() as client:
-            resp = client.get("/v1/categories")
-            resp.raise_for_status()
-            categories = resp.json()
-            cat_id = None
-            for cat in categories:
-                if cat.get("title", "").lower() == args.category.lower():
-                    cat_id = cat["id"]
-                    break
-            if cat_id is None:
-                resp = client.post("/v1/categories", json={"title": args.category})
-                resp.raise_for_status()
-                cat_id = resp.json()["id"]
-            payload["category_id"] = cat_id
-            resp = client.post("/v1/feeds", json=payload)
-            resp.raise_for_status()
-            print(json.dumps(resp.json(), indent=2))
-    else:
-        with _client() as client:
-            resp = client.post("/v1/feeds", json=payload)
-            resp.raise_for_status()
-            print(json.dumps(resp.json(), indent=2))
-
-
-def cmd_remove(args):
-    with _client() as client:
-        resp = client.delete(f"/v1/feeds/{args.id}")
-        resp.raise_for_status()
-        print(json.dumps({"status": "ok", "removed_feed_id": args.id}))
+    _output(_run(["list"]))
 
 
 def cmd_categories(args):
-    with _client() as client:
-        resp = client.get("/v1/categories")
-        resp.raise_for_status()
-        print(json.dumps(resp.json(), indent=2))
+    _output(_run(["categories"]))
 
 
 def cmd_entries(args):
-    params = {}
-    if args.feed_id:
-        params["feed_id"] = args.feed_id
+    cli_args = ["entries"]
     if args.status:
-        params["status"] = args.status
-    if args.limit:
-        params["limit"] = args.limit
-    if args.search:
-        params["search"] = args.search
-    params.setdefault("limit", 25)
-    params["order"] = "published_at"
-    params["direction"] = "desc"
+        cli_args += ["--status", args.status]
+    if args.feed_id:
+        cli_args += ["--feed-id", str(args.feed_id)]
+    if args.category_id:
+        cli_args += ["--category-id", str(args.category_id)]
+    if args.category:
+        cli_args += ["--category", args.category]
+    if args.limit is not None:
+        cli_args += ["--limit", str(args.limit)]
+    if args.offset is not None:
+        cli_args += ["--offset", str(args.offset)]
+    if args.before is not None:
+        cli_args += ["--before", str(args.before)]
+    if args.order:
+        cli_args += ["--order", args.order]
+    if args.direction:
+        cli_args += ["--direction", args.direction]
+    _output(_run(cli_args))
 
-    with _client() as client:
-        resp = client.get("/v1/entries", params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        entries = data.get("entries", [])
-        result = [
-            {
-                "id": e["id"],
-                "title": e.get("title", ""),
-                "url": e.get("url", ""),
-                "author": e.get("author", ""),
-                "status": e.get("status", ""),
-                "published_at": e.get("published_at", ""),
-                "feed": e.get("feed", {}).get("title", ""),
-            }
-            for e in entries
-        ]
-        print(json.dumps({"total": data.get("total", len(result)), "entries": result}, indent=2))
+
+def cmd_add(args):
+    cli_args = ["add", "--url", args.url]
+    if args.title:
+        cli_args += ["--title", args.title]
+    if args.category:
+        cli_args += ["--category", args.category]
+    if args.poll_interval_minutes is not None:
+        cli_args += ["--poll-interval-minutes", str(args.poll_interval_minutes)]
+    _output(_run(cli_args))
+
+
+def cmd_remove(args):
+    cli_args = ["remove"]
+    if args.url:
+        cli_args += ["--url", args.url]
+    if args.id is not None:
+        cli_args += ["--id", str(args.id)]
+    _output(_run(cli_args))
 
 
 def cmd_refresh(args):
-    with _client() as client:
-        if args.feed_id:
-            resp = client.put(f"/v1/feeds/{args.feed_id}/refresh")
-        else:
-            resp = client.put("/v1/feeds/refresh")
-        resp.raise_for_status()
-        print(json.dumps({"status": "ok"}))
+    cli_args = ["refresh"]
+    if args.id is not None:
+        cli_args += ["--id", str(args.id)]
+    _output(_run(cli_args))
+
+
+def cmd_poll(args):
+    cli_args = ["poll"]
+    if args.limit is not None:
+        cli_args += ["--limit", str(args.limit)]
+    _output(_run(cli_args))
+
+
+def cmd_run_scheduled(args):
+    cli_args = ["run-scheduled"]
+    if args.limit is not None:
+        cli_args += ["--limit", str(args.limit)]
+    _output(_run(cli_args))
+
+
+def cmd_import_opml(args):
+    cli_args = ["import-opml", args.path]
+    if args.no_write_config:
+        cli_args.append("--no-write-config")
+    _output(_run(cli_args))
+
+
+def cmd_export_opml(args):
+    cli_args = ["export-opml"]
+    if args.output:
+        cli_args += ["--output", args.output]
+    _output(_run(cli_args))
+
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Miniflux feed management")
+    parser = argparse.ArgumentParser(
+        prog="python -m istota.skills.feeds",
+        description="Native feeds (RSS / Atom / Tumblr / Are.na)",
+    )
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("list", help="List subscribed feeds")
-
-    add_p = sub.add_parser("add", help="Subscribe to a feed")
-    add_p.add_argument("--url", required=True, help="Feed URL")
-    add_p.add_argument("--category", help="Category name")
-
-    rm_p = sub.add_parser("remove", help="Unsubscribe from a feed")
-    rm_p.add_argument("--id", required=True, type=int, help="Feed ID")
-
     sub.add_parser("categories", help="List categories")
 
-    ent_p = sub.add_parser("entries", help="Fetch entries")
-    ent_p.add_argument("--feed-id", type=int, help="Filter by feed ID")
-    ent_p.add_argument("--status", choices=["unread", "read", "removed"], help="Filter by status")
-    ent_p.add_argument("--limit", type=int, help="Max entries to return")
-    ent_p.add_argument("--search", help="Search query")
+    p_ent = sub.add_parser("entries", help="List entries")
+    p_ent.add_argument("--status", choices=["unread", "read", "removed"])
+    p_ent.add_argument("--feed-id", type=int)
+    p_ent.add_argument("--category-id", type=int)
+    p_ent.add_argument("--category", help="Category slug")
+    p_ent.add_argument("--limit", type=int)
+    p_ent.add_argument("--offset", type=int)
+    p_ent.add_argument("--before", type=int, help="Unix ts; only entries published before this")
+    p_ent.add_argument("--order", choices=["published_at", "created_at", "id"])
+    p_ent.add_argument("--direction", choices=["asc", "desc"])
 
-    ref_p = sub.add_parser("refresh", help="Trigger feed refresh")
-    ref_p.add_argument("--feed-id", type=int, help="Specific feed ID (omit for all)")
+    p_add = sub.add_parser("add", help="Subscribe to a feed")
+    p_add.add_argument("--url", required=True)
+    p_add.add_argument("--title")
+    p_add.add_argument("--category")
+    p_add.add_argument("--poll-interval-minutes", type=int)
+
+    p_rm = sub.add_parser("remove", help="Unsubscribe from a feed")
+    p_rm.add_argument("--url")
+    p_rm.add_argument("--id", type=int)
+
+    p_ref = sub.add_parser("refresh", help="Mark feeds as due for next poll")
+    p_ref.add_argument("--id", type=int, help="Feed id; omit for all feeds")
+
+    p_poll = sub.add_parser("poll", help="Poll all due feeds now")
+    p_poll.add_argument("--limit", type=int)
+
+    p_run = sub.add_parser("run-scheduled", help="Periodic poll entry point used by the scheduler")
+    p_run.add_argument("--limit", type=int)
+
+    p_imp = sub.add_parser("import-opml", help="Import an OPML file (Miniflux export, etc.)")
+    p_imp.add_argument("path", help="Path to OPML file")
+    p_imp.add_argument("--no-write-config", action="store_true",
+                       help="Don't regenerate FEEDS.toml from the imported DB rows")
+
+    p_exp = sub.add_parser("export-opml", help="Export subscriptions as OPML")
+    p_exp.add_argument("--output", "-o", help="Write to file instead of stdout")
 
     return parser
 
 
-def main():
+def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
     commands = {
         "list": cmd_list,
-        "add": cmd_add,
-        "remove": cmd_remove,
         "categories": cmd_categories,
         "entries": cmd_entries,
+        "add": cmd_add,
+        "remove": cmd_remove,
         "refresh": cmd_refresh,
+        "poll": cmd_poll,
+        "run-scheduled": cmd_run_scheduled,
+        "import-opml": cmd_import_opml,
+        "export-opml": cmd_export_opml,
     }
     fn = commands.get(args.command)
     if fn:

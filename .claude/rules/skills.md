@@ -128,7 +128,7 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `location` | — | location, gps, where, place, tracking, ... | — | — |
 | `bookmarks` | — | bookmark, karakeep, save, read later, ... | karakeep | — |
 | `website` | — | website, site, publish, blog, ... | — | — |
-| `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe | miniflux | — |
+| `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe, opml | feeds | — |
 | `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws | — | — |
 | `money` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | money (legacy `moneyman` accepted) | — |
 | `untrusted_input` | — | — | — | — |
@@ -193,10 +193,10 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Subcommands**: `search`, `list`, `get`, `add`, `tags`, `tag`, `untag`, `lists`, `list-bookmarks`, `summarize`, `stats`
 **Env vars**: `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY`
 
-### `feeds/` - Miniflux RSS Feed Management
-**Subcommands**: `list`, `add`, `remove`, `categories`, `entries`, `refresh`
-**Env vars**: `MINIFLUX_BASE_URL`, `MINIFLUX_API_KEY`
-**Key fns**: `cmd_list()`, `cmd_add()`, `cmd_remove()`, `cmd_categories()`, `cmd_entries()`, `cmd_refresh()`
+### `feeds/` - Native RSS / Atom / Tumblr / Are.na (in-process)
+**Subcommands**: `list`, `categories`, `entries`, `add`, `remove`, `refresh`, `poll`, `run-scheduled`, `import-opml`, `export-opml`
+**Env vars**: `FEEDS_USER` (set by executor); `TUMBLR_API_KEY` optional fallback
+**Note**: In-process facade — resolves the user's `FeedsContext` via `istota.feeds.resolve_for_user` and invokes `istota.feeds.cli` through `CliRunner`. No subprocess, no Miniflux. Per-user SQLite at `{workspace}/feeds/data/feeds.db`; subscriptions in `FEEDS.toml`. Scheduler auto-seeds `_module.feeds.run_scheduled` (`*/15 * * * *`) for users with a `[[resources]] type = "feeds"` entry.
 
 ### `google_workspace/` - Google Workspace CLI Passthrough
 **Subcommands**: Passes all arguments through to `gws` binary (Drive, Gmail, Calendar, Sheets, Docs, Chat)
@@ -213,7 +213,7 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 - `markets/finviz.py` - FinViz scraping for market data (internal helper for `markets`)
 
 ### Top-Level Library Modules (outside skills/)
-- `feeds.py` (`src/istota/feeds.py`) - Miniflux API client + HTML feed page generation (used by scheduler for periodic regen)
+- `feeds/_miniflux.py` — Legacy Miniflux briefing client (HTML feed page generation). Kept until the `[feeds] backend` flag in Phase 3+ retires the proxy path.
 
 ## How to Add a New Skill
 

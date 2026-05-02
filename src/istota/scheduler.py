@@ -2631,6 +2631,11 @@ def _sync_cron_files(conn, app_config: Config) -> None:
     except Exception as e:
         logger.error("Error syncing money module jobs: %s", e)
 
+    try:
+        _sync_feeds_module_jobs(conn, app_config)
+    except Exception as e:
+        logger.error("Error syncing feeds module jobs: %s", e)
+
 
 def _sync_money_module_jobs(conn, app_config: Config) -> None:
     """Seed/refresh ``_module.money.*`` scheduled jobs from each user's money config.
@@ -2671,6 +2676,86 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
             continue
 
         wanted = jobs_for_user(money_ctx, user_id)
+        wanted_by_name = {j["name"]: j for j in wanted}
+
+        existing_rows = list(conn.execute(
+            "SELECT id, name, cron_expression, command "
+            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            (user_id, f"{MODULE_PREFIX}%"),
+        ))
+        existing_by_name = {row[1]: row for row in existing_rows}
+
+        for name, j in wanted_by_name.items():
+            row = existing_by_name.get(name)
+            if row is None:
+                conn.execute(
+                    "INSERT INTO scheduled_jobs "
+                    "(user_id, name, cron_expression, prompt, command, enabled) "
+                    "VALUES (?, ?, ?, '', ?, 1)",
+                    (user_id, name, j["cron"], j["command"]),
+                )
+                logger.info(
+                    "Seeded module job '%s' for user %s", name, user_id,
+                )
+            else:
+                if row[2] != j["cron"] or row[3] != j["command"]:
+                    conn.execute(
+                        "UPDATE scheduled_jobs "
+                        "SET cron_expression = ?, command = ?, last_run_at = datetime('now') "
+                        "WHERE id = ?",
+                        (j["cron"], j["command"], row[0]),
+                    )
+                    logger.info(
+                        "Updated module job '%s' for user %s", name, user_id,
+                    )
+
+        for name, row in existing_by_name.items():
+            if name not in wanted_by_name:
+                conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (row[0],))
+                logger.info(
+                    "Removed obsolete module job '%s' for user %s",
+                    name, user_id,
+                )
+
+    conn.commit()
+
+
+def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
+    """Seed/refresh ``_module.feeds.*`` scheduled jobs for users with a feeds resource.
+
+    Idempotent: existing rows are updated when cron or command differs;
+    obsolete rows (e.g. user removed their feeds resource) are deleted.
+    """
+    try:
+        from istota.feeds import UserNotFoundError, resolve_for_user
+        from istota.feeds.jobs import MODULE_PREFIX, jobs_for_user
+    except ImportError:
+        # feeds extra not installed
+        return
+
+    for user_id in app_config.users:
+        uc = app_config.users.get(user_id)
+        if uc is None:
+            continue
+
+        has_feeds = any(
+            getattr(r, "type", None) == "feeds"
+            for r in getattr(uc, "resources", []) or []
+        )
+        if not has_feeds:
+            conn.execute(
+                "DELETE FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+                (user_id, f"{MODULE_PREFIX}%"),
+            )
+            continue
+
+        try:
+            feeds_ctx = resolve_for_user(user_id, app_config)
+        except UserNotFoundError as e:
+            logger.warning("Could not resolve feeds config for %s: %s", user_id, e)
+            continue
+
+        wanted = jobs_for_user(feeds_ctx, user_id)
         wanted_by_name = {j["name"]: j for j in wanted}
 
         existing_rows = list(conn.execute(
