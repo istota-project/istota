@@ -84,6 +84,97 @@ export async function updateEntriesStatus(ids: number[], status: string): Promis
 	});
 }
 
+// Feeds settings types
+
+export interface FeedsConfigCategory {
+	slug: string;
+	title?: string;
+}
+
+export interface FeedsConfigFeed {
+	url: string;
+	title?: string;
+	category?: string;
+	poll_interval_minutes?: number;
+}
+
+export interface FeedsConfigSettings {
+	default_poll_interval_minutes?: number;
+}
+
+export interface FeedsConfigPayload {
+	settings: FeedsConfigSettings;
+	categories: FeedsConfigCategory[];
+	feeds: FeedsConfigFeed[];
+}
+
+export interface FeedsDiagnostics {
+	total_feeds: number;
+	total_entries: number;
+	unread_entries: number;
+	error_feeds: number;
+	last_poll_at: string | null;
+}
+
+export interface FeedsFeedState {
+	url: string;
+	last_fetched_at: string | null;
+	last_error: string | null;
+	error_count: number;
+}
+
+export interface FeedsConfigResponse {
+	config: FeedsConfigPayload;
+	diagnostics: FeedsDiagnostics;
+	feed_state: FeedsFeedState[];
+}
+
+export interface FeedsImportResult {
+	status: string;
+	feeds_added: number;
+	feeds_updated: number;
+	categories_added: number;
+	rewritten_bridger_urls: number;
+}
+
+export async function getFeedsConfig(): Promise<FeedsConfigResponse> {
+	return apiFetch<FeedsConfigResponse>('/feeds/config');
+}
+
+export async function putFeedsConfig(config: FeedsConfigPayload): Promise<{ status: string; sync: { categories_added: number; feeds_added: number; feeds_updated: number } }> {
+	return apiFetch('/feeds/config', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ config }),
+	});
+}
+
+export async function importOpml(file: File): Promise<FeedsImportResult> {
+	const fd = new FormData();
+	fd.append('file', file);
+	const resp = await fetch(`${base}/api/feeds/import-opml`, {
+		method: 'POST',
+		credentials: 'same-origin',
+		body: fd,
+	});
+	if (resp.status === 401) throw new AuthError();
+	if (!resp.ok) {
+		let msg = `Import failed: ${resp.status}`;
+		try {
+			const body = await resp.json();
+			if (body?.error) msg = body.error;
+		} catch {
+			// ignore
+		}
+		throw new Error(msg);
+	}
+	return resp.json();
+}
+
+export function exportOpmlUrl(): string {
+	return `${base}/api/feeds/export-opml`;
+}
+
 // Location types
 
 export interface LocationPing {

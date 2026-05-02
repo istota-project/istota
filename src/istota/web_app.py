@@ -304,6 +304,22 @@ def _get_miniflux_creds(username: str) -> tuple[str, str] | None:
     return None
 
 
+def _user_has_feeds(username: str) -> bool:
+    """True if the user has feeds available under the current backend.
+
+    Native backend: looks for a ``[[resources]] type = "feeds"`` entry.
+    Miniflux backend: looks for a ``miniflux`` resource with creds.
+    """
+    if not _config:
+        return False
+    if _config.feeds.backend == "native":
+        uc = _config.get_user(username)
+        if not uc:
+            return False
+        return any(r.type == "feeds" for r in uc.resources)
+    return _get_miniflux_creds(username) is not None
+
+
 def _user_has_money(username: str) -> bool:
     """True if the user has a money/moneyman resource configured."""
     if not _config:
@@ -354,8 +370,7 @@ async def api_me(user: dict = Depends(_require_api_auth)):
     username = user["username"]
     features: dict = {"feeds": False, "location": False, "money": False, "google_workspace": False, "google_workspace_enabled": False}
     if _config:
-        creds = _get_miniflux_creds(username)
-        features["feeds"] = creds is not None
+        features["feeds"] = _user_has_feeds(username)
         features["location"] = _config.location.enabled
         features["money"] = _user_has_money(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
@@ -510,7 +525,13 @@ def _map_entry(entry: dict) -> dict:
     }
 
 
-@api_router.get("/feeds")
+# Legacy Miniflux proxy router — included only when [feeds] backend = "miniflux".
+# When the backend flag flips to "native", istota.feeds.routes mounts at the
+# same path instead.
+miniflux_proxy_router = APIRouter(prefix="/istota/api")
+
+
+@miniflux_proxy_router.get("/feeds")
 async def api_feeds(
     user: dict = Depends(_require_api_auth),
     limit: int = Query(default=500, le=1000),
@@ -576,7 +597,7 @@ async def api_feeds(
     }
 
 
-@api_router.put("/feeds/entries/batch")
+@miniflux_proxy_router.put("/feeds/entries/batch")
 async def api_update_entries_batch(
     request: Request,
     user: dict = Depends(_require_api_auth),
@@ -611,7 +632,7 @@ async def api_update_entries_batch(
     return {"status": "ok"}
 
 
-@api_router.put("/feeds/entries/{entry_id}")
+@miniflux_proxy_router.put("/feeds/entries/{entry_id}")
 async def api_update_entry(
     entry_id: int,
     request: Request,
@@ -1344,6 +1365,29 @@ async def api_location_trips(
 
 app.include_router(api_router)
 app.include_router(auth_router)
+
+# Feeds web API — the backend flag picks between the native module (SQLite)
+# and the legacy Miniflux proxy. Both surfaces use the same
+# ``/istota/api/feeds`` prefix and the same JSON shape, so the SvelteKit
+# reader is backend-agnostic. Route registration happens at import time, so
+# we load the config eagerly here; lifespan still re-runs ``_reload_config``
+# on startup and SIGHUP for everything else.
+try:
+    if _config is None:
+        _reload_config()
+    _feeds_backend = _config.feeds.backend if _config else "miniflux"
+except Exception:
+    logger.exception("feeds backend resolution failed at import; defaulting to miniflux")
+    _feeds_backend = "miniflux"
+
+if _feeds_backend == "native":
+    from istota.feeds.routes import require_auth as _feeds_require_auth
+    from istota.feeds.routes import router as _feeds_router
+
+    app.include_router(_feeds_router, prefix="/istota/api/feeds", tags=["feeds"])
+    app.dependency_overrides[_feeds_require_auth] = _require_api_auth
+else:
+    app.include_router(miniflux_proxy_router)
 
 # Money web API — mounted when the optional ``money`` extra is installed.
 try:

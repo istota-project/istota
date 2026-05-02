@@ -21,6 +21,54 @@ const user = {
 
 const emptyFeeds = { feeds: [], entries: [], total: 0 };
 
+interface MockFeed {
+	url: string;
+	title?: string;
+	category?: string;
+	poll_interval_minutes?: number;
+}
+interface MockCategory {
+	slug: string;
+	title?: string;
+}
+const mockFeedsConfig: {
+	settings: { default_poll_interval_minutes?: number };
+	categories: MockCategory[];
+	feeds: MockFeed[];
+} = {
+	settings: { default_poll_interval_minutes: 30 },
+	categories: [
+		{ slug: 'blogs', title: 'Blogs' },
+		{ slug: 'tumblr', title: 'Tumblr' },
+		{ slug: 'arena', title: 'Are.na' },
+	],
+	feeds: [
+		{ url: 'https://example.com/feed.xml', title: 'Example Blog', category: 'blogs' },
+		{ url: 'tumblr:nemfrog', title: 'Nemfrog', category: 'tumblr' },
+		{ url: 'arena:cats-in-a-channel', category: 'arena', poll_interval_minutes: 60 },
+	],
+};
+
+function feedsConfigResponse() {
+	const now = new Date().toISOString();
+	return {
+		config: mockFeedsConfig,
+		diagnostics: {
+			total_feeds: mockFeedsConfig.feeds.length,
+			total_entries: 42,
+			unread_entries: 7,
+			error_feeds: 0,
+			last_poll_at: now,
+		},
+		feed_state: mockFeedsConfig.feeds.map((f) => ({
+			url: f.url,
+			last_fetched_at: now,
+			last_error: null,
+			error_count: 0,
+		})),
+	};
+}
+
 interface MockPlace {
 	id: number;
 	name: string;
@@ -153,6 +201,41 @@ function dropClusterNear(point: { lat: number; lon: number }, radius: number): v
 
 const handlers: MockHandler[] = [
 	({ url }) => (url === '/istota/api/me' ? user : undefined),
+
+	// Feeds settings: config GET/PUT
+	({ url, method, body }) => {
+		if (url !== '/istota/api/feeds/config') return undefined;
+		if (method === 'GET') return feedsConfigResponse();
+		if (method === 'PUT') {
+			const cfg = body?.config;
+			if (cfg && typeof cfg === 'object') {
+				mockFeedsConfig.settings = cfg.settings ?? {};
+				mockFeedsConfig.categories = cfg.categories ?? [];
+				mockFeedsConfig.feeds = cfg.feeds ?? [];
+			}
+			return {
+				status: 'ok',
+				sync: {
+					categories_added: 0,
+					feeds_added: 0,
+					feeds_updated: mockFeedsConfig.feeds.length,
+				},
+			};
+		}
+		return undefined;
+	},
+
+	({ url, method }) => {
+		if (url !== '/istota/api/feeds/import-opml' || method !== 'POST') return undefined;
+		return {
+			status: 'ok',
+			feeds_added: 1,
+			feeds_updated: 0,
+			categories_added: 1,
+			rewritten_bridger_urls: 0,
+		};
+	},
+
 	({ url }) => (url.startsWith('/istota/api/feeds') ? emptyFeeds : undefined),
 	({ url }) => (url.startsWith('/istota/api/location/current') ? mockCurrent : undefined),
 

@@ -36,7 +36,7 @@ src/istota/
 ├── nextcloud_api.py      # NC user metadata
 ├── nextcloud_client.py   # OCS + WebDAV plumbing
 ├── storage.py            # Bot-managed Nextcloud storage
-├── feeds.py              # Miniflux API client
+├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML
 ├── location_logic.py     # Place stats / cluster discovery (shared web ⇄ skill)
 ├── shared_file_organizer.py
 ├── commands.py           # !command dispatch
@@ -126,7 +126,7 @@ Nightly extraction goes through the configured Brain (no streaming, no sandbox).
 Overland webhook → `webhook_receiver.py`. Asymmetric place detection (hysteresis on entry, continuous away on exit). Reconciler re-derives closed visits. Discovered clusters dismissable. Tables: `location_pings`, `places`, `visits`, `location_state`, `dismissed_clusters`.
 
 ### Web UI
-SvelteKit (`web/`, `adapter-static`, base `/istota`) + FastAPI (`web_app.py`). Nextcloud OIDC auth, 7-day session. Routes: dashboard, feeds (Miniflux proxy), location (today + history with cluster discovery), money (`/istota/money/*`). Dev: `VITE_MOCK_API=1 npm run dev` for in-process mock backend. Frontend primitives in `web/src/lib/components/ui/` (AppShell, ShellHeader, Sidebar, Chip, Button, Select, Modal, etc.).
+SvelteKit (`web/`, `adapter-static`, base `/istota`) + FastAPI (`web_app.py`). Nextcloud OIDC auth, 7-day session. Routes: dashboard, feeds (reader + sprocket-icon settings page; backend selectable via `[feeds] backend = "miniflux" | "native"` — native serves `istota.feeds.routes` against per-user SQLite), location (today + history with cluster discovery), money (`/istota/money/*`). Dev: `VITE_MOCK_API=1 npm run dev` for in-process mock backend. Frontend primitives in `web/src/lib/components/ui/` (AppShell, ShellHeader, Sidebar, Chip, Button, Select, Modal, etc.).
 
 ### Security
 - **Sandbox** (`bwrap`): per-user filesystem isolation. Linux + bubblewrap is the only supported deployment.
