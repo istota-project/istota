@@ -388,64 +388,66 @@
 			{#if config.categories.length === 0}
 				<p class="empty">No categories yet. Categories group feeds in the sidebar.</p>
 			{:else}
-				<table class="grid">
-					<thead>
-						<tr>
-							<th>Slug</th>
-							<th>Title</th>
-							<th class="num">Feeds</th>
-							<th class="actions">Order</th>
-							<th class="actions"></th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each config.categories as cat, idx (cat.slug)}
-							{@const count = config.feeds.filter((f) => f.category === cat.slug).length}
+				<div class="table-scroll">
+					<table class="grid">
+						<thead>
 							<tr>
-								<td><code>{cat.slug}</code></td>
-								<td>
-									<input
-										type="text"
-										value={cat.title ?? ''}
-										placeholder={cat.slug}
-										oninput={(e) => {
-											config.categories = config.categories.map((c, i) =>
-												i === idx
-													? { ...c, title: (e.currentTarget as HTMLInputElement).value }
-													: c,
-											);
-										}}
-									/>
-								</td>
-								<td class="num">{count}</td>
-								<td class="actions">
-									<button
-										class="icon-btn"
-										title="Move up"
-										onclick={() => moveCategory(idx, -1)}
-										disabled={idx === 0}
-										type="button">↑</button
-									>
-									<button
-										class="icon-btn"
-										title="Move down"
-										onclick={() => moveCategory(idx, 1)}
-										disabled={idx === config.categories.length - 1}
-										type="button">↓</button
-									>
-								</td>
-								<td class="actions">
-									<button
-										class="icon-btn danger"
-										title="Delete category"
-										onclick={() => deleteCategory(idx)}
-										type="button">×</button
-									>
-								</td>
+								<th class="col-slug">Slug</th>
+								<th class="col-title">Title</th>
+								<th class="num col-count">Feeds</th>
+								<th class="actions">Order</th>
+								<th class="actions"></th>
 							</tr>
-						{/each}
-					</tbody>
-				</table>
+						</thead>
+						<tbody>
+							{#each config.categories as cat, idx (cat.slug)}
+								{@const count = config.feeds.filter((f) => f.category === cat.slug).length}
+								<tr>
+									<td class="col-slug"><code>{cat.slug}</code></td>
+									<td class="col-title">
+										<input
+											type="text"
+											value={cat.title ?? ''}
+											placeholder={cat.slug}
+											oninput={(e) => {
+												config.categories = config.categories.map((c, i) =>
+													i === idx
+														? { ...c, title: (e.currentTarget as HTMLInputElement).value }
+														: c,
+												);
+											}}
+										/>
+									</td>
+									<td class="num col-count">{count}</td>
+									<td class="actions">
+										<button
+											class="icon-btn"
+											title="Move up"
+											onclick={() => moveCategory(idx, -1)}
+											disabled={idx === 0}
+											type="button">↑</button
+										>
+										<button
+											class="icon-btn"
+											title="Move down"
+											onclick={() => moveCategory(idx, 1)}
+											disabled={idx === config.categories.length - 1}
+											type="button">↓</button
+										>
+									</td>
+									<td class="actions">
+										<button
+											class="icon-btn danger"
+											title="Delete category"
+											onclick={() => deleteCategory(idx)}
+											type="button">×</button
+										>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
 			{/if}
 		</section>
 
@@ -460,59 +462,66 @@
 					Miniflux.
 				</p>
 			{:else}
-				<table class="grid">
-					<thead>
-						<tr>
-							<th class="type">Type</th>
-							<th>Title</th>
-							<th>URL</th>
-							<th>Category</th>
-							<th class="num">Interval</th>
-							<th>Last fetch</th>
-							<th class="actions"></th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each config.feeds as feed, idx (feed.url + idx)}
-							{@const state = feedStateByUrl[feed.url]}
-							<tr class:has-error={state && state.error_count > 0}>
-								<td class="type"><span class="type-pill">{detectSourceType(feed.url)}</span></td>
-								<td>{feed.title || ''}</td>
-								<td><code class="url">{feed.url}</code></td>
-								<td>{feed.category || ''}</td>
-								<td class="num">{feed.poll_interval_minutes ?? defaultInterval()}m</td>
-								<td>
-									{#if state}
-										<div class="state">
-											<span>{formatDate(state.last_fetched_at)}</span>
-											{#if state.last_error}
-												<span class="state-error" title={state.last_error}>
-													{state.error_count}× err: {state.last_error.slice(0, 60)}
-												</span>
-											{/if}
-										</div>
-									{:else}
-										<span class="muted">never</span>
-									{/if}
-								</td>
-								<td class="actions">
-									<button
-										class="icon-btn"
-										title="Edit"
-										onclick={() => startEdit(idx)}
-										type="button">✎</button
-									>
-									<button
-										class="icon-btn danger"
-										title="Delete"
-										onclick={() => deleteFeed(idx)}
-										type="button">×</button
-									>
-								</td>
+				<div class="table-scroll">
+					<table class="grid">
+						<thead>
+							<tr>
+								<th class="type">Type</th>
+								<th class="col-title">Title</th>
+								<th class="col-url">URL</th>
+								<th class="col-category">Category</th>
+								<th class="num col-interval">Interval</th>
+								<th class="col-state">Last fetch</th>
+								<th class="actions"></th>
 							</tr>
-						{/each}
-					</tbody>
-				</table>
+						</thead>
+						<tbody>
+							{#each config.feeds as feed, idx (feed.url + idx)}
+								{@const state = feedStateByUrl[feed.url]}
+								<tr class:has-error={state && state.error_count > 0}>
+									<td class="type"><span class="type-pill">{detectSourceType(feed.url)}</span></td>
+									<td class="col-title">
+										<div class="title-cell">
+											<span class="title-text">{feed.title || feed.url}</span>
+											<code class="url url-inline">{feed.url}</code>
+										</div>
+									</td>
+									<td class="col-url"><code class="url">{feed.url}</code></td>
+									<td class="col-category">{feed.category || ''}</td>
+									<td class="num col-interval">{feed.poll_interval_minutes ?? defaultInterval()}m</td>
+									<td class="col-state">
+										{#if state}
+											<div class="state">
+												<span>{formatDate(state.last_fetched_at)}</span>
+												{#if state.last_error}
+													<span class="state-error" title={state.last_error}>
+														{state.error_count}× err: {state.last_error.slice(0, 60)}
+													</span>
+												{/if}
+											</div>
+										{:else}
+											<span class="muted">never</span>
+										{/if}
+									</td>
+									<td class="actions">
+										<button
+											class="icon-btn"
+											title="Edit"
+											onclick={() => startEdit(idx)}
+											type="button">✎</button
+										>
+										<button
+											class="icon-btn danger"
+											title="Delete"
+											onclick={() => deleteFeed(idx)}
+											type="button">×</button
+										>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
 			{/if}
 		</section>
 
@@ -676,12 +685,16 @@
 
 <style>
 	.settings {
+		width: 100%;
 		max-width: 980px;
 		margin: 0 auto;
 		padding: 1.5rem 1rem 4rem;
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
+		box-sizing: border-box;
+		container-type: inline-size;
+		container-name: settings;
 	}
 
 	.settings-header {
@@ -828,6 +841,10 @@
 		padding: 0.3rem 0.5rem;
 		font: inherit;
 		font-size: var(--text-sm);
+		width: 100%;
+		max-width: 24rem;
+		min-width: 0;
+		box-sizing: border-box;
 	}
 
 	.field input:focus,
@@ -835,10 +852,49 @@
 		outline: 1px solid var(--accent, #6c8ebf);
 	}
 
+	.table-scroll {
+		width: 100%;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+
 	.grid {
 		width: 100%;
 		border-collapse: collapse;
 		font-size: var(--text-sm);
+	}
+
+	.col-title {
+		max-width: 0;
+	}
+
+	.title-cell {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+		min-width: 0;
+	}
+
+	.title-text {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.col-state {
+		max-width: 14rem;
+	}
+
+	.url-inline {
+		display: none;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: var(--text-xs);
+		color: var(--text-dim);
+		background: transparent;
+		padding: 0;
 	}
 
 	.grid th,
@@ -920,6 +976,14 @@
 		flex-direction: column;
 		gap: 0.1rem;
 		font-size: var(--text-xs);
+		min-width: 0;
+		overflow: hidden;
+	}
+
+	.state > span:first-child {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.state-error {
@@ -982,5 +1046,111 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.6rem;
+	}
+
+	.modal-body .field input,
+	.modal-body .field select {
+		max-width: none;
+	}
+
+	/* Container-based: hide low-priority table columns as the content area
+	   narrows. Uses container queries because the page sits inside a shell
+	   with a 220px sidebar — viewport-based @media queries would misjudge
+	   the actual content width. */
+	@container settings (max-width: 880px) {
+		.col-state {
+			display: none;
+		}
+	}
+
+	@container settings (max-width: 720px) {
+		.col-url {
+			display: none;
+		}
+
+		.url-inline {
+			display: inline-block;
+		}
+
+		.url {
+			max-width: 22ch;
+		}
+	}
+
+	@container settings (max-width: 520px) {
+		.col-category,
+		.col-interval,
+		.col-count {
+			display: none;
+		}
+
+		.grid td.type,
+		.grid th.type {
+			width: 3rem;
+		}
+
+		.grid td.actions,
+		.grid th.actions {
+			width: auto;
+		}
+
+		.icon-btn {
+			padding: 0.25rem 0.4rem;
+		}
+	}
+
+	@container settings (max-width: 420px) {
+		.diag-grid {
+			grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+		}
+
+		.diag.wide {
+			grid-column: span 1;
+		}
+
+		.diag {
+			padding: 0.4rem 0.5rem;
+		}
+
+		.grid th,
+		.grid td {
+			padding: 0.4rem 0.3rem;
+		}
+	}
+
+	/* Viewport-based: shell-level paddings + header layout. These respond
+	   to the whole window shrinking (e.g. mobile portrait) regardless of
+	   sidebar state. */
+	@media (max-width: 768px) {
+		.settings {
+			padding: 1rem 0.75rem 3rem;
+		}
+
+		.settings-header {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.header-actions {
+			justify-content: flex-end;
+		}
+
+		.card {
+			padding: 0.75rem;
+		}
+
+		.section-header {
+			flex-wrap: wrap;
+		}
+	}
+
+	@media (max-width: 640px) {
+		.settings {
+			padding: 0.75rem 0.5rem 3rem;
+		}
+
+		.card {
+			padding: 0.6rem;
+		}
 	}
 </style>
