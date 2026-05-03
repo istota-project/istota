@@ -102,7 +102,10 @@ function generateMockEntries(): MockEntry[] {
 		const isImage = !isGallery && i % 3 === 0;
 		const images: string[] = [];
 		if (isGallery) {
-			for (let g = 0; g < 4; g++) {
+			// Vary gallery size: 2, 3, 4, 6 — covers all layout branches.
+			const sizes = [2, 3, 4, 6];
+			const galSize = sizes[Math.floor(i / 7) % sizes.length];
+			for (let g = 0; g < galSize; g++) {
 				images.push(`https://picsum.photos/seed/feed-${i}-${g}/600/600`);
 			}
 		} else if (isImage) {

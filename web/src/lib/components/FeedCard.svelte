@@ -7,7 +7,7 @@
 
 	let { entry, onImageClick, onViewed, onStarToggle }: {
 		entry: FeedEntry;
-		onImageClick: (url: string) => void;
+		onImageClick: (images: string[], index: number) => void;
 		onViewed?: (id: number) => void;
 		onStarToggle?: (id: number, starred: boolean) => void;
 	} = $props();
@@ -32,6 +32,7 @@
 	const feedSlug = $derived(entry.feed.title.toLowerCase().replace(/[^a-z0-9-]/g, '-'));
 	const isImage = $derived(entry.images.length > 0);
 	const hiddenCount = $derived(Math.max(0, entry.images.length - maxGrid));
+	const galleryCount = $derived(Math.min(entry.images.length, maxGrid));
 	const permalink = $derived(entry.url || entry.feed.site_url || '');
 
 	function formatDate(iso: string): string {
@@ -88,12 +89,12 @@
 	{/if}
 	{#if isImage}
 		{#if entry.images.length > 1}
-			<div class="card-gallery">
+			<div class="card-gallery gallery-{galleryCount}">
 				{#each entry.images.slice(0, maxGrid) as img, idx}
 					<button
 						type="button"
 						class="card-image{idx === maxGrid - 1 && hiddenCount > 0 ? ' gallery-more' : ''}"
-						onclick={() => onImageClick(img)}
+						onclick={() => onImageClick(entry.images, idx)}
 					>
 						<img src={img} alt={entry.title || ''} loading="lazy" />
 						{#if idx === maxGrid - 1 && hiddenCount > 0}
@@ -103,7 +104,7 @@
 				{/each}
 			</div>
 		{:else}
-			<button type="button" class="card-image" onclick={() => onImageClick(entry.images[0])}>
+			<button type="button" class="card-image" onclick={() => onImageClick(entry.images, 0)}>
 				<img src={entry.images[0]} alt={entry.title || ''} loading="lazy" />
 			</button>
 		{/if}
