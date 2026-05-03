@@ -208,6 +208,10 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Env vars**: `MONEY_CONFIG`, `MONEY_USER`
 **Note**: In-process facade — imports the vendored `money` package and invokes its Click CLI via `CliRunner`. No subprocess, no HTTP.
 
+### Module-skill facade exit-code contract
+
+The feeds and money skill facades (`src/istota/skills/feeds/__init__.py`, `src/istota/skills/money/__init__.py`) emit `{"status":"error","error":"…"}` envelopes from `_output()` whenever `_run()` catches an error (`UserNotFoundError`, missing env, exception, non-zero CliRunner exit, JSON decode failure). `_output()` calls `sys.exit(1)` when it sees an error envelope, so the subprocess returncode reflects reality. The scheduler's `_execute_command_task()` also detects the envelope shape on stdout as a defense-in-depth fallback (see `.claude/rules/scheduler.md`). New module-skill facades must follow this convention.
+
 ### Library-Only Modules (no CLI)
 - `files/` - Nextcloud file ops (mount-aware, rclone fallback)
 - `markets/finviz.py` - FinViz scraping for market data (internal helper for `markets`)
