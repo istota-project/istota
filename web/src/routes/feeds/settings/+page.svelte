@@ -649,12 +649,16 @@
 
 <style>
 	.settings {
+		width: 100%;
 		max-width: 980px;
 		margin: 0 auto;
 		padding: 1.5rem 1rem 4rem;
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
 	}
 
 	.settings-header {
