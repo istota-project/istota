@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-03: Feeds — multi-image gallery layout + navigable lightbox
+
+The grid-view feed cards were clipping their meta strip whenever an entry had multiple images. Each gallery cell used `aspect-ratio: 1`, so on wide cards (three columns at a 1600px viewport ≈ 400px each) the 2×2 gallery rendered as a 400×400 box, blew past the card's `max-height: 420px`, and `overflow: hidden` ate the meta row underneath. Three-image entries also showed an awkward empty bottom-right cell, and entries with 5+ images had the existing `+N` overlay on the 4th tile but no way to view the hidden ones.
+
+**Gallery sizing.** Replaced per-cell `aspect-ratio: 1` with a fixed `height: 320px` 2×2 grid (`grid-template-rows: repeat(2, 1fr)`) and `object-fit: cover` on the images. Gallery height is now bounded independently of card width, so the meta strip always fits inside `max-height: 420px`.
+
+**Per-count layouts.** `FeedCard.svelte` annotates the gallery with a `gallery-{N}` class (N = `min(images.length, 4)`). CSS branches on the class:
+- `gallery-2` → single row of 2 (no empty 2nd row).
+- `gallery-3` → first image spans both rows on the left, others stacked on the right (no empty bottom-right cell).
+- `gallery-4` and 5+ → unchanged 2×2 grid; 5+ keeps the `+N` overlay on the 4th tile.
+
+List-view overrides reset the new fixed height and the `grid-row: span 2` rule.
+
+**Navigable lightbox.** Reworked `Lightbox.svelte` from a single-`src` API to `images: string[]` + `index: number | null` (open ≡ `index !== null`). Added prev/next chevron buttons (lucide), a bottom "X / N" counter, ArrowLeft/ArrowRight keyboard navigation with wrap-around, and `stopPropagation` on the buttons so clicking them doesn't dismiss the overlay (background click + Esc still close). `FeedCard.onImageClick` now passes `(entry.images, idx)` — the full image array, not just the visible four — so clicking the `+N` tile opens at index 3 and the user can arrow into the hidden images.
+
+**Mock data.** `vite-mock-api.ts` now generates galleries of 2 / 3 / 4 / 6 images (was always 4) so `VITE_MOCK_API=1` exercises every layout branch and the +N overlay.
+
+**Files modified:**
+- `web/src/lib/components/FeedCard.svelte` — `gallery-{N}` class, `onImageClick(images, idx)` signature.
+- `web/src/lib/components/Lightbox.svelte` — array+index API, prev/next buttons + counter + arrow keys.
+- `web/src/routes/feeds/+page.svelte` — gallery CSS overhaul (fixed height + per-count layouts + list-view resets), lightbox state changed from a single `src` to `images`/`index`.
+- `web/vite-mock-api.ts` — vary mock gallery sizes.
+
+**Verified.** All four cases (2 / 3 / 4 / 6 images) render with the meta strip visible at 1600px viewport. Clicking the +3 tile on a 6-image entry opens the lightbox at "4 / 6"; → / ← navigate (wrap 6→1, 1→6), Esc closes.
+
 ## 2026-05-03: Feeds Tranche A — starring + bulk mark-as-read
 
 First slice of the Miniflux parity work (see `Notes/Projects/Istota/Feeds Miniflux parity spec.md`). Closes the two highest-value daily-workflow gaps left behind by the native cutover: there was no way to bookmark an entry for later, and "catching up" on a backlog meant scrolling everything into view to satisfy mark-on-scroll.

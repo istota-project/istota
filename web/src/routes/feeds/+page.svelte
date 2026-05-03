@@ -99,7 +99,8 @@
 	});
 
 	// Lightbox
-	let lightboxSrc = $state('');
+	let lightboxImages = $state<string[]>([]);
+	let lightboxIndex = $state<number | null>(null);
 
 	// Batch read queue
 	const pendingReadIds = new Set<number>();
@@ -344,7 +345,10 @@
 				>
 					<FeedCard
 						{entry}
-						onImageClick={(url) => (lightboxSrc = url)}
+						onImageClick={(imgs, idx) => {
+						lightboxImages = imgs;
+						lightboxIndex = idx;
+					}}
 						onViewed={handleViewed}
 						onStarToggle={handleStarToggle}
 					/>
@@ -364,7 +368,11 @@
 	<div class="status-badge">{entries.length} / {total}</div>
 {/if}
 
-<Lightbox src={lightboxSrc} onClose={() => lightboxSrc = ''} />
+<Lightbox
+	images={lightboxImages}
+	index={lightboxIndex}
+	onClose={() => (lightboxIndex = null)}
+/>
 
 <style>
 	.center-msg {
@@ -466,18 +474,38 @@
 		border-radius: var(--radius-card) var(--radius-card) 0 0;
 	}
 
-	/* Gallery */
+	/* Gallery — fixed-height grid so meta strip stays visible inside the
+	   card's max-height budget. Cells use object-fit: cover instead of
+	   per-image aspect-ratio to keep the gallery from dictating card height. */
 	.feed-grid :global(.card-gallery) {
 		display: grid;
 		grid-template-columns: repeat(2, 1fr);
+		grid-template-rows: repeat(2, 1fr);
+		height: 320px;
 		gap: 2px;
 	}
 
+	.feed-grid :global(.card-gallery.gallery-2) {
+		grid-template-rows: 1fr;
+	}
+
+	.feed-grid :global(.card-gallery.gallery-3 .card-image:first-child) {
+		grid-row: span 2;
+	}
+
+	.feed-grid :global(.card-gallery .card-image) {
+		min-width: 0;
+		min-height: 0;
+		overflow: hidden;
+	}
+
 	.feed-grid :global(.card-gallery .card-image img) {
-		border-radius: 0;
-		aspect-ratio: 1;
+		width: 100%;
+		height: 100%;
+		aspect-ratio: auto;
 		object-fit: cover;
 		max-height: none;
+		border-radius: 0;
 	}
 
 	.feed-grid :global(.card-gallery .card-image:first-child img) {
@@ -486,13 +514,6 @@
 
 	.feed-grid :global(.card-gallery .card-image:nth-child(2) img) {
 		border-radius: 0 var(--radius-card) 0 0;
-	}
-
-	.feed-grid :global(.card-gallery .card-image:only-child img) {
-		border-radius: var(--radius-card) var(--radius-card) 0 0;
-		grid-column: span 2;
-		aspect-ratio: auto;
-		object-fit: initial;
 	}
 
 	/* Gallery overflow */
@@ -623,9 +644,16 @@
 
 	.feed-grid.list-view :global(.card-gallery) {
 		grid-template-columns: 1fr;
+		grid-template-rows: auto;
+		height: auto;
+	}
+
+	.feed-grid.list-view :global(.card-gallery.gallery-3 .card-image:first-child) {
+		grid-row: auto;
 	}
 
 	.feed-grid.list-view :global(.card-gallery .card-image img) {
 		aspect-ratio: auto;
+		height: auto;
 	}
 </style>
