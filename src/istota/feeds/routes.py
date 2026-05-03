@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile
 from fastapi import File as FastAPIFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -292,6 +292,52 @@ async def api_export_opml(ctx: FeedsContext = Depends(get_user_context)):
         media_type="text/x-opml",
         headers={"Content-Disposition": 'attachment; filename="feeds.opml"'},
     )
+
+
+@router.post("/refresh")
+async def api_refresh(
+    background: BackgroundTasks,
+    ctx: FeedsContext = Depends(get_user_context),
+):
+    """Mark every feed due now and kick off a background poll.
+
+    The poll itself runs in a FastAPI background task so the request returns
+    as soon as the queue is reset. The settings page picks up updated
+    ``last_poll_at`` / per-feed state on its next load.
+    """
+
+    def _reset() -> int:
+        with feeds_db.connect(ctx.db_path) as conn:
+            cur = conn.execute("UPDATE feeds SET next_poll_at = NULL")
+            conn.commit()
+            return cur.rowcount or 0
+
+    queued = await asyncio.to_thread(_reset)
+    background.add_task(_poll_due_in_background, ctx)
+    return {"status": "queued", "feeds_queued": queued}
+
+
+def _poll_due_in_background(ctx: FeedsContext) -> None:
+    """Run the poller for ``ctx`` outside the request lifecycle."""
+    import os
+    from datetime import datetime, timezone
+
+    from istota.feeds.poller import poll_due_feeds
+
+    api_key = ctx.tumblr_api_key or os.environ.get("TUMBLR_API_KEY", "")
+    try:
+        with feeds_db.connect(ctx.db_path) as conn:
+            poll_due_feeds(
+                conn,
+                tumblr_api_key=api_key,
+                now=datetime.now(timezone.utc),
+            )
+    except Exception:
+        # Background tasks must not raise into the event loop.
+        import logging
+        logging.getLogger("istota.feeds.routes").exception(
+            "manual refresh poll failed user_db=%s", ctx.db_path,
+        )
 
 
 @router.post("/import-opml")
