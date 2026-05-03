@@ -23,7 +23,7 @@
 		CategoryGroup,
 		Chip,
 	} from '$lib/components/ui';
-	import { LayoutGrid, List, Cog, Star, CheckCheck } from 'lucide-svelte';
+	import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from 'lucide-svelte';
 
 	let { children } = $props();
 
@@ -53,6 +53,7 @@
 	function handleFeedClick(feedId: number) {
 		selectedFeedId.set($selectedFeedId === feedId ? 0 : feedId);
 		showStarred.set(false);
+		showUnseen.set(false);
 		sidebarOpen = false;
 		if (onSettings) goto(`${base}/feeds`);
 	}
@@ -60,12 +61,22 @@
 	function handleAllClick() {
 		selectedFeedId.set(0);
 		showStarred.set(false);
+		showUnseen.set(false);
+		sidebarOpen = false;
+		if (onSettings) goto(`${base}/feeds`);
+	}
+
+	function handleUnreadClick() {
+		showUnseen.set(true);
+		showStarred.set(false);
+		selectedFeedId.set(0);
 		sidebarOpen = false;
 		if (onSettings) goto(`${base}/feeds`);
 	}
 
 	function handleStarredClick() {
 		showStarred.set(true);
+		showUnseen.set(false);
 		selectedFeedId.set(0);
 		sidebarOpen = false;
 		if (onSettings) goto(`${base}/feeds`);
@@ -106,7 +117,6 @@
 				<div class="filter-group">
 					<Chip checked={$showImages} onclick={() => showImages.update((v) => !v)}>Images</Chip>
 					<Chip checked={$showText} onclick={() => showText.update((v) => !v)}>Text</Chip>
-					<Chip checked={$showUnseen} onclick={() => showUnseen.update((v) => !v)}>Unseen</Chip>
 				</div>
 				<div class="filter-group">
 					<Chip checked={$sortBy === 'published'} onclick={() => sortBy.set('published')}>Published</Chip>
@@ -148,11 +158,20 @@
 		>
 			<button
 				class="feed-btn special"
-				class:active={!$selectedFeedId && !$showStarred}
+				class:active={!$selectedFeedId && !$showStarred && !$showUnseen}
 				onclick={handleAllClick}
 				type="button"
 			>
 				<span class="feed-name">All</span>
+			</button>
+			<button
+				class="feed-btn special"
+				class:active={$showUnseen && !$showStarred && !$selectedFeedId}
+				onclick={handleUnreadClick}
+				type="button"
+			>
+				<Circle size={12} />
+				<span class="feed-name">Unread</span>
 			</button>
 			<button
 				class="feed-btn special"
