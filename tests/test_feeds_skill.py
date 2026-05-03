@@ -78,6 +78,31 @@ class TestSkillRun:
         assert "FEEDS_USER" in out["error"]
 
 
+class TestSkillExitCodes:
+    """Module-skill subprocesses must exit non-zero when they emit a
+    `{"status":"error",…}` envelope. The scheduler keys success/failure off
+    returncode (with a JSON-envelope fallback as defense-in-depth), so a
+    silent zero exit lets failed runs masquerade as successful."""
+
+    def test_main_exits_nonzero_on_error_envelope(self, monkeypatch, capsys):
+        monkeypatch.delenv("FEEDS_USER", raising=False)
+        from istota.skills.feeds import main
+        with pytest.raises(SystemExit) as exc_info:
+            main(["list"])
+        assert exc_info.value.code == 1
+
+    def test_main_exits_zero_on_ok(self, istota_config, tmp_path):
+        cfg_path = tmp_path / "workspace" / "feeds" / "feeds.toml"
+        from istota.feeds._config_io import write_feeds_config
+        write_feeds_config(cfg_path, {"settings": {}, "categories": [], "feeds": []})
+        from istota.skills.feeds import main
+        # No SystemExit raised, or SystemExit with code 0/None.
+        try:
+            main(["list"])
+        except SystemExit as e:
+            assert e.code in (0, None)
+
+
 class TestParser:
     def test_subcommands_present(self):
         from istota.skills.feeds import build_parser

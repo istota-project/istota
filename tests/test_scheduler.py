@@ -2215,6 +2215,56 @@ class TestExecuteCommandTask:
         assert success is True
         assert result == "(no output)"
 
+    def test_json_error_envelope_marks_task_failed(self, db_path, tmp_path):
+        """Module-skill subprocesses (feeds, money) print
+        ``{"status":"error","error":"…"}`` to stdout while exiting 0 when they
+        catch their own errors. The scheduler must treat that envelope as
+        failure, otherwise silent breakage rots indefinitely (see DEVLOG
+        2026-05-03 — both feeds bugs were hidden by exactly this gap)."""
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(
+            command='''printf '{"status":"error","error":"user not found"}' ''',
+        )
+        success, result = _execute_command_task(task, config)
+        assert success is False
+        assert "user not found" in result
+
+    def test_json_error_envelope_without_error_field(self, db_path, tmp_path):
+        """If the error envelope omits the message, fall back to a generic one."""
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(
+            command='''printf '{"status":"error"}' ''',
+        )
+        success, result = _execute_command_task(task, config)
+        assert success is False
+        assert "status=error" in result
+
+    def test_json_ok_envelope_succeeds(self, db_path, tmp_path):
+        """An ``{"status":"ok",…}`` envelope is the normal success shape."""
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(
+            command='''printf '{"status":"ok","polled":3}' ''',
+        )
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "polled" in result
+
+    def test_non_json_stdout_unaffected(self, db_path, tmp_path):
+        """Heartbeat-style commands that emit plain text are unchanged."""
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(command="echo 'all green: status error none here'")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "all green" in result
+
+    def test_malformed_json_stdout_unaffected(self, db_path, tmp_path):
+        """Output that starts with `{` but isn't valid JSON shouldn't break the
+        envelope check — we just treat it as opaque success output."""
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(command="echo '{not really json'")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_command_task_flows_through_process_one_task(self, mock_arun, mock_exec, db_path, tmp_path):

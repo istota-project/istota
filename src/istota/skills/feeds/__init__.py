@@ -63,6 +63,8 @@ def _run(args: list[str]) -> dict:
 
 def _output(data) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False))
+    if isinstance(data, dict) and data.get("status") == "error":
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
