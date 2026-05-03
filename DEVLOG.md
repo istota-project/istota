@@ -2,6 +2,36 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-03: Bug-fix sweep — ISSUE-067 to ISSUE-071
+
+Five issues opened during the module-skill silent-failure audit (DEVLOG entry below). All five were latent — they would have surfaced as "looks healthy, isn't" failures. Closing them in one pass keeps the rollup behavior consistent across the feeds + money facades and the heartbeat-vs-scheduler subprocess paths.
+
+**ISSUE-067 — Heartbeat shell-command env injection.** `scheduler._execute_command_task` propagated `ISTOTA_CONFIG_PATH` (the 36a5420 fix), but the equivalent path in `heartbeat._check_shell_command` did not. A heartbeat invoking `istota-skill feeds …` would call `load_config()` with no config-path candidate, get a default `Config()` with empty users, exit 0 with a JSON error envelope, and the heartbeat would look healthy. Patched the heartbeat path to inject `ISTOTA_CONFIG_PATH`, `ISTOTA_DB_PATH`, and `ISTOTA_USER_ID`. Updated the dispatcher in `run_check` to pass `user_id` to shell-command checks (joining the existing calendar/task-deadline/self-check tuple).
+
+**ISSUE-068 — Feeds `_poll_due` envelope rollup.** The poller reports per-source `error_total` but unconditionally wrapped it in `{"status": "ok"}`. Now: any errors → `status="partial_error"` (visible in logs, not a hard failure); all polled feeds errored → `status="error"` with `"all N feed poll(s) failed"` (triggers scheduler failure detection + `sys.exit(1)`).
+
+**ISSUE-069 — Money `run-scheduled` envelope rollup.** Same shape as ISSUE-068. `_run_monarch_sync` errors got nested under `out["monarch"]` while the outer envelope stayed `"ok"`. Added `_apply_monarch_status()` helper called on all three return paths of `run-scheduled`: `monarch_result.status == "error"` → outer `status="error"`; per-profile failures inside `monarch_result.profiles` → outer `status="partial_error"` with a `monarch_errors` summary.
+
+**ISSUE-070 — Money `run-scheduled` end-to-end test coverage.** The feeds `run-scheduled` regression (`TypeError: cmd_poll() got multiple values for argument 'ctx'`) ran silently because `tests/test_feeds_cli.py::TestPoll` only exercised `["poll"]`. The same shape of gap existed for money. Added `TestRunScheduled` in `tests/money/test_cli.py` with four cases: no-monarch / no-invoicing happy path, `--skip-monarch`, monarch error rollup (covers ISSUE-069), per-profile partial-error rollup.
+
+**ISSUE-071 — Phantom Monarch category-change entries after manual ledger edits.** Real incident: a $13.99 Apple transaction was originally posted to `Income:Consulting`. User asked the bot to recategorize → bot edited the beancount file directly to `Income:Sales`, and Monarch was also updated. Next morning's sync compared the stale DB tracking record (`Income:Consulting`) against the new Monarch category (`Income:Sales`), saw a discrepancy, and emitted a category-change entry "moving" the posting from Consulting to Sales — but the ledger already had Sales, so the entry double-counted the correction.
+
+Fix: added `_ledger_has_posting(ledger_path, synced_txn, expected_account)` in `transactions.py`. Before emitting a category-change entry, the reconciliation loop verifies the ledger still contains the OLD account for the matching transaction. If the ledger has already been changed out-of-band, the entry is skipped and the DB tracking record is updated to reflect reality (so the next sync doesn't re-evaluate the same stale comparison). Tracked under new `phantom_change_skipped_count` / `phantom_change_skipped_ids` fields in the sync result.
+
+Match is by `(date, payee)`. Multiple transactions same day, same merchant → if any of them still posts to the old account, prefer to emit the change (false positive over false negative). Conservative fallback: missing ledger / missing date / missing merchant returns True so legitimate changes aren't silently swallowed. The account-prefix check uses `startswith(expected + " ")` to avoid `Income:ConsultingExtra` matching `Income:Consulting`.
+
+**Files modified:**
+- `src/istota/heartbeat.py` — env injection in `_check_shell_command`, dispatcher signature.
+- `src/istota/feeds/cli.py` — `_poll_due` rollup.
+- `src/istota/money/cli.py` — `_apply_monarch_status` helper, called on all `run-scheduled` return paths.
+- `src/istota/money/core/transactions.py` — `_ledger_has_posting` helper, reconciliation-loop guard, `phantom_skipped` tracking.
+- `tests/test_heartbeat.py` — three env-propagation tests.
+- `tests/test_feeds_cli.py` — partial-error and all-fail tests.
+- `tests/money/test_cli.py` — `TestRunScheduled` (four cases).
+- `tests/money/test_transactions.py` — `TestLedgerHasPosting` (nine cases).
+
+**Verified.** 871 tests pass across the affected files (heartbeat, feeds-cli, money, scheduler, executor). No regressions.
+
 ## 2026-05-03: Feeds — multi-image gallery layout + navigable lightbox
 
 The grid-view feed cards were clipping their meta strip whenever an entry had multiple images. Each gallery cell used `aspect-ratio: 1`, so on wide cards (three columns at a 1600px viewport ≈ 400px each) the 2×2 gallery rendered as a 400×400 box, blew past the card's `max-height: 420px`, and `overflow: hidden` ate the meta row underneath. Three-image entries also showed an awkward empty bottom-right cell, and entries with 5+ images had the existing `+N` overlay on the 4th tile but no way to view the hidden ones.

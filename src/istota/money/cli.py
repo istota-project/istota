@@ -1132,6 +1132,30 @@ def invoice_void(ctx, invoice_number, force, delete_pdf):
     _output(result)
 
 
+def _apply_monarch_status(out: dict, monarch_result: dict | None) -> None:
+    """Roll up nested Monarch sync errors to the outer envelope.
+
+    The scheduler's JSON-error envelope detector (see
+    `scheduler._execute_command_task`) only fires on top-level
+    `status == "error"`. Without this rollup a broken Monarch sync would
+    nest its error under `out["monarch"]` and the task would silently
+    succeed. We promote a hard error if the sync itself failed, or a
+    `partial_error` if any individual profile failed.
+    """
+    if monarch_result is None:
+        return
+    if monarch_result.get("status") == "error":
+        out["status"] = "error"
+        out["error"] = f"monarch sync failed: {monarch_result.get('error', 'unknown error')}"
+        return
+    profiles = monarch_result.get("profiles") or []
+    failed = [p for p in profiles if isinstance(p, dict) and p.get("status") == "error"]
+    if failed:
+        out["status"] = "partial_error"
+        names = ", ".join(p.get("name") or p.get("ledger") or "?" for p in failed)
+        out["monarch_errors"] = f"{len(failed)} profile(s) failed: {names}"
+
+
 @cli.command("run-scheduled")
 @click.option("--dry-run", is_flag=True, help="Preview without generating files")
 @click.option("--skip-monarch", is_flag=True, help="Skip the monarch sync step")
@@ -1159,6 +1183,7 @@ def run_scheduled(ctx, dry_run, skip_monarch):
         out = {"status": "ok", "message": "No invoicing config; nothing to schedule"}
         if monarch_result is not None:
             out["monarch"] = monarch_result
+        _apply_monarch_status(out, monarch_result)
         _output(out)
         return
 
@@ -1177,6 +1202,7 @@ def run_scheduled(ctx, dry_run, skip_monarch):
             }
             if monarch_result is not None:
                 out["monarch"] = monarch_result
+            _apply_monarch_status(out, monarch_result)
             _output(out)
             return
 
@@ -1207,6 +1233,7 @@ def run_scheduled(ctx, dry_run, skip_monarch):
         }
         if monarch_result is not None:
             out["monarch"] = monarch_result
+        _apply_monarch_status(out, monarch_result)
         _output(out)
     finally:
         db_conn.commit()

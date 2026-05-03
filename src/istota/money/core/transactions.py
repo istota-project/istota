@@ -474,6 +474,59 @@ async def fetch_transactions_by_ids(
     return await _fetch(config, transaction_ids)
 
 
+def _ledger_has_posting(ledger_path: Path, synced_txn, expected_account: str) -> bool:
+    """Check whether the ledger still contains a transaction matching
+    ``synced_txn`` that posts to ``expected_account``.
+
+    Used by the reconciliation loop to detect when the DB tracking record
+    is stale relative to the actual ledger state — e.g. because a human
+    or the bot edited the original posting directly. Without this check
+    the next sync would generate a phantom category-change entry that
+    "corrects" something already correct, double-counting the change.
+
+    Match is by (date, payee). When multiple transactions share the same
+    date and payee, we return True if any of them still posts to the
+    expected account — preferring a false positive (emit the change) over
+    a false negative (silently swallow a legitimate change).
+
+    Conservative fallback: if the ledger file is missing or the synced
+    record is missing date/merchant, return True so the original behavior
+    holds and we don't suppress legitimate changes.
+    """
+    if not ledger_path.exists():
+        return True
+    if not synced_txn.txn_date or not synced_txn.merchant:
+        return True
+
+    try:
+        text = ledger_path.read_text()
+    except OSError:
+        return True
+
+    target_date = synced_txn.txn_date
+    target_merchant = synced_txn.merchant.strip()
+
+    # Beancount transaction header: YYYY-MM-DD * "payee" "narration"
+    header_re = re.compile(r'^(\d{4}-\d{2}-\d{2})\s+[*!]\s+"([^"]*)"', re.MULTILINE)
+
+    for m in header_re.finditer(text):
+        if m.group(1) != target_date:
+            continue
+        if m.group(2).strip() != target_merchant:
+            continue
+        # Posting block runs until the next blank line or next transaction.
+        body = text[m.end():].split("\n\n", 1)[0]
+        for line in body.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(";"):
+                continue
+            # Posting lines start with the account name (followed by amount).
+            if stripped.startswith(expected_account + " ") or stripped == expected_account:
+                return True
+
+    return False
+
+
 def sync_monarch(
     ledger_path: Path,
     config: MonarchConfig,
@@ -610,6 +663,7 @@ def sync_monarch(
     recat_skipped_legacy: list[str] = []
     category_change_entries = []
     category_change_updates = []
+    phantom_skipped: list[str] = []  # ISSUE-071: stale DB tracking, ledger already updated
 
     if db_conn is not None:
         active_synced = get_active_monarch_synced_transactions(db_conn, profile=profile)
@@ -659,6 +713,22 @@ def sync_monarch(
                     new_posted_account = map_monarch_category_with_config(current_category, config)
 
                     if new_posted_account != synced_txn.posted_account:
+                        # ISSUE-071: the DB tracking record may be stale if a
+                        # human or the bot edited the original posting in the
+                        # ledger directly. If the ledger no longer contains
+                        # the OLD account, the change was already made
+                        # out-of-band — skip the entry to avoid double-counting,
+                        # but still update the DB so future syncs see reality.
+                        if not _ledger_has_posting(
+                            ledger_path, synced_txn, synced_txn.posted_account,
+                        ):
+                            phantom_skipped.append(synced_txn.monarch_transaction_id)
+                            category_change_updates.append({
+                                "monarch_transaction_id": synced_txn.monarch_transaction_id,
+                                "posted_account": new_posted_account,
+                            })
+                            continue
+
                         cat_entry = format_category_change_entry(
                             txn_date=date.today(),
                             merchant=synced_txn.merchant,
@@ -690,6 +760,9 @@ def sync_monarch(
     }
     if recat_skipped_legacy:
         result["recat_skipped_legacy_ids"] = recat_skipped_legacy
+    if phantom_skipped:
+        result["phantom_change_skipped_count"] = len(phantom_skipped)
+        result["phantom_change_skipped_ids"] = phantom_skipped
 
     if dry_run:
         result["message"] = f"Would import {len(entries)} transactions"

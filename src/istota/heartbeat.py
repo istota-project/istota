@@ -228,7 +228,7 @@ def _check_file_watch(check: HeartbeatCheck, config: "Config") -> CheckResult:
     return CheckResult(healthy=True, message=f"File OK: {file_path}")
 
 
-def _check_shell_command(check: HeartbeatCheck, config: "Config") -> CheckResult:
+def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str | None = None) -> CheckResult:
     """
     Run a shell command and evaluate the condition.
 
@@ -248,13 +248,26 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config") -> CheckResult
 
     try:
         from .executor import build_stripped_env
+        env = build_stripped_env()
+        # Mirror scheduler._execute_command_task: module-skill CLIs (feeds, money)
+        # spawned from a heartbeat check need to find the daemon's config and
+        # know which user they're acting for. Without these, load_config() returns
+        # a default Config() with empty users and the skill exits with a JSON
+        # error envelope — but the shell command's exit 0 makes the heartbeat
+        # look healthy.
+        if config.config_path:
+            env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
+        if config.db_path:
+            env["ISTOTA_DB_PATH"] = str(config.db_path)
+        if user_id:
+            env["ISTOTA_USER_ID"] = user_id
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=build_stripped_env(),
+            env=env,
         )
         value = result.stdout.strip()
     except subprocess.TimeoutExpired:
@@ -646,8 +659,10 @@ def run_check(
         )
 
     try:
-        # Some handlers need user_id (calendar, task-deadline, self-check)
-        if check.type in ("calendar-conflicts", "task-deadline", "self-check"):
+        # Some handlers need user_id (calendar, task-deadline, self-check,
+        # shell-command — the latter so subprocesses spawned from the check
+        # can resolve the user's context the same way scheduler tasks do).
+        if check.type in ("calendar-conflicts", "task-deadline", "self-check", "shell-command"):
             return handler(check, config, user_id)
         else:
             return handler(check, config)

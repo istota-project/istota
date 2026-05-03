@@ -594,6 +594,119 @@ class TestSyncMonarchProfiles:
                 assert call_kwargs[1]["profile"] == "business"
 
 
+class TestRunScheduled:
+    """End-to-end CliRunner coverage for `run-scheduled` — mirrors
+    `tests/test_feeds_cli.py::TestPoll.test_run_scheduled_polls_due_feeds`
+    so wiring regressions (TypeError from pass-decorator collisions, etc.)
+    are caught at the same shape of layer.
+    """
+
+    def _basic_config(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("")
+        config = tmp_path / "config.toml"
+        config.write_text(
+            f'data_dir = "{tmp_path}"\n\n'
+            f'[[ledgers]]\nname = "default"\npath = "{ledger}"\n'
+        )
+        return config
+
+    def test_run_scheduled_no_monarch_no_invoicing(self, runner, tmp_path):
+        """No monarch_config and no invoicing — succeeds with the
+        no-invoicing message, doesn't blow up on wiring."""
+        config = self._basic_config(tmp_path)
+        result = runner.invoke(cli, ["-c", str(config), "run-scheduled"])
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["status"] == "ok"
+        assert "No invoicing config" in out["message"]
+        assert "monarch" not in out
+
+    def test_run_scheduled_skip_monarch(self, runner, tmp_path):
+        """--skip-monarch path — succeeds even with monarch_config set."""
+        monarch_config = tmp_path / "monarch.toml"
+        monarch_config.write_text(
+            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch.sync]\nlookback_days = 30\n'
+        )
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("")
+        config = tmp_path / "config.toml"
+        config.write_text(
+            f'data_dir = "{tmp_path}"\n'
+            f'monarch_config = "monarch.toml"\n\n'
+            f'[[ledgers]]\nname = "default"\npath = "{ledger}"\n'
+        )
+        result = runner.invoke(cli, ["-c", str(config), "run-scheduled", "--skip-monarch"])
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["status"] == "ok"
+        assert "monarch" not in out
+
+    def test_run_scheduled_rolls_up_monarch_error(self, runner, tmp_path):
+        """ISSUE-069: a monarch sync failure must surface as outer
+        envelope status='error' so the scheduler's JSON-error detector
+        and any alerting layer fire, instead of nesting the failure
+        invisibly under out['monarch']."""
+        monarch_config = tmp_path / "monarch.toml"
+        monarch_config.write_text(
+            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch.sync]\nlookback_days = 30\n'
+        )
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("")
+        config = tmp_path / "config.toml"
+        config.write_text(
+            f'data_dir = "{tmp_path}"\n'
+            f'monarch_config = "monarch.toml"\n\n'
+            f'[[ledgers]]\nname = "default"\npath = "{ledger}"\n'
+        )
+
+        with patch("istota.money.core.transactions.sync_all_profiles") as mock_sync:
+            mock_sync.return_value = {"status": "error", "error": "auth failed"}
+            result = runner.invoke(cli, ["-c", str(config), "run-scheduled"])
+
+        assert result.exit_code == 1, result.output
+        out = json.loads(result.output)
+        assert out["status"] == "error"
+        assert "auth failed" in out["error"]
+        assert out["monarch"]["status"] == "error"
+
+    def test_run_scheduled_partial_error_on_per_profile_failure(self, runner, tmp_path):
+        """When sync_all_profiles returns ok but one of its profiles
+        failed, surface as partial_error so logs reflect the issue."""
+        monarch_config = tmp_path / "monarch.toml"
+        monarch_config.write_text(
+            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch.sync]\nlookback_days = 30\n'
+        )
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("")
+        config = tmp_path / "config.toml"
+        config.write_text(
+            f'data_dir = "{tmp_path}"\n'
+            f'monarch_config = "monarch.toml"\n\n'
+            f'[[ledgers]]\nname = "default"\npath = "{ledger}"\n'
+        )
+
+        with patch("istota.money.core.transactions.sync_all_profiles") as mock_sync:
+            mock_sync.return_value = {
+                "status": "ok",
+                "profiles": [
+                    {"name": "personal", "ledger": "main", "status": "ok"},
+                    {"name": "business", "ledger": "biz", "status": "error", "error": "ledger not found"},
+                ],
+            }
+            result = runner.invoke(cli, ["-c", str(config), "run-scheduled"])
+
+        # partial_error is not a hard failure — exit 0, but the envelope
+        # records the per-profile breakage for logs/alerting.
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["status"] == "partial_error"
+        assert "business" in out["monarch_errors"]
+
+
 class TestHelp:
     def test_main_help(self, runner):
         result = runner.invoke(cli, ["--help"])
