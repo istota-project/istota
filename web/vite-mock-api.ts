@@ -19,7 +19,152 @@ const user = {
 	},
 };
 
-const emptyFeeds = { feeds: [], entries: [], total: 0 };
+// Mock reader dataset — populated below so the dev UI has scrollable content.
+
+interface MockFeedSource {
+	id: number;
+	title: string;
+	site_url: string;
+	category: { id: number; title: string };
+}
+
+interface MockEntry {
+	id: number;
+	title: string;
+	url: string;
+	content: string;
+	images: string[];
+	feed: MockFeedSource;
+	status: 'read' | 'unread';
+	starred: boolean;
+	starred_at: string;
+	published_at: string;
+	created_at: string;
+}
+
+const mockReaderFeeds: MockFeedSource[] = [
+	{ id: 1, title: 'Hacker News', site_url: 'https://news.ycombinator.com', category: { id: 1, title: 'Blogs' } },
+	{ id: 2, title: 'The Verge', site_url: 'https://www.theverge.com', category: { id: 1, title: 'Blogs' } },
+	{ id: 3, title: 'Daring Fireball', site_url: 'https://daringfireball.net', category: { id: 1, title: 'Blogs' } },
+	{ id: 4, title: 'Nemfrog', site_url: 'https://nemfrog.tumblr.com', category: { id: 2, title: 'Tumblr' } },
+	{ id: 5, title: 'Cats in a channel', site_url: 'https://are.na/cats', category: { id: 3, title: 'Are.na' } },
+];
+
+const sampleTitles = [
+	'A small note on cache invalidation',
+	'The unreasonable effectiveness of plain text',
+	'Why list views still matter in 2026',
+	'Notes from a week of dogfooding',
+	'On the quiet joy of finishing things',
+	'A case against premature abstraction',
+	'Latency budgets, revisited',
+	'How I learned to stop worrying and love SQLite',
+	'Tiny tools beat platforms',
+	'The room where it scrolls',
+	'Mid-year reading list',
+	'On naming things',
+	'Drafts: an underrated feature',
+	'Calm software in an anxious year',
+	'The browser is the OS',
+	'Three weeks with the new keyboard',
+	'A short rant about modal dialogs',
+	'Re-reading old code',
+	'The case for progressive enhancement',
+	'Sundays are for refactoring',
+];
+
+const sampleSnippets = [
+	'A few thoughts I jotted down on the train this morning. Nothing groundbreaking, just a small observation that turned into something I keep thinking about.',
+	'I have been reorganizing my notes and noticed a pattern I had not seen before. Sharing it here in case it is useful to someone else doing the same thing.',
+	'There is a particular kind of mistake I keep making, and I want to write it down so I stop making it. Maybe writing helps. Maybe it does not.',
+	'After a year of using this tool every day, here is what I would change. None of it is dramatic. Most of it is small. That is sort of the point.',
+	'Quick demo of a thing I built last weekend. Probably not useful for anyone else, but it scratched an itch I had had for a while.',
+];
+
+function pad(n: number): string {
+	return n < 10 ? `0${n}` : String(n);
+}
+
+function generateMockEntries(): MockEntry[] {
+	const entries: MockEntry[] = [];
+	const baseTime = Date.now();
+	// 30 days back, two entries per hour-ish on average — enough to scroll.
+	const total = 180;
+	for (let i = 0; i < total; i++) {
+		const feed = mockReaderFeeds[i % mockReaderFeeds.length];
+		// Spread over ~30 days; published earlier than created by a small jitter
+		// so the two sort orders produce visibly different results.
+		const publishedAt = new Date(baseTime - i * 3.5 * 60 * 60 * 1000);
+		const createdAt = new Date(publishedAt.getTime() + ((i * 17) % 41) * 60 * 1000);
+
+		// Mix: every 3rd entry has 1 image, every 7th has a gallery, rest are text.
+		const isGallery = i % 7 === 3;
+		const isImage = !isGallery && i % 3 === 0;
+		const images: string[] = [];
+		if (isGallery) {
+			for (let g = 0; g < 4; g++) {
+				images.push(`https://picsum.photos/seed/feed-${i}-${g}/600/600`);
+			}
+		} else if (isImage) {
+			images.push(`https://picsum.photos/seed/feed-${i}/800/500`);
+		}
+
+		const title = `${sampleTitles[i % sampleTitles.length]} (#${total - i})`;
+		const snippet = sampleSnippets[i % sampleSnippets.length];
+
+		entries.push({
+			id: i + 1,
+			title,
+			url: `${feed.site_url}/posts/${i + 1}`,
+			content: `<p>${snippet}</p><p>This is mock content number ${i + 1}, served by the dev mock API.</p>`,
+			images,
+			feed,
+			// First ~25% unread, rest read — gives the Unseen filter something to do.
+			status: i < total * 0.25 ? 'unread' : 'read',
+			starred: i % 11 === 0,
+			starred_at: i % 11 === 0 ? createdAt.toISOString() : '',
+			published_at: publishedAt.toISOString(),
+			created_at: createdAt.toISOString(),
+		});
+	}
+	return entries;
+}
+
+const mockReaderEntries: MockEntry[] = generateMockEntries();
+
+function feedsListResponse(params: URLSearchParams): { feeds: MockFeedSource[]; entries: MockEntry[]; total: number } {
+	const limit = Math.max(1, Math.min(500, Number(params.get('limit')) || 50));
+	const offset = Math.max(0, Number(params.get('offset')) || 0);
+	const before = params.get('before');
+	const order = params.get('order') === 'created_at' ? 'created_at' : 'published_at';
+	const feedId = params.get('feed_id') ? Number(params.get('feed_id')) : 0;
+	const statusFilter = params.get('status'); // 'unread' | null
+	const starredOnly = params.get('starred') === '1';
+
+	let pool = mockReaderEntries;
+	if (feedId) pool = pool.filter((e) => e.feed.id === feedId);
+	if (statusFilter === 'unread') pool = pool.filter((e) => e.status !== 'read');
+	if (starredOnly) pool = pool.filter((e) => e.starred);
+
+	pool = [...pool].sort((a, b) => {
+		const av = order === 'created_at' ? a.created_at : a.published_at;
+		const bv = order === 'created_at' ? b.created_at : b.published_at;
+		return bv.localeCompare(av); // desc
+	});
+
+	const total = pool.length;
+
+	if (before) {
+		const cutoffSec = Number(before);
+		pool = pool.filter((e) => {
+			const v = order === 'created_at' ? e.created_at : e.published_at;
+			return Math.floor(new Date(v).getTime() / 1000) < cutoffSec;
+		});
+	}
+
+	const slice = pool.slice(offset, offset + limit);
+	return { feeds: mockReaderFeeds, entries: slice, total };
+}
 
 interface MockFeed {
 	url: string;
@@ -236,7 +381,60 @@ const handlers: MockHandler[] = [
 		};
 	},
 
-	({ url }) => (url.startsWith('/istota/api/feeds') ? emptyFeeds : undefined),
+	// Reader: GET /feeds with pagination, sorting, filtering
+	({ url, method }) => {
+		if (method !== 'GET') return undefined;
+		const [path, query] = url.split('?');
+		if (path !== '/istota/api/feeds') return undefined;
+		return feedsListResponse(new URLSearchParams(query ?? ''));
+	},
+
+	// Reader mutations — accept and acknowledge.
+	({ url, method, body }) => {
+		const m = url.match(/^\/istota\/api\/feeds\/entries\/(\d+)$/);
+		if (!m || method !== 'PUT') return undefined;
+		const id = Number(m[1]);
+		const entry = mockReaderEntries.find((e) => e.id === id);
+		if (entry && body && typeof body === 'object') {
+			if (typeof body.starred === 'boolean') {
+				entry.starred = body.starred;
+				entry.starred_at = body.starred ? new Date().toISOString() : '';
+			}
+			if (typeof body.status === 'string') {
+				entry.status = body.status === 'read' ? 'read' : 'unread';
+			}
+		}
+		return { status: 'ok' };
+	},
+	({ url, method, body }) => {
+		if (url !== '/istota/api/feeds/entries/batch' || method !== 'PUT') return undefined;
+		const ids: number[] = Array.isArray(body?.entry_ids) ? body.entry_ids : [];
+		const status = body?.status === 'read' ? 'read' : 'unread';
+		for (const id of ids) {
+			const e = mockReaderEntries.find((x) => x.id === id);
+			if (e) e.status = status;
+		}
+		return { status: 'ok', updated: ids.length };
+	},
+	({ url, method, body }) => {
+		if (url !== '/istota/api/feeds/mark-as-read' || method !== 'POST') return undefined;
+		const scope = body?.scope;
+		const beforeId: number | undefined = body?.before_id;
+		const targetId: number | undefined = body?.id;
+		let updated = 0;
+		for (const e of mockReaderEntries) {
+			if (e.status === 'read') continue;
+			if (beforeId != null && e.id > beforeId) continue;
+			if (scope === 'feed' && targetId != null && e.feed.id !== targetId) continue;
+			e.status = 'read';
+			updated++;
+		}
+		return { status: 'ok', updated };
+	},
+	({ url, method }) => {
+		if (url !== '/istota/api/feeds/refresh' || method !== 'POST') return undefined;
+		return { status: 'ok' };
+	},
 	({ url }) => (url.startsWith('/istota/api/location/current') ? mockCurrent : undefined),
 
 	// Place stats
