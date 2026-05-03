@@ -122,7 +122,7 @@ The `preferred_username` claim from the OIDC token must match a user ID in istot
 
 **Dashboard**: shows available features for the authenticated user. When [Google Workspace](google-workspace.md) is enabled, the dashboard also shows a connect/disconnect card for linking a Google account.
 
-**Feeds**: Miniflux RSS feed reader with masonry card grid, image/text filter, sort by published/added, grid/list view, image lightbox. Viewport-based read tracking marks entries as read in Miniflux after 1.5s visible. Requires a `miniflux` resource.
+**Feeds**: RSS feed reader with masonry card grid, image/text filter, sort-by dropdown (published/added), grid/list view, navigable image lightbox, per-entry starring (`f` keyboard shortcut), and scope-aware bulk mark-as-read (`Shift-A` / toolbar button). Viewport-based read tracking marks entries as read after 1.5s visible. Sprocket-icon settings page for managing subscriptions, categories, and OPML import/export. Backend selectable via `[feeds] backend = "miniflux" | "native"` — the native backend serves the in-tree `istota.feeds` module against per-user SQLite; the legacy Miniflux proxy remains available. Requires a `feeds` resource (or `miniflux` for the legacy backend).
 
 **Money**: accounting dashboard with ledger queries, transaction management, invoicing, and work log tracking. Backed by the in-process `money` module (no external service). Requires a `money` resource.
 
@@ -140,7 +140,7 @@ The `preferred_username` claim from the OIDC token must match a user ID in istot
 | `/istota/google/callback` | Google OAuth callback |
 | `/istota/api/google/status` | Google connection status |
 | `/istota/api/google/disconnect` | Remove Google tokens |
-| `/istota/api/feeds` | Miniflux proxy |
+| `/istota/api/feeds` | Feeds backend (native module or Miniflux proxy, per `[feeds] backend`) |
 | `/istota/money/api/*` | Money module (ledger, transactions, invoicing) |
 | `/istota/api/location/*` | Places CRUD, pings, trips |
 

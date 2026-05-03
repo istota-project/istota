@@ -24,7 +24,7 @@ Admin-only skills are filtered out for non-admin users. Skills with unmet `depen
 
 ### Pass 2: semantic routing (LLM-based, additive)
 
-When `semantic_routing` is enabled (default), a Haiku call sees the task prompt, a manifest of unselected skills, and the user's resource types (so it can reason "user has miniflux configured → feeds is plausibly relevant" without keyword overlap). It returns additional skills to load. Results are merged with Pass 1. On timeout or error, falls back to Pass 1 only.
+When `semantic_routing` is enabled (default), a Haiku call sees the task prompt, a manifest of unselected skills, and the user's resource types (so it can reason "user has feeds configured → feeds is plausibly relevant" without keyword overlap). It returns additional skills to load. Results are merged with Pass 1. On timeout or error, falls back to Pass 1 only.
 
 ### Selection observability
 

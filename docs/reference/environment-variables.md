@@ -14,6 +14,7 @@ Set for every task:
 | `ISTOTA_CONVERSATION_TOKEN` | Talk room token (if set) |
 | `ISTOTA_DEFERRED_DIR` | Temp directory for deferred JSON writes |
 | `ISTOTA_SKILL_PROXY_SOCK` | Skill proxy socket path (if proxy enabled) |
+| `ISTOTA_CONFIG_PATH` | Config file path (propagated to subprocess children so module-skill jobs find the config) |
 
 ## Nextcloud
 
@@ -62,8 +63,10 @@ Derived from Nextcloud credentials:
 | `KARAKEEP_BASE_URL` | From resource config `extra` |
 | `KARAKEEP_API_KEY` | From resource config `extra` |
 | `MONARCH_SESSION_TOKEN` | From resource config `extra` |
-| `MINIFLUX_BASE_URL` | From resource config (type=miniflux) |
-| `MINIFLUX_API_KEY` | From resource config (type=miniflux) |
+| `MINIFLUX_BASE_URL` | From resource config (type=miniflux, legacy backend only) |
+| `MINIFLUX_API_KEY` | From resource config (type=miniflux, legacy backend only) |
+| `FEEDS_USER` | Istota user ID (set by executor for native feeds skill) |
+| `TUMBLR_API_KEY` | Optional fallback for Tumblr feeds (from resource `extra.tumblr_api_key`) |
 | `MONEY_CONFIG` | From the user's `money` resource (`config_path` extra) |
 | `MONEY_USER` | The istota user_id (override via `user_key` on the resource) |
 | `MONEY_SECRETS_FILE` | Optional escape hatch for direct `money` CLI use; not used by seeded scheduler jobs (the skill reads creds in-process from the resource entry) |
