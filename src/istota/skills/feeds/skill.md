@@ -9,7 +9,7 @@ env: [{"var":"FEEDS_USER","from":"user_id"}]
 ---
 # Feeds (native)
 
-Manage RSS/Atom/Tumblr/Are.na feed subscriptions through the in-tree feeds module. Per-user SQLite under `{workspace}/feeds/data/feeds.db`; subscriptions live in `feeds.toml` (or `FEEDS.md` with a fenced toml block).
+Manage RSS/Atom/Tumblr/Are.na feed subscriptions through the in-tree feeds module. Per-user SQLite under `{workspace}/feeds/data/feeds.db`; subscriptions live in `feeds.toml`.
 
 ## CLI
 

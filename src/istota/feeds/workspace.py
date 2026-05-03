@@ -5,9 +5,9 @@ Mirrors :mod:`istota.money.workspace`. Given a workspace root, synthesise a
 
 * ``data_dir`` = ``{workspace}/feeds``
 * ``config_dir`` = ``{data_dir}/config`` first, falling back to
-  ``{workspace}/config`` (so a user can colocate FEEDS.md with the rest of
-  their CRON.md / BRIEFINGS.md if they prefer that layout).
-* ``config_path`` = ``FEEDS.md`` (preferred) or ``feeds.toml`` (legacy).
+  ``{workspace}/config`` (so a user can colocate feeds.toml with the rest of
+  their other module configs if they prefer that layout).
+* ``config_path`` = ``feeds.toml``
 * ``db_path`` = ``{data_dir}/data/feeds.db``
 
 The function does not create files on disk — callers run
@@ -21,19 +21,17 @@ from pathlib import Path
 from istota.feeds.models import FeedsContext
 
 
-CONFIG_FILENAME = "FEEDS.md"
-LEGACY_CONFIG_FILENAME = "feeds.toml"
+CONFIG_FILENAME = "feeds.toml"
 
 
 def _resolve_config_path(config_dirs: list[Path]) -> Path:
-    """Find the first existing FEEDS.{md,toml}. Falls back to FEEDS.md in
-    the first dir if nothing exists yet.
+    """Find an existing feeds.toml in the search dirs, or fall back to
+    feeds.toml in the first dir if nothing exists yet.
     """
-    for fname in (CONFIG_FILENAME, LEGACY_CONFIG_FILENAME):
-        for cd in config_dirs:
-            p = cd / fname
-            if p.exists():
-                return p
+    for cd in config_dirs:
+        p = cd / CONFIG_FILENAME
+        if p.exists():
+            return p
     return config_dirs[0] / CONFIG_FILENAME
 
 
