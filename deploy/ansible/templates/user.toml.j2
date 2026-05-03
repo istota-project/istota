@@ -57,6 +57,31 @@ base_url = "{{ resource.base_url }}"
 api_key = "{{ resource.api_key }}"
 
 {% endif %}
+{% elif resource.type == 'feeds' %}
+[[resources]]
+type = "feeds"
+name = "{{ resource.name | default('Feeds') }}"
+{# Workspace mode (preferred): no overrides; the loader synthesizes a
+   FeedsContext rooted at the user's istota workspace and reads
+   FEEDS.toml (or FEEDS.md with a fenced toml block). The per-user SQLite
+   lives at {workspace}/feeds/data/feeds.db. Override data_dir / db_path /
+   config_dir / config_path if the layout differs from the default. #}
+{% if resource.data_dir is defined and resource.data_dir %}
+data_dir = "{{ resource.data_dir }}"
+{% endif %}
+{% if resource.config_dir is defined and resource.config_dir %}
+config_dir = "{{ resource.config_dir }}"
+{% endif %}
+{% if resource.config_path is defined and resource.config_path %}
+config_path = "{{ resource.config_path }}"
+{% endif %}
+{% if resource.db_path is defined and resource.db_path %}
+db_path = "{{ resource.db_path }}"
+{% endif %}
+{% if resource.tumblr_api_key is defined and resource.tumblr_api_key %}
+tumblr_api_key = "{{ resource.tumblr_api_key }}"
+{% endif %}
+
 {% elif resource.type in ['money', 'moneyman'] %}
 [[resources]]
 type = "money"
