@@ -496,12 +496,14 @@ def _validate_feeds_config(cfg: dict) -> str | None:
 
 
 def _sync_config_to_db(ctx: FeedsContext) -> dict:
-    """Push categories + feeds from feeds.toml into the feeds DB.
+    """Reconcile the feeds DB to match feeds.toml.
 
-    Mirrors :func:`istota.feeds.cli._sync_config_to_db`. Kept duplicate-free
-    by import — we *could* import the CLI helper, but the CLI module pulls
-    in Click and is a heavier import for the web app to take. The body is
-    small and identical in behaviour.
+    Unlike :func:`istota.feeds.cli._sync_config_to_db` (which is upsert-only
+    so ``feeds add`` can't clobber a typo'd save), this is wholesale-replace
+    semantics: the settings UI saves the entire feeds.toml at once, so feeds
+    and categories that disappeared from the payload must be removed from the
+    DB. Without this, a feed deleted in the UI keeps showing in the sidebar
+    because its DB row never goes away.
     """
     cfg = read_feeds_config(ctx.config_path)
     feeds_db.init_db(ctx.db_path)
@@ -509,13 +511,17 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
     cats_added = 0
     feeds_added = 0
     feeds_updated = 0
+    feeds_removed = 0
+    categories_removed = 0
     with feeds_db.connect(ctx.db_path) as conn:
         slug_to_id: dict[str, int] = {}
+        config_slugs: set[str] = set()
         for c in cfg.get("categories") or []:
             slug = str(c.get("slug") or "").strip()
             title = str(c.get("title") or slug or "").strip()
             if not slug:
                 continue
+            config_slugs.add(slug)
             existing = feeds_db.get_category_by_slug(conn, slug)
             cat_id = feeds_db.upsert_category(conn, slug, title)
             slug_to_id[slug] = cat_id
@@ -525,15 +531,18 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
         explicit_default = cfg.get("settings", {}).get("default_poll_interval_minutes")
         explicit_default = int(explicit_default) if explicit_default else None
 
+        config_urls: set[str] = set()
         for f in cfg.get("feeds") or []:
             url = str(f.get("url") or "").strip()
             if not url:
                 continue
+            config_urls.add(url)
             cat_slug = f.get("category")
             cat_id = slug_to_id.get(cat_slug) if cat_slug else None
             if cat_slug and cat_id is None:
                 cat_id = feeds_db.upsert_category(conn, cat_slug, cat_slug)
                 slug_to_id[cat_slug] = cat_id
+                config_slugs.add(cat_slug)
                 cats_added += 1
             source_type = detect_source_type(url)
             per_feed = f.get("poll_interval_minutes")
@@ -557,12 +566,25 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
                 feeds_added += 1
             else:
                 feeds_updated += 1
+
+        for feed in feeds_db.list_feeds(conn):
+            if feed.url not in config_urls:
+                feeds_db.delete_feed(conn, feed.url)
+                feeds_removed += 1
+
+        for cat in feeds_db.list_categories(conn):
+            if cat.slug not in config_slugs:
+                feeds_db.delete_category(conn, cat.slug)
+                categories_removed += 1
+
         conn.commit()
 
     return {
         "categories_added": cats_added,
+        "categories_removed": categories_removed,
         "feeds_added": feeds_added,
         "feeds_updated": feeds_updated,
+        "feeds_removed": feeds_removed,
     }
 
 
