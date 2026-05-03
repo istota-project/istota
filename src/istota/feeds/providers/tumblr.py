@@ -5,6 +5,11 @@ adapted to emit :class:`FetchedItem` directly (instead of the bridger's
 ``FeedItem``). The bridger's job — wrap this output in Atom XML so Miniflux
 could subscribe — is no longer needed; the native poller stores these
 items straight into SQLite.
+
+Uses ``requests`` rather than ``httpx`` because Tumblr's API edge
+disconnects httpx clients without sending a response (likely a TLS / JA3
+fingerprint difference). curl, urllib, and requests all work fine. The
+upstream rss-bridger made the same choice for the same reason.
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
-import httpx
+import requests
 
 from istota.feeds.models import FetchedItem
 
@@ -37,7 +42,7 @@ def fetch(identifier: str, *, api_key: str = "", limit: int = 50) -> list[Fetche
     url = f"{TUMBLR_API_BASE}/{identifier}/posts"
     params = {"api_key": key, "limit": limit, "npf": "true"}
 
-    resp = httpx.get(url, params=params, timeout=30.0)
+    resp = requests.get(url, params=params, timeout=30.0)
     resp.raise_for_status()
     data = resp.json()
 
