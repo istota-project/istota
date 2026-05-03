@@ -8,6 +8,12 @@ export const feedsList = writable<Feed[]>([]);
 /** Currently selected feed ID for sidebar filtering (0 = all). */
 export const selectedFeedId = writable<number>(0);
 
+/** When true, the reader is filtered to only starred entries. */
+export const showStarred = writable(false);
+
+/** Bumped to ask the entries page to reload — used after bulk mutations. */
+export const feedsRefreshNonce = writable(0);
+
 /** Filter/view state shared between layout (chips) and page (filtering). */
 function persistedWritable<T>(key: string, fallback: T) {
 	const store = writable<T>(loadSetting(key, fallback));

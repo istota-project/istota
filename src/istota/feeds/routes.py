@@ -113,6 +113,8 @@ def _map_entry(entry, feed_by_id: dict, cat_by_id: dict) -> dict:
             },
         },
         "status": entry.status,
+        "starred": bool(entry.starred),
+        "starred_at": entry.starred_at or "",
         "published_at": entry.published_at or "",
         "created_at": entry.fetched_at or "",
     }
@@ -136,9 +138,22 @@ async def api_feeds(
     status: str = Query(default=""),
     category_id: int = Query(default=0),
     feed_id: int = Query(default=0),
+    starred: int = Query(default=-1),
     before: int = Query(default=0, ge=0),
 ):
-    """List feeds and entries — mirrors Miniflux ``GET /v1/entries`` + ``/v1/feeds``."""
+    """List feeds and entries — mirrors Miniflux ``GET /v1/entries`` + ``/v1/feeds``.
+
+    ``starred`` is ``-1`` (default, no filter), ``1`` (only starred), or ``0``
+    (only unstarred). Independent of ``status`` so a starred unread entry
+    appears in both views.
+    """
+    starred_filter: bool | None
+    if starred == 1:
+        starred_filter = True
+    elif starred == 0:
+        starred_filter = False
+    else:
+        starred_filter = None
 
     def _query():
         with feeds_db.connect(ctx.db_path) as conn:
@@ -151,6 +166,7 @@ async def api_feeds(
                 status=status or None,
                 feed_id=feed_id or None,
                 category_id=category_id or None,
+                starred=starred_filter,
                 before_published_ts=before or None,
                 order=order,
                 direction=direction,
@@ -160,6 +176,7 @@ async def api_feeds(
                 status=status or None,
                 feed_id=feed_id or None,
                 category_id=category_id or None,
+                starred=starred_filter,
             )
         return cats, feeds, entries, total
 
@@ -185,15 +202,37 @@ async def api_update_entries_batch(
         return JSONResponse(
             {"error": "entry_ids must be a non-empty list"}, status_code=400,
         )
-    new_status = body.get("status", "read")
-    if new_status not in ("read", "unread", "removed"):
+
+    has_status = "status" in body
+    has_starred = "starred" in body
+    if not has_status and not has_starred:
+        # Back-compat: older clients always send a status. Default-mark-read
+        # so the existing batch behaviour stays unchanged.
+        has_status = True
+        body["status"] = "read"
+
+    new_status = body.get("status")
+    if has_status and new_status not in ("read", "unread", "removed"):
         return JSONResponse(
             {"error": "status must be one of: read, unread, removed"}, status_code=400,
         )
 
+    new_starred = body.get("starred")
+    if has_starred and not isinstance(new_starred, bool):
+        return JSONResponse(
+            {"error": "starred must be a boolean"}, status_code=400,
+        )
+
     def _update():
         with feeds_db.connect(ctx.db_path) as conn:
-            count = feeds_db.update_entry_status(conn, list(entry_ids), new_status)
+            ids = list(entry_ids)
+            count = 0
+            if has_status:
+                count = feeds_db.update_entry_status(conn, ids, new_status)
+            if has_starred:
+                star_count = feeds_db.update_entry_starred(conn, ids, new_starred)
+                if not has_status:
+                    count = star_count
             conn.commit()
         return count
 
@@ -208,17 +247,82 @@ async def api_update_entry(
     ctx: FeedsContext = Depends(get_user_context),
 ):
     body = await request.json()
-    new_status = body.get("status", "read")
-    if new_status not in ("read", "unread", "removed"):
+    has_status = "status" in body
+    has_starred = "starred" in body
+    if not has_status and not has_starred:
+        # Back-compat: older clients send only `status`. Treat a body with
+        # neither field as the legacy default of "mark read".
+        has_status = True
+        body["status"] = "read"
+
+    new_status = body.get("status")
+    if has_status and new_status not in ("read", "unread", "removed"):
         return JSONResponse(
             {"error": "status must be one of: read, unread, removed"}, status_code=400,
+        )
+    new_starred = body.get("starred")
+    if has_starred and not isinstance(new_starred, bool):
+        return JSONResponse(
+            {"error": "starred must be a boolean"}, status_code=400,
         )
 
     def _update():
         with feeds_db.connect(ctx.db_path) as conn:
-            count = feeds_db.update_entry_status(conn, [entry_id], new_status)
+            count = 0
+            if has_status:
+                count = feeds_db.update_entry_status(conn, [entry_id], new_status)
+            if has_starred:
+                star_count = feeds_db.update_entry_starred(conn, [entry_id], new_starred)
+                if not has_status:
+                    count = star_count
             conn.commit()
         return count
+
+    updated = await asyncio.to_thread(_update)
+    return {"status": "ok", "updated": updated}
+
+
+@router.post("/mark-as-read")
+async def api_mark_as_read(
+    request: Request,
+    ctx: FeedsContext = Depends(get_user_context),
+):
+    """Bulk mark unread entries as read.
+
+    Body: ``{"scope": "all|feed|category", "id": int?, "before_id": int?}``.
+    ``scope=all`` ignores ``id``; the other scopes require it. ``before_id``
+    caps the operation so concurrent infinite-scroll loads don't get clobbered.
+    """
+    body = await request.json()
+    scope = body.get("scope")
+    if scope not in ("all", "feed", "category"):
+        return JSONResponse(
+            {"error": "scope must be one of: all, feed, category"},
+            status_code=400,
+        )
+    raw_id = body.get("id")
+    if scope in ("feed", "category"):
+        if not isinstance(raw_id, int) or raw_id <= 0:
+            return JSONResponse(
+                {"error": f"scope={scope} requires a positive integer 'id'"},
+                status_code=400,
+            )
+    raw_before = body.get("before_id")
+    if raw_before is not None and (not isinstance(raw_before, int) or raw_before <= 0):
+        return JSONResponse(
+            {"error": "before_id must be a positive integer"}, status_code=400,
+        )
+
+    def _update():
+        with feeds_db.connect(ctx.db_path) as conn:
+            n = feeds_db.mark_as_read(
+                conn,
+                scope=scope,
+                scope_id=raw_id if scope != "all" else None,
+                before_id=raw_before,
+            )
+            conn.commit()
+        return n
 
     updated = await asyncio.to_thread(_update)
     return {"status": "ok", "updated": updated}

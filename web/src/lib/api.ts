@@ -49,6 +49,8 @@ export interface FeedEntry {
 	images: string[];
 	feed: Feed;
 	status: string;
+	starred: boolean;
+	starred_at: string;
 	published_at: string;
 	created_at: string;
 }
@@ -81,6 +83,30 @@ export async function updateEntriesStatus(ids: number[], status: string): Promis
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ entry_ids: ids, status }),
+	});
+}
+
+export async function updateEntryStarred(id: number, starred: boolean): Promise<void> {
+	await apiFetch(`/feeds/entries/${id}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ starred }),
+	});
+}
+
+export type MarkAsReadScope = 'all' | 'feed' | 'category';
+
+export async function markAsRead(
+	scope: MarkAsReadScope,
+	opts?: { id?: number; before_id?: number },
+): Promise<{ status: string; updated: number }> {
+	const body: Record<string, unknown> = { scope };
+	if (opts?.id != null) body.id = opts.id;
+	if (opts?.before_id != null) body.before_id = opts.before_id;
+	return apiFetch('/feeds/mark-as-read', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
 	});
 }
 

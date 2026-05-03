@@ -1,7 +1,13 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { getFeeds, updateEntriesStatus, type FeedEntry } from '$lib/api';
-	import { selectedFeedId, showImages, showText, showUnseen, sortBy, viewMode } from '$lib/stores/feeds';
+	import {
+		getFeeds, markAsRead, updateEntriesStatus, updateEntryStarred,
+		type FeedEntry,
+	} from '$lib/api';
+	import {
+		feedsRefreshNonce, selectedFeedId, showImages, showStarred,
+		showText, showUnseen, sortBy, viewMode,
+	} from '$lib/stores/feeds';
 	import FeedCard from '$lib/components/FeedCard.svelte';
 	import Lightbox from '$lib/components/Lightbox.svelte';
 	import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
@@ -24,6 +30,24 @@
 			loadEntries($selectedFeedId);
 		}
 		prevSu = $showUnseen;
+	});
+
+	// Reload when the user enters / leaves the Starred view.
+	let prevStarred = false;
+	$effect(() => {
+		if ($showStarred !== prevStarred) {
+			loadEntries($selectedFeedId);
+		}
+		prevStarred = $showStarred;
+	});
+
+	// Bumped by toolbar (mark-all) and similar bulk ops; force a reload.
+	let prevNonce = 0;
+	$effect(() => {
+		if ($feedsRefreshNonce !== prevNonce) {
+			loadEntries($selectedFeedId);
+		}
+		prevNonce = $feedsRefreshNonce;
 	});
 
 	// Lightbox
@@ -66,6 +90,7 @@
 		};
 		if (opts.feedId) params.feed_id = String(opts.feedId);
 		if ($showUnseen) params.status = 'unread';
+		if ($showStarred) params.starred = '1';
 		if (opts.before != null) {
 			params.before = String(opts.before);
 			params.offset = '0';
@@ -180,6 +205,71 @@
 		flushPending();
 	});
 
+	$effect(() => {
+		window.addEventListener('keydown', handleKeydown);
+		return () => window.removeEventListener('keydown', handleKeydown);
+	});
+
+	function handleStarToggle(id: number, starred: boolean) {
+		const idx = entries.findIndex((e) => e.id === id);
+		if (idx >= 0) {
+			entries[idx] = { ...entries[idx], starred };
+			// In starred-only view, drop the entry once it's unstarred so it
+			// disappears immediately like the unread filter does.
+			if ($showStarred && !starred) {
+				entries = entries.filter((e) => e.id !== id);
+				total = Math.max(0, total - 1);
+			}
+		}
+	}
+
+	// Keyboard shortcut: A marks every visible entry read (scope-aware).
+	// f toggles star on the focused entry — left to Tranche B's full
+	// shortcut layer; for now A is the highest-leverage one.
+	function isEditableTarget(t: EventTarget | null): boolean {
+		const el = t as HTMLElement | null;
+		if (!el) return false;
+		if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+		if ((el as HTMLElement).isContentEditable) return true;
+		return false;
+	}
+
+	async function handleKeydown(e: KeyboardEvent) {
+		if (isEditableTarget(e.target)) return;
+		if (e.metaKey || e.ctrlKey || e.altKey) return;
+		if (e.key === 'A' && e.shiftKey) {
+			e.preventDefault();
+			if (entries.length === 0) return;
+			const maxId = Math.max(...entries.map((x) => x.id));
+			const scope = $selectedFeedId ? 'feed' : 'all';
+			const opts = $selectedFeedId
+				? { id: $selectedFeedId, before_id: maxId }
+				: { before_id: maxId };
+			try {
+				await markAsRead(scope, opts);
+				feedsRefreshNonce.update((n) => n + 1);
+			} catch {
+				// non-fatal
+			}
+			return;
+		}
+		if (e.key === 'f' && !e.shiftKey && focusedEntryId != null) {
+			e.preventDefault();
+			const target = entries.find((x) => x.id === focusedEntryId);
+			if (!target) return;
+			const next = !target.starred;
+			handleStarToggle(target.id, next);
+			try {
+				await updateEntryStarred(target.id, next);
+			} catch {
+				handleStarToggle(target.id, !next);
+			}
+		}
+	}
+
+	// Track which card the cursor most recently entered so 'f' has a target.
+	let focusedEntryId: number | null = $state(null);
+
 	let filteredEntries = $derived.by(() => {
 		let filtered = entries.filter((e) => {
 			const isImage = e.images.length > 0;
@@ -204,7 +294,19 @@
 	{:else}
 		<div class="feed-grid" class:list-view={$viewMode === 'list'}>
 			{#each filteredEntries as entry (entry.id)}
-				<FeedCard {entry} onImageClick={(url) => lightboxSrc = url} onViewed={handleViewed} />
+				<div
+					class="card-slot"
+					onmouseenter={() => (focusedEntryId = entry.id)}
+					onfocusin={() => (focusedEntryId = entry.id)}
+					role="presentation"
+				>
+					<FeedCard
+						{entry}
+						onImageClick={(url) => (lightboxSrc = url)}
+						onViewed={handleViewed}
+						onStarToggle={handleStarToggle}
+					/>
+				</div>
 			{/each}
 		</div>
 
@@ -252,6 +354,10 @@
 		margin: 0 auto;
 	}
 
+	.feed-grid .card-slot {
+		display: contents;
+	}
+
 	/* Cards */
 	.feed-grid :global(.card) {
 		position: relative;
@@ -276,6 +382,38 @@
 		border-radius: 0.2rem;
 		pointer-events: none;
 		z-index: 2;
+	}
+
+	.feed-grid :global(.star-btn) {
+		position: absolute;
+		top: 0.4rem;
+		left: 0.4rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.25rem;
+		background: rgba(0, 0, 0, 0.45);
+		color: var(--text-muted);
+		border: none;
+		border-radius: 0.2rem;
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity var(--transition-fast), color var(--transition-fast);
+		z-index: 3;
+	}
+
+	.feed-grid :global(.card:hover .star-btn),
+	.feed-grid :global(.star-btn.starred),
+	.feed-grid :global(.star-btn:focus-visible) {
+		opacity: 1;
+	}
+
+	.feed-grid :global(.star-btn.starred) {
+		color: #f5b300;
+	}
+
+	.feed-grid :global(.star-btn:hover) {
+		color: #f5b300;
 	}
 
 	.feed-grid.list-view :global(.card) {

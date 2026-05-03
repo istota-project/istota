@@ -129,7 +129,8 @@ class TestGetFeeds:
         entry = body["entries"][0]
         expected = {
             "id", "title", "url", "content", "images", "feed",
-            "status", "published_at", "created_at",
+            "status", "starred", "starred_at",
+            "published_at", "created_at",
         }
         assert set(entry.keys()) == expected
         assert set(entry["feed"].keys()) == {"id", "title", "site_url", "category"}
@@ -220,6 +221,173 @@ class TestUpdateEntries:
         resp = client.put(
             "/istota/api/feeds/entries/1",
             json={"status": "archived"},
+        )
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Starring + GET ?starred=
+# ---------------------------------------------------------------------------
+
+
+class TestStarring:
+    def test_entry_response_includes_starred_fields(self, ctx, client):
+        _seed(ctx)
+        body = client.get("/istota/api/feeds").json()
+        for e in body["entries"]:
+            assert "starred" in e
+            assert "starred_at" in e
+            assert e["starred"] is False
+
+    def test_put_single_toggles_starred(self, ctx, client):
+        _seed(ctx)
+        body = client.get("/istota/api/feeds").json()
+        entry_id = body["entries"][0]["id"]
+
+        resp = client.put(
+            f"/istota/api/feeds/entries/{entry_id}",
+            json={"starred": True},
+        )
+        assert resp.status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT starred, starred_at FROM feed_entries WHERE id = ?",
+                (entry_id,),
+            ).fetchone()
+            assert row["starred"] == 1
+            assert row["starred_at"] is not None
+
+    def test_put_combined_status_and_starred(self, ctx, client):
+        _seed(ctx)
+        body = client.get("/istota/api/feeds?status=unread").json()
+        entry_id = body["entries"][0]["id"]
+
+        resp = client.put(
+            f"/istota/api/feeds/entries/{entry_id}",
+            json={"status": "read", "starred": True},
+        )
+        assert resp.status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT status, starred FROM feed_entries WHERE id = ?",
+                (entry_id,),
+            ).fetchone()
+            assert row["status"] == "read"
+            assert row["starred"] == 1
+
+    def test_batch_combined_status_and_starred(self, ctx, client):
+        _seed(ctx)
+        body = client.get("/istota/api/feeds").json()
+        ids = [e["id"] for e in body["entries"]]
+
+        resp = client.put(
+            "/istota/api/feeds/entries/batch",
+            json={"entry_ids": ids, "starred": True},
+        )
+        assert resp.status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM feed_entries WHERE starred = 1"
+            ).fetchone()["c"]
+            assert count == len(ids)
+
+    def test_put_rejects_non_bool_starred(self, ctx, client):
+        _seed(ctx)
+        resp = client.put(
+            "/istota/api/feeds/entries/1", json={"starred": "yes"},
+        )
+        assert resp.status_code == 400
+
+    def test_get_with_starred_filter(self, ctx, client):
+        ids = _seed(ctx)
+        # Star one tumblr entry.
+        with feeds_db.connect(ctx.db_path) as conn:
+            target = conn.execute(
+                "SELECT id FROM feed_entries WHERE feed_id = ? LIMIT 1",
+                (ids["tumblr_feed_id"],),
+            ).fetchone()["id"]
+            feeds_db.update_entry_starred(conn, [target], True)
+            conn.commit()
+
+        body = client.get("/istota/api/feeds?starred=1").json()
+        assert body["total"] == 1
+        assert body["entries"][0]["id"] == target
+        assert body["entries"][0]["starred"] is True
+
+        # starred=0 returns the unstarred remainder.
+        body0 = client.get("/istota/api/feeds?starred=0").json()
+        assert body0["total"] == 2
+
+        # Default (no starred param) returns everything.
+        body_all = client.get("/istota/api/feeds").json()
+        assert body_all["total"] == 3
+
+
+# ---------------------------------------------------------------------------
+# POST /feeds/mark-as-read
+# ---------------------------------------------------------------------------
+
+
+class TestMarkAsReadRoute:
+    def test_scope_all(self, ctx, client):
+        _seed(ctx)
+        resp = client.post("/istota/api/feeds/mark-as-read", json={"scope": "all"})
+        assert resp.status_code == 200
+        # Two unread entries pre-existed.
+        assert resp.json()["updated"] == 2
+        body = client.get("/istota/api/feeds?status=unread").json()
+        assert body["total"] == 0
+
+    def test_scope_feed(self, ctx, client):
+        ids = _seed(ctx)
+        resp = client.post(
+            "/istota/api/feeds/mark-as-read",
+            json={"scope": "feed", "id": ids["tumblr_feed_id"]},
+        )
+        assert resp.status_code == 200
+        # Only the unread tumblr entry (post-1) flipped; rss-1 still unread.
+        assert resp.json()["updated"] == 1
+        body = client.get("/istota/api/feeds?status=unread").json()
+        assert body["total"] == 1
+
+    def test_scope_category(self, ctx, client):
+        ids = _seed(ctx)
+        resp = client.post(
+            "/istota/api/feeds/mark-as-read",
+            json={"scope": "category", "id": ids["cat_id"]},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["updated"] == 1  # post-1 only
+
+    def test_before_id_caps(self, ctx, client):
+        _seed(ctx)
+        # Find current unread max id.
+        body = client.get("/istota/api/feeds?status=unread").json()
+        sorted_ids = sorted(e["id"] for e in body["entries"])
+        cap = sorted_ids[0]  # only the first
+        resp = client.post(
+            "/istota/api/feeds/mark-as-read",
+            json={"scope": "all", "before_id": cap},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["updated"] == 1
+
+    def test_rejects_unknown_scope(self, client):
+        resp = client.post(
+            "/istota/api/feeds/mark-as-read", json={"scope": "global"},
+        )
+        assert resp.status_code == 400
+
+    def test_feed_scope_requires_id(self, client):
+        resp = client.post(
+            "/istota/api/feeds/mark-as-read", json={"scope": "feed"},
+        )
+        assert resp.status_code == 400
+
+    def test_negative_before_id_rejected(self, client):
+        resp = client.post(
+            "/istota/api/feeds/mark-as-read",
+            json={"scope": "all", "before_id": -1},
         )
         assert resp.status_code == 400
 
