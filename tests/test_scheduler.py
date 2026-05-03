@@ -2188,6 +2188,26 @@ class TestExecuteCommandTask:
         assert success is True
         assert str(db_path) in result
 
+    def test_config_path_propagated_when_set(self, db_path, tmp_path):
+        """Subprocesses (e.g. _module.feeds.run_scheduled) need ISTOTA_CONFIG_PATH
+        because the daemon's `--config` flag isn't visible in their env, and
+        their cwd is `config.temp_dir` — not a directory containing
+        `config/config.toml`."""
+        config = self._make_config(db_path, tmp_path)
+        config.config_path = tmp_path / "config.toml"
+        task = self._make_task(command="echo $ISTOTA_CONFIG_PATH")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert str(config.config_path) in result
+
+    def test_config_path_absent_when_unset(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        # config.config_path defaults to None
+        task = self._make_task(command="echo path=[$ISTOTA_CONFIG_PATH]")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "path=[]" in result
+
     def test_no_output_shows_placeholder(self, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
         task = self._make_task(command="true")

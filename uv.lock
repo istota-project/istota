@@ -1219,6 +1219,7 @@ source = { editable = "." }
 dependencies = [
     { name = "croniter" },
     { name = "httpx" },
+    { name = "requests" },
     { name = "tomli" },
 ]
 
@@ -1351,6 +1352,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "python-multipart", marker = "extra == 'web'", specifier = ">=0.0.9" },
+    { name = "requests", specifier = ">=2.32.0" },
     { name = "sentence-transformers", marker = "extra == 'memory-search'", specifier = ">=3.0.0" },
     { name = "sqlite-vec", marker = "extra == 'memory-search'", specifier = ">=0.1.6" },
     { name = "tomli", specifier = ">=2.0.0" },

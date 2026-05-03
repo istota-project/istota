@@ -109,7 +109,7 @@
 			onClose={() => (sidebarOpen = false)}
 		>
 			{#each groupedFeeds as [category, catFeeds] (category)}
-				<CategoryGroup label={category}>
+				<CategoryGroup label={category} count={catFeeds.length} collapsible>
 					{#each catFeeds as feed (feed.id)}
 						<button
 							class="feed-btn"

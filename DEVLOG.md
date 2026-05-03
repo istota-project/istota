@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-03: Module-skill scheduled jobs lost the istota config in their subprocess
+
+User reported "feeds haven't polled in over an hour" and the settings-page refresh-now button doing nothing. The `_module.feeds.run_scheduled` cron job was firing every 5 minutes on schedule — the scheduler queued tasks at 02:00, 02:05, etc., and they all completed with no error from the scheduler's view. But the actual *result* of every recent run was `{"status": "error", "error": "user 'stefan' not in istota config"}`. Same for `_module.money.run_scheduled`.
+
+Root cause: `_execute_command_task()` runs the subprocess with `cwd=config.temp_dir` (e.g. the per-user temp directory) and env from `build_stripped_env()` (`os.environ` minus credentials). The daemon was launched with `--config <path>/config.toml`, but that flag isn't visible to children. When the subprocess (`istota-skill feeds run-scheduled` → `python -m istota.skills.feeds run-scheduled`) called `load_config()` with no argument, it walked the existing search list — `Path("config/config.toml")` (relative to cwd, missing), `~/src/config/config.toml` (missing), `~/.config/istota/config.toml` (missing), `/etc/istota/config.toml` (missing) — and returned a default `Config()` with an empty `users` dict. Then `resolve_for_user(<user>, cfg)` raised `UserNotFoundError`, the skill facade printed the JSON error, and the subprocess exited 0 (because the JSON error path doesn't propagate the exit code through to the shell). To the scheduler the task looked successful; from the user's perspective polling was silently dead.
+
+The settings-page refresh button has the same root cause — it just sets `next_poll_at = NULL` for all feeds and relies on the same broken scheduled job to pick them up next tick.
+
+**Fix.** Propagate the loaded config path to subprocesses via `ISTOTA_CONFIG_PATH`:
+
+- `Config` grew a `config_path: Path | None = None` field, set by `load_config()` to the file actually loaded.
+- `load_config()` now honours `ISTOTA_CONFIG_PATH` env var (highest priority) before falling through to the existing relative/home/etc search list. Missing-file path falls through cleanly so a stale env var doesn't break startup.
+- `_execute_command_task()` in `scheduler.py` sets `env["ISTOTA_CONFIG_PATH"] = str(config.config_path)` when present, so the daemon's loaded config is found by every child subprocess regardless of cwd.
+
+Both money and feeds module jobs benefit. No config or template change required — the daemon already passes `--config` so `Config.config_path` populates automatically on the next start.
+
+**Files modified:**
+- `src/istota/config.py` — env-var lookup in `load_config()`, `config_path` field on `Config`, recorded after a successful load.
+- `src/istota/scheduler.py` — `_execute_command_task()` propagates `ISTOTA_CONFIG_PATH`.
+- `tests/test_config.py` — five tests covering env-var lookup, explicit-path precedence, missing-file fall-through, and `config_path` recording.
+- `tests/test_scheduler.py` — two tests covering env propagation in `_execute_command_task`.
+
 ## 2026-05-02: Native feeds module — replacing Miniflux + bridger + PostgreSQL VM
 
 Folded the entire RSS pipeline into Istota. The previous architecture ran an external Miniflux instance backed by PostgreSQL plus an `rss-bridger` FastAPI service on a dedicated VM that translated Tumblr / Are.na API responses into RSS-shaped XML for Miniflux to ingest. With the SvelteKit reader UI already owning the hard part (grid/list views, image extraction, lightbox, infinite scroll, batched mark-read), three external services to push entries into a local SQLite is pure cost. The new module owns polling, storage, read state, subscription management, and the FastAPI surface in-process.
