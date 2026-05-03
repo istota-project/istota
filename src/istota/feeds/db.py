@@ -398,20 +398,19 @@ def list_entries(
     if starred is not None:
         clauses.append("e.starred = ?")
         params.append(1 if starred else 0)
-    if before_published_ts is not None:
-        # Miniflux semantics: strictly less than. Compare ISO timestamps lexically;
-        # works because we always store UTC ISO 8601.
-        cutoff = datetime.fromtimestamp(before_published_ts, tz=timezone.utc).isoformat()
-        clauses.append("e.published_at < ?")
-        params.append(cutoff)
-    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-
     order_col = {
         "published_at": "e.published_at",
         "created_at": "e.fetched_at",
         "id": "e.id",
         "starred_at": "e.starred_at",
     }.get(order, "e.published_at")
+    if before_published_ts is not None:
+        # Miniflux semantics: strictly less than. Cursor operates on the same
+        # column as `order` so pagination stays stable across sort modes.
+        cutoff = datetime.fromtimestamp(before_published_ts, tz=timezone.utc).isoformat()
+        clauses.append(f"{order_col} < ?")
+        params.append(cutoff)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     direction_sql = "ASC" if direction.lower() == "asc" else "DESC"
 
     rows = conn.execute(
