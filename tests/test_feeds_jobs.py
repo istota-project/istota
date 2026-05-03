@@ -60,10 +60,10 @@ class TestJobsForUser:
             assert "FEEDS_USER=alice" in j["command"]
             assert "istota-skill feeds run-scheduled" in j["command"]
 
-    def test_default_cron_every_15_min(self, tmp_path):
+    def test_default_cron_every_5_min(self, tmp_path):
         ctx = synthesize_feeds_context("alice", tmp_path)
         jobs = jobs_for_user(ctx, "alice")
-        assert jobs[0]["cron"] == "*/15 * * * *"
+        assert jobs[0]["cron"] == "*/5 * * * *"
 
 
 # ---------------------------------------------------------------------------

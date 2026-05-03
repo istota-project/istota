@@ -23,6 +23,7 @@ from istota.feeds import db as feeds_db
 from istota.feeds._config_io import read_feeds_config, write_feeds_config
 from istota.feeds.models import (
     DEFAULT_POLL_INTERVAL_MINUTES,
+    default_poll_interval_for,
     FeedsContext,
     detect_source_type,
 )
@@ -113,10 +114,8 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
             elif existing.title != title:
                 cats_updated += 1
 
-        default_interval = int(
-            cfg.get("settings", {}).get("default_poll_interval_minutes")
-            or DEFAULT_POLL_INTERVAL_MINUTES
-        )
+        explicit_default = cfg.get("settings", {}).get("default_poll_interval_minutes")
+        explicit_default = int(explicit_default) if explicit_default else None
 
         for f in cfg.get("feeds") or []:
             url = str(f.get("url") or "").strip()
@@ -129,14 +128,21 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
                 cat_id = feeds_db.upsert_category(conn, cat_slug, cat_slug)
                 slug_to_id[cat_slug] = cat_id
                 cats_added += 1
-            interval = int(f.get("poll_interval_minutes") or default_interval)
+            source_type = detect_source_type(url)
+            per_feed = f.get("poll_interval_minutes")
+            if per_feed:
+                interval = int(per_feed)
+            elif explicit_default is not None:
+                interval = explicit_default
+            else:
+                interval = default_poll_interval_for(source_type)
             existing = feeds_db.get_feed_by_url(conn, url)
             feeds_db.upsert_feed(
                 conn,
                 url=url,
                 title=title,
                 site_url=f.get("site_url"),
-                source_type=detect_source_type(url),
+                source_type=source_type,
                 category_id=cat_id,
                 poll_interval_minutes=interval,
             )
@@ -470,7 +476,7 @@ def _dump_db_to_config(ctx: FeedsContext) -> None:
             entry["title"] = f.title
         if f.category_id and f.category_id in cat_by_id:
             entry["category"] = cat_by_id[f.category_id].slug
-        if f.poll_interval_minutes != DEFAULT_POLL_INTERVAL_MINUTES:
+        if f.poll_interval_minutes != default_poll_interval_for(f.source_type):
             entry["poll_interval_minutes"] = f.poll_interval_minutes
         data["feeds"].append(entry)
     _save_config(ctx, data)

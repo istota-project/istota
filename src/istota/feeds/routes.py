@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi import File as FastAPIFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -25,6 +25,7 @@ from istota.feeds._loader import UserNotFoundError, resolve_for_user
 from istota.feeds.models import (
     DEFAULT_POLL_INTERVAL_MINUTES,
     FeedsContext,
+    default_poll_interval_for,
     detect_source_type,
 )
 
@@ -61,7 +62,17 @@ def get_user_context(
     except UserNotFoundError as e:
         raise HTTPException(404, str(e))
     ctx.ensure_dirs()
-    feeds_db.init_db(ctx.db_path)
+    # init_db sets WAL and runs CREATE TABLE IF NOT EXISTS. WAL is persistent
+    # in the SQLite file header, so we only need to run it once per DB per
+    # process. Caching by db_path also prevents concurrent requests from
+    # racing on the journal_mode transition lock.
+    cache: set = getattr(request.app.state, "feeds_initialised_dbs", None)
+    if cache is None:
+        cache = set()
+        request.app.state.feeds_initialised_dbs = cache
+    if ctx.db_path not in cache:
+        feeds_db.init_db(ctx.db_path)
+        cache.add(ctx.db_path)
     return ctx
 
 
@@ -296,14 +307,12 @@ async def api_export_opml(ctx: FeedsContext = Depends(get_user_context)):
 
 @router.post("/refresh")
 async def api_refresh(
-    background: BackgroundTasks,
     ctx: FeedsContext = Depends(get_user_context),
 ):
-    """Mark every feed due now and kick off a background poll.
-
-    The poll itself runs in a FastAPI background task so the request returns
-    as soon as the queue is reset. The settings page picks up updated
-    ``last_poll_at`` / per-feed state on its next load.
+    """Mark every feed due now. The scheduled job ``_module.feeds.run_scheduled``
+    (cron ``*/5``) picks them up out-of-process — keeping the long sequential
+    poll out of the web request lifecycle so shutdown is fast and one user's
+    refresh can't tie up uvicorn workers.
     """
 
     def _reset() -> int:
@@ -313,31 +322,7 @@ async def api_refresh(
             return cur.rowcount or 0
 
     queued = await asyncio.to_thread(_reset)
-    background.add_task(_poll_due_in_background, ctx)
     return {"status": "queued", "feeds_queued": queued}
-
-
-def _poll_due_in_background(ctx: FeedsContext) -> None:
-    """Run the poller for ``ctx`` outside the request lifecycle."""
-    import os
-    from datetime import datetime, timezone
-
-    from istota.feeds.poller import poll_due_feeds
-
-    api_key = ctx.tumblr_api_key or os.environ.get("TUMBLR_API_KEY", "")
-    try:
-        with feeds_db.connect(ctx.db_path) as conn:
-            poll_due_feeds(
-                conn,
-                tumblr_api_key=api_key,
-                now=datetime.now(timezone.utc),
-            )
-    except Exception:
-        # Background tasks must not raise into the event loop.
-        import logging
-        logging.getLogger("istota.feeds.routes").exception(
-            "manual refresh poll failed user_db=%s", ctx.db_path,
-        )
 
 
 @router.post("/import-opml")
@@ -433,10 +418,8 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
             if existing is None:
                 cats_added += 1
 
-        default_interval = int(
-            cfg.get("settings", {}).get("default_poll_interval_minutes")
-            or DEFAULT_POLL_INTERVAL_MINUTES
-        )
+        explicit_default = cfg.get("settings", {}).get("default_poll_interval_minutes")
+        explicit_default = int(explicit_default) if explicit_default else None
 
         for f in cfg.get("feeds") or []:
             url = str(f.get("url") or "").strip()
@@ -448,14 +431,21 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
                 cat_id = feeds_db.upsert_category(conn, cat_slug, cat_slug)
                 slug_to_id[cat_slug] = cat_id
                 cats_added += 1
-            interval = int(f.get("poll_interval_minutes") or default_interval)
+            source_type = detect_source_type(url)
+            per_feed = f.get("poll_interval_minutes")
+            if per_feed:
+                interval = int(per_feed)
+            elif explicit_default is not None:
+                interval = explicit_default
+            else:
+                interval = default_poll_interval_for(source_type)
             existing = feeds_db.get_feed_by_url(conn, url)
             feeds_db.upsert_feed(
                 conn,
                 url=url,
                 title=f.get("title"),
                 site_url=f.get("site_url"),
-                source_type=detect_source_type(url),
+                source_type=source_type,
                 category_id=cat_id,
                 poll_interval_minutes=interval,
             )
@@ -490,7 +480,7 @@ def _dump_db_to_config(ctx: FeedsContext) -> None:
             entry["title"] = f.title
         if f.category_id and f.category_id in cat_by_id:
             entry["category"] = cat_by_id[f.category_id].slug
-        if f.poll_interval_minutes != DEFAULT_POLL_INTERVAL_MINUTES:
+        if f.poll_interval_minutes != default_poll_interval_for(f.source_type):
             entry["poll_interval_minutes"] = f.poll_interval_minutes
         data["feeds"].append(entry)
     write_feeds_config(ctx.config_path, data)

@@ -25,7 +25,7 @@ class ModuleJob:
 DEFAULT_JOBS: tuple[ModuleJob, ...] = (
     ModuleJob(
         name=f"{MODULE_PREFIX}run_scheduled",
-        cron="*/15 * * * *",
+        cron="*/5 * * * *",
         command_template="FEEDS_USER={user_id} istota-skill feeds run-scheduled",
     ),
 )

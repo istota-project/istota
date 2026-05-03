@@ -24,6 +24,20 @@ PROVIDER_SCHEMES = ("tumblr:", "arena:")
 DEFAULT_POLL_INTERVAL_MINUTES = 30
 DEFAULT_BACKOFF_MAX_MINUTES = 24 * 60
 
+# Per-source-type default poll cadence (minutes). Tumblr and Are.na have
+# tight per-key / per-IP rate limits, so we poll them less aggressively when
+# feeds.toml doesn't override. RSS / Atom go through dozens of separate
+# origins so the global default applies.
+_SOURCE_TYPE_POLL_DEFAULTS: dict[str, int] = {
+    "tumblr": 60,
+    "arena": 60,
+}
+
+
+def default_poll_interval_for(source_type: str) -> int:
+    """Return the default ``poll_interval_minutes`` for a feed source type."""
+    return _SOURCE_TYPE_POLL_DEFAULTS.get(source_type, DEFAULT_POLL_INTERVAL_MINUTES)
+
 
 @dataclass
 class FeedsContext:
