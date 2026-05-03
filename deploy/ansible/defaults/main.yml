@@ -401,7 +401,7 @@ istota_skills_semantic_routing: true  # enable Pass 2 LLM classification
 #   "native"   — in-tree istota.feeds module (per-user [[resources]] type = "feeds";
 #                per-user SQLite under {workspace}/feeds/data/feeds.db)
 # Flipping the value requires an istota service restart (registered at import time).
-istota_feeds_backend: "miniflux"
+istota_feeds_backend: "native"
 
 # Sleep cycle settings (nightly memory extraction, cron evaluated per-user timezone)
 istota_sleep_cycle_enabled: true
