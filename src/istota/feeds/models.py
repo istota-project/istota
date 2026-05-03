@@ -50,7 +50,7 @@ class FeedsContext:
     user_id: str
     data_dir: Path
     config_dir: Path
-    config_path: Path        # FEEDS.md or feeds.toml
+    config_path: Path        # feeds.toml
     db_path: Path
     tumblr_api_key: str = ""
 

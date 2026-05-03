@@ -193,7 +193,7 @@ istota_disabled_skills: []
 #         # Native feeds module (used when istota_feeds_backend == "native").
 #         # Workspace mode (preferred): omit overrides. The loader
 #         # synthesizes a FeedsContext rooted at the user's istota workspace
-#         # and reads feeds.toml (or FEEDS.md with a fenced toml block).
+#         # and reads feeds.toml.
 #         # Defaults: data_dir = {workspace}/feeds,
 #         #           db_path = {data_dir}/data/feeds.db,
 #         #           config_path = {data_dir}/config/feeds.toml.
