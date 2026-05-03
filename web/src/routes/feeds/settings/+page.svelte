@@ -859,12 +859,24 @@
 
 	.grid {
 		width: 100%;
+		table-layout: fixed;
 		border-collapse: collapse;
 		font-size: var(--text-sm);
 	}
 
 	.col-title {
-		width: 100%;
+		width: auto;
+	}
+
+	.col-slug {
+		width: 12rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.col-count {
+		width: 4rem;
 	}
 
 	.title-cell {
@@ -881,8 +893,19 @@
 		color: var(--text-primary);
 	}
 
+	.col-category {
+		width: 7rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.col-interval {
+		width: 4.5rem;
+	}
+
 	.col-state {
-		max-width: 14rem;
+		width: 11rem;
 	}
 
 	.url-inline {
