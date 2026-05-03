@@ -38,7 +38,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | `briefing` | (auto-selected for briefing source type) | doc-only |
 | `briefings_config` | briefing config, briefing schedule | doc-only |
 | `markets` | market, stock, ticker, index, futures | yes -- quote, summary, finviz |
-| `feeds` | feed, rss, subscribe, unsubscribe | yes -- list, add, remove, entries |
+| `feeds` | feed, rss, subscribe, unsubscribe, opml | yes -- list, categories, entries, add, remove, refresh, poll, run-scheduled, import-opml, export-opml, star, starred, mark-read |
 | `browse` | browse, website, scrape, screenshot, url | yes -- get, screenshot, extract, interact |
 
 ## Media
