@@ -159,6 +159,12 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `semantic_routing_model` | `"haiku"` | Model for classification |
 | `semantic_routing_timeout` | `3.0` | Seconds, falls back to Pass 1 |
 
+## `[feeds]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `backend` | `"miniflux"` | Feeds backend for the web UI at `/istota/api/feeds`. `"native"` serves the in-tree `istota.feeds` module (per-user SQLite, no external service). `"miniflux"` keeps the legacy Miniflux HTTP proxy. |
+
 ## `[brain]`
 
 Selects which model-invocation backend the executor uses. See [architecture/brain](../architecture/brain.md) for the protocol.

@@ -24,6 +24,7 @@ uv sync --extra markets          # yfinance
 uv sync --extra transcribe       # pytesseract + Pillow (OCR)
 uv sync --extra memory-search    # sqlite-vec + sentence-transformers
 uv sync --extra whisper          # faster-whisper for audio transcription
+uv sync --extra feeds            # feedparser + bleach (native RSS/Atom feeds)
 uv sync --extra location         # fastapi + uvicorn + geopy
 uv sync --extra web              # fastapi + uvicorn + authlib
 uv sync --extra docs             # mkdocs + mkdocs-material
