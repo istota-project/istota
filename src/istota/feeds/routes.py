@@ -214,13 +214,13 @@ async def api_update_entry(
 
 
 # ---------------------------------------------------------------------------
-# Settings — FEEDS.toml CRUD + OPML
+# Settings — feeds.toml CRUD + OPML
 # ---------------------------------------------------------------------------
 
 
 @router.get("/config")
 async def api_get_config(ctx: FeedsContext = Depends(get_user_context)):
-    """Return the parsed FEEDS.toml plus runtime diagnostics."""
+    """Return the parsed feeds.toml plus runtime diagnostics."""
 
     def _read():
         cfg = read_feeds_config(ctx.config_path)
@@ -262,7 +262,7 @@ async def api_put_config(
     request: Request,
     ctx: FeedsContext = Depends(get_user_context),
 ):
-    """Write FEEDS.toml from the request body, then resync into the DB."""
+    """Write feeds.toml from the request body, then resync into the DB."""
     body = await request.json()
     config_payload = body.get("config")
     if not isinstance(config_payload, dict):
@@ -317,7 +317,7 @@ async def api_import_opml(
     except Exception as e:
         return JSONResponse({"error": f"OPML parse failed: {e}"}, status_code=400)
 
-    # Project the DB back to FEEDS.toml so the settings UI sees the new state.
+    # Project the DB back to feeds.toml so the settings UI sees the new state.
     await asyncio.to_thread(_dump_db_to_config, ctx)
 
     return {
@@ -361,7 +361,7 @@ def _validate_feeds_config(cfg: dict) -> str | None:
 
 
 def _sync_config_to_db(ctx: FeedsContext) -> dict:
-    """Push categories + feeds from FEEDS.toml into the feeds DB.
+    """Push categories + feeds from feeds.toml into the feeds DB.
 
     Mirrors :func:`istota.feeds.cli._sync_config_to_db`. Kept duplicate-free
     by import — we *could* import the CLI helper, but the CLI module pulls
@@ -427,7 +427,7 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
 
 
 def _dump_db_to_config(ctx: FeedsContext) -> None:
-    """Project the DB back to FEEDS.toml after an OPML import."""
+    """Project the DB back to feeds.toml after an OPML import."""
     feeds_db.init_db(ctx.db_path)
     with feeds_db.connect(ctx.db_path) as conn:
         cats = feeds_db.list_categories(conn)

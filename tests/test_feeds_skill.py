@@ -27,7 +27,7 @@ def istota_config(tmp_path, monkeypatch):
                         type="feeds",
                         extra={
                             "data_dir": str(workspace / "feeds"),
-                            "config_path": str(workspace / "feeds" / "FEEDS.toml"),
+                            "config_path": str(workspace / "feeds" / "feeds.toml"),
                             "db_path": str(workspace / "feeds" / "feeds.db"),
                         },
                     ),
@@ -49,7 +49,7 @@ def istota_config(tmp_path, monkeypatch):
 class TestSkillRun:
     def test_list_empty(self, istota_config, tmp_path):
         # Empty config -> empty list
-        cfg_path = tmp_path / "workspace" / "feeds" / "FEEDS.toml"
+        cfg_path = tmp_path / "workspace" / "feeds" / "feeds.toml"
         write_feeds_config(cfg_path, {"settings": {}, "categories": [], "feeds": []})
 
         from istota.skills.feeds import _run
@@ -58,7 +58,7 @@ class TestSkillRun:
         assert out["count"] == 0
 
     def test_add_then_list(self, istota_config, tmp_path):
-        cfg_path = tmp_path / "workspace" / "feeds" / "FEEDS.toml"
+        cfg_path = tmp_path / "workspace" / "feeds" / "feeds.toml"
         write_feeds_config(cfg_path, {"settings": {}, "categories": [], "feeds": []})
 
         from istota.skills.feeds import _run

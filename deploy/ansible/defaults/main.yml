@@ -193,14 +193,14 @@ istota_disabled_skills: []
 #         # Native feeds module (used when istota_feeds_backend == "native").
 #         # Workspace mode (preferred): omit overrides. The loader
 #         # synthesizes a FeedsContext rooted at the user's istota workspace
-#         # and reads FEEDS.toml (or FEEDS.md with a fenced toml block).
+#         # and reads feeds.toml (or FEEDS.md with a fenced toml block).
 #         # Defaults: data_dir = {workspace}/feeds,
 #         #           db_path = {data_dir}/data/feeds.db,
-#         #           config_path = {data_dir}/config/FEEDS.toml.
+#         #           config_path = {data_dir}/config/feeds.toml.
 #         # Overrides (rare):
 #         #   data_dir: "/srv/.../alice/istota/feeds"
 #         #   config_dir: "/srv/.../alice/istota/feeds/config"
-#         #   config_path: "/srv/.../FEEDS.toml"
+#         #   config_path: "/srv/.../feeds.toml"
 #         #   db_path: "/srv/.../feeds.db"
 #         tumblr_api_key: "{{ vault_alice_tumblr_api_key }}"  # optional; TUMBLR_API_KEY env is the fallback
 #       # Legacy Miniflux feeds (used when istota_feeds_backend == "miniflux"):

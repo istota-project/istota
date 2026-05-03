@@ -9,7 +9,7 @@ env: [{"var":"FEEDS_USER","from":"user_id"}]
 ---
 # Feeds (native)
 
-Manage RSS/Atom/Tumblr/Are.na feed subscriptions through the in-tree feeds module. Per-user SQLite under `{workspace}/feeds/data/feeds.db`; subscriptions live in `FEEDS.toml` (or `FEEDS.md` with a fenced toml block).
+Manage RSS/Atom/Tumblr/Are.na feed subscriptions through the in-tree feeds module. Per-user SQLite under `{workspace}/feeds/data/feeds.db`; subscriptions live in `feeds.toml` (or `FEEDS.md` with a fenced toml block).
 
 ## CLI
 
@@ -34,7 +34,7 @@ istota-skill feeds export-opml [--output PATH]           # Export as OPML 2.0
 - `tumblr:USERNAME` — Tumblr blog via the API v2 provider.
 - `arena:CHANNEL_SLUG` — Are.na channel via the Are.na API provider.
 
-OPML imports automatically rewrite bridger URLs (`http://127.0.0.1:8900/{provider}/{id}/feed.xml`) to the bare `{provider}:{id}` form so the same FEEDS.toml works after the bridger VM is decommissioned.
+OPML imports automatically rewrite bridger URLs (`http://127.0.0.1:8900/{provider}/{id}/feed.xml`) to the bare `{provider}:{id}` form so the same feeds.toml works after the bridger VM is decommissioned.
 
 ## Environment variables
 
@@ -45,5 +45,5 @@ OPML imports automatically rewrite bridger URLs (`http://127.0.0.1:8900/{provide
 
 ## Notes
 
-- Subscriptions and categories are stored in `FEEDS.toml`; entries + read state live only in SQLite. `FEEDS.toml` is the source of truth — `add` / `remove` mutate it and re-sync.
+- Subscriptions and categories are stored in `feeds.toml`; entries + read state live only in SQLite. `feeds.toml` is the source of truth — `add` / `remove` mutate it and re-sync.
 - `run-scheduled` runs every 15 minutes via the `_module.feeds.run_scheduled` job that the scheduler auto-seeds when the user has a `[[resources]] type = "feeds"` entry.

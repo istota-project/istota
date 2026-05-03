@@ -255,7 +255,7 @@ class TestConfigEndpoint:
         assert resp.status_code == 200
         assert resp.json()["sync"]["feeds_added"] == 1
 
-        # Round-trip: FEEDS.toml on disk, feeds in DB.
+        # Round-trip: feeds.toml on disk, feeds in DB.
         on_disk = read_feeds_config(ctx.config_path)
         assert on_disk["categories"] == [{"slug": "blogs", "title": "Blogs"}]
         with feeds_db.connect(ctx.db_path) as conn:
@@ -318,7 +318,7 @@ class TestOpml:
         assert body["feeds_added"] == 2
         assert body["rewritten_bridger_urls"] == 1
 
-        # FEEDS.toml was projected from the DB.
+        # feeds.toml was projected from the DB.
         on_disk = read_feeds_config(ctx.config_path)
         urls = {f["url"] for f in on_disk["feeds"]}
         assert "tumblr:nemfrog" in urls

@@ -63,7 +63,7 @@ type = "feeds"
 name = "{{ resource.name | default('Feeds') }}"
 {# Workspace mode (preferred): no overrides; the loader synthesizes a
    FeedsContext rooted at the user's istota workspace and reads
-   FEEDS.toml (or FEEDS.md with a fenced toml block). The per-user SQLite
+   feeds.toml (or FEEDS.md with a fenced toml block). The per-user SQLite
    lives at {workspace}/feeds/data/feeds.db. Override data_dir / db_path /
    config_dir / config_path if the layout differs from the default. #}
 {% if resource.data_dir is defined and resource.data_dir %}
