@@ -467,8 +467,7 @@
 						<thead>
 							<tr>
 								<th class="type">Type</th>
-								<th class="col-title">Title</th>
-								<th class="col-url">URL</th>
+								<th class="col-title">Subscription</th>
 								<th class="col-category">Category</th>
 								<th class="num col-interval">Interval</th>
 								<th class="col-state">Last fetch</th>
@@ -483,10 +482,11 @@
 									<td class="col-title">
 										<div class="title-cell">
 											<span class="title-text">{feed.title || feed.url}</span>
-											<code class="url url-inline">{feed.url}</code>
+											{#if feed.title && feed.title !== feed.url}
+												<code class="url-inline">{feed.url}</code>
+											{/if}
 										</div>
 									</td>
-									<td class="col-url"><code class="url">{feed.url}</code></td>
 									<td class="col-category">{feed.category || ''}</td>
 									<td class="num col-interval">{feed.poll_interval_minutes ?? defaultInterval()}m</td>
 									<td class="col-state">
@@ -719,7 +719,6 @@
 	}
 
 	.hint code,
-	.url,
 	code {
 		background: var(--surface-raised);
 		padding: 0 0.3rem;
@@ -865,13 +864,13 @@
 	}
 
 	.col-title {
-		max-width: 0;
+		width: 100%;
 	}
 
 	.title-cell {
 		display: flex;
 		flex-direction: column;
-		gap: 0.1rem;
+		gap: 0.15rem;
 		min-width: 0;
 	}
 
@@ -879,6 +878,7 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		color: var(--text-primary);
 	}
 
 	.col-state {
@@ -886,15 +886,18 @@
 	}
 
 	.url-inline {
-		display: none;
-		max-width: 100%;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
 		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 		font-size: var(--text-xs);
 		color: var(--text-dim);
 		background: transparent;
 		padding: 0;
+		overflow-wrap: anywhere;
+		word-break: break-all;
+		line-height: 1.3;
 	}
 
 	.grid th,
@@ -960,15 +963,6 @@
 		border-radius: var(--radius-pill);
 		background: var(--surface-raised);
 		color: var(--text-muted);
-	}
-
-	.url {
-		display: inline-block;
-		max-width: 28ch;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		vertical-align: middle;
 	}
 
 	.state {
@@ -1060,20 +1054,6 @@
 	@container settings (max-width: 880px) {
 		.col-state {
 			display: none;
-		}
-	}
-
-	@container settings (max-width: 720px) {
-		.col-url {
-			display: none;
-		}
-
-		.url-inline {
-			display: inline-block;
-		}
-
-		.url {
-			max-width: 22ch;
 		}
 	}
 
