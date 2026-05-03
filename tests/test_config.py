@@ -1318,6 +1318,52 @@ class TestIsAdmin:
         assert cfg.is_admin("charlie") is False
 
 
+class TestConfigPathPropagation:
+    def test_load_config_records_loaded_path(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("")
+        cfg = load_config(config_file)
+        assert cfg.config_path == config_file
+
+    def test_load_config_default_has_no_path(self):
+        cfg = Config()
+        assert cfg.config_path is None
+
+    def test_load_config_honors_env_var(self, tmp_path, monkeypatch):
+        """ISTOTA_CONFIG_PATH lets a subprocess find the parent's config."""
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        config_file = tmp_path / "from_env.toml"
+        config_file.write_text('bot_name = "FromEnv"\n')
+        # cwd is somewhere without a config/config.toml on the search list.
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config_file))
+        cfg = load_config()
+        assert cfg.config_path == config_file
+        assert cfg.bot_name == "FromEnv"
+
+    def test_load_config_explicit_path_overrides_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        env_cfg = tmp_path / "env.toml"
+        env_cfg.write_text('bot_name = "FromEnv"\n')
+        explicit_cfg = tmp_path / "explicit.toml"
+        explicit_cfg.write_text('bot_name = "Explicit"\n')
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(env_cfg))
+        cfg = load_config(explicit_cfg)
+        assert cfg.config_path == explicit_cfg
+        assert cfg.bot_name == "Explicit"
+
+    def test_load_config_env_var_missing_file_falls_through(self, tmp_path, monkeypatch):
+        """If ISTOTA_CONFIG_PATH points at a missing file, search continues."""
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "does_not_exist.toml"))
+        # No other config in any candidate path either, so we get a default Config.
+        monkeypatch.chdir(tmp_path)
+        cfg = load_config()
+        # Default Config — config_path stays None because nothing was loaded.
+        assert cfg.config_path is None
+
+
 class TestAdminUsersLoadConfig:
     def test_load_config_loads_admin_users(self, tmp_path, monkeypatch):
         admins_file = tmp_path / "admins"

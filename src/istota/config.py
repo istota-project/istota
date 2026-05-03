@@ -424,6 +424,7 @@ class Config:
     custom_system_prompt: bool = False  # Use config/system-prompt.md instead of Claude Code's default
     temp_dir: Path = field(default_factory=lambda: Path("/tmp/istota"))
     users_dir: Path | None = None  # config/users/ directory for per-user TOML files
+    config_path: Path | None = None  # Set by load_config() to the file actually loaded
 
     @property
     def bot_dir_name(self) -> str:
@@ -731,6 +732,16 @@ def reload_user_configs(config: "Config") -> bool:
 def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from TOML file."""
     if config_path is None:
+        # `ISTOTA_CONFIG_PATH` lets a parent process (e.g. the scheduler)
+        # propagate its loaded config to subprocesses whose cwd no longer
+        # contains the relative `config/config.toml` candidate.
+        env_path = os.environ.get("ISTOTA_CONFIG_PATH")
+        if env_path:
+            candidate = Path(env_path)
+            if candidate.exists():
+                config_path = candidate
+
+    if config_path is None:
         # Look for config in standard locations
         candidates = [
             Path("config/config.toml"),
@@ -754,6 +765,7 @@ def load_config(config_path: Path | None = None) -> Config:
         data = tomli.load(f)
 
     config = Config()
+    config.config_path = config_path
 
     if "namespace" in data:
         config.namespace = data["namespace"]
