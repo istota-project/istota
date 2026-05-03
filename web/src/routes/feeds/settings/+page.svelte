@@ -5,6 +5,7 @@
 		putFeedsConfig,
 		importOpml,
 		exportOpmlUrl,
+		refreshFeeds,
 		type FeedsConfigPayload,
 		type FeedsConfigFeed,
 		type FeedsConfigCategory,
@@ -16,6 +17,7 @@
 	let loading = $state(true);
 	let saving = $state(false);
 	let importing = $state(false);
+	let refreshing = $state(false);
 	let error = $state('');
 	let info = $state('');
 
@@ -235,6 +237,21 @@
 		config.categories = next;
 	}
 
+	async function refreshNow() {
+		if (refreshing) return;
+		refreshing = true;
+		error = '';
+		info = '';
+		try {
+			const result = await refreshFeeds();
+			info = `Queued ${result.feeds_queued} feed${result.feeds_queued === 1 ? '' : 's'} for an immediate poll. Reload the page in a moment to see updated diagnostics.`;
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Refresh failed';
+		} finally {
+			refreshing = false;
+		}
+	}
+
 	async function onImport(e: Event) {
 		const input = e.currentTarget as HTMLInputElement;
 		const file = input.files?.[0];
@@ -299,7 +316,17 @@
 	{:else}
 		{#if diagnostics}
 			<section class="card">
-				<h2>Diagnostics</h2>
+				<header class="section-header">
+					<h2>Diagnostics</h2>
+					<Button
+						variant="pill"
+						size="sm"
+						onclick={refreshNow}
+						disabled={refreshing}
+					>
+						{refreshing ? 'Queueing…' : 'Refresh all now'}
+					</Button>
+				</header>
 				<div class="diag-grid">
 					<div class="diag">
 						<span class="diag-value">{diagnostics.total_feeds}</span>
@@ -649,16 +676,12 @@
 
 <style>
 	.settings {
-		width: 100%;
 		max-width: 980px;
 		margin: 0 auto;
 		padding: 1.5rem 1rem 4rem;
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
-		flex: 1;
-		min-height: 0;
-		overflow-y: auto;
 	}
 
 	.settings-header {

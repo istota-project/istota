@@ -1,3 +1,17 @@
+<script lang="ts" module>
+	import { getContext, setContext } from 'svelte';
+
+	const SHELL_SCROLL_ROOT = Symbol('shell-scroll-root');
+
+	export function setShellScrollRoot(getter: () => HTMLElement | undefined): void {
+		setContext(SHELL_SCROLL_ROOT, getter);
+	}
+
+	export function getShellScrollRoot(): (() => HTMLElement | undefined) | undefined {
+		return getContext<() => HTMLElement | undefined>(SHELL_SCROLL_ROOT);
+	}
+</script>
+
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 
@@ -9,6 +23,9 @@
 	}
 
 	let { header, sidebar, children, extras }: Props = $props();
+
+	let mainEl: HTMLDivElement | undefined = $state();
+	setShellScrollRoot(() => mainEl);
 </script>
 
 <div class="shell">
@@ -16,7 +33,7 @@
 	{#if extras}{@render extras()}{/if}
 	<div class="shell-body">
 		{#if sidebar}{@render sidebar()}{/if}
-		<div class="shell-main">{@render children()}</div>
+		<div class="shell-main" bind:this={mainEl}>{@render children()}</div>
 	</div>
 </div>
 
@@ -45,8 +62,12 @@
 		min-width: 0;
 		display: flex;
 		flex-direction: column;
-		overflow: hidden;
+		overflow-y: auto;
 	}
+
+	.shell-main::-webkit-scrollbar { width: 4px; }
+	.shell-main::-webkit-scrollbar-track { background: transparent; }
+	.shell-main::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
 
 	@media (max-width: 768px) {
 		.shell {
