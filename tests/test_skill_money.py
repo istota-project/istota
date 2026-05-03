@@ -123,6 +123,18 @@ class TestRunInProcess:
         assert result["status"] == "error"
         assert "MONEY_USER" in result["error"]
 
+    def test_main_exits_nonzero_on_error_envelope(self):
+        """The scheduler relies on a non-zero exit to detect failure. Without
+        this, run-scheduled errors (broken Monarch credentials, missing config,
+        etc.) silently report status=completed."""
+        from istota.skills.money import main
+
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["list"])
+
+        assert exc_info.value.code == 1
+
     def test_run_errors_when_user_not_resolved(self):
         from istota.skills.money import _run
         from istota.money import UserNotFoundError

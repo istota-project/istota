@@ -1316,6 +1316,18 @@ def _execute_command_task(
 
     if proc.returncode == 0:
         result = proc.stdout.strip() if proc.stdout else "(no output)"
+        # Module-skill subprocesses (feeds, money, …) catch their own errors
+        # and print `{"status":"error","error":"…"}` to stdout while exiting 0,
+        # which would otherwise look like a successful run. Treat that envelope
+        # as failure so retries / alerts kick in instead of silently rotting.
+        if result.startswith("{"):
+            try:
+                parsed = json.loads(result)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict) and parsed.get("status") == "error":
+                err_msg = parsed.get("error") or "command reported status=error"
+                return False, str(err_msg)
         return True, result
     else:
         error = proc.stderr.strip() if proc.stderr else f"Exit code {proc.returncode}"

@@ -2,6 +2,36 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-03: Module-skill silent-failure class fix
+
+Both feeds bugs this week (config-path missing pre-36a5420, Click context double-binding pre-53b7088) shipped because the scheduler couldn't tell the difference between "command succeeded" and "command caught an error and printed it as JSON." Mulder's audit flagged this as the foundational issue: `_execute_command_task` returned `success = True` whenever `proc.returncode == 0`, but every skill facade (`src/istota/skills/feeds/__init__.py`, `src/istota/skills/money/__init__.py`) catches `UserNotFoundError`, exceptions, exit-code mismatches, and JSON-decode errors, converts them to `{"status":"error","error":"…"}`, prints to stdout via `_output()`, and exits 0. To the scheduler that looked indistinguishable from a healthy run.
+
+Same audit found money's `run-scheduled` was already hiding broken Monarch syncs in the same shape — `_run_monarch_sync` errors get nested under `out["monarch"]` while the outer envelope is unconditionally `"ok"`. A user whose Monarch credentials silently broke would see no signal, ever.
+
+Two-layer fix:
+
+1. **Scheduler-side detection** (`src/istota/scheduler.py`, `_execute_command_task`). When stdout starts with `{`, attempt JSON parse; if the result is a dict with `"status": "error"`, return `(False, parsed["error"])`. Non-JSON stdout (heartbeat shell commands, anything that doesn't follow the envelope convention) is unaffected. Malformed JSON falls back to opaque success — we don't want to fail valid commands that happen to print `{` for unrelated reasons.
+
+2. **Facade-side correct contract** (`src/istota/skills/feeds/__init__.py`, `src/istota/skills/money/__init__.py`). `_output()` now calls `sys.exit(1)` when the dict has `"status": "error"`. CLI tools should signal failure via exit code; this brings the facades in line with shell convention. Both `_run` returns and direct `cmd_*` errors flow through `_output`, so one line per facade catches the whole class.
+
+Both layers act independently. The scheduler-side check is the catch-all that protects against any future skill that forgets to exit non-zero. The facade-side fix is the right contract — and also helps when the facade is invoked directly from a heartbeat or interactive shell.
+
+**Tests added.** `tests/test_scheduler.py::TestExecuteCommandTask` grew five cases: error envelope marks task failed (`status:error` + message extracted), error envelope without `error` field falls back to a generic message, ok envelope still succeeds, plain-text stdout unaffected, malformed JSON unaffected. `tests/test_feeds_skill.py::TestSkillExitCodes` and `tests/test_skill_money.py::test_main_exits_nonzero_on_error_envelope` verify the facade exit-code contract.
+
+**Files modified:**
+- `src/istota/scheduler.py` — JSON error envelope detector in `_execute_command_task`.
+- `src/istota/skills/feeds/__init__.py` — `_output()` exits non-zero on error envelope.
+- `src/istota/skills/money/__init__.py` — same.
+- `tests/test_scheduler.py` — five new envelope-detection tests.
+- `tests/test_feeds_skill.py` — exit-code test class.
+- `tests/test_skill_money.py` — exit-code test.
+
+**Latent issues this fix surfaces, not yet addressed:**
+- Money's `run-scheduled` returns `status:ok` even when nested `monarch` reports an error. Need to roll the inner status up into the outer envelope, or the scheduler-side detector won't see it. Tracked separately.
+- Feeds' `_poll_due` reports `error_total` but the outer envelope is unconditionally `ok`. Same shape.
+- Heartbeat `shell-command` checks (`src/istota/heartbeat.py:249-258`) don't propagate `ISTOTA_CONFIG_PATH`. The 36a5420 fix only patched the scheduler path. Heartbeats invoking module-skill CLIs would hit the original empty-Config bug. Tracked separately.
+- Money has no end-to-end CliRunner test for `run-scheduled` — the same shape of test gap that hid the feeds bug.
+
 ## 2026-05-03: `feeds run-scheduled` was a Click context double-binding bug
 
 After the previous "module skills lose the config" fix landed and the daemon restarted, polling was *still* dead. The scheduler kept queuing `_module.feeds.run_scheduled` every 5 minutes (cron worked, command worked), but the user's settings-page refresh button still did nothing visible. Pulling the actual stored task results from `tasks.result` told the truth: the older runs (pre-restart) had `error: "user 'stefan' not in istota config"` — that's the one the previous fix targeted. Then task 93298 (the first run after the daemon picked up the config-path fix) failed with a *different* error: `TypeError: cmd_poll() got multiple values for argument 'ctx'`.
