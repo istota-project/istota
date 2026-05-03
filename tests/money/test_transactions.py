@@ -13,6 +13,7 @@ from istota.money.core.models import (
 )
 from istota.money.core.transactions import (
     MONARCH_CATEGORY_MAP,
+    _ledger_has_posting,
     filter_by_tags,
     format_beancount_transaction,
     format_category_change_entry,
@@ -29,6 +30,7 @@ from istota.money.core.transactions import (
     backup_ledger,
     append_to_ledger,
 )
+from istota.money.db import MonarchSyncedTransaction
 
 
 class TestCategoryMapping:
@@ -684,3 +686,114 @@ class TestLedgerFileOps:
         ledger.write_text("initial content\n")
         append_to_ledger(ledger, [])
         assert ledger.read_text() == "initial content\n"
+
+
+class TestLedgerHasPosting:
+    """ISSUE-071: detect when DB tracking is stale relative to ledger so
+    we don't generate phantom category-change entries."""
+
+    def _txn(self, txn_date="2026-05-01", merchant="Apple", account="Income:Consulting"):
+        return MonarchSyncedTransaction(
+            id=1,
+            monarch_transaction_id="m1",
+            tags_json=None,
+            amount=13.99,
+            merchant=merchant,
+            posted_account=account,
+            txn_date=txn_date,
+            contra_account=None,
+        )
+
+    def test_ledger_contains_old_account_returns_true(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            '2026-05-01 * "Apple" "App Store"\n'
+            '  Assets:Bank:Checking          13.99 USD\n'
+            '  Income:Consulting            -13.99 USD\n'
+        )
+        synced = self._txn()
+        assert _ledger_has_posting(ledger, synced, "Income:Consulting") is True
+
+    def test_ledger_already_changed_returns_false(self, tmp_path):
+        """The actual ISSUE-071 case: user manually edited the posting
+        from Income:Consulting to Income:Sales. The next sync must NOT
+        emit another category-change entry."""
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            '2026-05-01 * "Apple" "App Store"\n'
+            '  Assets:Bank:Checking          13.99 USD\n'
+            '  Income:Sales                 -13.99 USD\n'
+        )
+        synced = self._txn()
+        assert _ledger_has_posting(ledger, synced, "Income:Consulting") is False
+
+    def test_missing_ledger_falls_back_to_true(self, tmp_path):
+        """Conservative: emit the change rather than silently swallow it."""
+        synced = self._txn()
+        assert _ledger_has_posting(tmp_path / "missing.beancount", synced, "Income:Consulting") is True
+
+    def test_missing_date_or_merchant_falls_back_to_true(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("")
+        no_date = self._txn(txn_date=None)
+        no_merchant = self._txn(merchant=None)
+        assert _ledger_has_posting(ledger, no_date, "Income:Consulting") is True
+        assert _ledger_has_posting(ledger, no_merchant, "Income:Consulting") is True
+
+    def test_different_date_does_not_match(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            '2026-04-01 * "Apple" "App Store"\n'
+            '  Assets:Bank:Checking          13.99 USD\n'
+            '  Income:Consulting            -13.99 USD\n'
+        )
+        synced = self._txn(txn_date="2026-05-01")
+        assert _ledger_has_posting(ledger, synced, "Income:Consulting") is False
+
+    def test_different_merchant_does_not_match(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            '2026-05-01 * "Microsoft" "Office"\n'
+            '  Assets:Bank:Checking          13.99 USD\n'
+            '  Income:Consulting            -13.99 USD\n'
+        )
+        synced = self._txn(merchant="Apple")
+        assert _ledger_has_posting(ledger, synced, "Income:Consulting") is False
+
+    def test_pending_marker_also_recognized(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            '2026-05-01 ! "Apple" "App Store"\n'
+            '  Assets:Bank:Checking          13.99 USD\n'
+            '  Income:Consulting            -13.99 USD\n'
+        )
+        synced = self._txn()
+        assert _ledger_has_posting(ledger, synced, "Income:Consulting") is True
+
+    def test_account_substring_does_not_false_match(self, tmp_path):
+        """Income:ConsultingExtra must not match Income:Consulting."""
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            '2026-05-01 * "Apple" "App Store"\n'
+            '  Assets:Bank:Checking          13.99 USD\n'
+            '  Income:ConsultingExtra       -13.99 USD\n'
+        )
+        synced = self._txn()
+        assert _ledger_has_posting(ledger, synced, "Income:Consulting") is False
+
+    def test_multiple_same_day_returns_true_if_any_match(self, tmp_path):
+        """Multiple txns same day, same merchant — if any still posts to
+        the old account, prefer to emit the change (false positive over
+        false negative)."""
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            '2026-05-01 * "Apple" "App Store 1"\n'
+            '  Assets:Bank:Checking          13.99 USD\n'
+            '  Income:Sales                 -13.99 USD\n'
+            '\n'
+            '2026-05-01 * "Apple" "App Store 2"\n'
+            '  Assets:Bank:Checking          13.99 USD\n'
+            '  Income:Consulting            -13.99 USD\n'
+        )
+        synced = self._txn()
+        assert _ledger_has_posting(ledger, synced, "Income:Consulting") is True

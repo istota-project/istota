@@ -526,12 +526,30 @@ def _poll_due(ctx: FeedsContext, limit) -> None:
             "not_modified": result.not_modified,
             "error": result.error,
         })
-    _output(_ok(
-        polled=len(outcomes),
+
+    # Roll up per-source errors to the outer envelope so the scheduler's
+    # JSON-error detector and any alerting layer can see them. All-errors →
+    # hard failure (likely network outage or config breakage); some errors →
+    # partial_error, surfaced in logs but not treated as a task failure.
+    polled = len(outcomes)
+    if polled and error_total == polled:
+        _output(_err(
+            f"all {polled} feed poll(s) failed",
+            polled=polled,
+            new_entries=new_total,
+            errors=error_total,
+            feeds=summary,
+        ))
+        return
+    payload = _ok(
+        polled=polled,
         new_entries=new_total,
         errors=error_total,
         feeds=summary,
-    ))
+    )
+    if error_total:
+        payload["status"] = "partial_error"
+    _output(payload)
 
 
 @cli.command("poll")

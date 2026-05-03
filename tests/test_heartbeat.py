@@ -401,6 +401,44 @@ class TestCheckShellCommand:
         assert result.healthy is False
         assert "timed out" in result.message.lower()
 
+    def test_config_path_propagated(self, tmp_path):
+        """Module-skill subprocesses (e.g. `istota-skill feeds`) load the
+        daemon's config from ISTOTA_CONFIG_PATH. Without it they fall back
+        to a default Config() with empty users and exit with a JSON error
+        envelope, while the shell exit 0 makes the heartbeat look healthy."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        config.config_path = tmp_path / "config.toml"
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": "echo $ISTOTA_CONFIG_PATH"},
+        )
+        result = _check_shell_command(check, config, user_id="alice")
+        assert result.healthy is True
+        assert str(config.config_path) in result.details["value"]
+
+    def test_user_id_propagated(self, tmp_path):
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": "echo $ISTOTA_USER_ID"},
+        )
+        result = _check_shell_command(check, config, user_id="alice")
+        assert result.healthy is True
+        assert "alice" in result.details["value"]
+
+    def test_db_path_propagated(self, tmp_path):
+        config = Config(db_path=tmp_path / "istota.db", nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": "echo $ISTOTA_DB_PATH"},
+        )
+        result = _check_shell_command(check, config, user_id="alice")
+        assert result.healthy is True
+        assert str(config.db_path) in result.details["value"]
+
 
 # ---------------------------------------------------------------------------
 # TestCheckUrlHealth

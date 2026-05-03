@@ -261,6 +261,64 @@ class TestPoll:
         assert out["polled"] == 1
         assert out["new_entries"] == 1
 
+    def test_partial_error_when_some_feeds_fail(self, ctx, monkeypatch):
+        _seed_config(ctx, feeds=[
+            {"url": "https://ok.test/feed"},
+            {"url": "https://bad.test/feed"},
+        ])
+        _invoke(ctx, ["list"])
+
+        sample_rss = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<title>OK</title><link>https://ok.test</link>
+<item><guid>g1</guid><title>A</title><link>https://ok.test/a</link></item>
+</channel></rss>"""
+
+        class OkResp:
+            status_code = 200
+            content = sample_rss
+            text = sample_rss.decode()
+            headers = {"ETag": "abc"}
+
+        import httpx
+
+        def stub_get(url, *a, **kw):
+            if "bad.test" in url:
+                raise httpx.ConnectError("boom")
+            return OkResp()
+
+        monkeypatch.setattr(httpx, "get", stub_get)
+
+        r = _invoke(ctx, ["poll"])
+        out = json.loads(r.output)
+        assert out["status"] == "partial_error"
+        assert out["polled"] == 2
+        assert out["errors"] == 1
+        # Partial errors don't fail the CLI exit code (only status="error" does).
+        assert r.exit_code == 0
+
+    def test_error_when_all_feeds_fail(self, ctx, monkeypatch):
+        _seed_config(ctx, feeds=[{"url": "https://bad.test/feed"}])
+        _invoke(ctx, ["list"])
+
+        import httpx
+
+        def stub_get(*a, **kw):
+            raise httpx.ConnectError("network down")
+
+        monkeypatch.setattr(httpx, "get", stub_get)
+
+        # standalone_mode=False + catch_exceptions=False — _output calls
+        # sys.exit(1) on status="error", which surfaces as SystemExit.
+        runner = CliRunner()
+        r = runner.invoke(cli, ["poll"], obj=ctx, standalone_mode=False)
+        assert r.exit_code == 1
+        out = json.loads(r.output)
+        assert out["status"] == "error"
+        assert out["polled"] == 1
+        assert out["errors"] == 1
+        assert "all 1 feed poll(s) failed" in out["error"]
+
 
 # ---------------------------------------------------------------------------
 # OPML
