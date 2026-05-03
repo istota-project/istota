@@ -16,7 +16,7 @@ from typing import Any
 # URL-scheme prefixes that bypass the RSS poller and route to native API
 # providers instead. These are the same identifiers rss-bridger used; on
 # OPML import we rewrite ``http://127.0.0.1:8900/{provider}/{id}/feed.xml``
-# to ``{provider}:{id}`` so the same FEEDS.toml works locally and on
+# to ``{provider}:{id}`` so the same feeds.toml works locally and on
 # fresh machines.
 PROVIDER_SCHEMES = ("tumblr:", "arena:")
 
@@ -36,7 +36,7 @@ class FeedsContext:
     user_id: str
     data_dir: Path
     config_dir: Path
-    config_path: Path        # FEEDS.md or FEEDS.toml
+    config_path: Path        # FEEDS.md or feeds.toml
     db_path: Path
     tumblr_api_key: str = ""
 

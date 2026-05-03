@@ -80,12 +80,12 @@ def cli(ctx: click.Context, user_key: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sync FEEDS.toml -> SQLite (idempotent)
+# Sync feeds.toml -> SQLite (idempotent)
 # ---------------------------------------------------------------------------
 
 
 def _sync_config_to_db(ctx: FeedsContext) -> dict:
-    """Push categories + feeds from FEEDS.toml into the feeds DB.
+    """Push categories + feeds from feeds.toml into the feeds DB.
 
     Only adds/updates rows. Doesn't remove feeds that disappeared from the
     config — deleting subscriptions goes through ``feeds remove`` so we
@@ -155,7 +155,7 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
 
 
 def _config_data(ctx: FeedsContext) -> dict:
-    """Read FEEDS.toml or return the empty default."""
+    """Read feeds.toml or return the empty default."""
     return read_feeds_config(ctx.config_path)
 
 
@@ -171,7 +171,7 @@ def _save_config(ctx: FeedsContext, data: dict) -> None:
 @cli.command("list")
 @pass_ctx
 def cmd_list(ctx: FeedsContext) -> None:
-    """List subscribed feeds (DB view, after syncing FEEDS.toml)."""
+    """List subscribed feeds (DB view, after syncing feeds.toml)."""
     _sync_config_to_db(ctx)
     with feeds_db.connect(ctx.db_path) as conn:
         cats = {c.id: c for c in feeds_db.list_categories(conn)}
@@ -199,7 +199,7 @@ def cmd_list(ctx: FeedsContext) -> None:
 @cli.command("categories")
 @pass_ctx
 def cmd_categories(ctx: FeedsContext) -> None:
-    """List categories from FEEDS.toml (synced into the DB)."""
+    """List categories from feeds.toml (synced into the DB)."""
     _sync_config_to_db(ctx)
     with feeds_db.connect(ctx.db_path) as conn:
         cats = feeds_db.list_categories(conn)
@@ -263,7 +263,7 @@ def cmd_entries(
 
 
 # ---------------------------------------------------------------------------
-# add / remove (mutate FEEDS.toml + sync)
+# add / remove (mutate feeds.toml + sync)
 # ---------------------------------------------------------------------------
 
 
@@ -274,7 +274,7 @@ def cmd_entries(
 @click.option("--poll-interval-minutes", type=int, help="Override per-feed poll interval")
 @pass_ctx
 def cmd_add(ctx: FeedsContext, url, title, category, poll_interval_minutes) -> None:
-    """Add a feed by writing FEEDS.toml then syncing into the DB."""
+    """Add a feed by writing feeds.toml then syncing into the DB."""
     cfg = _config_data(ctx)
     feeds = cfg.setdefault("feeds", [])
     cats = cfg.setdefault("categories", [])
@@ -307,7 +307,7 @@ def cmd_add(ctx: FeedsContext, url, title, category, poll_interval_minutes) -> N
 @click.option("--id", "feed_id", type=int, help="DB feed id")
 @pass_ctx
 def cmd_remove(ctx: FeedsContext, url, feed_id) -> None:
-    """Unsubscribe by URL or DB id. Removes the row from FEEDS.toml and DB."""
+    """Unsubscribe by URL or DB id. Removes the row from feeds.toml and DB."""
     if not url and not feed_id:
         _output(_err("specify --url or --id"))
         return
@@ -414,7 +414,7 @@ def cmd_run_scheduled(ctx: FeedsContext, limit) -> None:
 @cli.command("import-opml")
 @click.argument("opml_path", type=click.Path(exists=True, dir_okay=False))
 @click.option("--write-config/--no-write-config", default=True,
-              help="After importing into the DB, regenerate FEEDS.toml from the DB")
+              help="After importing into the DB, regenerate feeds.toml from the DB")
 @pass_ctx
 def cmd_import_opml(ctx: FeedsContext, opml_path, write_config) -> None:
     """Import subscriptions from an OPML file (Miniflux export, etc.)."""
@@ -453,7 +453,7 @@ def cmd_export_opml(ctx: FeedsContext, output) -> None:
 
 
 def _dump_db_to_config(ctx: FeedsContext) -> None:
-    """Project the DB (which OPML import populated) back to FEEDS.toml."""
+    """Project the DB (which OPML import populated) back to feeds.toml."""
     feeds_db.init_db(ctx.db_path)
     with feeds_db.connect(ctx.db_path) as conn:
         cats = feeds_db.list_categories(conn)

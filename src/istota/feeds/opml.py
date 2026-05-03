@@ -10,7 +10,7 @@ URL:
    'tumblr'`` or ``'arena'`` so the native poller dispatches to its own
    provider modules.
 
-Bridger-URL rewriting means the same FEEDS.toml works on stefan's machine,
+Bridger-URL rewriting means the same feeds.toml works on stefan's machine,
 on a fresh deploy, and after the bridger VM is decommissioned.
 """
 

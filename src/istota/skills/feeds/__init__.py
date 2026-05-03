@@ -204,7 +204,7 @@ def build_parser():
     p_imp = sub.add_parser("import-opml", help="Import an OPML file (Miniflux export, etc.)")
     p_imp.add_argument("path", help="Path to OPML file")
     p_imp.add_argument("--no-write-config", action="store_true",
-                       help="Don't regenerate FEEDS.toml from the imported DB rows")
+                       help="Don't regenerate feeds.toml from the imported DB rows")
 
     p_exp = sub.add_parser("export-opml", help="Export subscriptions as OPML")
     p_exp.add_argument("--output", "-o", help="Write to file instead of stdout")

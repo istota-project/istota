@@ -1,6 +1,6 @@
-"""Read/write FEEDS.toml.
+"""Read/write feeds.toml.
 
-FEEDS.toml is the source of truth for subscriptions and categories. The
+feeds.toml is the source of truth for subscriptions and categories. The
 SQLite ``feeds`` table is its materialised projection (kept in sync on
 poll). Read state and entries live only in SQLite.
 
@@ -20,7 +20,7 @@ _TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
 
 
 def read_feeds_config(path: Path) -> dict[str, Any]:
-    """Parse a FEEDS.toml (or FEEDS.md with a toml block) file.
+    """Parse a feeds.toml (or FEEDS.md with a toml block) file.
 
     Returns the parsed dict with the documented top-level keys: ``settings``,
     ``categories``, ``feeds``. Missing keys default to empty.
@@ -44,7 +44,7 @@ def read_feeds_config(path: Path) -> dict[str, Any]:
 
 
 def write_feeds_config(path: Path, data: dict[str, Any]) -> None:
-    """Write the FEEDS.toml file.
+    """Write the feeds.toml file.
 
     Hand-written formatter — ``tomli`` doesn't ship a writer and pulling in
     ``tomli_w`` for one file isn't worth the dep. The output round-trips
@@ -67,7 +67,7 @@ def write_feeds_config(path: Path, data: dict[str, Any]) -> None:
 
 
 def _render_toml(data: dict[str, Any]) -> str:
-    """Serialise the FEEDS.toml shape to TOML text.
+    """Serialise the feeds.toml shape to TOML text.
 
     Only handles the shape this module produces — not a general TOML writer.
     """
@@ -110,4 +110,4 @@ def _format_value(v: Any) -> str:
         return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
     if isinstance(v, list):
         return "[" + ", ".join(_format_value(x) for x in v) + "]"
-    raise TypeError(f"Unsupported FEEDS.toml value type: {type(v).__name__}")
+    raise TypeError(f"Unsupported feeds.toml value type: {type(v).__name__}")

@@ -274,7 +274,7 @@
 			<h1>Feed settings</h1>
 			<p class="hint">
 				Edit subscriptions, categories, and poll defaults. Saving writes
-				<code>FEEDS.toml</code> and resyncs the local SQLite.
+				<code>feeds.toml</code> and resyncs the local SQLite.
 			</p>
 		</div>
 		<div class="header-actions">

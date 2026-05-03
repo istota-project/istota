@@ -36,7 +36,7 @@ class TestSynthesizeFeedsContext:
         assert ctx.config_path == explicit / "FEEDS.md"
 
     def test_explicit_config_path_wins(self, tmp_path):
-        explicit = tmp_path / "anywhere" / "MY_FEEDS.toml"
+        explicit = tmp_path / "anywhere" / "MY_feeds.toml"
         explicit.parent.mkdir(parents=True)
         explicit.write_text("")
         ctx = synthesize_feeds_context(
@@ -58,7 +58,7 @@ class TestReadFeedsConfig:
         assert cfg == {"settings": {}, "categories": [], "feeds": []}
 
     def test_plain_toml(self, tmp_path):
-        p = tmp_path / "FEEDS.toml"
+        p = tmp_path / "feeds.toml"
         p.write_text("""
 [settings]
 default_poll_interval_minutes = 30
@@ -99,7 +99,7 @@ category = "blogs"
 
 class TestWriteFeedsConfig:
     def test_round_trip_toml(self, tmp_path):
-        path = tmp_path / "FEEDS.toml"
+        path = tmp_path / "feeds.toml"
         data = {
             "settings": {"default_poll_interval_minutes": 30},
             "categories": [{"slug": "blogs", "title": "Blogs"}],
@@ -129,6 +129,6 @@ class TestWriteFeedsConfig:
         assert cfg["feeds"][0]["url"] == "x"
 
     def test_creates_parent_dir(self, tmp_path):
-        path = tmp_path / "deep" / "nested" / "FEEDS.toml"
+        path = tmp_path / "deep" / "nested" / "feeds.toml"
         write_feeds_config(path, {"feeds": []})
         assert path.exists()

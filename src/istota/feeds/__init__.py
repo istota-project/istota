@@ -2,7 +2,7 @@
 
 Replaces the previous Miniflux + PostgreSQL + rss-bridger stack. Mirrors the
 ``istota.money`` package layout: per-user workspace under
-``{workspace}/feeds/`` with ``config/FEEDS.toml`` (subscriptions) and
+``{workspace}/feeds/`` with ``config/feeds.toml`` (subscriptions) and
 ``data/feeds.db`` (entries + read state).
 
 The ``_miniflux`` submodule keeps the legacy briefing client around until the
