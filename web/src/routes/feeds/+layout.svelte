@@ -215,6 +215,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.4rem;
+		margin-right: 0.75rem;
 		font-size: var(--text-xs);
 		color: var(--text-muted);
 	}
