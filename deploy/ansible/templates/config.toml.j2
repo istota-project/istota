@@ -43,6 +43,15 @@ temp_dir = "{{ istota_home }}/tmp"
 # Future: "openrouter", "anthropic" for direct-HTTP brains.
 kind = "{{ istota_brain_kind | default('claude_code', true) }}"
 
+[feeds]
+# Which backend serves /istota/api/feeds.
+#   "miniflux" — legacy proxy in web_app.py; needs a [[resources]] type = "miniflux"
+#                entry per user with base_url + api_key.
+#   "native"   — in-tree istota.feeds module; needs a [[resources]] type = "feeds"
+#                entry per user (per-user SQLite under {workspace}/feeds/).
+# Backend is picked at process import; flipping requires a service restart.
+backend = "{{ istota_feeds_backend | default('miniflux', true) }}"
+
 [security]
 sandbox_enabled = {{ istota_security_sandbox_enabled | lower }}
 sandbox_admin_db_write = {{ istota_security_sandbox_admin_db_write | lower }}

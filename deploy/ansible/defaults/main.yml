@@ -377,6 +377,13 @@ istota_memory_search_auto_recall_limit: 5          # max results for auto-recall
 # Skills routing (LLM-based semantic routing for skill selection)
 istota_skills_semantic_routing: true  # enable Pass 2 LLM classification
 
+# Feeds backend — picks which router serves /istota/api/feeds.
+#   "miniflux" — legacy Miniflux proxy (default; needs per-user [[resources]] type = "miniflux")
+#   "native"   — in-tree istota.feeds module (per-user [[resources]] type = "feeds";
+#                per-user SQLite under {workspace}/feeds/data/feeds.db)
+# Flipping the value requires an istota service restart (registered at import time).
+istota_feeds_backend: "miniflux"
+
 # Sleep cycle settings (nightly memory extraction, cron evaluated per-user timezone)
 istota_sleep_cycle_enabled: true
 istota_sleep_cycle_cron: "0 2 * * *"
