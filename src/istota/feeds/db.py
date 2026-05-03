@@ -83,6 +83,10 @@ def init_db(db_path: Path) -> None:
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
+        # WAL is persistent in the SQLite file header — set it exactly once at
+        # DB creation, not per-connection. Re-issuing the pragma while sibling
+        # readers hold a transaction races and raises "database is locked".
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA_SQL)
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
@@ -98,12 +102,10 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     - ``foreign_keys = ON`` so the FK from feeds.category_id and from
       feed_entries.feed_id behave.
     - ``Row`` factory for column-name access in callers.
-    - ``WAL`` journaling for concurrent reads (poller writes, web reads).
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
     try:
         yield conn
     finally:

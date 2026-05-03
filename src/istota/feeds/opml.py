@@ -20,12 +20,11 @@ import re
 import sqlite3
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from pathlib import Path
 
 from istota.feeds import db as feeds_db
 from istota.feeds.models import (
-    DEFAULT_POLL_INTERVAL_MINUTES,
     FeedsContext,
+    default_poll_interval_for,
     detect_source_type,
 )
 
@@ -112,7 +111,7 @@ def _import_outline(
             category_id=parent_category,
             poll_interval_minutes=(
                 existing.poll_interval_minutes if existing
-                else DEFAULT_POLL_INTERVAL_MINUTES
+                else default_poll_interval_for(source_type)
             ),
         )
         if existing:
