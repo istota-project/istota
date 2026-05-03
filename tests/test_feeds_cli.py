@@ -267,6 +267,150 @@ class TestPoll:
 # ---------------------------------------------------------------------------
 
 
+class TestStar:
+    def _seed_one(self, ctx):
+        _seed_config(ctx, feeds=[{"url": "https://x.test/feed"}])
+        _invoke(ctx, ["list"])  # syncs into DB
+        with feeds_db.connect(ctx.db_path) as conn:
+            from istota.feeds.models import EntryRecord
+            feed = feeds_db.get_feed_by_url(conn, "https://x.test/feed")
+            feeds_db.insert_entries(conn, feed.id, [
+                EntryRecord(
+                    id=0, feed_id=feed.id, guid="a", title="A",
+                    url=None, author=None, content_html=None,
+                    content_text=None, image_urls=[],
+                    published_at="2026-01-01T00:00:00+00:00",
+                    fetched_at="2026-01-01T00:00:00+00:00",
+                ),
+                EntryRecord(
+                    id=0, feed_id=feed.id, guid="b", title="B",
+                    url=None, author=None, content_html=None,
+                    content_text=None, image_urls=[],
+                    published_at="2026-01-02T00:00:00+00:00",
+                    fetched_at="2026-01-02T00:00:00+00:00",
+                ),
+            ])
+            conn.commit()
+            ids = [e.id for e in feeds_db.list_entries(conn)]
+        return ids
+
+    def test_star_single(self, ctx):
+        ids = self._seed_one(ctx)
+        r = _invoke(ctx, ["star", "--id", str(ids[0])])
+        out = json.loads(r.output)
+        assert out["status"] == "ok"
+        assert out["updated"] == 1
+        assert out["starred"] is True
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT starred FROM feed_entries WHERE id = ?", (ids[0],),
+            ).fetchone()
+            assert row["starred"] == 1
+
+    def test_star_batch(self, ctx):
+        ids = self._seed_one(ctx)
+        r = _invoke(ctx, ["star", "--ids", ",".join(str(i) for i in ids)])
+        out = json.loads(r.output)
+        assert out["updated"] == 2
+
+    def test_unstar(self, ctx):
+        ids = self._seed_one(ctx)
+        _invoke(ctx, ["star", "--id", str(ids[0])])
+        r = _invoke(ctx, ["star", "--id", str(ids[0]), "--unstar"])
+        out = json.loads(r.output)
+        assert out["status"] == "ok"
+        assert out["starred"] is False
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT starred, starred_at FROM feed_entries WHERE id = ?",
+                (ids[0],),
+            ).fetchone()
+            assert row["starred"] == 0
+            assert row["starred_at"] is None
+
+    def test_starred_lists_only_starred(self, ctx):
+        ids = self._seed_one(ctx)
+        _invoke(ctx, ["star", "--id", str(ids[0])])
+        r = _invoke(ctx, ["starred"])
+        out = json.loads(r.output)
+        assert out["count"] == 1
+        assert out["entries"][0]["id"] == ids[0]
+
+    def test_star_no_args_errors(self, ctx):
+        _seed_config(ctx)
+        r = _invoke(ctx, ["star"])
+        out = json.loads(r.output)
+        assert out["status"] == "error"
+
+
+class TestMarkRead:
+    def _seed_two_feeds(self, ctx):
+        _seed_config(ctx, feeds=[
+            {"url": "https://x.test/feed", "category": "blogs"},
+            {"url": "https://y.test/feed"},
+        ], categories=[{"slug": "blogs", "title": "Blogs"}])
+        _invoke(ctx, ["list"])
+        with feeds_db.connect(ctx.db_path) as conn:
+            from istota.feeds.models import EntryRecord
+            feed_x = feeds_db.get_feed_by_url(conn, "https://x.test/feed")
+            feed_y = feeds_db.get_feed_by_url(conn, "https://y.test/feed")
+            for fid, guid in [
+                (feed_x.id, "x1"), (feed_x.id, "x2"),
+                (feed_y.id, "y1"),
+            ]:
+                feeds_db.insert_entries(conn, fid, [
+                    EntryRecord(
+                        id=0, feed_id=fid, guid=guid, title=guid,
+                        url=None, author=None, content_html=None,
+                        content_text=None, image_urls=[],
+                        published_at="2026-05-01T00:00:00+00:00",
+                        fetched_at="2026-05-01T00:00:00+00:00",
+                    ),
+                ])
+            conn.commit()
+        return feed_x.id, feed_y.id
+
+    def test_mark_all(self, ctx):
+        self._seed_two_feeds(ctx)
+        r = _invoke(ctx, ["mark-read", "--all"])
+        out = json.loads(r.output)
+        assert out["status"] == "ok"
+        assert out["updated"] == 3
+        assert out["scope"] == "all"
+
+    def test_mark_feed(self, ctx):
+        feed_x, _ = self._seed_two_feeds(ctx)
+        r = _invoke(ctx, ["mark-read", "--feed", str(feed_x)])
+        out = json.loads(r.output)
+        assert out["updated"] == 2
+        assert out["scope"] == "feed"
+
+    def test_mark_category_by_slug(self, ctx):
+        self._seed_two_feeds(ctx)
+        r = _invoke(ctx, ["mark-read", "--category", "blogs"])
+        out = json.loads(r.output)
+        assert out["updated"] == 2
+        assert out["scope"] == "category"
+
+    def test_mark_unknown_category_errors(self, ctx):
+        self._seed_two_feeds(ctx)
+        r = _invoke(ctx, ["mark-read", "--category", "nope"])
+        out = json.loads(r.output)
+        assert out["status"] == "error"
+
+    def test_no_scope_errors(self, ctx):
+        _seed_config(ctx)
+        r = _invoke(ctx, ["mark-read"])
+        out = json.loads(r.output)
+        assert out["status"] == "error"
+
+    def test_mutually_exclusive(self, ctx):
+        feed_x, _ = self._seed_two_feeds(ctx)
+        r = _invoke(ctx, ["mark-read", "--all", "--feed", str(feed_x)])
+        out = json.loads(r.output)
+        assert out["status"] == "error"
+
+
 class TestOpml:
     def test_import_and_round_trip(self, ctx, tmp_path):
         opml = """<?xml version="1.0"?>

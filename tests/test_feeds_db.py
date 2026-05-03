@@ -32,7 +32,68 @@ class TestInitDb:
             row = conn.execute(
                 "SELECT value FROM schema_meta WHERE key = 'version'"
             ).fetchone()
-        assert row["value"] == "1"
+        assert row["value"] == str(feeds_db.SCHEMA_VERSION)
+        assert int(row["value"]) >= 2
+
+    def test_v1_to_v2_migration_idempotent(self, tmp_path):
+        """Simulate an old DB (v1 schema) and confirm the v2 migration runs."""
+        import sqlite3
+
+        path = tmp_path / "feeds.db"
+        # Hand-build a v1 schema: feed_entries without `starred` / `starred_at`.
+        conn = sqlite3.connect(path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE feed_categories (
+                    id INTEGER PRIMARY KEY,
+                    slug TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL
+                );
+                CREATE TABLE feeds (
+                    id INTEGER PRIMARY KEY,
+                    url TEXT NOT NULL UNIQUE,
+                    title TEXT, site_url TEXT,
+                    category_id INTEGER REFERENCES feed_categories(id),
+                    source_type TEXT NOT NULL,
+                    etag TEXT, last_modified TEXT, last_fetched_at TEXT,
+                    last_error TEXT,
+                    error_count INTEGER NOT NULL DEFAULT 0,
+                    poll_interval_minutes INTEGER NOT NULL DEFAULT 30,
+                    next_poll_at TEXT
+                );
+                CREATE TABLE feed_entries (
+                    id INTEGER PRIMARY KEY,
+                    feed_id INTEGER NOT NULL REFERENCES feeds(id),
+                    guid TEXT NOT NULL,
+                    title TEXT, url TEXT, author TEXT,
+                    content_html TEXT, content_text TEXT,
+                    image_urls TEXT, published_at TEXT,
+                    fetched_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'unread',
+                    UNIQUE(feed_id, guid)
+                );
+                CREATE TABLE schema_meta (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL
+                );
+                INSERT INTO schema_meta(key, value) VALUES ('version', '1');
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)  # should add starred / starred_at + bump version
+        with feeds_db.connect(path) as conn:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")}
+            assert "starred" in cols
+            assert "starred_at" in cols
+            row = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = 'version'"
+            ).fetchone()
+            assert row["value"] == str(feeds_db.SCHEMA_VERSION)
+
+        feeds_db.init_db(path)  # second run is a no-op
 
 
 class TestCategories:
@@ -203,3 +264,186 @@ class TestEntries:
             conn.commit()
             after = feeds_db.list_entries(conn)
         assert after[0].status == "read"
+
+
+class TestStarring:
+    def _seed(self, tmp_path):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            cat_id = feeds_db.upsert_category(conn, "blogs", "Blogs")
+            feed_a = feeds_db.upsert_feed(
+                conn, url="a", title=None, site_url=None,
+                source_type="rss", category_id=cat_id,
+                poll_interval_minutes=30,
+            )
+            feed_b = feeds_db.upsert_feed(
+                conn, url="b", title=None, site_url=None,
+                source_type="rss", category_id=None,
+                poll_interval_minutes=30,
+            )
+            for feed_id, guid in [(feed_a, "a1"), (feed_a, "a2"), (feed_b, "b1")]:
+                feeds_db.insert_entries(conn, feed_id, [
+                    EntryRecord(
+                        id=0, feed_id=feed_id, guid=guid, title=guid,
+                        url=None, author=None, content_html=None,
+                        content_text=None, image_urls=[],
+                        published_at="2026-05-01T00:00:00+00:00",
+                        fetched_at="2026-05-01T00:00:00+00:00",
+                    ),
+                ])
+            conn.commit()
+        return path, cat_id, feed_a, feed_b
+
+    def test_star_sets_starred_at_then_unstar_clears(self, tmp_path):
+        path, _, feed_a, _ = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            ids = [e.id for e in feeds_db.list_entries(conn, feed_id=feed_a)]
+            n = feeds_db.update_entry_starred(conn, ids[:1], True)
+            conn.commit()
+            assert n == 1
+            row = conn.execute(
+                "SELECT starred, starred_at FROM feed_entries WHERE id = ?",
+                (ids[0],),
+            ).fetchone()
+            assert row["starred"] == 1
+            assert row["starred_at"] is not None
+
+            feeds_db.update_entry_starred(conn, ids[:1], False)
+            conn.commit()
+            row = conn.execute(
+                "SELECT starred, starred_at FROM feed_entries WHERE id = ?",
+                (ids[0],),
+            ).fetchone()
+            assert row["starred"] == 0
+            assert row["starred_at"] is None
+
+    def test_star_survives_status_changes(self, tmp_path):
+        path, _, feed_a, _ = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            ids = [e.id for e in feeds_db.list_entries(conn, feed_id=feed_a)]
+            feeds_db.update_entry_starred(conn, ids[:1], True)
+            feeds_db.update_entry_status(conn, ids[:1], "read")
+            feeds_db.update_entry_status(conn, ids[:1], "removed")
+            conn.commit()
+            row = conn.execute(
+                "SELECT starred, status FROM feed_entries WHERE id = ?",
+                (ids[0],),
+            ).fetchone()
+            assert row["starred"] == 1
+            assert row["status"] == "removed"
+
+    def test_starred_filter_independent_of_status(self, tmp_path):
+        path, _, feed_a, _ = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            all_ids = [e.id for e in feeds_db.list_entries(conn)]
+            feeds_db.update_entry_starred(conn, all_ids[:2], True)
+            feeds_db.update_entry_status(conn, all_ids[:1], "read")
+            conn.commit()
+            starred_only = feeds_db.list_entries(conn, starred=True)
+            unstarred_only = feeds_db.list_entries(conn, starred=False)
+            assert len(starred_only) == 2
+            assert len(unstarred_only) == 1
+            assert feeds_db.count_entries(conn, starred=True) == 2
+            # Combined with status filter: starred + read = 1.
+            mixed = feeds_db.list_entries(conn, status="read", starred=True)
+            assert len(mixed) == 1
+
+
+class TestMarkAsRead:
+    def _seed(self, tmp_path):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            cat_id = feeds_db.upsert_category(conn, "blogs", "Blogs")
+            feed_a = feeds_db.upsert_feed(
+                conn, url="a", title=None, site_url=None,
+                source_type="rss", category_id=cat_id,
+                poll_interval_minutes=30,
+            )
+            feed_b = feeds_db.upsert_feed(
+                conn, url="b", title=None, site_url=None,
+                source_type="rss", category_id=None,
+                poll_interval_minutes=30,
+            )
+            for feed_id, guid in [
+                (feed_a, "a1"), (feed_a, "a2"), (feed_a, "a3"),
+                (feed_b, "b1"), (feed_b, "b2"),
+            ]:
+                feeds_db.insert_entries(conn, feed_id, [
+                    EntryRecord(
+                        id=0, feed_id=feed_id, guid=guid, title=guid,
+                        url=None, author=None, content_html=None,
+                        content_text=None, image_urls=[],
+                        published_at="2026-05-01T00:00:00+00:00",
+                        fetched_at="2026-05-01T00:00:00+00:00",
+                    ),
+                ])
+            conn.commit()
+        return path, cat_id, feed_a, feed_b
+
+    def test_scope_all(self, tmp_path):
+        path, _, _, _ = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            n = feeds_db.mark_as_read(conn, scope="all")
+            conn.commit()
+            assert n == 5
+            assert feeds_db.count_entries(conn, status="unread") == 0
+
+    def test_scope_feed(self, tmp_path):
+        path, _, feed_a, feed_b = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            n = feeds_db.mark_as_read(conn, scope="feed", scope_id=feed_a)
+            conn.commit()
+            assert n == 3
+            assert feeds_db.count_entries(conn, status="unread", feed_id=feed_a) == 0
+            assert feeds_db.count_entries(conn, status="unread", feed_id=feed_b) == 2
+
+    def test_scope_category(self, tmp_path):
+        path, cat_id, feed_a, feed_b = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            n = feeds_db.mark_as_read(conn, scope="category", scope_id=cat_id)
+            conn.commit()
+            assert n == 3  # only feed_a is in the category
+            assert feeds_db.count_entries(conn, status="unread", feed_id=feed_b) == 2
+
+    def test_before_id_caps_operation(self, tmp_path):
+        path, _, _, _ = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            ids = sorted(e.id for e in feeds_db.list_entries(conn))
+            cap = ids[2]  # first 3 entries
+            n = feeds_db.mark_as_read(conn, scope="all", before_id=cap)
+            conn.commit()
+            assert n == 3
+            unread = feeds_db.list_entries(conn, status="unread")
+            assert {e.id for e in unread} == set(ids[3:])
+
+    def test_already_read_entries_untouched(self, tmp_path):
+        path, _, feed_a, _ = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            ids = [e.id for e in feeds_db.list_entries(conn, feed_id=feed_a)]
+            feeds_db.update_entry_status(conn, ids[:1], "read")
+            conn.commit()
+            n = feeds_db.mark_as_read(conn, scope="feed", scope_id=feed_a)
+            conn.commit()
+            assert n == 2  # not 3, the pre-marked entry is excluded
+
+    def test_unknown_scope_raises(self, tmp_path):
+        path, _, _, _ = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            try:
+                feeds_db.mark_as_read(conn, scope="nope")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("expected ValueError")
+
+    def test_feed_scope_requires_id(self, tmp_path):
+        path, _, _, _ = self._seed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            try:
+                feeds_db.mark_as_read(conn, scope="feed")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("expected ValueError")

@@ -194,7 +194,7 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Env vars**: `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY`
 
 ### `feeds/` - Native RSS / Atom / Tumblr / Are.na (in-process)
-**Subcommands**: `list`, `categories`, `entries`, `add`, `remove`, `refresh`, `poll`, `run-scheduled`, `import-opml`, `export-opml`
+**Subcommands**: `list`, `categories`, `entries`, `add`, `remove`, `refresh`, `poll`, `run-scheduled`, `import-opml`, `export-opml`, `star`, `starred`, `mark-read`
 **Env vars**: `FEEDS_USER` (set by executor); `TUMBLR_API_KEY` optional fallback
 **Note**: In-process facade — resolves the user's `FeedsContext` via `istota.feeds.resolve_for_user` and invokes `istota.feeds.cli` through `CliRunner`. No subprocess, no Miniflux. Per-user SQLite at `{workspace}/feeds/data/feeds.db`; subscriptions in `feeds.toml`. Scheduler auto-seeds `_module.feeds.run_scheduled` (`*/15 * * * *`) for users with a `[[resources]] type = "feeds"` entry.
 

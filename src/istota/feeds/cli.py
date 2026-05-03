@@ -262,10 +262,144 @@ def cmd_entries(
             "published_at": e.published_at,
             "fetched_at": e.fetched_at,
             "status": e.status,
+            "starred": e.starred,
+            "starred_at": e.starred_at,
         }
         for e in entries
     ]
     _output({"status": "ok", "total": total, "count": len(rows), "entries": rows})
+
+
+# ---------------------------------------------------------------------------
+# starring + bulk mark-read
+# ---------------------------------------------------------------------------
+
+
+def _parse_id_list(raw: str) -> list[int]:
+    """Turn ``"1,2,3"`` into ``[1, 2, 3]``. Raises on non-integer tokens."""
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    return [int(p) for p in parts]
+
+
+@cli.command("star")
+@click.option("--id", "entry_id", type=int, help="Single entry id to star")
+@click.option("--ids", help="Comma-separated entry ids (alternative to --id)")
+@click.option("--unstar", is_flag=True, help="Unstar instead of star")
+@pass_ctx
+def cmd_star(ctx: FeedsContext, entry_id, ids, unstar) -> None:
+    """Toggle the star flag on one or more entries."""
+    feeds_db.init_db(ctx.db_path)
+    entry_ids: list[int] = []
+    if entry_id:
+        entry_ids.append(entry_id)
+    if ids:
+        try:
+            entry_ids.extend(_parse_id_list(ids))
+        except ValueError:
+            _output(_err("--ids must be a comma-separated list of integers"))
+            return
+    if not entry_ids:
+        _output(_err("specify --id or --ids"))
+        return
+
+    with feeds_db.connect(ctx.db_path) as conn:
+        n = feeds_db.update_entry_starred(conn, entry_ids, not unstar)
+        conn.commit()
+    _output(_ok(updated=n, starred=not unstar, ids=entry_ids))
+
+
+@cli.command("starred")
+@click.option("--limit", type=int, default=25, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--feed-id", type=int, help="Filter by feed id")
+@click.option("--category-id", type=int, help="Filter by category id")
+@click.option("--category", help="Filter by category slug")
+@click.option(
+    "--order",
+    type=click.Choice(["starred_at", "published_at", "created_at", "id"]),
+    default="starred_at", show_default=True,
+)
+@click.option("--direction", type=click.Choice(["asc", "desc"]), default="desc",
+              show_default=True)
+@pass_ctx
+def cmd_starred(
+    ctx: FeedsContext, limit, offset, feed_id, category_id, category,
+    order, direction,
+) -> None:
+    """List starred entries (independent of read/unread/removed status)."""
+    feeds_db.init_db(ctx.db_path)
+    with feeds_db.connect(ctx.db_path) as conn:
+        if category and category_id is None:
+            cat = feeds_db.get_category_by_slug(conn, category)
+            if cat is not None:
+                category_id = cat.id
+        entries = feeds_db.list_entries(
+            conn,
+            limit=limit, offset=offset,
+            feed_id=feed_id, category_id=category_id,
+            starred=True, order=order, direction=direction,
+        )
+        total = feeds_db.count_entries(
+            conn, feed_id=feed_id, category_id=category_id, starred=True,
+        )
+    rows = [
+        {
+            "id": e.id,
+            "feed_id": e.feed_id,
+            "title": e.title,
+            "url": e.url,
+            "published_at": e.published_at,
+            "starred_at": e.starred_at,
+            "status": e.status,
+        }
+        for e in entries
+    ]
+    _output({"status": "ok", "total": total, "count": len(rows), "entries": rows})
+
+
+@cli.command("mark-read")
+@click.option("--all", "mark_all", is_flag=True, help="Mark every unread entry read")
+@click.option("--feed", "feed_id", type=int, help="Limit to one feed id")
+@click.option("--category", "category_slug", help="Limit to a category slug")
+@click.option("--category-id", type=int, help="Limit to a category id")
+@click.option("--before-id", type=int,
+              help="Cap to entries with id <= before-id (stable mark-visible)")
+@pass_ctx
+def cmd_mark_read(
+    ctx: FeedsContext, mark_all, feed_id, category_slug, category_id, before_id,
+) -> None:
+    """Bulk mark unread entries as read by scope."""
+    feeds_db.init_db(ctx.db_path)
+    selected = sum(1 for x in (mark_all, feed_id, category_slug, category_id) if x)
+    if selected == 0:
+        _output(_err("specify --all, --feed, --category, or --category-id"))
+        return
+    if selected > 1:
+        _output(_err("--all / --feed / --category / --category-id are mutually exclusive"))
+        return
+
+    with feeds_db.connect(ctx.db_path) as conn:
+        if mark_all:
+            scope = "all"
+            scope_id = None
+        elif feed_id:
+            scope = "feed"
+            scope_id = feed_id
+        else:
+            scope = "category"
+            if category_id:
+                scope_id = category_id
+            else:
+                cat = feeds_db.get_category_by_slug(conn, category_slug)
+                if cat is None:
+                    _output(_err(f"unknown category slug: {category_slug}"))
+                    return
+                scope_id = cat.id
+        n = feeds_db.mark_as_read(
+            conn, scope=scope, scope_id=scope_id, before_id=before_id,
+        )
+        conn.commit()
+    _output(_ok(updated=n, scope=scope, scope_id=scope_id, before_id=before_id))
 
 
 # ---------------------------------------------------------------------------

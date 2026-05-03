@@ -1,13 +1,32 @@
 <script lang="ts">
+	import { Star } from 'lucide-svelte';
 	import type { FeedEntry } from '$lib/api';
+	import { updateEntryStarred } from '$lib/api';
 
 	import { markReadDelay } from '$lib/stores/feeds';
 
-	let { entry, onImageClick, onViewed }: {
+	let { entry, onImageClick, onViewed, onStarToggle }: {
 		entry: FeedEntry;
 		onImageClick: (url: string) => void;
 		onViewed?: (id: number) => void;
+		onStarToggle?: (id: number, starred: boolean) => void;
 	} = $props();
+
+	async function toggleStar(e: MouseEvent) {
+		e.stopPropagation();
+		e.preventDefault();
+		const next = !entry.starred;
+		// Optimistic local update; the parent owns the entries array, so we
+		// poke a callback so it can rebroadcast (e.g. exit a starred-only view).
+		entry.starred = next;
+		try {
+			await updateEntryStarred(entry.id, next);
+			onStarToggle?.(entry.id, next);
+		} catch {
+			// Roll back if the server rejected.
+			entry.starred = !next;
+		}
+	}
 
 	const maxGrid = 4;
 	const feedSlug = $derived(entry.feed.title.toLowerCase().replace(/[^a-z0-9-]/g, '-'));
@@ -67,6 +86,16 @@
 	{#if entry.status === 'read'}
 		<span class="seen-pill">SEEN</span>
 	{/if}
+	<button
+		type="button"
+		class="star-btn"
+		class:starred={entry.starred}
+		onclick={toggleStar}
+		title={entry.starred ? 'Unstar' : 'Star'}
+		aria-label={entry.starred ? 'Unstar entry' : 'Star entry'}
+	>
+		<Star size={14} fill={entry.starred ? 'currentColor' : 'none'} />
+	</button>
 	{#if isImage}
 		{#if entry.images.length > 1}
 			<div class="card-gallery">

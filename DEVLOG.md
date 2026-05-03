@@ -2,6 +2,43 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-03: Feeds Tranche A — starring + bulk mark-as-read
+
+First slice of the Miniflux parity work (see `Notes/Projects/Istota/Feeds Miniflux parity spec.md`). Closes the two highest-value daily-workflow gaps left behind by the native cutover: there was no way to bookmark an entry for later, and "catching up" on a backlog meant scrolling everything into view to satisfy mark-on-scroll.
+
+**Schema migration (the first since `init_db` was written).** `SCHEMA_VERSION` bumped to 2 and a real migrations table introduced (`_MIGRATIONS: list[(target_version, fn)]`). `_migrate_v1_to_v2(conn)` adds `starred INTEGER NOT NULL DEFAULT 0` + `starred_at TEXT` to `feed_entries` plus a partial `idx_entries_starred ON (starred) WHERE starred = 1`. `init_db()` now reads the persisted version, runs the migration list before `executescript(SCHEMA_SQL)`, and writes the new version. Migrations had to run *before* the schema script, not after, because `SCHEMA_SQL` itself contains the partial-index DDL — running the script first against a v1 DB raises `OperationalError: no such column: starred`. Caught by a hand-built v1-schema fixture in `tests/test_feeds_db.py::TestInitDb::test_v1_to_v2_migration_idempotent` that re-runs `init_db` twice on the same DB.
+
+**Backend.** `db.update_entry_starred(conn, ids, starred)` writes the boolean and sets/clears `starred_at` (UTC ISO). `db.mark_as_read(conn, scope, scope_id?, before_id?)` does the bulk update in one statement per scope (`all`, `feed`, `category`); `before_id` caps via `id <= ?` so concurrent infinite-scroll loads don't get clobbered. Both `list_entries` and `count_entries` gained a `starred: bool | None` filter (None = don't filter). Routes: existing `PUT /feeds/entries/{id}` and `/batch` now accept `status` and/or `starred` additively (back-compat — body without either field defaults to `status=read` like before). New `POST /feeds/mark-as-read` with the same scope contract. New `starred` param on `GET /feeds` (-1 = all, 1 = starred, 0 = unstarred). Entry response always carries `starred` and `starred_at`.
+
+**CLI.** `feeds star --id N` / `--ids 1,2,3` / `--unstar`, `feeds starred` (with `--feed-id` / `--category` / sort / paging), `feeds mark-read --all|--feed N|--category SLUG|--category-id N [--before-id N]`. Mutually-exclusive scope flags enforced in the dispatcher.
+
+**Frontend.** `FeedCard.svelte` got an absolutely-positioned star button (lucide `Star`, hover-revealed unless starred) with optimistic toggle + rollback. The reader page slot wraps each card in a `display: contents` div whose `mouseenter` / `focusin` updates `focusedEntryId`, which the `f` shortcut targets. The layout adds "All" + "Starred" sidebar buttons above the category list; clicking "Starred" sets a `showStarred` store, which the page reacts to and adds `starred=1` to the API call. Toolbar gains a `CheckCheck` icon button — scope is the selected feed if one is picked, otherwise everything; gated by a `window.confirm`. After bulk ops, a `feedsRefreshNonce` store bumps and the page re-fetches.
+
+**Keyboard.** Just two shortcuts in this tranche; the full `j/k/o/m/...` layer lands in Tranche B. `Shift-A` triggers the same scope-aware mark-as-read as the toolbar but with `before_id = max(visible.id)` so newer entries that lazy-loaded after the user pressed the key aren't accidentally swept up. `f` flips star on the focused entry. Both are gated against editable targets (input/textarea/contenteditable) and modifier collisions.
+
+**What I deliberately deferred from the spec.** Per-row right-click context menu (the spec mentions it for "Mark all as read"); the toolbar button + `Shift-A` covers the same ground, and the right-click menu naturally folds into Tranche B's broader keyboard / interaction layer. Will revisit if it's actually missed.
+
+**Files added/modified:**
+- `src/istota/feeds/db.py` — `SCHEMA_VERSION = 2`, migration scaffolding, `_migrate_v1_to_v2`, `update_entry_starred`, `mark_as_read`, `starred` filter on list/count, `_row_to_entry` reads new columns defensively.
+- `src/istota/feeds/models.py` — `EntryRecord` gained `starred` / `starred_at`.
+- `src/istota/feeds/routes.py` — entry mapper carries star fields, `GET /feeds?starred=`, additive PUT body for status+starred, new `POST /feeds/mark-as-read`.
+- `src/istota/feeds/cli.py` — `star`, `starred`, `mark-read` subcommands.
+- `tests/test_feeds_db.py` — v1→v2 migration test, `TestStarring` (3 cases), `TestMarkAsRead` (6 cases).
+- `tests/test_feeds_routes.py` — `TestStarring` (6 cases), `TestMarkAsReadRoute` (7 cases), entry-shape test updated for new fields.
+- `tests/test_feeds_cli.py` — `TestStar` (5 cases), `TestMarkRead` (6 cases).
+- `web/src/lib/api.ts` — `starred` / `starred_at` on `FeedEntry`, `updateEntryStarred`, `markAsRead`.
+- `web/src/lib/components/FeedCard.svelte` — star button + optimistic toggle.
+- `web/src/lib/stores/feeds.ts` — `showStarred`, `feedsRefreshNonce` stores.
+- `web/src/routes/feeds/+layout.svelte` — All/Starred sidebar entries, toolbar mark-all button + confirm modal.
+- `web/src/routes/feeds/+page.svelte` — react to showStarred / refresh nonce, keyboard shortcuts (`Shift-A`, `f`), card hover/focus tracking, optimistic star handler that drops entries from the starred-only view when unstarred.
+- `.claude/rules/skills.md` — feeds subcommand list extended.
+- `Notes/Projects/Istota/Native RSS module spec.md` — "See also" pointer to parity spec.
+- `Notes/Projects/Istota/Feeds Miniflux parity spec.md` — Tranche A checklist marked done.
+
+**Test results.** 80 feeds tests pass (29 new). Full suite: only the 3 pre-existing `test_location.py::TestCmdDaySummary` failures and the pre-existing `test_channel_sleep_cycle.py::test_writes_memory_file` failure that are also red on `main` — Tranche A introduces no regressions.
+
+**Up next.** Tranche B (per-feed unread counters, per-feed/category refresh endpoints, error chip in sidebar, full keyboard layer + help modal, retention/cleanup job). The unread-counter query is the most mechanically-interesting piece; everything else is straightforward.
+
 ## 2026-05-03: Module-skill silent-failure class fix
 
 Both feeds bugs this week (config-path missing pre-36a5420, Click context double-binding pre-53b7088) shipped because the scheduler couldn't tell the difference between "command succeeded" and "command caught an error and printed it as JSON." Mulder's audit flagged this as the foundational issue: `_execute_command_task` returned `success = True` whenever `proc.returncode == 0`, but every skill facade (`src/istota/skills/feeds/__init__.py`, `src/istota/skills/money/__init__.py`) catches `UserNotFoundError`, exceptions, exit-code mismatches, and JSON-decode errors, converts them to `{"status":"error","error":"…"}`, prints to stdout via `_output()`, and exits 0. To the scheduler that looked indistinguishable from a healthy run.

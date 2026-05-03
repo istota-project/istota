@@ -102,6 +102,8 @@ class EntryRecord:
     published_at: str | None = None
     fetched_at: str = ""
     status: str = "unread"      # 'unread' | 'read' | 'removed'
+    starred: bool = False
+    starred_at: str | None = None
 
 
 @dataclass
