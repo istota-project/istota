@@ -427,33 +427,18 @@
 	}
 
 	.feed-grid :global(.star-btn) {
-		position: absolute;
-		top: 0.4rem;
-		left: 0.4rem;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		padding: 0.25rem;
-		background: rgba(0, 0, 0, 0.45);
-		color: var(--text-muted);
+		padding: 0;
+		background: none;
+		color: var(--text-dim);
 		border: none;
-		border-radius: 0.2rem;
 		cursor: pointer;
-		opacity: 0;
-		transition: opacity var(--transition-fast), color var(--transition-fast);
-		z-index: 3;
+		transition: color var(--transition-fast);
 	}
 
-	.feed-grid :global(.card:hover .star-btn),
 	.feed-grid :global(.star-btn.starred),
-	.feed-grid :global(.star-btn:focus-visible) {
-		opacity: 1;
-	}
-
-	.feed-grid :global(.star-btn.starred) {
-		color: #f5b300;
-	}
-
 	.feed-grid :global(.star-btn:hover) {
 		color: #f5b300;
 	}
