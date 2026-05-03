@@ -365,11 +365,7 @@ def cmd_refresh(ctx: FeedsContext, feed_id) -> None:
     _output(_ok(reset_count=cur.rowcount))
 
 
-@cli.command("poll")
-@click.option("--limit", type=int, help="Cap how many feeds to poll this run")
-@pass_ctx
-def cmd_poll(ctx: FeedsContext, limit) -> None:
-    """Poll every feed whose ``next_poll_at`` is in the past."""
+def _poll_due(ctx: FeedsContext, limit) -> None:
     from istota.feeds.poller import poll_due_feeds
 
     _sync_config_to_db(ctx)
@@ -404,12 +400,20 @@ def cmd_poll(ctx: FeedsContext, limit) -> None:
     ))
 
 
+@cli.command("poll")
+@click.option("--limit", type=int, help="Cap how many feeds to poll this run")
+@pass_ctx
+def cmd_poll(ctx: FeedsContext, limit) -> None:
+    """Poll every feed whose ``next_poll_at`` is in the past."""
+    _poll_due(ctx, limit)
+
+
 @cli.command("run-scheduled")
 @click.option("--limit", type=int, help="Cap how many feeds to poll this run")
 @pass_ctx
 def cmd_run_scheduled(ctx: FeedsContext, limit) -> None:
     """Periodic entry point used by the scheduler module-job."""
-    cmd_poll.callback(ctx=ctx, limit=limit)
+    _poll_due(ctx, limit)
 
 
 # ---------------------------------------------------------------------------

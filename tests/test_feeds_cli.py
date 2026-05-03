@@ -235,6 +235,32 @@ class TestPoll:
         assert out["polled"] == 1
         assert out["new_entries"] == 1
 
+    def test_run_scheduled_polls_due_feeds(self, ctx, monkeypatch):
+        _seed_config(ctx, feeds=[{"url": "https://y.test/feed"}])
+        _invoke(ctx, ["list"])
+
+        sample_rss = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<title>Y</title>
+<link>https://y.test</link>
+<item><guid>g1</guid><title>A</title><link>https://y.test/a</link></item>
+</channel></rss>"""
+
+        class StubResp:
+            status_code = 200
+            content = sample_rss
+            text = sample_rss.decode()
+            headers = {"ETag": "abc"}
+
+        import httpx
+        monkeypatch.setattr(httpx, "get", lambda *a, **kw: StubResp())
+
+        r = _invoke(ctx, ["run-scheduled"])
+        out = json.loads(r.output)
+        assert out["status"] == "ok"
+        assert out["polled"] == 1
+        assert out["new_entries"] == 1
+
 
 # ---------------------------------------------------------------------------
 # OPML
