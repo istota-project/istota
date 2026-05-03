@@ -175,6 +175,10 @@ export function exportOpmlUrl(): string {
 	return `${base}/api/feeds/export-opml`;
 }
 
+export async function refreshFeeds(): Promise<{ status: string; feeds_queued: number }> {
+	return apiFetch('/feeds/refresh', { method: 'POST' });
+}
+
 // Location types
 
 export interface LocationPing {
