@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-03: `feeds run-scheduled` was a Click context double-binding bug
+
+After the previous "module skills lose the config" fix landed and the daemon restarted, polling was *still* dead. The scheduler kept queuing `_module.feeds.run_scheduled` every 5 minutes (cron worked, command worked), but the user's settings-page refresh button still did nothing visible. Pulling the actual stored task results from `tasks.result` told the truth: the older runs (pre-restart) had `error: "user 'stefan' not in istota config"` — that's the one the previous fix targeted. Then task 93298 (the first run after the daemon picked up the config-path fix) failed with a *different* error: `TypeError: cmd_poll() got multiple values for argument 'ctx'`.
+
+Root cause: `cmd_run_scheduled` in `src/istota/feeds/cli.py` was implemented as
+
+```python
+@cli.command("run-scheduled")
+@click.option("--limit", type=int)
+@pass_ctx
+def cmd_run_scheduled(ctx: FeedsContext, limit) -> None:
+    cmd_poll.callback(ctx=ctx, limit=limit)
+```
+
+`pass_ctx = click.make_pass_decorator(FeedsContext)` wraps the inner callback so that on every invocation it pulls `FeedsContext` out of `click.get_current_context().obj` and prepends it as the first positional arg. `cmd_poll.callback` is the *wrapped* function (because `pass_ctx` is the innermost decorator below `cli.command`), so calling it with `ctx=ctx` collides with the positional injection — `cmd_poll(injected_obj, ctx=ctx, limit=limit)` → `multiple values for 'ctx'`.
+
+Why didn't tests catch it: `tests/test_feeds_cli.py::TestPoll` only exercised `["poll"]`. There was no test for `["run-scheduled"]`. The skill-side parser test (`tests/test_feeds_skill.py::TestParser`) only verified argparse accepted the subcommand name, not that invoking it succeeded. The settings-page "Refresh all" button is a thin wrapper that just sets `next_poll_at = NULL` and trusts the scheduled job to do the actual work, which is why the symptom from the user's perspective was identical to the previous bug.
+
+The settings-page refresh-all button is unblocked by the same fix because it never actually polled — it only resets `next_poll_at` and the scheduled job has to do the real work.
+
+**Fix.** Extracted the polling body into `_poll_due(ctx, limit)` and have both `cmd_poll` and `cmd_run_scheduled` call it directly. The `.callback` indirection is gone.
+
+**Files modified:**
+- `src/istota/feeds/cli.py` — refactored `cmd_poll` and `cmd_run_scheduled` to share `_poll_due()`.
+- `tests/test_feeds_cli.py` — `TestPoll.test_run_scheduled_polls_due_feeds` invokes `["run-scheduled"]` end-to-end. Verified to fail with the production error before the fix.
+
 ## 2026-05-03: Module-skill scheduled jobs lost the istota config in their subprocess
 
 User reported "feeds haven't polled in over an hour" and the settings-page refresh-now button doing nothing. The `_module.feeds.run_scheduled` cron job was firing every 5 minutes on schedule — the scheduler queued tasks at 02:00, 02:05, etc., and they all completed with no error from the scheduler's view. But the actual *result* of every recent run was `{"status": "error", "error": "user '<user>' not in istota config"}`. Same for `_module.money.run_scheduled`.
