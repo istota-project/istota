@@ -50,6 +50,15 @@
 		prevNonce = $feedsRefreshNonce;
 	});
 
+	// Sort toggle: server-side order needs a reload to take effect.
+	let prevSort: typeof $sortBy = $sortBy;
+	$effect(() => {
+		if ($sortBy !== prevSort) {
+			loadEntries($selectedFeedId);
+		}
+		prevSort = $sortBy;
+	});
+
 	// Lightbox
 	let lightboxSrc = $state('');
 
@@ -85,7 +94,7 @@
 	async function loadPage(opts: PageOpts) {
 		const params: Record<string, string> = {
 			limit: String(PAGE_SIZE),
-			order: 'published_at',
+			order: $sortBy === 'added' ? 'created_at' : 'published_at',
 			direction: 'desc',
 		};
 		if (opts.feedId) params.feed_id = String(opts.feedId);
@@ -123,19 +132,18 @@
 		try {
 			// Under the unread filter, offset is unstable: cards get marked read
 			// mid-scroll, shrinking the server's unread pool and shifting offsets.
-			// Use a `before` cursor on published_at instead.
+			// Use a `before` cursor on the active sort column instead.
 			let opts: PageOpts;
 			if ($showUnseen && entries.length > 0) {
 				const oldest = entries[entries.length - 1];
-				const oldestTs = oldest.published_at
-					? Math.floor(new Date(oldest.published_at).getTime() / 1000)
-					: 0;
+				const cursorIso = $sortBy === 'added' ? oldest.created_at : oldest.published_at;
+				const oldestTs = cursorIso ? Math.floor(new Date(cursorIso).getTime() / 1000) : 0;
 				if (!oldestTs) {
 					hasMore = false;
 					return;
 				}
-				// +1 to include entries at exactly oldestTs (Miniflux `before` is
-				// strictly less-than); dedup drops any already-loaded overlap.
+				// +1 to include entries at exactly oldestTs (`before` is strictly
+				// less-than); dedup drops any already-loaded overlap.
 				opts = { before: oldestTs + 1, feedId: $selectedFeedId };
 			} else {
 				opts = { offset: entries.length, feedId: $selectedFeedId };
@@ -270,20 +278,14 @@
 	// Track which card the cursor most recently entered so 'f' has a target.
 	let focusedEntryId: number | null = $state(null);
 
-	let filteredEntries = $derived.by(() => {
-		let filtered = entries.filter((e) => {
+	let filteredEntries = $derived(
+		entries.filter((e) => {
 			const isImage = e.images.length > 0;
 			if (isImage && !$showImages) return false;
 			if (!isImage && !$showText) return false;
 			return true;
-		});
-		filtered.sort((a, b) => {
-			const keyA = $sortBy === 'published' ? a.published_at : a.created_at;
-			const keyB = $sortBy === 'published' ? b.published_at : b.created_at;
-			return (keyB || '').localeCompare(keyA || '');
-		});
-		return filtered;
-	});
+		}),
+	);
 </script>
 
 <div class="feed-page">
