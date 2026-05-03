@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import {
 		getFeeds, markAsRead, updateEntriesStatus, updateEntryStarred,
 		type FeedEntry,
@@ -57,6 +57,45 @@
 			loadEntries($selectedFeedId);
 		}
 		prevSort = $sortBy;
+	});
+
+	// View-mode toggle: keep the topmost visible card pinned across grid/list
+	// switches. Capture before the class flips (effect.pre), restore after the
+	// next render tick.
+	let prevView: typeof $viewMode = $viewMode;
+	$effect.pre(() => {
+		const next = $viewMode;
+		if (next === prevView) return;
+		prevView = next;
+
+		const root = getScrollRoot?.();
+		if (!root) return;
+
+		const rootTop = root.getBoundingClientRect().top;
+		const slots = root.querySelectorAll<HTMLElement>('.card-slot[data-entry-id]');
+		let anchorId: string | null = null;
+		for (const slot of slots) {
+			const card = slot.firstElementChild as HTMLElement | null;
+			if (!card) continue;
+			// First card whose bottom is past the viewport top is the topmost
+			// visible one.
+			if (card.getBoundingClientRect().bottom > rootTop + 1) {
+				anchorId = slot.dataset.entryId ?? null;
+				break;
+			}
+		}
+		if (!anchorId) return;
+
+		tick().then(() => {
+			const slot = root.querySelector<HTMLElement>(
+				`.card-slot[data-entry-id="${anchorId}"]`,
+			);
+			const card = slot?.firstElementChild as HTMLElement | null;
+			if (!card) return;
+			const rootRect = root.getBoundingClientRect();
+			const cardRect = card.getBoundingClientRect();
+			root.scrollTop += cardRect.top - rootRect.top;
+		});
 	});
 
 	// Lightbox
@@ -298,6 +337,7 @@
 			{#each filteredEntries as entry (entry.id)}
 				<div
 					class="card-slot"
+					data-entry-id={entry.id}
 					onmouseenter={() => (focusedEntryId = entry.id)}
 					onfocusin={() => (focusedEntryId = entry.id)}
 					role="presentation"
