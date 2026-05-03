@@ -86,16 +86,6 @@
 	{#if entry.status === 'read'}
 		<span class="seen-pill">SEEN</span>
 	{/if}
-	<button
-		type="button"
-		class="star-btn"
-		class:starred={entry.starred}
-		onclick={toggleStar}
-		title={entry.starred ? 'Unstar' : 'Star'}
-		aria-label={entry.starred ? 'Unstar entry' : 'Star entry'}
-	>
-		<Star size={14} fill={entry.starred ? 'currentColor' : 'none'} />
-	</button>
 	{#if isImage}
 		{#if entry.images.length > 1}
 			<div class="card-gallery">
@@ -136,6 +126,16 @@
 		</div>
 	{/if}
 	<div class="meta">
+		<button
+			type="button"
+			class="star-btn"
+			class:starred={entry.starred}
+			onclick={toggleStar}
+			title={entry.starred ? 'Unstar' : 'Star'}
+			aria-label={entry.starred ? 'Unstar entry' : 'Star entry'}
+		>
+			<Star size={14} fill={entry.starred ? 'currentColor' : 'none'} />
+		</button>
 		<span class="feed-name">{entry.feed.title}</span>
 		{#if entry.published_at}
 			{#if permalink}
