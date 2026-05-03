@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-03
+
 ### Added
 - **Navigable lightbox in the feeds reader.** Clicking any image in a multi-image post now opens a lightbox that navigates the entry's full image set with prev/next buttons, ArrowLeft / ArrowRight keys (wrap-around), and a bottom "X / N" counter. Clicking the `+N` overflow tile on a gallery with 5+ images opens the lightbox at that position so the previously-hidden images are reachable.
 - **Starring + bulk mark-as-read in the feeds reader (Miniflux parity, Tranche A).** Per-entry `starred` flag independent of read status, surfaced via a star button on every card (hover-revealed, pinned-visible when starred). New "Starred" sidebar entry (alongside "All") filters the reader to starred entries; star survives `read` / `unread` / `removed` transitions. Toolbar "mark as read" button (`CheckCheck` icon) bulk-marks the current scope (selected feed if one is picked, otherwise everything) behind a confirm modal. Keyboard shortcuts: `f` toggles star on the focused/hovered card, `Shift-A` marks every visible entry as read using the new `before_id` cap so concurrent infinite-scroll loads are not clobbered. Backend: schema v2 migration adds `starred` / `starred_at` columns + a partial index, with the first real `_MIGRATIONS` table since the module was created. New `POST /feeds/mark-as-read` route (`scope=all|feed|category` + optional `before_id`); existing entry PUT routes accept `status` and/or `starred` additively (back-compat with older clients). New CLI subcommands `feeds star --id N [--unstar] [--ids 1,2,3]`, `feeds starred`, and `feeds mark-read --all|--feed N|--category SLUG|--category-id N [--before-id N]`. Wire format gains `starred` / `starred_at` on every entry response.
@@ -423,7 +425,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.8.2...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.9.0...main
+[0.9.0]: https://gitlab.com/cynium/istota/-/releases/v0.9.0
 [0.8.2]: https://gitlab.com/cynium/istota/-/releases/v0.8.2
 [0.8.1]: https://gitlab.com/cynium/istota/-/releases/v0.8.1
 [0.8.0]: https://gitlab.com/cynium/istota/-/releases/v0.8.0
