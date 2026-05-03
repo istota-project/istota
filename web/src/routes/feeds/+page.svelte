@@ -4,6 +4,9 @@
 	import { selectedFeedId, showImages, showText, showUnseen, sortBy, viewMode } from '$lib/stores/feeds';
 	import FeedCard from '$lib/components/FeedCard.svelte';
 	import Lightbox from '$lib/components/Lightbox.svelte';
+	import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
+
+	const getScrollRoot = getShellScrollRoot();
 
 	const PAGE_SIZE = 50;
 
@@ -86,7 +89,7 @@
 			loading = false;
 		}
 		// Scroll to top on reload
-		scrollRoot?.scrollTo(0, 0);
+		getScrollRoot?.()?.scrollTo(0, 0);
 	}
 
 	async function loadMore() {
@@ -146,7 +149,6 @@
 	// Infinite scroll sentinel
 	let sentinel: HTMLDivElement | undefined = $state();
 	let scrollObserver: IntersectionObserver | null = null;
-	let scrollRoot: HTMLDivElement | undefined = $state();
 
 	// Reload when selected feed changes
 	let prevSelFeed: number | null = null;
@@ -166,7 +168,7 @@
 			(observed) => {
 				if (observed[0].isIntersecting) loadMore();
 			},
-			{ root: scrollRoot, rootMargin: '600px' },
+			{ root: getScrollRoot?.() ?? null, rootMargin: '600px' },
 		);
 		scrollObserver.observe(sentinel);
 		return () => scrollObserver?.disconnect();
@@ -194,7 +196,7 @@
 	});
 </script>
 
-<div class="feed-scroll" bind:this={scrollRoot}>
+<div class="feed-page">
 	{#if loading}
 		<div class="center-msg">Loading feeds...</div>
 	{:else if error}
@@ -232,15 +234,10 @@
 
 	.center-msg.error { color: #c66; }
 
-	.feed-scroll {
-		flex: 1;
-		overflow-y: auto;
+	.feed-page {
+		min-height: 100%;
 		padding: 0.75rem;
 	}
-
-	.feed-scroll::-webkit-scrollbar { width: 4px; }
-	.feed-scroll::-webkit-scrollbar-track { background: transparent; }
-	.feed-scroll::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
 
 	/* Grid layout */
 	.feed-grid {
