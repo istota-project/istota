@@ -444,6 +444,59 @@ class TestConfigEndpoint:
         )
         assert resp.status_code == 400
 
+    def test_put_removes_feeds_and_categories_dropped_from_payload(self, ctx, client):
+        """Wholesale-replace: feeds removed in the UI must not linger in the DB.
+
+        Regression: previously the sidebar still showed the old RSS row after
+        re-subscribing as ``tumblr:`` because ``_sync_config_to_db`` was
+        upsert-only.
+        """
+        client.put(
+            "/istota/api/feeds/config",
+            json={
+                "config": {
+                    "categories": [
+                        {"slug": "rss", "title": "RSS"},
+                        {"slug": "tumblr", "title": "Tumblr"},
+                    ],
+                    "feeds": [
+                        {
+                            "url": "https://nemfrog.tumblr.com/rss",
+                            "title": "Nemfrog RSS",
+                            "category": "rss",
+                        },
+                    ],
+                }
+            },
+        )
+        resp = client.put(
+            "/istota/api/feeds/config",
+            json={
+                "config": {
+                    "categories": [{"slug": "tumblr", "title": "Tumblr"}],
+                    "feeds": [
+                        {
+                            "url": "tumblr:nemfrog",
+                            "title": "Nemfrog",
+                            "category": "tumblr",
+                        },
+                    ],
+                }
+            },
+        )
+        assert resp.status_code == 200
+        sync = resp.json()["sync"]
+        assert sync["feeds_removed"] == 1
+        assert sync["categories_removed"] == 1
+
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = {row["url"] for row in conn.execute("SELECT url FROM feeds")}
+            slugs = {
+                row["slug"] for row in conn.execute("SELECT slug FROM feed_categories")
+            }
+        assert urls == {"tumblr:nemfrog"}
+        assert slugs == {"tumblr"}
+
     def test_diagnostics_reflect_seeded_state(self, ctx, client):
         _seed(ctx)
         body = client.get("/istota/api/feeds/config").json()
