@@ -114,14 +114,12 @@
 				</div>
 			{/snippet}
 			{#snippet tools()}
-				<div class="filter-group">
-					<Chip icon checked={$viewMode === 'grid'} onclick={() => viewMode.set('grid')} title="Grid view">
-						<LayoutGrid size={14} />
-					</Chip>
-					<Chip icon checked={$viewMode === 'list'} onclick={() => viewMode.set('list')} title="List view">
-						<List size={14} />
-					</Chip>
-				</div>
+				<Chip icon checked={$viewMode === 'grid'} onclick={() => viewMode.set('grid')} title="Grid view">
+					<LayoutGrid size={14} />
+				</Chip>
+				<Chip icon checked={$viewMode === 'list'} onclick={() => viewMode.set('list')} title="List view">
+					<List size={14} />
+				</Chip>
 				<Chip icon onclick={handleMarkAllRead}
 					title={$selectedFeedId
 						? 'Mark this feed as read'
