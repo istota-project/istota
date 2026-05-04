@@ -128,6 +128,48 @@ class TestSyncFeedsModuleJobs:
         ).fetchall()
         assert rows == []
 
+    def test_seeds_with_skip_log_channel_set(self, tmp_path):
+        # Module jobs run on a noisy cadence (*/5 min) and emit structured
+        # JSON envelopes — they must never post to the user's log channel.
+        app_config = _make_app_config(
+            tmp_path,
+            {"alice": [ResourceConfig(type="feeds")]},
+        )
+        conn = _conn(tmp_path)
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT skip_log_channel FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert row[0] == 1
+
+    def test_backfills_skip_log_channel_on_existing_row(self, tmp_path):
+        # Pre-existing module rows that were seeded before the fix have
+        # skip_log_channel=0 and should be flipped to 1 on the next sync.
+        app_config = _make_app_config(
+            tmp_path,
+            {"alice": [ResourceConfig(type="feeds")]},
+        )
+        conn = _conn(tmp_path)
+        # Simulate the pre-fix row shape.
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, enabled, "
+            "skip_log_channel) "
+            "VALUES (?, ?, ?, '', ?, 1, 0)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "FEEDS_USER=alice istota-skill feeds run-scheduled"),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT skip_log_channel FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert row[0] == 1
+
     def test_updates_when_command_changes(self, tmp_path):
         app_config = _make_app_config(
             tmp_path,

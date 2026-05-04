@@ -2697,7 +2697,7 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
         wanted_by_name = {j["name"]: j for j in wanted}
 
         existing_rows = list(conn.execute(
-            "SELECT id, name, cron_expression, command "
+            "SELECT id, name, cron_expression, command, skip_log_channel "
             "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             (user_id, f"{MODULE_PREFIX}%"),
         ))
@@ -2708,18 +2708,26 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
             if row is None:
                 conn.execute(
                     "INSERT INTO scheduled_jobs "
-                    "(user_id, name, cron_expression, prompt, command, enabled) "
-                    "VALUES (?, ?, ?, '', ?, 1)",
+                    "(user_id, name, cron_expression, prompt, command, enabled, "
+                    "skip_log_channel) "
+                    "VALUES (?, ?, ?, '', ?, 1, 1)",
                     (user_id, name, j["cron"], j["command"]),
                 )
                 logger.info(
                     "Seeded module job '%s' for user %s", name, user_id,
                 )
             else:
-                if row[2] != j["cron"] or row[3] != j["command"]:
+                drift = (
+                    row[2] != j["cron"]
+                    or row[3] != j["command"]
+                    or not bool(row[4])
+                )
+                if drift:
                     conn.execute(
                         "UPDATE scheduled_jobs "
-                        "SET cron_expression = ?, command = ?, last_run_at = datetime('now') "
+                        "SET cron_expression = ?, command = ?, "
+                        "skip_log_channel = 1, "
+                        "last_run_at = datetime('now') "
                         "WHERE id = ?",
                         (j["cron"], j["command"], row[0]),
                     )
@@ -2777,7 +2785,7 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
         wanted_by_name = {j["name"]: j for j in wanted}
 
         existing_rows = list(conn.execute(
-            "SELECT id, name, cron_expression, command "
+            "SELECT id, name, cron_expression, command, skip_log_channel "
             "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             (user_id, f"{MODULE_PREFIX}%"),
         ))
@@ -2788,18 +2796,26 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
             if row is None:
                 conn.execute(
                     "INSERT INTO scheduled_jobs "
-                    "(user_id, name, cron_expression, prompt, command, enabled) "
-                    "VALUES (?, ?, ?, '', ?, 1)",
+                    "(user_id, name, cron_expression, prompt, command, enabled, "
+                    "skip_log_channel) "
+                    "VALUES (?, ?, ?, '', ?, 1, 1)",
                     (user_id, name, j["cron"], j["command"]),
                 )
                 logger.info(
                     "Seeded module job '%s' for user %s", name, user_id,
                 )
             else:
-                if row[2] != j["cron"] or row[3] != j["command"]:
+                drift = (
+                    row[2] != j["cron"]
+                    or row[3] != j["command"]
+                    or not bool(row[4])
+                )
+                if drift:
                     conn.execute(
                         "UPDATE scheduled_jobs "
-                        "SET cron_expression = ?, command = ?, last_run_at = datetime('now') "
+                        "SET cron_expression = ?, command = ?, "
+                        "skip_log_channel = 1, "
+                        "last_run_at = datetime('now') "
                         "WHERE id = ?",
                         (j["cron"], j["command"], row[0]),
                     )
