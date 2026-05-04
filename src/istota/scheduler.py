@@ -1210,6 +1210,58 @@ def _notify_confirmed_email_result(
     return send_notification(config, task.user_id, message, surface="talk")
 
 
+# Recognized deferred-file suffixes — files matching task_{id}_{suffix}.json
+# are consumed by their respective `_process_deferred_*` handlers. Anything
+# else in the user temp dir that mentions the task id is unrecognized and
+# was silently dropped. We log it so misnamed deferred writes (e.g. a
+# hallucinated filename from the model) become visible.
+_KNOWN_DEFERRED_SUFFIXES = (
+    "subtasks",
+    "tracked_transactions",
+    "sent_emails",
+    "kv_ops",
+    "user_alerts",
+    "email_output",
+)
+
+
+def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
+    """Log a WARN for any task-scoped file in user_temp_dir that doesn't
+    match a recognized deferred-file name.
+
+    Catches two failure shapes:
+    - Hallucinated names that drop the ``task_`` prefix (e.g.
+      ``{id}_skip_log.json``) — would never match the consumers' exact
+      filename lookup.
+    - Canonical ``task_{id}_<unknown>.json`` shapes for handlers that don't
+      exist — also silently ignored by the dispatch.
+    """
+    if not user_temp_dir.is_dir():
+        return
+    known_filenames = {
+        f"task_{task.id}_{suffix}.json" for suffix in _KNOWN_DEFERRED_SUFFIXES
+    }
+    # Static task-scoped files written by the executor itself.
+    known_filenames.add(f"task_{task.id}_prompt.txt")
+    known_filenames.add(f"task_{task.id}_result.txt")
+
+    suspicious: list[Path] = []
+    # Shape 1: missing the ``task_`` prefix entirely.
+    suspicious.extend(user_temp_dir.glob(f"{task.id}_*"))
+    # Shape 2: canonical prefix but unknown suffix.
+    for path in user_temp_dir.glob(f"task_{task.id}_*"):
+        if path.name not in known_filenames:
+            suspicious.append(path)
+
+    for path in suspicious:
+        logger.warning(
+            "Unrecognized deferred file for task %d: %s "
+            "(expected name: task_%d_<%s>.json)",
+            task.id, path.name, task.id,
+            "|".join(_KNOWN_DEFERRED_SUFFIXES),
+        )
+
+
 def _deliver_deferred_email_output(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> None:
@@ -1692,6 +1744,7 @@ def process_one_task(
         _process_deferred_kv_ops(config, task, user_temp_dir)
         _process_deferred_user_alerts(config, task, user_temp_dir)
         _deliver_deferred_email_output(config, task, user_temp_dir)
+        _warn_unconsumed_deferred_files(task, user_temp_dir)
         _notify_confirmed_email_result(config, task, result)
 
     # Save briefing digest for deduplication in the next run
