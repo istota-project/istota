@@ -239,29 +239,34 @@ class TestSyncMoneyModuleJobs:
         assert row[0] == 1
 
     def test_backfills_skip_log_channel_on_existing_row(self, tmp_path):
+        # Pre-fix rows have skip_log_channel=0 and should flip to 1 on the
+        # next sync. Critically, backfilling must NOT bump last_run_at — for
+        # a daily money job that would mean losing one whole day's run.
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         app_config = _make_app_config(
             tmp_path,
             {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg)})]},
         )
         conn = _conn(tmp_path)
-        # Pre-fix row shape: skip_log_channel=0.
+        original_last_run = "2026-05-03 08:00:01"
         conn.execute(
             "INSERT INTO scheduled_jobs "
             "(user_id, name, cron_expression, prompt, command, enabled, "
-            "skip_log_channel) "
-            "VALUES (?, ?, ?, '', ?, 1, 0)",
+            "skip_log_channel, last_run_at) "
+            "VALUES (?, ?, ?, '', ?, 1, 0, ?)",
             ("alice", f"{MODULE_PREFIX}run_scheduled", "0 8 * * *",
-             "MONEY_USER=alice istota-skill money run-scheduled"),
+             "MONEY_USER=alice istota-skill money run-scheduled",
+             original_last_run),
         )
         conn.commit()
         _sync_money_module_jobs(conn, app_config)
         row = conn.execute(
-            "SELECT skip_log_channel FROM scheduled_jobs "
+            "SELECT skip_log_channel, last_run_at FROM scheduled_jobs "
             "WHERE user_id = ? AND name LIKE ?",
             ("alice", f"{MODULE_PREFIX}%"),
         ).fetchone()
         assert row[0] == 1
+        assert row[1] == original_last_run
 
     def test_legacy_moneyman_resource_type_accepted(self, tmp_path):
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
