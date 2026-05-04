@@ -2723,11 +2723,13 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
                     or not bool(row[4])
                 )
                 if drift:
+                    # Don't bump last_run_at here — backfilling skip_log_channel
+                    # on existing rows would otherwise defer the next scheduled
+                    # run by one full cron interval (up to 24h for daily jobs).
                     conn.execute(
                         "UPDATE scheduled_jobs "
                         "SET cron_expression = ?, command = ?, "
-                        "skip_log_channel = 1, "
-                        "last_run_at = datetime('now') "
+                        "skip_log_channel = 1 "
                         "WHERE id = ?",
                         (j["cron"], j["command"], row[0]),
                     )
@@ -2811,11 +2813,13 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
                     or not bool(row[4])
                 )
                 if drift:
+                    # Don't bump last_run_at here — backfilling skip_log_channel
+                    # on existing rows would otherwise defer the next scheduled
+                    # run by one full cron interval (up to 24h for daily jobs).
                     conn.execute(
                         "UPDATE scheduled_jobs "
                         "SET cron_expression = ?, command = ?, "
-                        "skip_log_channel = 1, "
-                        "last_run_at = datetime('now') "
+                        "skip_log_channel = 1 "
                         "WHERE id = ?",
                         (j["cron"], j["command"], row[0]),
                     )
