@@ -3566,6 +3566,84 @@ class TestDeferredOperations:
 
 
 # ---------------------------------------------------------------------------
+# TestWarnUnconsumedDeferredFiles
+# ---------------------------------------------------------------------------
+
+
+class TestWarnUnconsumedDeferredFiles:
+    """Tests for _warn_unconsumed_deferred_files — surfaces silently-dropped
+    deferred files (e.g. a hallucinated filename) that the dispatch ignores.
+    """
+
+    def _task(self, task_id: int = 123):
+        return db.Task(
+            id=task_id, status="completed", source_type="talk",
+            user_id="alice", prompt="x",
+        )
+
+    def test_no_warning_for_recognized_files(self, tmp_path, caplog):
+        from istota.scheduler import _warn_unconsumed_deferred_files
+        task = self._task(123)
+        for name in (
+            "task_123_subtasks.json",
+            "task_123_tracked_transactions.json",
+            "task_123_sent_emails.json",
+            "task_123_kv_ops.json",
+            "task_123_user_alerts.json",
+            "task_123_email_output.json",
+            "task_123_prompt.txt",
+            "task_123_result.txt",
+        ):
+            (tmp_path / name).write_text("{}")
+        with caplog.at_level("WARNING"):
+            _warn_unconsumed_deferred_files(task, tmp_path)
+        assert not any("Unrecognized deferred file" in r.message for r in caplog.records)
+
+    def test_warns_on_missing_task_prefix(self, tmp_path, caplog):
+        # The shape that hit prod: model wrote "{id}_skip_log.json" instead
+        # of "task_{id}_subtasks.json".
+        from istota.scheduler import _warn_unconsumed_deferred_files
+        task = self._task(123)
+        (tmp_path / "123_skip_log.json").write_text("{}")
+        with caplog.at_level("WARNING"):
+            _warn_unconsumed_deferred_files(task, tmp_path)
+        warnings = [r.message for r in caplog.records if "Unrecognized deferred file" in r.message]
+        assert len(warnings) == 1
+        assert "123_skip_log.json" in warnings[0]
+        assert "task_123_<" in warnings[0]
+
+    def test_warns_on_unknown_suffix_with_canonical_prefix(self, tmp_path, caplog):
+        from istota.scheduler import _warn_unconsumed_deferred_files
+        task = self._task(123)
+        (tmp_path / "task_123_unknown_op.json").write_text("{}")
+        with caplog.at_level("WARNING"):
+            _warn_unconsumed_deferred_files(task, tmp_path)
+        warnings = [r.message for r in caplog.records if "Unrecognized deferred file" in r.message]
+        assert len(warnings) == 1
+        assert "task_123_unknown_op.json" in warnings[0]
+
+    def test_does_not_warn_on_other_tasks_files(self, tmp_path, caplog):
+        # User temp dir is shared across tasks for the same user; warning
+        # should be scoped to the current task id.
+        from istota.scheduler import _warn_unconsumed_deferred_files
+        task = self._task(123)
+        (tmp_path / "task_456_subtasks.json").write_text("{}")
+        (tmp_path / "task_4567_unknown.json").write_text("{}")
+        (tmp_path / "456_skip_log.json").write_text("{}")
+        with caplog.at_level("WARNING"):
+            _warn_unconsumed_deferred_files(task, tmp_path)
+        assert not any("Unrecognized deferred file" in r.message for r in caplog.records)
+
+    def test_handles_missing_temp_dir(self, tmp_path, caplog):
+        from istota.scheduler import _warn_unconsumed_deferred_files
+        task = self._task(123)
+        with caplog.at_level("WARNING"):
+            _warn_unconsumed_deferred_files(task, tmp_path / "does-not-exist")
+        # No exception, no warnings.
+        assert not any("Unrecognized deferred file" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # TestNotifyConfirmedEmailResult
 # ---------------------------------------------------------------------------
 
