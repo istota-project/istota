@@ -45,9 +45,16 @@ text = text.replace(old_unrel, f"{new_unrel}\n{new_link}")
 path.write_text(text)
 PY
 
-# Bump pyproject.toml version
+# Bump pyproject.toml version (canonical source; src/istota/__init__.py
+# derives __version__ from package metadata at runtime).
 sed -i.bak -E "s/^version = \".*\"/version = \"$NEW\"/" pyproject.toml
 rm pyproject.toml.bak
+
+# Bump the dev-mode mock backend so VITE_MOCK_API=1 reports the new version.
+if [ -f web/vite-mock-api.ts ]; then
+  sed -i.bak -E "s/^([[:space:]]+version: ')[^']*(',)/\\1$NEW\\2/" web/vite-mock-api.ts
+  rm web/vite-mock-api.ts.bak
+fi
 
 # Extract just-published version's section as the tag body, consolidating
 # duplicate ### subsections (Added/Changed/Fixed/...) into one of each in
