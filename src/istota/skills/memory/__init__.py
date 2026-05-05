@@ -76,15 +76,25 @@ def _bot_dir() -> str:
     bot = os.environ.get("ISTOTA_BOT_DIR_NAME", "")
     if bot:
         return bot
-    # Fallback: find a single bot dir under /Users/{user_id}/. The exec
-    # path always sets ISTOTA_BOT_DIR_NAME, so this is a defensive
-    # fallback for ad-hoc CLI use.
+    # Fallback for ad-hoc CLI use only — refuse to guess when more than
+    # one bot dir exists (ISSUE-077: silent writes to wrong USER.md under
+    # multi-bot tenancy or stale rename leftovers).
     user_id = _user_id()
     base = _mount_path() / "Users" / user_id
+    candidates: list[str] = []
     if base.is_dir():
         for child in sorted(base.iterdir()):
             if child.is_dir() and (child / "config" / "USER.md").is_file():
-                return child.name
+                candidates.append(child.name)
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        _err(
+            "ISTOTA_BOT_DIR_NAME not set and multiple bot dirs found — refusing to guess",
+            user_id=user_id,
+            candidates=candidates,
+        )
+        sys.exit(1)
     _err(
         "ISTOTA_BOT_DIR_NAME not set and could not infer from mount",
         user_id=user_id,
@@ -101,7 +111,13 @@ def _channel_md_path(token: str) -> Path:
         _err("invalid channel token", token=token)
         sys.exit(1)
     env_token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "")
-    if env_token and env_token != token:
+    if not env_token:
+        _err(
+            "channel write requires ISTOTA_CONVERSATION_TOKEN",
+            given=token,
+        )
+        sys.exit(1)
+    if env_token != token:
         _err(
             "channel token mismatch — refusing cross-channel write",
             given=token, expected=env_token,

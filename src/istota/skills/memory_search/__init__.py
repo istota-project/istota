@@ -170,20 +170,38 @@ def cmd_stats(args) -> dict:
 
 
 def _user_md_size_bytes(user_id: str) -> int | None:
-    """Return USER.md size in bytes via the mount, or None if unavailable."""
+    """Return USER.md size in bytes via the mount, or None if unavailable.
+
+    Prefers ``ISTOTA_BOT_DIR_NAME`` when set. Otherwise falls back to a
+    sole-candidate match — refuses to guess when multiple bot dirs exist
+    (ISSUE-077: would otherwise silently report the wrong file's size).
+    """
     mount = os.environ.get("NEXTCLOUD_MOUNT_PATH")
     if not mount:
         return None
-    # Bot dir name unknown to the skill — accept either common case.
     base = os.path.join(mount, "Users", user_id)
-    for candidate_dir in os.listdir(base) if os.path.isdir(base) else []:
-        config_md = os.path.join(base, candidate_dir, "config", "USER.md")
+    bot = os.environ.get("ISTOTA_BOT_DIR_NAME", "")
+    if bot:
+        config_md = os.path.join(base, bot, "config", "USER.md")
         if os.path.isfile(config_md):
             try:
                 return os.path.getsize(config_md)
             except OSError:
                 return None
-    return None
+        return None
+    if not os.path.isdir(base):
+        return None
+    candidates = [
+        d for d in sorted(os.listdir(base))
+        if os.path.isfile(os.path.join(base, d, "config", "USER.md"))
+    ]
+    if len(candidates) != 1:
+        return None
+    config_md = os.path.join(base, candidates[0], "config", "USER.md")
+    try:
+        return os.path.getsize(config_md)
+    except OSError:
+        return None
 
 
 def cmd_facts(args) -> dict:
