@@ -74,6 +74,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Per-task effort override (low/medium/high/xhigh/max); empty = use config default
     effort TEXT,
 
+    -- Real Talk room for this task's notifications. Distinct from
+    -- conversation_token, which doubles as an email-thread grouping key for
+    -- email-source tasks. NULL falls back to conversation_token at delivery time.
+    talk_delivery_token TEXT,
+
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
 );
 
@@ -371,6 +376,7 @@ CREATE TABLE IF NOT EXISTS sent_emails (
     in_reply_to TEXT,                  -- If this was a reply to another message
     "references" TEXT,                 -- RFC 5322 References thread chain
     conversation_token TEXT,           -- Talk conversation where send was requested
+    talk_delivery_token TEXT,          -- Originating task's resolved Talk room (real, not synthetic)
     sent_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
 );

@@ -669,6 +669,51 @@ class TestSentEmails:
             assert found.in_reply_to == "<original@example.com>"
             assert found.references == "<original@example.com>"
 
+    def test_record_with_talk_delivery_token(self, db_path):
+        # ISSUE-057: sent_emails carries the originating task's resolved Talk
+        # room so thread-match follow-ups inherit a real channel without
+        # re-resolving.
+        with db.get_db(db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<dt@example.com>",
+                to_addr="bob@example.com",
+                subject="Hi",
+                conversation_token="thread_hash",
+                talk_delivery_token="real_room",
+            )
+
+            found = db.find_sent_email_by_message_id(conn, "<dt@example.com>")
+            assert found.conversation_token == "thread_hash"
+            assert found.talk_delivery_token == "real_room"
+
+            via_refs = db.find_sent_email_by_references(conn, ["<dt@example.com>"])
+            assert via_refs is not None
+            assert via_refs.talk_delivery_token == "real_room"
+
+
+class TestTaskTalkDeliveryToken:
+    """ISSUE-057: tasks carry talk_delivery_token separate from conversation_token."""
+
+    def test_create_task_persists_talk_delivery_token(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hi", user_id="alice",
+                source_type="email",
+                conversation_token="deadbeef12345678",  # synthetic email-thread hash
+                talk_delivery_token="real_room",
+            )
+            task = db.get_task(conn, task_id)
+            assert task.conversation_token == "deadbeef12345678"
+            assert task.talk_delivery_token == "real_room"
+
+    def test_create_task_default_talk_delivery_token_is_none(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="hi", user_id="alice")
+            task = db.get_task(conn, task_id)
+            assert task.talk_delivery_token is None
+
 
 # =============================================================================
 # TestConfirmedAt

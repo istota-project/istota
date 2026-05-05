@@ -651,6 +651,76 @@ class TestPollEmailsThreadMatching:
             # Should use thread_id since no conversation_token on sent email
             assert task.conversation_token is not None
 
+    def test_thread_match_inherits_talk_delivery_token(self, make_config):
+        """ISSUE-057: thread_match inherits talk_delivery_token from sent_emails row."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(email_addresses=["stefan@test.com"])}
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<out@bot.com>",
+                to_addr="ext@x.com",
+                subject="Plan",
+                conversation_token="talk_room_99",
+                talk_delivery_token="real_talk_room",
+            )
+
+        envelope = _envelope(id="9", sender="ext@x.com", subject="Re: Plan")
+        email = Email(
+            id="9", subject="Re: Plan", sender="ext@x.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Sure", attachments=[],
+            message_id="<r9@x.com>", references="<out@bot.com>",
+            to=("bot@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.talk_delivery_token == "real_talk_room"
+            # conversation_token still preserves the email-thread grouping key
+            assert task.conversation_token == "talk_room_99"
+
+    def test_known_sender_resolves_talk_delivery_token_from_alerts(self, make_config):
+        """plus_address / sender_match routes resolve talk_delivery_token via user config."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "alice": UserConfig(
+                email_addresses=["alice@test.com"],
+                alerts_channel="alice_alerts",
+            ),
+        }
+
+        envelope = _envelope(sender="alice@test.com")
+        email = _email(sender="alice@test.com")
+
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            # conversation_token is the synthetic email-thread hash
+            assert task.conversation_token is not None
+            assert len(task.conversation_token) == 16
+            # talk_delivery_token resolves to the user's alerts channel
+            assert task.talk_delivery_token == "alice_alerts"
+
 
 # =============================================================================
 # TestExtractUserFromRecipient

@@ -191,6 +191,41 @@ class TestTalkTargetForDelivery:
         task = self._task(source_type="email", conversation_token=synthetic)
         assert _talk_target_for_delivery(config, task) == "briefroom"
 
+    def test_talk_delivery_token_takes_precedence_over_synthetic(self, tmp_path):
+        # ISSUE-057 proper fix: talk_delivery_token wins regardless of shape
+        # heuristics on conversation_token.
+        config = self._config(tmp_path, alerts_channel="alerts1")
+        synthetic = "deadbeef12345678"
+        task = self._task(
+            source_type="email",
+            conversation_token=synthetic,
+            talk_delivery_token="real_room",
+        )
+        assert _talk_target_for_delivery(config, task) == "real_room"
+
+    def test_talk_delivery_token_takes_precedence_over_real_token(self, tmp_path):
+        # Even when conversation_token is a real Talk room (e.g. a thread-match
+        # email task that inherited it from a prior outbound), the explicit
+        # talk_delivery_token still wins — they're authoritative for delivery.
+        config = self._config(tmp_path)
+        task = self._task(
+            source_type="email",
+            conversation_token="other_room",
+            talk_delivery_token="delivery_room",
+        )
+        assert _talk_target_for_delivery(config, task) == "delivery_room"
+
+    def test_talk_delivery_token_used_for_subtasks(self, tmp_path):
+        # Subtasks inherit talk_delivery_token from the parent regardless of
+        # source_type, so delivery hits the right room.
+        config = self._config(tmp_path)
+        task = self._task(
+            source_type="subtask",
+            conversation_token=None,
+            talk_delivery_token="parent_room",
+        )
+        assert _talk_target_for_delivery(config, task) == "parent_room"
+
 
 # ---------------------------------------------------------------------------
 # TestFormatErrorForUser
@@ -2592,6 +2627,35 @@ class TestDeferredOperations:
 
         # File should be deleted
         assert not (user_temp / f"task_{parent_id}_subtasks.json").exists()
+
+    def test_process_deferred_subtasks_inherits_talk_delivery_token(self, db_path, tmp_path):
+        """ISSUE-057: subtasks inherit talk_delivery_token from the parent task."""
+        from istota.scheduler import _process_deferred_subtasks
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="Parent", user_id="alice", source_type="email",
+                conversation_token="thread_hash_value",
+                talk_delivery_token="real_talk_room",
+            )
+            parent = db.get_task(conn, parent_id)
+
+        (user_temp / f"task_{parent_id}_subtasks.json").write_text(
+            json.dumps([{"prompt": "child"}])
+        )
+
+        count = _process_deferred_subtasks(config, parent, user_temp)
+        assert count == 1
+
+        with db.get_db(db_path) as conn:
+            tasks = db.list_tasks(conn, user_id="alice")
+        children = [t for t in tasks if t.source_type == "subtask"]
+        assert len(children) == 1
+        assert children[0].talk_delivery_token == "real_talk_room"
+        assert children[0].conversation_token == "thread_hash_value"
 
     def test_process_deferred_subtasks_admin_only(self, db_path, tmp_path):
         """Non-admin users should have deferred subtasks ignored."""

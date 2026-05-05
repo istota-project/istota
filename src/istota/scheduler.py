@@ -920,6 +920,7 @@ def _process_deferred_subtasks(
                 priority=entry.get("priority", 5),
                 queue=task.queue,
                 output_target=output_target,
+                talk_delivery_token=task.talk_delivery_token,
             )
             count += 1
 
@@ -1024,6 +1025,7 @@ def _process_deferred_sent_emails(
                     subject=entry.get("subject"),
                     task_id=task.id,
                     conversation_token=task.conversation_token,
+                    talk_delivery_token=task.talk_delivery_token,
                 )
                 count += 1
             except Exception as e:
@@ -1149,22 +1151,27 @@ def _process_deferred_user_alerts(
 def _talk_target_for_delivery(config: Config, task: db.Task) -> str | None:
     """Resolve the Talk room to deliver this task's notifications to.
 
-    Email-source tasks store a synthetic SHA-hash thread identifier in
-    `conversation_token` when the chain originated outside Talk (plus_address
-    or sender_match routing in email_poller). That value is not a real Talk
-    room, so posting to it silently no-ops. Fall back to the user's resolved
-    notification channel (alerts > briefing > auto-detected DM) in that case.
+    Tasks carry two related fields:
+      - conversation_token: doubles as the email-thread grouping key for
+        email-source tasks (synthetic 16-char hex hash) and as the Talk room
+        for talk-source tasks. Used by context/memory lookups.
+      - talk_delivery_token: the real Talk room for notifications. Always a
+        valid Talk token (or NULL).
 
-    Talk-originated email tasks (where conversation_token was inherited from
-    a sent_email record whose origin task ran in Talk) keep the original
-    token — the user expects follow-ups in the room where the chain started.
-
-    Heuristic: compute_thread_id() returns a 16-character hex string. Tokens
-    matching that shape on email-source tasks are treated as synthetic.
+    Delivery prefers talk_delivery_token. Falls back to conversation_token,
+    which is correct for talk-source tasks. Legacy email-source tasks that
+    pre-date the talk_delivery_token column may carry only a synthetic
+    conversation_token; for those we fall back to the user's resolved
+    notification channel (alerts > briefing > auto-detected DM).
     """
+    if task.talk_delivery_token:
+        return task.talk_delivery_token
     token = task.conversation_token
     if task.source_type != "email" or not token:
         return token
+    # Legacy fallback: pre-migration email tasks with a synthetic 16-char-hex
+    # conversation_token need redirection to the user's resolved channel,
+    # because the synthetic token is not a real Talk room.
     is_synthetic = len(token) == 16 and all(c in "0123456789abcdef" for c in token)
     if not is_synthetic:
         return token
@@ -2259,6 +2266,7 @@ def _record_sent_email(
                 in_reply_to=in_reply_to,
                 references=references,
                 conversation_token=task.conversation_token,
+                talk_delivery_token=task.talk_delivery_token,
             )
     except Exception as e:
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)

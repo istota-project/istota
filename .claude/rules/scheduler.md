@@ -169,7 +169,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `get_worker_id()` | `{hostname}-{pid}[-{user_id}]` |
 | `_make_talk_progress_callback()` | Rate-limited progress to Talk |
 | `post_result_to_talk()` | Send result to Talk conversation. Optional `target_token` overrides `task.conversation_token` for the actual post — used when the task's stored token isn't a real Talk room. |
-| `_talk_target_for_delivery()` | Resolve the Talk room for a task's notifications. Email-source tasks with a synthetic 16-char hex thread hash in `conversation_token` (the case for plus_address / sender_match / inherited-from-inbound thread_match routing) fall back to `resolve_conversation_token` (alerts → briefing → auto-DM). All other tasks pass through. Heuristic; proper structural fix tracked in `_ISSUES.md` ISSUE-057 (separate `talk_delivery_token` column). |
+| `_talk_target_for_delivery()` | Resolve the Talk room for a task's notifications. Returns `task.talk_delivery_token` when set (real Talk room, populated at task creation in `email_poller.py` and inherited by subtasks). Falls back to `task.conversation_token` for talk-source tasks. Legacy email tasks that pre-date the `talk_delivery_token` column may carry only a synthetic 16-char hex hash in `conversation_token`; for those the helper falls back to `resolve_conversation_token` (alerts → briefing → auto-DM). |
 | `_execute_command_task()` | Run a shell-command task in a subprocess (cwd = `config.temp_dir`, env from `build_stripped_env()` + propagated `ISTOTA_*` and credential vars). Success criterion: `returncode == 0`, with one exception — when stdout starts with `{` and parses as a JSON dict containing `"status": "error"`, the task is marked failed using `parsed["error"]` as the message. This catches the silent-failure pattern where module-skill facades (feeds, money) print `{"status":"error","error":"…"}` to stdout while exiting 0. Non-JSON stdout and malformed JSON are unaffected. |
 | `_parse_email_output()` | Parse JSON email response (legacy fallback) |
 | `_load_deferred_email_output()` | Load structured email output from deferred file |
@@ -187,7 +187,7 @@ After task completion, if enabled + `auto_index_conversations`:
 
 | Table | Dataclass | Key Columns |
 |---|---|---|
-| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, actions_taken, execution_trace, model, effort |
+| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, actions_taken, execution_trace, model, effort |
 | `user_resources` | `UserResource` | id, user_id, resource_type, resource_path, display_name, permissions |
 | `briefing_configs` | `BriefingConfig` | id, user_id, name, cron_expression, conversation_token, components (JSON), enabled |
 | `briefing_state` | — | user_id, briefing_name, last_run_at |
@@ -202,7 +202,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `monarch_synced_transactions` | — | id, user_id, monarch_transaction_id, amount, merchant, content_hash |
 | `csv_imported_transactions` | — | id, user_id, content_hash, source_file |
 | `user_skills_fingerprint` | — | user_id, fingerprint, updated_at |
-| `sent_emails` | — | id, user_id, task_id, message_id, to_addr, subject, thread_id, in_reply_to, references, conversation_token, sent_at |
+| `sent_emails` | — | id, user_id, task_id, message_id, to_addr, subject, thread_id, in_reply_to, references, conversation_token, talk_delivery_token, sent_at |
 | `task_logs` | — | task_id, level, message, timestamp |
 | `memory_chunks` | — | (from memory_search.py schema) |
 
@@ -214,7 +214,8 @@ create_task(conn, prompt, user_id, source_type="cli", conversation_token=None,
     parent_task_id=None, is_group_chat=False, attachments=None, priority=5,
     scheduled_for=None, output_target=None, talk_message_id=None,
     reply_to_talk_id=None, reply_to_content=None,
-    heartbeat_silent=False, scheduled_job_id=None) -> int
+    heartbeat_silent=False, scheduled_job_id=None,
+    talk_delivery_token=None) -> int
 
 claim_task(conn, worker_id, max_retry_age_minutes=60, user_id=None) -> Task | None
 get_task(conn, task_id) -> Task | None
@@ -281,7 +282,7 @@ get_heartbeat_state(conn, user_id, check_name) -> HeartbeatState | None
 update_heartbeat_state(conn, user_id, check_name, **kwargs) -> None
 
 # Sent emails (emissary thread tracking)
-record_sent_email(conn, user_id, message_id, to_addr, subject=None, task_id=None, thread_id=None, in_reply_to=None, references=None, conversation_token=None) -> int
+record_sent_email(conn, user_id, message_id, to_addr, subject=None, task_id=None, thread_id=None, in_reply_to=None, references=None, conversation_token=None, talk_delivery_token=None) -> int
 find_sent_email_by_references(conn, references: list[str]) -> SentEmail | None
 
 # Skills fingerprint

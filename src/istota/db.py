@@ -47,6 +47,7 @@ class Task:
     selected_skills: str | None = None  # JSON array of skill names
     model: str | None = None  # Per-task model override; empty/None = use config default
     effort: str | None = None  # Per-task effort override; empty/None = use config default
+    talk_delivery_token: str | None = None  # Real Talk room for this task's notifications; NULL falls back to conversation_token
 
 
 @dataclass
@@ -88,6 +89,7 @@ class SentEmail:
     references: str | None
     conversation_token: str | None
     sent_at: str
+    talk_delivery_token: str | None = None  # Originating task's resolved Talk room
 
 
 @dataclass
@@ -153,11 +155,22 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("selected_skills", "TEXT"),
         ("model", "TEXT"),
         ("effort", "TEXT"),
+        ("talk_delivery_token", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError:
             pass  # Column already exists or table doesn't exist yet
+
+    # Sent emails: carry the originating task's resolved Talk room so
+    # thread-match follow-ups can deliver to the right channel without re-resolving.
+    for col, col_type in [
+        ("talk_delivery_token", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE sent_emails ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
 
     # Scheduled jobs table migrations
     for col, col_type in [
@@ -287,6 +300,7 @@ def create_task(
     queue: str = "foreground",
     model: str | None = None,
     effort: str | None = None,
+    talk_delivery_token: str | None = None,
 ) -> int:
     """Create a new task and return its ID."""
     # Guard against duplicate Talk messages (race between overlapping poll cycles)
@@ -309,8 +323,9 @@ def create_task(
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
-            heartbeat_silent, skip_log_channel, scheduled_job_id, queue, model, effort
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            heartbeat_silent, skip_log_channel, scheduled_job_id, queue, model, effort,
+            talk_delivery_token
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -334,6 +349,7 @@ def create_task(
             queue,
             model or None,
             effort or None,
+            talk_delivery_token,
         ),
     )
     task_id = cursor.fetchone()[0]
@@ -377,6 +393,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         selected_skills=row["selected_skills"] if "selected_skills" in row.keys() else None,
         model=row["model"] if "model" in row.keys() else None,
         effort=row["effort"] if "effort" in row.keys() else None,
+        talk_delivery_token=row["talk_delivery_token"] if "talk_delivery_token" in row.keys() else None,
     )
 
 
@@ -509,7 +526,8 @@ def claim_task(
                   output_target, talk_message_id, talk_response_id,
                   reply_to_talk_id, reply_to_content,
                   heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
-                  confirmed_at, confirmation_prompt, model, effort
+                  confirmed_at, confirmation_prompt, model, effort,
+                  talk_delivery_token
         """,
         params,
     )
@@ -543,7 +561,8 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Task | None:
                created_at, scheduled_for, output_target,
                talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
                heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
-               confirmed_at, selected_skills, model, effort
+               confirmed_at, selected_skills, model, effort,
+               talk_delivery_token
         FROM tasks WHERE id = ?
         """,
         (task_id,),
@@ -1168,18 +1187,19 @@ def record_sent_email(
     in_reply_to: str | None = None,
     references: str | None = None,
     conversation_token: str | None = None,
+    talk_delivery_token: str | None = None,
 ) -> int:
     """Record an outbound email for thread matching."""
     cursor = conn.execute(
         """
         INSERT INTO sent_emails
             (user_id, task_id, message_id, to_addr, subject, thread_id,
-             in_reply_to, "references", conversation_token)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             in_reply_to, "references", conversation_token, talk_delivery_token)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (user_id, task_id, message_id, to_addr, subject, thread_id,
-         in_reply_to, references, conversation_token),
+         in_reply_to, references, conversation_token, talk_delivery_token),
     )
     return cursor.fetchone()[0]
 
@@ -1192,7 +1212,8 @@ def find_sent_email_by_message_id(
     cursor = conn.execute(
         """
         SELECT id, user_id, task_id, message_id, to_addr, subject, thread_id,
-               in_reply_to, "references", conversation_token, sent_at
+               in_reply_to, "references", conversation_token, sent_at,
+               talk_delivery_token
         FROM sent_emails
         WHERE message_id = ?
         """,
@@ -1213,6 +1234,7 @@ def find_sent_email_by_message_id(
         references=row["references"],
         conversation_token=row["conversation_token"],
         sent_at=row["sent_at"],
+        talk_delivery_token=row["talk_delivery_token"] if "talk_delivery_token" in row.keys() else None,
     )
 
 
@@ -1231,7 +1253,8 @@ def find_sent_email_by_references(
     cursor = conn.execute(
         f"""
         SELECT id, user_id, task_id, message_id, to_addr, subject, thread_id,
-               in_reply_to, "references", conversation_token, sent_at
+               in_reply_to, "references", conversation_token, sent_at,
+               talk_delivery_token
         FROM sent_emails
         WHERE message_id IN ({placeholders})
         ORDER BY sent_at DESC
@@ -1254,6 +1277,7 @@ def find_sent_email_by_references(
         references=row["references"],
         conversation_token=row["conversation_token"],
         sent_at=row["sent_at"],
+        talk_delivery_token=row["talk_delivery_token"] if "talk_delivery_token" in row.keys() else None,
     )
 
 
@@ -1361,7 +1385,8 @@ def get_reply_parent_task(
                created_at, scheduled_for, output_target,
                talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
                heartbeat_silent, actions_taken, scheduled_job_id, queue,
-               selected_skills, model, effort
+               selected_skills, model, effort,
+               talk_delivery_token
         FROM tasks
         WHERE conversation_token = ?
         AND (talk_message_id = ? OR talk_response_id = ?)
