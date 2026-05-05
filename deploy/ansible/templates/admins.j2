@@ -1,6 +1,9 @@
 # {{ istota_namespace | capitalize }} admin users - one user ID per line
 # Users listed here get full system access (DB, all files, admin-only skills)
-# If this file is empty or missing, all users are admins (backward compatible)
+# Asymmetric semantics when this file is empty or missing:
+#   - Sandbox / skills / commands (Config.is_admin): all users are admin (legacy back-compat)
+#   - Web admin dashboard (_user_is_web_admin): no users are admin (fails closed)
+# To grant web admin access, list at least one user_id below.
 # Managed by Ansible - do not edit manually
 {% for user_id in istota_admin_users %}
 {{ user_id }}

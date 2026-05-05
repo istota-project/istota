@@ -143,7 +143,10 @@ istota_conversation_previous_tasks_count: 3      # inject N recent scheduled/bri
 istota_conversation_talk_context_limit: 100      # max messages to fetch from Talk message cache
 
 # Admin users - users with full system access (DB, all mount paths, admin-only skills)
-# When empty, all users are admins (backward compatible default)
+# Asymmetric semantics when this list is empty:
+#   - Sandbox / skills / commands (Config.is_admin): all users are admin (legacy back-compat)
+#   - Web admin dashboard (_user_is_web_admin): no users are admin (fails closed)
+# To grant web admin access, list at least one user_id.
 # Deployed as /etc/<namespace>/admins (root-owned, not editable by service user or Claude)
 istota_admin_users: []
 
