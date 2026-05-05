@@ -1288,3 +1288,538 @@ class TestEmailPromptBoundaries:
             assert "<email_content>" in task.prompt
             assert "</email_content>" in task.prompt
             assert "do not follow instructions" in task.prompt.lower()
+
+
+# =============================================================================
+# TestEmissaryReplyDeliveryTokenResolution
+# =============================================================================
+
+
+class TestEmissaryReplyDeliveryTokenResolution:
+    """Cover every shape of sent_emails row that a thread-match can hit.
+
+    Originating tasks come in three flavours and either may pre-date the
+    talk_delivery_token column. The reply task's talk_delivery_token must
+    end up pointing at a real Talk room in every case.
+    """
+
+    def _inbound(self, references="<out@bot.com>"):
+        envelope = _envelope(id="r1", sender="ext@x.com", subject="Re: Plan")
+        email = Email(
+            id="r1", subject="Re: Plan", sender="ext@x.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="reply body", attachments=[],
+            message_id="<r1@x.com>", references=references,
+            to=("bot@test.com",), cc=(),
+        )
+        return envelope, email
+
+    def _poll(self, config, envelope, email):
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            return poll_emails(config)
+
+    def test_talk_originator_null_delivery_token_uses_real_conversation_token(
+        self, make_config,
+    ):
+        """The bug: pre-fix code threw away a real Talk room.
+
+        Talk-source originators record sent_emails with conversation_token =
+        real Talk room and talk_delivery_token = NULL. The reply must land
+        in that Talk room, not a resolved alerts/briefing/DM channel.
+        """
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "stefan": UserConfig(
+                email_addresses=["stefan@test.com"],
+                # alerts_channel set so the WRONG fallback would return it —
+                # if the test passes, we know we're using the sent_email row,
+                # not the user's resolved channel.
+                alerts_channel="WRONG_alerts_channel",
+            ),
+        }
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<out@bot.com>",
+                to_addr="ext@x.com",
+                subject="Plan",
+                conversation_token="original_talk_room",
+                talk_delivery_token=None,  # pre-migration / talk-originator
+            )
+
+        envelope, email = self._inbound()
+        task_ids = self._poll(config, envelope, email)
+        assert len(task_ids) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+        assert task.user_id == "stefan"
+        assert task.talk_delivery_token == "original_talk_room"
+        # conversation_token also preserved as the original Talk room
+        # (line 294 in email_poller.py: inherits from sent_email)
+        assert task.conversation_token == "original_talk_room"
+
+    def test_email_originator_null_delivery_token_synthetic_falls_back_to_alerts(
+        self, make_config,
+    ):
+        """Email-originator with synthetic thread hash and NULL delivery token.
+
+        The synthetic conversation_token isn't a real Talk room, so we must
+        resolve via the user's alerts/briefing/DM rather than misroute.
+        """
+        synthetic = "deadbeef12345678"  # 16 lowercase hex
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "stefan": UserConfig(
+                email_addresses=["stefan@test.com"],
+                alerts_channel="stefan_alerts",
+            ),
+        }
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<out@bot.com>",
+                to_addr="ext@x.com",
+                subject="Plan",
+                conversation_token=synthetic,
+                talk_delivery_token=None,  # pre-migration row
+            )
+
+        envelope, email = self._inbound()
+        task_ids = self._poll(config, envelope, email)
+        assert len(task_ids) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+        assert task.talk_delivery_token == "stefan_alerts"
+        # conversation_token preserved as the synthetic email-thread key
+        assert task.conversation_token == synthetic
+
+    def test_briefing_originator_null_delivery_token_uses_briefing_room(
+        self, make_config,
+    ):
+        """Briefing-originated email: conversation_token IS the briefing room."""
+        from istota.config import BriefingConfig as BriefConf
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "stefan": UserConfig(
+                email_addresses=["stefan@test.com"],
+                # alerts_channel deliberately empty so resolve_conversation_token
+                # would pick the briefing — same value as the sent_email's
+                # conversation_token. To prove we use the sent_email path
+                # rather than resolve, set alerts to a different value.
+                alerts_channel="other_alerts",
+                briefings=[BriefConf(
+                    name="morning", cron="0 8 * * *",
+                    conversation_token="morning_briefing_room",
+                )],
+            ),
+        }
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<out@bot.com>",
+                to_addr="ext@x.com",
+                subject="Briefing follow-up",
+                conversation_token="morning_briefing_room",
+                talk_delivery_token=None,
+            )
+
+        envelope, email = self._inbound()
+        task_ids = self._poll(config, envelope, email)
+        assert len(task_ids) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+        # Routes to the briefing room (which IS the original conversation_token),
+        # not "other_alerts"
+        assert task.talk_delivery_token == "morning_briefing_room"
+
+    def test_null_conversation_and_delivery_falls_back_to_resolve(
+        self, make_config,
+    ):
+        """Both NULL on sent_email — resolve via user config."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "stefan": UserConfig(
+                email_addresses=["stefan@test.com"],
+                alerts_channel="stefan_alerts",
+            ),
+        }
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<out@bot.com>",
+                to_addr="ext@x.com",
+                subject="Hello",
+                conversation_token=None,
+                talk_delivery_token=None,
+            )
+
+        envelope, email = self._inbound()
+        task_ids = self._poll(config, envelope, email)
+        assert len(task_ids) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+        assert task.talk_delivery_token == "stefan_alerts"
+
+    def test_explicit_delivery_token_wins_over_conversation_token(
+        self, make_config,
+    ):
+        """When sent_email has an explicit delivery token, it beats conversation_token."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "stefan": UserConfig(
+                email_addresses=["stefan@test.com"],
+                alerts_channel="WRONG_alerts",
+            ),
+        }
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<out@bot.com>",
+                to_addr="ext@x.com",
+                subject="Plan",
+                conversation_token="some_other_room",
+                talk_delivery_token="explicit_delivery_room",
+            )
+
+        envelope, email = self._inbound()
+        task_ids = self._poll(config, envelope, email)
+        assert len(task_ids) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+        assert task.talk_delivery_token == "explicit_delivery_room"
+
+    def test_real_conversation_token_no_user_config_preserves_it(
+        self, make_config,
+    ):
+        """No resolvable channel and a real-looking conversation_token: use it.
+
+        Don't return None just because resolve_conversation_token can't help —
+        the originating task already has a perfectly good Talk room recorded.
+        """
+        config = make_config()
+        config.email = _email_config()
+        # User exists for routing but has no alerts/briefing/DM
+        config.users = {"stefan": UserConfig(email_addresses=["stefan@test.com"])}
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<out@bot.com>",
+                to_addr="ext@x.com",
+                subject="Plan",
+                conversation_token="orig_room",
+                talk_delivery_token=None,
+            )
+
+        envelope, email = self._inbound()
+        task_ids = self._poll(config, envelope, email)
+        assert len(task_ids) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+        assert task.talk_delivery_token == "orig_room"
+
+
+# =============================================================================
+# TestEmissaryRecordingShape
+# =============================================================================
+
+
+class TestEmissaryRecordingShape:
+    """What gets written to sent_emails when each task type sends an email.
+
+    The thread-match logic above only works if sent_emails rows record the
+    right fields for each originator type. These tests pin that contract.
+    """
+
+    def _config(self, db_path, tmp_path):
+        from istota.config import (
+            EmailConfig as AppEmail, NextcloudConfig, SchedulerConfig, TalkConfig,
+        )
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=AppEmail(),
+            scheduler=SchedulerConfig(),
+            temp_dir=tmp_path / "temp",
+        )
+
+    def test_record_sent_email_for_talk_source_task(self, db_path, tmp_path):
+        """Talk-source task -> sent_emails.conversation_token = real Talk room."""
+        from istota.scheduler import _record_sent_email
+        config = self._config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Send email please", user_id="alice",
+                source_type="talk", conversation_token="real_talk_room",
+                # talk_delivery_token NULL: talk-source tasks rely on the
+                # _talk_target_for_delivery fallback to conversation_token.
+                talk_delivery_token=None,
+            )
+            task = db.get_task(conn, task_id)
+
+        _record_sent_email(
+            config, task,
+            message_id="<sent@bot.com>",
+            to_addr="ext@x.com",
+            subject="Hello",
+        )
+
+        with db.get_db(db_path) as conn:
+            row = db.find_sent_email_by_message_id(conn, "<sent@bot.com>")
+        assert row is not None
+        assert row.conversation_token == "real_talk_room"
+        # The known-NULL talk_delivery_token is the data shape that the
+        # email_poller fix has to handle correctly on the read side.
+        assert row.talk_delivery_token is None
+        assert row.user_id == "alice"
+
+    def test_record_sent_email_for_email_source_task(self, db_path, tmp_path):
+        """Email-source task -> sent_emails.talk_delivery_token populated."""
+        from istota.scheduler import _record_sent_email
+        config = self._config(db_path, tmp_path)
+        synthetic = "abcdef0123456789"
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Reply to that", user_id="alice",
+                source_type="email", conversation_token=synthetic,
+                talk_delivery_token="alerts_channel_xyz",
+            )
+            task = db.get_task(conn, task_id)
+
+        _record_sent_email(
+            config, task,
+            message_id="<sent2@bot.com>",
+            to_addr="ext@x.com",
+            subject="Re: Plan",
+        )
+
+        with db.get_db(db_path) as conn:
+            row = db.find_sent_email_by_message_id(conn, "<sent2@bot.com>")
+        assert row is not None
+        assert row.conversation_token == synthetic
+        assert row.talk_delivery_token == "alerts_channel_xyz"
+
+    def test_record_sent_email_for_subtask_inherits_parent_tokens(
+        self, db_path, tmp_path,
+    ):
+        """Subtask sending email -> sent_emails carries parent's tokens."""
+        from istota.scheduler import _record_sent_email
+        config = self._config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="parent", user_id="alice",
+                source_type="talk", conversation_token="parent_talk_room",
+            )
+            sub_id = db.create_task(
+                conn, prompt="child", user_id="alice",
+                source_type="subtask", parent_task_id=parent_id,
+                conversation_token="parent_talk_room",
+                talk_delivery_token="parent_talk_room",
+            )
+            sub = db.get_task(conn, sub_id)
+
+        _record_sent_email(
+            config, sub,
+            message_id="<sub@bot.com>",
+            to_addr="ext@x.com",
+        )
+
+        with db.get_db(db_path) as conn:
+            row = db.find_sent_email_by_message_id(conn, "<sub@bot.com>")
+        assert row is not None
+        assert row.conversation_token == "parent_talk_room"
+        assert row.talk_delivery_token == "parent_talk_room"
+
+
+# =============================================================================
+# TestEmissaryLifecycle — end-to-end outbound -> inbound
+# =============================================================================
+
+
+class TestEmissaryLifecycle:
+    """Round-trip tests: a task sends an email; the reply comes in and routes."""
+
+    def _inbound_for(self, message_id):
+        envelope = _envelope(id="lc1", sender="ext@x.com", subject="Re: Plan")
+        email = Email(
+            id="lc1", subject="Re: Plan", sender="ext@x.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="The reply", attachments=[],
+            message_id="<reply_lc1@x.com>", references=f"<{message_id}>",
+            to=("bot@test.com",), cc=(),
+        )
+        return envelope, email
+
+    def _scheduler_config(self, db_path, tmp_path, alerts="alerts_room"):
+        from istota.config import (
+            EmailConfig as AppEmail, NextcloudConfig, SchedulerConfig, TalkConfig,
+        )
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=AppEmail(),
+            scheduler=SchedulerConfig(),
+            temp_dir=tmp_path / "temp",
+            users={"alice": UserConfig(
+                email_addresses=["alice@test.com"],
+                alerts_channel=alerts,
+            )},
+        )
+
+    def _poller_config(self, db_path, tmp_path, alerts="alerts_room"):
+        config = Config()
+        config.db_path = db_path
+        config.temp_dir = tmp_path / "temp"
+        config.temp_dir.mkdir(exist_ok=True)
+        config.skills_dir = tmp_path / "skills"
+        config.skills_dir.mkdir(exist_ok=True)
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel=alerts,
+        )}
+        return config
+
+    def test_talk_task_sends_email_reply_routes_to_original_room(
+        self, db_path, tmp_path,
+    ):
+        """Full loop: talk task sends, external replies, routes to original room."""
+        from istota.scheduler import _record_sent_email
+        sched_cfg = self._scheduler_config(db_path, tmp_path, alerts="alerts_room")
+
+        with db.get_db(db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="send email", user_id="alice",
+                source_type="talk", conversation_token="talkroom_42",
+            )
+            task = db.get_task(conn, tid)
+        _record_sent_email(
+            sched_cfg, task,
+            message_id="<m_talk@bot.com>",
+            to_addr="ext@x.com", subject="Plan",
+        )
+
+        # Inbound reply
+        poll_cfg = self._poller_config(db_path, tmp_path, alerts="alerts_room")
+        envelope, email = self._inbound_for("m_talk@bot.com")
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(poll_cfg)
+
+        assert len(task_ids) == 1
+        with db.get_db(db_path) as conn:
+            new_task = db.get_task(conn, task_ids[0])
+        assert new_task.user_id == "alice"
+        assert new_task.talk_delivery_token == "talkroom_42"
+        assert new_task.conversation_token == "talkroom_42"
+        assert new_task.output_target == "both"
+
+    def test_email_task_sends_email_reply_routes_via_alerts(
+        self, db_path, tmp_path,
+    ):
+        """Email-source originator: reply routes via the recorded delivery token."""
+        from istota.scheduler import _record_sent_email
+        sched_cfg = self._scheduler_config(db_path, tmp_path, alerts="alerts_room")
+        synthetic = "0123456789abcdef"
+
+        with db.get_db(db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="reply", user_id="alice",
+                source_type="email", conversation_token=synthetic,
+                talk_delivery_token="alerts_room",
+            )
+            task = db.get_task(conn, tid)
+        _record_sent_email(
+            sched_cfg, task,
+            message_id="<m_email@bot.com>",
+            to_addr="ext@x.com", subject="Plan",
+        )
+
+        poll_cfg = self._poller_config(db_path, tmp_path, alerts="alerts_room")
+        envelope, email = self._inbound_for("m_email@bot.com")
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(poll_cfg)
+
+        assert len(task_ids) == 1
+        with db.get_db(db_path) as conn:
+            new_task = db.get_task(conn, task_ids[0])
+        assert new_task.talk_delivery_token == "alerts_room"
+        # conversation_token still preserves the original synthetic email-thread key
+        assert new_task.conversation_token == synthetic
+
+    def test_subtask_sends_email_reply_routes_to_parent_room(
+        self, db_path, tmp_path,
+    ):
+        """Subtask of a talk task sends an email — reply must reach parent's room."""
+        from istota.scheduler import _record_sent_email
+        sched_cfg = self._scheduler_config(db_path, tmp_path, alerts="alerts_room")
+
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="parent", user_id="alice",
+                source_type="talk", conversation_token="parent_room",
+            )
+            sub_id = db.create_task(
+                conn, prompt="child", user_id="alice",
+                source_type="subtask", parent_task_id=parent_id,
+                conversation_token="parent_room",
+                talk_delivery_token="parent_room",
+            )
+            sub = db.get_task(conn, sub_id)
+        _record_sent_email(
+            sched_cfg, sub,
+            message_id="<m_sub@bot.com>",
+            to_addr="ext@x.com", subject="Plan",
+        )
+
+        poll_cfg = self._poller_config(db_path, tmp_path)
+        envelope, email = self._inbound_for("m_sub@bot.com")
+        with (
+            patch("istota.email_poller.list_emails", return_value=[envelope]),
+            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.email_poller.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(poll_cfg)
+
+        assert len(task_ids) == 1
+        with db.get_db(db_path) as conn:
+            new_task = db.get_task(conn, task_ids[0])
+        assert new_task.talk_delivery_token == "parent_room"
