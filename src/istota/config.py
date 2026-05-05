@@ -534,16 +534,38 @@ def load_admin_users(path: str | None = None) -> set[str]:
     """Load admin user IDs from a plain-text file.
 
     File format: one user ID per line, # comments, blank lines ignored.
-    Returns empty set if file doesn't exist (backward compat: all users = admin).
+    Returns empty set if file doesn't exist. Empty-set semantics are
+    asymmetric: Config.is_admin treats empty as "all users admin" for
+    legacy back-compat, while the web admin dashboard fails closed.
 
     Args:
         path: Override file path. If None, checks ISTOTA_ADMINS_FILE env var,
-              then falls back to /etc/istota/admins.
+              then falls back to /etc/istota/admins. The default path is
+              wrong for renamed-namespace installs (e.g. /etc/zorg/admins);
+              such deploys must set ISTOTA_ADMINS_FILE in every entry-point
+              systemd unit. A WARNING is logged when the resolved path is
+              missing so silent fail-closed admin in the web UI is visible
+              in the journal.
     """
+    explicit_path = path is not None
+    env_var_set = "ISTOTA_ADMINS_FILE" in os.environ
     if path is None:
         path = os.environ.get("ISTOTA_ADMINS_FILE", "/etc/istota/admins")
     admins_path = Path(path)
     if not admins_path.exists():
+        if not explicit_path:
+            if env_var_set:
+                logger.warning(
+                    "admins_file_missing path=%s (ISTOTA_ADMINS_FILE set but file absent — "
+                    "web admin dashboard will fail closed)",
+                    path,
+                )
+            else:
+                logger.info(
+                    "admins_file_default_missing path=%s (ISTOTA_ADMINS_FILE not set; "
+                    "no web admins will be recognized)",
+                    path,
+                )
         return set()
     admins = set()
     for line in admins_path.read_text().splitlines():
