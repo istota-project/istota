@@ -197,6 +197,34 @@ class TestChannel:
         out = json.loads(capsys.readouterr().out)
         assert out["error"] == "channel token mismatch — refusing cross-channel write"
 
+    def test_channel_refused_when_env_token_unset(self, tmp_path, monkeypatch, capsys):
+        # ISSUE-075: empty/unset ISTOTA_CONVERSATION_TOKEN must refuse --channel,
+        # not pass through. Otherwise prompt-injected non-Talk tasks (email,
+        # briefing, scheduled, cron, subtask) can write into any channel's
+        # CHANNEL.md by passing --channel <victim_token>.
+        self._setup(tmp_path, monkeypatch, token="room-1")
+        monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
+        with pytest.raises(SystemExit):
+            memory_main([
+                "append", "--heading", "Decisions", "--line", "X",
+                "--channel", "room-1",
+            ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "channel write requires ISTOTA_CONVERSATION_TOKEN"
+
+    def test_channel_refused_when_env_token_empty(self, tmp_path, monkeypatch, capsys):
+        # Same gap: env var present but empty string also short-circuited the
+        # original guard. Treat empty as unset.
+        self._setup(tmp_path, monkeypatch, token="room-1")
+        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "")
+        with pytest.raises(SystemExit):
+            memory_main([
+                "append", "--heading", "Decisions", "--line", "X",
+                "--channel", "room-1",
+            ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "channel write requires ISTOTA_CONVERSATION_TOKEN"
+
 
 class TestAtomicWrite:
     def test_no_partial_write_on_reject(self, tmp_path, monkeypatch, capsys):
@@ -207,3 +235,60 @@ class TestAtomicWrite:
             memory_main(["remove", "--heading", "Notes", "--match", "note"])
         capsys.readouterr()
         assert user_md.read_text() == before
+
+
+class TestBotDirFallback:
+    """ISSUE-077: when ISTOTA_BOT_DIR_NAME is unset, refuse to guess between
+    multiple candidate bot dirs. Single-candidate fallback still works."""
+
+    def _setup_two_bots(self, tmp_path, monkeypatch, user_id="alice"):
+        mount = tmp_path / "mount"
+        for bot_dir in ("istota", "zorg"):
+            d = mount / "Users" / user_id / bot_dir / "config"
+            d.mkdir(parents=True)
+            (d / "USER.md").write_text(SEED_USER_MD)
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
+        monkeypatch.setenv("ISTOTA_USER_ID", user_id)
+        monkeypatch.delenv("ISTOTA_BOT_DIR_NAME", raising=False)
+        monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
+        monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
+        return mount
+
+    def test_multiple_candidates_refused(self, tmp_path, monkeypatch, capsys):
+        self._setup_two_bots(tmp_path, monkeypatch)
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--heading", "Notes", "--line", "X"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "error"
+        assert "multiple bot dirs" in out["error"]
+        assert sorted(out["candidates"]) == ["istota", "zorg"]
+
+    def test_single_candidate_used(self, tmp_path, monkeypatch, capsys):
+        mount = tmp_path / "mount"
+        d = mount / "Users" / "alice" / "istota" / "config"
+        d.mkdir(parents=True)
+        user_md = d / "USER.md"
+        user_md.write_text(SEED_USER_MD)
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.delenv("ISTOTA_BOT_DIR_NAME", raising=False)
+        monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
+        monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
+        memory_main(["append", "--heading", "Notes", "--line", "Inferred"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert "- Inferred" in user_md.read_text()
+
+    def test_zero_candidates_refused(self, tmp_path, monkeypatch, capsys):
+        mount = tmp_path / "mount"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.delenv("ISTOTA_BOT_DIR_NAME", raising=False)
+        monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
+        monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--heading", "Notes", "--line", "X"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "error"
+        assert "could not infer" in out["error"]

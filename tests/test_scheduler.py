@@ -3082,7 +3082,14 @@ class TestDeferredOperations:
     @patch("istota.scheduler.execute_task", return_value=(False, "Something broke", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_deferred_ops_skipped_on_failure(self, mock_arun, mock_exec, db_path, tmp_path):
-        """Deferred files should NOT be processed when task fails."""
+        """Deferred files should NOT be processed when task fails.
+
+        ISSUE-074 follow-up: a retry-eligible failure now also *purges* the
+        deferred file so the next attempt starts clean — without that, the
+        producer's append-on-write would replay the failed attempt's ops on
+        eventual success. The invariant the original test cared about
+        ("no DB side effects from a failed deferred file") still holds.
+        """
         config = self._make_config(db_path, tmp_path)
         user_temp = tmp_path / "temp" / "testuser"
         user_temp.mkdir(parents=True)
@@ -3092,7 +3099,6 @@ class TestDeferredOperations:
                 conn, prompt="Fail me", user_id="testuser", source_type="cli",
             )
 
-        # Write deferred files that should NOT be processed
         subtasks = [{"prompt": "Should not exist"}]
         (user_temp / f"task_{task_id}_subtasks.json").write_text(json.dumps(subtasks))
 
@@ -3101,10 +3107,11 @@ class TestDeferredOperations:
         _, success = result
         assert success is False
 
-        # Deferred files should still exist (not processed)
-        assert (user_temp / f"task_{task_id}_subtasks.json").exists()
+        # Retry-eligible failure: deferred file purged so the next attempt
+        # doesn't replay these ops. The DB side effects are still skipped —
+        # no subtask was ever created from this file.
+        assert not (user_temp / f"task_{task_id}_subtasks.json").exists()
 
-        # No subtasks created
         with db.get_db(db_path) as conn:
             tasks = db.list_tasks(conn, user_id="testuser")
         assert all(t.source_type != "subtask" for t in tasks)
@@ -3641,6 +3648,137 @@ class TestWarnUnconsumedDeferredFiles:
             _warn_unconsumed_deferred_files(task, tmp_path / "does-not-exist")
         # No exception, no warnings.
         assert not any("Unrecognized deferred file" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# TestPurgeDeferredFilesForRetry — ISSUE-074
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeDeferredFilesForRetry:
+    """ISSUE-074: deferred-op producers append to ``task_{id}_*.json``. When a
+    task fails and retries with the same ``task.id``, the next attempt's ops
+    must not replay alongside the failed attempt's. The retry path now purges
+    those files; ``_process_deferred_kg_ops`` commits per-op so a mid-loop
+    crash doesn't lose ops we've already accepted.
+    """
+
+    def _task(self, task_id: int = 999):
+        return db.Task(
+            id=task_id, status="pending_retry", source_type="talk",
+            user_id="alice", prompt="x",
+        )
+
+    def test_purge_removes_known_suffixes(self, tmp_path, caplog):
+        from istota.scheduler import _purge_deferred_files_for_retry
+        task = self._task(999)
+        for suffix in (
+            "subtasks", "tracked_transactions", "sent_emails",
+            "kv_ops", "kg_ops", "user_alerts", "email_output",
+        ):
+            (tmp_path / f"task_999_{suffix}.json").write_text("[]")
+        with caplog.at_level("INFO"):
+            _purge_deferred_files_for_retry(task, tmp_path)
+        for suffix in (
+            "subtasks", "tracked_transactions", "sent_emails",
+            "kv_ops", "kg_ops", "user_alerts", "email_output",
+        ):
+            assert not (tmp_path / f"task_999_{suffix}.json").exists()
+
+    def test_purge_leaves_other_tasks_files(self, tmp_path):
+        from istota.scheduler import _purge_deferred_files_for_retry
+        task = self._task(999)
+        (tmp_path / "task_999_kg_ops.json").write_text("[]")
+        (tmp_path / "task_1000_kg_ops.json").write_text("[]")
+        _purge_deferred_files_for_retry(task, tmp_path)
+        assert not (tmp_path / "task_999_kg_ops.json").exists()
+        assert (tmp_path / "task_1000_kg_ops.json").exists()
+
+    def test_purge_leaves_prompt_and_result(self, tmp_path):
+        # Result/prompt are scoped per-task and overwritten by the executor.
+        from istota.scheduler import _purge_deferred_files_for_retry
+        task = self._task(999)
+        (tmp_path / "task_999_prompt.txt").write_text("prompt")
+        (tmp_path / "task_999_result.txt").write_text("result")
+        (tmp_path / "task_999_kg_ops.json").write_text("[]")
+        _purge_deferred_files_for_retry(task, tmp_path)
+        assert (tmp_path / "task_999_prompt.txt").exists()
+        assert (tmp_path / "task_999_result.txt").exists()
+        assert not (tmp_path / "task_999_kg_ops.json").exists()
+
+    def test_purge_handles_missing_dir(self, tmp_path):
+        from istota.scheduler import _purge_deferred_files_for_retry
+        task = self._task(999)
+        # Should not raise.
+        _purge_deferred_files_for_retry(task, tmp_path / "missing")
+
+    def test_kg_ops_commit_per_op_survives_mid_loop_crash(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        """If an op mid-batch raises, ops accepted before it must persist —
+        i.e. they were committed independently, not rolled back.
+        """
+        from istota.scheduler import _process_deferred_kg_ops
+        from istota.memory import knowledge_graph as kg
+
+        config = Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(
+                url="https://nc.example.com", username="i", app_password="x",
+            ),
+            talk=TalkConfig(enabled=True, bot_username="i"),
+            email=EmailConfig(enabled=False),
+            scheduler=SchedulerConfig(),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            kg.ensure_table(conn)
+            task_id = db.create_task(
+                conn, prompt="p", user_id="alice", source_type="talk",
+            )
+            task = db.get_task(conn, task_id)
+
+        ops = [
+            {"op": "add_fact", "subject": "alice", "predicate": "likes",
+             "object": "tea", "source_type": "user_stated"},
+            {"op": "invalidate", "fact_id": 99999},  # nonexistent — fine
+            {"op": "add_fact", "subject": "alice", "predicate": "likes",
+             "object": "coffee", "source_type": "user_stated"},
+        ]
+        path = user_temp / f"task_{task_id}_kg_ops.json"
+        path.write_text(json.dumps(ops))
+
+        # Wrap kg_invalidate_fact to raise mid-loop on the second op.
+        real_invalidate = kg.invalidate_fact
+
+        def boom(*args, **kwargs):  # noqa: ARG001
+            raise RuntimeError("simulated crash")
+
+        # The scheduler imports symbols inside the function; patch the
+        # binding the function uses (`from .memory.knowledge_graph import
+        # invalidate_fact as kg_invalidate_fact` runs each call).
+        monkeypatch.setattr(kg, "invalidate_fact", boom)
+
+        _process_deferred_kg_ops(config, task, user_temp)
+
+        # The first add_fact (before the crash) AND the third (after the
+        # caught exception) must both have landed. With a single end-of-loop
+        # commit, the failure on op 2 would have rolled back op 1.
+        with db.get_db(db_path) as conn:
+            facts = kg.get_current_facts(conn, "alice", subject="alice")
+        objects = sorted(f.object for f in facts)
+        assert objects == ["coffee", "tea"], (
+            f"per-op commit broken — surviving facts: {objects}"
+        )
+
+        # File cleared.
+        assert not path.exists()
+
+        monkeypatch.setattr(kg, "invalidate_fact", real_invalidate)
 
 
 # ---------------------------------------------------------------------------

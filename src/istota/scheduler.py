@@ -1298,16 +1298,54 @@ def _process_deferred_kg_ops(
                     logger.warning(
                         "Unknown KG op %r in deferred file for task %d", op, task.id,
                     )
+                    continue
+                # Per-op commit (ISSUE-074): a failure later in the loop must
+                # not roll back ops we've already accepted. `delete` and
+                # `invalidate` are not idempotent, so a partial replay would
+                # otherwise re-apply work the next time this file was read.
+                conn.commit()
             except Exception as e:
                 logger.warning(
                     "Failed to process KG op for task %d: %s", task.id, e,
                 )
-        conn.commit()
 
     if count:
         logger.info("Processed %d deferred KG ops for task %d", count, task.id)
     path.unlink(missing_ok=True)
     return count
+
+
+def _purge_deferred_files_for_retry(task: db.Task, user_temp_dir: Path) -> None:
+    """Delete the task's accumulated deferred-op files before a retry.
+
+    ISSUE-074: producers like ``_defer_kg_op`` *append* to ``task_{id}_*.json``;
+    on retry the same task.id is reused, so a previously-failed attempt's ops
+    would replay alongside the new attempt's. Non-idempotent ops (``invalidate``,
+    ``delete`` for KG; subtask creation; outbound emails; user alerts) make
+    replays harmful, not just redundant. Clear the slate on every retry.
+
+    Result and prompt files are left in place — they're scoped per-task, not
+    per-attempt, and the executor overwrites them.
+    """
+    if not user_temp_dir.is_dir():
+        return
+    purged: list[str] = []
+    for suffix in _KNOWN_DEFERRED_SUFFIXES:
+        path = user_temp_dir / f"task_{task.id}_{suffix}.json"
+        if path.exists():
+            try:
+                path.unlink()
+                purged.append(suffix)
+            except OSError as e:
+                logger.warning(
+                    "Could not purge deferred %s for task %d retry: %s",
+                    suffix, task.id, e,
+                )
+    if purged:
+        logger.info(
+            "Purged deferred files for task %d retry: %s",
+            task.id, ", ".join(purged),
+        )
 
 
 def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
@@ -1778,6 +1816,14 @@ def process_one_task(
                 delay = 1 << (task.attempt_count * 2)
                 db.set_task_pending_retry(conn, task_id, result, delay)
                 db.log_task(conn, task_id, "warn", f"Task failed, will retry in {delay} minutes: {result[:200]}")
+                # ISSUE-074: clear any deferred-op files this attempt accumulated
+                # so the next attempt starts with a clean slate. Producers append
+                # to these files, so without this, eventual success would replay
+                # the failed attempt's ops alongside the successful one's.
+                from .executor import get_user_temp_dir
+                _purge_deferred_files_for_retry(
+                    task, get_user_temp_dir(config, task.user_id),
+                )
             else:
                 db.update_task_status(conn, task_id, "failed", error=result)
                 db.log_task(conn, task_id, "error", f"Task failed permanently: {result[:500]}")
