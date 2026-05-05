@@ -1,5 +1,6 @@
 """Tests for istota.web_app — authenticated web interface."""
 
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -536,6 +537,293 @@ class TestSessionRotation:
         resp = await client.get("/istota/api/me", cookies=cookies)
         assert resp.status_code == 200
         assert resp.json()["username"] == "bob"
+
+
+@_needs_web_deps
+class TestAdminStats:
+    """Phase 1 admin dashboard endpoint."""
+
+    def _config_with_admin(self, tmp_path):
+        from istota import db
+        config = _make_config(tmp_path)
+        config.db_path = tmp_path / "istota.db"
+        config.admin_users = {"alice"}
+        db.init_db(config.db_path)
+        return config
+
+    async def _login(self, client, username):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": username, "name": username.title()},
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def test_me_includes_is_admin(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/me", cookies=cookies)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["is_admin"] is True
+            assert data["features"]["admin"] is True
+
+    async def test_me_non_admin(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "bob")
+            resp = await client.get("/istota/api/me", cookies=cookies)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["is_admin"] is False
+            assert data["features"]["admin"] is False
+
+    async def test_admin_stats_requires_auth(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            resp = await client.get("/istota/api/admin/stats")
+            assert resp.status_code == 401
+
+    async def test_admin_stats_forbidden_for_non_admin(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "bob")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            assert resp.status_code == 403
+
+    async def test_admin_stats_empty_db(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            assert resp.status_code == 200
+            data = resp.json()
+
+            assert "system" in data
+            assert data["system"]["python_version"]
+            assert isinstance(data["system"]["uptime_seconds"], int)
+            assert data["system"]["db_size_bytes"] >= 0
+
+            assert isinstance(data["users"], list)
+            usernames = {u["username"] for u in data["users"]}
+            assert {"alice", "bob"}.issubset(usernames)
+            alice_row = next(u for u in data["users"] if u["username"] == "alice")
+            assert alice_row["is_admin"] is True
+            assert alice_row["tasks_total"] == 0
+
+            assert data["scheduler"]["jobs_total"] == 0
+            assert data["tasks"]["total"] == 0
+            assert "storage" in data
+            assert "modules" in data
+
+    async def test_admin_stats_aggregates_tasks(self, tmp_path):
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.create_task(conn, "task one", "alice", source_type="talk")
+            db.create_task(conn, "task two", "alice", source_type="email")
+            db.create_task(conn, "task three", "bob", source_type="talk")
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            assert resp.status_code == 200
+            data = resp.json()
+
+            assert data["tasks"]["total"] == 3
+            assert data["tasks"]["last_24h"] == 3
+            assert data["tasks"]["by_source"]["talk"] == 2
+            assert data["tasks"]["by_source"]["email"] == 1
+
+            alice_row = next(u for u in data["users"] if u["username"] == "alice")
+            assert alice_row["tasks_total"] == 2
+            assert alice_row["tasks_last_24h"] == 2
+            bob_row = next(u for u in data["users"] if u["username"] == "bob")
+            assert bob_row["tasks_total"] == 1
+
+    async def test_me_admin_fails_closed_when_admins_unset(self, tmp_path):
+        """Empty ``admin_users`` set must NOT grant admin via the web UI.
+
+        ``Config.is_admin`` returns True for everyone when the admins file
+        is missing (back-compat for sandbox/skill checks). The web admin
+        dashboard requires an explicit allowlist — fail closed.
+        """
+        config = self._config_with_admin(tmp_path)
+        config.admin_users = set()
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/me", cookies=cookies)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["is_admin"] is False
+            assert data["features"]["admin"] is False
+
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            assert resp.status_code == 403
+
+    async def test_admin_stats_error_rate_uses_terminal_states(self, tmp_path):
+        """A quiet day with one failure and pending work must not read 100%."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            t1 = db.create_task(conn, "ok 1", "alice", source_type="talk")
+            t2 = db.create_task(conn, "ok 2", "alice", source_type="talk")
+            t3 = db.create_task(conn, "fail", "alice", source_type="talk")
+            db.create_task(conn, "pending", "alice", source_type="talk")  # pending
+            db.create_task(conn, "running", "alice", source_type="talk")  # pending → no terminal
+            conn.execute("UPDATE tasks SET status = 'completed' WHERE id IN (?, ?)", (t1, t2))
+            conn.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (t3,))
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            # 1 failed / (2 completed + 1 failed) = 0.3333… not 0.2 (1/5)
+            assert data["tasks"]["error_rate_24h"] == pytest.approx(0.3333, rel=1e-3)
+
+    async def test_admin_stats_error_rate_zero_terminal_tasks(self, tmp_path):
+        """All-pending day must not crash on zero division."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.create_task(conn, "pending 1", "alice", source_type="talk")
+            db.create_task(conn, "pending 2", "alice", source_type="talk")
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            assert data["tasks"]["error_rate_24h"] == 0.0
+
+    async def test_admin_stats_timestamps_normalized_to_iso_z(self, tmp_path):
+        """Backend must emit a single canonical timestamp shape."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(conn, "task", "alice", source_type="talk")
+            conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, "
+                "enabled, last_run_at, last_success_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("alice", "j", "* * * * *", "p", 1,
+                 "2026-05-04 12:00:00", "2026-05-04 11:45:00"),
+            )
+            conn.commit()
+            assert tid > 0
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+
+            iso_re = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+            assert re.match(iso_re, data["system"]["last_scheduler_run"])
+            alice_row = next(u for u in data["users"] if u["username"] == "alice")
+            assert re.match(iso_re, alice_row["last_active"])
+            job = data["scheduler"]["jobs"][0]
+            assert re.match(iso_re, job["last_run_at"])
+            assert re.match(iso_re, job["last_success_at"])
+
+    async def test_admin_stats_feeds_module_unreachable_no_mount(self, tmp_path):
+        """Native feeds users without resolvable mount must not vanish."""
+        config = self._config_with_admin(tmp_path)
+        config.users["alice"] = UserConfig(
+            display_name="Alice",
+            resources=[ResourceConfig(type="feeds", name="Feeds")],
+        )
+        config.feeds.backend = "native"
+        config.nextcloud_mount_path = None  # docker-compose-style deploy
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            assert "feeds" in data["modules"]
+            feeds = data["modules"]["feeds"]
+            assert feeds["users_configured"] == 1
+            assert feeds["users_resolved"] == 0
+            assert feeds["status"] == "unreachable"
+
+    async def test_admin_stats_last_active_uses_created_at(self, tmp_path):
+        """Background ``updated_at`` bumps must not skew last_active."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(conn, "old", "alice", source_type="talk")
+            # Simulate a much later background retry stamping updated_at.
+            conn.execute(
+                "UPDATE tasks SET created_at = ?, updated_at = ? WHERE id = ?",
+                ("2026-04-01 12:00:00", "2026-05-04 12:00:00", tid),
+            )
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            alice = next(u for u in resp.json()["users"] if u["username"] == "alice")
+            assert alice["last_active"] == "2026-04-01T12:00:00Z"
+
+    async def test_admin_stats_includes_scheduled_jobs(self, tmp_path):
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO scheduled_jobs
+                  (user_id, name, cron_expression, prompt, enabled,
+                   consecutive_failures, last_error, last_run_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("alice", "morning", "0 7 * * *", "say hi", 1, 0, None, None),
+            )
+            conn.execute(
+                """
+                INSERT INTO scheduled_jobs
+                  (user_id, name, cron_expression, prompt, enabled,
+                   consecutive_failures, last_error, last_run_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("alice", "broken", "0 * * * *", "do thing", 0, 3,
+                 "timeout after 30s", "2026-05-04 12:00:00"),
+            )
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            assert data["scheduler"]["jobs_total"] == 2
+            assert data["scheduler"]["jobs_active"] == 1
+            assert data["scheduler"]["jobs_paused"] == 1
+            errs = data["scheduler"]["last_errors"]
+            assert any(e["job_name"] == "alice/broken" for e in errs)
 
 
 class TestWebConfigParsing:

@@ -20,13 +20,76 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 export interface User {
 	username: string;
 	display_name: string;
+	is_admin: boolean;
 	features: {
 		feeds: boolean;
 		location: boolean;
 		money: boolean;
 		google_workspace: boolean;
 		google_workspace_enabled: boolean;
+		admin: boolean;
 	};
+}
+
+export interface AdminStatsUser {
+	username: string;
+	display_name: string;
+	is_admin: boolean;
+	tasks_total: number;
+	tasks_last_24h: number;
+	tasks_avg_per_day: number;
+	last_active: string | null;
+}
+
+export interface AdminStatsJob {
+	id: number;
+	user_id: string;
+	name: string;
+	cron: string;
+	enabled: boolean;
+	last_run_at: string | null;
+	last_success_at: string | null;
+	consecutive_failures: number;
+	last_error: string | null;
+}
+
+export interface AdminStats {
+	system: {
+		version: string;
+		uptime_seconds: number;
+		db_size_bytes: number;
+		python_version: string;
+		last_scheduler_run: string | null;
+		scheduler_healthy: boolean;
+	};
+	users: AdminStatsUser[];
+	scheduler: {
+		jobs_total: number;
+		jobs_active: number;
+		jobs_paused: number;
+		jobs: AdminStatsJob[];
+		last_errors: { job_name: string; error: string; timestamp: string | null }[];
+	};
+	modules: Record<string, Record<string, unknown>>;
+	tasks: {
+		total: number;
+		last_24h: number;
+		avg_per_day_30d: number;
+		by_source: Record<string, number>;
+		avg_duration_seconds: number;
+		error_rate_24h: number;
+	};
+	storage: {
+		db_size_bytes: number;
+		backups_count: number;
+		last_backup: string | null;
+		nextcloud_mount_healthy: boolean;
+	};
+	error?: string;
+}
+
+export async function getAdminStats(): Promise<AdminStats> {
+	return apiFetch<AdminStats>('/admin/stats');
 }
 
 export interface FeedCategory {

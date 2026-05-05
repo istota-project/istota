@@ -9,9 +9,11 @@ SvelteKit frontend served as static files, Python handles auth and API.
 import asyncio
 import logging
 import os
+import platform
 import re
 import signal
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -38,6 +40,7 @@ logger = logging.getLogger("istota.web_app")
 # Module-level state
 _config = None
 _oauth = None
+_WEB_START_TIME = time.time()
 
 # Resolve static build directory (relative to this file or repo root)
 _STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "build"
@@ -119,6 +122,26 @@ def _require_api_auth(request: Request) -> dict:
     user = _get_session_user(request)
     if not user:
         raise _UnauthorizedException()
+    return user
+
+
+def _user_is_web_admin(username: str) -> bool:
+    """Web dashboard admin check — fails closed.
+
+    Distinct from ``Config.is_admin``, which treats an empty ``admin_users``
+    set as "all users are admin" for sandbox/skill/command back-compat. The
+    web admin dashboard requires an explicit allowlist: a missing or empty
+    ``/etc/istota/admins`` means no admin access via the web UI.
+    """
+    if not _config or not _config.admin_users:
+        return False
+    return username in _config.admin_users
+
+
+def _require_admin(user: dict = Depends(_require_api_auth)) -> dict:
+    """Dependency for admin API routes: returns user or 403."""
+    if not _user_is_web_admin(user["username"]):
+        raise _ForbiddenException("admin only")
     return user
 
 
@@ -368,7 +391,15 @@ def _resolve_tz(client_tz: str, fallback: str) -> str:
 @api_router.get("/me")
 async def api_me(user: dict = Depends(_require_api_auth)):
     username = user["username"]
-    features: dict = {"feeds": False, "location": False, "money": False, "google_workspace": False, "google_workspace_enabled": False}
+    is_admin = _user_is_web_admin(username)
+    features: dict = {
+        "feeds": False,
+        "location": False,
+        "money": False,
+        "google_workspace": False,
+        "google_workspace_enabled": False,
+        "admin": is_admin,
+    }
     if _config:
         features["feeds"] = _user_has_feeds(username)
         features["location"] = _config.location.enabled
@@ -379,8 +410,405 @@ async def api_me(user: dict = Depends(_require_api_auth)):
     return {
         "username": username,
         "display_name": user.get("display_name", username),
+        "is_admin": is_admin,
         "features": features,
     }
+
+
+# ---- Admin dashboard ----
+
+
+def _iso_utc(ts: str | None) -> str | None:
+    """Normalize a heterogeneous timestamp string to ISO 8601 UTC.
+
+    Inputs come from three writers with different conventions:
+    - SQLite ``datetime('now')`` and ``strftime`` — naive, space-separated,
+      documented to be UTC.
+    - Python ``datetime.now(timezone.utc).isoformat()`` — offset-aware,
+      ``T`` separator, ``+00:00`` suffix.
+    - Python ``datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")`` — naive.
+
+    Naive timestamps are treated as UTC. Output is always ``YYYY-MM-DDTHH:MM:SSZ``
+    so the frontend can pass it straight to ``new Date()``.
+    """
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace(" ", "T"))
+    except (ValueError, TypeError):
+        return ts
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _gather_admin_stats() -> dict:
+    """Aggregate read-only system stats for the admin dashboard.
+
+    Single payload — every section is best-effort: a failure in one
+    sub-aggregator is captured as an error string rather than failing the
+    whole request.
+    """
+    from . import __version__, db
+
+    db_path = _config.db_path
+    now = datetime.now(timezone.utc)
+
+    payload: dict = {
+        "system": _admin_system_section(__version__, db_path),
+        "users": [],
+        "scheduler": {"jobs_total": 0, "jobs_active": 0, "jobs_paused": 0, "last_errors": []},
+        "modules": {},
+        "tasks": {},
+        "storage": _admin_storage_section(db_path),
+    }
+
+    try:
+        with db.get_db(db_path) as conn:
+            payload["users"] = _admin_users_section(conn, now)
+            payload["scheduler"] = _admin_scheduler_section(conn)
+            payload["tasks"] = _admin_tasks_section(conn, now)
+            last_run, healthy = _admin_scheduler_health(conn, now)
+            payload["system"]["last_scheduler_run"] = last_run
+            payload["system"]["scheduler_healthy"] = healthy
+    except Exception as exc:
+        logger.exception("admin stats DB aggregation failed")
+        payload["error"] = str(exc)
+
+    payload["modules"] = _admin_modules_section()
+    return payload
+
+
+def _admin_system_section(version: str, db_path: Path) -> dict:
+    db_size = 0
+    try:
+        if db_path.exists():
+            db_size = db_path.stat().st_size
+    except OSError:
+        db_size = 0
+    return {
+        "version": version,
+        "uptime_seconds": int(time.time() - _WEB_START_TIME),
+        "db_size_bytes": db_size,
+        "python_version": platform.python_version(),
+        "last_scheduler_run": None,
+        "scheduler_healthy": False,
+    }
+
+
+def _admin_storage_section(db_path: Path) -> dict:
+    db_size = 0
+    try:
+        if db_path.exists():
+            db_size = db_path.stat().st_size
+    except OSError:
+        db_size = 0
+    mount_healthy = False
+    if _config and _config.nextcloud_mount_path:
+        try:
+            mount_healthy = Path(_config.nextcloud_mount_path).is_dir()
+        except OSError:
+            mount_healthy = False
+    return {
+        "db_size_bytes": db_size,
+        "backups_count": 0,
+        "last_backup": None,
+        "nextcloud_mount_healthy": mount_healthy,
+    }
+
+
+def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
+    """Per-user task counts, joined with config metadata.
+
+    ``last_active`` reflects the user's most recent task creation, not
+    ``updated_at`` — the latter bumps on background retries and would show
+    "active 30s ago" for users who logged off hours earlier.
+    """
+    cutoff_24h = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff_30d = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+    rows = conn.execute(
+        """
+        SELECT user_id,
+               COUNT(*) AS total,
+               SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_24h,
+               SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_30d,
+               MAX(created_at) AS last_active
+        FROM tasks
+        GROUP BY user_id
+        """,
+        (cutoff_24h, cutoff_30d),
+    ).fetchall()
+    by_user = {r["user_id"]: r for r in rows}
+
+    out = []
+    user_ids = set(_config.users.keys()) | set(by_user.keys()) if _config else set(by_user.keys())
+    for user_id in sorted(user_ids):
+        uc = _config.users.get(user_id) if _config else None
+        row = by_user.get(user_id)
+        total = int(row["total"]) if row else 0
+        last_24h = int(row["last_24h"] or 0) if row else 0
+        last_30d = int(row["last_30d"] or 0) if row else 0
+        avg_per_day = round(last_30d / 30.0, 2) if last_30d else 0.0
+        out.append({
+            "username": user_id,
+            "display_name": uc.display_name if uc else user_id,
+            "is_admin": _user_is_web_admin(user_id),
+            "tasks_total": total,
+            "tasks_last_24h": last_24h,
+            "tasks_avg_per_day": avg_per_day,
+            "last_active": _iso_utc(row["last_active"]) if row else None,
+        })
+    return out
+
+
+def _admin_scheduler_section(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute(
+        """
+        SELECT id, user_id, name, cron_expression, enabled, last_run_at,
+               last_success_at, consecutive_failures, last_error
+        FROM scheduled_jobs
+        ORDER BY user_id, name
+        """,
+    ).fetchall()
+    jobs = []
+    last_errors = []
+    active = paused = 0
+    for r in rows:
+        enabled = bool(r["enabled"])
+        if enabled:
+            active += 1
+        else:
+            paused += 1
+        jobs.append({
+            "id": r["id"],
+            "user_id": r["user_id"],
+            "name": r["name"],
+            "cron": r["cron_expression"],
+            "enabled": enabled,
+            "last_run_at": _iso_utc(r["last_run_at"]),
+            "last_success_at": _iso_utc(r["last_success_at"]),
+            "consecutive_failures": r["consecutive_failures"] or 0,
+            "last_error": r["last_error"],
+        })
+        if r["last_error"] and (r["consecutive_failures"] or 0) > 0:
+            last_errors.append({
+                "job_name": f"{r['user_id']}/{r['name']}",
+                "error": r["last_error"],
+                "timestamp": _iso_utc(r["last_run_at"]),
+            })
+    return {
+        "jobs_total": len(jobs),
+        "jobs_active": active,
+        "jobs_paused": paused,
+        "jobs": jobs,
+        "last_errors": last_errors[:10],
+    }
+
+
+def _admin_scheduler_health(conn: sqlite3.Connection, now: datetime) -> tuple[str | None, bool]:
+    row = conn.execute("SELECT MAX(updated_at) AS last_run FROM tasks").fetchone()
+    last_run_raw = row["last_run"] if row else None
+    last_run = _iso_utc(last_run_raw)
+    if not last_run_raw:
+        return None, False
+    try:
+        ts = datetime.fromisoformat(last_run_raw.replace(" ", "T"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        healthy = (now - ts) < timedelta(minutes=5)
+    except ValueError:
+        healthy = False
+    return last_run, healthy
+
+
+def _admin_tasks_section(conn: sqlite3.Connection, now: datetime) -> dict:
+    cutoff_24h = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff_30d = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+    total = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+    last_24h = conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks WHERE created_at >= ?", (cutoff_24h,),
+    ).fetchone()["n"]
+    last_30d = conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks WHERE created_at >= ?", (cutoff_30d,),
+    ).fetchone()["n"]
+
+    by_source_rows = conn.execute(
+        "SELECT source_type, COUNT(*) AS n FROM tasks WHERE created_at >= ? GROUP BY source_type",
+        (cutoff_24h,),
+    ).fetchall()
+    by_source = {r["source_type"]: r["n"] for r in by_source_rows}
+
+    duration_row = conn.execute(
+        """
+        SELECT AVG((julianday(completed_at) - julianday(started_at)) * 86400) AS avg_sec
+        FROM tasks
+        WHERE created_at >= ?
+          AND status = 'completed'
+          AND started_at IS NOT NULL
+          AND completed_at IS NOT NULL
+        """,
+        (cutoff_24h,),
+    ).fetchone()
+    avg_duration = float(duration_row["avg_sec"]) if duration_row["avg_sec"] else 0.0
+
+    # Error rate over terminal states only — including pending/locked/running
+    # in the denominator would spike the rate to 100% on a quiet day with one
+    # failure and a few in-flight tasks.
+    terminals = conn.execute(
+        """
+        SELECT
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+          SUM(CASE WHEN status IN ('completed', 'failed') THEN 1 ELSE 0 END) AS terminal
+        FROM tasks
+        WHERE created_at >= ?
+        """,
+        (cutoff_24h,),
+    ).fetchone()
+    failed_24h = int(terminals["failed"] or 0)
+    terminal_24h = int(terminals["terminal"] or 0)
+    error_rate = (failed_24h / terminal_24h) if terminal_24h else 0.0
+
+    return {
+        "total": total,
+        "last_24h": last_24h,
+        "avg_per_day_30d": round(last_30d / 30.0, 2) if last_30d else 0.0,
+        "by_source": by_source,
+        "avg_duration_seconds": round(avg_duration, 2),
+        "error_rate_24h": round(error_rate, 4),
+    }
+
+
+def _admin_modules_section() -> dict:
+    """Per-module health snapshot. Each sub-aggregator is best-effort."""
+    modules: dict = {}
+    if not _config:
+        return modules
+
+    feeds = _admin_module_feeds()
+    if feeds is not None:
+        modules["feeds"] = feeds
+
+    money = _admin_module_money()
+    if money is not None:
+        modules["money"] = money
+
+    if _config.location.enabled:
+        modules["location"] = _admin_module_location()
+
+    return modules
+
+
+def _admin_module_feeds() -> dict | None:
+    if _config.feeds.backend != "native":
+        # Miniflux backend — counts live in an external service. Skip.
+        users_with = sum(1 for u in _config.users.values()
+                         if any(r.type == "miniflux" for r in u.resources))
+        if not users_with:
+            return None
+        return {
+            "backend": "miniflux",
+            "users_configured": users_with,
+        }
+
+    # Native backend. Count users with a feeds resource configured even if
+    # we can't resolve their workspace (e.g. ``nextcloud_mount_path`` unset
+    # on docker-compose deploys). Returning ``None`` would silently hide a
+    # configured-but-unreachable subsystem from admins.
+    configured = sum(1 for u in _config.users.values()
+                     if any(r.type == "feeds" for r in u.resources))
+    if not configured:
+        return None
+
+    feeds_total = entries_total = entries_unread = 0
+    last_poll = None
+    poll_errors = 0
+    users_resolved = 0
+    resolve_errors = 0
+    try:
+        from istota.feeds._loader import UserNotFoundError, resolve_for_user
+    except Exception:  # pragma: no cover
+        return {
+            "backend": "native",
+            "users_configured": configured,
+            "status": "unreachable",
+        }
+
+    for user_id in _config.users:
+        try:
+            ctx = resolve_for_user(user_id, _config)
+        except UserNotFoundError:
+            continue
+        except Exception:
+            logger.exception("feeds resolve failed for %s", user_id)
+            resolve_errors += 1
+            continue
+        users_resolved += 1
+        try:
+            with sqlite3.connect(str(ctx.db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                feeds_total += conn.execute("SELECT COUNT(*) AS n FROM feeds").fetchone()["n"]
+                entries_total += conn.execute("SELECT COUNT(*) AS n FROM feed_entries").fetchone()["n"]
+                entries_unread += conn.execute(
+                    "SELECT COUNT(*) AS n FROM feed_entries WHERE status = 'unread'",
+                ).fetchone()["n"]
+                row = conn.execute(
+                    "SELECT MAX(last_fetched_at) AS lp FROM feeds",
+                ).fetchone()
+                if row["lp"] and (last_poll is None or row["lp"] > last_poll):
+                    last_poll = row["lp"]
+                poll_errors += conn.execute(
+                    "SELECT COUNT(*) AS n FROM feeds WHERE error_count > 0",
+                ).fetchone()["n"]
+        except sqlite3.Error:
+            logger.exception("feeds db read failed for %s", user_id)
+            resolve_errors += 1
+            continue
+
+    out = {
+        "backend": "native",
+        "users_configured": configured,
+        "users_resolved": users_resolved,
+        "feeds_total": feeds_total,
+        "entries_total": entries_total,
+        "entries_unread": entries_unread,
+        "last_poll": _iso_utc(last_poll),
+        "poll_errors_24h": poll_errors,
+    }
+    if users_resolved == 0:
+        out["status"] = "unreachable"
+    elif resolve_errors:
+        out["resolve_errors"] = resolve_errors
+    return out
+
+
+def _admin_module_money() -> dict | None:
+    users_with = sum(1 for u in _config.users.values()
+                     if any(r.type in ("money", "moneyman") for r in u.resources))
+    if not users_with:
+        return None
+    return {"users_configured": users_with}
+
+
+def _admin_module_location() -> dict:
+    out = {"visits_total": 0, "places_total": 0, "last_update": None}
+    try:
+        from . import db
+        with db.get_db(_config.db_path) as conn:
+            out["visits_total"] = conn.execute("SELECT COUNT(*) AS n FROM visits").fetchone()["n"]
+            out["places_total"] = conn.execute("SELECT COUNT(*) AS n FROM places").fetchone()["n"]
+            row = conn.execute("SELECT MAX(timestamp) AS ts FROM location_pings").fetchone()
+            out["last_update"] = _iso_utc(row["ts"]) if row else None
+    except Exception:
+        logger.exception("location module stats failed")
+    return out
+
+
+@api_router.get("/admin/stats")
+async def admin_stats(_: dict = Depends(_require_admin)):
+    """Single payload backing the admin dashboard. Read-only."""
+    return await asyncio.to_thread(_gather_admin_stats)
 
 
 # ---- Google Workspace API routes ----

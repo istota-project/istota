@@ -88,7 +88,7 @@ Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped m
 
 ### Memory System
 - `USER.md` — auto-loaded, optional nightly op-based curation. Runtime writes go through the `memory` skill CLI (`istota-skill memory append|add-heading|remove|show|headings`) — never `echo >>`. The CLI shares the curation `apply_ops` engine, takes a per-file flock, and writes a `source="runtime"` audit entry per call.
-- `CHANNEL.md` — loaded with `conversation_token`. Same CLI with `--channel TOKEN` (token must match `ISTOTA_CONVERSATION_TOKEN`).
+- `CHANNEL.md` — loaded with `conversation_token`. Same CLI with `--channel TOKEN` (token must match `ISTOTA_CONVERSATION_TOKEN`). Channel writes are not audited (no per-channel audit infrastructure yet) and do not update `USER.md.last_seen.json`; the audit/curation pipeline is USER.md-only.
 - `memories/YYYY-MM-DD.md` — last N days auto-loaded (`auto_load_dated_days`).
 - Knowledge graph (`knowledge_facts`) — temporal subject/predicate/object triples, freeform predicates, fuzzy dedup (predicate-equality gated), audited. Sandboxed runtime writes via `istota-skill memory_search add-fact|invalidate|delete-fact` are deferred as `task_<id>_kg_ops.json` and applied by the scheduler post-task.
 - Classification gate in `memory/skill.md`: temporal events and stable factual claims → KG; behavioral instructions → USER.md.
@@ -128,7 +128,7 @@ Nightly extraction goes through the configured Brain (no streaming, no sandbox).
 Overland webhook → `webhook_receiver.py`. Asymmetric place detection (hysteresis on entry, continuous away on exit). Reconciler re-derives closed visits. Discovered clusters dismissable. Tables: `location_pings`, `places`, `visits`, `location_state`, `dismissed_clusters`.
 
 ### Web UI
-SvelteKit (`web/`, `adapter-static`, base `/istota`) + FastAPI (`web_app.py`). Nextcloud OIDC auth, 7-day session. Routes: dashboard, feeds (reader + sprocket-icon settings page; backend selectable via `[feeds] backend = "miniflux" | "native"` — native serves `istota.feeds.routes` against per-user SQLite), location (today + history with cluster discovery), money (`/istota/money/*`). Dev: `VITE_MOCK_API=1 npm run dev` for in-process mock backend. Frontend primitives in `web/src/lib/components/ui/` (AppShell, ShellHeader, Sidebar, Chip, Button, Select, Modal, etc.).
+SvelteKit (`web/`, `adapter-static`, base `/istota`) + FastAPI (`web_app.py`). Nextcloud OIDC auth, 7-day session. Routes: dashboard, feeds (reader + sprocket-icon settings page; backend selectable via `[feeds] backend = "miniflux" | "native"` — native serves `istota.feeds.routes` against per-user SQLite), location (today + history with cluster discovery), money (`/istota/money/*`), admin (read-only system health at `/istota/admin`, gated by a new `_user_is_web_admin` helper that uses the `/etc/istota/admins` allowlist and fails closed on empty allowlist — distinct from `Config.is_admin`, which retains its back-compat "empty = all admin" rule for sandbox/skill/command checks). Single-payload `GET /istota/api/admin/stats` aggregator; all timestamps normalized to canonical ISO 8601 UTC via `_iso_utc()`. Dev: `VITE_MOCK_API=1 npm run dev` for in-process mock backend. Frontend primitives in `web/src/lib/components/ui/` (AppShell, ShellHeader, Sidebar, Chip, Button, Select, Modal, etc.).
 
 ### Security
 - **Sandbox** (`bwrap`): per-user filesystem isolation. Linux + bubblewrap is the only supported deployment.
