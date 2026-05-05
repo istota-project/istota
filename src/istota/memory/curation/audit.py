@@ -45,6 +45,11 @@ def get_user_md_last_seen_path(config: "Config", user_id: str) -> Path:
     return user_md.parent / "USER.md.last_seen.json"
 
 
+def get_user_md_lint_seen_path(config: "Config", user_id: str) -> Path:
+    user_md = _get_mount_path(config, get_user_memory_path(user_id, config.bot_dir_name))
+    return user_md.parent / "USER.md.lint_seen.json"
+
+
 def write_audit_log(
     config: "Config",
     user_id: str,

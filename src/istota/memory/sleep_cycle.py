@@ -885,10 +885,12 @@ def curate_user_memory(
     )
     from .curation.audit import (
         detect_bypass_write,
+        get_user_md_lint_seen_path,
         write_last_seen,
     )
     from .curation.file_lock import MemoryMdLocked, memory_md_lock
     from .curation.lint import (
+        filter_unseen_candidates,
         find_temporal_bullets,
         prepend_agents_header_if_missing,
     )
@@ -930,8 +932,14 @@ def curate_user_memory(
 
     # Phase A lint pass — log only. Find date-stamped bullets that look
     # like temporal facts so we can review the catch rate before flipping
-    # on Phase B (active migration).
+    # on Phase B (active migration). Dedup against a sidecar so each
+    # bullet emits at most once per TTL window.
     lint_candidates = find_temporal_bullets(doc, kg_text)
+    if lint_candidates:
+        lint_candidates = filter_unseen_candidates(
+            lint_candidates,
+            get_user_md_lint_seen_path(config, user_id),
+        )
     if lint_candidates:
         write_audit_log(
             config, user_id,
