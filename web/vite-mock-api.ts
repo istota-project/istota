@@ -10,12 +10,113 @@ type MockHandler = (req: MockReq) => unknown | undefined;
 const user = {
 	username: 'stefan',
 	display_name: 'Stefan',
+	is_admin: true,
 	features: {
 		feeds: true,
 		location: true,
 		money: true,
 		google_workspace: false,
 		google_workspace_enabled: false,
+		admin: true,
+	},
+};
+
+const mockAdminStats = {
+	system: {
+		version: '0.9.0',
+		uptime_seconds: 345600,
+		db_size_bytes: 119447552,
+		python_version: '3.12.3',
+		last_scheduler_run: new Date(Date.now() - 30_000).toISOString(),
+		scheduler_healthy: true,
+	},
+	users: [
+		{
+			username: 'stefan',
+			display_name: 'Stefan',
+			is_admin: true,
+			tasks_total: 4812,
+			tasks_last_24h: 37,
+			tasks_avg_per_day: 22.4,
+			last_active: new Date(Date.now() - 60_000).toISOString(),
+		},
+		{
+			username: 'kasia',
+			display_name: 'Kasia',
+			is_admin: false,
+			tasks_total: 891,
+			tasks_last_24h: 4,
+			tasks_avg_per_day: 6.2,
+			last_active: new Date(Date.now() - 3600_000).toISOString(),
+		},
+	],
+	scheduler: {
+		jobs_total: 12,
+		jobs_active: 10,
+		jobs_paused: 2,
+		jobs: [
+			{
+				id: 1,
+				user_id: 'stefan',
+				name: 'morning briefing',
+				cron: '0 7 * * *',
+				enabled: true,
+				last_run_at: new Date(Date.now() - 6 * 3600_000).toISOString(),
+				last_success_at: new Date(Date.now() - 6 * 3600_000).toISOString(),
+				consecutive_failures: 0,
+				last_error: null,
+			},
+			{
+				id: 2,
+				user_id: 'stefan',
+				name: 'feeds.poll',
+				cron: '*/15 * * * *',
+				enabled: true,
+				last_run_at: new Date(Date.now() - 12 * 60_000).toISOString(),
+				last_success_at: new Date(Date.now() - 27 * 60_000).toISOString(),
+				consecutive_failures: 1,
+				last_error: 'timeout after 30s',
+			},
+		],
+		last_errors: [
+			{
+				job_name: 'stefan/feeds.poll',
+				error: 'timeout after 30s',
+				timestamp: new Date(Date.now() - 12 * 60_000).toISOString(),
+			},
+		],
+	},
+	modules: {
+		feeds: {
+			backend: 'native',
+			users_configured: 1,
+			users_resolved: 1,
+			feeds_total: 129,
+			entries_total: 48201,
+			entries_unread: 342,
+			last_poll: new Date(Date.now() - 5 * 60_000).toISOString(),
+			poll_errors_24h: 2,
+		},
+		money: { users_configured: 1 },
+		location: {
+			visits_total: 1204,
+			places_total: 47,
+			last_update: new Date(Date.now() - 90 * 60_000).toISOString(),
+		},
+	},
+	tasks: {
+		total: 4812,
+		last_24h: 37,
+		avg_per_day_30d: 22.4,
+		by_source: { talk: 28, email: 4, scheduled: 5 },
+		avg_duration_seconds: 45.2,
+		error_rate_24h: 0.02,
+	},
+	storage: {
+		db_size_bytes: 119447552,
+		backups_count: 14,
+		last_backup: new Date(Date.now() - 18 * 3600_000).toISOString(),
+		nextcloud_mount_healthy: true,
 	},
 };
 
@@ -349,6 +450,8 @@ function dropClusterNear(point: { lat: number; lon: number }, radius: number): v
 
 const handlers: MockHandler[] = [
 	({ url }) => (url === '/istota/api/me' ? user : undefined),
+
+	({ url }) => (url === '/istota/api/admin/stats' ? mockAdminStats : undefined),
 
 	// Feeds settings: config GET/PUT
 	({ url, method, body }) => {

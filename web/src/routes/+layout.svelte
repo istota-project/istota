@@ -63,6 +63,9 @@
 			{#if user.features.money}
 				<a href="{base}/money" class:active={isActive('/money')}>Money</a>
 			{/if}
+			{#if user.features.admin}
+				<a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
+			{/if}
 		</div>
 		<div class="nav-right">
 			<span class="nav-user">{user.display_name}</span>
@@ -111,6 +114,18 @@
 										class="app-nav-menu-link"
 										class:active={isActive('/money')}
 										{...props}>Money</a
+									>
+								{/snippet}
+							</DropdownMenu.Item>
+						{/if}
+						{#if user.features.admin}
+							<DropdownMenu.Item>
+								{#snippet child({ props })}
+									<a
+										href="{base}/admin"
+										class="app-nav-menu-link"
+										class:active={isActive('/admin')}
+										{...props}>Admin</a
 									>
 								{/snippet}
 							</DropdownMenu.Item>

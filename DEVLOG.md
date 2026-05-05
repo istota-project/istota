@@ -2,6 +2,48 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-05: Admin dashboard (Phase 1)
+
+Read-only system-health dashboard at `/istota/admin`, gated to allowlisted admin users. Single endpoint, single payload, single page. Phases 2 (admin CLI skill) and 3 (write-side web UI) intentionally not started — the spec at `Notes/Projects/Istota/Admin dashboard spec.md` was followed only through Phase 1.
+
+The interesting work was the post-implementation audit. After the obvious-shape pass landed, an audit on the data layer turned up seven discrepancies between mock-data assumptions and prod reality. Two would have actively misled an admin staring at the live dashboard: `error_rate_24h` was `failed / total_created` so a quiet day with one failure plus a few in-flight tasks read as 100%; and `_user_is_web_admin` was reusing `Config.is_admin`, which returns True for everyone when the admins file is missing (back-compat fallback for sandbox/skill checks). On a fresh deploy without that file, every authenticated user would have seen the Admin link and read the dashboard. Fix was a web-only helper that fails closed; `Config.is_admin` semantics are unchanged everywhere they're already used (sandbox, skills, commands).
+
+Heterogeneous timestamp formats were the other lurking bug. SQLite `datetime('now')` writes naive UTC space-separated strings, Python ISO calls write offset-aware T-separated strings, and the frontend was patching shapes with `replace(' ', 'T') + 'Z'`. Working today, fragile tomorrow. Replaced with a single `_iso_utc()` normalizer in the backend that emits canonical `YYYY-MM-DDTHH:MM:SSZ` and let the frontend stop guessing.
+
+Feeds module was hiding configured-but-unreachable state. `_admin_module_feeds` resolved each user via `feeds.resolve_for_user`, which raises when `nextcloud_mount_path` is unset — true on docker-compose deploys by design. The error path swallowed silently, the function returned None, and the entire `feeds` key vanished from the response. Now it counts configured users from config first and emits a degraded card with `users_resolved: 0`, `status: "unreachable"` so admins see the broken state instead of nothing.
+
+`last_active` was using `MAX(updated_at)`, which bumps on every retry / status transition. A user who logged off hours ago would appear "active 30s ago" if a background retry happened. Switched to `MAX(created_at)` for true user activity.
+
+**Key changes:**
+- `/api/admin/stats` endpoint, admin-gated. Aggregates system, per-user task counts, scheduled jobs (with last-error rollup), tasks (total/24h/30d/by_source/avg_duration/error_rate), per-module health (feeds/money/location), storage. All sub-aggregators are best-effort — a single broken section becomes `payload.error` rather than a 500.
+- `_user_is_web_admin()` helper: distinct from `Config.is_admin`, fails closed on empty allowlist. Used by `_require_admin` (FastAPI dependency, returns 403) and `/api/me` (sets `is_admin` and `features.admin`).
+- `_iso_utc(ts)` normalizer applied to every timestamp in the response. Frontend `formatTimestamp` simplified to one `new Date()` call.
+- `error_rate_24h` denominator changed to `failed / (completed + failed)` over 24h with zero-division handling.
+- `_admin_module_feeds` returns a degraded card on unreachable state instead of disappearing. New `users_resolved` and optional `status: "unreachable"` / `resolve_errors` fields.
+- `_admin_users_section` uses `MAX(created_at)` for `last_active`.
+- Admin nav link in `+layout.svelte` (and the hamburger menu) gated on `user.features.admin`. Admin route at `web/src/routes/admin/+page.svelte`. Auto-refreshes every 60s.
+- `FIELD_LABELS` map on the frontend so module-card keys render as "Last poll" / "Poll errors (24h)" / "Users configured" instead of snake_case.
+- Mock backend at `web/vite-mock-api.ts` returns the same payload shape as the real backend (canonical ISO 8601 timestamps, `users_resolved`, etc.) so dev and prod render identically.
+
+**Files added:**
+- `web/src/routes/admin/+page.svelte` — single-page dashboard.
+
+**Files modified:**
+- `src/istota/web_app.py` — `_user_is_web_admin`, `_require_admin`, `_iso_utc`, the admin aggregator section (`_gather_admin_stats` + 8 helper functions), `/api/admin/stats` route, `/api/me` extended with `is_admin` and `features.admin`.
+- `web/src/lib/api.ts` — `User.is_admin`, `User.features.admin`, `AdminStats*` types, `getAdminStats()`.
+- `web/src/routes/+layout.svelte` — conditional Admin link in nav and hamburger menu.
+- `web/vite-mock-api.ts` — `mockAdminStats` fixture, `/admin/stats` mock handler, mock user gains `is_admin` / `features.admin`.
+- `tests/test_web_app.py::TestAdminStats` — 13 tests: `/me` admin shape, 401/403 gating, fail-closed-on-empty-admins, empty-DB shape, task aggregation, error-rate denominator (terminal-states + zero-division), timestamp normalization regex, feeds-unreachable degraded card, last-active uses-created-at, scheduler jobs.
+- `AGENTS.md` — admin route added to the web UI section.
+
+## 2026-05-05: Emissary self-reply edge case — known, not fixed
+
+Discovered while testing ff76c9a (route emissary replies to originator's room when delivery token is NULL): if the user replies to a bot-sent thread from an address that is *itself* configured against a user (i.e. their own email), the email_poller routing precedence in `email_poller.py:186-210` runs sender_match first, sets `user_id`, and skips thread_match (gated `if not user_id`). Result: `sent_email_match` stays `None`, so the new email task gets no emissary prompt prefix, no `output_target="both"`, and `talk_delivery_token` falls through to `resolve_conversation_token` (alerts/DM) instead of using the originating Talk room.
+
+ff76c9a is correct for the case it was written for (external contacts replying); it just doesn't anticipate that sender_match short-circuits thread_match for self-replies. Verified on zorg with task 98076: References header on the inbound contained sent_email 125's message_id verbatim, but `processed_emails.routing_method = sender_match` and the thread match was never attempted.
+
+Decision: leave it. The behavior — treating a self-reply as "user emails the bot directly" and posting in alerts — is a defensible interpretation, and the only real-world scenario this matters for is "user injects themselves into a thread the bot started on their behalf." If we ever want to support that, the minimal change is to run `_match_thread` unconditionally and, on a hit, set `sent_email_match` (without changing `user_id`) so the emissary prompt prefix, `output_target="both"`, and matched-row token resolution kick in. Not shipping it speculatively.
+
 ## 2026-05-04: Memory write classification — runtime CLI + curator self-heal
 
 USER.md was accumulating temporal facts ("ordered a fountain pen on …", "decided to standardize on …", "returned the …") under whatever `## heading` happened to be last in the file, because the runtime memory skill's only write recipe was `echo "- ... (noted $(date +%Y-%m-%d))" >> USER.md`. Two failures stacked: no classification (these belonged in the knowledge graph as `acquired` / `decided` / `disposed_of` triples) and no section routing (append-to-EOF dumps under whatever `## ` heading is last in the file). The fix lands the curation ops engine — used nightly already — as the runtime write path, plus a three-branch classification gate in the skill body, plus a Phase-A lint pass and bypass detector to surface the pre-existing damage without trying to migrate it blindly.
