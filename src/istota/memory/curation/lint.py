@@ -18,10 +18,19 @@ both are nightly self-heals over USER.md content.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
 
 from .types import SectionedDoc, classify_line, normalize_bullet_text, top_region_indices
+
+logger = logging.getLogger("istota.memory.curation.lint")
+
+LINT_SEEN_TTL_DAYS = 30
 
 # Temporal-verb → predicate mapping. Conservative: a verb whose mapping
 # is ambiguous or context-dependent (e.g. "moved", "joined", "left") is
@@ -186,6 +195,72 @@ def _classify_bullet(body: str) -> tuple[str | None, str | None, str | None] | N
     if predicate is None:
         return None
     return (predicate, obj, date)
+
+
+def _candidate_hash(heading: str, bullet_text: str) -> str:
+    h = hashlib.sha256()
+    h.update(heading.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(bullet_text.encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def filter_unseen_candidates(
+    candidates: list[TemporalBulletCandidate],
+    seen_path: Path,
+    *,
+    today: date | None = None,
+    ttl_days: int = LINT_SEEN_TTL_DAYS,
+) -> list[TemporalBulletCandidate]:
+    """Drop candidates already logged within `ttl_days`. Persists the seen set.
+
+    The sidecar at `seen_path` stores `{"hashes": {hash: "YYYY-MM-DD"}}`,
+    keyed by sha256(heading + NUL + bullet_text)[:16]. Entries older than
+    `ttl_days` are pruned on each call so a long-untouched bullet
+    eventually re-surfaces. Best-effort I/O — read errors fall back to an
+    empty seen set; write errors are logged and dropped (the lint pass
+    re-emits next night, which is the existing behavior).
+    """
+    today = today or datetime.utcnow().date()
+    seen: dict[str, str] = {}
+    try:
+        if seen_path.exists():
+            data = json.loads(seen_path.read_text(encoding="utf-8") or "{}")
+            seen = data.get("hashes") or {}
+            if not isinstance(seen, dict):
+                seen = {}
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("lint_seen_read_failed path=%s err=%s", seen_path, e)
+        seen = {}
+
+    fresh: dict[str, str] = {}
+    for h, iso in seen.items():
+        try:
+            d = datetime.strptime(iso, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        if (today - d).days <= ttl_days:
+            fresh[h] = iso
+
+    out: list[TemporalBulletCandidate] = []
+    today_iso = today.isoformat()
+    for cand in candidates:
+        h = _candidate_hash(cand.heading, cand.bullet_text)
+        if h in fresh:
+            continue
+        out.append(cand)
+        fresh[h] = today_iso
+
+    try:
+        seen_path.parent.mkdir(parents=True, exist_ok=True)
+        seen_path.write_text(
+            json.dumps({"hashes": fresh}, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        logger.warning("lint_seen_write_failed path=%s err=%s", seen_path, e)
+
+    return out
 
 
 _AGENTS_HEADER_MARKER = "<!-- agents:"
