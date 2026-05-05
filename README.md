@@ -144,29 +144,6 @@ In practice this means:
 
 Istota is built around Nextcloud — it uses your files, calendars, contacts, and chat directly rather than wrapping them in API adapters. This tight integration is by design: your assistant lives where your data already is. That said, like any agent, it integrates with outside services where useful — a Google Workspace skill (Drive, Gmail, Calendar, Sheets, Docs) ships in the box, and skills for Microsoft 365 or other services can be added the same way.
 
-## Vs OpenClaw
-
-[OpenClaw](https://github.com/openclaw/openclaw) is the most popular open-source AI agent project. Both are self-hosted AI assistants, but they make different design choices.
-
-| | Istota | OpenClaw |
-|---|---|---|
-| Architecture | Server daemon with SQLite task queue and per-user worker pool | Long-running Node.js gateway with WebSocket control plane |
-| LLM | Claude Code (subprocess) | Multi-provider (Claude, GPT, DeepSeek, Ollama) |
-| Messaging | Nextcloud Talk + email | WhatsApp, Telegram, Slack, Discord, Signal, Teams, Matrix, and more |
-| Multi-user | Native: per-user config, resources, sandboxing, worker isolation | Single-user per instance; run multiple containers for multiple users |
-| Storage | Nextcloud (WebDAV/rclone mount), includes files, calendars, contacts | Local filesystem |
-| Memory | USER.md + dated memories + channel memory + knowledge graph (temporal triples) + nightly curation + BM25/vector search + memory cap | Daily logs + MEMORY.md + hybrid search + pre-compaction flush |
-| Scheduling | CRON.md + briefings + heartbeats | Built-in cron + webhooks + Gmail Pub/Sub |
-| Skills | ~28 built-in skills with YAML frontmatter manifests, two-pass selection (keyword + semantic), sticky-skills carryover | 5,700+ community skills via ClawHub registry, three tiers |
-| Security | Bubblewrap filesystem sandbox, credential stripping, admin/non-admin isolation, deferred DB writes | DM pairing policy; community skills are an acknowledged risk vector |
-| Voice | Whisper transcription (input only) | ElevenLabs TTS + always-on speech wake |
-| Browser | Dockerized Playwright with bot-detection countermeasures | Built-in Chrome DevTools Protocol |
-| Companion apps | None (Nextcloud has its own web and mobile apps) | Native macOS, iOS, and Android apps |
-| Language | Python | TypeScript/Node.js |
-| License | MIT | MIT |
-
-OpenClaw connects to many messaging platforms and has a large community skill registry. Istota talks through Nextcloud and ships a smaller set of built-in skills with filesystem sandboxing and multi-user isolation.
-
 ## User workspace
 
 Each user gets a Nextcloud workspace:
