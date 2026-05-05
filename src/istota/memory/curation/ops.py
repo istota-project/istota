@@ -5,22 +5,32 @@ deep copy of `doc`; the input is never mutated. Each op is independently
 validated and applied — bad ops accumulate in `rejected` while good ones still
 apply. The applier never raises on a malformed op.
 
+For DB-aware ops (currently `add_fact`, which writes to `knowledge_facts`),
+use the sibling `apply_ops_with_db()`. Keeps `apply_ops()` pure for callers
+that only need file ops.
+
 Op shapes
 ---------
 - append:      {"op": "append", "heading": str, "line": str}
 - add_heading: {"op": "add_heading", "heading": str, "lines": list[str]}
 - remove:      {"op": "remove", "heading": str, "match": str}
+- add_fact:    {"op": "add_fact", "subject": str, "predicate": str,
+                "object": str, "valid_from": str | None}
+                (apply_ops_with_db only)
 
 Outcomes (kept on each entry of `applied`):
-- "applied"        — the doc changed
-- "noop_dup"       — append: bullet already exists in top region (case-insensitive)
+- "applied"        — the doc/DB changed
+- "noop_dup"       — append: bullet already exists in top region (case-insensitive);
+                     add_fact: an exact or fuzzy duplicate already exists
 - "noop_no_match"  — remove: zero lines matched
 
 Reject reasons (kept on each entry of `rejected`):
 - "unknown_op", "missing_field", "heading_missing", "heading_exists",
   "empty_line", "empty_lines", "empty_heading", "empty_match",
   "line_starts_with_hash", "heading_starts_with_hash", "multiple_matches",
-  "match_in_subsection"
+  "match_in_subsection",
+  "empty_subject", "empty_predicate", "empty_object", "invalid_predicate",
+  "invalid_valid_from", "object_too_long", "no_db_connection"
 """
 
 from __future__ import annotations
@@ -36,15 +46,70 @@ from .types import Section, SectionedDoc, classify_line, normalize_bullet_text, 
 # hashtag, footnote marker, or section reference).
 _HEADING_SHAPED_RE = re.compile(r"^#{1,6}(\s|$)")
 
+# Lowercase snake_case predicate names. Mirrors the validation the extraction
+# prompt asks the LLM to follow; centralized here so runtime callers don't
+# silently accept arbitrary predicates.
+_PREDICATE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+# YYYY-MM-DD without further calendar validation. The KG itself stores the
+# string verbatim and does no date arithmetic on `valid_from`.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 _REQUIRED_FIELDS = {
     "append": ("heading", "line"),
     "add_heading": ("heading", "lines"),
     "remove": ("heading", "match"),
+    "add_fact": ("subject", "predicate", "object"),
 }
+
+# Mirrors knowledge_graph.MAX_FACT_OBJECT_CHARS. Duplicated here to keep the
+# ops module independent of the DB module on import.
+_MAX_FACT_OBJECT_CHARS = 100
 
 
 def apply_ops(
     doc: SectionedDoc, ops: list[dict[str, Any]]
+) -> tuple[SectionedDoc, list[dict], list[dict]]:
+    """Apply file-only ops. `add_fact` ops are routed to `rejected` as
+    `no_db_connection` — use `apply_ops_with_db` if you need them."""
+    return _apply_ops_inner(doc, ops, db_ctx=None)
+
+
+def apply_ops_with_db(
+    doc: SectionedDoc,
+    ops: list[dict[str, Any]],
+    *,
+    conn: Any,
+    user_id: str,
+    source_task_id: int | None = None,
+    source_type: str = "extracted",
+) -> tuple[SectionedDoc, list[dict], list[dict]]:
+    """Apply ops including DB-aware ones (`add_fact`).
+
+    The full op vocabulary is supported. `conn` must be a writable
+    sqlite3 Connection; the caller is responsible for the surrounding
+    transaction (this function does not commit).
+
+    `source_type` is passed through to `knowledge_graph.add_fact` and
+    determines the audit trail label on the resulting fact.
+    """
+    return _apply_ops_inner(
+        doc,
+        ops,
+        db_ctx={
+            "conn": conn,
+            "user_id": user_id,
+            "source_task_id": source_task_id,
+            "source_type": source_type,
+        },
+    )
+
+
+def _apply_ops_inner(
+    doc: SectionedDoc,
+    ops: list[dict[str, Any]],
+    *,
+    db_ctx: dict | None,
 ) -> tuple[SectionedDoc, list[dict], list[dict]]:
     new_doc = copy.deepcopy(doc)
     applied: list[dict] = []
@@ -59,15 +124,28 @@ def apply_ops(
             rejected.append({"op": op, "reason": "missing_field"})
             continue
 
+        result: tuple[str, dict] | str
         if kind == "append":
-            outcome_or_reason = _apply_append(new_doc, op)
+            result = _apply_append(new_doc, op)
         elif kind == "add_heading":
-            outcome_or_reason = _apply_add_heading(new_doc, op)
-        else:  # "remove"
-            outcome_or_reason = _apply_remove(new_doc, op)
+            result = _apply_add_heading(new_doc, op)
+        elif kind == "remove":
+            result = _apply_remove(new_doc, op)
+        else:  # "add_fact"
+            result = _apply_add_fact(op, db_ctx)
+
+        # Most appliers return a bare string; add_fact returns a
+        # (outcome, extra) tuple so the fact_id can ride along.
+        if isinstance(result, tuple):
+            outcome_or_reason, extra = result
+        else:
+            outcome_or_reason, extra = result, None
 
         if outcome_or_reason in ("applied", "noop_dup", "noop_no_match"):
-            applied.append({"op": op, "outcome": outcome_or_reason})
+            entry: dict[str, Any] = {"op": op, "outcome": outcome_or_reason}
+            if extra:
+                entry.update(extra)
+            applied.append(entry)
         else:
             rejected.append({"op": op, "reason": outcome_or_reason})
 
@@ -221,3 +299,53 @@ def _apply_remove(doc: SectionedDoc, op: dict) -> str:
 
     section.lines.pop(matches[0])
     return "applied"
+
+
+def _apply_add_fact(op: dict, db_ctx: dict | None) -> tuple[str, dict | None] | str:
+    if db_ctx is None:
+        return "no_db_connection"
+
+    subject = op.get("subject", "")
+    predicate = op.get("predicate", "")
+    object_val = op.get("object", "")
+    valid_from = op.get("valid_from")
+
+    if not isinstance(subject, str) or not subject.strip():
+        return "empty_subject"
+    if not isinstance(predicate, str) or not predicate.strip():
+        return "empty_predicate"
+    if not isinstance(object_val, str) or not object_val.strip():
+        return "empty_object"
+
+    pred_norm = predicate.strip().lower()
+    if not _PREDICATE_RE.match(pred_norm):
+        return "invalid_predicate"
+
+    if len(object_val.strip()) > _MAX_FACT_OBJECT_CHARS:
+        return "object_too_long"
+
+    if valid_from is not None:
+        if not isinstance(valid_from, str) or not _ISO_DATE_RE.match(valid_from):
+            return "invalid_valid_from"
+
+    # Late import keeps this module loadable in tests that don't have a DB.
+    from ..knowledge_graph import add_fact, ensure_table
+
+    conn = db_ctx["conn"]
+    ensure_table(conn)
+    fact_id = add_fact(
+        conn,
+        db_ctx["user_id"],
+        subject,
+        pred_norm,
+        object_val,
+        valid_from=valid_from,
+        source_task_id=db_ctx.get("source_task_id"),
+        source_type=db_ctx.get("source_type", "extracted"),
+    )
+    if fact_id is None:
+        # add_fact returns None on either exact-duplicate or fuzzy-skip;
+        # both surface as `noop_dup` to the caller. The KG audit log
+        # captures which.
+        return ("noop_dup", None)
+    return ("applied", {"fact_id": fact_id})

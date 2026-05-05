@@ -2138,6 +2138,7 @@ def execute_task(
         env.update({
             "ISTOTA_TASK_ID": str(task.id),
             "ISTOTA_USER_ID": task.user_id,
+            "ISTOTA_BOT_DIR_NAME": config.bot_dir_name,
             # Nextcloud OCS API credentials
             "NC_URL": config.nextcloud.url or "",
             "NC_USER": config.nextcloud.username or "",

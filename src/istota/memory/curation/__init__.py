@@ -12,7 +12,7 @@ Public surface:
 """
 
 from .audit import get_curation_audit_path, write_audit_log
-from .ops import apply_ops
+from .ops import apply_ops, apply_ops_with_db
 from .parser import parse_sectioned_doc, serialize_sectioned_doc
 from .prompt import build_op_curation_prompt, strip_json_fences
 from .types import Section, SectionedDoc
@@ -21,6 +21,7 @@ __all__ = [
     "Section",
     "SectionedDoc",
     "apply_ops",
+    "apply_ops_with_db",
     "build_op_curation_prompt",
     "get_curation_audit_path",
     "parse_sectioned_doc",

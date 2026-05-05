@@ -29,7 +29,7 @@ istota-skill memory_search reindex [--lookback-days 90]
 istota-skill memory_search stats
 ```
 
-## Knowledge graph
+## Knowledge graph (read-only)
 
 Structured facts (entity-relationship triples) extracted by the nightly sleep cycle. Current facts are loaded into your prompt automatically as "Known facts."
 
@@ -42,18 +42,9 @@ istota-skill memory_search facts --as-of 2026-01-15 [--subject ENTITY]
 
 # Get full timeline for an entity (current + historical facts)
 istota-skill memory_search timeline ENTITY
-
-# Manually add a fact
-istota-skill memory_search add-fact --subject ENTITY --predicate TYPE --object VALUE [--valid-from DATE]
-
-# Mark a fact as no longer valid
-istota-skill memory_search invalidate FACT_ID [--ended DATE]
-
-# Hard delete a fact
-istota-skill memory_search delete-fact FACT_ID
 ```
 
-Predicates are freeform — use short, lowercase, snake_case verbs (e.g., `works_at`, `allergic_to`, `speaks`, `prefers`). Single-valued predicates (`works_at`, `lives_in`, `has_role`, `has_status`) auto-supersede old values. All others are multi-valued.
+**To write facts** — `add-fact`, `invalidate`, `delete-fact` — see the `memory` skill. The classification gate there decides when a piece of information goes to USER.md vs the knowledge graph; consult it before writing either.
 
 ## Source Types
 

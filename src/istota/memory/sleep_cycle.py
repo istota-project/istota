@@ -64,6 +64,10 @@ SUGGESTED_PREDICATES = {
     "interested_in": "topic, film, book, or creative interest the user has expressed",
     "completed": "finished project, task, or milestone — pair with valid_from for the completion date",
     "decided": "explicit decision or commitment",
+    "acquired": "purchased, ordered, or otherwise obtained an item — pair with valid_from for the acquisition date",
+    "disposed_of": "returned, sold, gave away, or got rid of an item — pair with valid_from; use the same object string as the prior 'acquired' fact",
+    "grew_up_in": "where the user grew up — biographical, no valid_from",
+    "born_in": "birth city/country — biographical",
 }
 
 # Hard cap on object length. Long objects make fuzzy dedup unreliable and
@@ -868,6 +872,7 @@ def curate_user_memory(
 
     Returns True if USER.md was updated.
     """
+    import hashlib
     import json
 
     from .curation import (
@@ -877,6 +882,15 @@ def curate_user_memory(
         serialize_sectioned_doc,
         strip_json_fences,
         write_audit_log,
+    )
+    from .curation.audit import (
+        detect_bypass_write,
+        write_last_seen,
+    )
+    from .curation.file_lock import MemoryMdLocked, memory_md_lock
+    from .curation.lint import (
+        find_temporal_bullets,
+        prepend_agents_header_if_missing,
     )
 
     current = read_user_memory_v2(config, user_id) or ""
@@ -888,8 +902,57 @@ def curate_user_memory(
         logger.warning("USER.md curation requires mount mode, skipping for %s", user_id)
         return False
 
+    # Bypass-write detection runs once per nightly pass, before the LLM
+    # call. If USER.md changed without any audit entry having updated
+    # last_seen, log it as a synthetic legacy entry. This can't tell us
+    # *what* changed, only *that* something did outside the ops engine.
+    bypass_signal = detect_bypass_write(config, user_id, current)
+    if bypass_signal is not None:
+        logger.warning(
+            "memory_user_md_bypass_write user_id=%s previous_size=%s current_size=%s",
+            user_id,
+            bypass_signal.get("previous_size_bytes"),
+            bypass_signal.get("current_size_bytes"),
+        )
+        write_audit_log(
+            config, user_id,
+            applied=[], rejected=[],
+            user_md_size_bytes=bypass_signal.get("current_size_bytes"),
+            source="legacy",
+            entry_kind="legacy_detected",
+            extra={"legacy_signal": bypass_signal},
+        )
+
+    initial_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
+
     doc = parse_sectioned_doc(current)
     kg_text = _load_kg_facts_text(config, conn, user_id)
+
+    # Phase A lint pass — log only. Find date-stamped bullets that look
+    # like temporal facts so we can review the catch rate before flipping
+    # on Phase B (active migration).
+    lint_candidates = find_temporal_bullets(doc, kg_text)
+    if lint_candidates:
+        write_audit_log(
+            config, user_id,
+            applied=[], rejected=[],
+            user_md_size_bytes=len(current.encode("utf-8")),
+            source="nightly",
+            entry_kind="lint_candidate",
+            extra={
+                "lint_candidates": [
+                    {
+                        "heading": c.heading,
+                        "bullet_text": c.bullet_text,
+                        "suggested_predicate": c.suggested_predicate,
+                        "suggested_object": c.suggested_object,
+                        "suggested_valid_from": c.suggested_valid_from,
+                    }
+                    for c in lint_candidates
+                ],
+            },
+        )
+
     prompt = build_op_curation_prompt(user_id, doc, dated, kg_text)
 
     ok, output = _run_sleep_cycle_brain(
@@ -915,33 +978,78 @@ def curate_user_memory(
         )
         return False
 
-    new_doc, applied, rejected = apply_ops(doc, ops)
-    if not applied and not rejected:
-        return False  # truly nothing happened — no audit, no write
-    if not applied:
-        write_audit_log(
-            config, user_id, applied=[], rejected=rejected,
-            user_md_size_bytes=len(current.encode("utf-8")),
-        )
-        return False
-
-    # Skip the write if every applied op was a no-op (dedup, no_match). Decide
-    # this from outcomes rather than text comparison — comparing serialized
-    # output against `current` is brittle when USER.md has formatting drift
-    # (trailing whitespace on headings, missing trailing newline, CRLF) that
-    # the round-trip normalizes away, leading to spurious nightly rewrites.
-    real_changes = any(a.get("outcome") == "applied" for a in applied)
-    if not real_changes:
-        write_audit_log(
-            config, user_id, applied=applied, rejected=rejected,
-            user_md_size_bytes=len(current.encode("utf-8")),
-        )
-        return False
-
-    new_text = serialize_sectioned_doc(new_doc)
     memory_path = _get_mount_path(config, get_user_memory_path(user_id, config.bot_dir_name))
     memory_path.parent.mkdir(parents=True, exist_ok=True)
-    memory_path.write_text(new_text)
+
+    header_added = False
+    try:
+        with memory_md_lock(memory_path, timeout_seconds=5.0):
+            # Re-read USER.md from disk after the LLM call. If it changed
+            # during the brain's wall time (a runtime CLI write landed
+            # between read and write), abort tonight's curation rather
+            # than clobber the runtime write.
+            try:
+                latest = memory_path.read_text()
+            except OSError:
+                latest = current
+            latest_sha = hashlib.sha256(latest.encode("utf-8")).hexdigest()
+            if latest_sha != initial_sha:
+                logger.warning(
+                    "memory_curation_aborted user=%s reason=user_md_changed_during_llm_call",
+                    user_id,
+                )
+                write_audit_log(
+                    config, user_id,
+                    applied=[], rejected=[],
+                    user_md_size_bytes=len(latest.encode("utf-8")),
+                    source="nightly",
+                    entry_kind="aborted",
+                    extra={"aborted_reason": "user_md_changed_during_llm_call"},
+                )
+                # Update last_seen so the next nightly run doesn't keep
+                # replaying the bypass detection on an already-noticed
+                # mismatch.
+                write_last_seen(
+                    config, user_id,
+                    size_bytes=len(latest.encode("utf-8")),
+                    sha256=latest_sha,
+                )
+                return False
+
+            new_doc, applied, rejected = apply_ops(doc, ops)
+            if not applied and not rejected:
+                return False  # truly nothing happened — no audit, no write
+            if not applied:
+                write_audit_log(
+                    config, user_id, applied=[], rejected=rejected,
+                    user_md_size_bytes=len(current.encode("utf-8")),
+                    source="nightly",
+                )
+                return False
+
+            # Skip the write if every applied op was a no-op (dedup, no_match). Decide
+            # this from outcomes rather than text comparison — comparing serialized
+            # output against `current` is brittle when USER.md has formatting drift
+            # (trailing whitespace on headings, missing trailing newline, CRLF) that
+            # the round-trip normalizes away, leading to spurious nightly rewrites.
+            real_changes = any(a.get("outcome") == "applied" for a in applied)
+            if not real_changes:
+                write_audit_log(
+                    config, user_id, applied=applied, rejected=rejected,
+                    user_md_size_bytes=len(current.encode("utf-8")),
+                    source="nightly",
+                )
+                return False
+
+            new_text = serialize_sectioned_doc(new_doc)
+            # One-shot agents-header migration. Idempotent.
+            new_text, header_added = prepend_agents_header_if_missing(new_text)
+            memory_path.write_text(new_text)
+    except MemoryMdLocked:
+        logger.warning(
+            "memory_curation_aborted user=%s reason=lock_timeout", user_id,
+        )
+        return False
     logger.info(
         "Updated USER.md for %s (+%d ops, %d rejected)",
         user_id,
@@ -949,9 +1057,27 @@ def curate_user_memory(
         len(rejected),
     )
     new_size_bytes = len(new_text.encode("utf-8"))
+    new_sha = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
     write_audit_log(
         config, user_id, applied=applied, rejected=rejected,
         user_md_size_bytes=new_size_bytes,
+        source="nightly",
+    )
+    write_last_seen(config, user_id, size_bytes=new_size_bytes, sha256=new_sha)
+
+    n_ops_applied = sum(1 for a in applied if a.get("outcome") == "applied")
+    n_ops_rejected = len(rejected)
+    n_lint = len(lint_candidates) if lint_candidates else 0
+    legacy_detected = 1 if bypass_signal is not None else 0
+    logger.info(
+        "memory_curation_run user=%s ops_applied=%d ops_rejected=%d "
+        "lint_candidates=%d legacy_detected=%d agents_header_added=%d",
+        user_id,
+        n_ops_applied,
+        n_ops_rejected,
+        n_lint,
+        legacy_detected,
+        1 if header_added else 0,
     )
 
     # Phase A — observability only. Warn to log_channel when USER.md crosses
