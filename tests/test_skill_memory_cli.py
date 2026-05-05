@@ -225,6 +225,31 @@ class TestChannel:
         out = json.loads(capsys.readouterr().out)
         assert out["error"] == "channel write requires ISTOTA_CONVERSATION_TOKEN"
 
+    def test_channel_write_skips_audit_log(self, tmp_path, monkeypatch, capsys):
+        # ISSUE-076: channel writes intentionally skip the audit log + the
+        # USER.md last_seen sidecar (no per-channel audit infrastructure).
+        # Lock in the asymmetry so a future change can't quietly start
+        # writing channel-write entries to the user-scoped audit file.
+        ch_md = self._setup(tmp_path, monkeypatch)
+        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "room-1")
+        # Materialize a USER.md so the audit path is resolvable and the
+        # absence of a write is meaningful (not just a missing parent dir).
+        user_md_dir = tmp_path / "mount" / "Users" / "alice" / "istota" / "config"
+        user_md_dir.mkdir(parents=True, exist_ok=True)
+        (user_md_dir / "USER.md").write_text("# User Memory\n\n")
+
+        memory_main([
+            "append", "--heading", "Decisions",
+            "--line", "Use Redis for queues", "--channel", "room-1",
+        ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        assert "Use Redis for queues" in ch_md.read_text()
+
+        # No audit JSONL, no last_seen sidecar.
+        assert not (user_md_dir / "USER.md.audit.jsonl").exists()
+        assert not (user_md_dir / "USER.md.last_seen.json").exists()
+
 
 class TestAtomicWrite:
     def test_no_partial_write_on_reject(self, tmp_path, monkeypatch, capsys):
