@@ -2,6 +2,47 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-04: Memory write classification — runtime CLI + curator self-heal
+
+USER.md was accumulating temporal facts ("ordered a fountain pen on …", "decided to standardize on …", "returned the …") under whatever `## heading` happened to be last in the file, because the runtime memory skill's only write recipe was `echo "- ... (noted $(date +%Y-%m-%d))" >> USER.md`. Two failures stacked: no classification (these belonged in the knowledge graph as `acquired` / `decided` / `disposed_of` triples) and no section routing (append-to-EOF dumps under whatever `## ` heading is last in the file). The fix lands the curation ops engine — used nightly already — as the runtime write path, plus a three-branch classification gate in the skill body, plus a Phase-A lint pass and bypass detector to surface the pre-existing damage without trying to migrate it blindly.
+
+**Key changes:**
+- New runtime memory CLI (`python -m istota.skills.memory`, exposed as `istota-skill memory`) with subcommands `append`, `add-heading`, `remove`, `show`, `headings`, plus `--channel TOKEN` flag for CHANNEL.md (refuses cross-channel writes when `ISTOTA_CONVERSATION_TOKEN` is set). Each write takes a per-file flock (`<path>.lock`), parses → applies → atomically renames, and writes a `source="runtime"` JSONL audit entry.
+- `apply_ops` gained a sibling `apply_ops_with_db()` and an `add_fact` op (subject, predicate, object, valid_from). DB-aware ops route through `knowledge_graph.add_fact`; the existing file-only `apply_ops` returns `no_db_connection` for `add_fact` so callers don't accidentally drop facts.
+- Three-branch classification gate replaces the old "Things to remember" guidance: temporal event → `add-fact` with `--from`; stable factual claim (allergies, family, biography, language) → `add-fact` no `--from`; behavioral instruction → `memory append`. Worked CLI examples for both targets, explicit "don't `echo >>`" callout. Skill body grows from ~5.5KB to ~9KB; trade-off accepted because the skill is `always_include`.
+- Knowledge-graph fuzzy dedup is now scoped to identical predicates and compares object tokens only. Previously `acquired pilot prera fountain pen` and `disposed_of pilot prera fountain pen` shared 4 of 6 tokens (Jaccard 0.67 ≥ 0.6) and the second insert was silently dropped. Five new suggested predicates: `acquired`, `disposed_of`, `grew_up_in`, `born_in`. (`allergic_to`, `speaks` were already there.)
+- Nightly curator self-heal: bypass-write detection via `USER.md.last_seen.json` sidecar (sha256 + size). USER.md mtime changed without an audit entry → synthetic `source="legacy"` entry, WARNING log. After the LLM call, the curator re-reads USER.md inside a flock, aborts if sha256 changed during the brain's wall time (defends against runtime CLI writes that landed mid-run). Agents-header `<!-- agents: ... -->` HTML comment is one-shot prepended to existing USER.md files lacking it; new USER.md seeds via `MEMORY_TEMPLATE` carry it from creation.
+- Phase-A lint pass (`memory/curation/lint.py`) detects date-stamped temporal-verb bullets in USER.md (`ordered/bought/decided/… on YYYY-MM-DD`, plus `YYYY-MM-DD: …` lead-date form), filters by behavior heading allowlist (Communication style / Preferences / Behavior / etc.) and KG dedup pre-check, caps at N=3 candidates per night. Logs only — `entry_kind="lint_candidate"` audit entries — Phase B will add the actual migration once we've eyeballed the catch rate. Bullets ending with bare `(noted YYYY-MM-DD)` are explicitly NOT a match (cargo-cult signature of the legacy skill, on essentially every existing bullet, behavioral or otherwise).
+- Sandbox path for runtime fact writes: `istota-skill memory_search add-fact|invalidate|delete-fact` now defers to `task_<id>_kg_ops.json` when `ISTOTA_DEFERRED_DIR` is set. New `_process_deferred_kg_ops` in the scheduler applies them post-task with `task.user_id` always taking precedence (defense-in-depth).
+- Audit JSONL gains `source` (`nightly` | `runtime` | `cli` | `legacy`) and `entry_kind` (`batch` | `lint_candidate` | `aborted` | `legacy_detected`) fields. Existing entries without these fields round-trip cleanly. Per-run summary log: `memory_curation_run user=… ops_applied=… ops_rejected=… lint_candidates=… legacy_detected=… agents_header_added=…`.
+
+**Files added:**
+- `src/istota/memory/curation/file_lock.py` — `memory_md_lock(target_path, timeout_seconds)` context manager (`fcntl.flock` on `<path>.lock`).
+- `src/istota/memory/curation/lint.py` — `find_temporal_bullets()` + `prepend_agents_header_if_missing()`.
+- `src/istota/skills/memory/__init__.py` + `__main__.py` — runtime CLI.
+- `tests/test_skill_memory_cli.py` — append / add-heading / remove / show / headings, channel-token gating, atomic-write-on-reject (14 tests).
+- `tests/test_skill_memory_classification.py` — body assertions: three-branch labels, no-echo regex, cli flag (6 tests).
+- `tests/test_curation_lint.py` — date-position rule, behavior allowlist, KG dedup, max cap, original-failure-case shape (11 tests).
+- `tests/test_curation_concurrency.py` — flock serialization + timeout (2 tests).
+- `tests/test_no_echo_user_md.py` — repo-wide grep guard.
+
+**Files modified:**
+- `src/istota/memory/curation/ops.py` — `add_fact` op + `apply_ops_with_db` sibling, validation (`empty_subject`, `invalid_predicate`, `invalid_valid_from`, `object_too_long`, `no_db_connection`).
+- `src/istota/memory/curation/audit.py` — `source` / `entry_kind` / `extra` fields, `last_seen` sidecar, `detect_bypass_write()`.
+- `src/istota/memory/curation/__init__.py` — exports `apply_ops_with_db`.
+- `src/istota/memory/knowledge_graph.py` — fuzzy dedup scoped to identical predicates, compares objects only; `_fact_similarity` docstring rewritten to call out the predicate-folding pitfall.
+- `src/istota/memory/sleep_cycle.py` — `SUGGESTED_PREDICATES` extended with acquired / disposed_of / grew_up_in / born_in. `curate_user_memory` wired with bypass detection, lint Phase-A logging, flock + sha256 re-read, agents-header migration, summary log line.
+- `src/istota/skills/memory/skill.md` — full body rewrite. `cli: true` in frontmatter.
+- `src/istota/skills/memory_search/__init__.py` — deferred-DB pattern for `add-fact` / `invalidate` / `delete-fact`; falls through to direct write outside the sandbox.
+- `src/istota/skills/memory_search/skill.md` — trimmed to read-only ops, points writers at the `memory` skill.
+- `src/istota/scheduler.py` — `_process_deferred_kg_ops()`, `kg_ops` added to `_KNOWN_DEFERRED_SUFFIXES`, wired into the post-task pipeline alongside `_process_deferred_kv_ops`.
+- `src/istota/executor.py` — sets `ISTOTA_BOT_DIR_NAME` env var for the runtime CLI to resolve USER.md without re-parsing config.
+- `src/istota/storage.py` — `MEMORY_TEMPLATE` now seeds with the agents-header HTML comment (covers both v2 mount and rclone seed paths).
+- `tests/test_curation_audit.py` — extended with source/entry_kind round-trip and bypass detection cases.
+- `AGENTS.md` — Memory System section reflects runtime CLI, deferred kg_ops, classification gate, lint + bypass detector.
+
+**Verified.** Full unit suite (3417 tests) passes. Pre-existing failures on `main` (`test_channel_sleep_cycle.py::test_writes_memory_file`, three `test_location.py::TestCmdDaySummary` cases) unrelated. Executor tests (247) pass.
+
 ## 2026-05-03: Bug-fix sweep — ISSUE-067 to ISSUE-071
 
 Five issues opened during the module-skill silent-failure audit (DEVLOG entry below). All five were latent — they would have surfaced as "looks healthy, isn't" failures. Closing them in one pass keeps the rollup behavior consistent across the feeds + money facades and the heartbeat-vs-scheduler subprocess paths.

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Runtime memory CLI (`istota-skill memory`).** New `append`, `add-heading`, `remove`, `show`, `headings` subcommands write to `USER.md` through the same op-based engine the nightly curator uses — same heading routing, dedup, opaque subsections, audit log. Optional `--channel TOKEN` flag retargets to `CHANNEL.md` (cross-channel writes are refused). Replaces `echo "- ..." >> USER.md` as the durable-memory write path.
+- **Three-branch classification gate in the memory skill body.** Temporal events ("ordered X on …", "decided to …", "returned …") and stable factual claims (allergies, family, biography, languages, residence) route to `istota-skill memory_search add-fact`; behavioral instructions ("default to short replies", "always sign as …") route to `istota-skill memory append`. Worked CLI examples and explicit "don't echo >>" callout in the skill body.
+- **Phase-A lint pass on USER.md.** Nightly curator scans for date-stamped temporal-verb bullets ("ordered X on YYYY-MM-DD" or `YYYY-MM-DD: …` lead-date form) and logs them as candidates (`entry_kind="lint_candidate"`) in `USER.md.audit.jsonl` without migrating. Filtered by behavior heading allowlist and KG dedup pre-check; capped at N=3 per run. A future Phase B will gate the actual migration on a config flag once the candidate quality is verified in the field.
+- **Bypass-write detection.** New `USER.md.last_seen.json` sidecar stores size + sha256. If USER.md changes without an audit entry recording it, the next nightly run logs a WARNING and writes a synthetic `source="legacy"` audit entry. Catches bypass writes from `echo >>`, manual edits, or third-party tools.
+- **`apply_ops_with_db()` (curation engine).** Sibling of `apply_ops()` that handles a new `add_fact` op alongside the existing file-only ops, against a writable sqlite3 connection. The runtime memory_search CLI uses this when running outside the sandbox; sandboxed runs go through the deferred-DB pattern.
+- **Sandbox-aware fact writes.** `istota-skill memory_search add-fact|invalidate|delete-fact` now defers to `task_<id>_kg_ops.json` when `ISTOTA_DEFERRED_DIR` is set. The scheduler's new `_process_deferred_kg_ops` applies them post-task using `task.user_id` (always wins over any user_id in the file).
+- **`source` and `entry_kind` fields on the curation audit log.** `source ∈ {nightly, runtime, cli, legacy}`; `entry_kind ∈ {batch, lint_candidate, aborted, legacy_detected}`. Existing entries lacking these fields read back cleanly. Per-run summary log line: `memory_curation_run user=… ops_applied=… ops_rejected=… lint_candidates=… legacy_detected=… agents_header_added=…`.
+- **Curator concurrency safety.** Per-file flock around the parse-modify-write window in both the runtime CLI and the nightly curator. The curator additionally re-reads USER.md after the LLM returns and aborts (with `entry_kind="aborted"`) if sha256 changed during the brain's wall time, so a runtime CLI write that lands during the nightly call is never clobbered.
+- **Agents-header HTML comment on USER.md.** New seed files include a `<!-- agents: ... -->` preamble describing what belongs in USER.md vs the knowledge graph; existing USER.md files get the comment one-shot prepended on the next nightly curation run (idempotent substring match).
+- **Five new suggested predicates** in the extraction prompt: `acquired`, `disposed_of`, `grew_up_in`, `born_in`. (`allergic_to`, `speaks` were already present.)
+
+### Changed
+- **Knowledge-graph fuzzy dedup is now scoped to identical predicates and compares object tokens only.** Previously the Jaccard signature `<predicate> <object>` was compared as a single string, so opposing-verb facts about the same object (e.g. `acquired pilot prera fountain pen` vs `disposed_of pilot prera fountain pen`) shared 4 tokens out of 6, scored 0.67 ≥ 0.6, and the second insert was silently dropped. Now: facts with different predicates never fuzzy-collide; same-predicate facts dedup on object tokens (substring fast-path + Jaccard ≥ 0.6).
+- **`memory_search` skill body trimmed to read-only knowledge-graph operations.** `add-fact`, `invalidate`, and `delete-fact` documentation moved to the `memory` skill, where the classification gate decides where a piece of information goes. The `memory_search` skill now points writers there.
+
+### Fixed
+- **Runtime memory writes can no longer land under the wrong heading.** The previous skill recipe was `echo "- … (noted $(date +%Y-%m-%d))" >> USER.md`, which appends to EOF — i.e. under whatever `## ` heading is last in the file. Real-world failure: temporal facts about a fountain-pen purchase / decision / return ended up under "Emailing on stefan's behalf" because that section happened to be last. The runtime CLI requires `--heading` and rejects unknown ones with the available-heading list, so the model self-corrects instead of dumping under the wrong section.
+
 ## [0.9.0] - 2026-05-03
 
 ### Added

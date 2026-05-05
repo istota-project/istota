@@ -73,10 +73,17 @@ def _normalize(text: str) -> str:
     return text.strip().lower()
 
 
-def _fact_similarity(pred_obj_a: str, pred_obj_b: str) -> float:
-    """Word-level Jaccard similarity between two 'predicate object' strings."""
-    words_a = set(pred_obj_a.split())
-    words_b = set(pred_obj_b.split())
+def _fact_similarity(text_a: str, text_b: str) -> float:
+    """Word-level Jaccard similarity between two whitespace-tokenized strings.
+
+    Used for object-only comparison after a predicate-equality gate. The
+    predicate must NOT be folded into the input — that produces false
+    positives between opposing-verb facts on the same object (e.g.
+    `acquired X` vs `disposed_of X` would collide on the shared object
+    tokens alone if compared together with the verb).
+    """
+    words_a = set(text_a.split())
+    words_b = set(text_b.split())
     if not words_a or not words_b:
         return 0.0
     return len(words_a & words_b) / len(words_a | words_b)
@@ -260,38 +267,42 @@ def add_fact(
     if existing:
         return None  # Duplicate
 
-    # Fuzzy dedup: catch near-duplicate predicate+object for same subject.
-    # Two-stage check:
-    #   1. Substring fast-path — if one sig contains the other after
-    #      normalization, treat as dup. Catches "python" vs "python 3" and
-    #      "acme" vs "acme corp" cleanly.
-    #   2. Word-level Jaccard ≥ 0.6 (down from 0.7). The looser threshold
-    #      is paired with audit logging (op="fuzzy_dedup_skip") so dedup
-    #      quality is observable and tunable, not silent.
+    # Fuzzy dedup: catch near-duplicate facts for the same subject, but
+    # ONLY when the new and existing facts share a predicate. Predicates
+    # carry meaning; comparing across predicates conflates opposing
+    # statements about the same object (e.g. `acquired pilot prera` vs
+    # `disposed_of pilot prera`) and silently drops the second.
+    #
+    # Two-stage check, both scoped to identical predicates and operating
+    # on object tokens only:
+    #   1. Token-subset fast-path — one object's tokens are a subset of
+    #      the other's. Catches "python" ⊂ "python 3" and "acme" ⊂
+    #      "acme corp"; rejects substring-only collisions like "tech_1"
+    #      inside "tech_10" (different tokens, neither a subset).
+    #   2. Word-level Jaccard on objects ≥ 0.6 (paired with audit
+    #      logging via op="fuzzy_dedup_skip" so dedup quality is
+    #      observable and tunable, not silent).
     FUZZY_DEDUP_THRESHOLD = 0.6
-    new_sig = f"{predicate} {object_val}".strip()
     near_matches = conn.execute(
         "SELECT id, predicate, object FROM knowledge_facts "
-        "WHERE user_id = ? AND subject = ? "
+        "WHERE user_id = ? AND subject = ? AND predicate = ? "
         "AND (valid_until IS NULL OR valid_until > ?)",
-        (user_id, subject, today),
+        (user_id, subject, predicate, today),
     ).fetchall()
     new_obj_tokens = set(object_val.split())
     for row in near_matches:
-        existing_sig = f"{row[1]} {row[2]}".strip()
-        # Token-subset fast-path scoped to identical predicates: one object's
-        # tokens are a subset of the other's. Catches "python" ⊂ "python 3"
-        # and "acme" ⊂ "acme corp"; rejects substring-only collisions like
-        # "tech_1" inside "tech_10" (different tokens, neither a subset).
+        # Predicates are guaranteed equal by the WHERE clause above.
         is_token_subset = False
-        if row[1] == predicate and object_val and row[2]:
+        if object_val and row[2]:
             existing_obj_tokens = set(row[2].split())
             if new_obj_tokens and existing_obj_tokens:
                 is_token_subset = (
                     new_obj_tokens <= existing_obj_tokens
                     or existing_obj_tokens <= new_obj_tokens
                 )
-        if is_token_subset or _fact_similarity(new_sig, existing_sig) >= FUZZY_DEDUP_THRESHOLD:
+        if is_token_subset or _fact_similarity(object_val, row[2]) >= FUZZY_DEDUP_THRESHOLD:
+            new_sig = f"{predicate} {object_val}".strip()
+            existing_sig = f"{row[1]} {row[2]}".strip()
             logger.debug(
                 "Skipping near-duplicate fact: '%s' ≈ '%s'", new_sig, existing_sig
             )

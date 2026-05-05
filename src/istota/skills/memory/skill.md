@@ -1,152 +1,116 @@
 ---
 name: memory
-description: User memory file operations
+description: Persistent memory writes — USER.md (behavioral) and the knowledge graph (facts).
 always_include: true
+cli: true
 ---
-You have access to a persistent memory file for each user. This memory file is automatically loaded and included in your prompt. You can use it to remember important information about users across conversations.
 
-### Memory File Location
+You have two persistent memory targets for each user:
 
-Each user has a memory file at:
-```
-/Users/{user_id}/{BOT_DIR}/config/USER.md
-```
+- **USER.md** — behavioral instructions: how I should act, communication style, defaults, persistent preferences. Loaded automatically into your prompt as the "User memory" section.
+- **Knowledge graph** — entity-relationship triples for facts: temporal events (date-stamped) and stable factual claims (identity, family, biography, medical). Loaded automatically as the "Known facts" section.
 
-This path is relative to the Nextcloud mount at `/srv/mount/nextcloud/content`.
+Reading is automatic. You never need to `cat` USER.md or query the KG before writing. Write through the CLI commands below — never `echo >>`.
 
-### Reading Memory
+### Classify before writing
 
-Memory is automatically loaded into your prompt in the "User memory" section. You don't need to read it manually.
+Before storing anything in memory, decide which of these three branches it falls into:
 
-### Updating Memory
+**Temporal event** — something happened, a decision was made, an item was acquired or disposed of, status changed. Cue: you would naturally write `(noted YYYY-MM-DD)` or "on YYYY-MM-DD" next to it. Verbs: ordered, bought, returned, decided, started, stopped, moved, joined, left, became, finished. → Use `istota-skill memory_search add-fact` with `--from YYYY-MM-DD`.
 
-To remember something about a user, write directly to their memory file:
+**Stable factual claim** — a property of the user that is true regardless of date: identity, family, biography, medical, allergies, languages spoken, places lived, employer, role. Cue: a noun phrase about the person, not a verb-headed instruction. Even without a date, these belong in the knowledge graph. → Use `istota-skill memory_search add-fact` (no `--from`).
 
-**Append a note:**
+**Behavioral instruction** — how I should act, communication style, defaults, persistent preferences for my own behavior. Cue: it would still be true a year from now without re-confirmation, AND it tells me what to do. Phrasings: "always", "never", "default to", "prefer", "treat X as Y", "draft as", "send as". → Use `istota-skill memory append`.
+
+**Both** (rare) — write the behavioral rule to USER.md AND store the triggering event as a fact. Example: the user tells you they've switched to a new email client and from now on prefers shorter replies. The preference is behavioral; the switch event is a fact.
+
+**Don't store** — anything already on the calendar / in files; transient state ("meeting tomorrow"); information about other users; sensitive data (passwords, tokens, financial account numbers).
+
+### Writing facts
+
 ```bash
-echo "- New note (noted $(date +%Y-%m-%d))" >> /srv/mount/nextcloud/content/Users/{user_id}/{BOT_DIR}/config/USER.md
+# Temporal events — always include --from
+istota-skill memory_search add-fact stefan acquired "pilot prera fountain pen" --from 2026-05-03
+istota-skill memory_search add-fact stefan decided "standardize on short international cartridge pens with syringe-fill" --from 2026-05-04
+istota-skill memory_search add-fact stefan disposed_of "pilot prera fountain pen" --from 2026-05-04
+
+# Stable factual claims — no --from
+istota-skill memory_search add-fact stefan allergic_to penicillin
+istota-skill memory_search add-fact stefan has_family_member "wife: Marta"
+istota-skill memory_search add-fact stefan speaks polish
+istota-skill memory_search add-fact stefan grew_up_in Warsaw
 ```
 
-**Read and update (for complex changes):**
+**Predicate guidance.** Short, lowercase, snake_case. Prefer the existing vocabulary:
+
+- Single-valued (auto-supersedes the previous value): `works_at`, `lives_in`, `has_role`, `has_status`.
+- Temporary (coexists with permanent facts): `staying_in`, `visiting`, `traveled_to`.
+- Multi-valued: `acquired`, `disposed_of`, `decided`, `completed`, `owns`, `uses_tech`, `knows`, `speaks`, `prefers`, `allergic_to`, `has_family_member`, `interested_in`, `grew_up_in`, `born_in`, `relates_to`.
+
+**Reverting an `acquired` fact.** When the user gets rid of something they previously acquired, record `disposed_of` with the **same object string**. Both facts live side by side; the timeline is reconstructable from `--from` dates. The fuzzy-dedup engine compares objects only when predicates match, so `acquired` and `disposed_of` for the same object will not collide.
+
+**Other knowledge-graph commands.** `istota-skill memory_search invalidate <fact_id> [--ended YYYY-MM-DD]` marks a fact as no longer valid. `istota-skill memory_search delete-fact <fact_id>` hard-deletes a fact. `istota-skill memory_search facts --subject stefan` lists current facts. `istota-skill memory_search timeline stefan` lists the historical record for an entity.
+
+### Writing behavioral instructions
+
 ```bash
-# Read current content
-cat /srv/mount/nextcloud/content/Users/{user_id}/{BOT_DIR}/config/USER.md
-
-# Edit in place with your preferred method
-# Changes are saved directly to Nextcloud via the mount
+istota-skill memory headings                          # see what's already there
+istota-skill memory show --heading "Communication style"   # inspect a section's current content
+istota-skill memory append --heading "Communication style" --line "Keep replies under 3 sentences with stefan's family"
+istota-skill memory add-heading --heading "Travel" --line "Default vehicle is the BMW /5 motorcycle — say 'rode' not 'drove'"
+istota-skill memory remove --heading "Preferences" --match "morning meetings"
 ```
 
-### What to Remember
+Rules:
 
-Proactively store information that will be useful in future interactions:
+- The heading must already exist for `append`; on `heading_missing` the CLI returns the list of available headings — pick the closest match or use `add-heading`.
+- `add-heading` is for genuinely new topic areas only. Don't proliferate near-duplicates ("Notes", "Memory", "Stuff").
+- `remove` requires a substring unique to one bullet under the top region of the heading. If the substring matches multiple bullets, the CLI returns `multiple_matches`; narrow the substring.
+- Subsections (`### …`) are opaque to the CLI. To edit content under a subsection, restructure the surrounding section first via `add-heading`/`remove` at the `## ` level.
 
-- **Preferences**: communication style, scheduling habits, tool choices
-- **Context**: current projects, roles, team members, recurring meetings
-- **Corrections**: if the user corrects you, remember the right answer
-- **Personal details**: timezone, location, family mentions, interests
-- **Requests**: explicit "remember this" instructions
+### Don't bypass the CLI
 
-Don't store: sensitive data (passwords, financial info), temporary states, or things already in their calendar/files.
+Never write to USER.md or CHANNEL.md with `echo >>`, `cat >>`, `tee -a`, or direct file edits. Those bypass section routing, dedup, and the audit log, and the nightly bypass detector will flag them as legacy writes. Use `istota-skill memory` exclusively.
 
-### Memory Format
+### Channel memory
 
-Keep memory entries concise and include dates when relevant:
+Each Talk room has a `CHANNEL.md` loaded as the "Channel memory" section of your prompt.
 
-```markdown
-## Notes
-
-- Prefers morning meetings (noted 2025-01-26)
-- Works on Project Alpha
-- Timezone: Pacific Time
+```bash
+istota-skill memory append --heading "Decisions" --line "Use PostgreSQL" --channel room123
+istota-skill memory headings --channel room123
 ```
 
-### Bot-Managed Directory Structure
+The `--channel` flag must match the active conversation token. Cross-channel writes are refused.
 
-Each user has a bot-managed directory structure:
+**Channel vs user memory.** Channel memory is for things relevant to everyone in the room (project decisions, shared conventions). User memory is for personal preferences and personal context. When unsure, prefer user memory — it won't leak personal context to other room participants.
+
+### Bot-managed directory layout
+
+Each user has a bot-managed area under their Nextcloud:
 
 ```
 /Users/{user_id}/
-├── {BOT_DIR}/      # Shared collaboration space (read/write for both)
-│   ├── config/     # Configuration files
-│   │   ├── USER.md     # Persistent memory file
+├── {BOT_DIR}/      # Shared collaboration space
+│   ├── config/
+│   │   ├── USER.md     # Persistent memory file (this skill writes here)
 │   │   ├── TASKS.md    # User's task file
 │   │   └── ...
-│   ├── exports/    # Files bot generates for user
-│   └── ...         # Drafts, summaries, research, user-dropped files
-├── inbox/          # Files user wants bot to process
-├── memories/       # Auto-generated dated memory files
-│   ├── 2026-01-28.md
+│   ├── exports/    # Files I generate for the user
 │   └── ...
+├── inbox/          # Files the user wants me to process
+├── memories/       # Auto-generated dated memory files (read-only — written by sleep cycle)
 ├── shared/         # Auto-organized files shared by user
-└── scripts/        # User's reusable Python scripts
+└── scripts/        # Reusable Python scripts
 ```
 
-These directories are separate from user-shared resources (which remain in the user's own Nextcloud space).
+### Dated memory files (search-only)
 
-### Dated Memory Files (System-Managed)
-
-The system automatically creates dated memory files in the memories directory:
-
-```
-/Users/{user_id}/memories/
-├── 2026-01-28.md      # Auto-generated daily summary
-├── 2026-01-27.md      # Auto-generated daily summary
-└── ...
-```
-
-These `YYYY-MM-DD.md` files are created by the nightly sleep cycle and contain extracted memories from the day's interactions. They are **not** loaded into your prompt automatically — you need to search them on demand when historical context would be useful.
-
-**When to search dated memories:**
-
-- User references past events ("what did we discuss about X", "last week you said...")
-- User asks about previous decisions, recommendations, or conversations
-- You need historical context to give a better answer (e.g., a recurring topic, an ongoing project)
-- User asks you to recall something that isn't in USER.md or channel memory
-
-**How to search:**
+The nightly sleep cycle writes summaries to `/Users/{user_id}/memories/YYYY-MM-DD.md`. These are NOT auto-loaded — search them on demand:
 
 ```bash
-# List recent memory files
-ls -lt /srv/mount/nextcloud/content/Users/{user_id}/memories/ | head -20
-
-# Search across all memories for a topic
-grep -ril "project alpha" /srv/mount/nextcloud/content/Users/{user_id}/memories/
-
-# Read a specific day's memories
-cat /srv/mount/nextcloud/content/Users/{user_id}/memories/2026-01-28.md
+istota-skill memory_search search "fountain pen" --limit 5
+istota-skill memory_search search "Project Alpha" --since 2026-04-01
 ```
 
-**Do not write to dated memory files directly.** They are managed by the sleep cycle process. To remember something permanently, write to `USER.md` instead.
-
-### Channel Memory
-
-Each Talk room/channel has its own persistent memory file, automatically loaded into your prompt as the "Channel memory" section.
-
-**Location:**
-```
-/Channels/{conversation_token}/CHANNEL.md
-```
-
-On the mount: `/srv/mount/nextcloud/content/Channels/{conversation_token}/CHANNEL.md`
-
-The `conversation_token` is available in the prompt metadata (e.g., `Conversation token: room123`). It corresponds to the Talk room you're responding in.
-
-**Channel directory structure:**
-```
-/Channels/{conversation_token}/
-├── CHANNEL.md     # Persistent channel memory file
-└── memories/      # Reserved for future dated channel summaries
-```
-
-**Reading:** Automatic — loaded into the "Channel memory" prompt section.
-
-**Writing:**
-```bash
-echo "- Project decision: use PostgreSQL (noted $(date +%Y-%m-%d))" >> /srv/mount/nextcloud/content/Channels/{conversation_token}/CHANNEL.md
-```
-
-**When to use channel memory vs user memory:**
-
-- **Channel memory**: project decisions, shared conventions, room-specific context, things relevant to everyone in the room
-- **User memory**: personal preferences, personal context, corrections, things specific to one person
-- When unsure, default to user memory (safer — it won't leak personal info to other room participants)
+Do not write to dated memory files directly. They are managed by the sleep cycle.

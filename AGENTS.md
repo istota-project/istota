@@ -47,7 +47,7 @@ config/                   # config.toml, users/, persona.md, emissaries.md, syst
 deploy/ansible/           # Role + install.sh + wizard.sh
 docker/                   # Full-stack compose (postgres + redis + nextcloud + istota)
 web/                      # SvelteKit (adapter-static, base /istota)
-tests/                    # pytest + pytest-asyncio (~3450 tests, 65 files)
+tests/                    # pytest + pytest-asyncio (~3900 tests, 91 files)
 schema.sql
 pyproject.toml
 ```
@@ -87,10 +87,12 @@ Web App ──► Nextcloud OIDC → Dashboard / Feeds / Location / Money
 Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped mount, no DB write, no subtasks, `admin_only` skills filtered.
 
 ### Memory System
-- `USER.md` — auto-loaded, optional nightly op-based curation.
-- `CHANNEL.md` — loaded with `conversation_token`.
+- `USER.md` — auto-loaded, optional nightly op-based curation. Runtime writes go through the `memory` skill CLI (`istota-skill memory append|add-heading|remove|show|headings`) — never `echo >>`. The CLI shares the curation `apply_ops` engine, takes a per-file flock, and writes a `source="runtime"` audit entry per call.
+- `CHANNEL.md` — loaded with `conversation_token`. Same CLI with `--channel TOKEN` (token must match `ISTOTA_CONVERSATION_TOKEN`).
 - `memories/YYYY-MM-DD.md` — last N days auto-loaded (`auto_load_dated_days`).
-- Knowledge graph (`knowledge_facts`) — temporal subject/predicate/object triples, freeform predicates, fuzzy dedup, audited.
+- Knowledge graph (`knowledge_facts`) — temporal subject/predicate/object triples, freeform predicates, fuzzy dedup (predicate-equality gated), audited. Sandboxed runtime writes via `istota-skill memory_search add-fact|invalidate|delete-fact` are deferred as `task_<id>_kg_ops.json` and applied by the scheduler post-task.
+- Classification gate in `memory/skill.md`: temporal events and stable factual claims → KG; behavioral instructions → USER.md.
+- Nightly curator self-heals: bypass-write detection (`USER.md.last_seen.json` sidecar), sha256 re-read after the LLM call, agents-header migration, Phase-A lint pass logs date-stamped USER.md bullets without migrating them.
 - Memory recall (BM25 + vector) — opt-in via `auto_recall`.
 - Briefings exclude all personal memory.
 - Subsystem lives under `src/istota/memory/`; `memory/sleep_cycle.py` orchestrates.

@@ -253,8 +253,45 @@ def cmd_timeline(args) -> dict:
     }
 
 
+def _defer_kg_op(entry: dict) -> bool:
+    """Append a deferred knowledge-graph op for the scheduler to process.
+
+    Returns True when the op was queued (sandbox mode, where the DB is
+    read-only). Caller falls back to a direct write if False.
+    """
+    deferred_dir = os.environ.get("ISTOTA_DEFERRED_DIR", "")
+    task_id = os.environ.get("ISTOTA_TASK_ID", "")
+    if not deferred_dir or not task_id:
+        return False
+
+    from pathlib import Path
+
+    path = Path(deferred_dir) / f"task_{task_id}_kg_ops.json"
+
+    ops = []
+    if path.exists():
+        try:
+            ops = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            ops = []
+    ops.append(entry)
+    path.write_text(json.dumps(ops))
+    return True
+
+
 def cmd_add_fact(args) -> dict:
-    """Manually add a fact."""
+    """Manually add a fact. Deferred under sandbox; direct write otherwise."""
+    entry = {
+        "op": "add_fact",
+        "subject": args.subject,
+        "predicate": args.predicate,
+        "object": args.object,
+        "valid_from": args.valid_from,
+        "source_type": "user_stated",
+    }
+    if _defer_kg_op(entry):
+        return {"status": "ok", "deferred": True}
+
     from istota.memory.knowledge_graph import ensure_table, add_fact
 
     conn = _get_conn()
@@ -275,7 +312,15 @@ def cmd_add_fact(args) -> dict:
 
 
 def cmd_invalidate_fact(args) -> dict:
-    """Invalidate a fact."""
+    """Invalidate a fact. Deferred under sandbox; direct write otherwise."""
+    entry = {
+        "op": "invalidate",
+        "fact_id": args.fact_id,
+        "ended": args.ended,
+    }
+    if _defer_kg_op(entry):
+        return {"status": "ok", "deferred": True}
+
     from istota.memory.knowledge_graph import ensure_table, invalidate_fact
 
     conn = _get_conn()
@@ -292,7 +337,11 @@ def cmd_invalidate_fact(args) -> dict:
 
 
 def cmd_delete_fact(args) -> dict:
-    """Hard delete a fact."""
+    """Hard delete a fact. Deferred under sandbox; direct write otherwise."""
+    entry = {"op": "delete", "fact_id": args.fact_id}
+    if _defer_kg_op(entry):
+        return {"status": "ok", "deferred": True}
+
     from istota.memory.knowledge_graph import ensure_table, delete_fact
 
     conn = _get_conn()

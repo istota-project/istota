@@ -4,7 +4,14 @@ import json
 from unittest.mock import patch
 
 from istota.config import Config, NextcloudConfig
-from istota.memory.curation.audit import get_curation_audit_path, write_audit_log
+from istota.memory.curation.audit import (
+    detect_bypass_write,
+    get_curation_audit_path,
+    get_user_md_last_seen_path,
+    read_last_seen,
+    write_audit_log,
+    write_last_seen,
+)
 
 
 class TestAuditPath:
@@ -78,3 +85,89 @@ class TestWriteAuditLog:
         path = get_curation_audit_path(config, "alice")
         lines = [line for line in path.read_text().splitlines() if line]
         assert len(lines) == 2
+
+
+class TestSourceAndEntryKind:
+    def _config(self, tmp_path):
+        return Config(
+            db_path=tmp_path / "x.db",
+            nextcloud=NextcloudConfig(),
+            nextcloud_mount_path=tmp_path / "mount",
+            bot_name="Istota",
+        )
+
+    def test_default_source_is_nightly(self, tmp_path):
+        config = self._config(tmp_path)
+        applied = [{"op": {"op": "append", "heading": "A", "line": "- x"}, "outcome": "applied"}]
+        write_audit_log(config, "alice", applied=applied, rejected=[])
+        entry = json.loads(get_curation_audit_path(config, "alice").read_text().strip())
+        assert entry["source"] == "nightly"
+        assert entry["entry_kind"] == "batch"
+
+    def test_runtime_source_round_trips(self, tmp_path):
+        config = self._config(tmp_path)
+        applied = [{"op": {"op": "append", "heading": "A", "line": "- x"}, "outcome": "applied"}]
+        write_audit_log(config, "alice", applied=applied, rejected=[], source="runtime")
+        entry = json.loads(get_curation_audit_path(config, "alice").read_text().strip())
+        assert entry["source"] == "runtime"
+
+    def test_lint_candidate_entry_with_extra(self, tmp_path):
+        config = self._config(tmp_path)
+        write_audit_log(
+            config, "alice",
+            applied=[], rejected=[],
+            source="nightly", entry_kind="lint_candidate",
+            extra={"lint_candidates": [{"heading": "Notes", "bullet_text": "bought X on 2026-01-01"}]},
+        )
+        entry = json.loads(get_curation_audit_path(config, "alice").read_text().strip())
+        assert entry["entry_kind"] == "lint_candidate"
+        assert entry["lint_candidates"][0]["heading"] == "Notes"
+
+
+class TestBypassDetection:
+    def _config(self, tmp_path):
+        return Config(
+            db_path=tmp_path / "x.db",
+            nextcloud=NextcloudConfig(),
+            nextcloud_mount_path=tmp_path / "mount",
+            bot_name="Istota",
+        )
+
+    def test_first_sight_returns_none(self, tmp_path):
+        config = self._config(tmp_path)
+        signal = detect_bypass_write(config, "alice", "first contents\n")
+        assert signal is None
+
+    def test_changed_since_last_seen_returns_signal(self, tmp_path):
+        config = self._config(tmp_path)
+        write_last_seen(config, "alice", size_bytes=10, sha256="deadbeef")
+        signal = detect_bypass_write(config, "alice", "different\n")
+        assert signal is not None
+        assert signal["previous_sha256"] == "deadbeef"
+
+    def test_unchanged_returns_none(self, tmp_path):
+        import hashlib
+        config = self._config(tmp_path)
+        text = "stable\n"
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        write_last_seen(config, "alice", size_bytes=len(text), sha256=sha)
+        assert detect_bypass_write(config, "alice", text) is None
+
+    def test_runtime_write_updates_last_seen(self, tmp_path):
+        # After a runtime write updates last_seen, the next bypass check
+        # against the same content should NOT flag.
+        import hashlib
+        config = self._config(tmp_path)
+        text = "v1\n"
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        write_last_seen(config, "alice", size_bytes=len(text), sha256=sha)
+        assert detect_bypass_write(config, "alice", text) is None
+        # Now a runtime write happens — caller updates last_seen — and
+        # bypass detection on the new contents should pass.
+        text2 = "v2\n"
+        sha2 = hashlib.sha256(text2.encode("utf-8")).hexdigest()
+        write_last_seen(config, "alice", size_bytes=len(text2), sha256=sha2)
+        assert detect_bypass_write(config, "alice", text2) is None
+        # An out-of-band edit that did NOT update last_seen flags.
+        signal = detect_bypass_write(config, "alice", "v3\n")
+        assert signal is not None

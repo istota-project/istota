@@ -1220,9 +1220,94 @@ _KNOWN_DEFERRED_SUFFIXES = (
     "tracked_transactions",
     "sent_emails",
     "kv_ops",
+    "kg_ops",
     "user_alerts",
     "email_output",
 )
+
+
+def _process_deferred_kg_ops(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> int:
+    """Process deferred knowledge-graph operations from JSON file.
+
+    `istota-skill memory_search add-fact / invalidate / delete-fact` write
+    a JSON op here when the DB is read-only inside the sandbox; we apply
+    them post-task with task.user_id always wins over any user_id in the
+    file (defense-in-depth).
+
+    Returns count of operations processed.
+    """
+    path = user_temp_dir / f"task_{task.id}_kg_ops.json"
+    if not path.exists():
+        return 0
+
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Bad deferred kg_ops file for task %d: %s", task.id, e)
+        path.unlink(missing_ok=True)
+        return 0
+
+    if not isinstance(data, list):
+        logger.warning("Deferred kg_ops for task %d is not a list", task.id)
+        path.unlink(missing_ok=True)
+        return 0
+
+    from .memory.knowledge_graph import (
+        add_fact as kg_add_fact,
+        delete_fact as kg_delete_fact,
+        ensure_table as kg_ensure_table,
+        invalidate_fact as kg_invalidate_fact,
+    )
+
+    count = 0
+    with db.get_db(config.db_path) as conn:
+        kg_ensure_table(conn)
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            op = entry.get("op")
+            try:
+                if op == "add_fact":
+                    subject = entry.get("subject", "")
+                    predicate = entry.get("predicate", "")
+                    object_val = entry.get("object", "")
+                    if not (subject and predicate and object_val):
+                        continue
+                    kg_add_fact(
+                        conn, task.user_id, subject, predicate, object_val,
+                        valid_from=entry.get("valid_from"),
+                        source_task_id=task.id,
+                        source_type=entry.get("source_type", "user_stated"),
+                    )
+                    count += 1
+                elif op == "invalidate":
+                    fact_id = entry.get("fact_id")
+                    if fact_id is None:
+                        continue
+                    kg_invalidate_fact(conn, int(fact_id), ended=entry.get("ended"))
+                    count += 1
+                elif op == "delete":
+                    fact_id = entry.get("fact_id")
+                    if fact_id is None:
+                        continue
+                    kg_delete_fact(conn, int(fact_id))
+                    count += 1
+                else:
+                    logger.warning(
+                        "Unknown KG op %r in deferred file for task %d", op, task.id,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Failed to process KG op for task %d: %s", task.id, e,
+                )
+        conn.commit()
+
+    if count:
+        logger.info("Processed %d deferred KG ops for task %d", count, task.id)
+    path.unlink(missing_ok=True)
+    return count
 
 
 def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
@@ -1742,6 +1827,7 @@ def process_one_task(
         _process_deferred_tracking(config, task, user_temp_dir)
         _process_deferred_sent_emails(config, task, user_temp_dir)
         _process_deferred_kv_ops(config, task, user_temp_dir)
+        _process_deferred_kg_ops(config, task, user_temp_dir)
         _process_deferred_user_alerts(config, task, user_temp_dir)
         _deliver_deferred_email_output(config, task, user_temp_dir)
         _warn_unconsumed_deferred_files(task, user_temp_dir)

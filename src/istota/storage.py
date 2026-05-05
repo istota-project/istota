@@ -327,8 +327,15 @@ Tasks are identified by content hash, so you can reorder freely.
 Completed/failed tasks can be deleted or kept for reference.
 """
 
-# Template for initial memory file
-MEMORY_TEMPLATE = """# User Memory
+# Template for initial memory file.
+#
+# The HTML comment at the top is read by Claude when USER.md is loaded
+# into the prompt. It's a hint, not enforcement — the structural fix
+# is the runtime classification gate in the memory skill — but it
+# survives parser round-trips (preamble) and can nudge the model when
+# it's unsure where a memory belongs.
+MEMORY_TEMPLATE = """<!-- agents: This file holds behavioral instructions and stable context only. Temporal events (purchases, decisions, status changes — anything you'd date-stamp) and stable factual claims (allergies, family, biography) belong in the knowledge graph via `istota-skill memory_search add-fact`. Append behavioral instructions only via `istota-skill memory append --heading "<existing heading>"`. Never use `echo >>` on this file. -->
+# User Memory
 
 This file contains remembered information about the user.
 The bot can append to this file to remember things for future conversations.
