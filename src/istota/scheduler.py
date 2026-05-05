@@ -1172,8 +1172,8 @@ def _talk_target_for_delivery(config: Config, task: db.Task) -> str | None:
     # Legacy fallback: pre-migration email tasks with a synthetic 16-char-hex
     # conversation_token need redirection to the user's resolved channel,
     # because the synthetic token is not a real Talk room.
-    is_synthetic = len(token) == 16 and all(c in "0123456789abcdef" for c in token)
-    if not is_synthetic:
+    from .email_poller import is_synthetic_email_thread_token
+    if not is_synthetic_email_thread_token(token):
         return token
     from .notifications import resolve_conversation_token
     resolved = resolve_conversation_token(config, task.user_id)
