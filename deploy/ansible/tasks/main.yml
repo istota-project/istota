@@ -734,6 +734,24 @@
     - "restart istota-scheduler"
     - "restart istota-web"
 
+# ISSUE-058: Validate the rendered config before any handler restarts the
+# scheduler. Catches structural bugs (keys nested under the wrong [table],
+# unparseable TOML, fields silently falling back to dataclass defaults)
+# at deploy time instead of in the scheduler logs. A failing assertion
+# fails the play, which prevents the queued restart handler from firing
+# against a broken config.
+- name: Validate rendered istota configuration
+  script: >
+    files/validate_config.py
+    "{{ istota_repo_dir }}/config/config.toml"
+    "{{ istota_package }}"
+    "{{ istota_home }}/data/{{ istota_namespace }}.db"
+    "{{ istota_home }}/tmp"
+  args:
+    executable: "{{ istota_home }}/.venv/bin/python"
+  changed_when: false
+  when: not istota_web_only
+
 - name: Deploy per-user config files
   template:
     src: user.toml.j2

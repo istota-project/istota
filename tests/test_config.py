@@ -1620,3 +1620,77 @@ class TestConfigToplevelKeyOrdering:
                 f"{key} is defined AFTER [brain] in the Ansible template — "
                 "it will be parsed as brain.{key}, breaking config loading"
             )
+
+
+class TestAnsibleValidateConfigScript:
+    """ISSUE-058: deploy/ansible/files/validate_config.py is the post-render
+    structural check the role runs before restarting the scheduler.
+    """
+
+    @staticmethod
+    def _run(tmp_path, cfg_text, expected_db, expected_tmp):
+        import subprocess
+        import sys
+
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(cfg_text)
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "deploy" / "ansible" / "files" / "validate_config.py"
+        )
+        proc = subprocess.run(
+            [sys.executable, str(script), str(cfg), "istota", expected_db, expected_tmp],
+            capture_output=True, text=True,
+        )
+        return proc
+
+    def test_passes_on_well_formed_config(self, tmp_path):
+        cfg = (
+            'bot_name = "Test"\n'
+            'db_path = "/srv/zorg/data/zorg.db"\n'
+            'temp_dir = "/srv/zorg/tmp"\n'
+            "\n[brain]\nkind = \"claude_code\"\n"
+        )
+        proc = self._run(tmp_path, cfg, "/srv/zorg/data/zorg.db", "/srv/zorg/tmp")
+        assert proc.returncode == 0, proc.stderr
+        assert "ok" in proc.stdout
+
+    def test_fails_when_root_keys_leak_under_brain(self, tmp_path):
+        cfg = (
+            'bot_name = "Test"\n'
+            "\n[brain]\n"
+            'kind = "claude_code"\n'
+            'db_path = "/srv/zorg/data/zorg.db"\n'
+            'temp_dir = "/srv/zorg/tmp"\n'
+        )
+        proc = self._run(tmp_path, cfg, "/srv/zorg/data/zorg.db", "/srv/zorg/tmp")
+        assert proc.returncode == 1
+        assert "leaked under [brain]" in proc.stderr
+        assert "db_path" in proc.stderr and "temp_dir" in proc.stderr
+
+    def test_fails_when_db_path_does_not_match_expected(self, tmp_path):
+        cfg = (
+            'bot_name = "Test"\n'
+            'db_path = "/wrong/path.db"\n'
+            'temp_dir = "/srv/zorg/tmp"\n'
+            "\n[brain]\nkind = \"claude_code\"\n"
+        )
+        proc = self._run(tmp_path, cfg, "/srv/zorg/data/zorg.db", "/srv/zorg/tmp")
+        assert proc.returncode == 1
+        assert "db_path" in proc.stderr and "/wrong/path.db" in proc.stderr
+
+    def test_fails_on_unparseable_toml(self, tmp_path):
+        proc = self._run(tmp_path, "this is not [valid TOML\n", "x", "y")
+        assert proc.returncode == 1
+        assert "TOML parse error" in proc.stderr
+
+    def test_brain_kind_alone_does_not_trip_leak_check(self, tmp_path):
+        cfg = (
+            'bot_name = "Test"\n'
+            'db_path = "/srv/zorg/data/zorg.db"\n'
+            'temp_dir = "/srv/zorg/tmp"\n'
+            "\n[brain]\n"
+            'kind = "claude_code"\n'
+        )
+        proc = self._run(tmp_path, cfg, "/srv/zorg/data/zorg.db", "/srv/zorg/tmp")
+        assert proc.returncode == 0, proc.stderr
