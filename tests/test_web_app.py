@@ -745,6 +745,48 @@ class TestAdminStats:
             assert re.match(iso_re, job["last_run_at"])
             assert re.match(iso_re, job["last_success_at"])
 
+    async def test_admin_stats_storage_backups(self, tmp_path):
+        """Storage card must reflect actual backup files alongside the DB."""
+        import os
+        config = self._config_with_admin(tmp_path)
+        backups = config.db_path.parent / "backups"
+        (backups / "daily").mkdir(parents=True)
+        (backups / "weekly").mkdir(parents=True)
+        old = backups / "daily" / "istota-2026-05-03_020000.db.gz"
+        mid = backups / "daily" / "istota-2026-05-04_020000.db.gz"
+        new = backups / "weekly" / "istota-2026-05-05_020000.db.gz"
+        for p in (old, mid, new):
+            p.write_bytes(b"x")
+        # Force distinct mtimes so "latest" is unambiguous.
+        os.utime(old, (1714694400, 1714694400))   # 2024-05-03 UTC
+        os.utime(mid, (1714780800, 1714780800))   # 2024-05-04 UTC
+        os.utime(new, (1714867200, 1714867200))   # 2024-05-05 UTC
+        # Stray non-backup file must be ignored.
+        (backups / "daily" / "README.txt").write_text("notes")
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            assert data["storage"]["backups_count"] == 3
+            assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+                            data["storage"]["last_backup"])
+            assert data["storage"]["last_backup"].startswith("2024-05-05T")
+
+    async def test_admin_stats_storage_backups_missing_dir(self, tmp_path):
+        """No backups dir → zero count, null timestamp, no exception."""
+        config = self._config_with_admin(tmp_path)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            assert data["storage"]["backups_count"] == 0
+            assert data["storage"]["last_backup"] is None
+
     async def test_admin_stats_feeds_module_unreachable_no_mount(self, tmp_path):
         """Native feeds users without resolvable mount must not vanish."""
         config = self._config_with_admin(tmp_path)

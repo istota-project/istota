@@ -509,12 +509,41 @@ def _admin_storage_section(db_path: Path) -> dict:
             mount_healthy = Path(_config.nextcloud_mount_path).is_dir()
         except OSError:
             mount_healthy = False
+    backups_count, last_backup = _scan_db_backups(db_path.parent / "backups")
     return {
         "db_size_bytes": db_size,
-        "backups_count": 0,
-        "last_backup": None,
+        "backups_count": backups_count,
+        "last_backup": last_backup,
         "nextcloud_mount_healthy": mount_healthy,
     }
+
+
+def _scan_db_backups(backups_dir: Path) -> tuple[int, str | None]:
+    """Count *.db.gz files under daily/ and weekly/, return latest mtime as ISO Z.
+
+    Mirrors the layout produced by deploy/ansible/templates/istota-backup.sh.j2.
+    """
+    count = 0
+    latest: float | None = None
+    try:
+        for sub in ("daily", "weekly"):
+            d = backups_dir / sub
+            if not d.is_dir():
+                continue
+            for p in d.glob("*.db.gz"):
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                count += 1
+                if latest is None or mtime > latest:
+                    latest = mtime
+    except OSError:
+        return 0, None
+    if latest is None:
+        return count, None
+    iso = datetime.fromtimestamp(latest, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return count, iso
 
 
 def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
