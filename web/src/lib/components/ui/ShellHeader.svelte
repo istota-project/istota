@@ -19,7 +19,7 @@
 <style>
 	.header {
 		display: flex;
-		align-items: baseline;
+		align-items: center;
 		gap: 1rem;
 		padding: 0.75rem;
 		border-bottom: 1px solid var(--border-subtle);
@@ -34,7 +34,7 @@
 	.header-nav {
 		display: flex;
 		gap: var(--chip-gap);
-		align-items: baseline;
+		align-items: center;
 		flex-wrap: wrap;
 		min-width: 0;
 	}
