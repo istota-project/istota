@@ -1387,10 +1387,14 @@ async def settings_resources(user: dict = Depends(_require_api_auth)) -> dict:
     if uc:
         for rc in uc.resources:
             # _apply_user_resources merges DB rows into uc.resources at
-            # config-load time so other call sites see them through one
-            # surface. Here we want a clean split, so skip TOML entries that
-            # the DB also owns — the loop below renders them with their
-            # actual id/extras and ``managed: "db"`` label.
+            # config-load time and tags them with ``from_db=True``. Skip
+            # those — the current DB query is authoritative, and a stale
+            # in-memory copy from startup must not resurface a row the
+            # user has since deleted.
+            if getattr(rc, "from_db", False):
+                continue
+            # Defensive: a TOML entry whose (type, path) collides with a
+            # current DB row is rendered once via the DB-row loop below.
             if (rc.type, rc.path) in db_keys:
                 continue
             out.append({
@@ -1573,6 +1577,11 @@ async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
     uc = _config.get_user(username)
     if uc:
         for b in uc.briefings:
+            # Skip DB-merged copies: the current DB query is authoritative,
+            # and a stale in-memory copy from startup must not resurface a
+            # briefing the user has since deleted as "managed=config".
+            if getattr(b, "from_db", False):
+                continue
             if b.name in db_names:
                 # The DB entry will be rendered below with its real id.
                 continue

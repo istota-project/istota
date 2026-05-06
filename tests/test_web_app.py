@@ -1428,6 +1428,48 @@ class TestResourceEndpoints:
         others = [r for r in rows if r["path"] == "/Other"]
         assert others[0]["managed"] == "config"
 
+    async def test_stale_db_merged_resource_not_shown_as_config(self, tmp_path, client, app):
+        # Bug: _apply_user_resources merges DB rows into UserConfig.resources
+        # at startup. When the user later deletes that row via the web UI,
+        # the in-memory copy stays. On the next listing, it doesn't match
+        # the current DB query, so the dedup falls through and labels the
+        # stale entry "config" — making it look like an Ansible-managed
+        # config.toml row that the UI can't remove. The fix: tag merged-DB
+        # ResourceConfigs and skip them in the listing.
+        from istota.config import ResourceConfig
+        # Build a config that simulates the post-startup, post-delete state:
+        # a DB-merged ResourceConfig (from_db=True) that's no longer in DB.
+        merged_from_db = ResourceConfig(
+            type="folder", path="/Moneyman", name="Moneyman",
+        )
+        merged_from_db.from_db = True
+        cfg = _make_config(
+            tmp_path,
+            users={
+                "alice": UserConfig(
+                    display_name="Alice",
+                    resources=[
+                        ResourceConfig(
+                            type="folder", path="/RealToml", name="Real TOML",
+                        ),
+                        merged_from_db,
+                    ],
+                ),
+            },
+        )
+        cfg.db_path = self._db_path
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.get("/istota/api/settings/resources", cookies=cookies)
+        assert resp.status_code == 200
+        rows = resp.json()["resources"]
+        moneyman = [r for r in rows if r["path"] == "/Moneyman"]
+        assert moneyman == [], (
+            "Stale DB-merged entry must not surface as managed=config"
+        )
+        # The genuine TOML row still shows.
+        assert any(r["path"] == "/RealToml" and r["managed"] == "config" for r in rows)
+
 
 @_needs_web_deps
 class TestBriefingEndpoints:
