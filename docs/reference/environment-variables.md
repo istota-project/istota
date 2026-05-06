@@ -126,5 +126,5 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_NTFY_TOKEN` | `ntfy.token` |
 | `ISTOTA_NTFY_PASSWORD` | `ntfy.password` |
 | `ISTOTA_GOOGLE_CLIENT_SECRET` | `google_workspace.client_secret` |
-| `ISTOTA_OIDC_CLIENT_SECRET` | `web.oidc_client_secret` |
+| `ISTOTA_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
 | `ISTOTA_WEB_SECRET_KEY` | `web.session_secret_key` |

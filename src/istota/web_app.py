@@ -56,8 +56,8 @@ _STATIC_DIR = Path(
 def _reload_config():
     """Load config and register OAuth clients.
 
-    Two NC auth modes are supported. OAuth2 (NC built-in provider, auth-only)
-    wins if configured; OIDC is the legacy path. Google is unrelated.
+    Web auth uses NC's built-in OAuth2 provider (auth-only). Google is
+    a separate, unrelated OAuth client used only by the google_workspace skill.
     """
     global _config, _oauth
     _config = load_config()
@@ -75,15 +75,6 @@ def _reload_config():
                 or f"{provider}/index.php/apps/oauth2/api/v1/token"
             ),
             client_kwargs={"scope": ""},  # NC built-in OAuth2 ignores scope
-        )
-    elif _config.web.oidc_issuer and _config.web.oidc_client_id:
-        issuer = _config.web.oidc_issuer.rstrip("/")
-        _oauth.register(
-            name="nextcloud",
-            client_id=_config.web.oidc_client_id,
-            client_secret=_config.web.oidc_client_secret,
-            server_metadata_url=f"{issuer}/index.php/.well-known/openid-configuration",
-            client_kwargs={"scope": "openid profile"},
         )
     if _config.google_workspace.enabled and _config.google_workspace.client_id:
         _oauth.register(
@@ -308,30 +299,23 @@ async def callback(request: Request):
         return Response("Auth not configured", status_code=500)
     token = await _oauth.nextcloud.authorize_access_token(request)
 
-    # OAuth2 auth-only path: NC's built-in provider returns the resource owner's
-    # username inline in the token response (`user_id`), so we don't need a
-    # second HTTP round-trip. The token is dropped after we extract user_id —
-    # the OCS userinfo path is kept as a fallback for older NC versions or
-    # custom auth backends that don't include `user_id`.
-    if _config and _config.web.oauth2_client_id:
-        username = token.get("user_id") or ""
-        display_name = ""
-        if not username:
-            try:
-                data = await _nc_oauth2_userinfo(token)
-            except Exception as e:
-                logger.warning("OAuth2 userinfo fetch failed: %s", e)
-                return Response("identity verification failed", status_code=502)
-            username = data.get("id") or data.get("user_id") or ""
-            display_name = data.get("displayname") or data.get("display-name") or ""
-        if not display_name:
-            display_name = username
-    else:
-        userinfo = token.get("userinfo")
-        if not userinfo:
-            userinfo = await _oauth.nextcloud.userinfo(request=request, token=token)
-        username = userinfo.get("preferred_username", "")
-        display_name = userinfo.get("name", username)
+    # NC's built-in OAuth2 returns the resource owner's username inline in
+    # the token response (`user_id`), so we don't need a second HTTP round-trip.
+    # The token is dropped after we extract user_id — the OCS userinfo path
+    # is kept as a fallback for older NC versions or custom auth backends
+    # that don't include `user_id`.
+    username = token.get("user_id") or ""
+    display_name = ""
+    if not username:
+        try:
+            data = await _nc_oauth2_userinfo(token)
+        except Exception as e:
+            logger.warning("OAuth2 userinfo fetch failed: %s", e)
+            return Response("identity verification failed", status_code=502)
+        username = data.get("id") or data.get("user_id") or ""
+        display_name = data.get("displayname") or data.get("display-name") or ""
+    if not display_name:
+        display_name = username
 
     if not username or (_config and _config.users and username not in _config.users):
         return Response("Access denied: user not configured", status_code=403)

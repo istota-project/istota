@@ -1,38 +1,33 @@
 # Web interface
 
-SvelteKit frontend with FastAPI backend, authenticated via Nextcloud OIDC.
+SvelteKit frontend with FastAPI backend, authenticated against Nextcloud's built-in OAuth2 provider.
 
-The web UI is per-user: each authenticated user sees only the features they have configured (feeds, money, location, etc.). Nextcloud's OpenID Connect plugin handles authentication, so any user with a Nextcloud account and an entry in istota's `config.users` can log in.
+The web UI is per-user: each authenticated user sees only the features they have configured (feeds, money, location, etc.). Any user with a Nextcloud account and an entry in istota's `config.users` (or a row in the `user_profiles` table) can log in.
 
 ## Prerequisites
 
 - A Nextcloud instance (the same one istota connects to for Talk and files)
-- The **OpenID Connect (OIDC)** Nextcloud app installed and enabled
 - An nginx reverse proxy (or equivalent) fronting the istota web service
 - Node.js 20+ for building the SvelteKit frontend
 
-## Nextcloud OIDC setup
+No extra Nextcloud apps are required — istota uses NC's built-in OAuth 2.0 provider.
 
-### 1. Install the OpenID Connect app
+## Nextcloud OAuth2 setup
 
-In Nextcloud, go to **Apps** (top-right menu) and search for "OpenID Connect user backend" (package name `user_oidc`). Install and enable it. This app turns your Nextcloud instance into an OpenID Connect provider, exposing a `.well-known/openid-configuration` discovery endpoint.
+### 1. Register an OAuth 2.0 client
 
-If your Nextcloud already has third-party OIDC configured (e.g., for SSO), you don't need a second app — the built-in OAuth 2.0 client registration is enough. Istota only needs the standard OIDC discovery + token endpoints.
-
-### 2. Register an OAuth 2.0 client
-
-Go to **Settings > Administration > Security > OAuth 2.0 clients** and add a new client:
+In Nextcloud, go to **Settings > Administration > Security > OAuth 2.0 clients** and add a new client:
 
 | Field | Value |
 |---|---|
 | Name | `istota-web` (or any label you prefer) |
 | Redirect URI | `https://{your-hostname}/istota/callback` |
 
-Nextcloud generates a **Client ID** and **Client Secret**. Copy both — you'll need them for istota's config.
+Nextcloud generates a **Client ID** and **Client Secret**. Copy both.
 
 The redirect URI must exactly match the callback route. If you're running behind a reverse proxy at a subpath or different hostname, adjust accordingly.
 
-### 3. Configure istota
+### 2. Configure istota
 
 In your `config.toml` (or via Ansible vars):
 
@@ -40,32 +35,40 @@ In your `config.toml` (or via Ansible vars):
 [web]
 enabled = true
 port = 8766
-oidc_issuer = "https://cloud.example.com"
-oidc_client_id = "your-client-id-from-step-2"
-oidc_client_secret = ""    # or set ISTOTA_OIDC_CLIENT_SECRET env var
-session_secret_key = ""    # or set ISTOTA_WEB_SECRET_KEY env var
+oauth2_provider = "https://cloud.example.com"
+oauth2_client_id = "your-client-id-from-step-1"
+oauth2_client_secret = ""    # or set ISTOTA_OAUTH2_CLIENT_SECRET env var
+session_secret_key = ""      # or set ISTOTA_WEB_SECRET_KEY env var
 ```
 
 | Setting | Description |
 |---|---|
-| `oidc_issuer` | Your Nextcloud URL (no trailing slash). Istota appends `/index.php/.well-known/openid-configuration` to discover endpoints. |
-| `oidc_client_id` | The client ID from the OAuth 2.0 registration. |
-| `oidc_client_secret` | The client secret. Prefer the `ISTOTA_OIDC_CLIENT_SECRET` env var over storing this in the config file. |
-| `session_secret_key` | Random string for encrypting session cookies. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`. Use the `ISTOTA_WEB_SECRET_KEY` env var in production. |
+| `oauth2_provider` | Your Nextcloud URL (no trailing slash) — what the browser hits to authorize. |
+| `oauth2_client_id` | The client ID from the OAuth 2.0 registration. |
+| `oauth2_client_secret` | The client secret. Prefer the `ISTOTA_OAUTH2_CLIENT_SECRET` env var. |
+| `session_secret_key` | Random string for signing session cookies. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`. Use the `ISTOTA_WEB_SECRET_KEY` env var in production. |
+
+Optional overrides (defaults derive from `oauth2_provider`):
+
+| Setting | Description |
+|---|---|
+| `oauth2_token_endpoint` | Server-to-server token URL. In Docker this often points at the internal NC service URL while `oauth2_provider` points at the host-mapped URL. |
+| `oauth2_userinfo_endpoint` | Server-to-server userinfo URL. Same Docker pattern. |
+| `oauth2_redirect_uri` | Explicit redirect URI override; otherwise derived from request host + scheme. |
 
 When using the Ansible role, set these in your vars:
 
 ```yaml
 istota_web_enabled: true
-istota_web_oidc_issuer: "https://cloud.example.com"
-istota_web_oidc_client_id: "your-client-id"
-istota_web_oidc_client_secret: "{{ vault_istota_oidc_secret }}"
+istota_web_oauth2_provider: "https://cloud.example.com"
+istota_web_oauth2_client_id: "your-client-id"
+istota_web_oauth2_client_secret: "{{ vault_istota_oauth2_secret }}"
 istota_web_secret_key: "{{ vault_istota_web_secret }}"
 ```
 
 Secrets stored in `secrets.env` (via `istota_use_environment_file: true`) are injected as env vars by systemd, keeping them out of the config file.
 
-### 4. Build the frontend
+### 3. Build the frontend
 
 ```bash
 uv sync --extra web
@@ -74,7 +77,7 @@ cd web && npm install && npm run build
 
 The Ansible role handles this automatically when `istota_web_enabled` is set and `istota_nodejs_enabled` is true.
 
-### 5. Reverse proxy
+### 4. Reverse proxy
 
 The web app listens on `127.0.0.1:{port}` and should not be exposed directly. Put it behind nginx (or your preferred reverse proxy).
 
@@ -90,9 +93,9 @@ location /istota/ {
 }
 ```
 
-TLS is required — session cookies are set with `secure=true` and the OIDC flow depends on HTTPS redirect URIs. Use Let's Encrypt or your preferred certificate provider.
+TLS is required — session cookies are set with `secure=true` and the registered redirect URI must use HTTPS. Use Let's Encrypt or your preferred certificate provider.
 
-### 6. Run
+### 5. Run
 
 ```bash
 uvicorn istota.web_app:app --host 127.0.0.1 --port 8766
@@ -109,14 +112,17 @@ journalctl -u istota-web -f
 ## How authentication works
 
 1. User visits `https://{hostname}/istota/` and is redirected to `/istota/login`
-2. Istota redirects to Nextcloud's OIDC authorization endpoint
+2. Istota redirects to Nextcloud's OAuth 2.0 authorization endpoint (`{oauth2_provider}/index.php/apps/oauth2/authorize`)
 3. User authenticates with their Nextcloud credentials (or is already logged in)
 4. Nextcloud redirects back to `/istota/callback` with an authorization code
-5. Istota exchanges the code for an ID token, extracts `preferred_username`
-6. If the username exists in `config.users`, a session cookie is set (7-day expiry)
-7. Subsequent requests use the session cookie — no re-authentication until expiry or logout
+5. Istota exchanges the code for an access token; NC inlines `user_id` in the token response, so identity is known without a second round-trip
+6. The access token is dropped immediately — only the username + display_name are kept in the session
+7. If the username exists in `config.users` (or auto-seeds a `user_profiles` row), a signed session cookie is set (7-day expiry)
+8. Subsequent requests use the session cookie — no re-authentication until expiry or logout
 
-The `preferred_username` claim from the OIDC token must match a user ID in istota's config. Users not in the config are rejected even if they have a valid Nextcloud account.
+If the token response doesn't include `user_id` (older NC versions or custom auth backends), istota falls back to fetching identity from the OCS userinfo endpoint with the bearer token before discarding it.
+
+Users not in the config are rejected with a 403 even if they have a valid Nextcloud account.
 
 ## Pages
 
@@ -132,11 +138,11 @@ The `preferred_username` claim from the OIDC token must match a user ID in istot
 
 | Route | Purpose |
 |---|---|
-| `/istota/login` | OIDC redirect |
-| `/istota/callback` | Token exchange |
+| `/istota/login` | OAuth2 redirect |
+| `/istota/callback` | Token exchange + identity resolution |
 | `/istota/logout` | Session clear |
 | `/istota/api/me` | User info + features |
-| `/istota/google/connect` | Google OAuth initiation |
+| `/istota/google/connect` | Google OAuth initiation (separate, for the gws skill) |
 | `/istota/google/callback` | Google OAuth callback |
 | `/istota/api/google/status` | Google connection status |
 | `/istota/api/google/disconnect` | Remove Google tokens |

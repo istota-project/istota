@@ -52,9 +52,9 @@ def _make_config(tmp_path, users=None, mount_path=None, web=None):
         web=web or WebConfig(
             enabled=True,
             port=8766,
-            oidc_issuer="https://cloud.example.com",
-            oidc_client_id="istota-web",
-            oidc_client_secret="test-secret",
+            oauth2_provider="https://cloud.example.com",
+            oauth2_client_id="istota-web",
+            oauth2_client_secret="test-secret",
             session_secret_key="test-session-key",
         ),
         bot_name="Istota",
@@ -93,7 +93,7 @@ def _login_cookies(client, app):
     """Helper: perform OIDC callback and return session cookies."""
     import istota.web_app as mod
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-        "userinfo": {"preferred_username": "alice", "name": "Alice"},
+        "user_id": "alice",
     })
 
 
@@ -122,7 +122,7 @@ class TestCallbackRoute:
         import istota.web_app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+            "user_id": "alice",
         })
 
         resp = await client.get("/istota/callback", follow_redirects=False)
@@ -134,25 +134,27 @@ class TestCallbackRoute:
         import istota.web_app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "unknown_person", "name": "Unknown"},
+            "user_id": "unknown_person",
         })
 
         resp = await client.get("/istota/callback", follow_redirects=False)
         assert resp.status_code == 403
 
-    async def test_callback_falls_back_to_userinfo_endpoint(self, client, app):
+    async def test_callback_falls_back_to_ocs_userinfo(self, client, app):
+        """When NC's OAuth2 token response omits ``user_id`` (older NC or
+        custom auth backend), the callback fetches identity from the OCS
+        userinfo endpoint and discards the bearer token."""
         import istota.web_app as mod
 
-        mock_token = {"access_token": "abc"}
-        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value=mock_token)
-        mod._oauth.nextcloud.userinfo = AsyncMock(return_value={
-            "preferred_username": "alice",
-            "name": "Alice",
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"access_token": "abc"})
+        mod._nc_oauth2_userinfo = AsyncMock(return_value={
+            "id": "alice",
+            "displayname": "Alice",
         })
 
         resp = await client.get("/istota/callback", follow_redirects=False)
         assert resp.status_code == 302
-        mod._oauth.nextcloud.userinfo.assert_called_once()
+        mod._nc_oauth2_userinfo.assert_called_once()
 
 
 @_needs_web_deps
@@ -172,7 +174,7 @@ class TestApiMe:
         import istota.web_app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+            "user_id": "alice",
         })
         login_resp = await client.get("/istota/callback", follow_redirects=False)
         cookies = login_resp.cookies
@@ -181,14 +183,16 @@ class TestApiMe:
         assert resp.status_code == 200
         data = resp.json()
         assert data["username"] == "alice"
-        assert data["display_name"] == "Alice"
+        # NC's built-in OAuth2 inlines user_id but not display_name; the
+        # callback falls back to username when no OCS roundtrip happens.
+        assert data["display_name"] == "alice"
         assert data["features"]["feeds"] is True
 
     async def test_returns_no_feeds_for_user_without_feeds_resource(self, client, app):
         import istota.web_app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "bob", "name": "Bob"},
+            "user_id": "bob",
         })
         login_resp = await client.get("/istota/callback", follow_redirects=False)
         cookies = login_resp.cookies
@@ -265,7 +269,7 @@ class TestLogout:
         import istota.web_app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+            "user_id": "alice",
         })
         login_resp = await client.get("/istota/callback", follow_redirects=False)
         cookies = login_resp.cookies
@@ -286,7 +290,7 @@ class TestCsrfOriginCheck:
     async def _login(self, client, app):
         import istota.web_app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+            "user_id": "alice",
         })
         login_resp = await client.get("/istota/callback", follow_redirects=False)
         return login_resp.cookies
@@ -351,14 +355,14 @@ class TestSessionRotation:
         # Set pre-existing session data (simulating a pre-login session)
         # First, make a request to establish a session with some data
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+            "user_id": "alice",
         })
         resp = await client.get("/istota/callback", follow_redirects=False)
         cookies = resp.cookies
 
         # Log in again as bob — old session data should be cleared
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "bob", "name": "Bob"},
+            "user_id": "bob",
         })
         resp = await client.get("/istota/callback", cookies=cookies, follow_redirects=False)
         cookies = resp.cookies
@@ -383,7 +387,7 @@ class TestAdminStats:
     async def _login(self, client, username):
         import istota.web_app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": username, "name": username.title()},
+            "user_id": username,
         })
         resp = await client.get("/istota/callback", follow_redirects=False)
         return resp.cookies
@@ -701,9 +705,9 @@ class TestWebConfigParsing:
         cfg = Config()
         assert cfg.web.enabled is False
         assert cfg.web.port == 8766
-        assert cfg.web.oidc_issuer == ""
-        assert cfg.web.oidc_client_id == ""
-        assert cfg.web.oidc_client_secret == ""
+        assert cfg.web.oauth2_provider == ""
+        assert cfg.web.oauth2_client_id == ""
+        assert cfg.web.oauth2_client_secret == ""
         assert cfg.web.session_secret_key == ""
 
     def test_web_config_from_toml(self, tmp_path):
@@ -711,9 +715,9 @@ class TestWebConfigParsing:
 [web]
 enabled = true
 port = 9000
-oidc_issuer = "https://cloud.example.com"
-oidc_client_id = "my-client"
-oidc_client_secret = "my-secret"
+oauth2_provider = "https://cloud.example.com"
+oauth2_client_id = "my-client"
+oauth2_client_secret = "my-secret"
 session_secret_key = "my-key"
 """
         config_file = tmp_path / "config.toml"
@@ -721,24 +725,24 @@ session_secret_key = "my-key"
         cfg = load_config(config_file)
         assert cfg.web.enabled is True
         assert cfg.web.port == 9000
-        assert cfg.web.oidc_issuer == "https://cloud.example.com"
-        assert cfg.web.oidc_client_id == "my-client"
-        assert cfg.web.oidc_client_secret == "my-secret"
+        assert cfg.web.oauth2_provider == "https://cloud.example.com"
+        assert cfg.web.oauth2_client_id == "my-client"
+        assert cfg.web.oauth2_client_secret == "my-secret"
         assert cfg.web.session_secret_key == "my-key"
 
     def test_env_var_overrides(self, tmp_path, monkeypatch):
         toml_content = """
 [web]
 enabled = true
-oidc_issuer = "https://cloud.example.com"
-oidc_client_id = "my-client"
+oauth2_provider = "https://cloud.example.com"
+oauth2_client_id = "my-client"
 """
         config_file = tmp_path / "config.toml"
         config_file.write_text(toml_content)
-        monkeypatch.setenv("ISTOTA_OIDC_CLIENT_SECRET", "env-secret")
+        monkeypatch.setenv("ISTOTA_OAUTH2_CLIENT_SECRET", "env-secret")
         monkeypatch.setenv("ISTOTA_WEB_SECRET_KEY", "env-key")
         cfg = load_config(config_file)
-        assert cfg.web.oidc_client_secret == "env-secret"
+        assert cfg.web.oauth2_client_secret == "env-secret"
         assert cfg.web.session_secret_key == "env-key"
 
 
@@ -801,7 +805,7 @@ class TestSettingsEndpoints:
     async def _login_alice(self, client, app):
         import istota.web_app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+            "user_id": "alice",
         })
         resp = await client.get("/istota/callback", follow_redirects=False)
         return resp.cookies
@@ -858,7 +862,7 @@ class TestSettingsEndpoints:
         _patch_app(cfg)
         import istota.web_app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "bob", "name": "Bob"},
+            "user_id": "bob",
         })
         resp = await client.get("/istota/callback", follow_redirects=False)
         cookies = resp.cookies
@@ -1024,9 +1028,15 @@ class TestProfileEndpoints:
         return cfg
 
     async def _login(self, client, username="alice", display="Alice"):
+        """Drive the login through the OCS userinfo path so the test can
+        supply a separate display name (NC's built-in OAuth2 token
+        response does not carry display_name; production fetches it from
+        OCS when the token's ``user_id`` is absent)."""
         import istota.web_app as mod
-        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": username, "name": display},
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"access_token": "stub"})
+        mod._nc_oauth2_userinfo = AsyncMock(return_value={
+            "id": username,
+            "displayname": display,
         })
         resp = await client.get("/istota/callback", follow_redirects=False)
         return resp.cookies
@@ -1177,7 +1187,7 @@ class TestResourceEndpoints:
     async def _login(self, client):
         import istota.web_app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+            "user_id": "alice",
         })
         resp = await client.get("/istota/callback", follow_redirects=False)
         return resp.cookies
@@ -1458,7 +1468,7 @@ class TestBriefingEndpoints:
     async def _login(self, client):
         import istota.web_app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+            "user_id": "alice",
         })
         resp = await client.get("/istota/callback", follow_redirects=False)
         return resp.cookies

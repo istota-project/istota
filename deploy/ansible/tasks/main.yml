@@ -597,10 +597,10 @@
          | list }}
   when: not istota_web_only
 
-# Monarch credentials are now colocated with the money resource entry in
-# the user config TOML (see user.toml.j2), matching the karakeep / overland
-# pattern. The previous /etc/{namespace}/secrets/{user}/money.toml file is
-# no longer used — clean it up if it exists.
+# Monarch credentials live in the encrypted secrets table (Phase 5)
+# alongside karakeep / overland. The previous
+# /etc/{namespace}/secrets/{user}/money.toml file is no longer used —
+# clean it up if it exists.
 - name: Remove obsolete per-user money.toml secrets file
   file:
     path: "/etc/{{ istota_namespace }}/secrets/{{ item.key }}/money.toml"
@@ -752,19 +752,21 @@
   changed_when: false
   when: not istota_web_only
 
-- name: Deploy per-user config files
-  template:
-    src: user.toml.j2
-    dest: "{{ istota_repo_dir }}/config/users/{{ user_id }}.toml"
-    owner: "{{ istota_user }}"
-    group: "{{ istota_group }}"
-    mode: '0600'
+# Per-user TOML files at config/users/{user}.toml are no longer rendered.
+# Profile fields live in `user_profiles` (Phase 6, populated by `user
+# ensure` below); resources live in `user_resources` (Phase 7a, populated
+# by `resource ensure`); briefings live in `briefing_configs` (Phase 7b,
+# populated by `briefing ensure`). The DB row wins at config-load time, so
+# any leftover TOML is harmless — but we remove existing files so the
+# deployed state matches the source of truth.
+- name: Remove obsolete per-user TOML files
+  file:
+    path: "{{ istota_repo_dir }}/config/users/{{ user_item.key }}.toml"
+    state: absent
   loop: "{{ istota_users | dict2items }}"
   loop_control:
     loop_var: user_item
-  vars:
-    user_id: "{{ user_item.key }}"
-    user_config: "{{ user_item.value }}"
+    label: "{{ user_item.key }}"
   when: not istota_web_only
   notify:
     - "restart istota-scheduler"
@@ -777,12 +779,12 @@
   when: not istota_web_only
 
 # Phase 6: write user profile rows into the user_profiles DB table.
-# The per-user TOML files above are still rendered (they own resources +
-# briefings), but profile-shaped fields (display_name, timezone,
-# email_addresses, log/alerts channels, ntfy_topic, worker overrides,
-# disabled_skills, trusted_email_senders) are now authoritatively stored
-# in the DB. The scheduler also auto-imports any remaining TOML profile
-# fields on startup, so a half-migrated deploy is safe.
+# Profile-shaped fields (display_name, timezone, email_addresses, log/alerts
+# channels, ntfy_topic, worker overrides, disabled_skills,
+# trusted_email_senders, disabled_modules) are authoritatively stored in
+# the DB. The `user ensure` CLI is idempotent, prints STATE: created|
+# updated|noop per call, and is the only path Ansible uses to provision
+# user profiles.
 - name: Ensure user_profiles rows (Phase 6)
   command: >
     {{ istota_home }}/.venv/bin/{{ istota_namespace }}
@@ -814,10 +816,10 @@
     - "restart istota-scheduler"
 
 # Phase 7a: write user_resources rows into the DB via `istota resource ensure`.
-# The per-user TOML template no longer renders [[resources]]; the DB is now
-# authoritative. Each (user, type, path) is upserted independently — type/
-# path/name/permissions are extracted as flags and any remaining keys are
-# passed as --extras-json so nested values round-trip cleanly.
+# The DB is the source of truth — each (user, type, path) is upserted
+# independently. type/path/name/permissions are extracted as flags and
+# any remaining keys are passed as --extras-json so nested values
+# round-trip cleanly.
 #
 # Obsolete types (feeds, money, monarch, moneyman, karakeep, overland) are
 # filtered out: their values now live in the encrypted secrets table (see
@@ -876,11 +878,10 @@
     - "restart istota-scheduler"
 
 # Phase 7b: write briefing rows into the briefing_configs DB table via
-# `istota briefing ensure`. The per-user TOML template no longer renders
-# [[briefings]]; the DB is now authoritative. Each (user, briefing.name)
-# is upserted independently. Components is a freeform dict so we pass it
-# through as JSON; output (talk|email|both) and conversation_token are
-# extracted as flags.
+# `istota briefing ensure`. The DB is the source of truth — each
+# (user, briefing.name) is upserted independently. Components is a
+# freeform dict so we pass it through as JSON; output (talk|email|both)
+# and conversation_token are extracted as flags.
 - name: Plan briefing ensure invocations (Phase 7b)
   set_fact:
     _istota_briefing_targets: "{{ _briefing_targets_json | from_json }}"
