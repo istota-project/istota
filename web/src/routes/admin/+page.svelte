@@ -147,31 +147,33 @@
 		<!-- Users -->
 		<section class="card">
 			<h2>Users</h2>
-			<table class="users-table">
-				<thead>
-					<tr>
-						<th>User</th>
-						<th class="num">Total</th>
-						<th class="num">24h</th>
-						<th class="num">Avg/day (30d)</th>
-						<th>Last active</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each stats.users as u (u.username)}
+			<div class="table-scroll">
+				<table class="users-table">
+					<thead>
 						<tr>
-							<td>
-								<span class="username">{u.display_name || u.username}</span>
-								{#if u.is_admin}<span class="badge">admin</span>{/if}
-							</td>
-							<td class="num">{u.tasks_total.toLocaleString()}</td>
-							<td class="num">{u.tasks_last_24h}</td>
-							<td class="num">{u.tasks_avg_per_day}</td>
-							<td>{formatTimestamp(u.last_active)}</td>
+							<th>User</th>
+							<th class="num">Total</th>
+							<th class="num">24h</th>
+							<th class="num">Avg/day (30d)</th>
+							<th>Last active</th>
 						</tr>
-					{/each}
-				</tbody>
-			</table>
+					</thead>
+					<tbody>
+						{#each stats.users as u (u.username)}
+							<tr>
+								<td>
+									<span class="username">{u.display_name || u.username}</span>
+									{#if u.is_admin}<span class="badge">admin</span>{/if}
+								</td>
+								<td class="num">{u.tasks_total.toLocaleString()}</td>
+								<td class="num">{u.tasks_last_24h}</td>
+								<td class="num">{u.tasks_avg_per_day}</td>
+								<td>{formatTimestamp(u.last_active)}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
 		</section>
 
 		<!-- Tasks -->
@@ -246,45 +248,47 @@
 			{#if stats.scheduler.jobs.length === 0}
 				<div class="empty">No scheduled jobs.</div>
 			{:else}
-				<table class="jobs-table">
-					<thead>
-						<tr>
-							<th>Job</th>
-							<th>Cron</th>
-							<th>Status</th>
-							<th>Last run</th>
-							<th class="num">Failures</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each stats.scheduler.jobs as j (j.id)}
-							{@const expandable = !!j.last_error}
-							<tr
-								class:row-error={j.consecutive_failures > 0}
-								class:row-clickable={expandable}
-								onclick={() => expandable && toggleJob(j.id)}
-							>
-								<td>
-									<span class="username">{j.user_id}</span>
-									<span class="muted">/</span>
-									{j.name}
-								</td>
-								<td><code>{j.cron}</code></td>
-								<td>
-									<span class="dot" class:dot-ok={j.enabled} class:dot-mute={!j.enabled}></span>
-									{j.enabled ? 'enabled' : 'paused'}
-								</td>
-								<td>{formatTimestamp(j.last_run_at)}</td>
-								<td class="num">{j.consecutive_failures}</td>
+				<div class="table-scroll">
+					<table class="jobs-table">
+						<thead>
+							<tr>
+								<th>Job</th>
+								<th>Cron</th>
+								<th>Status</th>
+								<th>Last run</th>
+								<th class="num">Failures</th>
 							</tr>
-							{#if expandable && expandedJobs[j.id]}
-								<tr class="error-row">
-									<td colspan="5"><pre>{j.last_error}</pre></td>
+						</thead>
+						<tbody>
+							{#each stats.scheduler.jobs as j (j.id)}
+								{@const expandable = !!j.last_error}
+								<tr
+									class:row-error={j.consecutive_failures > 0}
+									class:row-clickable={expandable}
+									onclick={() => expandable && toggleJob(j.id)}
+								>
+									<td>
+										<span class="username">{j.user_id}</span>
+										<span class="muted">/</span>
+										{j.name}
+									</td>
+									<td><code>{j.cron}</code></td>
+									<td>
+										<span class="dot" class:dot-ok={j.enabled} class:dot-mute={!j.enabled}></span>
+										{j.enabled ? 'enabled' : 'paused'}
+									</td>
+									<td>{formatTimestamp(j.last_run_at)}</td>
+									<td class="num">{j.consecutive_failures}</td>
 								</tr>
-							{/if}
-						{/each}
-					</tbody>
-				</table>
+								{#if expandable && expandedJobs[j.id]}
+									<tr class="error-row">
+										<td colspan="5"><pre>{j.last_error}</pre></td>
+									</tr>
+								{/if}
+							{/each}
+						</tbody>
+					</table>
+				</div>
 			{/if}
 		</section>
 
@@ -314,12 +318,15 @@
 
 <style>
 	.admin {
+		width: 100%;
 		max-width: 1100px;
 		margin: 0 auto;
 		padding: 1.5rem 1rem 4rem;
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
+		box-sizing: border-box;
+		min-width: 0;
 	}
 
 	.page-head {
@@ -344,6 +351,13 @@
 		background: var(--surface-card);
 		border-radius: var(--radius-card);
 		padding: 1rem 1.25rem;
+		min-width: 0;
+	}
+
+	.table-scroll {
+		width: 100%;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
 	}
 
 	.card h2 {
@@ -605,5 +619,23 @@
 	.empty {
 		font-size: var(--text-sm);
 		color: var(--text-muted);
+	}
+
+	@media (max-width: 768px) {
+		.admin {
+			padding: 1rem 0.75rem 3rem;
+		}
+		.card {
+			padding: 0.75rem;
+		}
+	}
+
+	@media (max-width: 640px) {
+		.admin {
+			padding: 0.75rem 0.5rem 3rem;
+		}
+		.card {
+			padding: 0.6rem;
+		}
 	}
 </style>
