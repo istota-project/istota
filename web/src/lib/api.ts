@@ -474,4 +474,50 @@ export async function disconnectGoogle(): Promise<void> {
 	await apiFetch('/google/disconnect', { method: 'DELETE' });
 }
 
+// ---- Settings (Phase 5) ----
+
+export interface SettingsField {
+	key: string;
+	label: string;
+	type: 'text' | 'email' | 'password' | 'url';
+}
+
+export interface ServiceCard {
+	service: string;
+	label: string;
+	status: 'configured' | 'partial' | 'missing' | 'unavailable';
+	fields: SettingsField[];
+	configured_keys: string[];
+	last_updated: string | null;
+}
+
+export interface ServicesResponse {
+	services: ServiceCard[];
+}
+
+export async function getSettingsServices(): Promise<ServicesResponse> {
+	return apiFetch<ServicesResponse>('/settings/services');
+}
+
+export async function setSecret(
+	service: string,
+	key: string,
+	value: string,
+): Promise<{ ok: boolean; configured: boolean }> {
+	return apiFetch(`/settings/secrets/${service}/${key}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ value }),
+	});
+}
+
+export async function deleteSecret(
+	service: string,
+	key: string,
+): Promise<{ ok: boolean; deleted: boolean }> {
+	return apiFetch(`/settings/secrets/${service}/${key}`, {
+		method: 'DELETE',
+	});
+}
+
 export { AuthError };

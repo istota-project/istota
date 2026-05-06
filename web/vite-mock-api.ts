@@ -448,10 +448,86 @@ function dropClusterNear(point: { lat: number; lon: number }, radius: number): v
 	);
 }
 
+// Phase 5 — settings/secrets mock state. Plaintext values stay only in memory;
+// the real backend never returns them.
+const mockSecrets: Record<string, Record<string, string>> = {
+	monarch: {},
+	karakeep: {},
+	feeds: {},
+};
+
+function mockSettingsServices(): { services: unknown[] } {
+	const schemas = [
+		{
+			service: 'monarch',
+			label: 'Monarch Money',
+			fields: [
+				{ key: 'email', label: 'Email', type: 'email' },
+				{ key: 'password', label: 'Password', type: 'password' },
+				{ key: 'session_token', label: 'Session token (optional)', type: 'password' },
+			],
+		},
+		{
+			service: 'karakeep',
+			label: 'Karakeep',
+			fields: [
+				{ key: 'api_key', label: 'API key', type: 'password' },
+			],
+		},
+		{
+			service: 'feeds',
+			label: 'Feeds (Tumblr)',
+			fields: [
+				{ key: 'tumblr_api_key', label: 'Tumblr API key (optional)', type: 'password' },
+			],
+		},
+	];
+	return {
+		services: schemas.map((s) => {
+			const configured_keys = Object.keys(mockSecrets[s.service] || {})
+				.filter((k) => mockSecrets[s.service][k]);
+			const required = s.fields
+				.filter((f) => !f.label.toLowerCase().includes('optional'))
+				.map((f) => f.key);
+			let status: 'configured' | 'partial' | 'missing' = 'missing';
+			if (required.every((k) => configured_keys.includes(k))) {
+				status = required.length === 0 && configured_keys.length === 0 ? 'missing' : 'configured';
+			} else if (required.some((k) => configured_keys.includes(k))) {
+				status = 'partial';
+			}
+			return { ...s, status, configured_keys, last_updated: null };
+		}),
+	};
+}
+
 const handlers: MockHandler[] = [
 	({ url }) => (url === '/istota/api/me' ? user : undefined),
 
 	({ url }) => (url === '/istota/api/admin/stats' ? mockAdminStats : undefined),
+
+	// Settings/secrets (Phase 5)
+	(req) => {
+		const { url, method, body } = req;
+		if (url === '/istota/api/settings/services' && method === 'GET') {
+			return mockSettingsServices();
+		}
+		const m = url.match(/^\/istota\/api\/settings\/secrets\/([^/]+)\/([^/?]+)$/);
+		if (!m) return undefined;
+		const [, service, key] = m;
+		if (!mockSecrets[service]) return { error: 'unknown service' };
+		if (method === 'PUT') {
+			const value = (body?.value as string | undefined) ?? '';
+			if (value) mockSecrets[service][key] = value;
+			else delete mockSecrets[service][key];
+			return { ok: true, service, key, configured: Boolean(value) };
+		}
+		if (method === 'DELETE') {
+			const had = Boolean(mockSecrets[service][key]);
+			delete mockSecrets[service][key];
+			return { ok: true, deleted: had };
+		}
+		return undefined;
+	},
 
 	// Feeds settings: config GET/PUT
 	({ url, method, body }) => {

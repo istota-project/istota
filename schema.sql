@@ -530,3 +530,22 @@ CREATE TABLE IF NOT EXISTS location_state (
     last_ping_place_id INTEGER,
     exit_started_at TEXT               -- first away-from-current-place ping, NULL when at place
 );
+
+-- Tier-2 credentials (web-UI-managed, encrypted at rest with a Fernet key
+-- derived from $ISTOTA_SECRET_KEY). One row per (user, service, key) — e.g.
+-- ("alice", "monarch", "email"), ("alice", "monarch", "password"),
+-- ("alice", "karakeep", "api_key"). Encrypted_value is a Fernet token (bytes).
+-- last_accessed_at is bumped on read so admins can see which secrets are
+-- live vs stale.
+CREATE TABLE IF NOT EXISTS secrets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    service TEXT NOT NULL,
+    key TEXT NOT NULL,
+    encrypted_value BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_accessed_at TEXT,
+    UNIQUE(user_id, service, key)
+);
+CREATE INDEX IF NOT EXISTS idx_secrets_user_service ON secrets(user_id, service);

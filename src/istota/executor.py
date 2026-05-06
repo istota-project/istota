@@ -2161,16 +2161,30 @@ def execute_task(
             env["IMAP_USER"] = config.email.imap_user
             env["IMAP_PASSWORD"] = config.email.imap_password
 
-        # Karakeep bookmarks (per-user API credentials from resource config)
+        # Karakeep bookmarks (per-user API credentials).
+        # Resolution: secrets table → resource entry fields (Phase 5).
+        # The resource declaration alone is enough — credentials may live in
+        # the secrets table (web-UI-managed) instead of inline TOML.
+        # Money/Monarch credentials use the in-process money loader, which
+        # consults the secrets table itself (see money/_loader.py).
         if user_config:
+            from . import secrets_store  # local import — avoids cycles at module load
+
             karakeep_resources = [
-                rc for rc in user_config.resources
-                if rc.type == "karakeep" and rc.base_url and rc.api_key
+                rc for rc in user_config.resources if rc.type == "karakeep"
             ]
             if karakeep_resources:
-                # Use the first karakeep resource entry
-                env["KARAKEEP_BASE_URL"] = karakeep_resources[0].base_url
-                env["KARAKEEP_API_KEY"] = karakeep_resources[0].api_key
+                rc = karakeep_resources[0]
+                # base_url is a service endpoint, not a credential — read it
+                # directly from the resource entry. Only api_key flows through
+                # the encrypted store.
+                api_key = secrets_store.resolve_secret(
+                    config.db_path, task.user_id, "karakeep", "api_key",
+                    fallback_extras={"api_key": rc.api_key},
+                )
+                if rc.base_url and api_key:
+                    env["KARAKEEP_BASE_URL"] = rc.base_url
+                    env["KARAKEEP_API_KEY"] = api_key
 
         # Developer skill (git + GitLab/GitHub workflows)
         # When the skill proxy is enabled, tokens are fetched at runtime via

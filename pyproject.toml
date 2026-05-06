@@ -10,6 +10,7 @@ dependencies = [
     "requests>=2.32.0",
     "croniter>=2.0.0",
     "tomli>=2.0.0",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

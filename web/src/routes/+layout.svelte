@@ -66,6 +66,7 @@
 			{#if user.features.admin}
 				<a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
 			{/if}
+			<a href="{base}/settings" class:active={isActive('/settings')}>Settings</a>
 		</div>
 		<div class="nav-right">
 			<span class="nav-user">{user.display_name}</span>
@@ -130,6 +131,16 @@
 								{/snippet}
 							</DropdownMenu.Item>
 						{/if}
+						<DropdownMenu.Item>
+							{#snippet child({ props })}
+								<a
+									href="{base}/settings"
+									class="app-nav-menu-link"
+									class:active={isActive('/settings')}
+									{...props}>Settings</a
+								>
+							{/snippet}
+						</DropdownMenu.Item>
 					</DropdownMenu.Content>
 				</DropdownMenu.Portal>
 			</DropdownMenu.Root>

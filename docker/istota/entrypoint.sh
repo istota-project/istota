@@ -876,6 +876,29 @@ fi
     fi
 } >&2
 
+# --- Application secret key (Phase 5) ---
+#
+# ISTOTA_SECRET_KEY derives the Fernet key that encrypts tier-2 credentials
+# in the SQLite ``secrets`` table. Resolution order:
+#   1. environment (operator-supplied via .env / compose)
+#   2. previously-persisted file at /data/.secret_key
+#   3. fresh hex-32 value, written to that file with mode 600
+# The file lives on the istota_data volume so it survives container rebuilds.
+# Losing the key makes existing secrets unrecoverable — operators are warned
+# in .env.example to back it up.
+SECRET_KEY_FILE="/data/.secret_key"
+if [ -z "${ISTOTA_SECRET_KEY:-}" ] && [ -f "$SECRET_KEY_FILE" ]; then
+    ISTOTA_SECRET_KEY=$(cat "$SECRET_KEY_FILE")
+fi
+if [ -z "${ISTOTA_SECRET_KEY:-}" ]; then
+    ISTOTA_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+    umask 077
+    printf '%s' "$ISTOTA_SECRET_KEY" > "$SECRET_KEY_FILE"
+    chmod 600 "$SECRET_KEY_FILE"
+    echo "[istota] Generated new ISTOTA_SECRET_KEY (persisted to ${SECRET_KEY_FILE})."
+fi
+export ISTOTA_SECRET_KEY
+
 # --- Initialize database ---
 
 echo "[istota] Initializing database..."

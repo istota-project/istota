@@ -1218,6 +1218,7 @@ version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "requests" },
     { name = "tomli" },
@@ -1324,6 +1325,7 @@ requires-dist = [
     { name = "click", marker = "extra == 'feeds'", specifier = ">=8.0" },
     { name = "click", marker = "extra == 'money'", specifier = ">=8.0" },
     { name = "croniter", specifier = ">=2.0.0" },
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "fastapi", marker = "extra == 'location'", specifier = ">=0.100.0" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.100.0" },
     { name = "faster-whisper", marker = "extra == 'whisper'", specifier = ">=1.1.0" },

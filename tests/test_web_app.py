@@ -761,3 +761,185 @@ class TestResolveTz:
         assert _resolve_tz("../etc/passwd", "UTC") == "UTC"
 
 
+@_needs_web_deps
+class TestSettingsEndpoints:
+    """Web UI settings page: per-service credential cards + write-only secrets API."""
+
+    @pytest.fixture(autouse=True)
+    def _secret_key(self, monkeypatch, tmp_path):
+        # Real DB so the secrets table exists.
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _make_test_config(self, tmp_path):
+        cfg = _make_config(
+            tmp_path,
+            users={
+                "alice": UserConfig(
+                    display_name="Alice",
+                    resources=[
+                        ResourceConfig(type="money", name="Money"),
+                        ResourceConfig(type="karakeep", name="Karakeep",
+                                       base_url="https://k.example", api_key=""),
+                    ],
+                ),
+                "bob": UserConfig(display_name="Bob"),  # no money/karakeep resources
+            },
+        )
+        cfg.db_path = self._db_path
+        return cfg
+
+    async def _login_alice(self, client, app):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def test_services_returns_cards(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/settings/services", cookies=cookies)
+        assert resp.status_code == 200
+        services = {s["service"]: s for s in resp.json()["services"]}
+        # money resource → monarch card available
+        assert services["monarch"]["status"] in ("missing", "partial", "configured")
+        # karakeep resource present
+        assert services["karakeep"]["status"] in ("missing", "partial", "configured")
+
+    async def test_services_unavailable_when_no_resource(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        # Bob has no resources at all.
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": "bob", "name": "Bob"},
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        cookies = resp.cookies
+        resp = await client.get("/istota/api/settings/services", cookies=cookies)
+        services = {s["service"]: s for s in resp.json()["services"]}
+        assert services["monarch"]["status"] == "unavailable"
+        assert services["karakeep"]["status"] == "unavailable"
+
+    async def test_services_never_returns_plaintext(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        from istota import secrets_store
+        secrets_store.set_secret(self._db_path, "alice", "monarch", "email", "secret@x.com")
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/settings/services", cookies=cookies)
+        body = resp.text
+        assert "secret@x.com" not in body
+
+    async def test_set_secret_persists(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.put(
+            "/istota/api/settings/secrets/monarch/email",
+            json={"value": "alice@example.com"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["configured"] is True
+        from istota import secrets_store
+        assert secrets_store.get_secret(self._db_path, "alice", "monarch", "email") == "alice@example.com"
+
+    async def test_set_secret_rejects_unknown_service(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.put(
+            "/istota/api/settings/secrets/bogus/api_key",
+            json={"value": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 404
+
+    async def test_set_secret_rejects_unknown_key(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.put(
+            "/istota/api/settings/secrets/monarch/nonexistent_field",
+            json={"value": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_set_secret_csrf_origin_required(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.put(
+            "/istota/api/settings/secrets/monarch/email",
+            json={"value": "x"},
+            cookies=cookies,
+            # wrong origin
+            headers={"origin": "https://evil.example.com"},
+        )
+        assert resp.status_code == 403
+
+    async def test_set_secret_requires_auth(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        resp = await client.put(
+            "/istota/api/settings/secrets/monarch/email",
+            json={"value": "x"},
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 401
+
+    async def test_delete_secret(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        from istota import secrets_store
+        secrets_store.set_secret(self._db_path, "alice", "monarch", "email", "x@y")
+        cookies = await self._login_alice(client, app)
+        resp = await client.delete(
+            "/istota/api/settings/secrets/monarch/email",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        assert secrets_store.get_secret(self._db_path, "alice", "monarch", "email") is None
+
+    async def test_delete_rejects_unknown_key(self, tmp_path, client, app):
+        """Symmetric with the PUT handler — DELETE must not let callers remove
+        rows whose key is not part of the schema."""
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.delete(
+            "/istota/api/settings/secrets/monarch/nonexistent_field",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_set_secret_per_user_scoping(self, tmp_path, client, app):
+        """Alice setting a value must not affect bob's namespace."""
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        await client.put(
+            "/istota/api/settings/secrets/monarch/email",
+            json={"value": "alice@x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        from istota import secrets_store
+        assert secrets_store.get_secret(self._db_path, "alice", "monarch", "email") == "alice@x"
+        assert secrets_store.get_secret(self._db_path, "bob", "monarch", "email") is None
+
+
