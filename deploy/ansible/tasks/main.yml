@@ -799,6 +799,7 @@
     {% if user_item.value.max_foreground_workers is defined %}--max-foreground-workers {{ user_item.value.max_foreground_workers }}{% endif %}
     {% if user_item.value.max_background_workers is defined %}--max-background-workers {{ user_item.value.max_background_workers }}{% endif %}
     {% for skill in user_item.value.disabled_skills | default([]) %}--disabled-skill "{{ skill }}" {% endfor %}
+    {% for module in user_item.value.disabled_modules | default([]) %}--disabled-module "{{ module }}" {% endfor %}
     {% if user_item.value.site_enabled | default(false) %}--site-enabled{% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"
@@ -816,19 +817,33 @@
 # The per-user TOML template no longer renders [[resources]]; the DB is now
 # authoritative. Each (user, type, path) is upserted independently — type/
 # path/name/permissions are extracted as flags and any remaining keys are
-# passed as --extras-json so nested values (money's `ledgers: [main]`,
-# overland's `default_radius: 75`) round-trip cleanly.
+# passed as --extras-json so nested values round-trip cleanly.
+#
+# Obsolete types (feeds, money, monarch, moneyman, karakeep, overland) are
+# filtered out: their values now live in the encrypted secrets table (see
+# `istota_user_secrets`) and the scheduler runs `cleanup_obsolete_resources`
+# at startup to delete any stragglers. Pushing them here would just create
+# audit-log churn — the row would be deleted before any task could read it.
 - name: Plan user_resources ensure invocations
   set_fact:
     _istota_resource_targets: "{{ _resource_targets_json | from_json }}"
   vars:
+    _obsolete_resource_types:
+      - feeds
+      - money
+      - monarch
+      - moneyman
+      - karakeep
+      - overland
     _resource_targets_json: |-
       {%- set ns = namespace(out=[]) -%}
       {%- for user_id, user_cfg in istota_users.items() -%}
       {%- for r in (user_cfg.resources | default([])) -%}
+      {%- if r.type not in _obsolete_resource_types -%}
       {%- set rkey = ['type','path','name','permissions'] -%}
       {%- set extras = dict(r.items() | rejectattr(0, 'in', rkey) | list) -%}
       {%- set _ = ns.out.append({'user': user_id, 'type': r.type, 'path': r.path | default(''), 'name': r.name | default(''), 'permissions': r.permissions | default('read'), 'extras': extras}) -%}
+      {%- endif -%}
       {%- endfor -%}
       {# Backward-compat: a flat `reminders_file: /path` on the user entry
          is provisioned as a synthetic reminders_file resource. #}
@@ -907,6 +922,67 @@
     label: "{{ item.user }}/{{ item.name }}"
   changed_when: false  # CLI is idempotent and prints STATE: created|updated|noop
   when: not istota_web_only
+  notify:
+    - "restart istota-scheduler"
+
+# Connected services + module-owned credentials (Phase 1+2 of the modules
+# refactor). Tier-2 secrets (Karakeep base_url+api_key, Monarch creds,
+# Overland ingest_token, Tumblr API key) live in the encrypted `secrets`
+# table — not in per-user TOML, not in `[[resources]]`. `istota secret
+# ensure` validates against the central schema and is idempotent.
+#
+# Inventory shape:
+#   istota_user_secrets:
+#     alice:
+#       - { service: karakeep, key: base_url, value: "https://kk.example.com" }
+#       - { service: karakeep, key: api_key,  value: "{{ vault_alice_kk_token }}" }
+#       - { service: monarch,  key: email,    value: "alice@example.com" }
+#       - { service: overland, key: ingest_token, value: "{{ vault_alice_overland }}" }
+- name: Plan secret ensure invocations
+  set_fact:
+    _istota_secret_targets: "{{ _secret_targets_json | from_json }}"
+  vars:
+    _secret_targets_json: |-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for user_id, entries in (istota_user_secrets | default({})).items() -%}
+      {%- for s in entries -%}
+      {%- set _ = ns.out.append({'user': user_id, 'service': s.service, 'key': s.key, 'value': s.value | default('')}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.out | to_json }}
+  when: not istota_web_only
+
+- name: Ensure encrypted secret rows
+  command:
+    argv:
+      - "{{ istota_home }}/.venv/bin/{{ istota_namespace }}"
+      - "-c"
+      - "{{ istota_repo_dir }}/config/config.toml"
+      - "secret"
+      - "ensure"
+      - "--user"
+      - "{{ item.user }}"
+      - "--service"
+      - "{{ item.service }}"
+      - "--key"
+      - "{{ item.key }}"
+      - "--value"
+      - "{{ item.value }}"
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  environment:
+    ISTOTA_SECRET_KEY: "{{ istota_secret_key }}"
+  loop: "{{ _istota_secret_targets | default([]) }}"
+  loop_control:
+    # Don't echo `value` in the loop label — Ansible logs that into the
+    # play recap, and these are credentials.
+    label: "{{ item.user }}/{{ item.service }}/{{ item.key }}"
+  no_log: true  # belt + suspenders: hide the full item dict on failure too
+  changed_when: false  # CLI is idempotent and prints STATE: created|updated|noop
+  when:
+    - not istota_web_only
+    - istota_secret_key | length > 0
+    - item.value | length > 0  # an empty string would error; use `secret remove` task instead
   notify:
     - "restart istota-scheduler"
 

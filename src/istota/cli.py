@@ -478,6 +478,101 @@ def cmd_briefing(args):
         return
 
 
+def cmd_secret(args):
+    """Manage per-user encrypted secrets.
+
+    Same partial-update + state-output contract as ``user ensure`` and
+    ``resource ensure``. Validation is gated by the central
+    ``secret_schema`` registry — operators get a loud error on a typo
+    instead of an orphan row that no skill ever reads.
+
+    Plaintext values are never echoed to stdout. The ``ensure`` action
+    prints the decision (created / updated / noop) but not the value;
+    ``list`` prints (service, key, last_updated) tuples only.
+    """
+    from . import secrets_store
+    from .secret_schema import all_known_services, known_service_keys
+
+    config = load_config(Path(args.config) if args.config else None)
+    db_path = config.db_path
+
+    if args.action == "list":
+        if not args.user:
+            print("Error: --user is required for list", file=sys.stderr)
+            sys.exit(1)
+        stored = secrets_store.list_user_services(db_path, args.user)
+        if not stored:
+            print(f"No secrets stored for {args.user!r}.")
+            return
+        print(f"Secrets stored for {args.user!r}:")
+        for service in sorted(stored):
+            for entry in stored[service]:
+                ts = entry.get("updated_at") or "?"
+                print(f"  {service:20} {entry['key']:20} updated_at={ts}")
+        return
+
+    # ensure / remove both need (user, service, key).
+    if not args.user or not args.service or not args.key:
+        print("Error: --user, --service, and --key are required", file=sys.stderr)
+        sys.exit(1)
+
+    schema = all_known_services()
+    if args.service not in schema:
+        print(
+            f"Error: unknown service {args.service!r} "
+            f"(known: {', '.join(sorted(schema))})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    valid_keys = known_service_keys()[args.service]
+    if not valid_keys:
+        print(
+            f"Error: service {args.service!r} has no operator-writable keys "
+            "(OAuth-only — use the web UI's Connect button)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.key not in valid_keys:
+        print(
+            f"Error: unknown key {args.key!r} for service {args.service!r} "
+            f"(known: {', '.join(sorted(valid_keys))})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.action == "ensure":
+        if not args.value:
+            print(
+                "Error: --value is required for ensure (use `secret remove` to clear)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        existing = secrets_store.get_secret(db_path, args.user, args.service, args.key)
+        if existing is None:
+            state = "created"
+        elif existing == args.value:
+            state = "noop"
+        else:
+            state = "updated"
+        if state != "noop":
+            secrets_store.set_secret(
+                db_path, args.user, args.service, args.key, args.value,
+            )
+        print(f"Secret ensured for {args.user!r}: service={args.service} key={args.key}")
+        print(f"STATE: {state}")
+        return
+
+    if args.action == "remove":
+        removed = secrets_store.delete_secret(
+            db_path, args.user, args.service, args.key,
+        )
+        state = "removed" if removed else "noop"
+        print(f"Secret remove for {args.user!r}: service={args.service} key={args.key}")
+        print(f"STATE: {state}")
+        return
+
+
 def cmd_email(args):
     """Email management commands."""
     config = load_config(Path(args.config) if args.config else None)
@@ -672,6 +767,23 @@ def cmd_user_ensure(args):
         updates["max_background_workers"] = args.max_background_workers
     if args.disabled_skill is not None:
         updates["disabled_skills"] = list(args.disabled_skill)
+    if args.disabled_module is not None:
+        from .modules import MODULE_NAMES
+
+        # Drop empty strings so `--disabled-module ""` is the explicit-clear
+        # form (argparse delivers ["" ] when the flag is passed once with no
+        # value). Validate the rest against the module registry — a typo
+        # would silently disable nothing otherwise.
+        names = [m for m in args.disabled_module if m]
+        unknown = [m for m in names if m not in MODULE_NAMES]
+        if unknown:
+            print(
+                f"Error: unknown module name(s): {', '.join(unknown)} "
+                f"(known: {', '.join(sorted(MODULE_NAMES))})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        updates["disabled_modules"] = names
     if args.site_enabled is not None:
         updates["site_enabled"] = args.site_enabled
 
@@ -704,6 +816,8 @@ def cmd_user_ensure(args):
         print(f"  alerts_channel: {profile.alerts_channel}")
     if profile.trusted_email_senders:
         print(f"  trusted_senders: {', '.join(profile.trusted_email_senders)}")
+    if profile.disabled_modules:
+        print(f"  disabled_modules: {', '.join(profile.disabled_modules)}")
 
 
 def cmd_user_show(args):
@@ -733,6 +847,7 @@ def cmd_user_show(args):
         "max_foreground_workers": profile.max_foreground_workers,
         "max_background_workers": profile.max_background_workers,
         "disabled_skills": profile.disabled_skills,
+        "disabled_modules": profile.disabled_modules,
         "trusted_email_senders": profile.trusted_email_senders,
     }, indent=2))
 
@@ -1078,6 +1193,25 @@ def main():
         help="Mark this briefing as disabled (drops the corresponding TOML entry without scheduling)",
     )
 
+    # secret (encrypted per-user credentials)
+    secret_parser = subparsers.add_parser(
+        "secret",
+        help="Manage per-user encrypted secrets (Ansible-friendly, idempotent)",
+    )
+    secret_parser.add_argument(
+        "action", choices=["ensure", "list", "remove"], help="Action",
+    )
+    secret_parser.add_argument("-u", "--user", help="User id")
+    secret_parser.add_argument(
+        "--service",
+        help="Service name (karakeep, monarch, overland, feeds, ...)",
+    )
+    secret_parser.add_argument("--key", help="Secret key within the service")
+    secret_parser.add_argument(
+        "--value",
+        help="Secret value (ensure only). Use `secret remove` to clear.",
+    )
+
     # email
     email_parser = subparsers.add_parser("email", help="Email management")
     email_parser.add_argument("action", choices=["poll", "list", "test"], help="Action")
@@ -1129,6 +1263,13 @@ def main():
     user_ensure_parser.add_argument(
         "--disabled-skill", action="append",
         help="Skill name to exclude from selection (repeatable)",
+    )
+    user_ensure_parser.add_argument(
+        "--disabled-module", action="append",
+        help=(
+            "Module to opt this user out of (repeatable). One of "
+            "feeds, money, location. Pass an empty value to clear."
+        ),
     )
     site_group = user_ensure_parser.add_mutually_exclusive_group()
     site_group.add_argument("--site-enabled", dest="site_enabled", action="store_const", const=True,
@@ -1217,6 +1358,7 @@ def main():
         "show": cmd_show,
         "resource": cmd_resource,
         "briefing": cmd_briefing,
+        "secret": cmd_secret,
         "email": cmd_email,
     }
 
