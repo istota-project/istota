@@ -15,14 +15,20 @@ cd docker
 bash init.sh
 ```
 
-`init.sh` is a one-shot bootstrap. It auto-generates passwords for the Nextcloud admin, Postgres, the bot account, and your user; auto-detects your timezone; and prompts for the two things it can't guess:
+`init.sh` is a guided wizard that mirrors the bare-metal install flow. It auto-generates passwords for the Nextcloud admin, Postgres, the bot account, and your user; auto-detects your timezone; and walks through the same optional-feature prompts you'd see on a real install:
 
-- `CLAUDE_CODE_OAUTH_TOKEN` — run `claude setup-token` on a machine that has Claude Code installed and authenticated, paste the `sk-ant-…` value when asked. Leave empty to use `ANTHROPIC_API_KEY` instead (set it manually in the resulting `.env`).
-- `USER_NAME` / `USER_DISPLAY_NAME` — your Nextcloud login id and full name.
+- **Identity** — bot name, public hostname (`DOMAIN` — leave empty for localhost-only).
+- **Claude auth** — paste a token from `claude setup-token` (instructions printed inline), or skip and set `ANTHROPIC_API_KEY` later.
+- **Primary user** — login id, display name, timezone, optional email address.
+- **Email integration** — IMAP/SMTP host, user, password (skipped if you say no).
+- **ntfy push notifications** — server URL, topic, optional bearer token.
+- **GPS location tracking** — toggles the `location` compose profile so the Overland webhook receiver starts.
+- **Developer credentials** — optional GitLab / GitHub personal access tokens.
+- **Browser container** — auto-enabled on x86-64 hosts (Chrome has no ARM packages).
 
-The script writes `docker/.env` (mode 600) and prints the generated passwords once — copy them somewhere safe. Re-run with `--force` to regenerate.
+The script writes `docker/.env` (mode 600) and prints the generated passwords once — copy them somewhere safe. Flags: `--minimal` skips the optional-feature sections (passwords + Claude + user only), `--force` overwrites an existing `.env` without asking.
 
-If you'd rather configure by hand, copy `.env.example` to `.env` and edit it directly. At minimum set `CLAUDE_CODE_OAUTH_TOKEN`, `ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `BOT_PASSWORD`, `USER_PASSWORD`, and `USER_NAME`. Optional but recommended: `USER_DISPLAY_NAME`, `USER_TIMEZONE`, `USER_EMAIL`.
+If you'd rather configure by hand, copy `.env.example` to `.env` and edit it directly. At minimum set `CLAUDE_CODE_OAUTH_TOKEN`, `ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `BOT_PASSWORD`, `USER_PASSWORD`, and `USER_NAME`.
 
 ### 2. Start
 
