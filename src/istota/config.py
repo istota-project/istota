@@ -532,10 +532,27 @@ class Config:
         explicit ``disabled_modules`` entry for this module. Unknown users
         default to True so docker auto-seeding doesn't block first-login
         access.
+
+        Reads from the ``user_profiles`` DB row when a DB is configured so
+        that web / scheduler / skill subprocesses all see the same value
+        without waiting for a config reload. Falls back to the in-memory
+        ``UserConfig`` for the init / test paths where the DB may not exist
+        yet, or when the row hasn't been seeded.
         """
         from .modules import MODULE_NAMES
         if module not in MODULE_NAMES:
             return False
+
+        if self.db_path is not None and Path(self.db_path).exists():
+            try:
+                from . import user_profiles as _up
+                profile = _up.get_profile(Path(self.db_path), user_id)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("is_module_enabled DB read failed: %s", e)
+                profile = None
+            if profile is not None:
+                return module not in (profile.disabled_modules or [])
+
         uc = self.users.get(user_id)
         if uc is None:
             return True

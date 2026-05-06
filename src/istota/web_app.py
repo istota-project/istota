@@ -1333,6 +1333,9 @@ async def settings_update_profile(
     )
     if coerced:
         user_profiles.update_profile(_config.db_path, user["username"], **coerced)
+        # No in-memory sync needed: gates that depend on these fields
+        # (is_module_enabled, …) read user_profiles live, so the next call
+        # in this process — and in the scheduler — sees the new value.
 
     logger.info("profile updated user=%s fields=%s", user["username"], sorted(coerced))
     return {"ok": True, "fields": sorted(coerced)}

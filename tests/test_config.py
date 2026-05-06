@@ -1486,6 +1486,43 @@ class TestDisabledModules:
         cfg.users["alice"] = UserConfig()
         assert cfg.is_module_enabled("alice", "ghost") is False
 
+    def test_is_module_enabled_reads_live_db_row(self, tmp_path):
+        # Cross-process scenario: web_app writes user_profiles.disabled_modules
+        # via the settings UI; the scheduler (its own Config instance) must
+        # pick up the new value on the next is_module_enabled call without
+        # any reload. The in-memory UserConfig deliberately disagrees with
+        # the DB row to prove the DB is consulted, not the in-memory copy.
+        from istota import db, user_profiles
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        user_profiles.ensure_profile(db_path, "alice", display_name="Alice")
+
+        cfg = Config()
+        cfg.db_path = db_path
+        cfg.users["alice"] = UserConfig(disabled_modules=["feeds"])  # stale in-memory
+
+        # DB row has feeds enabled (default empty list) — DB wins.
+        assert cfg.is_module_enabled("alice", "feeds") is True
+
+        # External writer disables money in the DB; next call reflects it.
+        user_profiles.update_profile(db_path, "alice", disabled_modules=["money"])
+        assert cfg.is_module_enabled("alice", "money") is False
+        assert cfg.is_module_enabled("alice", "feeds") is True
+
+    def test_is_module_enabled_falls_back_when_no_db_row(self, tmp_path):
+        # A user with no user_profiles row (e.g. mid-init, before auto-seed)
+        # falls back to the in-memory UserConfig.disabled_modules list.
+        from istota import db
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+
+        cfg = Config()
+        cfg.db_path = db_path
+        cfg.users["alice"] = UserConfig(disabled_modules=["feeds"])
+        assert cfg.is_module_enabled("alice", "feeds") is False
+
 
 class TestCleanupObsoleteResources:
     """db.cleanup_obsolete_resources removes retired resource types."""

@@ -1154,6 +1154,25 @@ class TestProfileEndpoints:
         # Bob has no row yet; alice's update must not have created one.
         assert bob is None
 
+    async def test_update_disabled_modules_takes_effect_immediately(self, tmp_path, client, app):
+        # Regression: is_module_enabled must reflect the new value on the
+        # very next call. Previously this only updated the user_profiles
+        # row, while is_module_enabled kept reading the stale in-memory
+        # UserConfig — the module stayed accessible until SIGHUP.
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        import istota.web_app as mod
+        assert mod._config.is_module_enabled("alice", "feeds") is True
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"disabled_modules": ["feeds"]},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert mod._config.is_module_enabled("alice", "feeds") is False
+
 
 @_needs_web_deps
 class TestResourceEndpoints:
