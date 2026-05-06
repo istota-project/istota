@@ -7,8 +7,8 @@ Scheduled summaries delivered to Talk and/or email. A morning briefing might inc
 Briefing config is loaded from three sources (higher precedence wins):
 
 1. User workspace `BRIEFINGS.md` (Nextcloud file, user self-service)
-2. Per-user config TOML (`config/users/alice.toml`)
-3. Main config (`config/config.toml` under `[[users.alice.briefings]]`)
+2. `briefing_configs` DB table — provisioned via `istota briefing ensure` (Ansible) or the web UI (`/istota/settings → Briefings`); `enabled=0` mutes a row without scheduling.
+3. `[[users.alice.briefings]]` blocks in main `config/config.toml` (docker entrypoint shortcut; DB rows win)
 
 Merging happens at the briefing name level.
 

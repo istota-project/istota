@@ -126,6 +126,6 @@ Instance-wide and per-user skill exclusion:
 # config.toml (instance-wide)
 disabled_skills = ["browse", "whisper"]
 
-# config/users/alice.toml (per-user)
+# [users.alice] block in config.toml (per-user — DB row from `istota user ensure --disabled-skill markets` wins)
 disabled_skills = ["markets"]
 ```
