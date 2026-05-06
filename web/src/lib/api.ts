@@ -520,4 +520,126 @@ export async function deleteSecret(
 	});
 }
 
+// --- Phase 6: profile + resources ---
+
+export interface UserProfile {
+	user_id: string;
+	display_name: string;
+	timezone: string;
+	email_addresses: string[];
+	trusted_email_senders: string[];
+	ntfy_topic: string;
+	log_channel: string;
+	alerts_channel: string;
+	disabled_skills: string[];
+	max_foreground_workers: number;
+	max_background_workers: number;
+	site_enabled: boolean;
+}
+
+export async function getProfile(): Promise<{ profile: UserProfile | null }> {
+	return apiFetch<{ profile: UserProfile | null }>('/settings/profile');
+}
+
+export async function updateProfile(
+	patch: Partial<UserProfile>,
+): Promise<{ ok: boolean; fields: string[] }> {
+	return apiFetch('/settings/profile', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(patch),
+	});
+}
+
+export interface ResourceTypeSchema {
+	type: string;
+	label: string;
+	needs_path: boolean;
+	permissions: string[];
+}
+
+export interface UserResourceRow {
+	managed: 'config' | 'db';
+	id?: number;
+	type: string;
+	name: string;
+	path: string;
+	permissions: string;
+	extras?: Record<string, unknown>;
+}
+
+export async function getResources(): Promise<{
+	types: ResourceTypeSchema[];
+	resources: UserResourceRow[];
+}> {
+	return apiFetch('/settings/resources');
+}
+
+export async function addResource(payload: {
+	type: string;
+	path?: string;
+	name?: string;
+	permissions?: string;
+	extras?: Record<string, unknown>;
+}): Promise<{ ok: boolean; id: number }> {
+	return apiFetch('/settings/resources', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload),
+	});
+}
+
+export async function deleteResource(
+	id: number,
+): Promise<{ ok: boolean; deleted: boolean }> {
+	return apiFetch(`/settings/resources/${id}`, { method: 'DELETE' });
+}
+
+// --- Phase 7b: briefings ---
+
+export interface UserBriefingRow {
+	managed: 'config' | 'db';
+	id?: number;
+	name: string;
+	cron: string;
+	conversation_token: string;
+	output: 'talk' | 'email' | 'both';
+	components: Record<string, unknown>;
+	enabled: boolean;
+}
+
+export interface BriefingRoomOption {
+	token: string;
+	name: string;
+}
+
+export async function getBriefings(): Promise<{
+	briefings: UserBriefingRow[];
+	rooms: BriefingRoomOption[];
+	outputs: string[];
+}> {
+	return apiFetch('/settings/briefings');
+}
+
+export async function upsertBriefing(payload: {
+	name: string;
+	cron: string;
+	conversation_token?: string;
+	output?: 'talk' | 'email' | 'both';
+	components?: Record<string, unknown>;
+	enabled?: boolean;
+}): Promise<{ ok: boolean; id: number; state: 'created' | 'updated' | 'noop' }> {
+	return apiFetch('/settings/briefings', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload),
+	});
+}
+
+export async function deleteBriefing(
+	id: number,
+): Promise<{ ok: boolean; deleted: boolean }> {
+	return apiFetch(`/settings/briefings/${id}`, { method: 'DELETE' });
+}
+
 export { AuthError };

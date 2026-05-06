@@ -4,10 +4,10 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 logger = logging.getLogger("istota.db")
 
@@ -58,6 +58,7 @@ class UserResource:
     resource_path: str
     display_name: str | None
     permissions: str
+    extras: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -228,6 +229,16 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE monarch_synced_transactions ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError:
             pass
+
+    # User resources: JSON extras for resource-type-specific config
+    # (overland ingest_token, money config_path/data_dir, feeds tumblr_api_key, etc.).
+    # Lets DB-managed resources carry the same payload that TOML rows do, so
+    # ansible can drive resource provisioning through `istota resource ensure`
+    # instead of templating per-user TOML.
+    try:
+        conn.execute("ALTER TABLE user_resources ADD COLUMN extras TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     # Location state: add dwell-based exit tracking column
     try:
@@ -804,6 +815,18 @@ def get_pending_confirmation_by_response_id(
     return _row_to_task(row)
 
 
+def _decode_resource_extras(raw: object) -> dict[str, Any]:
+    """Parse the extras JSON column. Falls back to {} on missing or corrupt data."""
+    if raw is None or raw == "":
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("user_resources.extras contained invalid JSON; defaulting to {}")
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
 def get_user_resources(
     conn: sqlite3.Connection,
     user_id: str,
@@ -813,7 +836,7 @@ def get_user_resources(
     if resource_type:
         cursor = conn.execute(
             """
-            SELECT id, user_id, resource_type, resource_path, display_name, permissions
+            SELECT id, user_id, resource_type, resource_path, display_name, permissions, extras
             FROM user_resources
             WHERE user_id = ? AND resource_type = ?
             """,
@@ -822,7 +845,7 @@ def get_user_resources(
     else:
         cursor = conn.execute(
             """
-            SELECT id, user_id, resource_type, resource_path, display_name, permissions
+            SELECT id, user_id, resource_type, resource_path, display_name, permissions, extras
             FROM user_resources
             WHERE user_id = ?
             """,
@@ -837,9 +860,17 @@ def get_user_resources(
             resource_path=row["resource_path"],
             display_name=row["display_name"],
             permissions=row["permissions"],
+            extras=_decode_resource_extras(row["extras"]),
         )
         for row in cursor.fetchall()
     ]
+
+
+# Sentinel for add_user_resource: distinguishes "caller didn't pass extras"
+# (preserve existing column on update) from "caller passed an explicit value
+# including {}" (overwrite). Operators clearing extras through the CLI / web
+# UI must produce a write, not a no-op.
+_EXTRAS_UNCHANGED = object()
 
 
 def add_user_resource(
@@ -849,20 +880,60 @@ def add_user_resource(
     resource_path: str,
     display_name: str | None = None,
     permissions: str = "read",
+    extras: "dict[str, Any] | object" = _EXTRAS_UNCHANGED,
 ) -> int:
-    """Add a resource permission for a user."""
-    cursor = conn.execute(
-        """
-        INSERT INTO user_resources (user_id, resource_type, resource_path, display_name, permissions)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (user_id, resource_type, resource_path) DO UPDATE SET
-            display_name = excluded.display_name,
-            permissions = excluded.permissions
-        RETURNING id
-        """,
-        (user_id, resource_type, resource_path, display_name, permissions),
-    )
+    """Upsert a resource for a user.
+
+    On conflict (user_id, resource_type, resource_path) the row's
+    display_name + permissions are overwritten. ``extras`` follows
+    partial-update semantics matching ``istota user ensure``: when the caller
+    omits the kwarg, the existing column value is preserved; passing an
+    explicit dict (including ``{}``) overwrites.
+    """
+    if extras is _EXTRAS_UNCHANGED:
+        cursor = conn.execute(
+            """
+            INSERT INTO user_resources (user_id, resource_type, resource_path, display_name, permissions, extras)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            ON CONFLICT (user_id, resource_type, resource_path) DO UPDATE SET
+                display_name = excluded.display_name,
+                permissions = excluded.permissions
+            RETURNING id
+            """,
+            (user_id, resource_type, resource_path, display_name, permissions),
+        )
+    else:
+        extras_json = json.dumps(extras) if extras else None
+        cursor = conn.execute(
+            """
+            INSERT INTO user_resources (user_id, resource_type, resource_path, display_name, permissions, extras)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (user_id, resource_type, resource_path) DO UPDATE SET
+                display_name = excluded.display_name,
+                permissions = excluded.permissions,
+                extras = excluded.extras
+            RETURNING id
+            """,
+            (user_id, resource_type, resource_path, display_name, permissions, extras_json),
+        )
     return cursor.fetchone()[0]
+
+
+def delete_user_resource(
+    conn: sqlite3.Connection,
+    user_id: str,
+    resource_id: int,
+) -> bool:
+    """Delete a resource by id, scoped to user_id (web UI safety).
+
+    Returns True if a row was removed. The user_id scope prevents one user
+    from deleting another user's resource by guessing IDs from the URL.
+    """
+    cur = conn.execute(
+        "DELETE FROM user_resources WHERE id = ? AND user_id = ?",
+        (resource_id, user_id),
+    )
+    return cur.rowcount > 0
 
 
 def get_briefing_last_run(conn: sqlite3.Connection, user_id: str, briefing_name: str) -> str | None:

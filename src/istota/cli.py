@@ -191,6 +191,64 @@ def cmd_show(args):
             print(f"  [{log['level']}] {log['timestamp']}: {log['message']}")
 
 
+def _coerce_extras_value(raw: str):
+    """Best-effort coerce a CLI ``key=value`` string to its natural Python type.
+
+    Operators shouldn't have to learn JSON quoting just to pass an integer
+    like ``default_radius=75`` or a bool like ``site_enabled=true``. We try
+    JSON first (handles ints, floats, bools, null, lists, dicts) and fall
+    back to a plain string. Mirrors how TOML would have parsed the same
+    field.
+    """
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+
+
+def _build_resource_extras(args) -> "dict[str, object] | None":
+    """Assemble the extras payload from CLI flags.
+
+    Returns ``None`` when the operator hasn't expressed an intent — neither
+    ``--extras`` nor ``--extras-json`` nor ``--extras-clear`` was passed.
+    Returns ``{}`` when ``--extras-clear`` is set or ``--extras-json``
+    decodes to an empty dict. Otherwise returns the assembled dict.
+    """
+    extras_json = getattr(args, "extras_json", None)
+    extras_kv = getattr(args, "extras", None)
+    extras_clear = getattr(args, "extras_clear", False)
+
+    if extras_clear:
+        return {}
+
+    if extras_json is not None:
+        try:
+            decoded = json.loads(extras_json)
+        except json.JSONDecodeError as e:
+            print(f"Error: --extras-json is not valid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(decoded, dict):
+            print("Error: --extras-json must decode to a JSON object", file=sys.stderr)
+            sys.exit(1)
+        return decoded
+
+    if extras_kv:
+        result: dict[str, object] = {}
+        for pair in extras_kv:
+            if "=" not in pair:
+                print(f"Error: --extras pair must be key=value, got {pair!r}", file=sys.stderr)
+                sys.exit(1)
+            key, _, value = pair.partition("=")
+            key = key.strip()
+            if not key:
+                print(f"Error: --extras key cannot be empty in {pair!r}", file=sys.stderr)
+                sys.exit(1)
+            result[key] = _coerce_extras_value(value)
+        return result
+
+    return None
+
+
 def cmd_resource(args):
     """Manage user resources."""
     config = load_config(Path(args.config) if args.config else None)
@@ -227,7 +285,103 @@ def cmd_resource(args):
                 permissions=args.permissions or "read",
             )
             print(f"Resource added to DB: {resource_id}")
-            print("Note: For permanent resources, add them to the user's config file instead.")
+            print("Note: For permanent resources, prefer `istota resource ensure`.")
+
+    elif args.action == "ensure":
+        if not args.type:
+            print("Error: --type is required for ensure", file=sys.stderr)
+            sys.exit(1)
+
+        # Module-shaped resources don't carry a real path; the (user, type,
+        # type) tuple acts as the unique key. Matches the web UI behavior.
+        # Filesystem-shaped types (folder, calendar, todo_file, ...) require
+        # an explicit --path so a typo doesn't silently create a row at the
+        # type-named pseudo-path.
+        _MODULE_SHAPED_TYPES = {"feeds", "money", "moneyman", "overland", "karakeep", "monarch"}
+        if not args.path and args.type not in _MODULE_SHAPED_TYPES:
+            print(
+                f"Error: --path is required for resource type {args.type!r}; "
+                f"only module-shaped types ({', '.join(sorted(_MODULE_SHAPED_TYPES))}) "
+                "default the path to the type name",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        resource_path = args.path if args.path else args.type
+        display_name = args.name
+        permissions = args.permissions or "read"
+        new_extras = _build_resource_extras(args)
+
+        with db.get_db(config.db_path) as conn:
+            existing = next(
+                (r for r in db.get_user_resources(conn, args.user)
+                 if r.resource_type == args.type and r.resource_path == resource_path),
+                None,
+            )
+
+            if existing is None:
+                state = "created"
+            else:
+                # Compute would-be values (so omitted extras = preserve).
+                next_extras = existing.extras if new_extras is None else new_extras
+                same = (
+                    (existing.display_name or "") == (display_name or "")
+                    and (existing.permissions or "read") == permissions
+                    and (existing.extras or {}) == (next_extras or {})
+                )
+                state = "noop" if same else "updated"
+
+            kwargs: dict[str, object] = {
+                "user_id": args.user,
+                "resource_type": args.type,
+                "resource_path": resource_path,
+                "display_name": display_name,
+                "permissions": permissions,
+            }
+            if new_extras is not None:
+                kwargs["extras"] = new_extras
+            db.add_user_resource(conn, **kwargs)
+
+        print(f"Resource ensured for {args.user!r}: type={args.type} path={resource_path}")
+        print(f"STATE: {state}")
+
+
+def _parse_components_arg(args) -> "dict[str, object] | None":
+    """Build the components dict from --components-json or --component flags.
+
+    Returns ``None`` when neither is set (caller decides default).
+    ``--components-json`` takes precedence; ``--component k=v`` pairs are
+    merged on top so an operator can override a single key.
+    """
+    components_json = getattr(args, "components_json", None)
+    component_kv = getattr(args, "component", None) or []
+
+    result: dict[str, object] | None = None
+
+    if components_json:
+        try:
+            decoded = json.loads(components_json)
+        except json.JSONDecodeError as e:
+            print(f"Error: --components-json is not valid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(decoded, dict):
+            print("Error: --components-json must decode to a JSON object", file=sys.stderr)
+            sys.exit(1)
+        result = dict(decoded)
+
+    for pair in component_kv:
+        if "=" not in pair:
+            print(f"Error: --component pair must be key=value, got {pair!r}", file=sys.stderr)
+            sys.exit(1)
+        key, _, value = pair.partition("=")
+        key = key.strip()
+        if not key:
+            print(f"Error: --component key cannot be empty in {pair!r}", file=sys.stderr)
+            sys.exit(1)
+        if result is None:
+            result = {}
+        result[key] = _coerce_extras_value(value)
+
+    return result
 
 
 def cmd_briefing(args):
@@ -235,7 +389,7 @@ def cmd_briefing(args):
     config = load_config(Path(args.config) if args.config else None)
 
     if args.action == "list":
-        # List briefings from config file
+        from . import user_briefings as _ub
         found = False
         for user_id, user_config in config.users.items():
             if args.user and user_id != args.user:
@@ -255,8 +409,73 @@ def cmd_briefing(args):
                             enabled.append(k)
                     if enabled:
                         print(f"{'':15} components: {', '.join(enabled)}")
-        if not found:
-            print("No briefings configured (add to config.toml)")
+        # Also show DB-only rows that aren't represented in user_config.briefings
+        # (typically: disabled rows, which the overlay drops). Operators want to
+        # see them so they can re-enable.
+        db_rows = _ub.list_briefings(config.db_path)
+        disabled_rows = [r for r in db_rows if not r.enabled]
+        if args.user:
+            disabled_rows = [r for r in disabled_rows if r.user_id == args.user]
+        if disabled_rows:
+            print("\nDisabled briefings (DB):")
+            for r in disabled_rows:
+                print(f"  {r.user_id:15} {r.name:10} {r.cron:15} -> {r.conversation_token}")
+        if not found and not disabled_rows:
+            print("No briefings configured")
+        return
+
+    if args.action == "ensure":
+        from . import user_briefings as _ub
+
+        if not args.user or not args.name or not args.cron:
+            print("Error: --user, --name, and --cron are required for ensure", file=sys.stderr)
+            sys.exit(1)
+
+        output = args.output or "talk"
+        if output in {"talk", "both"} and not args.conversation_token:
+            print(
+                f"Error: --conversation-token is required when --output is {output!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        components = _parse_components_arg(args) or {}
+
+        try:
+            briefing, state = _ub.ensure_briefing(
+                config.db_path,
+                user_id=args.user,
+                name=args.name,
+                cron=args.cron,
+                conversation_token=args.conversation_token or "",
+                output=output,
+                components=components,
+                enabled=not args.disabled,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        print(
+            f"Briefing ensured for {args.user!r}: name={briefing.name} cron={briefing.cron!r} "
+            f"output={briefing.output} enabled={briefing.enabled}"
+        )
+        print(f"STATE: {state}")
+        return
+
+    if args.action == "delete":
+        from . import user_briefings as _ub
+
+        if not args.user or not args.name:
+            print("Error: --user and --name are required for delete", file=sys.stderr)
+            sys.exit(1)
+        removed = _ub.delete_briefing(config.db_path, args.user, args.name)
+        if removed:
+            print(f"Briefing deleted: user={args.user} name={args.name}")
+        else:
+            print(f"No briefing found: user={args.user} name={args.name}")
+            sys.exit(1)
+        return
 
 
 def cmd_email(args):
@@ -412,6 +631,122 @@ def cmd_user_status(args):
         print(f"  Status: initialized ({line_count} lines)")
     else:
         print("  Status: not initialized")
+
+
+def cmd_user_ensure(args):
+    """Create or update a user_profiles row (idempotent).
+
+    Drop-in replacement for templating per-user TOML files via Ansible.
+    Only the flags the operator passes are written; omitted flags leave
+    the existing column value untouched (or use defaults on first insert).
+    """
+    from . import user_profiles
+
+    config = load_config(Path(args.config) if args.config else None)
+    user_id = args.name
+    db_path = config.db_path
+
+    if not Path(db_path).exists():
+        print(f"Error: DB not found at {db_path}; run `istota init` first", file=sys.stderr)
+        sys.exit(1)
+
+    # Build the partial-update dict from flags the user actually passed.
+    updates: dict[str, object] = {}
+    if args.display_name is not None:
+        updates["display_name"] = args.display_name
+    if args.tz is not None:
+        updates["timezone"] = args.tz
+    if args.email is not None:
+        updates["email_addresses"] = list(args.email)
+    if args.trusted_sender is not None:
+        updates["trusted_email_senders"] = list(args.trusted_sender)
+    if args.ntfy_topic is not None:
+        updates["ntfy_topic"] = args.ntfy_topic
+    if args.log_channel is not None:
+        updates["log_channel"] = args.log_channel
+    if args.alerts_channel is not None:
+        updates["alerts_channel"] = args.alerts_channel
+    if args.max_foreground_workers is not None:
+        updates["max_foreground_workers"] = args.max_foreground_workers
+    if args.max_background_workers is not None:
+        updates["max_background_workers"] = args.max_background_workers
+    if args.disabled_skill is not None:
+        updates["disabled_skills"] = list(args.disabled_skill)
+    if args.site_enabled is not None:
+        updates["site_enabled"] = args.site_enabled
+
+    existing = user_profiles.get_profile(db_path, user_id)
+    if existing is None:
+        seed_display = (
+            updates.get("display_name")
+            if isinstance(updates.get("display_name"), str)
+            else user_id
+        )
+        seed_tz = updates.get("timezone") if isinstance(updates.get("timezone"), str) else "UTC"
+        user_profiles.ensure_profile(db_path, user_id, display_name=seed_display, timezone=seed_tz)
+
+    if updates:
+        user_profiles.update_profile(db_path, user_id, **updates)
+
+    profile = user_profiles.get_profile(db_path, user_id)
+    if profile is None:
+        print(f"Error: failed to ensure user {user_id!r}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"User {user_id!r} ensured.")
+    print(f"  display_name: {profile.display_name}")
+    print(f"  timezone:     {profile.timezone}")
+    if profile.email_addresses:
+        print(f"  emails:       {', '.join(profile.email_addresses)}")
+    if profile.log_channel:
+        print(f"  log_channel:  {profile.log_channel}")
+    if profile.alerts_channel:
+        print(f"  alerts_channel: {profile.alerts_channel}")
+    if profile.trusted_email_senders:
+        print(f"  trusted_senders: {', '.join(profile.trusted_email_senders)}")
+
+
+def cmd_user_show(args):
+    """Show the stored profile for a user (DB row only — no TOML overlay)."""
+    from . import user_profiles
+
+    config = load_config(Path(args.config) if args.config else None)
+    db_path = config.db_path
+    if not Path(db_path).exists():
+        print(f"Error: DB not found at {db_path}", file=sys.stderr)
+        sys.exit(1)
+
+    profile = user_profiles.get_profile(db_path, args.name)
+    if profile is None:
+        print(f"No DB profile row for {args.name!r}")
+        return
+
+    print(json.dumps({
+        "user_id": profile.user_id,
+        "display_name": profile.display_name,
+        "email_addresses": profile.email_addresses,
+        "timezone": profile.timezone,
+        "log_channel": profile.log_channel,
+        "alerts_channel": profile.alerts_channel,
+        "ntfy_topic": profile.ntfy_topic,
+        "site_enabled": profile.site_enabled,
+        "max_foreground_workers": profile.max_foreground_workers,
+        "max_background_workers": profile.max_background_workers,
+        "disabled_skills": profile.disabled_skills,
+        "trusted_email_senders": profile.trusted_email_senders,
+    }, indent=2))
+
+
+def cmd_user_remove(args):
+    """Remove a user_profiles row. Does not touch resources or other tables."""
+    from . import user_profiles
+
+    config = load_config(Path(args.config) if args.config else None)
+    db_path = config.db_path
+    if user_profiles.delete_profile(db_path, args.name):
+        print(f"Removed profile row for {args.name!r}.")
+    else:
+        print(f"No profile row for {args.name!r} (nothing to remove).")
 
 
 def cmd_calendar_discover(args):
@@ -693,17 +1028,55 @@ def main():
 
     # resource
     resource_parser = subparsers.add_parser("resource", help="Manage user resources")
-    resource_parser.add_argument("action", choices=["list", "add"], help="Action")
+    resource_parser.add_argument("action", choices=["list", "add", "ensure"], help="Action")
     resource_parser.add_argument("-u", "--user", required=True, help="User ID")
-    resource_parser.add_argument("-t", "--type", help="Resource type (calendar, folder, todo_file, email_folder)")
-    resource_parser.add_argument("-p", "--path", help="Resource path")
+    resource_parser.add_argument("-t", "--type", help="Resource type (calendar, folder, todo_file, email_folder, feeds, money, overland, ...)")
+    resource_parser.add_argument("-p", "--path", help="Resource path (defaults to type for module-shaped resources)")
     resource_parser.add_argument("-n", "--name", help="Display name")
     resource_parser.add_argument("--permissions", help="Permissions (read, write)")
+    resource_parser.add_argument(
+        "--extras", action="append",
+        help="Extra resource-specific config as key=value (repeatable). "
+             "Values parsed as JSON when possible (e.g. default_radius=75 → int).",
+    )
+    resource_parser.add_argument(
+        "--extras-json",
+        help="Full extras payload as a JSON object. Overrides --extras pairs.",
+    )
+    resource_parser.add_argument(
+        "--extras-clear", action="store_true",
+        help="Wipe extras on the row. Use to explicitly clear what --extras would otherwise preserve.",
+    )
 
     # briefing
     briefing_parser = subparsers.add_parser("briefing", help="Manage briefings")
-    briefing_parser.add_argument("action", choices=["list"], help="Action")
-    briefing_parser.add_argument("-u", "--user", help="Filter by user")
+    briefing_parser.add_argument(
+        "action", choices=["list", "ensure", "delete"], help="Action",
+    )
+    briefing_parser.add_argument("-u", "--user", help="User id (required for ensure/delete)")
+    briefing_parser.add_argument("--name", help="Briefing name (e.g. 'morning')")
+    briefing_parser.add_argument("--cron", help="Cron expression (user TZ), e.g. '0 7 * * 1-5'")
+    briefing_parser.add_argument(
+        "--conversation-token",
+        help="Talk room token (required when output includes 'talk')",
+    )
+    briefing_parser.add_argument(
+        "--output", choices=["talk", "email", "both"], default="talk",
+    )
+    briefing_parser.add_argument(
+        "--components-json",
+        help='JSON object of components, e.g. \'{"calendar": true, "email": true}\'',
+    )
+    briefing_parser.add_argument(
+        "--component",
+        action="append",
+        help="Repeatable: simple component flag, e.g. --component calendar=true",
+    )
+    briefing_parser.add_argument(
+        "--disabled",
+        action="store_true",
+        help="Mark this briefing as disabled (drops the corresponding TOML entry without scheduling)",
+    )
 
     # email
     email_parser = subparsers.add_parser("email", help="Email management")
@@ -732,6 +1105,45 @@ def main():
     # user status
     user_status_parser = user_subparsers.add_parser("status", help="Show user directory status")
     user_status_parser.add_argument("username", help="User ID to check")
+
+    # user ensure  (Phase 6: idempotent profile upsert; replaces per-user TOML in Ansible)
+    user_ensure_parser = user_subparsers.add_parser(
+        "ensure",
+        help="Create or update a user profile row (idempotent; for Ansible)",
+    )
+    user_ensure_parser.add_argument("--name", required=True, help="User ID (Nextcloud username)")
+    user_ensure_parser.add_argument("--display-name", help="Display name shown in prompts")
+    user_ensure_parser.add_argument("--tz", "--timezone", dest="tz", help="IANA timezone (e.g. America/Los_Angeles)")
+    user_ensure_parser.add_argument(
+        "--email", action="append", help="User email address (repeatable; replaces existing list when passed)"
+    )
+    user_ensure_parser.add_argument(
+        "--trusted-sender", action="append",
+        help="Trusted email sender pattern (repeatable; fnmatch syntax)",
+    )
+    user_ensure_parser.add_argument("--ntfy-topic", help="Per-user ntfy topic override")
+    user_ensure_parser.add_argument("--log-channel", help="Talk room token for verbose execution logs")
+    user_ensure_parser.add_argument("--alerts-channel", help="Talk room token for confirmations and alerts")
+    user_ensure_parser.add_argument("--max-foreground-workers", type=int, help="Per-user fg worker cap (0 = global default)")
+    user_ensure_parser.add_argument("--max-background-workers", type=int, help="Per-user bg worker cap (0 = global default)")
+    user_ensure_parser.add_argument(
+        "--disabled-skill", action="append",
+        help="Skill name to exclude from selection (repeatable)",
+    )
+    site_group = user_ensure_parser.add_mutually_exclusive_group()
+    site_group.add_argument("--site-enabled", dest="site_enabled", action="store_const", const=True,
+                            help="Enable static website hosting at /~user/")
+    site_group.add_argument("--no-site", dest="site_enabled", action="store_const", const=False,
+                            help="Disable static website hosting")
+    user_ensure_parser.set_defaults(site_enabled=None)
+
+    # user show  (Phase 6: dump the DB row as JSON)
+    user_show_parser = user_subparsers.add_parser("show", help="Show stored profile row as JSON")
+    user_show_parser.add_argument("--name", required=True, help="User ID")
+
+    # user remove  (Phase 6: delete a user_profiles row; does not touch other tables)
+    user_remove_parser = user_subparsers.add_parser("remove", help="Remove a user_profiles row")
+    user_remove_parser.add_argument("--name", required=True, help="User ID")
 
     # calendar (with subparsers)
     calendar_parser = subparsers.add_parser("calendar", help="Calendar management")
@@ -814,6 +1226,9 @@ def main():
             "lookup": cmd_user_lookup,
             "init": cmd_user_init,
             "status": cmd_user_status,
+            "ensure": cmd_user_ensure,
+            "show": cmd_user_show,
+            "remove": cmd_user_remove,
         }
         user_commands[args.user_action](args)
     elif args.command == "calendar":

@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS user_resources (
     resource_path TEXT NOT NULL,
     display_name TEXT,
     permissions TEXT DEFAULT 'read', -- 'read', 'write'
+    extras TEXT,                     -- JSON dict of resource-type-specific config (e.g. overland ingest_token, money config_path)
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, resource_type, resource_path)
 );
@@ -549,3 +550,29 @@ CREATE TABLE IF NOT EXISTS secrets (
     UNIQUE(user_id, service, key)
 );
 CREATE INDEX IF NOT EXISTS idx_secrets_user_service ON secrets(user_id, service);
+
+-- User profiles (Phase 6 of the Docker onboarding spec).
+-- Replaces per-user TOML files (config/users/{user}.toml). Resource entries
+-- still live in config.toml under [[users.X.resources]] (deployment-level
+-- topology, ansible-managed); profile fields move here so the web UI can
+-- write them without touching disk and so Docker can auto-seed at first
+-- login. See `.claude/rules/config.md`.
+--
+-- list/dict columns store JSON arrays/objects.
+-- Empty/zero values mean "use defaults" (matches UserConfig dataclass).
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    email_addresses TEXT NOT NULL DEFAULT '[]',          -- JSON array
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    log_channel TEXT NOT NULL DEFAULT '',                -- Talk room token
+    alerts_channel TEXT NOT NULL DEFAULT '',             -- Talk room token
+    ntfy_topic TEXT NOT NULL DEFAULT '',
+    site_enabled INTEGER NOT NULL DEFAULT 0,
+    max_foreground_workers INTEGER NOT NULL DEFAULT 0,   -- 0 = use global default
+    max_background_workers INTEGER NOT NULL DEFAULT 0,
+    disabled_skills TEXT NOT NULL DEFAULT '[]',          -- JSON array
+    trusted_email_senders TEXT NOT NULL DEFAULT '[]',    -- JSON array (patterns)
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

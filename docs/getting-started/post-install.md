@@ -2,6 +2,14 @@
 
 After deploying via [Docker](quickstart-docker.md) or [bare metal](quickstart-bare-metal.md), complete these steps.
 
+!!! tip "Phase 6 — DB-backed user profiles"
+    Profile fields (display_name, timezone, email addresses, log/alerts channels, ntfy topic, worker overrides, trusted email senders, disabled skills) live in the `user_profiles` SQLite table. They're auto-seeded the first time a user logs into the web UI, or you can pre-seed via Ansible:
+    ```bash
+    istota user ensure --name alice --display-name "Alice" \
+      --tz "America/Los_Angeles" --email alice@example.com
+    ```
+    The web UI at `/istota/settings` lets each user edit their own profile and add per-user resources (calendars, folders, modules) without touching `config.toml`. Operator-supplied resources from `config.toml` show up alongside as read-only.
+
 ## Authenticate Claude CLI
 
 === "Bare metal"

@@ -529,6 +529,153 @@ const handlers: MockHandler[] = [
 		return undefined;
 	},
 
+	// Phase 6 — profile + resources
+	(() => {
+		const mockProfile: Record<string, unknown> = {
+			user_id: user.username,
+			display_name: user.display_name,
+			timezone: 'UTC',
+			email_addresses: ['user@example.com'],
+			trusted_email_senders: [],
+			ntfy_topic: '',
+			log_channel: '',
+			alerts_channel: '',
+			disabled_skills: [],
+			max_foreground_workers: 0,
+			max_background_workers: 0,
+			site_enabled: false,
+		};
+		let nextResourceId = 100;
+		const mockDbResources: {
+			id: number; type: string; name: string; path: string; permissions: string; extras?: Record<string, unknown>;
+		}[] = [];
+		const resourceTypes = [
+			{ type: 'calendar', label: 'Calendar (CalDAV)', needs_path: true, permissions: ['read', 'readwrite'] },
+			{ type: 'folder', label: 'Nextcloud folder', needs_path: true, permissions: ['read', 'readwrite'] },
+			{ type: 'todo_file', label: 'TODO file (markdown)', needs_path: true, permissions: ['read', 'readwrite'] },
+			{ type: 'feeds', label: 'Feeds (RSS/Atom)', needs_path: false, permissions: ['read'] },
+			{ type: 'money', label: 'Money (beancount)', needs_path: false, permissions: ['read'] },
+			{ type: 'overland', label: 'Location (Overland GPS)', needs_path: false, permissions: ['read'] },
+			{ type: 'karakeep', label: 'Karakeep bookmarks', needs_path: false, permissions: ['read'] },
+		];
+		return ({ url, method, body }: { url: string; method: string; body?: unknown }) => {
+			if (url === '/istota/api/settings/profile' && method === 'GET') {
+				return { profile: mockProfile };
+			}
+			if (url === '/istota/api/settings/profile' && method === 'PUT') {
+				const patch = body as Record<string, unknown> | undefined;
+				if (patch && typeof patch === 'object') {
+					for (const [k, v] of Object.entries(patch)) {
+						mockProfile[k] = v;
+					}
+				}
+				return { ok: true, fields: Object.keys(patch ?? {}) };
+			}
+			if (url === '/istota/api/settings/resources' && method === 'GET') {
+				return {
+					types: resourceTypes,
+					resources: [
+						{ managed: 'config', type: 'feeds', name: 'Feeds', path: '', permissions: 'read' },
+						...mockDbResources.map((r) => ({ managed: 'db', ...r })),
+					],
+				};
+			}
+			if (url === '/istota/api/settings/resources' && method === 'POST') {
+				const p = body as Record<string, unknown> | undefined;
+				if (!p || typeof p !== 'object') return { error: 'bad payload' };
+				const id = nextResourceId++;
+				const extras = p.extras as Record<string, unknown> | undefined;
+				mockDbResources.push({
+					id,
+					type: String(p.type ?? ''),
+					name: String(p.name ?? ''),
+					path: String(p.path ?? p.type ?? ''),
+					permissions: String(p.permissions ?? 'read'),
+					...(extras && typeof extras === 'object' ? { extras } : {}),
+				});
+				return { ok: true, id };
+			}
+			const m = url.match(/^\/istota\/api\/settings\/resources\/(\d+)$/);
+			if (m && method === 'DELETE') {
+				const id = Number(m[1]);
+				const idx = mockDbResources.findIndex((r) => r.id === id);
+				if (idx >= 0) mockDbResources.splice(idx, 1);
+				return { ok: true, deleted: idx >= 0 };
+			}
+			return undefined;
+		};
+	})(),
+
+	// Phase 7b — briefings
+	(() => {
+		let nextBriefingId = 200;
+		const mockDbBriefings: {
+			id: number;
+			name: string;
+			cron: string;
+			conversation_token: string;
+			output: 'talk' | 'email' | 'both';
+			components: Record<string, unknown>;
+			enabled: boolean;
+		}[] = [];
+		const tomlBriefings = [
+			{
+				name: 'morning',
+				cron: '0 7 * * 1-5',
+				conversation_token: 'abc123',
+				output: 'talk' as const,
+				components: { calendar: true, todos: true, email: true },
+				enabled: true,
+			},
+		];
+		return ({ url, method, body }: { url: string; method: string; body?: unknown }) => {
+			if (url === '/istota/api/settings/briefings' && method === 'GET') {
+				return {
+					briefings: [
+						...tomlBriefings.map((b) => ({ managed: 'config', ...b })),
+						...mockDbBriefings.map((b) => ({ managed: 'db', ...b })),
+					],
+					rooms: [
+						{ token: 'abc123', name: 'Log channel' },
+						{ token: 'def456', name: 'Alerts channel' },
+					],
+					outputs: ['talk', 'email', 'both'],
+				};
+			}
+			if (url === '/istota/api/settings/briefings' && method === 'POST') {
+				const p = body as Record<string, unknown> | undefined;
+				if (!p || typeof p !== 'object') return { error: 'bad payload' };
+				const name = String(p.name ?? '');
+				const existing = mockDbBriefings.findIndex((b) => b.name === name);
+				const row = {
+					id: existing >= 0 ? mockDbBriefings[existing].id : nextBriefingId++,
+					name,
+					cron: String(p.cron ?? ''),
+					conversation_token: String(p.conversation_token ?? ''),
+					output: (p.output as 'talk' | 'email' | 'both') ?? 'talk',
+					components:
+						(p.components as Record<string, unknown> | undefined) ?? {},
+					enabled: p.enabled !== false,
+				};
+				if (existing >= 0) mockDbBriefings[existing] = row;
+				else mockDbBriefings.push(row);
+				return {
+					ok: true,
+					id: row.id,
+					state: existing >= 0 ? 'updated' : 'created',
+				};
+			}
+			const m = url.match(/^\/istota\/api\/settings\/briefings\/(\d+)$/);
+			if (m && method === 'DELETE') {
+				const id = Number(m[1]);
+				const idx = mockDbBriefings.findIndex((b) => b.id === id);
+				if (idx >= 0) mockDbBriefings.splice(idx, 1);
+				return { ok: true, deleted: idx >= 0 };
+			}
+			return undefined;
+		};
+	})(),
+
 	// Feeds settings: config GET/PUT
 	({ url, method, body }) => {
 		if (url !== '/istota/api/feeds/config') return undefined;

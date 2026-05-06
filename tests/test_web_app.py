@@ -943,3 +943,586 @@ class TestSettingsEndpoints:
         assert secrets_store.get_secret(self._db_path, "bob", "monarch", "email") is None
 
 
+# ============================================================================
+# Phase 6 — profile + resources endpoints
+# ============================================================================
+
+@_needs_web_deps
+class TestProfileEndpoints:
+    """Settings → profile section: scalars, list fields, validation, scoping."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_db(self, monkeypatch, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        # Phase 5 store needs the secret key, but profile tests don't depend on it.
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _make_test_config(self, tmp_path):
+        cfg = _make_config(
+            tmp_path,
+            users={"alice": UserConfig(display_name="Alice"), "bob": UserConfig(display_name="Bob")},
+        )
+        cfg.db_path = self._db_path
+        return cfg
+
+    async def _login(self, client, username="alice", display="Alice"):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": username, "name": display},
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def test_callback_seeds_profile(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        await self._login(client, "alice", "Alice the Great")
+        from istota import user_profiles
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p is not None
+        assert p.display_name == "Alice the Great"
+
+    async def test_get_profile_returns_seeded_row(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["profile"]["user_id"] == "alice"
+        assert body["profile"]["timezone"] == "UTC"
+
+    async def test_update_profile_partial(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"timezone": "America/Los_Angeles", "ntfy_topic": "alice-alerts"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import user_profiles
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.timezone == "America/Los_Angeles"
+        assert p.ntfy_topic == "alice-alerts"
+        assert p.display_name == "Alice"  # untouched
+
+    async def test_update_profile_lists(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"email_addresses": ["a@x.com", "b@x.com"], "trusted_email_senders": ["*@trusted.org"]},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import user_profiles
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.email_addresses == ["a@x.com", "b@x.com"]
+        assert p.trusted_email_senders == ["*@trusted.org"]
+
+    async def test_update_profile_rejects_unknown_field(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"evil": "value"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_update_profile_rejects_bad_type(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"max_foreground_workers": "not-a-number"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_update_profile_csrf_required(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"timezone": "UTC"},
+            cookies=cookies,
+            headers={"origin": "https://evil.example.com"},
+        )
+        assert resp.status_code == 403
+
+    async def test_update_profile_requires_auth(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"timezone": "UTC"},
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 401
+
+    async def test_per_user_scoping(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        await client.put(
+            "/istota/api/settings/profile",
+            json={"ntfy_topic": "alice-only"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        from istota import user_profiles
+        bob = user_profiles.get_profile(self._db_path, "bob")
+        # Bob has no row yet; alice's update must not have created one.
+        assert bob is None
+
+
+@_needs_web_deps
+class TestResourceEndpoints:
+    """Settings → resources: list TOML+DB merged, add/remove DB rows."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_db(self, monkeypatch, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _make_test_config(self, tmp_path):
+        cfg = _make_config(
+            tmp_path,
+            users={
+                "alice": UserConfig(
+                    display_name="Alice",
+                    resources=[ResourceConfig(type="feeds", name="Feeds (TOML)")],
+                ),
+            },
+        )
+        cfg.db_path = self._db_path
+        return cfg
+
+    async def _login(self, client):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def test_list_includes_toml_and_db(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        from istota import db
+        with db.get_db(self._db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Notes", display_name="Notes",
+            )
+        cookies = await self._login(client)
+        resp = await client.get("/istota/api/settings/resources", cookies=cookies)
+        assert resp.status_code == 200
+        body = resp.json()
+        types = {t["type"] for t in body["types"]}
+        assert "calendar" in types and "feeds" in types
+        managed = {(r["type"], r["managed"]) for r in body["resources"]}
+        assert ("feeds", "config") in managed
+        assert ("folder", "db") in managed
+
+    async def test_add_resource(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/resources",
+            json={"type": "calendar", "path": "/dav/work", "name": "Work"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        rid = resp.json()["id"]
+        assert rid > 0
+        from istota import db
+        with db.get_db(self._db_path) as conn:
+            rows = db.get_user_resources(conn, "alice", resource_type="calendar")
+        assert len(rows) == 1
+        assert rows[0].resource_path == "/dav/work"
+
+    async def test_add_resource_rejects_unknown_type(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/resources",
+            json={"type": "evil", "path": "/x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_add_resource_requires_path_when_needed(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/resources",
+            json={"type": "folder"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_add_resource_no_path_for_module_types(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/resources",
+            json={"type": "money", "name": "Money"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+
+    async def test_delete_db_resource(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        from istota import db
+        with db.get_db(self._db_path) as conn:
+            rid = db.add_user_resource(
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/x", display_name="X",
+            )
+        cookies = await self._login(client)
+        resp = await client.delete(
+            f"/istota/api/settings/resources/{rid}",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        with db.get_db(self._db_path) as conn:
+            assert db.get_user_resources(conn, "alice", resource_type="folder") == []
+
+    async def test_delete_other_users_resource_returns_404(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        from istota import db
+        with db.get_db(self._db_path) as conn:
+            rid = db.add_user_resource(
+                conn, user_id="bob", resource_type="folder",
+                resource_path="/bobs", display_name="Bob's",
+            )
+        cookies = await self._login(client)  # logged in as alice
+        resp = await client.delete(
+            f"/istota/api/settings/resources/{rid}",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        # 404 is intentional: indistinguishable from "no such id" so a
+        # caller can't probe for other users' resource IDs.
+        assert resp.status_code == 404
+        with db.get_db(self._db_path) as conn:
+            still_there = db.get_user_resources(conn, "bob", resource_type="folder")
+        assert len(still_there) == 1
+
+    async def test_delete_negative_id_rejected(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.delete(
+            "/istota/api/settings/resources/-1",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_add_resource_with_extras_persists(self, tmp_path, client, app):
+        # Module-shaped resources carry their config in extras (overland's
+        # ingest_token, money's data_dir, feeds' tumblr_api_key, etc.).
+        # Without this the web UI can't fully replace the per-user TOML.
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/resources",
+            json={
+                "type": "overland", "name": "GPS",
+                "extras": {"ingest_token": "tok-xyz", "default_radius": 75},
+            },
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import db
+        with db.get_db(self._db_path) as conn:
+            rows = db.get_user_resources(conn, "alice", resource_type="overland")
+        assert rows[0].extras == {"ingest_token": "tok-xyz", "default_radius": 75}
+
+    async def test_list_returns_extras_on_db_rows(self, tmp_path, client, app):
+        # The UI needs to read back extras to render an editable form;
+        # otherwise users can only delete-and-recreate.
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        from istota import db
+        with db.get_db(self._db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={"ingest_token": "tok-xyz"},
+            )
+        cookies = await self._login(client)
+        resp = await client.get("/istota/api/settings/resources", cookies=cookies)
+        assert resp.status_code == 200
+        db_rows = [r for r in resp.json()["resources"] if r["managed"] == "db"]
+        overland = next(r for r in db_rows if r["type"] == "overland")
+        assert overland["extras"] == {"ingest_token": "tok-xyz"}
+
+    async def test_add_resource_rejects_non_dict_extras(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/resources",
+            json={"type": "feeds", "name": "Feeds", "extras": "not a dict"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_db_row_not_double_listed_when_in_uc_resources(self, tmp_path, client, app):
+        # _apply_user_resources merges DB rows into UserConfig.resources so
+        # other code paths see them through one surface. The settings GET
+        # must not show the same row twice (once as "config" via the
+        # merged UserConfig, once as "db" via the direct DB query).
+        from istota import db
+        with db.get_db(self._db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={"ingest_token": "tok-xyz"},
+            )
+        # Build a config whose UserConfig already holds the DB row (as
+        # _apply_user_resources would have done) plus a separate TOML feed
+        # entry.
+        cfg = _make_config(
+            tmp_path,
+            users={
+                "alice": UserConfig(
+                    display_name="Alice",
+                    resources=[
+                        ResourceConfig(type="feeds", name="Feeds (TOML)"),
+                        ResourceConfig(
+                            type="overland", path="overland",
+                            name="GPS", extra={"ingest_token": "tok-xyz"},
+                        ),
+                    ],
+                ),
+            },
+        )
+        cfg.db_path = self._db_path
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.get("/istota/api/settings/resources", cookies=cookies)
+        assert resp.status_code == 200
+        rows = resp.json()["resources"]
+        overlands = [r for r in rows if r["type"] == "overland"]
+        assert len(overlands) == 1
+        assert overlands[0]["managed"] == "db"
+        # The unrelated TOML feed entry still renders as config.
+        feeds = [r for r in rows if r["type"] == "feeds"]
+        assert feeds[0]["managed"] == "config"
+
+
+@_needs_web_deps
+class TestBriefingEndpoints:
+    """Settings → briefings: list TOML+DB merged, upsert/delete DB rows."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_db(self, monkeypatch, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _make_test_config(self, tmp_path):
+        from istota.config import BriefingConfig
+        cfg = _make_config(
+            tmp_path,
+            users={
+                "alice": UserConfig(
+                    display_name="Alice",
+                    log_channel="logtoken",
+                    alerts_channel="alertstoken",
+                    briefings=[
+                        BriefingConfig(
+                            name="morning",
+                            cron="0 7 * * 1-5",
+                            conversation_token="logtoken",
+                            output="talk",
+                            components={"calendar": True},
+                        ),
+                    ],
+                ),
+            },
+        )
+        cfg.db_path = self._db_path
+        return cfg
+
+    async def _login(self, client):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "userinfo": {"preferred_username": "alice", "name": "Alice"},
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def test_list_includes_toml_and_db(self, tmp_path, client, app):
+        from istota import user_briefings
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        user_briefings.ensure_briefing(
+            self._db_path, user_id="alice", name="evening",
+            cron="0 19 * * *", conversation_token="logtoken", output="talk",
+        )
+        cookies = await self._login(client)
+        resp = await client.get("/istota/api/settings/briefings", cookies=cookies)
+        assert resp.status_code == 200
+        body = resp.json()
+        managed = {(b["name"], b["managed"]) for b in body["briefings"]}
+        assert ("morning", "config") in managed
+        assert ("evening", "db") in managed
+        # rooms come from log_channel / alerts_channel
+        room_tokens = {r["token"] for r in body["rooms"]}
+        assert "logtoken" in room_tokens
+        assert "alertstoken" in room_tokens
+
+    async def test_post_creates_briefing(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/briefings",
+            json={
+                "name": "midday",
+                "cron": "0 12 * * *",
+                "conversation_token": "logtoken",
+                "output": "talk",
+                "components": {"calendar": True},
+            },
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["state"] == "created"
+        assert body["id"] > 0
+
+    async def test_post_idempotent_returns_noop(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        payload = {
+            "name": "midday",
+            "cron": "0 12 * * *",
+            "conversation_token": "logtoken",
+            "output": "talk",
+            "components": {"calendar": True},
+        }
+        await client.post(
+            "/istota/api/settings/briefings",
+            json=payload, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        resp = await client.post(
+            "/istota/api/settings/briefings",
+            json=payload, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "noop"
+
+    async def test_post_rejects_talk_without_token(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/briefings",
+            json={"name": "x", "cron": "0 7 * * *", "output": "talk"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_post_rejects_unknown_output(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/briefings",
+            json={"name": "x", "cron": "0 7 * * *", "output": "sms"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_delete_db_briefing(self, tmp_path, client, app):
+        from istota import user_briefings
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        b, _ = user_briefings.ensure_briefing(
+            self._db_path, user_id="alice", name="x",
+            cron="0 7 * * *", conversation_token="t",
+        )
+        cookies = await self._login(client)
+        resp = await client.delete(
+            f"/istota/api/settings/briefings/{b.id}",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+
+    async def test_delete_other_users_briefing_returns_404(self, tmp_path, client, app):
+        from istota import user_briefings
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        b, _ = user_briefings.ensure_briefing(
+            self._db_path, user_id="bob", name="x",
+            cron="0 7 * * *", conversation_token="t",
+        )
+        cookies = await self._login(client)  # logged in as alice
+        resp = await client.delete(
+            f"/istota/api/settings/briefings/{b.id}",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 404
+        # Bob's briefing untouched
+        rows = user_briefings.list_briefings(self._db_path, "bob")
+        assert len(rows) == 1
+
+    async def test_delete_negative_id_rejected(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.delete(
+            "/istota/api/settings/briefings/-1",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
