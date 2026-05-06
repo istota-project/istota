@@ -1693,3 +1693,291 @@ class TestAnsibleValidateConfigScript:
         )
         proc = self._run(tmp_path, cfg, "/srv/zorg/data/zorg.db", "/srv/zorg/tmp")
         assert proc.returncode == 0, proc.stderr
+
+
+class TestApplyUserResources:
+    """`_apply_user_resources` overlays DB resource rows onto loaded UserConfig.
+
+    The runtime invariant is: every resource the operator has provisioned —
+    whether via TOML or via `istota resource ensure` / web UI — appears in
+    ``config.users[uid].resources`` so existing call sites (executor merge,
+    webhook_receiver, money/feeds loaders, secrets_store import) work
+    uniformly. DB rows win when the (type, path) pair matches a TOML row.
+    """
+
+    def _write_minimal_config(self, tmp_path: Path, db_path: Path) -> Path:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+        )
+        return cfg
+
+    def test_db_resource_appears_in_user_config(self, tmp_path, monkeypatch):
+        from istota import db
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={"ingest_token": "tok-xyz", "default_radius": 75},
+            )
+        cfg_path = self._write_minimal_config(tmp_path, db_path)
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg_path)
+        resources = config.users["alice"].resources
+        overland = [r for r in resources if r.type == "overland"]
+        assert len(overland) == 1
+        assert overland[0].extra == {"ingest_token": "tok-xyz", "default_radius": 75}
+        assert overland[0].name == "GPS"
+
+    def test_db_row_dedupes_against_matching_toml_row(self, tmp_path, monkeypatch):
+        # Same (type, path): DB row replaces TOML row. Without dedupe the
+        # executor would see two ResourceConfig entries for one logical
+        # resource and double-count.
+        from istota import db
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS (DB)",
+                extras={"ingest_token": "from-db"},
+            )
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+            "\n[[users.alice.resources]]\n"
+            'type = "overland"\n'
+            'path = "overland"\n'
+            'name = "GPS (TOML)"\n'
+            'ingest_token = "from-toml"\n'
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        resources = config.users["alice"].resources
+        overland = [r for r in resources if r.type == "overland"]
+        assert len(overland) == 1
+        # DB wins because once the row exists, operators expect it to be
+        # authoritative — same precedence as user_profiles.
+        assert overland[0].extra["ingest_token"] == "from-db"
+        assert overland[0].name == "GPS (DB)"
+
+    def test_distinct_paths_keep_both_resources(self, tmp_path, monkeypatch):
+        # Two folders with different paths must coexist — dedupe is keyed on
+        # (type, path), not type alone.
+        from istota import db
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Documents", display_name="Docs",
+            )
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+            "\n[[users.alice.resources]]\n"
+            'type = "folder"\n'
+            'path = "/Pictures"\n'
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        folders = sorted(
+            (r.path for r in config.users["alice"].resources if r.type == "folder")
+        )
+        assert folders == ["/Documents", "/Pictures"]
+
+    def test_synthesises_user_when_only_db_row_exists(self, tmp_path, monkeypatch):
+        # A user with no TOML stanza but a DB resource row must still be
+        # reachable through config.users[uid].resources. Mirrors the
+        # _apply_user_profiles pattern for synthesised UserConfigs.
+        from istota import db
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="bob", resource_type="folder",
+                resource_path="/Bob", display_name="Bob's folder",
+            )
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        assert "bob" in config.users
+        assert any(r.type == "folder" and r.path == "/Bob"
+                   for r in config.users["bob"].resources)
+
+    def test_missing_db_does_not_fail_load(self, tmp_path, monkeypatch):
+        # Same best-effort contract as _apply_user_profiles: callers like
+        # `istota init` run before the DB exists.
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{tmp_path / "does-not-exist.db"}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+            "\n[[users.alice.resources]]\n"
+            'type = "folder"\n'
+            'path = "/x"\n'
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        assert any(r.type == "folder" for r in config.users["alice"].resources)
+
+
+class TestApplyUserBriefings:
+    """`_apply_user_briefings` overlays DB briefing rows onto loaded UserConfig.
+
+    DB row replaces the matching TOML briefing by ``name``; new DB rows are
+    added on top. Disabled rows drop the matching TOML name without
+    scheduling a replacement, so the web UI can mute a TOML-templated
+    briefing without re-templating.
+    """
+
+    def _write_minimal_config(self, tmp_path: Path, db_path: Path) -> Path:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+        )
+        return cfg
+
+    def test_db_briefing_appears_in_user_config(self, tmp_path, monkeypatch):
+        from istota import db, user_briefings
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning",
+            cron="0 7 * * 1-5", conversation_token="tok123",
+            output="talk", components={"calendar": True},
+        )
+        cfg_path = self._write_minimal_config(tmp_path, db_path)
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg_path)
+        briefings = config.users["alice"].briefings
+        assert len(briefings) == 1
+        assert briefings[0].name == "morning"
+        assert briefings[0].cron == "0 7 * * 1-5"
+        assert briefings[0].components == {"calendar": True}
+
+    def test_db_row_replaces_matching_toml_row(self, tmp_path, monkeypatch):
+        from istota import db, user_briefings
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning",
+            cron="0 8 * * *", conversation_token="db-room",
+            output="talk", components={"calendar": True},
+        )
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+            "\n[[users.alice.briefings]]\n"
+            'name = "morning"\n'
+            'cron = "0 7 * * *"\n'
+            'conversation_token = "toml-room"\n'
+            'output = "talk"\n'
+            "[users.alice.briefings.components]\n"
+            "todos = true\n"
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        briefings = config.users["alice"].briefings
+        assert len(briefings) == 1
+        # DB wins
+        assert briefings[0].cron == "0 8 * * *"
+        assert briefings[0].conversation_token == "db-room"
+
+    def test_distinct_names_coexist(self, tmp_path, monkeypatch):
+        from istota import db, user_briefings
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="evening",
+            cron="0 19 * * *", conversation_token="t", output="talk",
+        )
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+            "\n[[users.alice.briefings]]\n"
+            'name = "morning"\n'
+            'cron = "0 7 * * *"\n'
+            'conversation_token = "t"\n'
+            'output = "talk"\n'
+            "[users.alice.briefings.components]\n"
+            "calendar = true\n"
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        names = {b.name for b in config.users["alice"].briefings}
+        assert names == {"morning", "evening"}
+
+    def test_disabled_db_row_drops_toml_briefing(self, tmp_path, monkeypatch):
+        # Operator can mute a TOML-templated briefing via the web UI by
+        # toggling the row off. Without this the TOML would resurrect it.
+        from istota import db, user_briefings
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning",
+            cron="0 7 * * *", conversation_token="t", output="talk",
+            enabled=False,
+        )
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+            "\n[[users.alice.briefings]]\n"
+            'name = "morning"\n'
+            'cron = "0 7 * * *"\n'
+            'conversation_token = "t"\n'
+            'output = "talk"\n'
+            "[users.alice.briefings.components]\n"
+            "calendar = true\n"
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        assert config.users["alice"].briefings == []
+
+    def test_missing_db_does_not_fail_load(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{tmp_path / "does-not-exist.db"}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        assert "alice" in config.users

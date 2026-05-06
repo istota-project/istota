@@ -1,10 +1,19 @@
 # Per-user configuration
 
-Each user can be configured at three levels (later overrides earlier):
+Each user can be configured at four levels (later overrides earlier):
 
 1. `[users.alice]` in main `config/config.toml`
-2. `config/users/alice.toml` (per-user TOML file)
-3. User workspace files in Nextcloud (PERSONA.md, BRIEFINGS.md, CRON.md, etc.)
+2. `config/users/alice.toml` (per-user TOML file — still authoritative for **resources** and **briefings**)
+3. `user_profiles` row in the istota DB — owns profile fields (display_name, timezone, channels, ntfy_topic, worker overrides, email lists, trusted senders, disabled skills)
+4. User workspace files in Nextcloud (PERSONA.md, BRIEFINGS.md, CRON.md, etc.)
+
+The DB row is populated three ways:
+
+- **Ansible**: `istota user ensure --name alice --display-name "Alice" --tz "America/Los_Angeles" --email alice@example.com` (idempotent partial update).
+- **Web UI**: `/istota/settings` lets each user edit their profile directly.
+- **Auto-seed**: on first OAuth login the row is created from the Nextcloud display_name and any TOML profile fields the operator already supplied. Subsequent logins do not overwrite values the user has edited.
+
+Migration from existing TOML installs: the scheduler imports any TOML profile fields into the DB on startup, but only for users without a row yet. Existing per-user TOML files keep working — they just stop being the source of truth for profile fields once a DB row exists.
 
 ## Per-user TOML settings
 

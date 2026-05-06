@@ -66,10 +66,16 @@
 			{#if user.features.admin}
 				<a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
 			{/if}
-			<a href="{base}/settings" class:active={isActive('/settings')}>Settings</a>
 		</div>
 		<div class="nav-right">
-			<span class="nav-user">{user.display_name}</span>
+			<a
+				href="{base}/settings"
+				class="nav-user"
+				class:active={isActive('/settings')}
+				title="Settings"
+			>
+				{user.display_name}
+			</a>
 			<a href="{base}/logout" class="logout-btn" title="Log out" aria-label="Log out">
 				<LogOut size={14} />
 			</a>
@@ -169,6 +175,10 @@
 	.hamburger-btn[data-state='open'] {
 		color: var(--text-primary);
 		background: var(--surface-raised);
+	}
+
+	.nav-user.active {
+		color: var(--text-primary);
 	}
 
 	@media (max-width: 640px) {

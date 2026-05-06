@@ -1138,4 +1138,172 @@ def load_config(config_path: Path | None = None) -> Config:
         if val:
             setattr(getattr(config, section), field_name, val)
 
+    # Phase 6: overlay profile fields from the user_profiles table.
+    # DB rows replace the matching scalar fields on TOML-loaded UserConfig
+    # entries; briefings stay TOML-owned. Users that exist only
+    # in the DB (no TOML entry) get a synthesised UserConfig.
+    _apply_user_profiles(config)
+
+    # Phase 7a: overlay user_resources rows onto config.users[*].resources.
+    # DB rows win over TOML for matching (type, path); distinct (type, path)
+    # pairs coexist. Existing call sites (executor merge, webhook_receiver,
+    # money/feeds loaders, secrets_store import) keep reading
+    # ``config.users[uid].resources`` unchanged.
+    _apply_user_resources(config)
+
+    # Phase 7b: overlay briefing_configs rows onto config.users[*].briefings.
+    # DB rows replace TOML rows of the same ``name``; distinct names coexist.
+    # ``check_briefings`` and ``get_briefings_for_user`` keep reading
+    # ``user_config.briefings`` unchanged.
+    _apply_user_briefings(config)
+
     return config
+
+
+def _apply_user_profiles(config: "Config") -> None:
+    """Merge ``user_profiles`` rows into ``config.users``.
+
+    Best-effort: a missing/unreadable DB does not fail config loading
+    (callers like ``istota init`` run before the DB exists). The DB wins for
+    profile-shaped fields; TOML keeps resources and briefings.
+    """
+    try:
+        from . import user_profiles as _up  # avoid import cycles at module load
+    except Exception:  # pragma: no cover - defensive
+        return
+
+    db_path = config.db_path
+    if db_path is None or not Path(db_path).exists():
+        return
+
+    try:
+        rows = _up.list_profiles(Path(db_path))
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("user_profiles overlay skipped: %s", e)
+        return
+
+    for user_id, profile in rows.items():
+        existing = config.users.get(user_id)
+        if existing is None:
+            existing = UserConfig(display_name=profile.display_name or user_id)
+            config.users[user_id] = existing
+        _up.merge_into_user_config(profile, existing)
+
+
+def _apply_user_resources(config: "Config") -> None:
+    """Merge ``user_resources`` rows into ``config.users[*].resources``.
+
+    DB rows are appended as ``ResourceConfig`` entries so every existing call
+    site that walks ``user_config.resources`` (executor merge,
+    webhook_receiver, money/feeds loaders, secrets_store import) sees
+    DB-managed resources transparently. Dedup key is ``(type, path)`` — DB
+    wins, matching the user_profiles precedence rule.
+
+    Best-effort: a missing DB does not fail config loading.
+    """
+    try:
+        from . import db as _db
+    except Exception:  # pragma: no cover - defensive
+        return
+
+    db_path = config.db_path
+    if db_path is None or not Path(db_path).exists():
+        return
+
+    user_ids: set[str] = set(config.users.keys())
+    try:
+        with _db.get_db(db_path) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT user_id FROM user_resources"
+            ).fetchall()
+            user_ids.update(r["user_id"] for r in rows)
+
+            for user_id in user_ids:
+                db_resources = _db.get_user_resources(conn, user_id)
+                if not db_resources:
+                    continue
+                user_config = config.users.get(user_id)
+                if user_config is None:
+                    user_config = UserConfig(display_name=user_id)
+                    config.users[user_id] = user_config
+
+                # Drop TOML rows that the DB also owns (same type+path).
+                db_keys = {(r.resource_type, r.resource_path) for r in db_resources}
+                user_config.resources = [
+                    rc for rc in user_config.resources
+                    if (rc.type, rc.path) not in db_keys
+                ]
+
+                # Append DB rows as ResourceConfig entries. Pull credentials
+                # the loader normally splits out (base_url, api_key) into
+                # the dataclass's flat fields so secrets_store._IMPORT_MAP
+                # and Karakeep's loader keep working unchanged.
+                for r in db_resources:
+                    extras = dict(r.extras or {})
+                    rc = ResourceConfig(
+                        type=r.resource_type,
+                        path=r.resource_path,
+                        name=r.display_name or "",
+                        permissions=r.permissions or "read",
+                        base_url=str(extras.pop("base_url", "")) or "",
+                        api_key=str(extras.pop("api_key", "")) or "",
+                        extra=extras,
+                    )
+                    user_config.resources.append(rc)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("user_resources overlay skipped: %s", e)
+
+
+def _apply_user_briefings(config: "Config") -> None:
+    """Merge ``briefing_configs`` rows into ``config.users[*].briefings``.
+
+    DB rows replace TOML rows of the same ``name``; distinct names coexist.
+    Disabled DB rows (enabled=0) drop the matching TOML name without adding
+    a replacement, so an operator can switch a TOML-templated briefing off
+    via the web UI without re-templating.
+
+    Best-effort: a missing DB does not fail config loading.
+    """
+    try:
+        from . import user_briefings as _ub  # avoid import cycles at module load
+    except Exception:  # pragma: no cover - defensive
+        return
+
+    db_path = config.db_path
+    if db_path is None or not Path(db_path).exists():
+        return
+
+    try:
+        rows = _ub.list_briefings(Path(db_path))
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("user_briefings overlay skipped: %s", e)
+        return
+
+    by_user: dict[str, list] = {}
+    for row in rows:
+        by_user.setdefault(row.user_id, []).append(row)
+
+    for user_id, db_rows in by_user.items():
+        user_config = config.users.get(user_id)
+        if user_config is None:
+            user_config = UserConfig(display_name=user_id)
+            config.users[user_id] = user_config
+
+        db_names = {r.name for r in db_rows}
+        # Drop TOML briefings whose names are claimed by DB rows.
+        user_config.briefings = [
+            b for b in user_config.briefings if b.name not in db_names
+        ]
+        # Append enabled DB rows as BriefingConfig entries.
+        for r in db_rows:
+            if not r.enabled:
+                continue
+            user_config.briefings.append(
+                BriefingConfig(
+                    name=r.name,
+                    cron=r.cron,
+                    conversation_token=r.conversation_token,
+                    output=r.output,
+                    components=dict(r.components),
+                )
+            )

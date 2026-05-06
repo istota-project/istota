@@ -1,7 +1,7 @@
 # Docker quickstart
 
-!!! warning "Experimental"
-    The Docker deployment is functional but should be considered unstable. The stable deployment method is [bare metal](quickstart-bare-metal.md) using the install script or Ansible role.
+!!! info "Beta"
+    The Docker deployment is now feature-complete (Phase 6 — May 2026): default Talk channels, OAuth2 web UI, nginx reverse proxy, optional modules (feeds, money, location), encrypted secrets store, and DB-backed user profiles all auto-provision. The bare-metal Ansible path remains the longest-running deployment model — pick whichever fits your operations style.
 
 The Docker setup spins up a complete stack: Postgres, Redis, a fresh Nextcloud instance, and the Istota scheduler. If you already have a Nextcloud instance, use [bare metal](quickstart-bare-metal.md) instead -- Docker Compose creates its own Nextcloud.
 

@@ -1380,3 +1380,91 @@ class TestGetSubtaskDepth:
             # Whatever cap is chosen, the helper must terminate and return
             # an int >= the cap (>= 50 is enough to prove it didn't bail at 0).
             assert depth >= 50
+
+
+class TestUserResourceExtras:
+    def test_add_without_extras_round_trips_as_empty_dict(self, db_path):
+        with db.get_db(db_path) as conn:
+            rid = db.add_user_resource(
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Documents", display_name="Docs",
+            )
+            rows = db.get_user_resources(conn, "alice")
+            assert len(rows) == 1
+            assert rows[0].id == rid
+            assert rows[0].extras == {}
+
+    def test_add_with_extras_round_trips(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={"ingest_token": "abc123", "default_radius": 75},
+            )
+            rows = db.get_user_resources(conn, "alice")
+            assert rows[0].extras == {"ingest_token": "abc123", "default_radius": 75}
+
+    def test_upsert_overwrites_extras_when_provided(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={"ingest_token": "old"},
+            )
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={"ingest_token": "new", "default_radius": 50},
+            )
+            rows = db.get_user_resources(conn, "alice")
+            assert len(rows) == 1
+            assert rows[0].extras == {"ingest_token": "new", "default_radius": 50}
+
+    def test_upsert_preserves_extras_when_not_provided(self, db_path):
+        # Operator first sets extras, then a later call without --extras
+        # should leave them alone (mirrors the `user ensure` partial-update
+        # contract: omitted fields are unchanged).
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={"ingest_token": "preserved"},
+            )
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+            )
+            rows = db.get_user_resources(conn, "alice")
+            assert rows[0].extras == {"ingest_token": "preserved"}
+
+    def test_explicit_empty_dict_clears_extras(self, db_path):
+        # Distinct from "not provided": passing an empty dict explicitly
+        # means the operator wants the extras cleared.
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={"ingest_token": "to-clear"},
+            )
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={},
+            )
+            rows = db.get_user_resources(conn, "alice")
+            assert rows[0].extras == {}
+
+    def test_corrupt_json_in_extras_falls_back_to_empty(self, db_path):
+        # If the extras column ever holds non-JSON (manual edit, partial
+        # write), get_user_resources must not raise.
+        with db.get_db(db_path) as conn:
+            rid = db.add_user_resource(
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/x", display_name="X",
+            )
+            conn.execute(
+                "UPDATE user_resources SET extras = ? WHERE id = ?",
+                ("{not valid json", rid),
+            )
+            rows = db.get_user_resources(conn, "alice")
+            assert rows[0].extras == {}

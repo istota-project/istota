@@ -335,6 +335,35 @@ async def callback(request: Request):
 
     if not username or (_config and _config.users and username not in _config.users):
         return Response("Access denied: user not configured", status_code=403)
+
+    # Phase 6: auto-seed the user_profiles row on first login.
+    # Idempotent — existing rows are not overwritten on subsequent logins.
+    # The TOML UserConfig is passed as ``seed_from`` so the row carries the
+    # full operator-supplied profile (emails, channels, ntfy_topic, …) the
+    # moment it's created, even if the scheduler's startup migration hasn't
+    # run yet (web service may boot first). The ``created`` signal gates
+    # the NC display_name refresh to first-login only — any subsequent
+    # web-UI edit to display_name is preserved across logins.
+    if _config and _config.db_path and Path(_config.db_path).exists():
+        try:
+            from . import user_profiles as _up  # noqa: PLC0415
+
+            uc = _config.get_user(username) if _config else None
+            seeded, created = _up.ensure_profile_with_status(
+                _config.db_path, username,
+                display_name=display_name or username,
+                seed_from=uc,
+            )
+            if (
+                created
+                and display_name
+                and seeded.display_name == username
+                and display_name != username
+            ):
+                _up.update_profile(_config.db_path, username, display_name=display_name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("user_profile auto-seed failed user=%s: %s", username, e)
+
     request.session.clear()
     request.session["user"] = {
         "username": username,
@@ -1093,6 +1122,520 @@ async def settings_delete_secret(
 
     deleted = secrets_store.delete_secret(_config.db_path, user["username"], service, key)
     return {"ok": True, "deleted": deleted}
+
+
+# ============================================================================
+# Phase 6 — User profile (user_profiles table)
+# ============================================================================
+
+# Editable scalar/list fields on the profile card. Each entry maps a JSON
+# key (sent by the frontend) to a column in user_profiles, plus a coercion
+# hook so PUT bodies can be validated without a separate Pydantic model.
+_PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
+    "display_name":           {"type": "str"},
+    "timezone":               {"type": "str"},
+    "ntfy_topic":             {"type": "str"},
+    "log_channel":            {"type": "str"},
+    "alerts_channel":         {"type": "str"},
+    "email_addresses":        {"type": "list[str]"},
+    "trusted_email_senders":  {"type": "list[str]"},
+    "disabled_skills":        {"type": "list[str]"},
+    "max_foreground_workers": {"type": "int"},
+    "max_background_workers": {"type": "int"},
+    "site_enabled":           {"type": "bool"},
+}
+
+
+def _coerce_profile_value(field: str, value: object) -> object:
+    """Validate + coerce a profile field. Raises ValueError on bad input."""
+    spec = _PROFILE_EDITABLE_FIELDS.get(field)
+    if spec is None:
+        raise ValueError(f"unknown profile field: {field}")
+    t = spec["type"]
+    if t == "str":
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string")
+        return value.strip()
+    if t == "list[str]":
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError(f"{field} must be a list")
+        out = []
+        for v in value:
+            if not isinstance(v, str):
+                raise ValueError(f"{field} entries must be strings")
+            v = v.strip()
+            if v:
+                out.append(v)
+        return out
+    if t == "int":
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} must be an integer")
+        if n < 0:
+            raise ValueError(f"{field} must be >= 0")
+        return n
+    if t == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("1", "true", "yes", "on")
+        raise ValueError(f"{field} must be boolean")
+    raise ValueError(f"unsupported field type: {t}")  # pragma: no cover
+
+
+@api_router.get("/settings/profile")
+async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
+    """Return the current user's profile fields (no plaintext secrets)."""
+    from . import user_profiles
+
+    if not _config:
+        return {"profile": None}
+    profile = user_profiles.get_profile(_config.db_path, user["username"])
+    if profile is None:
+        # Auto-seed; the OAuth callback usually does this, but a logged-in
+        # session predating Phase 6 may hit this endpoint with no row.
+        profile = user_profiles.ensure_profile(
+            _config.db_path, user["username"],
+            display_name=user.get("display_name") or user["username"],
+        )
+    return {"profile": {
+        "user_id": profile.user_id,
+        "display_name": profile.display_name,
+        "timezone": profile.timezone,
+        "email_addresses": profile.email_addresses,
+        "trusted_email_senders": profile.trusted_email_senders,
+        "ntfy_topic": profile.ntfy_topic,
+        "log_channel": profile.log_channel,
+        "alerts_channel": profile.alerts_channel,
+        "disabled_skills": profile.disabled_skills,
+        "max_foreground_workers": profile.max_foreground_workers,
+        "max_background_workers": profile.max_background_workers,
+        "site_enabled": profile.site_enabled,
+    }}
+
+
+@api_router.put("/settings/profile")
+async def settings_update_profile(
+    payload: dict,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Partial update — only fields present in the body are written.
+
+    Body shape: ``{<field>: <value>, ...}``. Unknown fields → 400. Empty
+    payload is a no-op (returns the current profile).
+    """
+    from . import user_profiles
+    from fastapi import HTTPException
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+
+    coerced: dict[str, object] = {}
+    for field, value in payload.items():
+        if field not in _PROFILE_EDITABLE_FIELDS:
+            raise HTTPException(status_code=400, detail=f"unknown field: {field}")
+        try:
+            coerced[field] = _coerce_profile_value(field, value)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+
+    # Make sure the row exists; web UI auto-seed on login covers the
+    # happy path, but a hand-rolled API client could land here cold.
+    user_profiles.ensure_profile(
+        _config.db_path, user["username"],
+        display_name=user.get("display_name") or user["username"],
+    )
+    if coerced:
+        user_profiles.update_profile(_config.db_path, user["username"], **coerced)
+
+    logger.info("profile updated user=%s fields=%s", user["username"], sorted(coerced))
+    return {"ok": True, "fields": sorted(coerced)}
+
+
+# ============================================================================
+# Phase 6 — User-managed resources (user_resources table)
+# ============================================================================
+#
+# Resources can be declared in two places:
+#   1. config.toml under [[users.X.resources]]  — Ansible-managed, system topology
+#   2. user_resources DB table                  — web UI / `istota resource add`
+#
+# Both sources are merged at runtime in executor.execute_task. The web UI
+# only writes to (2): the operator-controlled config.toml stays read-only
+# from the browser. TOML resources show up in the response with
+# ``"managed": "config"`` so the UI can render them as read-only rows.
+
+# Resource types that need credentials and/or a real path. The frontend
+# uses this list to render the "add resource" picker; the backend validates
+# against it on POST.
+_RESOURCE_TYPE_SCHEMA: dict[str, dict] = {
+    "calendar":      {"label": "Calendar (CalDAV)",        "needs_path": True,  "permissions": ("read", "readwrite")},
+    "folder":        {"label": "Nextcloud folder",         "needs_path": True,  "permissions": ("read", "readwrite")},
+    "todo_file":     {"label": "TODO file (markdown)",     "needs_path": True,  "permissions": ("read", "readwrite")},
+    "notes_folder":  {"label": "Notes folder",             "needs_path": True,  "permissions": ("read", "readwrite")},
+    "email_folder":  {"label": "Email folder (IMAP)",      "needs_path": True,  "permissions": ("read",)},
+    "reminders_file":{"label": "Reminders (markdown)",     "needs_path": True,  "permissions": ("read", "readwrite")},
+    "feeds":         {"label": "Feeds (RSS/Atom)",         "needs_path": False, "permissions": ("read",)},
+    "money":         {"label": "Money (beancount)",        "needs_path": False, "permissions": ("read",)},
+    "overland":      {"label": "Location (Overland GPS)",  "needs_path": False, "permissions": ("read",)},
+    "karakeep":      {"label": "Karakeep bookmarks",       "needs_path": False, "permissions": ("read",)},
+    "monarch":       {"label": "Monarch Money",            "needs_path": False, "permissions": ("read",)},
+}
+
+
+@api_router.get("/settings/resources")
+async def settings_resources(user: dict = Depends(_require_api_auth)) -> dict:
+    """List the user's resources, merged from TOML + DB.
+
+    Response: ``{"types": [{type, label, ...}], "resources": [{...}]}``.
+    Each resource carries ``managed: "config" | "db"`` so the UI can
+    render TOML rows as read-only.
+    """
+    if _config is None:
+        return {"types": [], "resources": []}
+    username = user["username"]
+
+    from . import db
+
+    out: list[dict] = []
+    with db.get_db(_config.db_path) as conn:
+        db_resources = db.get_user_resources(conn, username)
+    db_keys = {(r.resource_type, r.resource_path) for r in db_resources}
+
+    uc = _config.get_user(username)
+    if uc:
+        for rc in uc.resources:
+            # _apply_user_resources merges DB rows into uc.resources at
+            # config-load time so other call sites see them through one
+            # surface. Here we want a clean split, so skip TOML entries that
+            # the DB also owns — the loop below renders them with their
+            # actual id/extras and ``managed: "db"`` label.
+            if (rc.type, rc.path) in db_keys:
+                continue
+            out.append({
+                "managed": "config",
+                "type": rc.type,
+                "name": rc.name or "",
+                "path": rc.path or "",
+                "permissions": rc.permissions or "read",
+                # extras suppressed — they may contain credentials we don't
+                # want to leak (Phase 5 import path covers the safe shape).
+            })
+
+    for r in db_resources:
+        out.append({
+            "managed": "db",
+            "id": r.id,
+            "type": r.resource_type,
+            "name": r.display_name or "",
+            "path": r.resource_path or "",
+            "permissions": r.permissions or "read",
+            "extras": dict(r.extras or {}),
+        })
+
+    types = [
+        {"type": t, **{k: v for k, v in spec.items() if k != "permissions"}, "permissions": list(spec["permissions"])}
+        for t, spec in _RESOURCE_TYPE_SCHEMA.items()
+    ]
+    return {"types": types, "resources": out}
+
+
+@api_router.post("/settings/resources")
+async def settings_add_resource(
+    payload: dict,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Add a resource for the current user. Writes to the user_resources DB table.
+
+    Body: ``{"type": ..., "path": ..., "name": ..., "permissions": ...}``.
+    TOML-declared resources of the same type are not affected — both
+    sources merge at runtime.
+    """
+    from fastapi import HTTPException
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+
+    rtype = (payload.get("type") or "").strip()
+    schema = _RESOURCE_TYPE_SCHEMA.get(rtype)
+    if not schema:
+        raise HTTPException(status_code=400, detail=f"unknown resource type: {rtype!r}")
+
+    path = (payload.get("path") or "").strip()
+    if schema["needs_path"] and not path:
+        raise HTTPException(status_code=400, detail=f"{rtype} requires a path")
+
+    name = (payload.get("name") or "").strip() or None
+    perms = (payload.get("permissions") or schema["permissions"][0]).strip()
+    if perms not in schema["permissions"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{rtype} permissions must be one of {list(schema['permissions'])}",
+        )
+
+    raw_extras = payload.get("extras")
+    if raw_extras is not None and not isinstance(raw_extras, dict):
+        raise HTTPException(status_code=400, detail="extras must be a JSON object")
+    extras = dict(raw_extras) if raw_extras else None
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+
+    from . import db
+
+    # Resources without a path use the type as the implicit path so the
+    # UNIQUE(user_id, resource_type, resource_path) constraint still works
+    # for one-per-type resources (feeds, money, location, etc.).
+    storage_path = path or rtype
+
+    add_kwargs: dict[str, object] = {
+        "user_id": user["username"],
+        "resource_type": rtype,
+        "resource_path": storage_path,
+        "display_name": name,
+        "permissions": perms,
+    }
+    if extras is not None:
+        add_kwargs["extras"] = extras
+
+    with db.get_db(_config.db_path) as conn:
+        rid = db.add_user_resource(conn, **add_kwargs)
+    logger.info(
+        "resource added user=%s id=%d type=%s path=%s",
+        user["username"], rid, rtype, storage_path,
+    )
+    return {"ok": True, "id": rid}
+
+
+@api_router.delete("/settings/resources/{resource_id}")
+async def settings_delete_resource(
+    resource_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Delete a DB-managed resource. TOML-declared resources cannot be removed here."""
+    from fastapi import HTTPException
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    if resource_id <= 0:
+        raise HTTPException(status_code=400, detail="resource_id must be positive")
+
+    from . import db
+
+    with db.get_db(_config.db_path) as conn:
+        deleted = db.delete_user_resource(conn, user["username"], resource_id)
+    if not deleted:
+        # Either no row at this id, or the row belongs to another user.
+        # Return 404 either way — user_id scoping is silent on purpose.
+        raise HTTPException(status_code=404, detail="resource not found")
+    return {"ok": True, "deleted": True}
+
+
+# ============================================================================
+# Phase 7b — User-managed briefings (briefing_configs table)
+# ============================================================================
+#
+# Briefings can be declared in two places:
+#   1. config.toml / per-user TOML  — Ansible-managed (legacy, being retired)
+#   2. briefing_configs DB table    — web UI / `istota briefing ensure`
+#
+# Both sources are merged at config-load time in ``_apply_user_briefings``.
+# DB rows replace TOML rows of the same name. The web UI only writes to (2);
+# TOML briefings appear with ``"managed": "config"`` so the UI can render
+# them as read-only.
+
+_BRIEFING_OUTPUTS = {"talk", "email", "both"}
+
+
+def _briefing_to_dict(b, *, managed: str) -> dict:
+    """Serialize a BriefingConfig (TOML) or UserBriefing (DB) for the API."""
+    out = {
+        "managed": managed,
+        "name": getattr(b, "name", "") or "",
+        "cron": getattr(b, "cron", "") or "",
+        "conversation_token": getattr(b, "conversation_token", "") or "",
+        "output": getattr(b, "output", "talk") or "talk",
+        "components": dict(getattr(b, "components", {}) or {}),
+        "enabled": bool(getattr(b, "enabled", True)),
+    }
+    if managed == "db":
+        out["id"] = int(getattr(b, "id", 0))
+    return out
+
+
+@api_router.get("/settings/briefings")
+async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
+    """List the current user's briefings, merged from TOML + DB.
+
+    Response: ``{"briefings": [{...}], "rooms": [{token, name}]}``.
+    Each entry carries ``managed: "config" | "db"`` so the UI can render
+    TOML rows as read-only. ``rooms`` is a best-effort list of Talk room
+    tokens the bot can use as the briefing destination — currently
+    populated from the user's auto-provisioned ``log_channel`` /
+    ``alerts_channel`` (Phase 1) so the UI can offer them as picks
+    without exposing every Talk room the bot can see.
+    """
+    if _config is None:
+        return {"briefings": [], "rooms": []}
+
+    from . import db as _db
+    from . import user_briefings as _ub
+
+    username = user["username"]
+    out: list[dict] = []
+
+    db_rows = _ub.list_briefings(_config.db_path, username)
+    db_names = {r.name for r in db_rows}
+
+    uc = _config.get_user(username)
+    if uc:
+        for b in uc.briefings:
+            if b.name in db_names:
+                # The DB entry will be rendered below with its real id.
+                continue
+            out.append(_briefing_to_dict(b, managed="config"))
+
+    for r in db_rows:
+        out.append(_briefing_to_dict(r, managed="db"))
+
+    rooms: list[dict] = []
+    seen_tokens: set[str] = set()
+    if uc:
+        for label, token in (
+            ("Log channel", uc.log_channel),
+            ("Alerts channel", uc.alerts_channel),
+        ):
+            if token and token not in seen_tokens:
+                rooms.append({"token": token, "name": label})
+                seen_tokens.add(token)
+
+    return {
+        "briefings": out,
+        "rooms": rooms,
+        "outputs": sorted(_BRIEFING_OUTPUTS),
+    }
+
+
+def _validate_briefing_payload(payload: dict, *, name_required: bool) -> dict:
+    """Common shape check for POST/PUT briefing endpoints.
+
+    Returns the cleaned dict. Raises HTTPException on bad input.
+    """
+    from fastapi import HTTPException
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+
+    name = (payload.get("name") or "").strip()
+    if name_required and not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    cron = (payload.get("cron") or "").strip()
+    if not cron:
+        raise HTTPException(status_code=400, detail="cron is required")
+
+    output = (payload.get("output") or "talk").strip()
+    if output not in _BRIEFING_OUTPUTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"output must be one of {sorted(_BRIEFING_OUTPUTS)}",
+        )
+
+    token = (payload.get("conversation_token") or "").strip()
+    if output in {"talk", "both"} and not token:
+        raise HTTPException(
+            status_code=400,
+            detail=f"conversation_token is required when output is {output!r}",
+        )
+
+    raw_components = payload.get("components")
+    if raw_components is None:
+        components = {}
+    elif isinstance(raw_components, dict):
+        components = dict(raw_components)
+    else:
+        raise HTTPException(status_code=400, detail="components must be a JSON object")
+
+    enabled = payload.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="enabled must be a boolean")
+
+    return {
+        "name": name,
+        "cron": cron,
+        "conversation_token": token,
+        "output": output,
+        "components": components,
+        "enabled": enabled,
+    }
+
+
+@api_router.post("/settings/briefings")
+async def settings_add_briefing(
+    payload: dict,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Upsert a briefing for the current user.
+
+    Body: ``{"name", "cron", "conversation_token"?, "output"?, "components"?, "enabled"?}``.
+    Idempotent — a second POST with the same ``name`` updates in place.
+    """
+    from fastapi import HTTPException
+    from . import user_briefings as _ub
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+
+    cleaned = _validate_briefing_payload(payload, name_required=True)
+    try:
+        briefing, state = _ub.ensure_briefing(
+            _config.db_path,
+            user_id=user["username"],
+            **cleaned,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    logger.info(
+        "briefing %s user=%s name=%s",
+        state, user["username"], briefing.name,
+    )
+    return {"ok": True, "id": briefing.id, "state": state}
+
+
+@api_router.delete("/settings/briefings/{briefing_id}")
+async def settings_delete_briefing(
+    briefing_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Delete a DB-managed briefing. TOML briefings cannot be removed here."""
+    from fastapi import HTTPException
+    from . import user_briefings as _ub
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    if briefing_id <= 0:
+        raise HTTPException(status_code=400, detail="briefing_id must be positive")
+
+    deleted = _ub.delete_briefing_by_id(_config.db_path, user["username"], briefing_id)
+    if not deleted:
+        # Either no row at this id, or the row belongs to another user.
+        # Match the resources-endpoint behavior: silent on user_id scoping.
+        raise HTTPException(status_code=404, detail="briefing not found")
+    return {"ok": True, "deleted": True}
 
 
 # Tags allowed in feed card excerpts

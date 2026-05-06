@@ -776,6 +776,140 @@
   changed_when: false  # Schema uses CREATE TABLE IF NOT EXISTS, always safe to run
   when: not istota_web_only
 
+# Phase 6: write user profile rows into the user_profiles DB table.
+# The per-user TOML files above are still rendered (they own resources +
+# briefings), but profile-shaped fields (display_name, timezone,
+# email_addresses, log/alerts channels, ntfy_topic, worker overrides,
+# disabled_skills, trusted_email_senders) are now authoritatively stored
+# in the DB. The scheduler also auto-imports any remaining TOML profile
+# fields on startup, so a half-migrated deploy is safe.
+- name: Ensure user_profiles rows (Phase 6)
+  command: >
+    {{ istota_home }}/.venv/bin/{{ istota_namespace }}
+    -c {{ istota_repo_dir }}/config/config.toml
+    user ensure
+    --name {{ user_id }}
+    {% if (user_item.value.display_name | default('')) %}--display-name "{{ user_item.value.display_name }}"{% endif %}
+    {% if (user_item.value.timezone | default('')) %}--tz "{{ user_item.value.timezone }}"{% endif %}
+    {% for email in user_item.value.email_addresses | default([]) %}--email "{{ email }}" {% endfor %}
+    {% for sender in user_item.value.trusted_email_senders | default([]) %}--trusted-sender "{{ sender }}" {% endfor %}
+    {% if (user_item.value.ntfy_topic | default('')) %}--ntfy-topic "{{ user_item.value.ntfy_topic }}"{% endif %}
+    {% if (user_item.value.log_channel | default('')) %}--log-channel "{{ user_item.value.log_channel }}"{% endif %}
+    {% if (user_item.value.alerts_channel | default('')) %}--alerts-channel "{{ user_item.value.alerts_channel }}"{% endif %}
+    {% if user_item.value.max_foreground_workers is defined %}--max-foreground-workers {{ user_item.value.max_foreground_workers }}{% endif %}
+    {% if user_item.value.max_background_workers is defined %}--max-background-workers {{ user_item.value.max_background_workers }}{% endif %}
+    {% for skill in user_item.value.disabled_skills | default([]) %}--disabled-skill "{{ skill }}" {% endfor %}
+    {% if user_item.value.site_enabled | default(false) %}--site-enabled{% endif %}
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  loop: "{{ istota_users | dict2items }}"
+  loop_control:
+    loop_var: user_item
+  vars:
+    user_id: "{{ user_item.key }}"
+  changed_when: false  # CLI is idempotent; DB row state already audited per call
+  when: not istota_web_only
+  notify:
+    - "restart istota-scheduler"
+
+# Phase 7a: write user_resources rows into the DB via `istota resource ensure`.
+# The per-user TOML template no longer renders [[resources]]; the DB is now
+# authoritative. Each (user, type, path) is upserted independently — type/
+# path/name/permissions are extracted as flags and any remaining keys are
+# passed as --extras-json so nested values (money's `ledgers: [main]`,
+# overland's `default_radius: 75`) round-trip cleanly.
+- name: Plan user_resources ensure invocations
+  set_fact:
+    _istota_resource_targets: "{{ _resource_targets_json | from_json }}"
+  vars:
+    _resource_targets_json: |-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for user_id, user_cfg in istota_users.items() -%}
+      {%- for r in (user_cfg.resources | default([])) -%}
+      {%- set rkey = ['type','path','name','permissions'] -%}
+      {%- set extras = dict(r.items() | rejectattr(0, 'in', rkey) | list) -%}
+      {%- set _ = ns.out.append({'user': user_id, 'type': r.type, 'path': r.path | default(''), 'name': r.name | default(''), 'permissions': r.permissions | default('read'), 'extras': extras}) -%}
+      {%- endfor -%}
+      {# Backward-compat: a flat `reminders_file: /path` on the user entry
+         is provisioned as a synthetic reminders_file resource. #}
+      {%- if user_cfg.reminders_file is defined and user_cfg.reminders_file -%}
+      {%- set _ = ns.out.append({'user': user_id, 'type': 'reminders_file', 'path': user_cfg.reminders_file, 'name': 'Reminders', 'permissions': 'read', 'extras': {}}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.out | to_json }}
+  when: not istota_web_only
+
+- name: Ensure user_resources rows (Phase 7a)
+  command: >
+    {{ istota_home }}/.venv/bin/{{ istota_namespace }}
+    -c {{ istota_repo_dir }}/config/config.toml
+    resource ensure
+    --user {{ item.user }}
+    --type {{ item.type }}
+    {% if item.path %}--path "{{ item.path }}"{% endif %}
+    {% if item.name %}--name "{{ item.name }}"{% endif %}
+    --permissions {{ item.permissions }}
+    {% if item.extras %}--extras-json '{{ item.extras | to_json }}'{% endif %}
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  loop: "{{ _istota_resource_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.user }}/{{ item.type }}{% if item.path %}@{{ item.path }}{% endif %}"
+  changed_when: false  # CLI is idempotent and prints STATE: created|updated|noop
+  when: not istota_web_only
+  notify:
+    - "restart istota-scheduler"
+
+# Phase 7b: write briefing rows into the briefing_configs DB table via
+# `istota briefing ensure`. The per-user TOML template no longer renders
+# [[briefings]]; the DB is now authoritative. Each (user, briefing.name)
+# is upserted independently. Components is a freeform dict so we pass it
+# through as JSON; output (talk|email|both) and conversation_token are
+# extracted as flags.
+- name: Plan briefing ensure invocations (Phase 7b)
+  set_fact:
+    _istota_briefing_targets: "{{ _briefing_targets_json | from_json }}"
+  vars:
+    _briefing_targets_json: |-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for user_id, user_cfg in istota_users.items() -%}
+      {%- for b in (user_cfg.briefings | default([])) -%}
+      {%- set _ = ns.out.append({
+        'user': user_id,
+        'name': b.name,
+        'cron': b.cron,
+        'conversation_token': b.conversation_token | default(''),
+        'output': b.output | default('talk'),
+        'components': b.components | default({}),
+        'enabled': b.enabled | default(true),
+      }) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.out | to_json }}
+  when: not istota_web_only
+
+- name: Ensure briefing_configs rows (Phase 7b)
+  command: >
+    {{ istota_home }}/.venv/bin/{{ istota_namespace }}
+    -c {{ istota_repo_dir }}/config/config.toml
+    briefing ensure
+    --user {{ item.user }}
+    --name "{{ item.name }}"
+    --cron "{{ item.cron }}"
+    {% if item.conversation_token %}--conversation-token "{{ item.conversation_token }}"{% endif %}
+    --output {{ item.output }}
+    {% if item.components %}--components-json '{{ item.components | to_json }}'{% endif %}
+    {% if not item.enabled %}--disabled{% endif %}
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  loop: "{{ _istota_briefing_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.user }}/{{ item.name }}"
+  changed_when: false  # CLI is idempotent and prints STATE: created|updated|noop
+  when: not istota_web_only
+  notify:
+    - "restart istota-scheduler"
+
 - name: Apply database migrations
   shell: |
     sqlite3 "{{ istota_home }}/data/{{ istota_namespace }}.db" "ALTER TABLE processed_emails ADD COLUMN \"references\" TEXT;" 2>/dev/null || true

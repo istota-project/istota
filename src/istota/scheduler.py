@@ -3369,6 +3369,36 @@ def run_daemon(config: Config) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("Secrets import skipped: %s", e)
 
+    # Phase 6: migrate per-user TOML profile fields into the user_profiles
+    # table on first run. Idempotent — only writes rows that don't exist.
+    try:
+        from . import user_profiles as _up  # noqa: PLC0415
+
+        _up.import_from_user_configs(config.db_path, config.users)
+        # Re-apply DB rows onto config.users so the in-memory Config reflects
+        # the freshly-imported values (the load_config call earlier in the
+        # process saw an empty table). Cheap; only touches users that already
+        # have rows.
+        from .config import _apply_user_profiles  # noqa: PLC0415
+
+        _apply_user_profiles(config)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("user_profiles migration skipped: %s", e)
+
+    # Phase 7b: migrate per-user TOML briefings into the briefing_configs
+    # table on first run. Idempotent — only writes rows whose
+    # (user_id, name) pair doesn't already exist. Re-applies the overlay
+    # so the in-memory config reflects DB-managed briefings.
+    try:
+        from . import user_briefings as _ub  # noqa: PLC0415
+
+        _ub.import_from_user_configs(config.db_path, config.users)
+        from .config import _apply_user_briefings  # noqa: PLC0415
+
+        _apply_user_briefings(config)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("user_briefings migration skipped: %s", e)
+
     # Start Talk polling in background thread so it runs independently of task processing
     if config.talk.enabled:
         talk_thread = threading.Thread(

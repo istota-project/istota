@@ -4,20 +4,66 @@
 		getSettingsServices,
 		setSecret,
 		deleteSecret,
+		getProfile,
+		updateProfile,
+		getResources,
+		addResource,
+		deleteResource,
+		getBriefings,
+		upsertBriefing,
+		deleteBriefing,
 		type ServiceCard,
+		type UserProfile,
+		type UserResourceRow,
+		type ResourceTypeSchema,
+		type UserBriefingRow,
+		type BriefingRoomOption,
 	} from '$lib/api';
+	import { Button, Modal } from '$lib/components/ui';
 
 	let services: ServiceCard[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	let info = $state('');
 
-	// Per-(service, key) form state, keyed as `${service}:${key}`. Plaintext
-	// inputs never round-trip through the server — they're cleared after a
-	// successful save.
+	let profile: UserProfile | null = $state(null);
+	let profileSaving = $state(false);
+	let profileError = $state('');
+	let initialProfileJson = $state('');
+	let profileDirty = $derived(
+		profile ? JSON.stringify(profile) !== initialProfileJson : false,
+	);
+
+	let resourceTypes: ResourceTypeSchema[] = $state([]);
+	let resources: UserResourceRow[] = $state([]);
+	let newRes = $state({ type: '', path: '', name: '', permissions: 'read', extrasJson: '' });
+	let resourceError = $state('');
+	let resourceSaving = $state(false);
+
+	let briefings: UserBriefingRow[] = $state([]);
+	let briefingRooms: BriefingRoomOption[] = $state([]);
+	let briefingOutputs: string[] = $state(['talk', 'email', 'both']);
+	let newBriefing = $state({
+		name: '',
+		cron: '0 7 * * *',
+		conversation_token: '',
+		output: 'talk' as 'talk' | 'email' | 'both',
+		componentsJson: '{"calendar": true, "todos": true, "email": true}',
+		enabled: true,
+	});
+	let briefingError = $state('');
+	let briefingSaving = $state(false);
+
 	let inputs: Record<string, string> = $state({});
 	let saving: Record<string, boolean> = $state({});
 	let savedFlash: Record<string, boolean> = $state({});
 	let saveError: Record<string, string> = $state({});
+
+	type ConfirmKind =
+		| { kind: 'resource'; id: number; label: string }
+		| { kind: 'briefing'; id: number; label: string }
+		| { kind: 'secret'; service: string; key: string; label: string };
+	let confirmDelete: ConfirmKind | null = $state(null);
 
 	function fieldId(service: string, key: string): string {
 		return `${service}:${key}`;
@@ -26,13 +72,231 @@
 	async function refresh() {
 		loading = true;
 		try {
-			const resp = await getSettingsServices();
-			services = resp.services;
+			const [svcResp, profResp, resResp, briefResp] = await Promise.all([
+				getSettingsServices(),
+				getProfile(),
+				getResources(),
+				getBriefings(),
+			]);
+			services = svcResp.services;
+			profile = profResp.profile;
+			initialProfileJson = profile ? JSON.stringify(profile) : '';
+			resourceTypes = resResp.types;
+			resources = resResp.resources;
+			briefings = briefResp.briefings;
+			briefingRooms = briefResp.rooms;
+			briefingOutputs = briefResp.outputs?.length
+				? briefResp.outputs
+				: ['talk', 'email', 'both'];
 			error = '';
 		} catch (e) {
 			error = (e as Error).message || 'Failed to load settings';
 		} finally {
 			loading = false;
+		}
+	}
+
+	function profileListString(values: string[]): string {
+		return values.join(', ');
+	}
+
+	function parseListInput(value: string): string[] {
+		return value
+			.split(',')
+			.map((v) => v.trim())
+			.filter((v) => v.length > 0);
+	}
+
+	async function saveProfile() {
+		if (!profile) return;
+		profileSaving = true;
+		profileError = '';
+		info = '';
+		try {
+			const patch: Partial<UserProfile> = {
+				display_name: profile.display_name,
+				timezone: profile.timezone,
+				ntfy_topic: profile.ntfy_topic,
+				email_addresses: profile.email_addresses,
+				trusted_email_senders: profile.trusted_email_senders,
+				disabled_skills: profile.disabled_skills,
+				site_enabled: profile.site_enabled,
+			};
+			await updateProfile(patch);
+			info = 'Profile saved.';
+			await refresh();
+		} catch (e) {
+			profileError = (e as Error).message || 'Save failed';
+		} finally {
+			profileSaving = false;
+		}
+	}
+
+	async function submitResource(e: SubmitEvent) {
+		e.preventDefault();
+		resourceError = '';
+		const t = newRes.type.trim();
+		if (!t) {
+			resourceError = 'Pick a resource type.';
+			return;
+		}
+		const spec = resourceTypes.find((rt) => rt.type === t);
+		if (spec?.needs_path && !newRes.path.trim()) {
+			resourceError = `${spec.label} requires a path.`;
+			return;
+		}
+		let extras: Record<string, unknown> | undefined;
+		const rawExtras = newRes.extrasJson.trim();
+		if (rawExtras) {
+			try {
+				const parsed = JSON.parse(rawExtras);
+				if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+					resourceError = 'Extras must be a JSON object.';
+					return;
+				}
+				extras = parsed as Record<string, unknown>;
+			} catch (err) {
+				resourceError = `Extras JSON parse error: ${(err as Error).message}`;
+				return;
+			}
+		}
+
+		resourceSaving = true;
+		try {
+			await addResource({
+				type: t,
+				path: newRes.path.trim() || undefined,
+				name: newRes.name.trim() || undefined,
+				permissions: newRes.permissions || 'read',
+				extras,
+			});
+			newRes = { type: '', path: '', name: '', permissions: 'read', extrasJson: '' };
+			await refresh();
+		} catch (e) {
+			resourceError = (e as Error).message || 'Add failed';
+		} finally {
+			resourceSaving = false;
+		}
+	}
+
+	function askRemoveResource(r: UserResourceRow) {
+		if (r.id === undefined) return;
+		confirmDelete = {
+			kind: 'resource',
+			id: r.id,
+			label: r.name || r.path || r.type,
+		};
+	}
+
+	function askRemoveBriefing(b: UserBriefingRow) {
+		if (b.id === undefined) return;
+		confirmDelete = {
+			kind: 'briefing',
+			id: b.id,
+			label: b.name,
+		};
+	}
+
+	async function submitBriefing(e: SubmitEvent) {
+		e.preventDefault();
+		briefingError = '';
+		const name = newBriefing.name.trim();
+		const cron = newBriefing.cron.trim();
+		if (!name || !cron) {
+			briefingError = 'Name and cron are required.';
+			return;
+		}
+		if ((newBriefing.output === 'talk' || newBriefing.output === 'both') &&
+			!newBriefing.conversation_token.trim()) {
+			briefingError = `Conversation token is required when output is "${newBriefing.output}".`;
+			return;
+		}
+		let components: Record<string, unknown> | undefined;
+		const raw = newBriefing.componentsJson.trim();
+		if (raw) {
+			try {
+				const parsed = JSON.parse(raw);
+				if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+					briefingError = 'Components must be a JSON object.';
+					return;
+				}
+				components = parsed as Record<string, unknown>;
+			} catch (err) {
+				briefingError = `Components JSON parse error: ${(err as Error).message}`;
+				return;
+			}
+		}
+		briefingSaving = true;
+		try {
+			await upsertBriefing({
+				name,
+				cron,
+				conversation_token: newBriefing.conversation_token.trim() || undefined,
+				output: newBriefing.output,
+				components,
+				enabled: newBriefing.enabled,
+			});
+			newBriefing = {
+				name: '',
+				cron: '0 7 * * *',
+				conversation_token: '',
+				output: 'talk',
+				componentsJson: '{"calendar": true, "todos": true, "email": true}',
+				enabled: true,
+			};
+			await refresh();
+		} catch (e) {
+			briefingError = (e as Error).message || 'Save failed';
+		} finally {
+			briefingSaving = false;
+		}
+	}
+
+	function componentsSummary(components: Record<string, unknown>): string {
+		const parts: string[] = [];
+		for (const [key, value] of Object.entries(components)) {
+			if (key === '__output__') continue;
+			if (value === true) parts.push(key);
+			else if (
+				typeof value === 'object' &&
+				value !== null &&
+				!Array.isArray(value) &&
+				(value as Record<string, unknown>).enabled === true
+			) {
+				parts.push(key);
+			}
+		}
+		return parts.join(', ');
+	}
+
+	function askClearSecret(service: string, key: string, label: string) {
+		confirmDelete = { kind: 'secret', service, key, label };
+	}
+
+	async function performDelete() {
+		if (!confirmDelete) return;
+		const target = confirmDelete;
+		confirmDelete = null;
+		try {
+			if (target.kind === 'resource') {
+				await deleteResource(target.id);
+				await refresh();
+			} else if (target.kind === 'briefing') {
+				await deleteBriefing(target.id);
+				await refresh();
+			} else {
+				const id = fieldId(target.service, target.key);
+				saving[id] = true;
+				saveError[id] = '';
+				try {
+					await deleteSecret(target.service, target.key);
+					await refresh();
+				} finally {
+					saving[id] = false;
+				}
+			}
+		} catch (e) {
+			error = (e as Error).message || 'Delete failed';
 		}
 	}
 
@@ -56,21 +320,6 @@
 		}
 	}
 
-	async function clear(service: string, key: string) {
-		if (!confirm(`Clear ${service}/${key}?`)) return;
-		const id = fieldId(service, key);
-		saving[id] = true;
-		saveError[id] = '';
-		try {
-			await deleteSecret(service, key);
-			await refresh();
-		} catch (e) {
-			saveError[id] = (e as Error).message || 'Delete failed';
-		} finally {
-			saving[id] = false;
-		}
-	}
-
 	onMount(() => {
 		void refresh();
 	});
@@ -87,169 +336,702 @@
 				return 'Not enabled';
 		}
 	}
+
+	// Hide services with no matching resource — the user adds the resource
+	// first, then the credentials card appears.
+	let activeServices = $derived(
+		services.filter((s) => s.status !== 'unavailable'),
+	);
 </script>
 
 <div class="settings">
-	<h1>Settings</h1>
-	<p class="lead">
-		Per-service credentials for the integrations your account has enabled.
-		Values are encrypted at rest and never sent back to the browser — the
-		fields below are write-only.
-	</p>
+	<header class="settings-header">
+		<div>
+			<h1>Settings</h1>
+			<p class="hint">
+				Profile, resources, and per-service credentials. Secrets are encrypted
+				at rest and never sent back to the browser — secret fields are
+				write-only.
+			</p>
+		</div>
+	</header>
+
+	{#if error}
+		<div class="banner error">{error}</div>
+	{/if}
+	{#if info}
+		<div class="banner info">{info}</div>
+	{/if}
 
 	{#if loading}
-		<div class="muted">Loading…</div>
-	{:else if error}
-		<div class="error">{error}</div>
+		<div class="placeholder">Loading…</div>
 	{:else}
-		<div class="cards">
-			{#each services as svc (svc.service)}
-				<section class="card" data-status={svc.status}>
-					<header>
-						<div class="title">
-							<h2>{svc.label}</h2>
-							<span class="status-pill status-{svc.status}">
-								{statusLabel(svc.status)}
-							</span>
-						</div>
-						{#if svc.last_updated}
-							<div class="meta">Last updated: {svc.last_updated}</div>
-						{/if}
-					</header>
+		{#if profile}
+			{@const saveBtn = {
+				dirty: profileDirty,
+				saving: profileSaving,
+			}}
 
-					{#if svc.status === 'unavailable'}
-						<p class="muted">
-							This service is not declared as a resource for your account.
-							Add a <code>[[users.X.resources]]</code> entry in
-							<code>config.toml</code> to enable it.
-						</p>
-					{:else}
-						<div class="fields">
-							{#each svc.fields as field (field.key)}
-								{@const id = fieldId(svc.service, field.key)}
-								{@const isConfigured = svc.configured_keys.includes(field.key)}
-								<div class="field">
-									<label for="input-{id}">{field.label}</label>
-									<div class="row">
-										<input
-											id="input-{id}"
-											type={field.type}
-											autocomplete="new-password"
-											placeholder={isConfigured ? '•••• stored — enter to replace' : 'Enter value'}
-											bind:value={inputs[id]}
-											disabled={saving[id]}
-										/>
-										<button
-											type="button"
-											class="btn btn-primary"
-											disabled={saving[id] || !inputs[id]}
-											onclick={() => save(svc.service, field.key)}
-										>
-											{saving[id] ? 'Saving…' : 'Save'}
-										</button>
-										{#if isConfigured}
+			<section class="card">
+				<header class="section-header">
+					<h2>Identity</h2>
+					<div class="header-actions">
+						{#if saveBtn.dirty}
+							<span class="dirty-badge">Unsaved changes</span>
+						{/if}
+						<Button
+							variant="primary"
+							size="sm"
+							onclick={saveProfile}
+							disabled={!saveBtn.dirty || saveBtn.saving}
+						>
+							{saveBtn.saving ? 'Saving…' : 'Save'}
+						</Button>
+					</div>
+				</header>
+				<p class="hint">
+					How Istota addresses you. User ID: <code>{profile.user_id}</code>
+				</p>
+
+				<label class="field">
+					<span>Display name</span>
+					<input type="text" bind:value={profile.display_name} />
+				</label>
+				<label class="field">
+					<span>Timezone (IANA)</span>
+					<input type="text" placeholder="UTC" bind:value={profile.timezone} />
+				</label>
+				<label class="field">
+					<span>Email addresses (comma-separated)</span>
+					<input
+						type="text"
+						value={profileListString(profile.email_addresses)}
+						oninput={(e) => {
+							if (profile)
+								profile.email_addresses = parseListInput(
+									(e.currentTarget as HTMLInputElement).value,
+								);
+						}}
+					/>
+				</label>
+				<label class="field">
+					<span>ntfy topic (optional)</span>
+					<input type="text" bind:value={profile.ntfy_topic} />
+				</label>
+			</section>
+
+			<section class="card">
+				<header class="section-header">
+					<h2>Preferences</h2>
+					<div class="header-actions">
+						{#if saveBtn.dirty}
+							<span class="dirty-badge">Unsaved changes</span>
+						{/if}
+						<Button
+							variant="primary"
+							size="sm"
+							onclick={saveProfile}
+							disabled={!saveBtn.dirty || saveBtn.saving}
+						>
+							{saveBtn.saving ? 'Saving…' : 'Save'}
+						</Button>
+					</div>
+				</header>
+				<p class="hint">
+					How Istota behaves for your account.
+				</p>
+
+				<label class="field">
+					<span>Trusted email senders (fnmatch patterns, comma-separated)</span>
+					<input
+						type="text"
+						value={profileListString(profile.trusted_email_senders)}
+						oninput={(e) => {
+							if (profile)
+								profile.trusted_email_senders = parseListInput(
+									(e.currentTarget as HTMLInputElement).value,
+								);
+						}}
+					/>
+				</label>
+				<label class="field">
+					<span>Disabled skills (comma-separated)</span>
+					<input
+						type="text"
+						value={profileListString(profile.disabled_skills)}
+						oninput={(e) => {
+							if (profile)
+								profile.disabled_skills = parseListInput(
+									(e.currentTarget as HTMLInputElement).value,
+								);
+						}}
+					/>
+				</label>
+				<label class="field checkbox">
+					<input type="checkbox" bind:checked={profile.site_enabled} />
+					<span>Static website hosting at /~user/</span>
+				</label>
+
+				{#if profileError}
+					<div class="banner error">{profileError}</div>
+				{/if}
+			</section>
+		{/if}
+
+		<section class="card">
+			<header class="section-header">
+				<h2>Resources ({resources.length})</h2>
+			</header>
+			<p class="hint">
+				Calendars, folders, modules, and integrations available to your
+				account. Operator-managed entries (from <code>config.toml</code>) are
+				read-only here.
+			</p>
+
+			{#if resources.length === 0}
+				<p class="empty">No resources configured yet.</p>
+			{:else}
+				<div class="table-scroll">
+					<table class="grid">
+						<thead>
+							<tr>
+								<th class="col-type">Type</th>
+								<th class="col-name">Name</th>
+								<th class="col-path">Path</th>
+								<th class="col-perms">Perms</th>
+								<th class="col-source">Source</th>
+								<th class="actions"></th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each resources as r (`${r.managed}-${r.id ?? r.path}-${r.type}`)}
+								<tr>
+									<td class="col-type">{r.type}</td>
+									<td class="col-name">{r.name || '—'}</td>
+									<td class="col-path"><code>{r.path || '—'}</code></td>
+									<td class="col-perms">{r.permissions}</td>
+									<td class="col-source muted">
+										{r.managed === 'config' ? 'config.toml' : 'user'}
+									</td>
+									<td class="actions">
+										{#if r.managed === 'db' && r.id !== undefined}
 											<button
+												class="icon-btn danger"
+												title="Remove"
 												type="button"
-												class="btn btn-danger"
-												disabled={saving[id]}
-												onclick={() => clear(svc.service, field.key)}
+												onclick={() => askRemoveResource(r)}>×</button
 											>
-												Clear
-											</button>
 										{/if}
-									</div>
-									{#if savedFlash[id]}
-										<div class="flash">Saved.</div>
-									{/if}
-									{#if saveError[id]}
-										<div class="error">{saveError[id]}</div>
-									{/if}
-								</div>
+									</td>
+								</tr>
 							{/each}
-						</div>
+						</tbody>
+					</table>
+				</div>
+			{/if}
+
+			<form class="add-resource" onsubmit={submitResource}>
+				<h3>Add resource</h3>
+				<div class="add-grid">
+					<label class="field">
+						<span>Type</span>
+						<select bind:value={newRes.type}>
+							<option value="">Type…</option>
+							{#each resourceTypes as rt (rt.type)}
+								<option value={rt.type}>{rt.label}</option>
+							{/each}
+						</select>
+					</label>
+					<label class="field">
+						<span>Path</span>
+						<input
+							type="text"
+							placeholder="(if applicable)"
+							bind:value={newRes.path}
+						/>
+					</label>
+					<label class="field">
+						<span>Display name</span>
+						<input type="text" placeholder="(optional)" bind:value={newRes.name} />
+					</label>
+					<label class="field">
+						<span>Permissions</span>
+						<select bind:value={newRes.permissions}>
+							<option value="read">read</option>
+							<option value="readwrite">readwrite</option>
+						</select>
+					</label>
+					<label class="field field-wide">
+						<span>Extras (JSON)</span>
+						<textarea
+							rows="2"
+							placeholder={'e.g. {"ingest_token": "…", "default_radius": 75}'}
+							bind:value={newRes.extrasJson}
+						></textarea>
+					</label>
+				</div>
+				<div class="add-actions">
+					<Button
+						variant="primary"
+						size="sm"
+						type="submit"
+						disabled={resourceSaving}
+					>
+						{resourceSaving ? 'Adding…' : 'Add resource'}
+					</Button>
+				</div>
+				{#if resourceError}
+					<div class="banner error">{resourceError}</div>
+				{/if}
+			</form>
+		</section>
+
+		<section class="card">
+			<header class="section-header">
+				<h2>Briefings ({briefings.length})</h2>
+			</header>
+			<p class="hint">
+				Cron-scheduled summaries posted to a Talk room or sent by email.
+				Operator-managed entries (from <code>config.toml</code>) are
+				read-only here.
+			</p>
+
+			{#if briefings.length === 0}
+				<p class="empty">No briefings configured yet.</p>
+			{:else}
+				<div class="table-scroll">
+					<table class="grid">
+						<thead>
+							<tr>
+								<th class="col-name">Name</th>
+								<th>Cron</th>
+								<th>Output</th>
+								<th>Components</th>
+								<th>Token</th>
+								<th class="col-source">Source</th>
+								<th class="actions"></th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each briefings as b (`${b.managed}-${b.id ?? b.name}`)}
+								<tr>
+									<td class="col-name">
+										{b.name}
+										{#if !b.enabled}<span class="muted"> (disabled)</span>{/if}
+									</td>
+									<td><code>{b.cron}</code></td>
+									<td>{b.output}</td>
+									<td class="muted">{componentsSummary(b.components) || '—'}</td>
+									<td class="muted"><code>{b.conversation_token || '—'}</code></td>
+									<td class="col-source muted">
+										{b.managed === 'config' ? 'config.toml' : 'user'}
+									</td>
+									<td class="actions">
+										{#if b.managed === 'db' && b.id !== undefined}
+											<button
+												class="icon-btn danger"
+												title="Remove"
+												type="button"
+												onclick={() => askRemoveBriefing(b)}>×</button
+											>
+										{/if}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
+
+			<form class="add-resource" onsubmit={submitBriefing}>
+				<h3>Add briefing</h3>
+				<div class="add-grid">
+					<label class="field">
+						<span>Name</span>
+						<input
+							type="text"
+							placeholder="morning"
+							bind:value={newBriefing.name}
+						/>
+					</label>
+					<label class="field">
+						<span>Cron (user TZ)</span>
+						<input
+							type="text"
+							placeholder="0 7 * * 1-5"
+							bind:value={newBriefing.cron}
+						/>
+					</label>
+					<label class="field">
+						<span>Output</span>
+						<select bind:value={newBriefing.output}>
+							{#each briefingOutputs as opt (opt)}
+								<option value={opt}>{opt}</option>
+							{/each}
+						</select>
+					</label>
+					<label class="field">
+						<span>Conversation token</span>
+						{#if briefingRooms.length > 0}
+							<select bind:value={newBriefing.conversation_token}>
+								<option value="">(paste token below)</option>
+								{#each briefingRooms as room (room.token)}
+									<option value={room.token}>{room.name} — {room.token}</option>
+								{/each}
+							</select>
+						{:else}
+							<input
+								type="text"
+								placeholder="Talk room token"
+								bind:value={newBriefing.conversation_token}
+							/>
+						{/if}
+					</label>
+					{#if briefingRooms.length > 0}
+						<label class="field">
+							<span>Or paste a token</span>
+							<input
+								type="text"
+								placeholder="(optional override)"
+								bind:value={newBriefing.conversation_token}
+							/>
+						</label>
 					{/if}
-				</section>
-			{/each}
-		</div>
+					<label class="field field-wide">
+						<span>Components (JSON)</span>
+						<textarea
+							rows="2"
+							placeholder={'e.g. {"calendar": true, "email": true, "markets": true}'}
+							bind:value={newBriefing.componentsJson}
+						></textarea>
+					</label>
+					<label class="field">
+						<span>Enabled</span>
+						<input type="checkbox" bind:checked={newBriefing.enabled} />
+					</label>
+				</div>
+				<div class="add-actions">
+					<Button
+						variant="primary"
+						size="sm"
+						type="submit"
+						disabled={briefingSaving}
+					>
+						{briefingSaving ? 'Saving…' : 'Add briefing'}
+					</Button>
+				</div>
+				{#if briefingError}
+					<div class="banner error">{briefingError}</div>
+				{/if}
+			</form>
+		</section>
+
+		{#if activeServices.length > 0}
+			<div class="subsection-heading">
+				<h2>Credentials</h2>
+				<p class="hint">
+					Per-service credentials for the resources above. Values are
+					encrypted at rest and never sent back to the browser — these
+					fields are write-only.
+				</p>
+			</div>
+		{/if}
+
+		{#each activeServices as svc (svc.service)}
+			<section class="card" data-status={svc.status}>
+				<header class="section-header">
+					<div class="title">
+						<h2>{svc.label}</h2>
+						<span class="status-pill status-{svc.status}">
+							{statusLabel(svc.status)}
+						</span>
+					</div>
+					{#if svc.last_updated}
+						<span class="meta">Updated {svc.last_updated}</span>
+					{/if}
+				</header>
+
+				{#each svc.fields as field (field.key)}
+					{@const id = fieldId(svc.service, field.key)}
+					{@const isConfigured = svc.configured_keys.includes(field.key)}
+					<label class="field">
+						<span>{field.label}</span>
+						<div class="row">
+							<input
+								type={field.type}
+								autocomplete="new-password"
+								placeholder={isConfigured
+									? '•••• stored — enter to replace'
+									: 'Enter value'}
+								bind:value={inputs[id]}
+								disabled={saving[id]}
+							/>
+							<Button
+								variant="primary"
+								size="sm"
+								disabled={saving[id] || !inputs[id]}
+								onclick={() => save(svc.service, field.key)}
+							>
+								{saving[id] ? 'Saving…' : 'Save'}
+							</Button>
+							{#if isConfigured}
+								<button
+									class="icon-btn danger"
+									title="Clear stored value"
+									type="button"
+									disabled={saving[id]}
+									onclick={() => askClearSecret(svc.service, field.key, `${svc.label} / ${field.label}`)}
+									>×</button
+								>
+							{/if}
+						</div>
+						{#if savedFlash[id]}
+							<span class="flash">Saved.</span>
+						{/if}
+						{#if saveError[id]}
+							<span class="field-error">{saveError[id]}</span>
+						{/if}
+					</label>
+				{/each}
+			</section>
+		{/each}
 	{/if}
 </div>
 
+{#if confirmDelete}
+	<Modal
+		open={true}
+		title={confirmDelete.kind === 'resource' ? 'Remove resource?' : 'Clear secret?'}
+		onOpenChange={(o) => {
+			if (!o) confirmDelete = null;
+		}}
+	>
+		<p>
+			{#if confirmDelete.kind === 'resource'}
+				Remove <strong>{confirmDelete.label}</strong>?
+			{:else}
+				Clear stored value for <strong>{confirmDelete.label}</strong>?
+			{/if}
+		</p>
+		{#snippet footer()}
+			<Button variant="ghost" onclick={() => (confirmDelete = null)}>Cancel</Button>
+			<Button variant="primary" onclick={performDelete}>
+				{confirmDelete?.kind === 'resource' ? 'Remove' : 'Clear'}
+			</Button>
+		{/snippet}
+	</Modal>
+{/if}
+
 <style>
 	.settings {
-		max-width: 48rem;
+		width: 100%;
+		max-width: 980px;
 		margin: 0 auto;
-		padding: 1.25rem;
-	}
-
-	h1 {
-		font-size: var(--text-2xl, 1.5rem);
-		margin: 0 0 0.5rem 0;
-	}
-
-	.lead {
-		color: var(--text-muted);
-		margin: 0 0 1.5rem 0;
-	}
-
-	.cards {
-		display: grid;
+		padding: 1.5rem 1rem 4rem;
+		display: flex;
+		flex-direction: column;
 		gap: 1rem;
+		box-sizing: border-box;
+		container-type: inline-size;
+		container-name: settings;
 	}
 
-	.card {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
-		padding: 1rem 1.1rem;
+	.settings-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 1rem;
+		flex-wrap: wrap;
 	}
 
-	.card header {
-		margin-bottom: 0.75rem;
+	.settings-header h1 {
+		margin: 0;
+		font-size: var(--text-lg, 1.05rem);
+		color: var(--text-primary);
 	}
 
-	.title {
+	.hint {
+		margin: 0.25rem 0 0;
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+		max-width: 60ch;
+	}
+
+	.hint code,
+	code {
+		background: var(--surface-raised);
+		padding: 0 0.3rem;
+		border-radius: 0.2rem;
+		font-size: 0.8em;
+	}
+
+	.header-actions {
 		display: flex;
 		align-items: center;
 		gap: 0.6rem;
 	}
 
-	.title h2 {
+	.dirty-badge {
+		font-size: var(--text-xs);
+		color: #d6a000;
+	}
+
+	.banner {
+		padding: 0.4rem 0.75rem;
+		border-radius: var(--radius-card);
+		font-size: var(--text-sm);
+	}
+	.banner.error {
+		background: rgba(204, 102, 102, 0.15);
+		color: #e88;
+	}
+	.banner.info {
+		background: rgba(110, 184, 132, 0.15);
+		color: #8d8;
+	}
+
+	.placeholder {
+		color: var(--text-dim);
+		padding: 2rem 0;
+		text-align: center;
+	}
+
+	.card {
+		background: var(--surface-card);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-card);
+		padding: 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.card h2 {
 		margin: 0;
-		font-size: var(--text-lg, 1.05rem);
+		font-size: var(--text-base);
+		color: var(--text-primary);
+	}
+
+	.card h3 {
+		margin: 0;
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+		font-weight: 600;
+	}
+
+	.section-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.subsection-heading {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		margin: 0.5rem 0 -0.25rem;
+	}
+
+	.subsection-heading h2 {
+		margin: 0;
+		font-size: var(--text-base);
+		color: var(--text-primary);
+	}
+
+	.subsection-heading .hint {
+		margin: 0;
+	}
+
+	.title {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.meta {
+		font-size: var(--text-xs);
+		color: var(--text-dim);
 	}
 
 	.status-pill {
-		font-size: var(--text-xs, 0.75rem);
-		padding: 0.1rem 0.5rem;
+		font-size: var(--text-xs);
+		padding: 0.05rem 0.4rem;
 		border-radius: var(--radius-pill);
 		background: var(--surface-raised);
 		color: var(--text-muted);
 	}
-
-	.status-pill.status-configured { color: #3a8a3a; }
-	.status-pill.status-partial { color: #b88a2a; }
+	.status-pill.status-configured { color: #6eb884; }
+	.status-pill.status-partial { color: #d6a000; }
 	.status-pill.status-missing { color: var(--text-dim); }
 	.status-pill.status-unavailable { color: var(--text-dim); }
 
-	.meta {
-		font-size: var(--text-xs, 0.75rem);
+	.empty {
+		font-size: var(--text-sm);
 		color: var(--text-dim);
-		margin-top: 0.25rem;
-	}
-
-	.fields {
-		display: grid;
-		gap: 0.85rem;
+		margin: 0;
 	}
 
 	.field {
-		display: grid;
-		gap: 0.3rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		font-size: var(--text-sm);
 	}
 
-	label {
-		font-size: var(--text-sm, 0.85rem);
+	.field > span {
 		color: var(--text-muted);
+	}
+
+	.field input:not([type='checkbox']),
+	.field select,
+	.field textarea {
+		background: var(--surface-base);
+		color: var(--text-primary);
+		border: 1px solid var(--border-default);
+		border-radius: 0.3rem;
+		padding: 0.3rem 0.5rem;
+		font: inherit;
+		font-size: var(--text-sm);
+		width: 100%;
+		max-width: 24rem;
+		min-width: 0;
+		box-sizing: border-box;
+	}
+
+	.field textarea {
+		font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+		resize: vertical;
+	}
+
+	.field-wide textarea {
+		max-width: 36rem;
+	}
+
+	.field input:focus,
+	.field select:focus,
+	.field textarea:focus {
+		outline: 1px solid var(--accent, #6c8ebf);
+	}
+
+	.field.checkbox {
+		flex-direction: row;
+		align-items: center;
+		gap: 0.4rem;
+		color: var(--text-primary);
+	}
+	.field.checkbox > span {
+		color: var(--text-primary);
+	}
+	.field.checkbox input[type='checkbox'] {
+		width: auto;
+	}
+
+	.two-col {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.75rem;
 	}
 
 	.row {
@@ -258,67 +1040,155 @@
 		align-items: center;
 	}
 
-	input {
-		flex: 1;
-		font: inherit;
-		padding: 0.35rem 0.55rem;
-		border-radius: var(--radius-card);
-		border: 1px solid var(--border-default);
-		background: var(--surface-base);
-		color: var(--text-primary);
-	}
-
-	input:focus {
-		outline: none;
-		border-color: var(--accent);
-	}
-
-	.btn {
-		font: inherit;
-		padding: 0.35rem 0.7rem;
-		border-radius: var(--radius-pill);
-		border: none;
-		cursor: pointer;
-	}
-
-	.btn-primary {
-		background: var(--accent);
-		color: var(--surface-base);
-	}
-
-	.btn-primary:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.btn-danger {
-		background: transparent;
-		color: var(--text-dim);
-	}
-
-	.btn-danger:hover {
-		color: #c66;
-	}
-
 	.flash {
-		font-size: var(--text-xs, 0.75rem);
-		color: #3a8a3a;
+		font-size: var(--text-xs);
+		color: #6eb884;
 	}
 
-	.error {
-		font-size: var(--text-sm, 0.85rem);
-		color: #c66;
+	.field-error {
+		font-size: var(--text-xs);
+		color: #e88;
+	}
+
+	.table-scroll {
+		width: 100%;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.grid {
+		width: 100%;
+		table-layout: fixed;
+		border-collapse: collapse;
+		font-size: var(--text-sm);
+	}
+
+	.grid th,
+	.grid td {
+		text-align: left;
+		padding: 0.4rem 0.5rem;
+		border-bottom: 1px solid var(--border-subtle);
+		vertical-align: middle;
+	}
+
+	.grid th {
+		color: var(--text-dim);
+		font-weight: 500;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	.col-type {
+		width: 7rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.col-name {
+		width: auto;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.col-path {
+		width: auto;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.col-perms {
+		width: 5.5rem;
+	}
+	.col-source {
+		width: 6rem;
+	}
+
+	.grid td.actions,
+	.grid th.actions {
+		text-align: right;
+		width: 3rem;
+		white-space: nowrap;
 	}
 
 	.muted {
-		color: var(--text-muted);
+		color: var(--text-dim);
 	}
 
-	code {
-		font-family: var(--font-mono, monospace);
-		font-size: 0.9em;
-		padding: 0 0.2rem;
+	.icon-btn {
+		background: transparent;
+		border: none;
+		color: var(--text-dim);
+		cursor: pointer;
+		padding: 0.1rem 0.35rem;
+		border-radius: 0.2rem;
+		font: inherit;
+		font-size: var(--text-base);
+		line-height: 1;
+	}
+
+	.icon-btn:hover:not(:disabled) {
+		color: var(--text-primary);
 		background: var(--surface-raised);
-		border-radius: 3px;
+	}
+
+	.icon-btn.danger:hover:not(:disabled) {
+		color: #e88;
+	}
+
+	.icon-btn:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
+	}
+
+	.add-resource {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+		padding-top: 0.4rem;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.add-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+		gap: 0.6rem;
+	}
+
+	.add-actions {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	@container settings (max-width: 520px) {
+		.col-source,
+		.col-perms {
+			display: none;
+		}
+		.two-col {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	@media (max-width: 768px) {
+		.settings {
+			padding: 1rem 0.75rem 3rem;
+		}
+		.settings-header {
+			flex-direction: column;
+			align-items: stretch;
+		}
+		.card {
+			padding: 0.75rem;
+		}
+	}
+
+	@media (max-width: 640px) {
+		.settings {
+			padding: 0.75rem 0.5rem 3rem;
+		}
+		.card {
+			padding: 0.6rem;
+		}
 	}
 </style>
