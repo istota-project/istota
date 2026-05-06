@@ -96,7 +96,7 @@ The wizard prompts for these and configures them automatically:
 Features requiring manual Ansible vars:
 
 - Nginx site hosting
-- Web interface (OIDC)
+- Web interface (Nextcloud OAuth2)
 - Developer skill (Git/GitLab/GitHub)
 - Auto-update
 

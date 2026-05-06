@@ -246,7 +246,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 
 ## Money
 
-There is no instance-level `[money]` config section. Per-user access is controlled via `[[resources]] type = "money"` in each user's TOML. See `config/users/alice.example.toml` for resource fields (workspace mode, ledgers, etc.).
+There is no instance-level `[money]` config section. Money is a **module** (on by default; opt out per user via `disabled_modules = ["money"]`). The bot auto-discovers `*.beancount` files at the top level of `{user_workspace}/ledgers/` — no per-resource path is required. Monarch credentials live in the encrypted `secrets` table (provision via `istota secret ensure --user alice --service monarch --key session_token --value …` or the web settings UI).
 
 ## `[google_workspace]`
 

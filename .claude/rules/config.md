@@ -204,7 +204,7 @@ Properties:
 Methods:
 - `get_user(nc_username) -> UserConfig | None`
 - `is_admin(user_id) -> bool` — True if `admin_users` empty or user in set
-- `is_module_enabled(user_id, module) -> bool` — True unless ``module`` appears in the user's `disabled_modules`. Unknown users default to True (docker auto-seed path). Module names are validated against `istota.modules.MODULE_NAMES` (`feeds`, `money`, `location`); unknown names always return False.
+- `is_module_enabled(user_id, module) -> bool` — True unless ``module`` appears in the user's `disabled_modules`. Unknown users default to True (docker auto-seed path). Module names are validated against `istota.modules.MODULE_NAMES` (`feeds`, `money`, `location`); unknown names always return False. Reads from the `user_profiles` DB row when `db_path` is set (so web edits to `disabled_modules` take effect across web/scheduler/webhook processes without SIGHUP), falls back to the in-memory `UserConfig.disabled_modules` for init/test paths or unseeded rows.
 - `find_user_by_email(email_address) -> str | None`
 - `is_trusted_email_sender(user_id, sender_email) -> bool` — checks user's own emails + `trusted_email_senders` patterns via fnmatch
 
@@ -315,5 +315,5 @@ Note: Uses `resource_name` field alias at executor.py L645 (historical quirk; fi
        env["MY_DATA_PATH"] = str(config.nextcloud_mount_path / my_data[0].resource_path.lstrip("/"))
    ```
 4. In `build_prompt()` (L180-242), add resource display section if user should see it
-5. In skill `skill.toml`, add `resource_types = ["my_data"]` to relevant skill
+5. In `skill.md` frontmatter, add `resource_types: [my_data]` to relevant skill
 6. Document in skill markdown file

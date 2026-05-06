@@ -55,13 +55,13 @@ timezone = "America/New_York"
 
 See the [full reference](reference.md) for all available settings.
 
-## Per-user config files
+## Per-user config
 
-In addition to the `[users.NAME]` section in the main config, per-user config files can be placed at `config/users/{user_id}.toml`. These take precedence over the main config. See [per-user configuration](per-user.md).
+Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`, `secrets`) populated by the matching `istota … ensure` CLI commands or the web UI. The `[users.NAME]` block in the main config is also accepted (the docker entrypoint relies on it); DB rows win at config-load time. The retired `config/users/{user_id}.toml` mechanism is gone. See [per-user configuration](per-user.md).
 
 ## Secret env var overrides
 
-Secrets can be provided via environment variables (e.g., from systemd `EnvironmentFile=`), which override the TOML values:
+Instance-wide secrets can be provided via environment variables (e.g., from systemd `EnvironmentFile=`), which override the TOML values:
 
 | Env var | Config field |
 |---|---|
@@ -72,6 +72,10 @@ Secrets can be provided via environment variables (e.g., from systemd `Environme
 | `ISTOTA_GITHUB_TOKEN` | `developer.github_token` |
 | `ISTOTA_NTFY_TOKEN` | `ntfy.token` |
 | `ISTOTA_NTFY_PASSWORD` | `ntfy.password` |
+| `ISTOTA_OAUTH2_CLIENT_SECRET` | `web.oauth2.client_secret` |
+| `ISTOTA_SECRET_KEY` | Master key for the encrypted `secrets` table (≥32 chars, scrypt-derived Fernet key) |
+
+Per-user external API credentials (Karakeep API key, Monarch session, Tumblr API key, Overland ingest token, etc.) live in the encrypted `secrets` table — provision via `istota secret ensure` or the web settings UI rather than env vars.
 
 ## Admin users
 

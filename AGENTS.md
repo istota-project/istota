@@ -18,8 +18,8 @@ src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── skills/               # 28 self-contained skills (skill.md + optional CLI)
-├── cli.py                # Local CLI (task, resource, run, etc.)
-├── config.py             # TOML config + per-user overrides
+├── cli.py                # Local CLI (task, resource, briefing, secret, user, run, …)
+├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── context.py            # Hybrid conversation context selection
 ├── db.py                 # SQLite operations (all tables)
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
@@ -29,7 +29,12 @@ src/istota/
 ├── tasks_file_poller.py  # TASKS.md monitoring
 ├── heartbeat.py          # Health-check system
 ├── webhook_receiver.py   # FastAPI: Overland GPS, etc.
-├── web_app.py            # Authenticated web UI (Nextcloud OIDC)
+├── web_app.py            # Authenticated web UI (Nextcloud OAuth2 + admin dashboard)
+├── secrets_store.py      # Encrypted credential store (Fernet via scrypt-derived key)
+├── secret_schema.py      # Shared service/key schema for `istota secret` CLI + web UI
+├── modules.py            # MODULE_NAMES registry (feeds, money, location)
+├── user_profiles.py      # Per-user profile store (Phase 6)
+├── user_briefings.py     # Per-user briefings store (Phase 7b)
 ├── notifications.py      # Talk / Email / ntfy dispatcher
 ├── skill_proxy.py        # Unix-socket proxy for credential isolation
 ├── network_proxy.py      # CONNECT proxy for network isolation
@@ -43,11 +48,11 @@ src/istota/
 ├── cron_loader.py        # CRON.md → DB sync
 └── logging_setup.py
 
-config/                   # config.toml, users/, persona.md, emissaries.md, system-prompt.md, guidelines/, skills/
-deploy/ansible/           # Role + install.sh + wizard.sh
-docker/                   # Full-stack compose (postgres + redis + nextcloud + istota)
+config/                   # config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/, skills/
+deploy/ansible/           # Role + install.sh + wizard.sh + validate_config.py
+docker/                   # Full-stack compose (nginx + nextcloud + postgres + redis + istota scheduler/web/webhooks)
 web/                      # SvelteKit (adapter-static, base /istota)
-tests/                    # pytest + pytest-asyncio (~3900 tests, 91 files)
+tests/                    # pytest + pytest-asyncio (~4100 tests, 99 files)
 schema.sql
 pyproject.toml
 ```
@@ -61,7 +66,7 @@ TASKS.md ────►│
 CLI ─────────►┘
 
 GPS Webhook ──► Location DB → Place detection → ntfy/Talk
-Web App ──► Nextcloud OIDC → Dashboard / Feeds / Location / Money
+Web App ──► Nextcloud OAuth2 → Dashboard / Feeds / Location / Money / Settings / Admin
 ```
 
 - **Talk poller**: daemon thread, long-poll per conversation, WAL-mode DB.
@@ -89,7 +94,7 @@ Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped m
 ### Modules vs resources vs connected services
 - **Resources** — paths/identifiers a user owns (calendars, folders, todo files, notes folders, email folders, reminders files). Multiple per user. Live in `[[users.X.resources]]` + the `user_resources` DB table.
 - **Modules** — on-by-default features with their own UI tab and a settings page reachable via a cog icon (`feeds`, `money`, `location`). Names live in `istota.modules.MODULE_NAMES`. Per-user opt-out via `disabled_modules`. Single source of truth: `Config.is_module_enabled(user_id, module)`.
-- **Connected services** — per-user external API credentials consumed by skills (`karakeep`, `google_workspace`). Stored encrypted in the `secrets` table; the bookmarks skill resolves both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` from there.
+- **Connected services** — per-user external API credentials consumed by skills (`karakeep`, `google_workspace`). Stored encrypted in the `secrets` table (Fernet over scrypt-derived key from `ISTOTA_SECRET_KEY`); the bookmarks skill resolves both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` from there. Provisioned via `istota secret ensure|list|remove` (Ansible) or `/istota/settings` (web). Schema for both surfaces lives in `secret_schema.py`.
 
 ### Memory System
 - `USER.md` — auto-loaded, optional nightly op-based curation. Runtime writes go through the `memory` skill CLI (`istota-skill memory append|add-heading|remove|show|headings`) — never `echo >>`. The CLI shares the curation `apply_ops` engine, takes a per-file flock, and writes a `source="runtime"` audit entry per call.
@@ -118,7 +123,7 @@ Self-contained `src/istota/skills/<name>/skill.md` (YAML frontmatter + body). Tw
 - **TASKS.md**: 30s poll, `[ ] [~] [x] [!]` markers, SHA-256 identity.
 
 ### Briefings
-Sources: user `BRIEFINGS.md` > per-user config > main config. Cron in user TZ. Components: calendar, todos, email, markets, news, headlines, notes, reminders. Claude returns structured JSON (`{subject, body}`); scheduler delivers. Email skill excluded.
+Sources: user `BRIEFINGS.md` > `briefing_configs` DB table > `[[users.X.briefings]]` block. Provision via `istota briefing ensure` or the web UI; `enabled=0` mutes a row. Cron in user TZ. Components: calendar, todos, email, markets, news, headlines, notes, reminders. Claude returns structured JSON (`{subject, body}`); scheduler delivers. Email skill excluded.
 
 ### Scheduled Jobs (CRON.md)
 Markdown with TOML `[[jobs]]`. Types: `prompt`, `prompt_file`, `command`. Per-job `model`/`effort` overrides. Auto-disable after 5 consecutive failures. `skip_log_channel`, `silent_unless_action`, `once = true` supported.
@@ -133,7 +138,7 @@ Nightly extraction goes through the configured Brain (no streaming, no sandbox).
 Overland webhook → `webhook_receiver.py`. Asymmetric place detection (hysteresis on entry, continuous away on exit). Reconciler re-derives closed visits. Discovered clusters dismissable. Tables: `location_pings`, `places`, `visits`, `location_state`, `dismissed_clusters`.
 
 ### Web UI
-SvelteKit (`web/`, `adapter-static`, base `/istota`) + FastAPI (`web_app.py`). Nextcloud OIDC auth, 7-day session. Routes: dashboard, feeds (reader + sprocket-icon settings page served by `istota.feeds.routes` against per-user SQLite), location (today + history with cluster discovery; `/location/settings` for Overland ingest token), money (`/istota/money/*`), admin (read-only system health at `/istota/admin`, gated by a new `_user_is_web_admin` helper that uses the `/etc/istota/admins` allowlist and fails closed on empty allowlist — distinct from `Config.is_admin`, which retains its back-compat "empty = all admin" rule for sandbox/skill/command checks). Single-payload `GET /istota/api/admin/stats` aggregator; all timestamps normalized to canonical ISO 8601 UTC via `_iso_utc()`. Dev: `VITE_MOCK_API=1 npm run dev` for in-process mock backend. Frontend primitives in `web/src/lib/components/ui/` (AppShell, ShellHeader, Sidebar, Chip, Button, Select, Modal, etc.); shared settings primitives in `web/src/lib/components/settings/` (`SecretField`, `ServiceCard`).
+SvelteKit (`web/`, `adapter-static`, base `/istota`) + FastAPI (`web_app.py`). Nextcloud-hosted OAuth2 (the legacy generic OIDC fallback was retired — Docker provisions the OAuth2 client via `provision-nc.sh`; Ansible templates `[web.oauth2]` directly), 7-day session. Routes: dashboard, feeds (reader + sprocket-icon settings page served by `istota.feeds.routes` against per-user SQLite), location (today + history with cluster discovery; `/location/settings` for Overland ingest token), money (`/istota/money/*`), admin (read-only system health at `/istota/admin`, gated by a new `_user_is_web_admin` helper that uses the `/etc/istota/admins` allowlist and fails closed on empty allowlist — distinct from `Config.is_admin`, which retains its back-compat "empty = all admin" rule for sandbox/skill/command checks). Single-payload `GET /istota/api/admin/stats` aggregator; all timestamps normalized to canonical ISO 8601 UTC via `_iso_utc()`. Dev: `VITE_MOCK_API=1 npm run dev` for in-process mock backend. Frontend primitives in `web/src/lib/components/ui/` (AppShell, ShellHeader, Sidebar, Chip, Button, Select, Modal, etc.); shared settings primitives in `web/src/lib/components/settings/` (`SecretField`, `ServiceCard`).
 
 Settings split (modules refactor, Phase 2): `GET /settings/services` returns only Connected services (`karakeep`, `google_workspace`); module-owned services (`monarch`, `feeds.tumblr_api_key`, `overland.ingest_token`) live on the per-module settings page and are reachable via `GET /settings/module-services/{module}`. Both endpoints share `_build_service_card`. `GET /settings/modules` returns the module registry plus per-user `disabled_modules` so the Preferences card can render the opt-out multiselect. Secret PUT/DELETE accept any service in `_all_known_services()` (connected ∪ module). Each per-module page calls `getModuleServices(<module>)` first; when `module_enabled=false`, it shows a "Module disabled — enable in /settings → Preferences" banner instead of the configuration UI. `/location/settings` adds an `/location/settings-info` endpoint that returns the webhook-URL placeholder (`https://<host>/webhooks/location?token=<token>`) and read-only place-detection knobs.
 
@@ -160,10 +165,12 @@ uv sync                                            # Install deps
 uv run istota init                                 # Initialize DB
 uv run istota task "prompt" -u USER -x [--dry-run] # Execute task
 uv run istota task "prompt" -u USER -t ROOM -x     # With conversation context
-uv run istota resource add|list -u USER ...        # Resources
+uv run istota resource ensure|add|list -u USER ... # Resources (DB-backed)
+uv run istota briefing ensure -u USER -n NAME ...  # Briefings (DB-backed)
+uv run istota secret ensure|list|remove -u USER -s SERVICE -k KEY [-v VALUE]
+uv run istota user ensure|list|lookup|init|status -u USER ...
 uv run istota run [--once] [--briefings]           # Process pending
 uv run istota email list|poll|test
-uv run istota user list|lookup|init|status
 uv run istota calendar discover|test
 uv run istota tasks-file poll|status [-u USER]
 uv run istota kv get|set|list|delete|namespaces
@@ -176,13 +183,13 @@ uv run istota-scheduler [-d] [-v] [--max-tasks N]
 
 Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`. Override with `-c PATH`.
 
-Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`) populated by `istota user|resource|briefing ensure`. The `[users.X]` block in `config.toml` (docker entrypoint path) is also accepted; DB rows win at config-load time. CalDAV derived from Nextcloud. Field-by-field reference in `.claude/rules/config.md`.
+Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`, `secrets`) populated by `istota user|resource|briefing|secret ensure`. The `[users.X]` block in `config.toml` (docker entrypoint path) is also accepted; DB rows win at config-load time. The retired `config/users/{user}.toml` mechanism and `config/users/` directory are gone — Ansible no longer renders per-user TOML. CalDAV derived from Nextcloud. Field-by-field reference in `.claude/rules/config.md`.
 
 ## Deployment
 
-**Ansible**: role at `deploy/ansible/` (symlinked from `~/Repos/ansible-server/roles/istota/`). When adding config fields, update `defaults/main.yml` + `templates/config.toml.j2`.
+**Ansible**: role at `deploy/ansible/` (symlinked from `~/Repos/ansible-server/roles/istota/`). When adding config fields, update `defaults/main.yml` + `templates/config.toml.j2`. The role runs `files/validate_config.py` against the rendered TOML before any handler can restart the scheduler — structural bugs fail the play instead of the running daemon. Three systemd units (`istota-scheduler`, `istota-web`, `istota-webhooks`) all read `ISTOTA_ADMINS_FILE` and `ISTOTA_SECRET_KEY` from the same EnvironmentFile.
 
-**Docker**: `docker/docker-compose.yml` brings up postgres + redis + nextcloud + istota. Sandbox / skill proxy / network proxy disabled inside container (container provides isolation). Key env: `CLAUDE_CODE_OAUTH_TOKEN`, `ADMIN_PASSWORD`, `USER_NAME`/`USER_PASSWORD`, `BOT_PASSWORD`, `POSTGRES_PASSWORD`.
+**Docker**: `docker/docker-compose.yml` brings up nginx (single host port, reverse-proxies `/` → Nextcloud and `/istota/` → web service) + nextcloud + postgres + redis + istota (multi-stage Dockerfile builds the SvelteKit frontend; separate scheduler / web / webhooks services). Sandbox / skill proxy / network proxy disabled inside container (container provides isolation). The entrypoint auto-provisions `#general`, `{user}-log`, `{user}-alerts` group rooms, registers an OAuth2 client in NC via inline PHP, generates `LOCATION_INGEST_TOKEN` + `ISTOTA_SECRET_KEY` (persisted to `/data/.secret_key`), and seeds workspace files. Modules default on (`ISTOTA_*_ENABLED=true`). Key env: `CLAUDE_CODE_OAUTH_TOKEN`, `ADMIN_PASSWORD`, `USER_NAME`/`USER_PASSWORD`, `BOT_PASSWORD`, `POSTGRES_PASSWORD`, `DOMAIN`, `ISTOTA_WEB_INSECURE_COOKIES` (toggle for plaintext localhost).
 
 **Nextcloud mount**: `/srv/mount/nextcloud/content` via rclone (`istota_use_nextcloud_mount: true`).
 

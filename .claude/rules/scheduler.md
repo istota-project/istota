@@ -78,6 +78,16 @@ After successful task completion (not confirmation, not failure), the scheduler 
 - Enables reply routing: when external contacts reply, References headers match against sent_emails
 - Deletes file after processing
 
+**Other deferred handlers**:
+- `_process_deferred_kg_ops` — `task_{id}_kg_ops.json` from `istota-skill memory_search add-fact|invalidate|delete-fact`. Commits per op so a mid-loop crash can't roll back ops we've already accepted.
+- `_process_deferred_kv_ops` — `task_{id}_kv_ops.json` from `istota-skill kv set|delete`.
+- `_process_deferred_user_alerts` — `task_{id}_user_alerts.json` for the alerts/notification path.
+- `_load_deferred_email_output` — `task_{id}_email_output.json` for structured email replies (preferred over the legacy stdout-JSON parser).
+
+**Retry replay safety (ISSUE-074)**: deferred-op producers append to per-task files keyed only by `task.id`. `set_task_pending_retry` keeps the same id, so `_purge_deferred_files_for_retry()` clears the slate in the retry-eligible failure branch — eventual success replays only the final attempt's writes (matters most for non-idempotent KG `invalidate`/`delete`).
+
+**Unconsumed-file warnings (ISSUE-073)**: after the drain phase, `_warn_unconsumed_deferred_files()` scans the user temp dir and logs WARN for files missing the `task_` prefix or carrying an unknown suffix. The misnamed file is left on disk for inspection.
+
 **Why deferred**: With bubblewrap sandbox, DB is RO inside the sandbox. Claude and skill CLIs write JSON to the always-RW temp dir; the scheduler (unsandboxed) processes them.
 
 ## WorkerPool
@@ -205,6 +215,17 @@ After task completion, if enabled + `auto_index_conversations`:
 | `sent_emails` | — | id, user_id, task_id, message_id, to_addr, subject, thread_id, in_reply_to, references, conversation_token, talk_delivery_token, sent_at |
 | `task_logs` | — | task_id, level, message, timestamp |
 | `memory_chunks` | — | (from memory_search.py schema) |
+| `user_profiles` | — | user_id, display_name, timezone, log_channel, alerts_channel, ntfy_topic, site_enabled, max_foreground_workers, max_background_workers, email_addresses (JSON), disabled_skills (JSON), disabled_modules (JSON), trusted_email_senders (JSON) |
+| `secrets` | — | user_id, service, key, value (Fernet ciphertext), created_at, updated_at, last_accessed_at |
+| `knowledge_facts` | — | id, user_id, subject, predicate, object, source, source_task_id, valid_from, valid_to, created_at |
+| `knowledge_facts_audit` | — | id, fact_id, user_id, op, payload (JSON), source_task_id, created_at |
+| `google_oauth_tokens` | — | user_id, access_token, refresh_token, expires_at, scopes |
+| `dismissed_clusters` | — | user_id, cluster_hash, dismissed_at |
+| `location_state` | — | user_id, last_place_id, last_seen_at, away_streak_started_at |
+| `location_pings` / `places` / `visits` / `geocode_cache` / `reverse_geocode_cache` | — | location subsystem (see `webhook_receiver.py`, `location_logic.py`) |
+| `talk_messages` / `talk_poll_state` | — | Talk poller state + message cache |
+| `istota_kv` | — | user_id, namespace, key, value (JSON) — backs the `kv` skill |
+| `trusted_email_senders` | — | user_id, pattern (fnmatch) — email-gate allowlist |
 
 ## Key DB Functions
 

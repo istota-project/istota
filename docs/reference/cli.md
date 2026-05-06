@@ -32,11 +32,27 @@ istota user status USER                      # User status and resources
 ### Resources
 
 ```bash
-istota resource add -u USER -t TYPE -p PATH  # Add resource
-istota resource list -u USER                  # List resources
+istota resource ensure -u USER -t TYPE -p PATH [--name NAME] [--permissions read|readwrite] [--extras k=v | --extras-json '{…}'] [--extras-clear]
+istota resource add    -u USER -t TYPE -p PATH         # one-shot add (fails if duplicate)
+istota resource list   -u USER                          # List resources
 ```
 
-Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `reminders_file`, `shared_file`, `ledger`, `invoicing`, `karakeep`, `monarch`, `feeds`, `money` (legacy alias `moneyman` still accepted).
+Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `reminders_file`, `shared_file`, `notes_folder`. The retired types (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`, `ledger`, `invoicing`) are auto-cleaned at scheduler startup — feeds/money/location are now modules, karakeep/monarch/overland/tumblr are connected services in the encrypted `secrets` table.
+
+### Briefings
+
+```bash
+istota briefing ensure -u USER -n NAME -c CRON [--conversation-token TOKEN] [--output talk|email|both] [--component k=v] [--components-json '{…}'] [--disabled]
+istota briefing list   -u USER
+```
+
+### Secrets (encrypted store)
+
+```bash
+istota secret ensure -u USER -s SERVICE -k KEY -v VALUE   # value via flag, env, or stdin
+istota secret list   -u USER                               # service/key/last_accessed; values never printed
+istota secret remove -u USER -s SERVICE -k KEY
+```
 
 ### Email
 

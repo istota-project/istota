@@ -1,24 +1,28 @@
 # Per-user configuration
 
-Each user can be configured at four levels (later overrides earlier):
+Per-user data lives in three DB tables and (optionally) the user's Nextcloud workspace:
 
-1. `[users.alice]` in main `config/config.toml`
-2. `config/users/alice.toml` (per-user TOML file — still authoritative for **resources** and **briefings**)
-3. `user_profiles` row in the istota DB — owns profile fields (display_name, timezone, channels, ntfy_topic, worker overrides, email lists, trusted senders, disabled skills)
-4. User workspace files in Nextcloud (PERSONA.md, BRIEFINGS.md, CRON.md, etc.)
+1. **DB tables** (authoritative)
+   - `user_profiles` — display_name, timezone, channels, ntfy_topic, worker overrides, email lists, trusted senders, disabled_skills, **disabled_modules**
+   - `user_resources` — resources (calendar, folder, todo_file, notes_folder, email_folder, reminders_file). The `extras` JSON column carries resource-type-specific config.
+   - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
+   - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, etc.)
+2. `[users.alice]` block in main `config/config.toml` (the docker entrypoint path) — DB rows still win at config-load time.
+3. User workspace files in Nextcloud (`PERSONA.md`, `BRIEFINGS.md`, `CRON.md`, `HEARTBEAT.md`, `TASKS.md`, `USER.md`).
 
-The DB row is populated three ways:
+> The legacy `config/users/{user_id}.toml` file (and its `.user.json` overlay) was retired with the OIDC retirement / Phase 7 sweep. The `config/users/` directory is gone, Ansible no longer renders per-user TOML, and `Config.users_dir` / `load_user_configs()` no longer exist.
 
-- **Ansible**: `istota user ensure --name alice --display-name "Alice" --tz "America/Los_Angeles" --email alice@example.com` (idempotent partial update).
-- **Web UI**: `/istota/settings` lets each user edit their profile directly.
-- **Auto-seed**: on first OAuth login the row is created from the Nextcloud display_name and any TOML profile fields the operator already supplied. Subsequent logins do not overwrite values the user has edited.
+The DB rows are populated four ways:
 
-Migration from existing TOML installs: the scheduler imports any TOML profile fields into the DB on startup, but only for users without a row yet. Existing per-user TOML files keep working — they just stop being the source of truth for profile fields once a DB row exists.
+- **Ansible**: `istota user|resource|briefing|secret ensure …` — each idempotent and prints `STATE: created|updated|noop` for `changed_when` semantics.
+- **Web UI**: `/istota/settings` (Profile + Connected services + module pages) and the per-feature settings under `/istota/{feeds,money,location}/settings`.
+- **Auto-seed**: on first OAuth login the profile row is created from the Nextcloud display_name and any `[users.X]` block. Subsequent logins do not overwrite values the user has edited.
+- **TOML migration**: on scheduler startup, `import_from_user_configs` (one each for profiles / resources / briefings) seeds DB rows from any remaining `[users.X]` block whose natural key isn't already present.
 
 ## Per-user TOML settings
 
 ```toml
-# config/users/alice.toml
+# main config.toml: [users.alice]
 display_name = "Alice"
 email_addresses = ["alice@example.com", "alice.work@company.com"]
 timezone = "America/New_York"
@@ -44,48 +48,48 @@ site_enabled = true
 
 # ntfy topic override
 ntfy_topic = "alice-alerts"
+
+# Modules to opt out of (default-on otherwise)
+disabled_modules = ["money"]
 ```
 
 ### Resources
 
-Resources define what data the bot can access for this user:
+Resources define what data the bot can access for this user. Provision via Ansible (`istota resource ensure --user alice --type calendar --path /Personal --name Personal`) or the web UI (`/istota/settings`). The `[[users.X.resources]]` TOML block is also accepted as a docker-entrypoint shortcut.
 
 ```toml
-[[resources]]
+[[users.alice.resources]]
 type = "reminders_file"
 path = "/Users/alice/shared/Notes/_REMINDERS.md"
 name = "Reminders"
 
-[[resources]]
-type = "feeds"
-name = "Feeds"
-extra = { tumblr_api_key = "..." }   # optional; TUMBLR_API_KEY env is the fallback
-
-[[resources]]
-type = "moneyman"
-name = "Accounting"
-extra = { user_key = "alice" }
-
-[[resources]]
-type = "overland"
-name = "GPS"
-extra = { ingest_token = "secret", default_radius = 100 }
+[[users.alice.resources]]
+type = "calendar"
+path = "Personal"
+name = "Personal"
 ```
 
-Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`, `ledger`, `karakeep`, `monarch`, `feeds`, `money`, `overland`.
+Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`.
+
+> **Modules vs resources vs connected services.** The retired `feeds` / `money` / `monarch` / `karakeep` / `overland` resource types were split apart in the modules / connected services refactor:
+> - **Modules** (`feeds`, `money`, `location`) are on by default; opt out per user via `disabled_modules`. Module-owned secrets (Tumblr API key, Monarch session, Overland ingest token) live on the per-module settings page.
+> - **Connected services** (`karakeep`, `google_workspace`) are external API credentials in the encrypted `secrets` table.
+> - The scheduler auto-cleans the obsolete resource types from `user_resources` on startup; their TOML extras are migrated into `secrets` via `secrets_store.import_from_user_configs`.
 
 CalDAV calendars are auto-discovered from Nextcloud and don't need to be configured as resources.
 
 ### Briefings
 
+Provision via `istota briefing ensure --user alice --name morning --cron "0 6 * * *" --conversation-token room123 --output both --component calendar=true --component todos=true` or the web UI (`/istota/settings → Briefings`). The `[[users.X.briefings]]` TOML block is a docker-entrypoint shortcut.
+
 ```toml
-[[briefings]]
+[[users.alice.briefings]]
 name = "morning"
 cron = "0 6 * * *"
 conversation_token = "room123"
 output = "both"
 
-[briefings.components]
+[users.alice.briefings.components]
 calendar = true
 todos = true
 markets = true

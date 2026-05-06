@@ -74,7 +74,7 @@ Polling interval is controlled by `email_poll_interval` in `[scheduler]` (defaul
 ### Per-user email settings
 
 ```toml
-# config/users/alice.toml
+# [users.alice] block in config.toml — DB row populated by `istota user ensure` wins
 email_addresses = ["alice@example.com"]
 trusted_email_senders = ["*@company.com", "boss@other.com"]
 alerts_channel = "room789"  # Talk room for confirmations/alerts

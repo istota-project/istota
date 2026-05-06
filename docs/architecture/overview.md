@@ -85,7 +85,7 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 | `shared_file_organizer.py` | Scans for files shared with the bot, auto-organizes by owner |
 | `nextcloud_client.py` | Shared Nextcloud HTTP plumbing (OCS + WebDAV) |
 | `nextcloud_api.py` | Enriches user configs from Nextcloud OCS API at startup |
-| `web_app.py` | Authenticated web interface (FastAPI + Nextcloud OIDC) |
+| `web_app.py` | Authenticated web interface (FastAPI + Nextcloud OAuth2) |
 | `webhook_receiver.py` | FastAPI webhook receiver (Overland GPS) |
 | `briefing.py` | Builds briefing prompts from pre-fetched components |
 | `briefing_loader.py` | Loads and merges briefing configs from user workspace, per-user TOML, and main config |
