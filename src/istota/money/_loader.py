@@ -93,7 +93,13 @@ def resolve_for_user(user_id: str, istota_config) -> UserContext:
     workspace = Path(mount) / get_user_bot_path(
         user_id, istota_config.bot_dir_name,
     ).lstrip("/")
-    return synthesize_user_context(workspace)
+    ctx = synthesize_user_context(workspace)
+    # Lazy import — _migrate imports config_store, which imports model
+    # dataclasses. Keeping the import here avoids a startup-time cost when
+    # the module isn't enabled for any user.
+    from istota.money._migrate import ensure_initialised  # noqa: PLC0415
+    ensure_initialised(ctx)
+    return ctx
 
 
 def list_users(istota_config) -> list[str]:
