@@ -456,11 +456,16 @@ CREATE TABLE IF NOT EXISTS reverse_geocode_cache (
     PRIMARY KEY (lat_rounded, lon_rounded)
 );
 
--- Google OAuth tokens (per-user Google Workspace access)
+-- Google OAuth tokens (per-user Google Workspace access). access_token and
+-- refresh_token are stored as Fernet ciphertext (BLOB) keyed off
+-- $ISTOTA_SECRET_KEY -- same primitive as the `secrets` table. SQLite is
+-- declared-type-lenient, so existing deployments with TEXT columns keep
+-- working; the migration in db._run_migrations encrypts any plaintext rows
+-- in place on first run with a key available.
 CREATE TABLE IF NOT EXISTS google_oauth_tokens (
     user_id TEXT PRIMARY KEY,
-    access_token TEXT NOT NULL,
-    refresh_token TEXT NOT NULL,
+    access_token BLOB NOT NULL,
+    refresh_token BLOB NOT NULL,
     token_expiry TEXT NOT NULL,     -- ISO 8601 datetime
     scopes TEXT NOT NULL DEFAULT '[]',  -- JSON array of granted scopes
     created_at TEXT DEFAULT (datetime('now')),

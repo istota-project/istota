@@ -38,6 +38,15 @@ def require_auth(request: Request) -> dict:
     return user
 
 
+def verify_origin(request: Request) -> None:
+    """CSRF check stub for mutating routes — host overrides via dependency_overrides.
+
+    Default is a no-op so the router stays usable in isolation (tests). The host
+    app installs a real Origin/Referer check. Same shape as ``require_auth``.
+    """
+    return None
+
+
 def get_user_config(
     request: Request,
     user: dict = Depends(require_auth),
@@ -531,6 +540,7 @@ async def api_tax_estimate_recalculate(
     request: Request,
     ledger: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from datetime import date
 
@@ -663,6 +673,7 @@ async def api_config_invoicing(user_ctx: UserContext = Depends(get_user_config))
 @router.put("/config/invoicing")
 async def api_config_invoicing_put(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     """Update scalar invoicing settings.
 
@@ -702,6 +713,7 @@ async def api_config_companies(user_ctx: UserContext = Depends(get_user_config))
 @router.post("/config/companies")
 async def api_config_companies_post(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -717,6 +729,7 @@ async def api_config_companies_post(
 async def api_config_companies_put(
     key: str, request: Request,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -727,6 +740,7 @@ async def api_config_companies_put(
 @router.delete("/config/companies/{key}")
 async def api_config_companies_delete(
     key: str, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     ok = config_store.delete_company(user_ctx.db_path, key)
@@ -746,6 +760,7 @@ async def api_config_clients(user_ctx: UserContext = Depends(get_user_config)):
 @router.post("/config/clients")
 async def api_config_clients_post(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -761,6 +776,7 @@ async def api_config_clients_post(
 async def api_config_clients_put(
     key: str, request: Request,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -771,6 +787,7 @@ async def api_config_clients_put(
 @router.delete("/config/clients/{key}")
 async def api_config_clients_delete(
     key: str, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     ok = config_store.delete_client(user_ctx.db_path, key)
@@ -790,6 +807,7 @@ async def api_config_services(user_ctx: UserContext = Depends(get_user_config)):
 @router.post("/config/services")
 async def api_config_services_post(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -805,6 +823,7 @@ async def api_config_services_post(
 async def api_config_services_put(
     key: str, request: Request,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -815,6 +834,7 @@ async def api_config_services_put(
 @router.delete("/config/services/{key}")
 async def api_config_services_delete(
     key: str, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     ok = config_store.delete_service(user_ctx.db_path, key)
@@ -845,6 +865,7 @@ async def api_config_tax(user_ctx: UserContext = Depends(get_user_config)):
 @router.put("/config/tax")
 async def api_config_tax_put(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -877,6 +898,7 @@ async def api_config_tax_years(user_ctx: UserContext = Depends(get_user_config))
 async def api_config_tax_years_put(
     year: int, request: Request,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -890,6 +912,7 @@ async def api_config_tax_years_put(
 @router.delete("/config/tax/years/{year}")
 async def api_config_tax_years_delete(
     year: int, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     ok = config_store.delete_tax_year_rates(user_ctx.db_path, year)
@@ -908,6 +931,7 @@ async def api_config_tax_patterns(user_ctx: UserContext = Depends(get_user_confi
 @router.put("/config/tax/patterns")
 async def api_config_tax_patterns_put(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     """Replace-all per-kind. Body: ``{"se_income": [...], "se_expense": [...]}``."""
     from istota.money import config_store
@@ -943,6 +967,7 @@ async def api_config_monarch(user_ctx: UserContext = Depends(get_user_config)):
 @router.put("/config/monarch")
 async def api_config_monarch_put(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -973,6 +998,7 @@ async def api_config_monarch_profiles(
 @router.post("/config/monarch/profiles")
 async def api_config_monarch_profiles_post(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -993,6 +1019,7 @@ async def api_config_monarch_profiles_post(
 async def api_config_monarch_profiles_put(
     name: str, request: Request,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     body = await request.json()
@@ -1008,6 +1035,7 @@ async def api_config_monarch_profiles_put(
 @router.delete("/config/monarch/profiles/{name}")
 async def api_config_monarch_profiles_delete(
     name: str, user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     ok = config_store.delete_monarch_profile(user_ctx.db_path, name)
@@ -1039,6 +1067,7 @@ async def api_config_monarch_account_map_put(
     request: Request,
     profile: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     p = _resolve_profile_query(profile)
@@ -1073,6 +1102,7 @@ async def api_config_monarch_category_map_put(
     request: Request,
     profile: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     from istota.money import config_store
     p = _resolve_profile_query(profile)
@@ -1106,6 +1136,7 @@ async def api_config_monarch_tag_filters_put(
     request: Request,
     profile: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     """Body: ``{"include": [...], "exclude": [...]}`` — replaces both lists."""
     from istota.money import config_store
@@ -1177,6 +1208,7 @@ async def api_config_import(
     dry_run: int = 0,
     replace: int = 0,
     user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
 ):
     """Import a TOML payload (multipart or JSON {text: ...}).
 

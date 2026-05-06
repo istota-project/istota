@@ -1,6 +1,7 @@
 """Tests for Google Workspace skill — config, DB tokens, skill selection, setup_env, network."""
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +11,13 @@ import pytest
 
 from istota import config, db
 from istota.skills._loader import load_skill_index, select_skills
+
+
+@pytest.fixture
+def secret_key():
+    """Set ISTOTA_SECRET_KEY for the duration of a test (32+ chars)."""
+    with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "deadbeef" * 8}):
+        yield
 
 
 # ============================================================================
@@ -85,12 +93,12 @@ client_id = "id"
 # ============================================================================
 
 class TestGoogleTokenDB:
-    def test_get_returns_none_when_empty(self, tmp_path):
+    def test_get_returns_none_when_empty(self, tmp_path, secret_key):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
             assert db.get_google_token(conn, "alice") is None
 
-    def test_upsert_and_get(self, tmp_path):
+    def test_upsert_and_get(self, tmp_path, secret_key):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
             db.upsert_google_token(
@@ -103,7 +111,7 @@ class TestGoogleTokenDB:
         assert token["refresh_token"] == "refresh456"
         assert token["scopes"] == '["drive"]'
 
-    def test_upsert_updates_existing(self, tmp_path):
+    def test_upsert_updates_existing(self, tmp_path, secret_key):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
             db.upsert_google_token(conn, "alice", "old", "refresh", "2025-01-01T00:00:00+00:00")
@@ -112,25 +120,140 @@ class TestGoogleTokenDB:
         assert token["access_token"] == "new"
         assert token["refresh_token"] == "refresh2"
 
-    def test_delete(self, tmp_path):
+    def test_delete(self, tmp_path, secret_key):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
             db.upsert_google_token(conn, "alice", "a", "r", "2025-01-01T00:00:00+00:00")
             assert db.delete_google_token(conn, "alice") is True
             assert db.get_google_token(conn, "alice") is None
 
-    def test_delete_nonexistent(self, tmp_path):
+    def test_delete_nonexistent(self, tmp_path, secret_key):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
             assert db.delete_google_token(conn, "nobody") is False
 
-    def test_per_user_isolation(self, tmp_path):
+    def test_per_user_isolation(self, tmp_path, secret_key):
         db_path = _init_db(tmp_path)
         with db.get_db(db_path) as conn:
             db.upsert_google_token(conn, "alice", "a-token", "a-refresh", "2025-01-01T00:00:00+00:00")
             db.upsert_google_token(conn, "bob", "b-token", "b-refresh", "2025-01-01T00:00:00+00:00")
             assert db.get_google_token(conn, "alice")["access_token"] == "a-token"
             assert db.get_google_token(conn, "bob")["access_token"] == "b-token"
+
+    def test_tokens_encrypted_at_rest(self, tmp_path, secret_key):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "supersecret-access", "supersecret-refresh",
+                "2025-12-31T00:00:00+00:00",
+            )
+        # Bypass the API and read the raw bytes -- plaintext must not appear.
+        with sqlite3.connect(db_path) as raw:
+            row = raw.execute(
+                "SELECT access_token, refresh_token FROM google_oauth_tokens WHERE user_id = ?",
+                ("alice",),
+            ).fetchone()
+        assert b"supersecret-access" not in (row[0] if isinstance(row[0], bytes) else row[0].encode())
+        assert b"supersecret-refresh" not in (row[1] if isinstance(row[1], bytes) else row[1].encode())
+
+    def test_get_returns_none_without_secret_key(self, tmp_path, secret_key):
+        # Write encrypted with the key, then read without it.
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(conn, "alice", "a", "r", "2025-01-01T00:00:00+00:00")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ISTOTA_SECRET_KEY", None)
+            with db.get_db(db_path) as conn:
+                assert db.get_google_token(conn, "alice") is None
+
+    def test_upsert_raises_without_secret_key(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ISTOTA_SECRET_KEY", None)
+            from istota.secrets_store import SecretKeyMissingError
+            with db.get_db(db_path) as conn, pytest.raises(SecretKeyMissingError):
+                db.upsert_google_token(conn, "alice", "a", "r", "2025-01-01T00:00:00+00:00")
+
+    def test_get_returns_none_on_decrypt_failure(self, tmp_path, secret_key):
+        # Simulate key rotation: write with key A, try to read with key B.
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(conn, "alice", "a", "r", "2025-01-01T00:00:00+00:00")
+        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "rotated-key" * 4}):
+            with db.get_db(db_path) as conn:
+                assert db.get_google_token(conn, "alice") is None
+
+
+class TestGoogleOAuthMigration:
+    def test_legacy_plaintext_rows_get_encrypted_on_init(self, tmp_path, secret_key):
+        # Build a legacy-shape row by writing plaintext directly past the API.
+        db_path = _init_db(tmp_path)
+        with sqlite3.connect(db_path) as raw:
+            raw.execute(
+                "INSERT INTO google_oauth_tokens "
+                "(user_id, access_token, refresh_token, token_expiry, scopes) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("alice", "plain-access", "plain-refresh", "2025-01-01T00:00:00+00:00", "[]"),
+            )
+
+        # Re-init runs migrations, which encrypts the row.
+        db.init_db(db_path)
+
+        with sqlite3.connect(db_path) as raw:
+            row = raw.execute(
+                "SELECT access_token, refresh_token FROM google_oauth_tokens WHERE user_id = ?",
+                ("alice",),
+            ).fetchone()
+        assert b"plain-access" not in (row[0] if isinstance(row[0], bytes) else row[0].encode())
+        assert b"plain-refresh" not in (row[1] if isinstance(row[1], bytes) else row[1].encode())
+
+        # And the read path still returns the original plaintext after decrypt.
+        with db.get_db(db_path) as conn:
+            token = db.get_google_token(conn, "alice")
+        assert token is not None
+        assert token["access_token"] == "plain-access"
+        assert token["refresh_token"] == "plain-refresh"
+
+    def test_migration_is_idempotent(self, tmp_path, secret_key):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(conn, "alice", "a", "r", "2025-01-01T00:00:00+00:00")
+        with sqlite3.connect(db_path) as raw:
+            ct_before = raw.execute(
+                "SELECT access_token FROM google_oauth_tokens WHERE user_id=?", ("alice",),
+            ).fetchone()[0]
+
+        # Re-running migrations should not re-encrypt (no double-encryption).
+        db.init_db(db_path)
+
+        with sqlite3.connect(db_path) as raw:
+            ct_after = raw.execute(
+                "SELECT access_token FROM google_oauth_tokens WHERE user_id=?", ("alice",),
+            ).fetchone()[0]
+        assert ct_after == ct_before
+        with db.get_db(db_path) as conn:
+            assert db.get_google_token(conn, "alice")["access_token"] == "a"
+
+    def test_migration_skipped_without_secret_key(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with sqlite3.connect(db_path) as raw:
+            raw.execute(
+                "INSERT INTO google_oauth_tokens "
+                "(user_id, access_token, refresh_token, token_expiry, scopes) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("alice", "plain", "plain-r", "2025-01-01T00:00:00+00:00", "[]"),
+            )
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ISTOTA_SECRET_KEY", None)
+            db.init_db(db_path)  # should not raise
+
+        # Row left as plaintext -- read path returns None (forces re-auth).
+        with sqlite3.connect(db_path) as raw:
+            row = raw.execute(
+                "SELECT access_token FROM google_oauth_tokens WHERE user_id=?", ("alice",),
+            ).fetchone()
+        assert row[0] in (b"plain", "plain")
 
 
 # ============================================================================
@@ -220,7 +343,7 @@ class TestSetupEnv:
         ctx = self._make_ctx(tmp_path)
         assert setup_env(ctx) == {}
 
-    def test_returns_token_when_valid(self, tmp_path):
+    def test_returns_token_when_valid(self, tmp_path, secret_key):
         from istota.skills.google_workspace import setup_env
         ctx = self._make_ctx(tmp_path)
         future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
@@ -230,7 +353,7 @@ class TestSetupEnv:
         assert result["GOOGLE_WORKSPACE_CLI_TOKEN"] == "valid-token"
         assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" in result
 
-    def test_refreshes_expired_token(self, tmp_path):
+    def test_refreshes_expired_token(self, tmp_path, secret_key):
         from istota.skills.google_workspace import setup_env
         ctx = self._make_ctx(tmp_path)
         past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
@@ -259,7 +382,7 @@ class TestSetupEnv:
             updated = db.get_google_token(conn, "alice")
         assert updated["access_token"] == "new-token"
 
-    def test_returns_empty_on_refresh_failure(self, tmp_path):
+    def test_returns_empty_on_refresh_failure(self, tmp_path, secret_key):
         from istota.skills.google_workspace import setup_env
         ctx = self._make_ctx(tmp_path)
         past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
