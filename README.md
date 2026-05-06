@@ -12,20 +12,17 @@ The Docker setup spins up a complete stack from scratch: Postgres, Redis, a fres
 
 ```bash
 cd docker
-cp .env.example .env
+bash init.sh
 ```
 
-Edit `.env` and set at minimum:
+`init.sh` is a one-shot bootstrap. It auto-generates passwords for the Nextcloud admin, Postgres, the bot account, and your user; auto-detects your timezone; and prompts for the two things it can't guess:
 
-- `CLAUDE_CODE_OAUTH_TOKEN` — generate one with `claude setup-token` (or set `ANTHROPIC_API_KEY` for direct API access)
-- `ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `BOT_PASSWORD`, `USER_PASSWORD` — pick something real
-- `USER_NAME` — your Nextcloud username
+- `CLAUDE_CODE_OAUTH_TOKEN` — run `claude setup-token` on a machine that has Claude Code installed and authenticated, paste the `sk-ant-…` value when asked. Leave empty to use `ANTHROPIC_API_KEY` instead (set it manually in the resulting `.env`).
+- `USER_NAME` / `USER_DISPLAY_NAME` — your Nextcloud login id and full name.
 
-Optional but recommended:
+The script writes `docker/.env` (mode 600) and prints the generated passwords once — copy them somewhere safe. Re-run with `--force` to regenerate.
 
-- `USER_DISPLAY_NAME` — your full name
-- `USER_TIMEZONE` — e.g. `America/New_York` (defaults to UTC)
-- `USER_EMAIL` — enables email-related features
+If you'd rather configure by hand, copy `.env.example` to `.env` and edit it directly. At minimum set `CLAUDE_CODE_OAUTH_TOKEN`, `ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `BOT_PASSWORD`, `USER_PASSWORD`, and `USER_NAME`. Optional but recommended: `USER_DISPLAY_NAME`, `USER_TIMEZONE`, `USER_EMAIL`.
 
 ### 2. Start
 
