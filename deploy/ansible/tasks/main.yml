@@ -787,7 +787,7 @@
 # user profiles.
 - name: Ensure user_profiles rows (Phase 6)
   command: >
-    {{ istota_home }}/.venv/bin/{{ istota_namespace }}
+    {{ istota_home }}/.venv/bin/{{ istota_package }}
     -c {{ istota_repo_dir }}/config/config.toml
     user ensure
     --name {{ user_id }}
@@ -858,7 +858,7 @@
 
 - name: Ensure user_resources rows (Phase 7a)
   command: >
-    {{ istota_home }}/.venv/bin/{{ istota_namespace }}
+    {{ istota_home }}/.venv/bin/{{ istota_package }}
     -c {{ istota_repo_dir }}/config/config.toml
     resource ensure
     --user {{ item.user }}
@@ -906,7 +906,7 @@
 
 - name: Ensure briefing_configs rows (Phase 7b)
   command: >
-    {{ istota_home }}/.venv/bin/{{ istota_namespace }}
+    {{ istota_home }}/.venv/bin/{{ istota_package }}
     -c {{ istota_repo_dir }}/config/config.toml
     briefing ensure
     --user {{ item.user }}
@@ -956,7 +956,7 @@
 - name: Ensure encrypted secret rows
   command:
     argv:
-      - "{{ istota_home }}/.venv/bin/{{ istota_namespace }}"
+      - "{{ istota_home }}/.venv/bin/{{ istota_package }}"
       - "-c"
       - "{{ istota_repo_dir }}/config/config.toml"
       - "secret"
