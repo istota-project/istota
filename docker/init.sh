@@ -9,9 +9,11 @@
 # stack lights up the same surface area as a "real" install.
 #
 # Usage:
-#   bash docker/init.sh             # full wizard
+#   bash docker/init.sh             # full wizard, then asks before bringing up the stack
 #   bash docker/init.sh --minimal   # skip optional sections (passwords + Claude + user only)
 #   bash docker/init.sh --force     # overwrite an existing .env without asking
+#   bash docker/init.sh --start     # bring the stack up unconditionally (skip the prompt)
+#   bash docker/init.sh --no-start  # only write .env; never run docker compose up
 
 set -euo pipefail
 
@@ -20,11 +22,14 @@ ENV_FILE="$SCRIPT_DIR/.env"
 EXAMPLE_FILE="$SCRIPT_DIR/.env.example"
 FORCE=false
 MINIMAL=false
+START_PROMPT="ask"   # ask | yes | no
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --force|-f)   FORCE=true; shift ;;
         --minimal|-m) MINIMAL=true; shift ;;
+        --start)      START_PROMPT="yes"; shift ;;
+        --no-start)   START_PROMPT="no";  shift ;;
         --help|-h)
             sed -n '2,/^$/s/^# \?//p' "$0"
             exit 0 ;;
@@ -393,7 +398,7 @@ chmod 600 "$ENV_FILE"
 trap - EXIT
 
 # --- summary ---
-section "Done"
+section "Configuration written"
 ok "Wrote $ENV_FILE (mode 600)"
 echo
 echo -e "  ${_BOLD}Generated credentials${_RESET} (also saved in $ENV_FILE):"
@@ -412,14 +417,116 @@ echo "    ntfy              :  $ISTOTA_NTFY_ENABLED"
 [ -n "$ISTOTA_DEVELOPER_GITLAB_USERNAME" ] && echo "    Developer GitLab  :  $ISTOTA_DEVELOPER_GITLAB_USERNAME"
 [ -n "$ISTOTA_DEVELOPER_GITHUB_USERNAME" ] && echo "    Developer GitHub  :  $ISTOTA_DEVELOPER_GITHUB_USERNAME"
 echo
+
 if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-    warn "No Claude Code token set. Edit $ENV_FILE and set"
-    warn "  CLAUDE_CODE_OAUTH_TOKEN=... or ANTHROPIC_API_KEY=... before bringing the stack up."
+    warn "No Claude Code token set. The stack will start, but the bot can't"
+    warn "  call the model until you set CLAUDE_CODE_OAUTH_TOKEN or"
+    warn "  ANTHROPIC_API_KEY in $ENV_FILE and 'docker compose restart istota'."
     echo
 fi
-echo -e "  ${_BOLD}Next steps:${_RESET}"
-echo "    cd $SCRIPT_DIR"
-echo "    docker compose up -d"
-echo
-dim "Tip: re-run with --minimal to skip optional sections, or edit $ENV_FILE directly."
-echo
+
+# --- decide whether to bring the stack up ---
+should_start=false
+if [ "$DOCKER_MISSING" = true ] || [ "$COMPOSE_MISSING" = true ]; then
+    warn "Docker / docker compose not available on this host — skipping startup."
+    warn "  Copy this directory to a host with Docker, then run 'docker compose up -d'."
+else
+    case "$START_PROMPT" in
+        yes) should_start=true ;;
+        no)  should_start=false ;;
+        ask)
+            echo
+            prompt_bool _start_now "Bring the stack up now (docker compose up -d --build)?" "y"
+            should_start="$_start_now"
+            ;;
+    esac
+fi
+
+# Build URLs from the .env we just wrote (NC_PORT may have come from the example).
+nc_port_raw="$(grep -E '^NC_PORT=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
+nc_port="${nc_port_raw:-8080}"
+public_proto="$(grep -E '^ISTOTA_PUBLIC_PROTO=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
+public_proto="${public_proto:-http}"
+
+# Localhost is always reachable when running on this host. The NC_PORT bind in
+# docker-compose.yml maps to nginx :80, which proxies both / (Nextcloud) and
+# /istota/ (web UI), so they share the host:port.
+local_base="http://localhost:${nc_port}"
+
+# Public URL (only meaningful when DOMAIN is set). DOMAIN may already include
+# :port; if not, assume the proxy in front terminates on the default port for
+# the proto. We don't try to second-guess that.
+public_base=""
+if [ -n "$DOMAIN" ]; then
+    case "$DOMAIN" in
+        *:*) public_base="${public_proto}://${DOMAIN}" ;;
+        *)   public_base="${public_proto}://${DOMAIN}" ;;
+    esac
+fi
+
+print_urls() {
+    echo
+    echo -e "  ${_BOLD}URLs (localhost — always works on this host):${_RESET}"
+    echo "    Nextcloud   :  ${local_base}/"
+    echo "    Istota web  :  ${local_base}/istota/"
+    if [ -n "$public_base" ]; then
+        echo
+        echo -e "  ${_BOLD}URLs (public — once DNS / your reverse proxy is in place):${_RESET}"
+        echo "    Nextcloud   :  ${public_base}/"
+        echo "    Istota web  :  ${public_base}/istota/"
+    fi
+}
+
+if [ "$should_start" = true ]; then
+    section "Starting the stack"
+    info "Running: docker compose up -d --build"
+    if ! (cd "$SCRIPT_DIR" && docker compose up -d --build); then
+        die "docker compose failed. Inspect the output above, then re-run 'docker compose up -d' from $SCRIPT_DIR."
+    fi
+    echo
+
+    # Poll Nextcloud's status endpoint via the localhost bind. First boot can
+    # take a minute or two while NC runs migrations and the istota entrypoint
+    # provisions Talk rooms + the OAuth2 client. Cap at 5 minutes — beyond
+    # that the user should look at the logs anyway.
+    info "Waiting for Nextcloud to come up (first boot can take a minute or two)..."
+    nc_status_url="${local_base}/status.php"
+    waited=0
+    nc_ready=false
+    while [ "$waited" -lt 300 ]; do
+        if curl -sf "$nc_status_url" 2>/dev/null | grep -q '"installed":true'; then
+            nc_ready=true
+            break
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    if [ "$nc_ready" = true ]; then
+        ok "Nextcloud is up at ${local_base}/"
+    else
+        warn "Nextcloud didn't respond at ${local_base}/ within 5 minutes."
+        warn "  Check logs with: docker compose -f $SCRIPT_DIR/docker-compose.yml logs nextcloud istota"
+    fi
+
+    section "Ready"
+    print_urls
+    echo
+    echo -e "  ${_BOLD}Log in:${_RESET}"
+    echo "    Open ${local_base}/ and sign in as ${USER_NAME} / ${USER_PASSWORD}"
+    echo "    Then visit ${local_base}/istota/ — sign in there with the same"
+    echo "    Nextcloud user (OAuth2 redirects through Nextcloud)."
+    echo
+    dim "Tail logs:    docker compose -f $SCRIPT_DIR/docker-compose.yml logs -f"
+    dim "Stop stack:   docker compose -f $SCRIPT_DIR/docker-compose.yml down"
+    echo
+else
+    section "Done"
+    echo -e "  ${_BOLD}Next steps:${_RESET}"
+    echo "    cd $SCRIPT_DIR"
+    echo "    docker compose up -d --build"
+    print_urls
+    echo
+    dim "Tip: re-run with --start to bring the stack up automatically, --no-start"
+    dim "to skip the prompt entirely, or --minimal for a shorter wizard."
+    echo
+fi
