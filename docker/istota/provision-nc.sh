@@ -74,6 +74,86 @@ mkdir -p "${USER_BASE}/shared"
 mkdir -p "${USER_BASE}/scripts"
 mkdir -p "${SHARED}/Channels"
 
+# --- OAuth2 client for the web UI ---
+# Stock NC's oauth2 app exposes only `ImportLegacyOcClient` via occ — there is
+# no `oauth2:add-client` / `:list-clients` / `:remove-client`. Admin UI is the
+# only documented path (Settings → Security → OAuth 2.0 clients).
+#
+# For unattended provisioning we replicate what SettingsController::addClient()
+# does: generate plaintext client_id and secret via NC's SecureRandom, hash the
+# secret with NC's ICrypto::calculateHMAC(), and INSERT into oauth2_clients via
+# the QueryBuilder. Using NC's own crypto API means the resulting row is
+# byte-identical to one created from the admin UI — no schema/encryption drift
+# across NC versions.
+
+OAUTH_CLIENT_NAME="istota-web"
+OAUTH_REDIRECT_URI="${ISTOTA_WEB_CALLBACK_URL:-http://localhost:8766/istota/callback}"
+OAUTH_CLIENT_ID=""
+OAUTH_CLIENT_SECRET=""
+
+echo "[istota-provision] Registering OAuth2 client '${OAUTH_CLIENT_NAME}' -> ${OAUTH_REDIRECT_URI}"
+
+OAUTH_OUT=$(OAUTH_NAME="$OAUTH_CLIENT_NAME" OAUTH_REDIRECT="$OAUTH_REDIRECT_URI" \
+    php <<'PHP' 2>&1 || true
+<?php
+$name = getenv('OAUTH_NAME');
+$redirect = getenv('OAUTH_REDIRECT');
+$_SERVER['HTTP_HOST'] = 'localhost';
+require '/var/www/html/lib/base.php';
+\OC_App::loadApp('oauth2');
+$crypto = \OC::$server->get(\OCP\Security\ICrypto::class);
+$random = \OC::$server->get(\OCP\Security\ISecureRandom::class);
+$db = \OC::$server->get(\OCP\IDBConnection::class);
+
+// Idempotency: any existing row with the same name is replaced. NC stores the
+// secret hashed, so we cannot recover the plaintext for an existing row —
+// delete and recreate. Reached only when /mnt/shared/.istota-provisioned is
+// missing, so this is not per-boot churn.
+$qb = $db->getQueryBuilder();
+$rows = $qb->select('id')->from('oauth2_clients')
+    ->where($qb->expr()->eq('name', $qb->createNamedParameter($name)))
+    ->executeQuery()->fetchAll();
+foreach ($rows as $row) {
+    $qb2 = $db->getQueryBuilder();
+    $qb2->delete('oauth2_clients')
+        ->where($qb2->expr()->eq('id', $qb2->createNamedParameter((int)$row['id'])))
+        ->executeStatement();
+    fwrite(STDERR, "[oauth2] Deleted stale client id=" . $row['id'] . "\n");
+}
+
+// Match SettingsController::addClient() exactly: 64 chars from the same alphabet,
+// HMAC-hashed secret stored hex-encoded.
+$validChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+$plain = $random->generate(64, $validChars);
+$hash = bin2hex($crypto->calculateHMAC($plain));
+$cid = $random->generate(64, $validChars);
+
+$qb = $db->getQueryBuilder();
+$qb->insert('oauth2_clients')->values([
+    'name' => $qb->createNamedParameter($name),
+    'redirect_uri' => $qb->createNamedParameter($redirect),
+    'client_identifier' => $qb->createNamedParameter($cid),
+    'secret' => $qb->createNamedParameter($hash),
+])->executeStatement();
+
+echo "OAUTH_CLIENT_ID=" . $cid . "\n";
+echo "OAUTH_CLIENT_SECRET=" . $plain . "\n";
+PHP
+)
+
+OAUTH_CLIENT_ID=$(printf '%s\n' "$OAUTH_OUT" | sed -n 's/^OAUTH_CLIENT_ID=\(.*\)$/\1/p' | head -1)
+OAUTH_CLIENT_SECRET=$(printf '%s\n' "$OAUTH_OUT" | sed -n 's/^OAUTH_CLIENT_SECRET=\(.*\)$/\1/p' | head -1)
+
+if [ -n "$OAUTH_CLIENT_ID" ] && [ -n "$OAUTH_CLIENT_SECRET" ]; then
+    echo "[istota-provision] OAuth2 client created (id=${OAUTH_CLIENT_ID})."
+else
+    echo "[istota-provision] Warning: OAuth2 client registration failed. Web UI auth will be unavailable."
+    echo "[istota-provision] PHP output was:"
+    printf '%s\n' "$OAUTH_OUT" | sed 's/^/[istota-provision]   /'
+    OAUTH_CLIENT_ID=""
+    OAUTH_CLIENT_SECRET=""
+fi
+
 # --- Write provisioning flag ---
 # API-based provisioning (Talk room, app password) happens in the istota container.
 
@@ -81,6 +161,9 @@ cat > "$PROVISION_FLAG" <<ENDOFFILE
 # Istota provisioning results
 USER_NAME=${USER_NAME}
 BOT_USER=${BOT_USER}
+OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}
+OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+OAUTH_REDIRECT_URI=${OAUTH_REDIRECT_URI}
 ENDOFFILE
 
 chmod 644 "$PROVISION_FLAG"

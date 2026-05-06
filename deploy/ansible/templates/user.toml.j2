@@ -48,15 +48,6 @@ name = "{{ resource.name | default('Monarch Money') }}"
 session_token = "{{ resource.session_token }}"
 
 {% endif %}
-{% elif resource.type == 'miniflux' %}
-{% if resource.base_url is defined and resource.api_key is defined %}
-[[resources]]
-type = "miniflux"
-name = "{{ resource.name | default('Miniflux') }}"
-base_url = "{{ resource.base_url }}"
-api_key = "{{ resource.api_key }}"
-
-{% endif %}
 {% elif resource.type == 'feeds' %}
 [[resources]]
 type = "feeds"

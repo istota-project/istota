@@ -1,7 +1,7 @@
 ---
 name: feeds
 triggers: [feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe, opml]
-description: Native RSS/Atom/Tumblr/Are.na feed manager (in-tree, no Miniflux)
+description: Native RSS/Atom/Tumblr/Are.na feed manager (in-tree)
 cli: true
 resource_types: [feeds]
 companion_skills: [untrusted_input]

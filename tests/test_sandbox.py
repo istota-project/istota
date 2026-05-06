@@ -631,34 +631,6 @@ class TestBuildNetworkAllowlist:
         hosts = _build_network_allowlist(config, ["developer"])
         assert "gitlab.example.com:8443" in hosts
 
-    def test_miniflux_host_scoped_to_user(self):
-        """Miniflux host comes from user_config, not all users."""
-        alice_uc = UserConfig(resources=[
-            ResourceConfig(type="miniflux", base_url="https://feeds.alice.example.com", api_key="k"),
-        ])
-        bob_uc = UserConfig(resources=[
-            ResourceConfig(type="miniflux", base_url="https://feeds.bob.example.com", api_key="k"),
-        ])
-        config = Config(
-            security=SecurityConfig(network=NetworkConfig()),
-            users={"alice": alice_uc, "bob": bob_uc},
-        )
-        hosts = _build_network_allowlist(config, ["feeds"], user_config=alice_uc)
-        assert "feeds.alice.example.com:443" in hosts
-        assert "feeds.bob.example.com:443" not in hosts
-
-    def test_no_user_config_excludes_resource_hosts(self):
-        """When user_config is None, no resource hosts are added."""
-        config = Config(
-            security=SecurityConfig(network=NetworkConfig()),
-            users={"alice": UserConfig(resources=[
-                ResourceConfig(type="miniflux", base_url="https://feeds.example.com", api_key="k"),
-            ])},
-        )
-        hosts = _build_network_allowlist(config, ["feeds"], user_config=None)
-        assert "feeds.example.com:443" not in hosts
-
-
 class TestNetworkConfigParsing:
     def test_defaults(self):
         nc = NetworkConfig()

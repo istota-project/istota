@@ -281,12 +281,32 @@ class LocationReceiverConfig:
 
 @dataclass
 class WebConfig:
-    """Authenticated web interface configuration (Nextcloud OIDC)."""
+    """Authenticated web interface configuration.
+
+    Two auth modes are supported, OAuth2 wins when both are configured:
+    - `oauth2_*`: NC's built-in OAuth2 provider (no extra apps required).
+      Auth-only flow: code exchange → identity check via OCS → discard token.
+    - `oidc_*`: third-party OIDC provider (legacy / external IDPs).
+    """
     enabled: bool = False
     port: int = 8766
+    # OIDC (legacy / external IDPs)
     oidc_issuer: str = ""
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
+    # OAuth2 auth-only (NC built-in provider).
+    # `oauth2_provider` is the user-facing NC URL — what the browser hits to
+    # authorize. `oauth2_token_endpoint` and `oauth2_userinfo_endpoint` are
+    # server-to-server; in Docker they typically point at the internal
+    # service URL while `oauth2_provider` points at the host-mapped URL.
+    # Empty endpoint overrides default to derivations from `oauth2_provider`.
+    oauth2_provider: str = ""
+    oauth2_client_id: str = ""
+    oauth2_client_secret: str = ""
+    oauth2_token_endpoint: str = ""
+    oauth2_userinfo_endpoint: str = ""
+    oauth2_redirect_uri: str = ""       # explicit override; otherwise derived from request
+    token_storage: str = "ephemeral"    # self-documenting; only "ephemeral" supported today
     session_secret_key: str = ""
 
 
@@ -345,18 +365,6 @@ class MoneymanConfig:
 
 
 @dataclass
-class FeedsConfig:
-    """Selects the feeds backend served at ``/istota/api/feeds``.
-
-    ``"miniflux"`` keeps the legacy proxy in ``web_app.py`` (HTTP to a Miniflux
-    instance from the user's resource config). ``"native"`` mounts
-    :mod:`istota.feeds.routes`, which reads the per-user workspace SQLite
-    populated by the native poller.
-    """
-    backend: str = "miniflux"
-
-
-@dataclass
 class SkillsConfig:
     """Skill routing configuration."""
     semantic_routing: bool = True  # enable LLM-based Pass 2 skill classification
@@ -411,7 +419,6 @@ class Config:
     site: SiteConfig = field(default_factory=SiteConfig)
     location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
     moneyman: MoneymanConfig = field(default_factory=MoneymanConfig)
-    feeds: FeedsConfig = field(default_factory=FeedsConfig)
     google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
     web: WebConfig = field(default_factory=WebConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
@@ -640,7 +647,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
 
 
 # Resource types that contain credentials and must only come from TOML (Ansible-managed).
-_CREDENTIAL_RESOURCE_TYPES = frozenset({"karakeep", "miniflux", "monarch", "moneyman"})
+_CREDENTIAL_RESOURCE_TYPES = frozenset({"karakeep", "monarch", "moneyman"})
 
 
 def _merge_user_configs(
@@ -1041,15 +1048,6 @@ def load_config(config_path: Path | None = None) -> Config:
             api_key=mm.get("api_key", ""),
         )
 
-    if "feeds" in data:
-        fd = data["feeds"]
-        backend = fd.get("backend", "miniflux")
-        if backend not in ("miniflux", "native"):
-            raise ValueError(
-                f"[feeds] backend must be 'miniflux' or 'native', got {backend!r}"
-            )
-        config.feeds = FeedsConfig(backend=backend)
-
     if "google_workspace" in data:
         gw = data["google_workspace"]
         config.google_workspace = GoogleWorkspaceConfig(
@@ -1067,6 +1065,13 @@ def load_config(config_path: Path | None = None) -> Config:
             oidc_issuer=w.get("oidc_issuer", ""),
             oidc_client_id=w.get("oidc_client_id", ""),
             oidc_client_secret=w.get("oidc_client_secret", ""),
+            oauth2_provider=w.get("oauth2_provider", ""),
+            oauth2_client_id=w.get("oauth2_client_id", ""),
+            oauth2_client_secret=w.get("oauth2_client_secret", ""),
+            oauth2_token_endpoint=w.get("oauth2_token_endpoint", ""),
+            oauth2_userinfo_endpoint=w.get("oauth2_userinfo_endpoint", ""),
+            oauth2_redirect_uri=w.get("oauth2_redirect_uri", ""),
+            token_storage=w.get("token_storage", "ephemeral"),
             session_secret_key=w.get("session_secret_key", ""),
         )
 
@@ -1125,6 +1130,7 @@ def load_config(config_path: Path | None = None) -> Config:
         ("ISTOTA_NTFY_PASSWORD", "ntfy", "password"),
         ("ISTOTA_GOOGLE_CLIENT_SECRET", "google_workspace", "client_secret"),
         ("ISTOTA_OIDC_CLIENT_SECRET", "web", "oidc_client_secret"),
+        ("ISTOTA_OAUTH2_CLIENT_SECRET", "web", "oauth2_client_secret"),
         ("ISTOTA_WEB_SECRET_KEY", "web", "session_secret_key"),
     ]
     for env_var, section, field_name in _env_secret_overrides:

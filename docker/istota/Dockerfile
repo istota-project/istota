@@ -1,3 +1,19 @@
+# --- Frontend build stage ---
+# SvelteKit static build for the web UI. The output (web/build) is copied into
+# the runtime image so the web service can mount it without `npm install` at
+# container start.
+FROM node:20-slim AS web-builder
+
+WORKDIR /app/web
+
+# Copy lock first for cache-friendly dependency install.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
+# --- Runtime stage ---
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1
@@ -33,6 +49,9 @@ COPY config/ config/
 
 # Install all deps (core + all optional extras)
 RUN uv sync --frozen --no-dev --extra all
+
+# SvelteKit static build (from web-builder stage)
+COPY --from=web-builder /app/web/build /app/web/build
 
 # Data directories (persistent via volume)
 RUN mkdir -p /data/db /data/config /data/tmp

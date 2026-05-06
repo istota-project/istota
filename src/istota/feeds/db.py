@@ -383,7 +383,7 @@ def list_entries(
     order: str = "published_at",
     direction: str = "desc",
 ) -> list[EntryRecord]:
-    """Page through entries. Mirrors Miniflux's ``/v1/entries`` knobs."""
+    """Page through entries."""
     clauses: list[str] = []
     params: list = []
     if status:
@@ -405,8 +405,8 @@ def list_entries(
         "starred_at": "e.starred_at",
     }.get(order, "e.published_at")
     if before_published_ts is not None:
-        # Miniflux semantics: strictly less than. Cursor operates on the same
-        # column as `order` so pagination stays stable across sort modes.
+        # Strictly less than: cursor operates on the same column as `order`
+        # so pagination stays stable across sort modes.
         cutoff = datetime.fromtimestamp(before_published_ts, tz=timezone.utc).isoformat()
         clauses.append(f"{order_col} < ?")
         params.append(cutoff)

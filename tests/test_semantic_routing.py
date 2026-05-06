@@ -167,9 +167,9 @@ class TestBuildSkillManifest:
         index = self._make_index()
         manifest = build_skill_manifest(
             index, exclude=set(),
-            user_resource_types={"miniflux", "karakeep"},
+            user_resource_types={"feeds", "karakeep"},
         )
-        assert manifest.startswith("User has resources: karakeep, miniflux")
+        assert manifest.startswith("User has resources: feeds, karakeep")
 
     def test_user_resources_omitted_when_empty(self):
         """Without user_resource_types the original header is unchanged."""
@@ -181,15 +181,15 @@ class TestBuildSkillManifest:
     def test_resource_hint_in_skill_line(self):
         """Skills with resource_types show a `[needs resource: …]` hint."""
         index = {
-            "feeds": SkillMeta(
-                name="feeds",
-                description="RSS feeds",
-                keywords=["feed"],
-                resource_types=["miniflux"],
+            "bookmarks": SkillMeta(
+                name="bookmarks",
+                description="Karakeep bookmarks",
+                keywords=["bookmark"],
+                resource_types=["karakeep"],
             ),
         }
         manifest = build_skill_manifest(index, exclude=set())
-        assert "[needs resource: miniflux]" in manifest
+        assert "[needs resource: karakeep]" in manifest
 
 
 class TestClassifySkills:

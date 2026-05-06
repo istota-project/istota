@@ -43,7 +43,7 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
     2. The user's ``[[resources]] type = "money"`` entry in the istota config
        — credentials are colocated with the resource as ``monarch_session_token``
        / ``monarch_email`` / ``monarch_password``, the same pattern used by
-       karakeep / miniflux / overland.
+       karakeep / overland.
 
     Returns ``{}`` if no credentials are configured — sync commands that
     require them will surface their own error.

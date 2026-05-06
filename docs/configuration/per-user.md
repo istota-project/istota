@@ -48,9 +48,9 @@ path = "/Users/alice/shared/Notes/_REMINDERS.md"
 name = "Reminders"
 
 [[resources]]
-type = "miniflux"
+type = "feeds"
 name = "Feeds"
-extra = { base_url = "https://rss.example.com", api_key = "..." }
+extra = { tumblr_api_key = "..." }   # optional; TUMBLR_API_KEY env is the fallback
 
 [[resources]]
 type = "moneyman"
@@ -63,7 +63,7 @@ name = "GPS"
 extra = { ingest_token = "secret", default_radius = 100 }
 ```
 
-Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`, `ledger`, `karakeep`, `monarch`, `miniflux`, `moneyman`, `overland`.
+Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`, `ledger`, `karakeep`, `monarch`, `feeds`, `money`, `overland`.
 
 CalDAV calendars are auto-discovered from Nextcloud and don't need to be configured as resources.
 

@@ -1,17 +1,13 @@
-"""OPML import/export — also serves as the Miniflux migration tool.
+"""OPML import/export.
 
-OPML 2.0 is the lingua franca for feed reader exports. Miniflux exports
-this format directly. The importer here understands two variants of feed
-URL:
+OPML 2.0 is the lingua franca for feed reader exports. The importer here
+understands two variants of feed URL:
 
 1. Plain RSS/Atom URLs — stored as ``source_type = 'rss'``.
-2. Bridger-proxy URLs (``http://127.0.0.1:8900/{provider}/{id}/feed.xml``)
+2. Legacy bridger-proxy URLs (``http://127.0.0.1:8900/{provider}/{id}/feed.xml``)
    — rewritten to ``{provider}:{id}`` and stored as ``source_type =
    'tumblr'`` or ``'arena'`` so the native poller dispatches to its own
-   provider modules.
-
-Bridger-URL rewriting means the same feeds.toml works on stefan's machine,
-on a fresh deploy, and after the bridger VM is decommissioned.
+   provider modules. Lets old exports import cleanly.
 """
 
 from __future__ import annotations
@@ -143,8 +139,7 @@ def export_opml(ctx: FeedsContext) -> str:
 
     Categories become top-level outlines; feeds nest under their category.
     Feeds whose URL uses the ``tumblr:`` / ``arena:`` scheme are exported
-    in that bare form — re-importing into Miniflux requires running them
-    back through a bridger; re-importing into istota round-trips fine.
+    in that bare form; re-importing into istota round-trips fine.
     """
     feeds_db.init_db(ctx.db_path)
     with feeds_db.connect(ctx.db_path) as conn:

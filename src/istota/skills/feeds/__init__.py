@@ -3,7 +3,7 @@
 Resolves the user's :class:`FeedsContext` via
 :func:`istota.feeds.resolve_for_user` and invokes
 :mod:`istota.feeds.cli` through Click's ``CliRunner``. No subprocess,
-no HTTP, no Miniflux. Mirrors :mod:`istota.skills.money`.
+no HTTP. Mirrors :mod:`istota.skills.money`.
 """
 
 import argparse
@@ -203,7 +203,7 @@ def build_parser():
     p_run = sub.add_parser("run-scheduled", help="Periodic poll entry point used by the scheduler")
     p_run.add_argument("--limit", type=int)
 
-    p_imp = sub.add_parser("import-opml", help="Import an OPML file (Miniflux export, etc.)")
+    p_imp = sub.add_parser("import-opml", help="Import an OPML file")
     p_imp.add_argument("path", help="Path to OPML file")
     p_imp.add_argument("--no-write-config", action="store_true",
                        help="Don't regenerate feeds.toml from the imported DB rows")

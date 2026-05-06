@@ -1,15 +1,11 @@
 """Tumblr API v2 provider.
 
-Vendored from ``rss-bridger/src/rss_bridger/providers/tumblr.py`` and
-adapted to emit :class:`FetchedItem` directly (instead of the bridger's
-``FeedItem``). The bridger's job — wrap this output in Atom XML so Miniflux
-could subscribe — is no longer needed; the native poller stores these
-items straight into SQLite.
+Emits :class:`FetchedItem` straight into the native poller; no Atom XML
+intermediate.
 
 Uses ``requests`` rather than ``httpx`` because Tumblr's API edge
 disconnects httpx clients without sending a response (likely a TLS / JA3
-fingerprint difference). curl, urllib, and requests all work fine. The
-upstream rss-bridger made the same choice for the same reason.
+fingerprint difference). curl, urllib, and requests all work fine.
 """
 
 from __future__ import annotations

@@ -74,7 +74,7 @@ After execution, the resolved skill set is persisted via `db.save_task_selected_
 **Pre-transcription**: before skill selection, `_pre_transcribe_attachments()` (`executor.py:225`) transcribes audio attachments and enriches `task.prompt` with the spoken text so keyword rules match voice memos.
 
 **Pass 2: Semantic routing** (`classify_skills`) — LLM-based, additive to Pass 1.
-When `config.skills.semantic_routing` is enabled (default: true), a Haiku call sees the task prompt + a manifest of unselected skills (filtered for admin_only/disabled/deps) plus the user's resource types (so it can reason "user has miniflux → feeds is plausible"), and returns additional skill names. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only.
+When `config.skills.semantic_routing` is enabled (default: true), a Haiku call sees the task prompt + a manifest of unselected skills (filtered for admin_only/disabled/deps) plus the user's resource types (so it can reason "user has karakeep → bookmarks is plausible"), and returns additional skill names. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only.
 
 After the union, the executor (`executor.py:1815-1823`) re-applies `exclude_skills` because newly added skills may exclude previously-selected ones.
 
@@ -196,7 +196,7 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 ### `feeds/` - Native RSS / Atom / Tumblr / Are.na (in-process)
 **Subcommands**: `list`, `categories`, `entries`, `add`, `remove`, `refresh`, `poll`, `run-scheduled`, `import-opml`, `export-opml`, `star`, `starred`, `mark-read`
 **Env vars**: `FEEDS_USER` (set by executor); `TUMBLR_API_KEY` optional fallback
-**Note**: In-process facade — resolves the user's `FeedsContext` via `istota.feeds.resolve_for_user` and invokes `istota.feeds.cli` through `CliRunner`. No subprocess, no Miniflux. Per-user SQLite at `{workspace}/feeds/data/feeds.db`; subscriptions in `feeds.toml`. Scheduler auto-seeds `_module.feeds.run_scheduled` (`*/15 * * * *`) for users with a `[[resources]] type = "feeds"` entry.
+**Note**: In-process facade — resolves the user's `FeedsContext` via `istota.feeds.resolve_for_user` and invokes `istota.feeds.cli` through `CliRunner`. No subprocess, no HTTP. Per-user SQLite at `{workspace}/feeds/data/feeds.db`; subscriptions in `feeds.toml`. Scheduler auto-seeds `_module.feeds.run_scheduled` (`*/15 * * * *`) for users with a `[[resources]] type = "feeds"` entry.
 
 ### `google_workspace/` - Google Workspace CLI Passthrough
 **Subcommands**: Passes all arguments through to `gws` binary (Drive, Gmail, Calendar, Sheets, Docs, Chat)
@@ -215,9 +215,6 @@ The feeds and money skill facades (`src/istota/skills/feeds/__init__.py`, `src/i
 ### Library-Only Modules (no CLI)
 - `files/` - Nextcloud file ops (mount-aware, rclone fallback)
 - `markets/finviz.py` - FinViz scraping for market data (internal helper for `markets`)
-
-### Top-Level Library Modules (outside skills/)
-- `feeds/_miniflux.py` — Legacy Miniflux briefing client (HTML feed page generation). Kept until the `[feeds] backend` flag in Phase 3+ retires the proxy path.
 
 ## How to Add a New Skill
 

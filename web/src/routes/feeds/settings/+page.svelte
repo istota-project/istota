@@ -88,7 +88,8 @@
 		}
 	}
 
-	function detectSourceType(url: string): string {
+	function detectSourceType(url: string | undefined | null): string {
+		if (!url) return '?';
 		const u = url.trim().toLowerCase();
 		if (u.startsWith('tumblr:')) return 'tumblr';
 		if (u.startsWith('arena:')) return 'arena';
@@ -458,8 +459,7 @@
 			</header>
 			{#if config.feeds.length === 0}
 				<p class="empty">
-					No subscriptions yet. Add one above, or import an OPML file from
-					Miniflux.
+					No subscriptions yet. Add one above, or import an OPML file.
 				</p>
 			{:else}
 				<div class="table-scroll">
@@ -528,8 +528,8 @@
 		<section class="card">
 			<h2>OPML</h2>
 			<p class="hint">
-				Import subscriptions from a Miniflux export, or download the current
-				list as OPML. Bridger URLs (<code>localhost:8900/tumblr/…</code>,
+				Import subscriptions from an OPML export, or download the current
+				list as OPML. Legacy bridger URLs (<code>localhost:8900/tumblr/…</code>,
 				<code>localhost:8900/arena/…</code>) are rewritten to <code>tumblr:</code>
 				/ <code>arena:</code> on import.
 			</p>

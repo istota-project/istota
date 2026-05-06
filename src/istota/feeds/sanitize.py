@@ -1,8 +1,8 @@
 """HTML sanitization for feed entry content.
 
-Miniflux did this for us before. Prefer ``bleach`` when available; fall
-back to a minimal regex-based stripper so the module imports without the
-extra dep installed (the ``feeds`` extra pulls bleach in).
+Prefer ``bleach`` when available; fall back to a minimal regex-based
+stripper so the module imports without the extra dep installed (the
+``feeds`` extra pulls bleach in).
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ except ImportError:
     _HAS_BLEACH = False
 
 
-# Tags safe to keep in feed content. Mirrors Miniflux's default policy
-# closely; tightening over time is fine, but loosening warrants a review.
+# Tags safe to keep in feed content. Tightening over time is fine, but
+# loosening warrants a review.
 ALLOWED_TAGS = [
     "a", "abbr", "b", "blockquote", "br", "caption", "cite", "code",
     "dd", "del", "details", "div", "dl", "dt", "em", "figcaption",

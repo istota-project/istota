@@ -2999,6 +2999,24 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
                 logger.info(
                     "Seeded module job '%s' for user %s", name, user_id,
                 )
+                # First-time seed: queue an immediate one-shot poll so newly
+                # provisioned users see their seeded subscriptions populate
+                # without waiting up to 5 minutes for the first cron tick.
+                if name == f"{MODULE_PREFIX}run_scheduled":
+                    task_id = db.create_task(
+                        conn,
+                        prompt="",
+                        user_id=user_id,
+                        source_type="scheduled",
+                        priority=5,
+                        skip_log_channel=True,
+                        command=j["command"],
+                        queue="background",
+                    )
+                    logger.info(
+                        "Queued initial feeds poll for user %s as task %d",
+                        user_id, task_id,
+                    )
             else:
                 drift = (
                     row[2] != j["cron"]

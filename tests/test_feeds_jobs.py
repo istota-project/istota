@@ -174,6 +174,42 @@ class TestSyncFeedsModuleJobs:
         assert row[0] == 1
         assert row[1] == original_last_run
 
+    def test_first_seed_queues_immediate_poll_task(self, tmp_path):
+        # Newly provisioned users shouldn't have to wait up to 5 minutes for
+        # the first cron tick — first seed enqueues a one-shot command task.
+        app_config = _make_app_config(
+            tmp_path,
+            {"alice": [ResourceConfig(type="feeds")]},
+        )
+        conn = _conn(tmp_path)
+        _sync_feeds_module_jobs(conn, app_config)
+        rows = conn.execute(
+            "SELECT command, queue, source_type, skip_log_channel "
+            "FROM tasks WHERE user_id = ?",
+            ("alice",),
+        ).fetchall()
+        assert len(rows) == 1
+        assert "istota-skill feeds run-scheduled" in rows[0][0]
+        assert rows[0][1] == "background"
+        assert rows[0][2] == "scheduled"
+        assert rows[0][3] == 1
+
+    def test_resync_does_not_requeue_immediate_poll(self, tmp_path):
+        # Subsequent restarts must not flood the queue — the immediate-poll
+        # task is a one-time hook, only fired when the job row is absent.
+        app_config = _make_app_config(
+            tmp_path,
+            {"alice": [ResourceConfig(type="feeds")]},
+        )
+        conn = _conn(tmp_path)
+        _sync_feeds_module_jobs(conn, app_config)
+        _sync_feeds_module_jobs(conn, app_config)
+        _sync_feeds_module_jobs(conn, app_config)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE user_id = ?", ("alice",),
+        ).fetchone()[0]
+        assert count == 1
+
     def test_updates_when_command_changes(self, tmp_path):
         app_config = _make_app_config(
             tmp_path,

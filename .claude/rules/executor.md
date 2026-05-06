@@ -90,8 +90,8 @@ def build_prompt(
 | Email | `IMAP_HOST/PORT/USER/PASSWORD` | `config.email.*` |
 | Karakeep | `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY` | From resource config `extra` |
 | Monarch | `MONARCH_SESSION_TOKEN` | From resource config `extra` |
-| Miniflux | `MINIFLUX_BASE_URL`, `MINIFLUX_API_KEY` | From resource config (type=miniflux) |
 | Money | `MONEY_CONFIG`, `MONEY_USER` | From the user's `money` resource (in-process; `MONEY_USER` defaults to istota user_id) |
+| Feeds | `FEEDS_USER` | From the user's `feeds` resource (in-process; defaults to istota user_id) |
 | Website | `WEBSITE_PATH`, `WEBSITE_URL` | `config.site.*` (if enabled + user site_enabled) |
 | Developer | `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` (if enabled) |
 | Developer | `GITLAB_URL` | `config.developer.gitlab_url` (if enabled) |
@@ -164,7 +164,7 @@ brain-agnostic `(result_text, execution_trace)` pair. Two modes:
 | `build_clean_env(config)` | Minimal env for Claude subprocess (PATH, HOME, PYTHONUNBUFFERED + passthrough vars) |
 | `build_stripped_env()` | os.environ minus credential vars (PASSWORD/TOKEN/SECRET/API_KEY/NC_PASS/PRIVATE_KEY/APP_PASSWORD). For heartbeat/cron commands. Always-on. |
 | `build_allowed_tools(is_admin, skill_names)` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash"]`. All Bash allowed — clean env is the boundary. |
-| `_PROXY_CREDENTIAL_VARS` | Frozenset of specific env vars stripped when proxy enabled (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, MINIFLUX_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, MONARCH_SESSION_TOKEN, GOOGLE_WORKSPACE_CLI_TOKEN) |
+| `_PROXY_CREDENTIAL_VARS` | Frozenset of specific env vars stripped when proxy enabled (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, MONARCH_SESSION_TOKEN, GOOGLE_WORKSPACE_CLI_TOKEN) |
 | `_CREDENTIAL_SKILL_MAP` | Maps each credential env var to the set of skills that need it (scopes proxy responses) |
 | `_authorized_skills_from_credentials(skill_index, credential_env)` | Returns CLI skills authorized for credential access this task — any skill is authorized if at least one of its mapped credentials is present in `credential_env`. Decoupled from skill selection: a keyword miss in Pass 1 / Pass 2 doesn't lock out a skill the user has clearly configured. Threat model is unchanged because `credential_env` only contains creds the user's resources / instance config supplied. |
 
