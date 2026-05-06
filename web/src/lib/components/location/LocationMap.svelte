@@ -13,6 +13,7 @@
 		clusters?: DiscoveredCluster[];
 		dismissedClusters?: DismissedCluster[];
 		currentPosition?: { lat: number; lon: number } | null;
+		currentSource?: 'tracker' | 'browser';
 		showPath?: boolean;
 		showHeat?: boolean;
 		activeActivityTypes?: Set<string> | null;
@@ -32,6 +33,7 @@
 		clusters = [],
 		dismissedClusters = [],
 		currentPosition = null,
+		currentSource = 'tracker',
 		showPath = true,
 		showHeat = false,
 		activeActivityTypes = null,
@@ -781,6 +783,7 @@
 
 		const el = document.createElement('div');
 		el.className = 'current-position-marker';
+		if (currentSource === 'browser') el.classList.add('browser');
 		currentMarker = new maplibregl.Marker({ element: el })
 			.setLngLat([currentPosition.lon, currentPosition.lat])
 			.addTo(map);
@@ -872,6 +875,7 @@
 
 	$effect(() => {
 		currentPosition;
+		currentSource;
 		updateCurrentMarker();
 	});
 
@@ -922,6 +926,18 @@
 	@keyframes pulse {
 		0% { box-shadow: 0 0 0 0 rgba(74, 255, 127, 0.5); }
 		100% { box-shadow: 0 0 0 12px rgba(74, 255, 127, 0); }
+	}
+
+	/* Browser-geolocation fallback marker — orange to differentiate from tracker pings */
+	:global(.current-position-marker.browser) {
+		background: #ff9800;
+		box-shadow: 0 0 0 0 rgba(255, 152, 0, 0.4);
+		animation: pulse-browser 2s ease-out infinite;
+	}
+
+	@keyframes pulse-browser {
+		0% { box-shadow: 0 0 0 0 rgba(255, 152, 0, 0.5); }
+		100% { box-shadow: 0 0 0 12px rgba(255, 152, 0, 0); }
 	}
 
 	/* Draggable place marker */
