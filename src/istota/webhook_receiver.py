@@ -50,16 +50,16 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-def _get_overland_resource(user_config):
-    """Find the first overland resource for a user config."""
-    for rc in user_config.resources:
-        if rc.type == "overland" and rc.extra.get("ingest_token"):
-            return rc
-    return None
-
-
 def reload_config() -> None:
-    """Reload config, token map, and places cache."""
+    """Reload config, token map, and places cache.
+
+    Tokens come from the encrypted ``secrets`` table per user; the location
+    module gate decides which users get scanned. Users without an ingest
+    token (or with the location module disabled) simply don't appear in the
+    token map and their requests fall through to the 403 path.
+    """
+    from . import secrets_store  # noqa: PLC0415
+
     global _config, _token_map, _places_cache
     _config = load_config()
     with _lock:
@@ -67,10 +67,14 @@ def reload_config() -> None:
         places_cache = {}
         conn = _get_conn()
         try:
-            for user_id, uc in _config.users.items():
-                rc = _get_overland_resource(uc)
-                if rc:
-                    token_map[rc.extra["ingest_token"]] = user_id
+            for user_id in _config.users:
+                if not _config.is_module_enabled(user_id, "location"):
+                    continue
+                tok = secrets_store.get_secret(
+                    _config.db_path, user_id, "overland", "ingest_token",
+                )
+                if tok:
+                    token_map[tok] = user_id
                     places_cache[user_id] = db.get_places(conn, user_id)
         finally:
             conn.close()

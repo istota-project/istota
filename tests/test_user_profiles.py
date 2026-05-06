@@ -51,11 +51,13 @@ class TestUpdate:
             email_addresses=["a@x.com", "b@x.com"],
             trusted_email_senders=["*@trusted.org"],
             disabled_skills=["bookmarks"],
+            disabled_modules=["feeds"],
         )
         p = user_profiles.get_profile(db_path, "alice")
         assert p.email_addresses == ["a@x.com", "b@x.com"]
         assert p.trusted_email_senders == ["*@trusted.org"]
         assert p.disabled_skills == ["bookmarks"]
+        assert p.disabled_modules == ["feeds"]
 
     def test_update_unknown_field_raises(self, db_path):
         user_profiles.ensure_profile(db_path, "alice")

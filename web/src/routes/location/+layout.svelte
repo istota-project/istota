@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { base } from '$app/paths';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import {
@@ -30,7 +31,9 @@
 		SidebarToggle,
 		CategoryGroup,
 		NavLink,
+		Chip,
 	} from '$lib/components/ui';
+	import { Cog } from 'lucide-svelte';
 
 	let { children } = $props();
 
@@ -64,6 +67,15 @@
 	function isExactActive(path: string): boolean {
 		const current = page.url.pathname;
 		return current === `${base}${path}` || current === `${base}${path}/`;
+	}
+
+	const onSettings = $derived(
+		page.url.pathname.startsWith(`${base}/location/settings`),
+	);
+
+	function toggleSettings() {
+		if (onSettings) goto(`${base}/location`);
+		else goto(`${base}/location/settings`);
 	}
 
 	function startPicking() {
@@ -251,6 +263,9 @@
 					count={places.length}
 					onclick={() => (sidebarOpen = !sidebarOpen)}
 				/>
+				<Chip icon checked={onSettings} onclick={toggleSettings} title="Location settings">
+					<Cog size={14} />
+				</Chip>
 			{/snippet}
 		</ShellHeader>
 	{/snippet}

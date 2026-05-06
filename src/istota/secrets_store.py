@@ -203,10 +203,18 @@ def get_secret(db_path: Path, user_id: str, service: str, key: str) -> str | Non
             )
             return None
 
-        conn.execute(
-            "UPDATE secrets SET last_accessed_at = datetime('now') WHERE id = ?",
-            (secret_id,),
-        )
+        # Bumping last_accessed_at is observability, not correctness — if
+        # another writer holds the lock (e.g. a long-lived in-task
+        # transaction), don't stall the read on it. Drop busy_timeout to
+        # 100ms for this UPDATE so we fail fast and skip the bump.
+        try:
+            conn.execute("PRAGMA busy_timeout = 100")
+            conn.execute(
+                "UPDATE secrets SET last_accessed_at = datetime('now') WHERE id = ?",
+                (secret_id,),
+            )
+        except sqlite3.OperationalError as e:
+            logger.debug("skipped last_accessed_at update (locked?): %s", e)
         return plaintext
 
 
@@ -310,11 +318,21 @@ _IMPORT_MAP: dict[str, tuple[str, list[tuple[str, str]]]] = {
         ("extra:email", "email"),
         ("extra:password", "password"),
     ]),
-    # karakeep.base_url stays in TOML — it's a service URL, not a credential.
-    # Encrypting an endpoint adds no security but does mean URL typos require
-    # the same "delete from encrypted store" flow as a compromised key.
+    # base_url moves into the secrets table alongside api_key as part of
+    # the modules/connected-services refactor — once the bookmarks resource
+    # type is dropped, the secrets table is the only place these values live.
     "karakeep": ("karakeep", [
+        ("base_url", "base_url"),
         ("api_key", "api_key"),
+    ]),
+    "feeds": ("feeds", [
+        ("extra:tumblr_api_key", "tumblr_api_key"),
+    ]),
+    # Overland ingest token: per-user webhook auth for Overland GPS uploads.
+    # The webhook receiver scans the secrets table at startup to build its
+    # token → user_id map.
+    "overland": ("overland", [
+        ("extra:ingest_token", "ingest_token"),
     ]),
 }
 

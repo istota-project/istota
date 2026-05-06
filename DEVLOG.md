@@ -2,6 +2,48 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-06: Modules / connected services UI split (Phases 2 + 3)
+
+Phase 1 of the modules refactor (backend gating + secret-store import + obsolete-resource cleanup) had landed but was uncommitted. This pass implements the UI split spec'd in `Notes/Projects/Istota/Modules and connected services refactor spec.md` and lands phases 2 and 3 of that spec.
+
+The shape: `[[resources]]` was conflating three concepts. Now they're distinct. **Resources** are paths/identifiers a user owns (calendars, folders, todos) — multiple per user, picker on `/settings`. **Modules** (`feeds`, `money`, `location`) are on-by-default features with their own UI tab and a cog-icon settings page; per-user opt-out via `disabled_modules`. **Connected services** (`karakeep`, `google_workspace`) are per-user external API credentials consumed by skills, with no module page of their own.
+
+Backend split is `_SERVICE_SCHEMA` → `_CONNECTED_SERVICE_SCHEMA` + `_MODULE_SERVICE_SCHEMA`. The connected schema is what `/settings/services` returns and is what the main `/settings` page renders. The module schema is keyed by module name and surfaced via a new `/settings/module-services/{module}` endpoint that also reports `module_enabled` so the per-module page can render a "module disabled — enable in /settings → Preferences" banner. Both share `_build_service_card`. The secret PUT/DELETE handlers validate against `_all_known_services()` (connected ∪ module) so module pages keep writing through the same `/settings/secrets/{service}/{key}` route. A new `/settings/modules` endpoint returns `{modules, disabled, enabled_for_user}` for the new "Disabled modules" multiselect on `/settings → Preferences`. `_coerce_profile_value("disabled_modules", …)` validates user input against `MODULE_NAMES` server-side.
+
+The `_user_has_*` gate functions (`_user_has_feeds` / `_user_has_money` / new `_user_has_location`) now route through `Config.is_module_enabled`. `_admin_module_feeds` / `_admin_module_money` / `_admin_modules_section` follow the same pattern. `_service_status` lost its `user_resource_types` arg — module gating is the new "unavailable" signal and lives behind `is_module_enabled`. The simplification ripples through the test suite: `test_web_app.py::TestSettingsEndpoints` was reshaped to assert that `/settings/services` no longer returns `monarch` / `feeds` / `overland`, plus three new tests cover `/settings/module-services/{money,location,bogus}` and `/settings/modules`.
+
+Phase 3 added `/location/settings`. The page mirrors `/feeds/settings` and `/money/settings` — calls `getModuleServices('location')` first, renders the module-disabled banner if the gate is closed, and otherwise renders one `ServiceCard` for the Overland ingest_token. A small new endpoint `/location/settings-info` returns the webhook-URL placeholder (`https://<host>/webhooks/location?token=<token>` — the token never leaves the server, so the URL shown uses a placeholder) and the read-only place-detection knobs. The `/location/+layout.svelte` got a Cog `Chip` next to `SidebarToggle` matching the toggle pattern from money's layout.
+
+Frontend primitives consolidate in `web/src/lib/components/settings/`. `ServiceCard.svelte` is new — it wraps the "title + status pill + meta + used-by line + secret fields / OAuth button" pattern. `SecretField.svelte` is unchanged but now ships from this directory rather than each page reimplementing the inline state. `/settings/+page.svelte` deletes ~80 lines of duplicated secret-row state (`inputs`, `saving`, `savedFlash`, `saveError`, `fieldId`, `save`, `askClearSecret`) since the ServiceCard owns those mechanics; `/feeds/settings/+page.svelte` and `/money/settings/+page.svelte` follow suit and drop their inline status-pill blocks of dead CSS in the process.
+
+A small but load-bearing detail: `KARAKEEP_BASE_URL` is now an encrypted secret alongside `KARAKEEP_API_KEY`. The bookmarks `skill.md` env block uses a new `from: "secret"` source spec resolved by `_resolve_env_spec` in `skills/_env.py`. The executor's karakeep injection block dropped the `karakeep_resources` lookup entirely — both halves come from the secrets table or neither gets injected. `_IMPORT_MAP["karakeep"]` was extended to migrate `extra.base_url` on first startup; `db.cleanup_obsolete_resources` removes the row afterwards.
+
+The pre-existing `urllib3` `ModuleNotFoundError` in `tests/test_feeds_cli.py::TestPoll` is unrelated to this change — verified by stashing the diff and reproducing the failure on `main`. 3977 tests pass; the 4 environmental failures don't touch any code I modified.
+
+**Key changes:**
+- New `/api/settings/modules` and `/api/settings/module-services/{module}` endpoints; `/settings/services` filtered to connected services only.
+- `disabled_modules` editable in the Preferences card; new multiselect UI; server-side validation against `MODULE_NAMES`.
+- New `ServiceCard.svelte` shared component; `SecretField.svelte` now exported from `web/src/lib/components/settings/index.ts`.
+- New `/location/settings` page with cog toggle on `/location/+layout.svelte`.
+- `_user_has_feeds` / `_user_has_money` / `_user_has_location` gate on `Config.is_module_enabled`.
+- `KARAKEEP_BASE_URL` resolves from the secrets table (new `from: "secret"` env-spec source); legacy `[[resources]] type = "karakeep" base_url = "…"` migrates on first startup.
+- 3 new tests in `tests/test_webhook_receiver.py` covering token-map sourced from secrets + module gate.
+
+**Files added/modified:**
+- `src/istota/web_app.py` - Split `_SERVICE_SCHEMA`; new `/settings/modules`, `/settings/module-services/{module}`, `/location/settings-info` endpoints; `_user_has_*` route through `is_module_enabled`; `disabled_modules` in `_PROFILE_EDITABLE_FIELDS`.
+- `src/istota/skills/_env.py`, `_types.py`, `_loader.py` - New `from: "secret"` env-spec source.
+- `src/istota/skills/bookmarks/skill.md` - `KARAKEEP_BASE_URL` and `_API_KEY` resolved from secrets.
+- `src/istota/secrets_store.py` - `_IMPORT_MAP["karakeep"]` extends to `base_url`.
+- `src/istota/executor.py` - Drops `karakeep_resources` lookup; both env vars come from secrets.
+- `web/src/lib/components/settings/ServiceCard.svelte` (new) + `index.ts` exports.
+- `web/src/lib/api.ts` - `getModules`, `getModuleServices`, `getLocationSettingsInfo`; `disabled_modules` on `UserProfile`; `used_by` / `oauth` / `connected` on `ServiceCard`.
+- `web/src/routes/settings/+page.svelte` - Connected services section + Disabled-modules multiselect; duplicated secret-row state removed.
+- `web/src/routes/feeds/settings/+page.svelte`, `web/src/routes/money/settings/+page.svelte` - Switched to `getModuleServices` + `module_enabled` banner + `ServiceCard`.
+- `web/src/routes/location/settings/+page.svelte` (new), `web/src/routes/location/+layout.svelte` - Phase 3 location page + cog toggle.
+- `tests/test_web_app.py` - Reshaped fixtures + `TestSettingsEndpoints` for new schema split; new module-endpoint tests.
+- `tests/test_webhook_receiver.py` (new) - Token-map sourced from secrets table + module gate.
+- `AGENTS.md`, `.claude/rules/config.md`, `config/users/alice.example.toml` - Doc updates.
+
 ## 2026-05-05: Miniflux backend removal (native RSS Phase 5)
 
 Production has been running native feeds since the Ansible flip on 2026-05-02 and the Flux VM was decommissioned 2026-05-04, but the codebase was still carrying the dual-backend scaffolding from the cutover-reversible Phase 3 work. This pass deletes it.

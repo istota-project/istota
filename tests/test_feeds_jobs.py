@@ -26,13 +26,18 @@ def _make_app_config(
     users: dict[str, list[ResourceConfig]],
     *,
     nextcloud_mount: Path | None = None,
+    disabled_modules: dict[str, list[str]] | None = None,
 ) -> Config:
+    disabled_modules = disabled_modules or {}
     return Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "tmp",
         nextcloud_mount_path=nextcloud_mount or tmp_path,
         users={
-            uid: UserConfig(resources=resources)
+            uid: UserConfig(
+                resources=resources,
+                disabled_modules=disabled_modules.get(uid, []),
+            )
             for uid, resources in users.items()
         },
     )
@@ -88,8 +93,11 @@ class TestSyncFeedsModuleJobs:
         names = [r[0] for r in rows]
         assert names == [f"{MODULE_PREFIX}run_scheduled"]
 
-    def test_user_without_feeds_resource_has_no_module_jobs(self, tmp_path):
-        app_config = _make_app_config(tmp_path, {"bob": []})
+    def test_user_with_feeds_module_disabled_has_no_module_jobs(self, tmp_path):
+        app_config = _make_app_config(
+            tmp_path, {"bob": []},
+            disabled_modules={"bob": ["feeds"]},
+        )
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         rows = conn.execute(
@@ -112,15 +120,18 @@ class TestSyncFeedsModuleJobs:
         ).fetchone()[0]
         assert count == 1
 
-    def test_removes_module_jobs_when_resource_disappears(self, tmp_path):
+    def test_removes_module_jobs_when_module_disabled(self, tmp_path):
         app_config = _make_app_config(
             tmp_path,
             {"alice": [ResourceConfig(type="feeds")]},
         )
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
-        # Drop the resource
-        app_config2 = _make_app_config(tmp_path, {"alice": []})
+        # Disable the feeds module for alice
+        app_config2 = _make_app_config(
+            tmp_path, {"alice": []},
+            disabled_modules={"alice": ["feeds"]},
+        )
         _sync_feeds_module_jobs(conn, app_config2)
         rows = conn.execute(
             "SELECT 1 FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",

@@ -136,6 +136,7 @@ site_enabled: bool = False
 max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 = use global default
 disabled_skills: list[str] = []           # per-user skills to exclude
 trusted_email_senders: list[str] = []     # patterns for trusted senders (email gate)
+disabled_modules: list[str] = []          # modules to opt out of (default-on otherwise)
 ```
 
 ### `MemorySearchConfig`
@@ -204,6 +205,7 @@ Properties:
 Methods:
 - `get_user(nc_username) -> UserConfig | None`
 - `is_admin(user_id) -> bool` — True if `admin_users` empty or user in set
+- `is_module_enabled(user_id, module) -> bool` — True unless ``module`` appears in the user's `disabled_modules`. Unknown users default to True (docker auto-seed path). Module names are validated against `istota.modules.MODULE_NAMES` (`feeds`, `money`, `location`); unknown names always return False.
 - `find_user_by_email(email_address) -> str | None`
 - `is_trusted_email_sender(user_id, sender_email) -> bool` — checks user's own emails + `trusted_email_senders` patterns via fnmatch
 
@@ -223,8 +225,24 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 9. Apply env var overrides for secrets (`ISTOTA_NC_APP_PASSWORD` → `nextcloud.app_password`, etc.)
 10. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, ntfy_topic, site_enabled, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
 11. **Phase 7a**: `_apply_user_resources(config)` overlays the `user_resources` DB table onto `config.users[*].resources`. Each row becomes a `ResourceConfig` entry with extras decoded from JSON. Dedup is keyed on `(type, path)` — DB wins. Distinct paths coexist.
-12. **Phase 7b**: `_apply_user_briefings(config)` overlays the `briefing_configs` DB table onto `config.users[*].briefings`. Each row becomes a `BriefingConfig` entry. Dedup is keyed on `name` — DB wins. Disabled DB rows (`enabled=0`) drop the matching TOML name without scheduling, so the web UI can mute a TOML-templated briefing without re-templating.
-13. Return `Config`
+12. **Modules refactor (between 7a and 7b)**: `_migrate_obsolete_resources(config)` first calls `secrets_store.import_from_user_configs` (idempotent — extends `_IMPORT_MAP` to absorb karakeep `base_url`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources(db_path)` deletes `user_resources` rows whose type is in the retired set (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`), then filters those types out of `uc.resources` in memory so the rest of the load cycle sees post-cleanup state.
+13. **Phase 7b**: `_apply_user_briefings(config)` overlays the `briefing_configs` DB table onto `config.users[*].briefings`. Each row becomes a `BriefingConfig` entry. Dedup is keyed on `name` — DB wins. Disabled DB rows (`enabled=0`) drop the matching TOML name without scheduling, so the web UI can mute a TOML-templated briefing without re-templating.
+14. Return `Config`
+
+**Modules vs resources vs connected services.** Three distinct concepts that used to be conflated under `[[resources]]`:
+- **Resources** — paths/identifiers (calendars, folders, todos). Multiple per user. `[[users.X.resources]]` + `user_resources` DB table. Picker types: `calendar`, `folder`, `todo_file`, `notes_folder`, `email_folder`, `reminders_file`.
+- **Modules** — on-by-default features with their own UI tab + cog (`feeds`, `money`, `location`). Per-user opt-out via `disabled_modules`. Module names live in `istota.modules.MODULE_NAMES`. Gated everywhere by `Config.is_module_enabled(user_id, module)`.
+- **Connected services** — per-user external API credentials (karakeep, google_workspace) consumed by skills. Stored encrypted in the `secrets` table.
+
+**user_profiles.disabled_modules.** New JSON-array column added in Phase 1 of the modules refactor. Migration runs in `_run_migrations` via `ALTER TABLE … ADD COLUMN … DEFAULT '[]'`. Mirrors `disabled_skills` in handling: list-field rule in `merge_into_user_config` (DB row owns the list once it exists; auto-seed carries TOML lists in). Surfaced in the web UI as a multiselect on `/settings → Preferences`; values are validated against `MODULE_NAMES` server-side via `_coerce_profile_value("disabled_modules", …)`.
+
+**Settings split (modules refactor, Phase 2).** `web_app._SERVICE_SCHEMA` is gone. In its place:
+- `_CONNECTED_SERVICE_SCHEMA` — services that aren't owned by any single module (`karakeep`, `google_workspace`). Each entry carries `used_by` (skill names) and an optional `oauth: True` flag. Surfaced via `GET /settings/services`.
+- `_MODULE_SERVICE_SCHEMA` — per-module schema map (`feeds → {feeds.tumblr_api_key}`, `money → {monarch.*}`, `location → {overland.ingest_token}`). Surfaced via `GET /settings/module-services/{module}` which also returns `module_enabled` so the page can render its banner instead of the config UI when the module is disabled.
+- `_all_known_services()` is the union the secret PUT/DELETE handlers validate against — module pages write their secrets through the same `/settings/secrets/{service}/{key}` route.
+- `GET /settings/modules` returns `{modules, disabled, enabled_for_user}` for the Preferences card.
+- `_service_status` no longer takes `user_resource_types`; status is purely a function of which keys are configured. The old "unavailable when no resource declaration" path is gone — module gating is the new "unavailable" signal and lives behind `is_module_enabled`.
+- `/location/settings-info` returns the webhook-URL placeholder (`https://<host>/webhooks/location?token=<token>`) plus read-only place-detection knobs for `/location/settings`. The token is never echoed back to the browser.
 
 **user_profiles table (Phase 6).** Per-user profile fields live in `user_profiles` (one row per user). The scheduler imports any profile-shaped fields from TOML on startup via `user_profiles.import_from_user_configs(db_path, config.users)` (idempotent — only writes rows that don't yet exist). DB row wins at config-load time. The web UI reads/writes via `/istota/api/settings/profile` (GET, PUT). Ansible deploys provision via the `istota user ensure --name <user> ...` CLI (idempotent partial update). See `src/istota/user_profiles.py`.
 

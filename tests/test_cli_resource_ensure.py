@@ -68,54 +68,38 @@ class TestResourceEnsureCreate:
         assert rows[0].resource_path == "/Documents"
         assert rows[0].display_name == "Docs"
 
-    def test_path_defaults_to_type_for_module_resources(self, cfg_with_db, capsys):
-        # Module-shaped resources (feeds, money, overland, karakeep, monarch)
-        # don't carry a real filesystem path. Match the web UI behavior of
-        # using the type as the implicit unique-key path.
-        from istota.cli import cmd_resource
-
-        cfg, db_path = cfg_with_db
-        args = _FakeArgs(
-            action="ensure", config=str(cfg), user="alice",
-            type="feeds", name="Feeds",
-        )
-        cmd_resource(args)
-        with db.get_db(db_path) as conn:
-            rows = db.get_user_resources(conn, "alice")
-        assert rows[0].resource_path == "feeds"
-
     def test_extras_key_value_pairs_persist(self, cfg_with_db, capsys):
         from istota.cli import cmd_resource
 
         cfg, db_path = cfg_with_db
         args = _FakeArgs(
             action="ensure", config=str(cfg), user="alice",
-            type="overland", name="GPS",
-            extras=["ingest_token=tok-xyz", "default_radius=75"],
+            type="folder", path="/x", name="X",
+            extras=["meta_key=meta-val", "meta_count=75"],
         )
         cmd_resource(args)
         with db.get_db(db_path) as conn:
             rows = db.get_user_resources(conn, "alice")
-        # Numeric strings are coerced to int so int-typed fields like
-        # default_radius round-trip without operators having to know JSON.
-        assert rows[0].extras == {"ingest_token": "tok-xyz", "default_radius": 75}
+        # Numeric strings are coerced to int so int-typed fields
+        # round-trip without operators having to know JSON.
+        assert rows[0].extras == {"meta_key": "meta-val", "meta_count": 75}
 
     def test_extras_json_overrides_kv_pairs(self, cfg_with_db, capsys):
         # --extras-json wins. Lets ansible pass through a complex nested dict
-        # (e.g. money's `ledgers` array) without splitting into kv pairs.
+        # without splitting into kv pairs.
         from istota.cli import cmd_resource
 
         cfg, db_path = cfg_with_db
         args = _FakeArgs(
             action="ensure", config=str(cfg), user="alice",
-            type="money", name="Money",
+            type="folder", path="/x", name="X",
             extras=["data_dir=/ignored"],
-            extras_json='{"ledgers": ["main"], "data_dir": "/used"}',
+            extras_json='{"sub": ["a"], "data_dir": "/used"}',
         )
         cmd_resource(args)
         with db.get_db(db_path) as conn:
             rows = db.get_user_resources(conn, "alice")
-        assert rows[0].extras == {"ledgers": ["main"], "data_dir": "/used"}
+        assert rows[0].extras == {"sub": ["a"], "data_dir": "/used"}
 
 
 class TestResourceEnsureIdempotency:
@@ -162,18 +146,18 @@ class TestResourceEnsureIdempotency:
         cfg, db_path = cfg_with_db
         cmd_resource(_FakeArgs(
             action="ensure", config=str(cfg), user="alice",
-            type="overland", name="GPS",
-            extras=["ingest_token=preserved"],
+            type="folder", path="/x", name="X",
+            extras=["meta_key=preserved"],
         ))
         capsys.readouterr()
 
         cmd_resource(_FakeArgs(
             action="ensure", config=str(cfg), user="alice",
-            type="overland", name="GPS",
+            type="folder", path="/x", name="X",
         ))
         with db.get_db(db_path) as conn:
             rows = db.get_user_resources(conn, "alice")
-        assert rows[0].extras == {"ingest_token": "preserved"}
+        assert rows[0].extras == {"meta_key": "preserved"}
 
     def test_extras_clear_wipes_extras(self, cfg_with_db, capsys):
         # The escape hatch for "I really do want extras gone." Distinct from
@@ -183,14 +167,14 @@ class TestResourceEnsureIdempotency:
         cfg, db_path = cfg_with_db
         cmd_resource(_FakeArgs(
             action="ensure", config=str(cfg), user="alice",
-            type="overland", name="GPS",
-            extras=["ingest_token=goodbye"],
+            type="folder", path="/x", name="X",
+            extras=["meta_key=goodbye"],
         ))
         capsys.readouterr()
 
         cmd_resource(_FakeArgs(
             action="ensure", config=str(cfg), user="alice",
-            type="overland", name="GPS",
+            type="folder", path="/x", name="X",
             extras_clear=True,
         ))
         with db.get_db(db_path) as conn:
@@ -216,7 +200,7 @@ class TestResourceEnsureValidation:
         # than have it silently dropped.
         args = _FakeArgs(
             action="ensure", config=str(cfg), user="alice",
-            type="overland", name="GPS",
+            type="folder", path="/x", name="X",
             extras=["malformed"],
         )
         with pytest.raises(SystemExit):
@@ -228,7 +212,7 @@ class TestResourceEnsureValidation:
         cfg, _ = cfg_with_db
         args = _FakeArgs(
             action="ensure", config=str(cfg), user="alice",
-            type="money", name="Money",
+            type="folder", path="/x", name="X",
             extras_json="{not valid",
         )
         with pytest.raises(SystemExit):

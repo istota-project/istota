@@ -106,6 +106,18 @@ def _resolve_env_spec(spec: EnvSpec, ctx: EnvContext) -> str | None:
     elif spec.source == "user_id":
         return getattr(ctx.task, "user_id", None) or None
 
+    elif spec.source == "secret":
+        # Per-user encrypted secret resolved from the secrets table.
+        if not spec.service or not spec.key:
+            return None
+        from .. import secrets_store  # noqa: PLC0415
+
+        db_path = getattr(ctx.config, "db_path", None)
+        user_id = getattr(ctx.task, "user_id", None)
+        if not db_path or not user_id:
+            return None
+        return secrets_store.get_secret(db_path, user_id, spec.service, spec.key)
+
     elif spec.source == "template_file":
         # Auto-create from template if missing, return path
         mount = getattr(ctx.config, "nextcloud_mount_path", None)

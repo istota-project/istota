@@ -1169,7 +1169,12 @@ class TestWebsiteEnvVars:
 
 
 class TestKarakeepEnvVars:
-    def _make_config(self, tmp_path, karakeep_resources=None):
+    """Karakeep env vars come from the encrypted secrets table after the
+    modules / connected services refactor — the karakeep resource type was
+    retired with that change.
+    """
+
+    def _make_config(self, tmp_path):
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
@@ -1178,8 +1183,7 @@ class TestKarakeepEnvVars:
         (skills_dir / "files.md").write_text("File operations guide.")
         mount_path = tmp_path / "mount"
         mount_path.mkdir(parents=True)
-        resources = karakeep_resources or []
-        users = {"alice": UserConfig(resources=resources)}
+        users = {"alice": UserConfig()}
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
@@ -1195,19 +1199,24 @@ class TestKarakeepEnvVars:
         return db.get_task(conn, task_id)
 
     @patch("istota.executor.subprocess.run")
-    def test_karakeep_env_vars_set_when_configured(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, karakeep_resources=[
-            ResourceConfig(
-                type="karakeep", name="Bookmarks",
-                base_url="https://keep.example.com/api/v1",
-                api_key="kk-secret",
-            ),
-        ])
+    def test_karakeep_env_vars_set_when_secrets_configured(self, mock_run, tmp_path, monkeypatch):
+        from istota import secrets_store
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
+        config = self._make_config(tmp_path)
+        secrets_store.set_secret(
+            config.db_path, "alice", "karakeep", "base_url",
+            "https://keep.example.com/api/v1",
+        )
+        secrets_store.set_secret(
+            config.db_path, "alice", "karakeep", "api_key", "kk-secret",
+        )
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
+            conn.commit()  # release writer lock so secrets_store can bump last_accessed_at
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
@@ -1216,8 +1225,9 @@ class TestKarakeepEnvVars:
         assert env["KARAKEEP_API_KEY"] == "kk-secret"
 
     @patch("istota.executor.subprocess.run")
-    def test_karakeep_env_vars_not_set_when_no_resource(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, karakeep_resources=[])
+    def test_karakeep_env_vars_not_set_when_no_secrets(self, mock_run, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
+        config = self._make_config(tmp_path)
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
@@ -1231,47 +1241,29 @@ class TestKarakeepEnvVars:
         assert "KARAKEEP_API_KEY" not in env
 
     @patch("istota.executor.subprocess.run")
-    def test_karakeep_env_vars_not_set_when_credentials_empty(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, karakeep_resources=[
-            ResourceConfig(type="karakeep", name="Bookmarks", base_url="", api_key=""),
-        ])
+    def test_karakeep_env_vars_not_set_when_only_one_secret(self, mock_run, tmp_path, monkeypatch):
+        # Without both halves the env injection is skipped — half-configured
+        # credentials would just give a 403 from karakeep at runtime.
+        from istota import secrets_store
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
+        config = self._make_config(tmp_path)
+        secrets_store.set_secret(
+            config.db_path, "alice", "karakeep", "base_url",
+            "https://keep.example.com/api/v1",
+        )
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
+            conn.commit()
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
         env = mock_run.call_args[1]["env"]
         assert "KARAKEEP_BASE_URL" not in env
         assert "KARAKEEP_API_KEY" not in env
-
-    @patch("istota.executor.subprocess.run")
-    def test_karakeep_uses_first_resource_when_multiple(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, karakeep_resources=[
-            ResourceConfig(
-                type="karakeep", name="Primary",
-                base_url="https://primary.example.com/api/v1",
-                api_key="primary-key",
-            ),
-            ResourceConfig(
-                type="karakeep", name="Secondary",
-                base_url="https://secondary.example.com/api/v1",
-                api_key="secondary-key",
-            ),
-        ])
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert env["KARAKEEP_BASE_URL"] == "https://primary.example.com/api/v1"
-        assert env["KARAKEEP_API_KEY"] == "primary-key"
 
 
 class TestWebsitePromptSection:

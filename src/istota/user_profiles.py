@@ -60,6 +60,7 @@ class UserProfile:
     max_background_workers: int = 0
     disabled_skills: list[str] = field(default_factory=list)
     trusted_email_senders: list[str] = field(default_factory=list)
+    disabled_modules: list[str] = field(default_factory=list)
 
 
 _PROFILE_COLUMNS = (
@@ -67,6 +68,7 @@ _PROFILE_COLUMNS = (
     "log_channel", "alerts_channel", "ntfy_topic",
     "site_enabled", "max_foreground_workers", "max_background_workers",
     "disabled_skills", "trusted_email_senders",
+    "disabled_modules",
 )
 
 
@@ -97,6 +99,7 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         max_background_workers=int(row["max_background_workers"] or 0),
         disabled_skills=_parse_json_list(row["disabled_skills"]),
         trusted_email_senders=_parse_json_list(row["trusted_email_senders"]),
+        disabled_modules=_parse_json_list(row["disabled_modules"]),
     )
 
 
@@ -184,6 +187,7 @@ def ensure_profile(
         email_addresses=list(_attr(seed_from, "email_addresses") or []),
         trusted_email_senders=list(_attr(seed_from, "trusted_email_senders") or []),
         disabled_skills=list(_attr(seed_from, "disabled_skills") or []),
+        disabled_modules=list(_attr(seed_from, "disabled_modules") or []),
     )
     _insert(db_path, profile)
     logger.info("ensured user_profile user=%s (new row)", user_id)
@@ -256,7 +260,7 @@ def update_profile(
     sets: list[str] = []
     params: list[object] = []
     for col, value in fields.items():
-        if col in {"email_addresses", "disabled_skills", "trusted_email_senders"}:
+        if col in {"email_addresses", "disabled_skills", "trusted_email_senders", "disabled_modules"}:
             value = json.dumps(list(value or []))
         elif col == "site_enabled":
             value = 1 if value else 0
@@ -313,6 +317,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         int(profile.max_background_workers or 0),
         json.dumps(list(profile.disabled_skills)),
         json.dumps(list(profile.trusted_email_senders)),
+        json.dumps(list(profile.disabled_modules)),
     )
     cols_sql = ", ".join(insert_cols)
     if replace:
@@ -372,6 +377,7 @@ def import_from_user_configs(
             max_background_workers=int(getattr(user_config, "max_background_workers", 0) or 0),
             disabled_skills=list(getattr(user_config, "disabled_skills", []) or []),
             trusted_email_senders=list(getattr(user_config, "trusted_email_senders", []) or []),
+            disabled_modules=list(getattr(user_config, "disabled_modules", []) or []),
         )
         try:
             _insert(db_path, profile, replace=False)
@@ -412,7 +418,10 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     # List fields: DB row owns them once it exists. The auto-seed path
     # carries TOML lists into the row, so an empty DB list is a deliberate
     # "user cleared this" signal.
-    for attr in ("email_addresses", "disabled_skills", "trusted_email_senders"):
+    for attr in (
+        "email_addresses", "disabled_skills",
+        "trusted_email_senders", "disabled_modules",
+    ):
         setattr(user_config, attr, list(getattr(profile, attr) or []))
 
     return user_config

@@ -2868,10 +2868,7 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
         if uc is None:
             continue
 
-        has_money = any(
-            getattr(r, "type", None) in ("money", "moneyman")
-            for r in getattr(uc, "resources", []) or []
-        )
+        has_money = app_config.is_module_enabled(user_id, "money")
         if not has_money:
             # Drop any stale module rows
             conn.execute(
@@ -2959,10 +2956,7 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
         if uc is None:
             continue
 
-        has_feeds = any(
-            getattr(r, "type", None) == "feeds"
-            for r in getattr(uc, "resources", []) or []
-        )
+        has_feeds = app_config.is_module_enabled(user_id, "feeds")
         if not has_feeds:
             conn.execute(
                 "DELETE FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",

@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { base } from '$app/paths';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { Collapsible } from 'bits-ui';
 	import { getLedgers, checkLedger, AuthError } from '$lib/money/api';
 	import { selectedLedger, availableLedgers } from '$lib/money/stores/ledger';
-	import { AppShell, ShellHeader, NavLink, Select } from '$lib/components/ui';
+	import { AppShell, ShellHeader, NavLink, Select, Chip } from '$lib/components/ui';
+	import { Cog } from 'lucide-svelte';
 
 	let { children } = $props();
 
@@ -57,6 +59,13 @@
 	}
 
 	const ledgerOptions = $derived($availableLedgers.map((l) => ({ value: l, label: l })));
+
+	const onSettings = $derived(page.url.pathname.startsWith(`${moneyBase}/settings`));
+
+	function toggleSettings() {
+		if (onSettings) goto(`${moneyBase}/accounts`);
+		else goto(`${moneyBase}/settings`);
+	}
 </script>
 
 {#if loading}
@@ -90,6 +99,9 @@
 							</Collapsible.Trigger>
 						</Collapsible.Root>
 					{/if}
+					<Chip icon checked={onSettings} onclick={toggleSettings} title="Money settings">
+						<Cog size={14} />
+					</Chip>
 				{/snippet}
 			</ShellHeader>
 		{/snippet}

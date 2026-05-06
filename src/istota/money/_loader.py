@@ -1,18 +1,14 @@
 """Resolve a user's money :class:`UserContext` from istota's config.
 
-Single entry point for both web routes and the in-process skill. Replaces
-the earlier ``set_loader`` injection / TTL-cache machinery — the istota
-config is already in-process and TOML files are cheap to re-read on demand.
+Single entry point for both web routes and the in-process skill.
 
-Two modes:
-
-* **Legacy:** the user's ``[[resources]] type = "money"`` entry carries
-  ``extra.config_path`` (or ``path``) pointing at a money config TOML with
-  ``[users.X]`` sections.
-* **Workspace:** no ``config_path``. Synthesize a context rooted at
-  ``{nextcloud_mount}/Users/{user_id}/{bot_dir}`` and read
-  ``INVOICING.md`` / ``TAX.md`` / ``MONARCH.md`` from its ``config/``
-  subdir.
+Money is a "module" in the modules/connected-services taxonomy: on by
+default for every configured user, gated by
+``Config.is_module_enabled(user_id, "money")``. The user's workspace path is
+derived from ``nextcloud_mount_path`` + ``get_user_bot_path``, and Monarch
+credentials come from the encrypted secrets table. Legacy mode (the
+``[[resources]] type = "money" config_path = …``-driven branch) was removed
+when modules took over module gating.
 """
 
 from __future__ import annotations
@@ -22,11 +18,8 @@ from pathlib import Path
 
 import tomli
 
-from istota.money.cli import UserContext, load_context
+from istota.money.cli import UserContext
 from istota.money.workspace import synthesize_user_context
-
-
-_MONEY_RESOURCE_TYPES = ("money", "moneyman")
 
 
 class UserNotFoundError(Exception):
@@ -34,24 +27,17 @@ class UserNotFoundError(Exception):
 
 
 def load_user_secrets(user_id: str, istota_config) -> dict:
-    """Load per-user money secrets (e.g. ``[monarch] session_token``).
+    """Load per-user money secrets (e.g. Monarch credentials).
 
     Resolution order:
 
     1. ``MONEY_SECRETS_FILE`` env var (escape hatch for direct ``money`` CLI
        invocations and tests).
-    2. The encrypted ``secrets`` table (web-UI-managed, per Phase 5).
-    3. The user's ``[[resources]] type = "money"`` entry in the istota config
-       — credentials are colocated with the resource as ``monarch_session_token``
-       / ``monarch_email`` / ``monarch_password``, the same pattern used by
-       karakeep / overland.
-
-    Secrets-table values fully replace TOML extras when present (per-key
-    granularity — having ``session_token`` in the DB while ``email`` is
-    still in TOML is fine and works as expected).
+    2. The encrypted ``secrets`` table — the only durable home for Monarch
+       credentials after the modules refactor.
 
     Returns ``{}`` if no credentials are configured — sync commands that
-    require them will surface their own error.
+    require them surface their own error.
     """
     explicit = os.environ.get("MONEY_SECRETS_FILE", "")
     if explicit:
@@ -62,96 +48,59 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
 
     if istota_config is None:
         return {}
-    uc = istota_config.get_user(user_id)
-    if not uc:
-        return {}
-    for r in uc.resources:
-        if r.type not in _MONEY_RESOURCE_TYPES:
-            continue
-        extra = getattr(r, "extra", {}) or {}
-        # Start with TOML-based monarch extras (legacy / Ansible path).
-        monarch = {
-            k.removeprefix("monarch_"): v
-            for k, v in extra.items()
-            if k.startswith("monarch_") and v
-        }
-        # Layer secrets-table values on top — DB wins per-key when set.
-        try:
-            from istota import secrets_store  # noqa: PLC0415
 
-            db_path = getattr(istota_config, "db_path", None)
-            if db_path is not None:
-                for sk in ("email", "password", "session_token"):
-                    val = secrets_store.get_secret(db_path, user_id, "monarch", sk)
-                    if val:
-                        monarch[sk] = val
-        except Exception:  # noqa: BLE001
-            # Secrets store is best-effort here; falling back to TOML extras
-            # is the safe behavior if cryptography or the DB is unavailable.
-            pass
-        return {"monarch": monarch} if monarch else {}
-    return {}
+    monarch: dict[str, str] = {}
+    try:
+        from istota import secrets_store  # noqa: PLC0415
+
+        db_path = getattr(istota_config, "db_path", None)
+        if db_path is not None:
+            for sk in ("email", "password", "session_token"):
+                val = secrets_store.get_secret(db_path, user_id, "monarch", sk)
+                if val:
+                    monarch[sk] = val
+    except Exception:  # noqa: BLE001
+        # Best-effort: a missing/unavailable secrets store yields no creds.
+        pass
+
+    return {"monarch": monarch} if monarch else {}
 
 
 def resolve_for_user(user_id: str, istota_config) -> UserContext:
+    """Build a money :class:`UserContext` for ``user_id``.
+
+    Gated on ``Config.is_module_enabled(user_id, "money")``. The workspace
+    root is always ``{nextcloud_mount}/{get_user_bot_path(...)}``.
+    """
     if istota_config is None:
         raise UserNotFoundError("istota config not loaded")
+
+    if not istota_config.is_module_enabled(user_id, "money"):
+        raise UserNotFoundError(f"money module disabled for '{user_id}'")
 
     uc = istota_config.get_user(user_id)
     if not uc:
         raise UserNotFoundError(f"user '{user_id}' not in istota config")
 
-    for r in uc.resources:
-        if r.type not in _MONEY_RESOURCE_TYPES:
-            continue
-
-        extra = getattr(r, "extra", {}) or {}
-        config_path = extra.get("config_path") or getattr(r, "path", "")
-        user_key = extra.get("user_key") or user_id
-
-        if config_path:
-            ctx = load_context(str(config_path))
-            if user_key not in ctx.users:
-                raise UserNotFoundError(
-                    f"user '{user_key}' not in money config at {config_path}"
-                )
-            return ctx.users[user_key]
-
-        mount = getattr(istota_config, "nextcloud_mount_path", None)
-        if not mount:
-            raise UserNotFoundError(
-                f"money resource for '{user_id}' has no config_path "
-                "and no nextcloud mount is configured"
-            )
-
-        from istota.storage import get_user_bot_path
-
-        workspace = Path(mount) / get_user_bot_path(
-            user_id, istota_config.bot_dir_name,
-        ).lstrip("/")
-        data_dir = Path(extra["data_dir"]) if extra.get("data_dir") else None
-        config_dir = Path(extra["config_dir"]) if extra.get("config_dir") else None
-        db_path = Path(extra["db_path"]) if extra.get("db_path") else None
-        ledgers = extra.get("ledgers")
-        return synthesize_user_context(
-            workspace,
-            data_dir=data_dir,
-            config_dir=config_dir,
-            ledgers=ledgers,
-            db_path=db_path,
+    mount = getattr(istota_config, "nextcloud_mount_path", None)
+    if not mount:
+        raise UserNotFoundError(
+            f"money module for '{user_id}' has no nextcloud mount configured"
         )
 
-    raise UserNotFoundError(f"no money resource for user '{user_id}'")
+    from istota.storage import get_user_bot_path
+
+    workspace = Path(mount) / get_user_bot_path(
+        user_id, istota_config.bot_dir_name,
+    ).lstrip("/")
+    return synthesize_user_context(workspace)
 
 
 def list_users(istota_config) -> list[str]:
-    """List istota usernames with a money/moneyman resource configured."""
+    """List istota usernames with the money module enabled."""
     if istota_config is None:
         return []
-    out: list[str] = []
-    for username, uc in (istota_config.users or {}).items():
-        for r in uc.resources:
-            if r.type in _MONEY_RESOURCE_TYPES:
-                out.append(username)
-                break
-    return out
+    return [
+        uid for uid in (istota_config.users or {})
+        if istota_config.is_module_enabled(uid, "money")
+    ]

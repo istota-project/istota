@@ -59,7 +59,10 @@ def _istota_config(tmp_path, money_config_path: Path | None = None) -> Config:
         ))
     users = {
         "alice": UserConfig(display_name="Alice", resources=resources),
-        "bob": UserConfig(display_name="Bob"),  # no money resource
+        # Money module is on by default after the modules refactor; bob
+        # opts out explicitly so the "module disabled" code path stays
+        # testable.
+        "bob": UserConfig(display_name="Bob", disabled_modules=["money"]),
     }
     return Config(
         nextcloud_mount_path=tmp_path / "mount",
@@ -133,8 +136,9 @@ class TestMoneyMount:
         assert resp.status_code == 200
         assert resp.json()["username"] == "alice"
 
-    async def test_authenticated_without_resource_returns_404(self, client_with_money):
-        # bob has no money resource; the per-user config resolver should 404
+    async def test_authenticated_with_module_disabled_returns_404(self, client_with_money):
+        # bob has the money module disabled; the per-user config resolver
+        # raises UserNotFoundError, which the route surfaces as 404.
         cookies = await _login_as(client_with_money, "bob")
         resp = await client_with_money.get("/istota/money/api/ledgers", cookies=cookies)
         assert resp.status_code == 404

@@ -42,6 +42,8 @@ def _parse_env_specs(data: list[dict]) -> list[EnvSpec]:
             field=entry.get("field", ""),
             template=entry.get("template", ""),
             user_path_fn=entry.get("user_path_fn", ""),
+            service=entry.get("service", ""),
+            key=entry.get("key", ""),
         ))
     return specs
 

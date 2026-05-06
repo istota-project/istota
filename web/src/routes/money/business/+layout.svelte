@@ -13,7 +13,6 @@
 	<div class="money-section-nav">
 		<a href="{base}/money/business/invoices" class:active={isActive('/money/business/invoices')}>Invoices</a>
 		<a href="{base}/money/business/clients" class:active={isActive('/money/business/clients')}>Clients</a>
-		<a href="{base}/money/business/settings" class:active={isActive('/money/business/settings')}>Settings</a>
 	</div>
 </div>
 

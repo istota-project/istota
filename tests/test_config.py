@@ -1066,17 +1066,22 @@ cron = "0 6 * * *"
         assert result["alice"].briefings[0].name == "evening"
         assert result["alice"].briefings[0].output == "email"
 
-    def test_json_appends_non_credential_resources(self, tmp_path):
-        """JSON resources are appended to TOML credential resources."""
+    def test_json_resources_replace_toml(self, tmp_path):
+        """JSON resources replace TOML resources entirely.
+
+        After the modules / connected services refactor the merger no
+        longer preserves TOML "credential resources" — credentials live in
+        the secrets table now, so resource lists are a single, replaceable
+        concept.
+        """
         users_dir = tmp_path / "users"
         users_dir.mkdir()
         (users_dir / "alice.toml").write_text("""
 display_name = "Alice"
 [[resources]]
-type = "karakeep"
-name = "Bookmarks"
-base_url = "https://keep.example.com"
-api_key = "secret-key"
+type = "folder"
+path = "/alice/old"
+name = "Old"
 """)
         import json
         (users_dir / "alice.user.json").write_text(json.dumps({
@@ -1085,28 +1090,8 @@ api_key = "secret-key"
             ],
         }))
         result = load_user_configs(users_dir)
-        types = [r.type for r in result["alice"].resources]
-        assert "karakeep" in types
-        assert "folder" in types
-        assert len(result["alice"].resources) == 2
-
-    def test_json_credential_resources_ignored(self, tmp_path):
-        """Credential resource types in JSON are ignored."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
-        import json
-        (users_dir / "alice.user.json").write_text(json.dumps({
-            "resources": [
-                {"type": "karakeep", "name": "Hacked", "api_key": "evil"},
-                {"type": "monarch", "name": "Bad"},
-                {"type": "moneyman", "name": "Bad", "api_key": "evil"},
-                {"type": "folder", "path": "/ok", "name": "Legit"},
-            ],
-        }))
-        result = load_user_configs(users_dir)
-        types = [r.type for r in result["alice"].resources]
-        assert types == ["folder"]
+        types = [(r.type, r.path) for r in result["alice"].resources]
+        assert types == [("folder", "/alice/Projects")]
 
     def test_json_without_toml_ignored(self, tmp_path):
         """A .user.json without a matching .toml is ignored."""
@@ -1161,21 +1146,17 @@ api_key = "secret-key"
         result = load_user_configs(users_dir)
         assert result["alice"].display_name == "Alice"
 
-    def test_toml_credential_resources_preserved_when_json_has_briefings(self, tmp_path):
-        """TOML credential resources are preserved even when JSON provides briefings."""
+    def test_toml_resources_preserved_when_json_only_changes_briefings(self, tmp_path):
+        """TOML resources stay when JSON only overrides briefings."""
         users_dir = tmp_path / "users"
         users_dir.mkdir()
         (users_dir / "alice.toml").write_text("""
 display_name = "Alice"
 
-[monarch]
-session_token = "secret-token"
-
 [[resources]]
-type = "karakeep"
-name = "Bookmarks"
-base_url = "https://karakeep.example.com"
-api_key = "kk-key"
+type = "folder"
+path = "/Docs"
+name = "Docs"
 
 [[briefings]]
 name = "old-briefing"
@@ -1191,10 +1172,9 @@ cron = "0 6 * * *"
         # Briefings from JSON
         assert len(result["alice"].briefings) == 1
         assert result["alice"].briefings[0].name == "new-briefing"
-        # Credential resources from TOML still present
+        # Resources from TOML still present (JSON didn't touch resources).
         types = [r.type for r in result["alice"].resources]
-        assert "monarch" in types
-        assert "karakeep" in types
+        assert "folder" in types
 
 
 class TestReloadUserConfigs:
@@ -1722,18 +1702,18 @@ class TestApplyUserResources:
         db.init_db(db_path)
         with db.get_db(db_path) as conn:
             db.add_user_resource(
-                conn, user_id="alice", resource_type="overland",
-                resource_path="overland", display_name="GPS",
-                extras={"ingest_token": "tok-xyz", "default_radius": 75},
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Docs", display_name="Docs",
+                extras={"meta_key": "meta-val", "meta_count": 75},
             )
         cfg_path = self._write_minimal_config(tmp_path, db_path)
         monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
         config = load_config(cfg_path)
         resources = config.users["alice"].resources
-        overland = [r for r in resources if r.type == "overland"]
-        assert len(overland) == 1
-        assert overland[0].extra == {"ingest_token": "tok-xyz", "default_radius": 75}
-        assert overland[0].name == "GPS"
+        folders = [r for r in resources if r.type == "folder"]
+        assert len(folders) == 1
+        assert folders[0].extra == {"meta_key": "meta-val", "meta_count": 75}
+        assert folders[0].name == "Docs"
 
     def test_db_row_dedupes_against_matching_toml_row(self, tmp_path, monkeypatch):
         # Same (type, path): DB row replaces TOML row. Without dedupe the
@@ -1745,9 +1725,9 @@ class TestApplyUserResources:
         db.init_db(db_path)
         with db.get_db(db_path) as conn:
             db.add_user_resource(
-                conn, user_id="alice", resource_type="overland",
-                resource_path="overland", display_name="GPS (DB)",
-                extras={"ingest_token": "from-db"},
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Docs", display_name="Docs (DB)",
+                extras={"meta_key": "from-db"},
             )
         cfg = tmp_path / "config.toml"
         cfg.write_text(
@@ -1756,20 +1736,20 @@ class TestApplyUserResources:
             "\n[users.alice]\n"
             'display_name = "Alice"\n'
             "\n[[users.alice.resources]]\n"
-            'type = "overland"\n'
-            'path = "overland"\n'
-            'name = "GPS (TOML)"\n'
-            'ingest_token = "from-toml"\n'
+            'type = "folder"\n'
+            'path = "/Docs"\n'
+            'name = "Docs (TOML)"\n'
+            'meta_key = "from-toml"\n'
         )
         monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
         config = load_config(cfg)
         resources = config.users["alice"].resources
-        overland = [r for r in resources if r.type == "overland"]
-        assert len(overland) == 1
+        folders = [r for r in resources if r.type == "folder"]
+        assert len(folders) == 1
         # DB wins because once the row exists, operators expect it to be
         # authoritative — same precedence as user_profiles.
-        assert overland[0].extra["ingest_token"] == "from-db"
-        assert overland[0].name == "GPS (DB)"
+        assert folders[0].extra["meta_key"] == "from-db"
+        assert folders[0].name == "Docs (DB)"
 
     def test_distinct_paths_keep_both_resources(self, tmp_path, monkeypatch):
         # Two folders with different paths must coexist — dedupe is keyed on
@@ -1981,3 +1961,128 @@ class TestApplyUserBriefings:
         monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
         config = load_config(cfg)
         assert "alice" in config.users
+
+
+class TestDisabledModules:
+    """Phase 1 of the modules / connected services refactor."""
+
+    def test_user_config_default_empty(self):
+        assert UserConfig().disabled_modules == []
+
+    def test_parsed_from_toml(self, tmp_path):
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        (users_dir / "alice.toml").write_text(
+            'display_name = "Alice"\n'
+            'disabled_modules = ["feeds", "money"]\n'
+        )
+        result = load_user_configs(users_dir)
+        assert result["alice"].disabled_modules == ["feeds", "money"]
+
+    def test_is_module_enabled_default_on(self):
+        cfg = Config()
+        cfg.users["alice"] = UserConfig()
+        assert cfg.is_module_enabled("alice", "feeds") is True
+        assert cfg.is_module_enabled("alice", "money") is True
+        assert cfg.is_module_enabled("alice", "location") is True
+
+    def test_is_module_enabled_unknown_user_default_on(self):
+        cfg = Config()
+        # No users configured at all — default-on still applies (docker
+        # auto-seeding flow can hit this path before profiles are written).
+        assert cfg.is_module_enabled("ghost", "feeds") is True
+
+    def test_is_module_enabled_disabled_for_user(self):
+        cfg = Config()
+        cfg.users["alice"] = UserConfig(disabled_modules=["feeds"])
+        assert cfg.is_module_enabled("alice", "feeds") is False
+        assert cfg.is_module_enabled("alice", "money") is True
+
+    def test_is_module_enabled_unknown_module(self):
+        # Unknown module names are never "enabled" — guard against typos
+        # leaking into user-supplied data.
+        cfg = Config()
+        cfg.users["alice"] = UserConfig()
+        assert cfg.is_module_enabled("alice", "ghost") is False
+
+
+class TestCleanupObsoleteResources:
+    """db.cleanup_obsolete_resources removes retired resource types."""
+
+    def test_drops_retired_types(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            for rtype in ("feeds", "money", "monarch", "moneyman", "karakeep", "overland"):
+                db.add_user_resource(
+                    conn, user_id="alice", resource_type=rtype,
+                    resource_path=rtype, display_name=f"{rtype} display",
+                )
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Docs", display_name="Docs",
+            )
+        removed = db.cleanup_obsolete_resources(db_path)
+        assert removed == 6
+        with db.get_db(db_path) as conn:
+            rows = db.get_user_resources(conn, "alice")
+        assert [r.resource_type for r in rows] == ["folder"]
+
+    def test_idempotent(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Docs", display_name="Docs",
+            )
+        # Second run is a no-op — operators can leave the call wired into
+        # startup without worrying about duplicate work.
+        assert db.cleanup_obsolete_resources(db_path) == 0
+        assert db.cleanup_obsolete_resources(db_path) == 0
+
+    def test_missing_db_is_noop(self, tmp_path):
+        from istota import db
+        # Mirrors the best-effort contract used by _apply_user_profiles —
+        # callers like `istota init` may run before the DB exists.
+        assert db.cleanup_obsolete_resources(tmp_path / "no.db") == 0
+
+    def test_load_config_runs_cleanup(self, tmp_path, monkeypatch):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="overland",
+                resource_path="overland", display_name="GPS",
+                extras={"ingest_token": "tok-xyz"},
+            )
+
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
+        config = load_config(cfg)
+
+        # The retired row no longer surfaces in the in-memory resources
+        # list (the load_config-time filter caught it).
+        assert all(r.type != "overland" for r in config.users["alice"].resources)
+
+        # And the row is gone from the DB.
+        with db.get_db(db_path) as conn:
+            rows = db.get_user_resources(conn, "alice")
+        assert all(r.resource_type != "overland" for r in rows)
+
+        # The credential was migrated into the secrets table during the
+        # same load — webhook_receiver.reload_config picks it up from there.
+        from istota import secrets_store
+        assert secrets_store.get_secret(
+            db_path, "alice", "overland", "ingest_token",
+        ) == "tok-xyz"

@@ -210,6 +210,7 @@ class UserConfig:
     max_background_workers: int = 0  # per-user bg worker override (0 = use global default)
     disabled_skills: list[str] = field(default_factory=list)  # skills to exclude from selection
     trusted_email_senders: list[str] = field(default_factory=list)  # patterns for trusted senders
+    disabled_modules: list[str] = field(default_factory=list)  # modules to disable (default-on otherwise)
 
 
 @dataclass
@@ -526,6 +527,22 @@ class Config:
             return uc.max_background_workers
         return self.scheduler.user_max_background_workers
 
+    def is_module_enabled(self, user_id: str, module: str) -> bool:
+        """Check whether a module is enabled for a user.
+
+        Modules are on by default. Returns False only when the user has an
+        explicit ``disabled_modules`` entry for this module. Unknown users
+        default to True so docker auto-seeding doesn't block first-login
+        access.
+        """
+        from .modules import MODULE_NAMES
+        if module not in MODULE_NAMES:
+            return False
+        uc = self.users.get(user_id)
+        if uc is None:
+            return True
+        return module not in (uc.disabled_modules or [])
+
     def is_admin(self, user_id: str) -> bool:
         """Check if user has admin privileges.
 
@@ -643,11 +660,8 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         max_background_workers=user_data.get("max_background_workers", 0),
         disabled_skills=user_data.get("disabled_skills", []),
         trusted_email_senders=user_data.get("trusted_email_senders", []),
+        disabled_modules=user_data.get("disabled_modules", []),
     )
-
-
-# Resource types that contain credentials and must only come from TOML (Ansible-managed).
-_CREDENTIAL_RESOURCE_TYPES = frozenset({"karakeep", "monarch", "moneyman"})
 
 
 def _merge_user_configs(
@@ -658,9 +672,10 @@ def _merge_user_configs(
     Merge rules:
     - Scalar fields present in override_data replace the base value.
     - ``briefings``: JSON list replaces TOML list entirely.
-    - ``resources``: credential resources from TOML are preserved; JSON
-      non-credential resources replace TOML non-credential resources.
-    - Credential resource types in JSON are silently dropped.
+    - ``resources``: JSON list replaces TOML list entirely. The legacy
+      "credential resource types" carve-out went away with the modules
+      refactor — credentials live in the secrets table now, not in
+      ``[[resources]]`` blocks.
     """
     override = _parse_user_data(override_data, user_id)
 
@@ -675,6 +690,7 @@ def _merge_user_configs(
         max_foreground_workers=override.max_foreground_workers if "max_foreground_workers" in override_data else base.max_foreground_workers,
         max_background_workers=override.max_background_workers if "max_background_workers" in override_data else base.max_background_workers,
         disabled_skills=override.disabled_skills if "disabled_skills" in override_data else base.disabled_skills,
+        disabled_modules=override.disabled_modules if "disabled_modules" in override_data else base.disabled_modules,
         # Briefings: JSON replaces entirely, else keep TOML.
         briefings=override.briefings if "briefings" in override_data else base.briefings,
         # Resources: credential resources from TOML + non-credential from JSON (if provided).
@@ -682,11 +698,8 @@ def _merge_user_configs(
     )
 
     if "resources" in override_data:
-        # Keep credential resources from TOML, replace non-credential with JSON.
-        toml_credential = [r for r in base.resources if r.type in _CREDENTIAL_RESOURCE_TYPES]
-        json_non_credential = [r for r in override.resources if r.type not in _CREDENTIAL_RESOURCE_TYPES]
-        merged.resources = toml_credential + json_non_credential
-    # else: keep all base resources as-is (including non-credential ones from TOML).
+        merged.resources = override.resources
+    # else: keep all base resources as-is.
 
     return merged
 
@@ -1151,6 +1164,13 @@ def load_config(config_path: Path | None = None) -> Config:
     # ``config.users[uid].resources`` unchanged.
     _apply_user_resources(config)
 
+    # Modules refactor: absorb credentials from `[[resources]]` blocks for
+    # types that have been retired (karakeep base_url, overland.ingest_token,
+    # etc.) into the secrets table, then drop those rows from user_resources
+    # and from the in-memory ``uc.resources`` lists so the rest of the load
+    # cycle sees the post-cleanup state.
+    _migrate_obsolete_resources(config)
+
     # Phase 7b: overlay briefing_configs rows onto config.users[*].briefings.
     # DB rows replace TOML rows of the same ``name``; distinct names coexist.
     # ``check_briefings`` and ``get_briefings_for_user`` keep reading
@@ -1252,6 +1272,56 @@ def _apply_user_resources(config: "Config") -> None:
                     user_config.resources.append(rc)
     except Exception as e:  # pragma: no cover - defensive
         logger.debug("user_resources overlay skipped: %s", e)
+
+
+def _migrate_obsolete_resources(config: "Config") -> None:
+    """Absorb obsolete resource credentials into secrets, then drop the rows.
+
+    Sequence:
+
+    1. ``secrets_store.import_from_user_configs`` — copies credentials out of
+       ``[[resources]]`` extras for the retired types (karakeep base_url,
+       overland.ingest_token, monarch session_token, etc.) into the
+       encrypted secrets table. Idempotent; rows already in the table are
+       not overwritten.
+    2. ``db.cleanup_obsolete_resources`` — deletes the matching rows from
+       the ``user_resources`` DB table so they stop being merged into
+       ``uc.resources`` on future loads.
+    3. Filter ``uc.resources`` in memory so the rest of this load cycle
+       sees the post-cleanup state (the executor merge, scheduler hooks,
+       etc. all read this list).
+
+    Best-effort: a missing/unreadable DB or unset ``ISTOTA_SECRET_KEY`` is
+    not fatal — startup continues and the operator sees the warning.
+    """
+    try:
+        from . import db as _db  # noqa: PLC0415
+        from . import secrets_store as _ss  # noqa: PLC0415
+    except Exception:  # pragma: no cover - defensive
+        return
+
+    db_path = config.db_path
+    if db_path is None or not Path(db_path).exists():
+        return
+
+    try:
+        _ss.import_from_user_configs(db_path, config.users)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("secrets import failed: %s", e)
+
+    try:
+        removed = _db.cleanup_obsolete_resources(db_path)
+        if removed:
+            logger.info(
+                "dropped %d obsolete resource row(s) (types: %s)",
+                removed, ", ".join(_db._OBSOLETE_RESOURCE_TYPES),
+            )
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("obsolete resource cleanup failed: %s", e)
+
+    obsolete = set(_db._OBSOLETE_RESOURCE_TYPES)
+    for uc in config.users.values():
+        uc.resources = [rc for rc in uc.resources if rc.type not in obsolete]
 
 
 def _apply_user_briefings(config: "Config") -> None:

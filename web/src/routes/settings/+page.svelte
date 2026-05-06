@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { base } from '$app/paths';
 	import {
 		getSettingsServices,
-		setSecret,
-		deleteSecret,
+		getModules,
 		getProfile,
 		updateProfile,
 		getResources,
@@ -12,7 +12,7 @@
 		getBriefings,
 		upsertBriefing,
 		deleteBriefing,
-		type ServiceCard,
+		type ServiceCard as ServiceCardData,
 		type UserProfile,
 		type UserResourceRow,
 		type ResourceTypeSchema,
@@ -20,11 +20,14 @@
 		type BriefingRoomOption,
 	} from '$lib/api';
 	import { Button, Modal } from '$lib/components/ui';
+	import { ServiceCard } from '$lib/components/settings';
 
-	let services: ServiceCard[] = $state([]);
+	let services: ServiceCardData[] = $state([]);
+	let allModules: string[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let info = $state('');
+	let oauthBusy = $state(false);
 
 	let profile: UserProfile | null = $state(null);
 	let profileSaving = $state(false);
@@ -54,29 +57,20 @@
 	let briefingError = $state('');
 	let briefingSaving = $state(false);
 
-	let inputs: Record<string, string> = $state({});
-	let saving: Record<string, boolean> = $state({});
-	let savedFlash: Record<string, boolean> = $state({});
-	let saveError: Record<string, string> = $state({});
-
 	type ConfirmKind =
 		| { kind: 'resource'; id: number; label: string }
-		| { kind: 'briefing'; id: number; label: string }
-		| { kind: 'secret'; service: string; key: string; label: string };
+		| { kind: 'briefing'; id: number; label: string };
 	let confirmDelete: ConfirmKind | null = $state(null);
-
-	function fieldId(service: string, key: string): string {
-		return `${service}:${key}`;
-	}
 
 	async function refresh() {
 		loading = true;
 		try {
-			const [svcResp, profResp, resResp, briefResp] = await Promise.all([
+			const [svcResp, profResp, resResp, briefResp, modResp] = await Promise.all([
 				getSettingsServices(),
 				getProfile(),
 				getResources(),
 				getBriefings(),
+				getModules(),
 			]);
 			services = svcResp.services;
 			profile = profResp.profile;
@@ -88,11 +82,49 @@
 			briefingOutputs = briefResp.outputs?.length
 				? briefResp.outputs
 				: ['talk', 'email', 'both'];
+			allModules = modResp.modules;
 			error = '';
 		} catch (e) {
 			error = (e as Error).message || 'Failed to load settings';
 		} finally {
 			loading = false;
+		}
+	}
+
+	async function reloadServices() {
+		try {
+			services = (await getSettingsServices()).services;
+		} catch (e) {
+			error = (e as Error).message || 'Failed to reload services';
+		}
+	}
+
+	function toggleDisabledModule(name: string) {
+		if (!profile) return;
+		const next = new Set(profile.disabled_modules || []);
+		if (next.has(name)) next.delete(name);
+		else next.add(name);
+		profile.disabled_modules = [...next];
+	}
+
+	function connectGoogle() {
+		oauthBusy = true;
+		// Full-page nav — the OAuth callback redirects back to /istota/.
+		window.location.href = `${base}/google/connect`;
+	}
+
+	async function disconnectGoogle() {
+		oauthBusy = true;
+		try {
+			await fetch(`${base}/api/google/disconnect`, {
+				method: 'DELETE',
+				credentials: 'include',
+			});
+			await reloadServices();
+		} catch (e) {
+			error = (e as Error).message || 'Disconnect failed';
+		} finally {
+			oauthBusy = false;
 		}
 	}
 
@@ -120,6 +152,7 @@
 				email_addresses: profile.email_addresses,
 				trusted_email_senders: profile.trusted_email_senders,
 				disabled_skills: profile.disabled_skills,
+				disabled_modules: profile.disabled_modules,
 				site_enabled: profile.site_enabled,
 			};
 			await updateProfile(patch);
@@ -269,10 +302,6 @@
 		return parts.join(', ');
 	}
 
-	function askClearSecret(service: string, key: string, label: string) {
-		confirmDelete = { kind: 'secret', service, key, label };
-	}
-
 	async function performDelete() {
 		if (!confirmDelete) return;
 		const target = confirmDelete;
@@ -284,39 +313,9 @@
 			} else if (target.kind === 'briefing') {
 				await deleteBriefing(target.id);
 				await refresh();
-			} else {
-				const id = fieldId(target.service, target.key);
-				saving[id] = true;
-				saveError[id] = '';
-				try {
-					await deleteSecret(target.service, target.key);
-					await refresh();
-				} finally {
-					saving[id] = false;
-				}
 			}
 		} catch (e) {
 			error = (e as Error).message || 'Delete failed';
-		}
-	}
-
-	async function save(service: string, key: string) {
-		const id = fieldId(service, key);
-		const value = inputs[id] ?? '';
-		saving[id] = true;
-		saveError[id] = '';
-		try {
-			await setSecret(service, key, value);
-			inputs[id] = '';
-			savedFlash[id] = true;
-			setTimeout(() => {
-				savedFlash[id] = false;
-			}, 1500);
-			await refresh();
-		} catch (e) {
-			saveError[id] = (e as Error).message || 'Save failed';
-		} finally {
-			saving[id] = false;
 		}
 	}
 
@@ -324,21 +323,10 @@
 		void refresh();
 	});
 
-	function statusLabel(s: ServiceCard['status']): string {
-		switch (s) {
-			case 'configured':
-				return 'Configured';
-			case 'partial':
-				return 'Partial';
-			case 'missing':
-				return 'Missing';
-			case 'unavailable':
-				return 'Not enabled';
-		}
-	}
-
-	// Hide services with no matching resource — the user adds the resource
-	// first, then the credentials card appears.
+	// /settings/services already filters to connected services (no module-owned
+	// monarch/feeds/overland leak through). Skip cards whose status is
+	// "unavailable" — historically used to mean "no resource declaration" but
+	// now only OAuth services with the global flag off can land there.
 	let activeServices = $derived(
 		services.filter((s) => s.status !== 'unavailable'),
 	);
@@ -467,6 +455,27 @@
 						}}
 					/>
 				</label>
+				{#if allModules.length > 0}
+					<div class="field">
+						<span>Disabled modules</span>
+						<div class="module-toggles">
+							{#each allModules as m (m)}
+								<label class="module-chip">
+									<input
+										type="checkbox"
+										checked={(profile.disabled_modules || []).includes(m)}
+										onchange={() => toggleDisabledModule(m)}
+									/>
+									<span>{m}</span>
+								</label>
+							{/each}
+						</div>
+						<p class="hint">
+							Modules are on by default. Tick to opt out — the corresponding
+							UI tab and scheduled jobs will be hidden / paused.
+						</p>
+					</div>
+				{/if}
 				<label class="field checkbox">
 					<input type="checkbox" bind:checked={profile.site_enabled} />
 					<span>Static website hosting at /~user/</span>
@@ -728,72 +737,27 @@
 
 		{#if activeServices.length > 0}
 			<div class="subsection-heading">
-				<h2>Credentials</h2>
+				<h2>Connected services</h2>
 				<p class="hint">
-					Per-service credentials for the resources above. Values are
-					encrypted at rest and never sent back to the browser — these
-					fields are write-only.
+					Per-service credentials for skills that need them. Values are
+					encrypted at rest and never sent back to the browser — secret
+					fields are write-only. Module-specific credentials live on
+					their own settings pages
+					(<a href="{base}/feeds/settings">feeds</a>,
+					<a href="{base}/money/settings">money</a>,
+					<a href="{base}/location/settings">location</a>).
 				</p>
 			</div>
 		{/if}
 
 		{#each activeServices as svc (svc.service)}
-			<section class="card" data-status={svc.status}>
-				<header class="section-header">
-					<div class="title">
-						<h2>{svc.label}</h2>
-						<span class="status-pill status-{svc.status}">
-							{statusLabel(svc.status)}
-						</span>
-					</div>
-					{#if svc.last_updated}
-						<span class="meta">Updated {svc.last_updated}</span>
-					{/if}
-				</header>
-
-				{#each svc.fields as field (field.key)}
-					{@const id = fieldId(svc.service, field.key)}
-					{@const isConfigured = svc.configured_keys.includes(field.key)}
-					<label class="field">
-						<span>{field.label}</span>
-						<div class="row">
-							<input
-								type={field.type}
-								autocomplete="new-password"
-								placeholder={isConfigured
-									? '•••• stored — enter to replace'
-									: 'Enter value'}
-								bind:value={inputs[id]}
-								disabled={saving[id]}
-							/>
-							<Button
-								variant="primary"
-								size="sm"
-								disabled={saving[id] || !inputs[id]}
-								onclick={() => save(svc.service, field.key)}
-							>
-								{saving[id] ? 'Saving…' : 'Save'}
-							</Button>
-							{#if isConfigured}
-								<button
-									class="icon-btn danger"
-									title="Clear stored value"
-									type="button"
-									disabled={saving[id]}
-									onclick={() => askClearSecret(svc.service, field.key, `${svc.label} / ${field.label}`)}
-									>×</button
-								>
-							{/if}
-						</div>
-						{#if savedFlash[id]}
-							<span class="flash">Saved.</span>
-						{/if}
-						{#if saveError[id]}
-							<span class="field-error">{saveError[id]}</span>
-						{/if}
-					</label>
-				{/each}
-			</section>
+			<ServiceCard
+				service={svc}
+				onChanged={reloadServices}
+				onConnect={connectGoogle}
+				onDisconnect={disconnectGoogle}
+				oauthBusy={oauthBusy}
+			/>
 		{/each}
 	{/if}
 </div>
@@ -801,23 +765,15 @@
 {#if confirmDelete}
 	<Modal
 		open={true}
-		title={confirmDelete.kind === 'resource' ? 'Remove resource?' : 'Clear secret?'}
+		title={confirmDelete.kind === 'resource' ? 'Remove resource?' : 'Remove briefing?'}
 		onOpenChange={(o) => {
 			if (!o) confirmDelete = null;
 		}}
 	>
-		<p>
-			{#if confirmDelete.kind === 'resource'}
-				Remove <strong>{confirmDelete.label}</strong>?
-			{:else}
-				Clear stored value for <strong>{confirmDelete.label}</strong>?
-			{/if}
-		</p>
+		<p>Remove <strong>{confirmDelete.label}</strong>?</p>
 		{#snippet footer()}
 			<Button variant="ghost" onclick={() => (confirmDelete = null)}>Cancel</Button>
-			<Button variant="primary" onclick={performDelete}>
-				{confirmDelete?.kind === 'resource' ? 'Remove' : 'Clear'}
-			</Button>
+			<Button variant="primary" onclick={performDelete}>Remove</Button>
 		{/snippet}
 	</Modal>
 {/if}
@@ -944,29 +900,6 @@
 		margin: 0;
 	}
 
-	.title {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.meta {
-		font-size: var(--text-xs);
-		color: var(--text-dim);
-	}
-
-	.status-pill {
-		font-size: var(--text-xs);
-		padding: 0.05rem 0.4rem;
-		border-radius: var(--radius-pill);
-		background: var(--surface-raised);
-		color: var(--text-muted);
-	}
-	.status-pill.status-configured { color: #6eb884; }
-	.status-pill.status-partial { color: #d6a000; }
-	.status-pill.status-missing { color: var(--text-dim); }
-	.status-pill.status-unavailable { color: var(--text-dim); }
-
 	.empty {
 		font-size: var(--text-sm);
 		color: var(--text-dim);
@@ -1026,28 +959,6 @@
 	}
 	.field.checkbox input[type='checkbox'] {
 		width: auto;
-	}
-
-	.two-col {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 0.75rem;
-	}
-
-	.row {
-		display: flex;
-		gap: 0.4rem;
-		align-items: center;
-	}
-
-	.flash {
-		font-size: var(--text-xs);
-		color: #6eb884;
-	}
-
-	.field-error {
-		font-size: var(--text-xs);
-		color: #e88;
 	}
 
 	.table-scroll {
@@ -1160,13 +1071,33 @@
 		justify-content: flex-end;
 	}
 
+	.module-toggles {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+	}
+
+	.module-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		padding: 0.15rem 0.5rem;
+		border-radius: var(--radius-pill);
+		background: var(--surface-raised);
+		font-size: var(--text-xs);
+		color: var(--text-muted);
+		cursor: pointer;
+	}
+
+	.module-chip input[type='checkbox'] {
+		margin: 0;
+		width: auto;
+	}
+
 	@container settings (max-width: 520px) {
 		.col-source,
 		.col-perms {
 			display: none;
-		}
-		.two-col {
-			grid-template-columns: 1fr;
 		}
 	}
 
