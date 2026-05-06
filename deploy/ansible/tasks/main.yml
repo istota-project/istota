@@ -1429,6 +1429,21 @@
     daemon_reload: yes
   when: not istota_web_only
 
+# Update-only mode is "pull latest code, restart services". Handler-based
+# restarts only fire when a task reports `changed`, so an idempotent rerun
+# (git already at HEAD, config.toml unchanged) leaves the running services
+# pinned to old code. Force the restart explicitly here, mirroring the
+# `istota_web_only` pattern further up the file.
+- name: Restart services (update-only mode)
+  systemd:
+    name: "{{ item.name }}"
+    state: restarted
+  loop:
+    - { name: "{{ istota_namespace }}-scheduler", enabled: true }
+    - { name: "{{ istota_namespace }}-web", enabled: "{{ istota_web_enabled | default(false) }}" }
+    - { name: "{{ istota_namespace }}-webhooks", enabled: "{{ istota_location_enabled | default(false) }}" }
+  when: istota_update_only and (item.enabled | bool)
+
 - name: Display deployment info
   debug:
     msg:
