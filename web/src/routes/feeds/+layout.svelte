@@ -115,13 +115,10 @@
 		<ShellHeader title="Feeds">
 			{#snippet nav()}
 				{#if !onSettings}
-					<label class="sort-by">
-						<span>Sort by</span>
-						<select class="mode-select" bind:value={$sortBy}>
-							<option value="published">Published</option>
-							<option value="added">Added</option>
-						</select>
-					</label>
+					<select class="mode-select" bind:value={$sortBy}>
+						<option value="published">Published</option>
+						<option value="added">Added</option>
+					</select>
 					<div class="filter-group">
 						<Chip checked={$showImages} onclick={() => showImages.update((v) => !v)}>Images</Chip>
 						<Chip checked={$showText} onclick={() => showText.update((v) => !v)}>Text</Chip>
@@ -219,15 +216,6 @@
 		gap: var(--chip-gap);
 	}
 
-	.sort-by {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.4rem;
-		margin-right: 0.75rem;
-		font-size: var(--text-xs);
-		color: var(--text-muted);
-	}
-
 	.mode-select {
 		background: var(--surface-card);
 		border: 1px solid var(--border-default);
@@ -237,6 +225,7 @@
 		padding: 0.2rem 0.4rem;
 		border-radius: 0.25rem;
 		cursor: pointer;
+		margin-right: 0.5rem;
 	}
 
 	.feed-btn {
