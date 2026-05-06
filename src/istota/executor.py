@@ -384,8 +384,17 @@ def build_stripped_env() -> dict[str, str]:
     """Build os.environ minus credential vars. For heartbeat/cron commands."""
     return {
         k: v for k, v in os.environ.items()
-        if not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
+        if k in _STRIPPED_ENV_PRESERVE
+        or not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
     }
+
+
+# Env vars that match a strip pattern but must survive build_stripped_env().
+# ISTOTA_SECRET_KEY is the master key needed by module-skill subprocesses
+# (feeds, money, location) to decrypt the secrets table — without it
+# secrets_store.get_secret() returns None and per-user credentials configured
+# via the web UI are invisible.
+_STRIPPED_ENV_PRESERVE = frozenset({"ISTOTA_SECRET_KEY"})
 
 
 # Env vars that carry secrets and should be routed through the skill proxy.
