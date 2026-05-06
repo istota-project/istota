@@ -16,7 +16,12 @@
 		type ServiceCard as ServiceCardData,
 	} from '$lib/api';
 	import { Button, Modal } from '$lib/components/ui';
-	import { ServiceCard } from '$lib/components/settings';
+	import {
+		ServiceCard,
+		SettingsLayout,
+		SettingsCard,
+		SettingsField,
+	} from '$lib/components/settings';
 
 	let loading = $state(true);
 	let saving = $state(false);
@@ -310,34 +315,23 @@
 	}
 </script>
 
-<div class="settings">
-	<header class="settings-header">
-		<div>
-			<h1>Feed settings</h1>
-			<p class="hint">
-				Edit subscriptions, categories, and poll defaults. Saved straight to your local SQLite.
-			</p>
-		</div>
-		<div class="header-actions">
-			{#if dirty}
-				<span class="dirty-badge">Unsaved changes</span>
-			{/if}
-			<Button variant="primary" onclick={save} disabled={!dirty || saving}>
-				{saving ? 'Saving…' : 'Save changes'}
-			</Button>
-		</div>
-	</header>
+<SettingsLayout
+	title="Feed settings"
+	description="Edit subscriptions, categories, and poll defaults. Saved straight to your local SQLite."
+	{loading}
+	{error}
+	{info}
+>
+	{#snippet headerActions()}
+		{#if dirty}
+			<span class="dirty-badge">Unsaved changes</span>
+		{/if}
+		<Button variant="primary" onclick={save} disabled={!dirty || saving}>
+			{saving ? 'Saving…' : 'Save changes'}
+		</Button>
+	{/snippet}
 
-	{#if error}
-		<div class="banner error">{error}</div>
-	{/if}
-	{#if info}
-		<div class="banner info">{info}</div>
-	{/if}
-
-	{#if loading}
-		<div class="placeholder">Loading…</div>
-	{:else if !moduleEnabled}
+	{#if !moduleEnabled}
 		<div class="banner info">
 			Feeds module is disabled. Enable it in
 			<a href="{base}/settings">Settings → Preferences</a> to manage
@@ -345,9 +339,8 @@
 		</div>
 	{:else}
 		{#if diagnostics}
-			<section class="card">
-				<header class="section-header">
-					<h2>Diagnostics</h2>
+			<SettingsCard title="Diagnostics">
+				{#snippet actions()}
 					<Button
 						variant="pill"
 						size="sm"
@@ -356,7 +349,7 @@
 					>
 						{refreshing ? 'Queueing…' : 'Refresh all now'}
 					</Button>
-				</header>
+				{/snippet}
 				<div class="diag-grid">
 					<div class="diag">
 						<span class="diag-value">{diagnostics.total_feeds}</span>
@@ -379,15 +372,11 @@
 						<span class="diag-label">last poll</span>
 					</div>
 				</div>
-			</section>
+			</SettingsCard>
 		{/if}
 
-		<section class="card">
-			<header class="section-header">
-				<h2>Settings</h2>
-			</header>
-			<label class="field">
-				<span>Default poll interval (minutes)</span>
+		<SettingsCard title="Settings">
+			<SettingsField label="Default poll interval (minutes)">
 				<input
 					type="number"
 					min="1"
@@ -407,14 +396,13 @@
 						config.settings = next;
 					}}
 				/>
-			</label>
-		</section>
+			</SettingsField>
+		</SettingsCard>
 
-		<section class="card">
-			<header class="section-header">
-				<h2>Categories ({config.categories.length})</h2>
+		<SettingsCard title="Categories ({config.categories.length})">
+			{#snippet actions()}
 				<Button variant="pill" size="sm" onclick={addCategory}>+ Add category</Button>
-			</header>
+			{/snippet}
 			{#if config.categories.length === 0}
 				<p class="empty">No categories yet. Categories group feeds in the sidebar.</p>
 			{:else}
@@ -479,13 +467,12 @@
 					</table>
 				</div>
 			{/if}
-		</section>
+		</SettingsCard>
 
-		<section class="card">
-			<header class="section-header">
-				<h2>Subscriptions ({config.feeds.length})</h2>
+		<SettingsCard title="Subscriptions ({config.feeds.length})">
+			{#snippet actions()}
 				<Button variant="pill" size="sm" onclick={startAdd}>+ Add subscription</Button>
-			</header>
+			{/snippet}
 			{#if config.feeds.length === 0}
 				<p class="empty">
 					No subscriptions yet. Add one above, or import an OPML file.
@@ -552,10 +539,9 @@
 					</table>
 				</div>
 			{/if}
-		</section>
+		</SettingsCard>
 
-		<section class="card">
-			<h2>OPML</h2>
+		<SettingsCard title="OPML">
 			<p class="hint">
 				Import subscriptions from an OPML export, or download the current
 				list as OPML. Legacy bridger URLs (<code>localhost:8900/tumblr/…</code>,
@@ -577,13 +563,13 @@
 				onchange={onImport}
 				hidden
 			/>
-		</section>
+		</SettingsCard>
 
 		{#each moduleServices as svc (svc.service)}
 			<ServiceCard service={svc} onChanged={reloadServices} />
 		{/each}
 	{/if}
-</div>
+</SettingsLayout>
 
 {#if adding}
 	<Modal
@@ -594,36 +580,32 @@
 		}}
 	>
 		<div class="modal-body">
-			<label class="field">
-				<span>URL</span>
+			<SettingsField label="URL">
 				<input
 					type="text"
 					placeholder="https://example.com/feed.xml | tumblr:user | arena:slug"
 					bind:value={adding.url}
 				/>
-			</label>
-			<label class="field">
-				<span>Title (optional)</span>
+			</SettingsField>
+			<SettingsField label="Title (optional)">
 				<input type="text" bind:value={adding.title} />
-			</label>
-			<label class="field">
-				<span>Category</span>
+			</SettingsField>
+			<SettingsField label="Category">
 				<select bind:value={adding.category}>
 					<option value="">(none)</option>
 					{#each categoryOptions() as slug (slug)}
 						<option value={slug}>{slug}</option>
 					{/each}
 				</select>
-			</label>
-			<label class="field">
-				<span>Poll interval (minutes, optional)</span>
+			</SettingsField>
+			<SettingsField label="Poll interval (minutes, optional)">
 				<input
 					type="number"
 					min="1"
 					placeholder={String(defaultInterval())}
 					bind:value={adding.poll_interval_minutes}
 				/>
-			</label>
+			</SettingsField>
 			{#if modalError}
 				<div class="banner error">{modalError}</div>
 			{/if}
@@ -644,32 +626,28 @@
 		}}
 	>
 		<div class="modal-body">
-			<label class="field">
-				<span>URL</span>
+			<SettingsField label="URL">
 				<input type="text" bind:value={editing.draft.url} />
-			</label>
-			<label class="field">
-				<span>Title</span>
+			</SettingsField>
+			<SettingsField label="Title">
 				<input type="text" bind:value={editing.draft.title} />
-			</label>
-			<label class="field">
-				<span>Category</span>
+			</SettingsField>
+			<SettingsField label="Category">
 				<select bind:value={editing.draft.category}>
 					<option value="">(none)</option>
 					{#each categoryOptions() as slug (slug)}
 						<option value={slug}>{slug}</option>
 					{/each}
 				</select>
-			</label>
-			<label class="field">
-				<span>Poll interval (minutes)</span>
+			</SettingsField>
+			<SettingsField label="Poll interval (minutes)">
 				<input
 					type="number"
 					min="1"
 					placeholder={String(defaultInterval())}
 					bind:value={editing.draft.poll_interval_minutes}
 				/>
-			</label>
+			</SettingsField>
 			{#if modalError}
 				<div class="banner error">{modalError}</div>
 			{/if}
@@ -705,107 +683,9 @@
 {/if}
 
 <style>
-	.settings {
-		width: 100%;
-		max-width: 980px;
-		margin: 0 auto;
-		padding: 1.5rem 1rem 4rem;
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-		box-sizing: border-box;
-		container-type: inline-size;
-		container-name: settings;
-	}
-
-	.settings-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 1rem;
-		flex-wrap: wrap;
-	}
-
-	.settings-header h1 {
-		margin: 0;
-		font-size: var(--text-lg, 1.05rem);
-		color: var(--text-primary);
-	}
-
-	.hint {
-		margin: 0.25rem 0 0;
-		font-size: var(--text-sm);
-		color: var(--text-muted);
-		max-width: 60ch;
-	}
-
-	.hint code,
-	code {
-		background: var(--surface-raised);
-		padding: 0 0.3rem;
-		border-radius: 0.2rem;
-		font-size: 0.8em;
-	}
-
-	.header-actions {
-		display: flex;
-		align-items: center;
-		gap: 0.6rem;
-	}
-
-	.dirty-badge {
-		font-size: var(--text-xs);
-		color: #d6a000;
-	}
-
-	.banner {
-		padding: 0.4rem 0.75rem;
-		border-radius: var(--radius-card);
-		font-size: var(--text-sm);
-	}
-	.banner.error {
-		background: rgba(204, 102, 102, 0.15);
-		color: #e88;
-	}
-	.banner.info {
-		background: rgba(110, 184, 132, 0.15);
-		color: #8d8;
-	}
-
-	.placeholder {
-		color: var(--text-dim);
-		padding: 2rem 0;
-		text-align: center;
-	}
-
-	.card {
-		background: var(--surface-card);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-card);
-		padding: 1rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-	}
-
-	.card h2 {
-		margin: 0;
-		font-size: var(--text-base);
-		color: var(--text-primary);
-	}
-
-	.section-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 0.75rem;
-	}
-
-	.empty {
-		font-size: var(--text-sm);
-		color: var(--text-dim);
-		margin: 0;
-	}
+	/* Shared .settings/.card/.field/.grid/.banner/.icon-btn primitives live in
+	   web/src/lib/styles/settings.css (imported by app.css). Only feeds-specific
+	   styling (diagnostics, type pill, title cell, container queries) stays. */
 
 	.diag-grid {
 		display: grid;
@@ -839,50 +719,6 @@
 	.diag-label {
 		font-size: var(--text-xs);
 		color: var(--text-dim);
-	}
-
-	.field {
-		display: flex;
-		flex-direction: column;
-		gap: 0.2rem;
-		font-size: var(--text-sm);
-	}
-
-	.field span {
-		color: var(--text-muted);
-	}
-
-	.field input,
-	.field select {
-		background: var(--surface-base);
-		color: var(--text-primary);
-		border: 1px solid var(--border-default);
-		border-radius: 0.3rem;
-		padding: 0.3rem 0.5rem;
-		font: inherit;
-		font-size: var(--text-sm);
-		width: 100%;
-		max-width: 24rem;
-		min-width: 0;
-		box-sizing: border-box;
-	}
-
-	.field input:focus,
-	.field select:focus {
-		outline: 1px solid var(--accent, #6c8ebf);
-	}
-
-	.table-scroll {
-		width: 100%;
-		overflow-x: auto;
-		-webkit-overflow-scrolling: touch;
-	}
-
-	.grid {
-		width: 100%;
-		table-layout: fixed;
-		border-collapse: collapse;
-		font-size: var(--text-sm);
 	}
 
 	.col-title {
@@ -944,22 +780,6 @@
 		line-height: 1.3;
 	}
 
-	.grid th,
-	.grid td {
-		text-align: left;
-		padding: 0.4rem 0.5rem;
-		border-bottom: 1px solid var(--border-subtle);
-		vertical-align: middle;
-	}
-
-	.grid th {
-		color: var(--text-dim);
-		font-weight: 500;
-		font-size: var(--text-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-	}
-
 	.grid tbody tr.has-error {
 		background: rgba(204, 102, 102, 0.05);
 	}
@@ -975,11 +795,10 @@
 		white-space: nowrap;
 	}
 
+	/* Override shared .grid actions width — feeds row has two icon buttons. */
 	.grid td.actions,
 	.grid th.actions {
-		text-align: right;
 		width: 4.5rem;
-		white-space: nowrap;
 	}
 
 	.grid input[type='text'] {
@@ -1032,37 +851,6 @@
 		white-space: nowrap;
 	}
 
-	.muted {
-		color: var(--text-dim);
-		font-size: var(--text-xs);
-	}
-
-	.icon-btn {
-		background: transparent;
-		border: none;
-		color: var(--text-dim);
-		cursor: pointer;
-		padding: 0.1rem 0.35rem;
-		border-radius: 0.2rem;
-		font: inherit;
-		font-size: var(--text-base);
-		line-height: 1;
-	}
-
-	.icon-btn:hover:not(:disabled) {
-		color: var(--text-primary);
-		background: var(--surface-raised);
-	}
-
-	.icon-btn.danger:hover:not(:disabled) {
-		color: #e88;
-	}
-
-	.icon-btn:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
-	}
-
 	.opml-actions {
 		display: flex;
 		gap: 0.6rem;
@@ -1084,11 +872,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.6rem;
-	}
-
-	.modal-body .field input,
-	.modal-body .field select {
-		max-width: none;
 	}
 
 	/* Container-based: hide low-priority table columns as the content area
@@ -1135,46 +918,6 @@
 		.diag {
 			padding: 0.4rem 0.5rem;
 		}
-
-		.grid th,
-		.grid td {
-			padding: 0.4rem 0.3rem;
-		}
 	}
 
-	/* Viewport-based: shell-level paddings + header layout. These respond
-	   to the whole window shrinking (e.g. mobile portrait) regardless of
-	   sidebar state. */
-	@media (max-width: 768px) {
-		.settings {
-			padding: 1rem 0.75rem 3rem;
-		}
-
-		.settings-header {
-			flex-direction: column;
-			align-items: stretch;
-		}
-
-		.header-actions {
-			justify-content: flex-end;
-		}
-
-		.card {
-			padding: 0.75rem;
-		}
-
-		.section-header {
-			flex-wrap: wrap;
-		}
-	}
-
-	@media (max-width: 640px) {
-		.settings {
-			padding: 0.75rem 0.5rem 3rem;
-		}
-
-		.card {
-			padding: 0.6rem;
-		}
-	}
 </style>

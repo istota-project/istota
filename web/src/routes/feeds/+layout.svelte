@@ -114,51 +114,58 @@
 	{#snippet header()}
 		<ShellHeader title="Feeds">
 			{#snippet nav()}
-				<label class="sort-by">
-					<span>Sort by</span>
-					<select class="mode-select" bind:value={$sortBy}>
-						<option value="published">Published</option>
-						<option value="added">Added</option>
-					</select>
-				</label>
-				<div class="filter-group">
-					<Chip checked={$showImages} onclick={() => showImages.update((v) => !v)}>Images</Chip>
-					<Chip checked={$showText} onclick={() => showText.update((v) => !v)}>Text</Chip>
-				</div>
+				{#if !onSettings}
+					<label class="sort-by">
+						<span>Sort by</span>
+						<select class="mode-select" bind:value={$sortBy}>
+							<option value="published">Published</option>
+							<option value="added">Added</option>
+						</select>
+					</label>
+					<div class="filter-group">
+						<Chip checked={$showImages} onclick={() => showImages.update((v) => !v)}>Images</Chip>
+						<Chip checked={$showText} onclick={() => showText.update((v) => !v)}>Text</Chip>
+					</div>
+				{/if}
 			{/snippet}
 			{#snippet tools()}
-				<Chip icon checked={$viewMode === 'grid'} onclick={() => viewMode.set('grid')} title="Grid view">
-					<LayoutGrid size={14} />
-				</Chip>
-				<Chip icon checked={$viewMode === 'list'} onclick={() => viewMode.set('list')} title="List view">
-					<List size={14} />
-				</Chip>
-				<Chip icon onclick={handleMarkAllRead}
-					title={$selectedFeedId
-						? 'Mark this feed as read'
-						: 'Mark every feed as read'}>
-					<CheckCheck size={14} />
-				</Chip>
+				{#if !onSettings}
+					<Chip icon checked={$viewMode === 'grid'} onclick={() => viewMode.set('grid')} title="Grid view">
+						<LayoutGrid size={14} />
+					</Chip>
+					<Chip icon checked={$viewMode === 'list'} onclick={() => viewMode.set('list')} title="List view">
+						<List size={14} />
+					</Chip>
+					<Chip icon onclick={handleMarkAllRead}
+						title={$selectedFeedId
+							? 'Mark this feed as read'
+							: 'Mark every feed as read'}>
+						<CheckCheck size={14} />
+					</Chip>
+				{/if}
 				<Chip icon checked={onSettings} onclick={toggleSettings} title="Feed settings">
 					<Cog size={14} />
 				</Chip>
-				<SidebarToggle
-					open={sidebarOpen}
-					label="Sources"
-					count={feeds.length}
-					onclick={() => (sidebarOpen = !sidebarOpen)}
-				/>
+				{#if !onSettings}
+					<SidebarToggle
+						open={sidebarOpen}
+						label="Sources"
+						count={feeds.length}
+						onclick={() => (sidebarOpen = !sidebarOpen)}
+					/>
+				{/if}
 			{/snippet}
 		</ShellHeader>
 	{/snippet}
 
 	{#snippet sidebar()}
-		<Sidebar
-			title="Sources"
-			count={feeds.length}
-			open={sidebarOpen}
-			onClose={() => (sidebarOpen = false)}
-		>
+		{#if !onSettings}
+			<Sidebar
+				title="Sources"
+				count={feeds.length}
+				open={sidebarOpen}
+				onClose={() => (sidebarOpen = false)}
+			>
 			<button
 				class="feed-btn special"
 				class:active={!$selectedFeedId && !$showStarred && !$showUnseen}
@@ -199,7 +206,8 @@
 					{/each}
 				</CategoryGroup>
 			{/each}
-		</Sidebar>
+			</Sidebar>
+		{/if}
 	{/snippet}
 
 	{@render children()}

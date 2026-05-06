@@ -9,7 +9,7 @@
 		type BusinessDefaults,
 	} from '$lib/money/api';
 	import { selectedLedger } from '$lib/money/stores/ledger';
-	import { ServiceCard } from '$lib/components/settings';
+	import { ServiceCard, SettingsLayout, SettingsCard } from '$lib/components/settings';
 
 	let loading = $state(true);
 	let error = $state('');
@@ -79,24 +79,13 @@
 
 </script>
 
-<div class="settings">
-	<header class="settings-header">
-		<div>
-			<h1>Money settings</h1>
-			<p class="hint">
-				Monarch credentials and business configuration. Secrets are encrypted
-				at rest and never sent back to the browser.
-			</p>
-		</div>
-	</header>
-
-	{#if error}
-		<div class="banner error">{error}</div>
-	{/if}
-
-	{#if loading}
-		<div class="placeholder">Loading…</div>
-	{:else if !moduleEnabled}
+<SettingsLayout
+	title="Money settings"
+	description="Monarch credentials and business configuration. Secrets are encrypted at rest and never sent back to the browser."
+	{loading}
+	{error}
+>
+	{#if !moduleEnabled}
 		<div class="banner info">
 			Money module is disabled. Enable it in
 			<a href="{base}/settings">Settings → Preferences</a> to manage Monarch
@@ -107,10 +96,7 @@
 			<ServiceCard service={svc} onChanged={loadServices} />
 		{/each}
 
-		<section class="card">
-			<header class="section-header">
-				<h2>Business defaults</h2>
-			</header>
+		<SettingsCard title="Business defaults">
 			{#if businessError}
 				<div class="banner error">{businessError}</div>
 			{:else if !defaults}
@@ -131,13 +117,10 @@
 					{/if}
 				</dl>
 			{/if}
-		</section>
+		</SettingsCard>
 
 		{#if defaults}
-			<section class="card">
-				<header class="section-header">
-					<h2>Entities ({entities.length})</h2>
-				</header>
+			<SettingsCard title="Entities ({entities.length})">
 				<p class="hint">
 					Read-only view from <code>INVOICING.md</code>. Edit on the server
 					to change.
@@ -179,12 +162,9 @@
 						{/each}
 					</div>
 				{/if}
-			</section>
+			</SettingsCard>
 
-			<section class="card">
-				<header class="section-header">
-					<h2>Services ({services.length})</h2>
-				</header>
+			<SettingsCard title="Services ({services.length})">
 				{#if services.length === 0}
 					<p class="empty">No services configured.</p>
 				{:else}
@@ -214,103 +194,15 @@
 						</table>
 					</div>
 				{/if}
-			</section>
+			</SettingsCard>
 		{/if}
 	{/if}
-</div>
+</SettingsLayout>
 
 <style>
-	.settings {
-		width: 100%;
-		max-width: 980px;
-		margin: 0 auto;
-		padding: 1.5rem 1rem 4rem;
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-		box-sizing: border-box;
-		container-type: inline-size;
-		container-name: settings;
-	}
-
-	.settings-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 1rem;
-		flex-wrap: wrap;
-	}
-
-	.settings-header h1 {
-		margin: 0;
-		font-size: var(--text-lg, 1.05rem);
-		color: var(--text-primary);
-	}
-
-	.hint {
-		margin: 0.25rem 0 0;
-		font-size: var(--text-sm);
-		color: var(--text-muted);
-		max-width: 60ch;
-	}
-
-	.hint code,
-	code {
-		background: var(--surface-raised);
-		padding: 0 0.3rem;
-		border-radius: 0.2rem;
-		font-size: 0.8em;
-	}
-
-	.banner {
-		padding: 0.4rem 0.75rem;
-		border-radius: var(--radius-card);
-		font-size: var(--text-sm);
-	}
-	.banner.error {
-		background: rgba(204, 102, 102, 0.15);
-		color: #e88;
-	}
-
-	.placeholder {
-		color: var(--text-dim);
-		padding: 2rem 0;
-		text-align: center;
-	}
-
-	.card {
-		background: var(--surface-card);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-card);
-		padding: 1rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-	}
-
-	.card h2 {
-		margin: 0;
-		font-size: var(--text-base);
-		color: var(--text-primary);
-	}
-
-	.section-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 0.75rem;
-		flex-wrap: wrap;
-	}
-
-	.empty {
-		font-size: var(--text-sm);
-		color: var(--text-dim);
-		margin: 0;
-	}
-
-	.muted {
-		color: var(--text-dim);
-	}
+	/* Shared .settings/.card/.field/.grid/.banner primitives live in
+	   web/src/lib/styles/settings.css (imported by app.css). Only money-specific
+	   styling (kv, entity grid, numeric column tweaks) stays. */
 
 	.kv {
 		display: grid;
@@ -371,31 +263,10 @@
 		font-size: var(--text-xs);
 	}
 
-	.table-scroll {
-		width: 100%;
-		overflow-x: auto;
-	}
-
+	/* Money's services table sizes by content; shared .settings .grid uses
+	   fixed layout, so opt back to auto here. */
 	.grid {
-		width: 100%;
-		border-collapse: collapse;
-		font-size: var(--text-sm);
-	}
-
-	.grid th,
-	.grid td {
-		text-align: left;
-		padding: 0.4rem 0.5rem;
-		border-bottom: 1px solid var(--border-subtle);
-		vertical-align: middle;
-	}
-
-	.grid th {
-		color: var(--text-dim);
-		font-weight: 500;
-		font-size: var(--text-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
+		table-layout: auto;
 	}
 
 	.grid th.num,
@@ -403,27 +274,5 @@
 		text-align: right;
 		white-space: nowrap;
 		font-variant-numeric: tabular-nums;
-	}
-
-	@media (max-width: 768px) {
-		.settings {
-			padding: 1rem 0.75rem 3rem;
-		}
-		.settings-header {
-			flex-direction: column;
-			align-items: stretch;
-		}
-		.card {
-			padding: 0.75rem;
-		}
-	}
-
-	@media (max-width: 640px) {
-		.settings {
-			padding: 0.75rem 0.5rem 3rem;
-		}
-		.card {
-			padding: 0.6rem;
-		}
 	}
 </style>
