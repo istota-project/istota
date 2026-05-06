@@ -15,6 +15,10 @@
   args:
     chdir: "{{ istota_home }}"
   when: istota_browser_enabled and not istota_web_only
+  # A docker build/pull failure here used to mark the host failed and
+  # silently skip every later handler in the file (web, webhooks, nginx).
+  # Decouple: log the failure but let the rest of the restarts proceed.
+  failed_when: false
 
 - name: "restart istota-web"
   systemd:
