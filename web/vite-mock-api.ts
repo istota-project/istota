@@ -451,52 +451,129 @@ function dropClusterNear(point: { lat: number; lon: number }, radius: number): v
 // Phase 5 — settings/secrets mock state. Plaintext values stay only in memory;
 // the real backend never returns them.
 const mockSecrets: Record<string, Record<string, string>> = {
-	monarch: {},
 	karakeep: {},
+	google_workspace: {},
+	monarch: {},
 	feeds: {},
+	overland: {},
 };
 
-function mockSettingsServices(): { services: unknown[] } {
-	const schemas = [
+interface ServiceSchema {
+	service: string;
+	label: string;
+	fields: { key: string; label: string; type: string }[];
+	used_by?: string[];
+	oauth?: boolean;
+}
+
+const _CONNECTED_SCHEMAS: ServiceSchema[] = [
+	{
+		service: 'karakeep',
+		label: 'Karakeep',
+		used_by: ['bookmarks'],
+		fields: [
+			{ key: 'base_url', label: 'Base URL', type: 'url' },
+			{ key: 'api_key', label: 'API key', type: 'password' },
+		],
+	},
+	{
+		service: 'google_workspace',
+		label: 'Google Workspace',
+		used_by: ['google_workspace'],
+		oauth: true,
+		fields: [],
+	},
+];
+
+const _MODULE_SCHEMAS: Record<string, ServiceSchema[]> = {
+	feeds: [
+		{
+			service: 'feeds',
+			label: 'Feeds (Tumblr)',
+			used_by: ['feeds'],
+			fields: [
+				{ key: 'tumblr_api_key', label: 'Tumblr API key (optional)', type: 'password' },
+			],
+		},
+	],
+	money: [
 		{
 			service: 'monarch',
 			label: 'Monarch Money',
+			used_by: ['money'],
 			fields: [
 				{ key: 'email', label: 'Email', type: 'email' },
 				{ key: 'password', label: 'Password', type: 'password' },
 				{ key: 'session_token', label: 'Session token (optional)', type: 'password' },
 			],
 		},
+	],
+	location: [
 		{
-			service: 'karakeep',
-			label: 'Karakeep',
+			service: 'overland',
+			label: 'Overland GPS',
+			used_by: ['location'],
 			fields: [
-				{ key: 'api_key', label: 'API key', type: 'password' },
+				{ key: 'ingest_token', label: 'Ingest token', type: 'password' },
 			],
 		},
-		{
-			service: 'feeds',
-			label: 'Feeds (Tumblr)',
-			fields: [
-				{ key: 'tumblr_api_key', label: 'Tumblr API key (optional)', type: 'password' },
-			],
-		},
-	];
+	],
+};
+
+const MODULE_NAMES = ['feeds', 'money', 'location'];
+
+function buildServiceCard(s: ServiceSchema) {
+	const stored = mockSecrets[s.service] || {};
+	const configured_keys = Object.keys(stored).filter((k) => stored[k]);
+	if (s.oauth) {
+		const connected = configured_keys.length > 0;
+		return {
+			...s,
+			status: connected ? 'configured' : 'missing',
+			configured_keys,
+			last_updated: null,
+			connected,
+			enabled: true,
+		};
+	}
+	const required = s.fields
+		.filter((f) => !f.label.toLowerCase().includes('optional'))
+		.map((f) => f.key);
+	let status: 'configured' | 'partial' | 'missing' = 'missing';
+	if (required.length === 0) {
+		status = configured_keys.length > 0 ? 'configured' : 'missing';
+	} else if (required.every((k) => configured_keys.includes(k))) {
+		status = 'configured';
+	} else if (required.some((k) => configured_keys.includes(k))) {
+		status = 'partial';
+	}
+	return { ...s, status, configured_keys, last_updated: null };
+}
+
+function mockSettingsServices(): { services: unknown[] } {
+	return { services: _CONNECTED_SCHEMAS.map(buildServiceCard) };
+}
+
+// disabled_modules lives on the user profile and gates per-module status.
+const mockDisabledModules = new Set<string>();
+
+function mockModulesResponse() {
 	return {
-		services: schemas.map((s) => {
-			const configured_keys = Object.keys(mockSecrets[s.service] || {})
-				.filter((k) => mockSecrets[s.service][k]);
-			const required = s.fields
-				.filter((f) => !f.label.toLowerCase().includes('optional'))
-				.map((f) => f.key);
-			let status: 'configured' | 'partial' | 'missing' = 'missing';
-			if (required.every((k) => configured_keys.includes(k))) {
-				status = required.length === 0 && configured_keys.length === 0 ? 'missing' : 'configured';
-			} else if (required.some((k) => configured_keys.includes(k))) {
-				status = 'partial';
-			}
-			return { ...s, status, configured_keys, last_updated: null };
-		}),
+		modules: MODULE_NAMES,
+		disabled: [...mockDisabledModules],
+		enabled_for_user: Object.fromEntries(
+			MODULE_NAMES.map((m) => [m, !mockDisabledModules.has(m)]),
+		),
+	};
+}
+
+function mockModuleServices(module: string) {
+	const schemas = _MODULE_SCHEMAS[module];
+	if (!schemas) return undefined;
+	return {
+		module,
+		module_enabled: !mockDisabledModules.has(module),
+		services: schemas.map(buildServiceCard),
 	};
 }
 
@@ -510,6 +587,15 @@ const handlers: MockHandler[] = [
 		const { url, method, body } = req;
 		if (url === '/istota/api/settings/services' && method === 'GET') {
 			return mockSettingsServices();
+		}
+		if (url === '/istota/api/settings/modules' && method === 'GET') {
+			return mockModulesResponse();
+		}
+		const moduleSvcMatch = url.match(/^\/istota\/api\/settings\/module-services\/([^/?]+)$/);
+		if (moduleSvcMatch && method === 'GET') {
+			const resp = mockModuleServices(moduleSvcMatch[1]);
+			if (!resp) return { error: `Unknown module: ${moduleSvcMatch[1]}` };
+			return resp;
 		}
 		const m = url.match(/^\/istota\/api\/settings\/secrets\/([^/]+)\/([^/?]+)$/);
 		if (!m) return undefined;
@@ -541,6 +627,7 @@ const handlers: MockHandler[] = [
 			log_channel: '',
 			alerts_channel: '',
 			disabled_skills: [],
+			disabled_modules: [],
 			max_foreground_workers: 0,
 			max_background_workers: 0,
 			site_enabled: false,
@@ -567,6 +654,14 @@ const handlers: MockHandler[] = [
 				if (patch && typeof patch === 'object') {
 					for (const [k, v] of Object.entries(patch)) {
 						mockProfile[k] = v;
+					}
+					if (Array.isArray(patch.disabled_modules)) {
+						mockDisabledModules.clear();
+						for (const m of patch.disabled_modules as unknown[]) {
+							if (typeof m === 'string' && MODULE_NAMES.includes(m)) {
+								mockDisabledModules.add(m);
+							}
+						}
 					}
 				}
 				return { ok: true, fields: Object.keys(patch ?? {}) };
@@ -764,6 +859,18 @@ const handlers: MockHandler[] = [
 		if (url !== '/istota/api/feeds/refresh' || method !== 'POST') return undefined;
 		return { status: 'ok' };
 	},
+	({ url }) => {
+		if (url !== '/istota/api/location/settings-info') return undefined;
+		return {
+			webhook_url: 'https://example.invalid/webhooks/location?token=<token>',
+			module_enabled: !mockDisabledModules.has('location'),
+			place_detection: {
+				accuracy_threshold_m: 100,
+				visit_exit_minutes: 5,
+			},
+		};
+	},
+
 	({ url }) => (url.startsWith('/istota/api/location/current') ? mockCurrent : undefined),
 
 	// Place stats
@@ -848,6 +955,39 @@ const handlers: MockHandler[] = [
 	({ url }) => (url.startsWith('/istota/money/api/ledgers') ? ledgers : undefined),
 	({ url }) => (url.startsWith('/istota/money/api/check') ? checkResp : undefined),
 	({ url }) => (url.startsWith('/istota/money/api/accounts') ? accountsResp : undefined),
+	({ url }) => {
+		if (!url.startsWith('/istota/money/api/business-settings')) return undefined;
+		return {
+			status: 'ok',
+			entities: [
+				{
+					key: 'main',
+					name: 'Acme Studio LLC',
+					address: '123 Example St, Berlin',
+					email: 'billing@example.com',
+					payment_instructions: 'Wire to IBAN DE00 …',
+					logo: '',
+					ar_account: 'Assets:AR:Acme',
+					bank_account: 'Assets:Checking',
+					currency: 'EUR',
+				},
+			],
+			services: [
+				{ key: 'consulting', display_name: 'Consulting', rate: 150, type: 'hours', income_account: 'Income:Consulting' },
+				{ key: 'design', display_name: 'Design', rate: 1200, type: 'days', income_account: 'Income:Design' },
+			],
+			defaults: {
+				currency: 'EUR',
+				default_entity: 'main',
+				default_ar_account: 'Assets:AR:Acme',
+				default_bank_account: 'Assets:Checking',
+				invoice_output: '/tmp/invoices',
+				next_invoice_number: 42,
+				notifications: 'email',
+				days_until_overdue: 14,
+			},
+		};
+	},
 ];
 
 function readBody(req: any): Promise<any> {
