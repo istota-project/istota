@@ -276,6 +276,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass  # Table doesn't exist yet (fresh install before schema.sql runs)
 
+    # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
+    # rows already in Fernet form (the new write path) are detected via
+    # decrypt-or-fail and skipped. No-op on fresh installs (table not
+    # created until schema.sql runs below) and on deployments without
+    # $ISTOTA_SECRET_KEY (the read path will fail loudly so operators
+    # notice and the user re-auths).
+    _migrate_google_oauth_encryption(conn)
+
 
 def init_db(db_path: Path) -> None:
     """Initialize database with schema."""
@@ -1399,7 +1407,13 @@ def find_sent_email_by_references(
 
 
 def get_google_token(conn: sqlite3.Connection, user_id: str) -> dict | None:
-    """Get Google OAuth tokens for a user."""
+    """Get Google OAuth tokens for a user.
+
+    access_token and refresh_token are Fernet-decrypted via $ISTOTA_SECRET_KEY.
+    Returns None if the row is missing, the secret key is unavailable, or the
+    stored ciphertext fails to decrypt (treated as a corrupt/rotated-key row;
+    the user has to re-connect Google).
+    """
     cursor = conn.execute(
         "SELECT access_token, refresh_token, token_expiry, scopes FROM google_oauth_tokens WHERE user_id = ?",
         (user_id,),
@@ -1407,9 +1421,30 @@ def get_google_token(conn: sqlite3.Connection, user_id: str) -> dict | None:
     row = cursor.fetchone()
     if not row:
         return None
+
+    from istota import secrets_store
+
+    if not secrets_store.secret_key_available():
+        logger.warning(
+            "google_oauth: cannot decrypt tokens for user=%s (ISTOTA_SECRET_KEY missing)",
+            user_id,
+        )
+        return None
+
+    try:
+        fernet = secrets_store._get_fernet()
+        access_token = fernet.decrypt(_as_bytes(row["access_token"])).decode("utf-8")
+        refresh_token = fernet.decrypt(_as_bytes(row["refresh_token"])).decode("utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "google_oauth: decrypt failed user=%s (stale ISTOTA_SECRET_KEY?): %s",
+            user_id, exc,
+        )
+        return None
+
     return {
-        "access_token": row["access_token"],
-        "refresh_token": row["refresh_token"],
+        "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_expiry": row["token_expiry"],
         "scopes": row["scopes"],
     }
@@ -1423,7 +1458,18 @@ def upsert_google_token(
     token_expiry: str,
     scopes: str = "[]",
 ) -> None:
-    """Insert or update Google OAuth tokens for a user."""
+    """Insert or update Google OAuth tokens for a user.
+
+    access_token and refresh_token are Fernet-encrypted at rest via
+    $ISTOTA_SECRET_KEY. Raises if the key is unavailable -- writing plaintext
+    is exactly what this table no longer tolerates.
+    """
+    from istota import secrets_store
+
+    fernet = secrets_store._get_fernet()
+    access_ct = fernet.encrypt(access_token.encode("utf-8"))
+    refresh_ct = fernet.encrypt(refresh_token.encode("utf-8"))
+
     conn.execute(
         """INSERT INTO google_oauth_tokens (user_id, access_token, refresh_token, token_expiry, scopes)
         VALUES (?, ?, ?, ?, ?)
@@ -1433,9 +1479,83 @@ def upsert_google_token(
             token_expiry = excluded.token_expiry,
             scopes = excluded.scopes,
             updated_at = datetime('now')""",
-        (user_id, access_token, refresh_token, token_expiry, scopes),
+        (user_id, access_ct, refresh_ct, token_expiry, scopes),
     )
     conn.commit()
+
+
+def _as_bytes(value) -> bytes:
+    """Coerce an SQLite cell to bytes for Fernet decrypt.
+
+    Cells may come back as bytes (BLOB) or str (TEXT, on legacy schemas where
+    plaintext UTF-8 was stored as text). Fernet.decrypt accepts both forms
+    when given bytes, so we normalise here.
+    """
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    raise TypeError(f"unexpected token cell type: {type(value).__name__}")
+
+
+def _migrate_google_oauth_encryption(conn: sqlite3.Connection) -> int:
+    """Encrypt any plaintext rows in google_oauth_tokens.
+
+    Detection is decrypt-or-fail: a Fernet token validates an HMAC, so a real
+    plaintext value reliably raises and gets re-encrypted. Idempotent --
+    rows that already decrypt are left alone. No-ops without
+    $ISTOTA_SECRET_KEY (logged once, leaves rows as-is for a later boot).
+
+    Returns the number of rows re-encrypted.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT user_id, access_token, refresh_token FROM google_oauth_tokens"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    if not rows:
+        return 0
+
+    from istota import secrets_store
+
+    if not secrets_store.secret_key_available():
+        logger.info(
+            "google_oauth: %d row(s) present but ISTOTA_SECRET_KEY unset -- "
+            "skipping plaintext-to-Fernet migration", len(rows),
+        )
+        return 0
+
+    fernet = secrets_store._get_fernet()
+    migrated = 0
+    for user_id, at, rt in rows:
+        at_b, rt_b = _as_bytes(at), _as_bytes(rt)
+        try:
+            fernet.decrypt(at_b)
+            fernet.decrypt(rt_b)
+            continue  # already encrypted
+        except Exception:
+            pass
+
+        try:
+            at_ct = fernet.encrypt(at_b)
+            rt_ct = fernet.encrypt(rt_b)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "google_oauth: re-encrypt failed user=%s: %s", user_id, exc,
+            )
+            continue
+        conn.execute(
+            "UPDATE google_oauth_tokens SET access_token = ?, refresh_token = ?, "
+            "updated_at = datetime('now') WHERE user_id = ?",
+            (at_ct, rt_ct, user_id),
+        )
+        migrated += 1
+
+    if migrated:
+        conn.commit()
+        logger.info("google_oauth: encrypted %d plaintext row(s) at rest", migrated)
+    return migrated
 
 
 def delete_google_token(conn: sqlite3.Connection, user_id: str) -> bool:
@@ -1445,6 +1565,20 @@ def delete_google_token(conn: sqlite3.Connection, user_id: str) -> bool:
     )
     conn.commit()
     return cursor.rowcount > 0
+
+
+def has_google_token(conn: sqlite3.Connection, user_id: str) -> bool:
+    """Decryption-free existence check for the UI's "connected" badge.
+
+    Distinct from ``get_google_token`` returning a non-None value -- that's
+    "row present AND decryptable AND key available". This one is just "row
+    present", which is what the UI cares about (a stale-key row still wants
+    a Disconnect button).
+    """
+    row = conn.execute(
+        "SELECT 1 FROM google_oauth_tokens WHERE user_id = ? LIMIT 1", (user_id,),
+    ).fetchone()
+    return row is not None
 
 
 # ============================================================================

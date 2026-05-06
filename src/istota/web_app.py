@@ -454,7 +454,7 @@ def _has_google_token(username: str) -> bool:
     try:
         from . import db
         with db.get_db(_config.db_path) as conn:
-            return db.get_google_token(conn, username) is not None
+            return db.has_google_token(conn, username)
     except Exception:
         return False
 
@@ -2522,9 +2522,11 @@ app.dependency_overrides[_feeds_verify_origin] = _verify_origin
 try:
     from istota.money.routes import require_auth as _money_require_auth
     from istota.money.routes import router as _money_router
+    from istota.money.routes import verify_origin as _money_verify_origin
 
     app.include_router(_money_router, prefix="/istota/money/api", tags=["money"])
     app.dependency_overrides[_money_require_auth] = _require_api_auth
+    app.dependency_overrides[_money_verify_origin] = _verify_origin
 except ImportError:
     pass
 
