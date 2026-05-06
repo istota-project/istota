@@ -21,6 +21,7 @@ import click
 
 from istota.feeds import db as feeds_db
 from istota.feeds._config_io import read_feeds_config, write_feeds_config
+from istota.feeds._migrate import ensure_initialised
 from istota.feeds.models import (
     DEFAULT_POLL_INTERVAL_MINUTES,
     default_poll_interval_for,
@@ -75,9 +76,11 @@ def _resolve_default_context(user_id: str | None) -> FeedsContext:
 def cli(ctx: click.Context, user_key: str | None) -> None:
     """Native feeds — subscriptions, polling, OPML."""
     if isinstance(ctx.obj, FeedsContext):
+        ensure_initialised(ctx.obj)
         return
     fctx = _resolve_default_context(user_key)
     ctx.obj = fctx
+    ensure_initialised(fctx)
 
 
 # ---------------------------------------------------------------------------

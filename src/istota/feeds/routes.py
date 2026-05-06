@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from istota.feeds import db as feeds_db
 from istota.feeds._config_io import read_feeds_config, write_feeds_config
 from istota.feeds._loader import UserNotFoundError, resolve_for_user
+from istota.feeds._migrate import ensure_initialised
 from istota.feeds.models import (
     DEFAULT_POLL_INTERVAL_MINUTES,
     FeedsContext,
@@ -68,18 +69,21 @@ def get_user_context(
         ctx = resolve_for_user(user["username"], istota_config)
     except UserNotFoundError as e:
         raise HTTPException(404, str(e))
-    ctx.ensure_dirs()
     # init_db sets WAL and runs CREATE TABLE IF NOT EXISTS. WAL is persistent
     # in the SQLite file header, so we only need to run it once per DB per
     # process. Caching by db_path also prevents concurrent requests from
-    # racing on the journal_mode transition lock.
+    # racing on the journal_mode transition lock. ensure_initialised also
+    # runs the legacy-toml importer; it has its own cross-process sentinel
+    # so subsequent calls in other workers are O(1).
     cache: set = getattr(request.app.state, "feeds_initialised_dbs", None)
     if cache is None:
         cache = set()
         request.app.state.feeds_initialised_dbs = cache
     if ctx.db_path not in cache:
-        feeds_db.init_db(ctx.db_path)
+        ensure_initialised(ctx)
         cache.add(ctx.db_path)
+    else:
+        ctx.ensure_dirs()
     return ctx
 
 

@@ -17,7 +17,7 @@ def _run(args: list[str]) -> dict:
     from click.testing import CliRunner
 
     from istota.config import load_config
-    from istota.feeds import UserNotFoundError, resolve_for_user
+    from istota.feeds import UserNotFoundError, ensure_initialised, resolve_for_user
     from istota.feeds.cli import cli
 
     user_id = os.environ.get("FEEDS_USER", "") or ""
@@ -30,7 +30,7 @@ def _run(args: list[str]) -> dict:
     except UserNotFoundError as e:
         return {"status": "error", "error": str(e)}
 
-    feeds_ctx.ensure_dirs()
+    ensure_initialised(feeds_ctx)
 
     runner = CliRunner()
     result = runner.invoke(
