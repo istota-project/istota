@@ -2500,10 +2500,10 @@ def check_briefing_triggers(db_path, config: Config) -> list[int]:
 
     Returns list of created task IDs.
     """
-    if config.users_dir is None:
+    if config.config_path is None:
         return []
 
-    triggers_dir = config.users_dir.parent / "triggers"
+    triggers_dir = config.config_path.parent / "triggers"
     if not triggers_dir.is_dir():
         return []
 
@@ -3417,7 +3417,6 @@ def run_daemon(config: Config) -> None:
     last_sleep_cycle_check = 0.0
     last_channel_sleep_cycle_check = 0.0
     last_heartbeat_check = 0.0
-    last_config_reload = 0.0
     last_status_write = 0.0
     last_trigger_check = 0.0
 
@@ -3543,16 +3542,6 @@ def run_daemon(config: Config) -> None:
             except Exception as e:
                 logger.error("Error writing status: %s", e)
             last_status_write = now
-
-        # Reload user configs periodically
-        if (config.scheduler.config_reload_interval > 0
-                and now - last_config_reload >= config.scheduler.config_reload_interval):
-            try:
-                from .config import reload_user_configs
-                reload_user_configs(config)
-            except Exception as e:
-                logger.error("Error reloading user configs: %s", e)
-            last_config_reload = now
 
         # Check heartbeats periodically
         if now - last_heartbeat_check >= config.scheduler.heartbeat_check_interval:

@@ -190,7 +190,6 @@ rclone_remote: str = "nextcloud"
 nextcloud_mount_path: Path | None = None
 skills_dir: Path = Path("config/skills")
 temp_dir: Path = Path("/tmp/istota")
-users_dir: Path | None = None
 max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
 max_knowledge_facts: int = 0  # cap knowledge graph facts per prompt (0 = unlimited)
 disabled_skills: list[str] = []    # instance-wide skills to exclude
@@ -217,17 +216,14 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 1. Parse TOML file
 2. Build each sub-config from sections: `[logging]`, `[nextcloud]`, `[talk]`, `[email]`, `[browser]`, `[conversation]`, `[scheduler]`, `[memory_search]`, `[channel_sleep_cycle]`, `[briefing_defaults]`, `[location]`, `[site]`, `[developer]`
 3. Parse `[users.*]` section → `_parse_user_data()` for each
-4. Set `users_dir = config_dir / "users"` if exists
-5. Load per-user configs via `load_user_configs()`
-6. **Merge**: per-user files override main config `[users]` section
-7. Parse `[security]` section → `SecurityConfig`
-8. Call `load_admin_users()` → `config.admin_users`
-9. Apply env var overrides for secrets (`ISTOTA_NC_APP_PASSWORD` → `nextcloud.app_password`, etc.)
-10. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, ntfy_topic, site_enabled, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
-11. **Phase 7a**: `_apply_user_resources(config)` overlays the `user_resources` DB table onto `config.users[*].resources`. Each row becomes a `ResourceConfig` entry with extras decoded from JSON. Dedup is keyed on `(type, path)` — DB wins. Distinct paths coexist.
-12. **Modules refactor (between 7a and 7b)**: `_migrate_obsolete_resources(config)` first calls `secrets_store.import_from_user_configs` (idempotent — extends `_IMPORT_MAP` to absorb karakeep `base_url`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources(db_path)` deletes `user_resources` rows whose type is in the retired set (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`), then filters those types out of `uc.resources` in memory so the rest of the load cycle sees post-cleanup state.
-13. **Phase 7b**: `_apply_user_briefings(config)` overlays the `briefing_configs` DB table onto `config.users[*].briefings`. Each row becomes a `BriefingConfig` entry. Dedup is keyed on `name` — DB wins. Disabled DB rows (`enabled=0`) drop the matching TOML name without scheduling, so the web UI can mute a TOML-templated briefing without re-templating.
-14. Return `Config`
+4. Parse `[security]` section → `SecurityConfig`
+5. Call `load_admin_users()` → `config.admin_users`
+6. Apply env var overrides for secrets (`ISTOTA_NC_APP_PASSWORD` → `nextcloud.app_password`, etc.)
+7. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, ntfy_topic, site_enabled, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
+8. **Phase 7a**: `_apply_user_resources(config)` overlays the `user_resources` DB table onto `config.users[*].resources`. Each row becomes a `ResourceConfig` entry with extras decoded from JSON. Dedup is keyed on `(type, path)` — DB wins. Distinct paths coexist.
+9. **Modules refactor (between 7a and 7b)**: `_migrate_obsolete_resources(config)` first calls `secrets_store.import_from_user_configs` (idempotent — extends `_IMPORT_MAP` to absorb karakeep `base_url`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources(db_path)` deletes `user_resources` rows whose type is in the retired set (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`), then filters those types out of `uc.resources` in memory so the rest of the load cycle sees post-cleanup state.
+10. **Phase 7b**: `_apply_user_briefings(config)` overlays the `briefing_configs` DB table onto `config.users[*].briefings`. Each row becomes a `BriefingConfig` entry. Dedup is keyed on `name` — DB wins. Disabled DB rows (`enabled=0`) drop the matching TOML name without scheduling, so the web UI can mute a TOML-templated briefing without re-templating.
+11. Return `Config`
 
 **Modules vs resources vs connected services.** Three distinct concepts that used to be conflated under `[[resources]]`:
 - **Resources** — paths/identifiers (calendars, folders, todos). Multiple per user. `[[users.X.resources]]` + `user_resources` DB table. Picker types: `calendar`, `folder`, `todo_file`, `notes_folder`, `email_folder`, `reminders_file`.
@@ -273,11 +269,6 @@ Parses user dict → `UserConfig`:
 - Parses `[[resources]]` → `ResourceConfig` list
 - Backward compat: migrates `reminders_file` string to `ResourceConfig(type="reminders_file")`
 
-### `load_user_configs()`
-Loads `config/users/*.toml` (skips `*.example.toml`):
-- Filename = user_id (without `.toml`)
-- Returns `dict[user_id, UserConfig]`
-
 ## UserResource (DB Model, in db.py)
 ```python
 @dataclass
@@ -310,8 +301,8 @@ Note: Uses `resource_name` field alias at executor.py L645 (historical quirk; fi
 ### To add a new per-user field:
 1. Add field with default to `UserConfig` dataclass
 2. Parse it in `_parse_user_data()` if non-trivial
-3. It loads from `[users.NAME.field]` in main config or per-user TOML
-4. Update `config/users/alice.example.toml`
+3. It loads from `[users.NAME.field]` in main config (docker entrypoint path)
+4. If profile-shaped, plumb it through `user_profiles` (DB row, web UI, `istota user ensure`)
 
 ## How to Add a New Resource Type
 
