@@ -1,8 +1,9 @@
 """Native feeds module — RSS/Atom/Tumblr/Are.na in-process.
 
-Mirrors the ``istota.money`` package layout: per-user workspace under
-``{workspace}/feeds/`` with ``config/feeds.toml`` (subscriptions) and
-``data/feeds.db`` (entries + read state).
+Per-user workspace under ``{workspace}/feeds/data/feeds.db`` — single
+SQLite holds subscriptions, categories, entries, and read state. The
+legacy ``feeds.toml`` is auto-imported on first touch by
+:mod:`istota.feeds._migrate` for users upgrading from the TOML era.
 """
 
 from istota.feeds._loader import (

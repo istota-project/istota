@@ -769,22 +769,11 @@ WORKSPACE_DIR="/mnt/shared/Users/${USER_NAME}/${BOT_DIR_NAME}"
 
 if [ "${ISTOTA_FEEDS_ENABLED:-false}" = "true" ]; then
     FEEDS_DIR="${WORKSPACE_DIR}/feeds"
-    # Loader uses {data_dir}/config/feeds.toml first; data_dir defaults to
-    # {workspace}/feeds. data/ holds the per-user SQLite (feeds.db).
-    mkdir -p "${FEEDS_DIR}/config" "${FEEDS_DIR}/data"
-    if [ ! -f "${FEEDS_DIR}/config/feeds.toml" ]; then
-        cat > "${FEEDS_DIR}/config/feeds.toml" <<'FEEDSEOF'
-# RSS / Atom / Tumblr / Are.na subscriptions.
-# Add via Talk: "subscribe to https://example.com/feed.xml"
-# Or via CLI:   istota-skill feeds add --url https://example.com/feed.xml
-# Or in the web UI: Feeds → settings (cog icon) → Add subscription.
-
-[[feeds]]
-url = "https://kubicki.org/rss/newsletters/2.xml"
-title = "Pirate Utopia"
-FEEDSEOF
-        echo "[istota] Seeded feeds.toml at ${FEEDS_DIR}/config/feeds.toml"
-    fi
+    # data/ holds the per-user SQLite (feeds.db) — the sole source of
+    # truth for subscriptions, categories, entries, and read state.
+    # Add subscriptions via Talk, the CLI (`istota-skill feeds add ...`),
+    # or the web UI's Feeds settings page.
+    mkdir -p "${FEEDS_DIR}/data"
     chown -R 33:33 "$FEEDS_DIR" 2>/dev/null || true
 fi
 
@@ -844,7 +833,7 @@ fi
         echo " ISTOTA MODULES"
         echo "==========================================================="
         if [ "${ISTOTA_FEEDS_ENABLED:-false}" = "true" ]; then
-            echo " Feeds:    enabled — config at ${WORKSPACE_DIR}/feeds/config/feeds.toml"
+            echo " Feeds:    enabled — manage in web UI (Feeds → settings) or via 'istota-skill feeds'"
         fi
         if [ "${ISTOTA_LOCATION_ENABLED:-false}" = "true" ]; then
             # Webhooks bind their port directly (not nginx-proxied), so the

@@ -16,7 +16,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from istota.feeds import db as feeds_db
-from istota.feeds._config_io import read_feeds_config, write_feeds_config
 from istota.feeds.models import EntryRecord, FeedsContext
 from istota.feeds.routes import (
     get_user_context,
@@ -405,7 +404,7 @@ class TestConfigEndpoint:
         assert body["config"] == {"settings": {}, "categories": [], "feeds": []}
         assert body["diagnostics"]["total_feeds"] == 0
 
-    def test_put_writes_toml_and_syncs_db(self, ctx, client):
+    def test_put_persists_to_db(self, ctx, client):
         payload = {
             "config": {
                 "settings": {"default_poll_interval_minutes": 45},
@@ -423,15 +422,27 @@ class TestConfigEndpoint:
         assert resp.status_code == 200
         assert resp.json()["sync"]["feeds_added"] == 1
 
-        # Round-trip: feeds.toml on disk, feeds in DB.
-        on_disk = read_feeds_config(ctx.config_path)
-        assert on_disk["categories"] == [{"slug": "blogs", "title": "Blogs"}]
         with feeds_db.connect(ctx.db_path) as conn:
             row = conn.execute(
                 "SELECT title FROM feeds WHERE url = ?",
                 ("https://example.com/feed.xml",),
             ).fetchone()
             assert row["title"] == "Example"
+            cat = conn.execute(
+                "SELECT title FROM feed_categories WHERE slug = ?",
+                ("blogs",),
+            ).fetchone()
+            assert cat["title"] == "Blogs"
+            assert feeds_db.get_default_poll_interval(conn) == 45
+
+        # GET round-trip: the wire shape coming back matches what was sent.
+        body = client.get("/istota/api/feeds/config").json()
+        assert body["config"]["settings"] == {"default_poll_interval_minutes": 45}
+        assert body["config"]["categories"] == [
+            {"slug": "blogs", "title": "Blogs"},
+        ]
+        urls = [f["url"] for f in body["config"]["feeds"]]
+        assert urls == ["https://example.com/feed.xml"]
 
     def test_put_rejects_malformed_body(self, client):
         resp = client.put("/istota/api/feeds/config", json={"oops": "no"})
@@ -539,9 +550,8 @@ class TestOpml:
         assert body["feeds_added"] == 2
         assert body["rewritten_bridger_urls"] == 1
 
-        # feeds.toml was projected from the DB.
-        on_disk = read_feeds_config(ctx.config_path)
-        urls = {f["url"] for f in on_disk["feeds"]}
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = {row["url"] for row in conn.execute("SELECT url FROM feeds")}
         assert "tumblr:nemfrog" in urls
         assert "https://example.com/feed.xml" in urls
 

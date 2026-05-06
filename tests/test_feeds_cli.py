@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from istota.feeds import db as feeds_db
-from istota.feeds._config_io import read_feeds_config, write_feeds_config
 from istota.feeds.cli import cli
 from istota.feeds.workspace import synthesize_feeds_context
 
@@ -18,6 +16,7 @@ from istota.feeds.workspace import synthesize_feeds_context
 def ctx(tmp_path):
     fctx = synthesize_feeds_context("alice", tmp_path)
     fctx.ensure_dirs()
+    feeds_db.init_db(fctx.db_path)
     return fctx
 
 
@@ -26,12 +25,37 @@ def _invoke(ctx, args):
     return runner.invoke(cli, args, obj=ctx, standalone_mode=False, catch_exceptions=False)
 
 
-def _seed_config(ctx, feeds=None, categories=None):
-    write_feeds_config(ctx.config_path, {
-        "settings": {"default_poll_interval_minutes": 30},
-        "categories": categories or [],
-        "feeds": feeds or [],
-    })
+def _seed_db(ctx, *, feeds=None, categories=None, default_interval=None):
+    """Seed the per-user feeds DB directly. Replaces the pre-cut feeds.toml seed."""
+    feeds_db.init_db(ctx.db_path)
+    with feeds_db.connect(ctx.db_path) as conn:
+        slug_to_id: dict[str, int] = {}
+        for c in categories or []:
+            cat_id = feeds_db.upsert_category(conn, c["slug"], c.get("title", c["slug"]))
+            slug_to_id[c["slug"]] = cat_id
+        for f in feeds or []:
+            url = f["url"]
+            from istota.feeds.models import detect_source_type, default_poll_interval_for
+            source_type = detect_source_type(url)
+            cat_id = slug_to_id.get(f.get("category"))
+            if f.get("category") and cat_id is None:
+                cat_id = feeds_db.ensure_category(conn, f["category"])
+                slug_to_id[f["category"]] = cat_id
+            feeds_db.upsert_feed(
+                conn,
+                url=url,
+                title=f.get("title"),
+                site_url=f.get("site_url"),
+                source_type=source_type,
+                category_id=cat_id,
+                poll_interval_minutes=f.get(
+                    "poll_interval_minutes",
+                    default_poll_interval_for(source_type),
+                ),
+            )
+        if default_interval is not None:
+            feeds_db.set_default_poll_interval(conn, default_interval)
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +65,6 @@ def _seed_config(ctx, feeds=None, categories=None):
 
 class TestList:
     def test_empty(self, ctx):
-        _seed_config(ctx)
         r = _invoke(ctx, ["list"])
         assert r.exit_code == 0
         out = json.loads(r.output)
@@ -49,8 +72,8 @@ class TestList:
         assert out["count"] == 0
         assert out["feeds"] == []
 
-    def test_syncs_config_to_db(self, ctx):
-        _seed_config(
+    def test_lists_seeded_feed(self, ctx):
+        _seed_db(
             ctx,
             categories=[{"slug": "blogs", "title": "Blogs"}],
             feeds=[{
@@ -68,7 +91,7 @@ class TestList:
         assert out["feeds"][0]["source_type"] == "rss"
 
     def test_provider_url_classified(self, ctx):
-        _seed_config(ctx, feeds=[{"url": "tumblr:nemfrog"}, {"url": "arena:cats"}])
+        _seed_db(ctx, feeds=[{"url": "tumblr:nemfrog"}, {"url": "arena:cats"}])
         r = _invoke(ctx, ["list"])
         out = json.loads(r.output)
         types = {f["url"]: f["source_type"] for f in out["feeds"]}
@@ -78,7 +101,7 @@ class TestList:
 
 class TestCategories:
     def test_lists_categories(self, ctx):
-        _seed_config(ctx, categories=[
+        _seed_db(ctx, categories=[
             {"slug": "blogs", "title": "Blogs"},
             {"slug": "art", "title": "Art"},
         ])
@@ -90,9 +113,7 @@ class TestCategories:
 
 class TestEntries:
     def test_filters_by_status(self, ctx):
-        _seed_config(ctx, feeds=[{"url": "https://x.test/feed"}])
-        # populate one read + one unread entry directly
-        _invoke(ctx, ["list"])  # syncs the feed into the db
+        _seed_db(ctx, feeds=[{"url": "https://x.test/feed"}])
         with feeds_db.connect(ctx.db_path) as conn:
             feed = feeds_db.get_feed_by_url(conn, "https://x.test/feed")
             from istota.feeds.models import EntryRecord
@@ -129,46 +150,74 @@ class TestEntries:
 
 
 class TestAdd:
-    def test_adds_feed_and_writes_config(self, ctx):
-        _seed_config(ctx)
+    def test_adds_feed(self, ctx):
         r = _invoke(ctx, [
             "add", "--url", "https://example.com/feed.xml",
             "--title", "Example", "--category", "blogs",
         ])
         out = json.loads(r.output)
         assert out["status"] == "ok"
-        cfg = read_feeds_config(ctx.config_path)
-        assert cfg["feeds"][0]["url"] == "https://example.com/feed.xml"
-        assert cfg["feeds"][0]["category"] == "blogs"
-        slugs = [c["slug"] for c in cfg["categories"]]
-        assert "blogs" in slugs
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT title, category_id FROM feeds WHERE url = ?",
+                ("https://example.com/feed.xml",),
+            ).fetchone()
+            assert row["title"] == "Example"
+            cat = conn.execute(
+                "SELECT slug FROM feed_categories WHERE id = ?",
+                (row["category_id"],),
+            ).fetchone()
+            assert cat["slug"] == "blogs"
 
     def test_duplicate_returns_error(self, ctx):
-        _seed_config(ctx, feeds=[{"url": "https://x/feed"}])
+        _seed_db(ctx, feeds=[{"url": "https://x/feed"}])
         r = _invoke(ctx, ["add", "--url", "https://x/feed"])
         out = json.loads(r.output)
         assert out["status"] == "error"
         assert "already exists" in out["error"]
 
+    def test_add_uses_user_default_interval(self, ctx):
+        _seed_db(ctx, default_interval=77)
+        r = _invoke(ctx, ["add", "--url", "https://example.com/feed.xml"])
+        assert json.loads(r.output)["status"] == "ok"
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT poll_interval_minutes FROM feeds WHERE url = ?",
+                ("https://example.com/feed.xml",),
+            ).fetchone()
+            assert row["poll_interval_minutes"] == 77
+
+    def test_add_does_not_stomp_existing_category_title(self, ctx):
+        _seed_db(ctx, categories=[{"slug": "blogs", "title": "Blogs"}])
+        # Adding a feed with --category blogs (slug-only) must preserve
+        # the title set elsewhere.
+        r = _invoke(ctx, [
+            "add", "--url", "https://x.test/feed", "--category", "blogs",
+        ])
+        assert json.loads(r.output)["status"] == "ok"
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT title FROM feed_categories WHERE slug = ?", ("blogs",),
+            ).fetchone()
+            assert row["title"] == "Blogs"  # not stomped to "blogs"
+
 
 class TestRemove:
     def test_removes_by_url(self, ctx):
-        _seed_config(ctx, feeds=[
+        _seed_db(ctx, feeds=[
             {"url": "https://a/feed"}, {"url": "https://b/feed"},
         ])
-        _invoke(ctx, ["list"])  # sync to db
         r = _invoke(ctx, ["remove", "--url", "https://a/feed"])
         out = json.loads(r.output)
         assert out["status"] == "ok"
         assert out["removed_url"] == "https://a/feed"
 
-        cfg = read_feeds_config(ctx.config_path)
-        urls = [f["url"] for f in cfg["feeds"]]
-        assert urls == ["https://b/feed"]
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = {row["url"] for row in conn.execute("SELECT url FROM feeds")}
+            assert urls == {"https://b/feed"}
 
     def test_removes_by_id(self, ctx):
-        _seed_config(ctx, feeds=[{"url": "https://x/feed"}])
-        _invoke(ctx, ["list"])
+        _seed_db(ctx, feeds=[{"url": "https://x/feed"}])
         with feeds_db.connect(ctx.db_path) as conn:
             feed = feeds_db.get_feed_by_url(conn, "https://x/feed")
         r = _invoke(ctx, ["remove", "--id", str(feed.id)])
@@ -176,8 +225,12 @@ class TestRemove:
         assert out["removed_url"] == "https://x/feed"
 
     def test_no_args_errors(self, ctx):
-        _seed_config(ctx)
         r = _invoke(ctx, ["remove"])
+        out = json.loads(r.output)
+        assert out["status"] == "error"
+
+    def test_unknown_url_errors(self, ctx):
+        r = _invoke(ctx, ["remove", "--url", "https://nope.test/feed"])
         out = json.loads(r.output)
         assert out["status"] == "error"
 
@@ -189,9 +242,7 @@ class TestRemove:
 
 class TestRefresh:
     def test_clears_next_poll_at(self, ctx):
-        _seed_config(ctx, feeds=[{"url": "https://x/feed"}])
-        _invoke(ctx, ["list"])
-        # Set a future next_poll_at
+        _seed_db(ctx, feeds=[{"url": "https://x/feed"}])
         with feeds_db.connect(ctx.db_path) as conn:
             conn.execute("UPDATE feeds SET next_poll_at = '9999-01-01T00:00:00+00:00'")
             conn.commit()
@@ -206,8 +257,7 @@ class TestRefresh:
 
 class TestPoll:
     def test_poll_uses_stub_http(self, ctx, monkeypatch):
-        _seed_config(ctx, feeds=[{"url": "https://x.test/feed"}])
-        _invoke(ctx, ["list"])
+        _seed_db(ctx, feeds=[{"url": "https://x.test/feed"}])
 
         sample_rss = b"""<?xml version="1.0"?>
 <rss version="2.0"><channel>
@@ -225,7 +275,6 @@ class TestPoll:
         def stub_get(*a, **kw):
             return StubResp()
 
-        # Replace httpx.get to make the cli's poll_due_feeds → poll_feed → _poll_rss → http_get default work.
         import httpx
         monkeypatch.setattr(httpx, "get", stub_get)
 
@@ -236,8 +285,7 @@ class TestPoll:
         assert out["new_entries"] == 1
 
     def test_run_scheduled_polls_due_feeds(self, ctx, monkeypatch):
-        _seed_config(ctx, feeds=[{"url": "https://y.test/feed"}])
-        _invoke(ctx, ["list"])
+        _seed_db(ctx, feeds=[{"url": "https://y.test/feed"}])
 
         sample_rss = b"""<?xml version="1.0"?>
 <rss version="2.0"><channel>
@@ -262,11 +310,10 @@ class TestPoll:
         assert out["new_entries"] == 1
 
     def test_partial_error_when_some_feeds_fail(self, ctx, monkeypatch):
-        _seed_config(ctx, feeds=[
+        _seed_db(ctx, feeds=[
             {"url": "https://ok.test/feed"},
             {"url": "https://bad.test/feed"},
         ])
-        _invoke(ctx, ["list"])
 
         sample_rss = b"""<?xml version="1.0"?>
 <rss version="2.0"><channel>
@@ -294,12 +341,10 @@ class TestPoll:
         assert out["status"] == "partial_error"
         assert out["polled"] == 2
         assert out["errors"] == 1
-        # Partial errors don't fail the CLI exit code (only status="error" does).
         assert r.exit_code == 0
 
     def test_error_when_all_feeds_fail(self, ctx, monkeypatch):
-        _seed_config(ctx, feeds=[{"url": "https://bad.test/feed"}])
-        _invoke(ctx, ["list"])
+        _seed_db(ctx, feeds=[{"url": "https://bad.test/feed"}])
 
         import httpx
 
@@ -308,8 +353,6 @@ class TestPoll:
 
         monkeypatch.setattr(httpx, "get", stub_get)
 
-        # standalone_mode=False + catch_exceptions=False — _output calls
-        # sys.exit(1) on status="error", which surfaces as SystemExit.
         runner = CliRunner()
         r = runner.invoke(cli, ["poll"], obj=ctx, standalone_mode=False)
         assert r.exit_code == 1
@@ -320,15 +363,9 @@ class TestPoll:
         assert "all 1 feed poll(s) failed" in out["error"]
 
 
-# ---------------------------------------------------------------------------
-# OPML
-# ---------------------------------------------------------------------------
-
-
 class TestStar:
     def _seed_one(self, ctx):
-        _seed_config(ctx, feeds=[{"url": "https://x.test/feed"}])
-        _invoke(ctx, ["list"])  # syncs into DB
+        _seed_db(ctx, feeds=[{"url": "https://x.test/feed"}])
         with feeds_db.connect(ctx.db_path) as conn:
             from istota.feeds.models import EntryRecord
             feed = feeds_db.get_feed_by_url(conn, "https://x.test/feed")
@@ -395,7 +432,6 @@ class TestStar:
         assert out["entries"][0]["id"] == ids[0]
 
     def test_star_no_args_errors(self, ctx):
-        _seed_config(ctx)
         r = _invoke(ctx, ["star"])
         out = json.loads(r.output)
         assert out["status"] == "error"
@@ -403,11 +439,10 @@ class TestStar:
 
 class TestMarkRead:
     def _seed_two_feeds(self, ctx):
-        _seed_config(ctx, feeds=[
+        _seed_db(ctx, feeds=[
             {"url": "https://x.test/feed", "category": "blogs"},
             {"url": "https://y.test/feed"},
         ], categories=[{"slug": "blogs", "title": "Blogs"}])
-        _invoke(ctx, ["list"])
         with feeds_db.connect(ctx.db_path) as conn:
             from istota.feeds.models import EntryRecord
             feed_x = feeds_db.get_feed_by_url(conn, "https://x.test/feed")
@@ -457,7 +492,6 @@ class TestMarkRead:
         assert out["status"] == "error"
 
     def test_no_scope_errors(self, ctx):
-        _seed_config(ctx)
         r = _invoke(ctx, ["mark-read"])
         out = json.loads(r.output)
         assert out["status"] == "error"
@@ -491,10 +525,9 @@ class TestOpml:
         assert out["status"] == "ok"
         assert out["feeds_added"] == 2
         assert out["rewritten_bridger_urls"] == 1
-        assert out["wrote_config"] is True
 
-        cfg = read_feeds_config(ctx.config_path)
-        urls = sorted(f["url"] for f in cfg["feeds"])
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = sorted(row["url"] for row in conn.execute("SELECT url FROM feeds"))
         assert urls == ["https://example.com/feed.xml", "tumblr:nemfrog"]
 
         out_path = tmp_path / "out.opml"

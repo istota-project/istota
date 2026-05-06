@@ -16,8 +16,7 @@ from typing import Any
 # URL-scheme prefixes that bypass the RSS poller and route to native API
 # providers instead. These are the same identifiers rss-bridger used; on
 # OPML import we rewrite ``http://127.0.0.1:8900/{provider}/{id}/feed.xml``
-# to ``{provider}:{id}`` so the same feeds.toml works locally and on
-# fresh machines.
+# to ``{provider}:{id}`` so old exports import cleanly on fresh machines.
 PROVIDER_SCHEMES = ("tumblr:", "arena:")
 
 # Default poll cadence and error-backoff cap (minutes).
@@ -25,9 +24,9 @@ DEFAULT_POLL_INTERVAL_MINUTES = 30
 DEFAULT_BACKOFF_MAX_MINUTES = 24 * 60
 
 # Per-source-type default poll cadence (minutes). Tumblr and Are.na have
-# tight per-key / per-IP rate limits, so we poll them less aggressively when
-# feeds.toml doesn't override. RSS / Atom go through dozens of separate
-# origins so the global default applies.
+# tight per-key / per-IP rate limits, so we poll them less aggressively
+# unless the user overrides per-feed. RSS / Atom go through dozens of
+# separate origins so the global default applies.
 _SOURCE_TYPE_POLL_DEFAULTS: dict[str, int] = {
     "tumblr": 60,
     "arena": 60,
@@ -43,21 +42,18 @@ def default_poll_interval_for(source_type: str) -> int:
 class FeedsContext:
     """Per-user runtime handle for the feeds module.
 
-    All paths are absolute. The data dir / config dir / db path are
-    materialised by the workspace loader; ``tumblr_api_key`` and other
-    credentials come from the user's istota resource extras.
+    All paths are absolute. The data dir / db path are materialised by
+    the workspace loader; ``tumblr_api_key`` and other credentials come
+    from the user's encrypted secrets.
     """
     user_id: str
     data_dir: Path
-    config_dir: Path
-    config_path: Path        # feeds.toml
     db_path: Path
     tumblr_api_key: str = ""
 
     def ensure_dirs(self) -> None:
-        """Create data/config dirs if they don't exist yet."""
+        """Create the data dir and the SQLite parent dir."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.config_dir.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
 

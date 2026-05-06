@@ -221,6 +221,21 @@ def delete_category(conn: sqlite3.Connection, slug: str) -> None:
     conn.execute("DELETE FROM feed_categories WHERE slug = ?", (slug,))
 
 
+def ensure_category(conn: sqlite3.Connection, slug: str) -> int:
+    """Return the id of the category with this slug, creating one with the
+    slug doubling as title if it doesn't exist yet.
+
+    Distinct from :func:`upsert_category` — this does NOT overwrite an
+    existing title when called with slug-as-title. Use this from callers
+    that only know the slug (CLI ``--category``, OPML import that lacks a
+    title, etc.) to avoid stomping on a title set elsewhere.
+    """
+    existing = get_category_by_slug(conn, slug)
+    if existing is not None:
+        return existing.id
+    return upsert_category(conn, slug, slug)
+
+
 # -- feeds --------------------------------------------------------------------
 
 
@@ -327,6 +342,42 @@ def update_feed_fetch_state(
 
 def delete_feed(conn: sqlite3.Connection, url: str) -> None:
     conn.execute("DELETE FROM feeds WHERE url = ?", (url,))
+
+
+# -- settings (singleton scalars stored in schema_meta) -----------------------
+
+
+_DEFAULT_INTERVAL_KEY = "feeds_settings.default_poll_interval_minutes"
+
+
+def get_default_poll_interval(conn: sqlite3.Connection) -> int | None:
+    """Read the user-set global poll-interval default. ``None`` if unset."""
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = ?",
+        (_DEFAULT_INTERVAL_KEY,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return None
+
+
+def set_default_poll_interval(
+    conn: sqlite3.Connection, minutes: int | None,
+) -> None:
+    """Set or clear the global poll-interval default."""
+    if minutes is None:
+        conn.execute(
+            "DELETE FROM schema_meta WHERE key = ?",
+            (_DEFAULT_INTERVAL_KEY,),
+        )
+    else:
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+            (_DEFAULT_INTERVAL_KEY, str(minutes)),
+        )
 
 
 # -- entries ------------------------------------------------------------------

@@ -58,7 +58,7 @@
 		error = '';
 		try {
 			// Module endpoint first — if the user has feeds disabled we skip
-			// the heavier feeds.toml read and render a banner instead.
+			// the heavier config read and render a banner instead.
 			const mod = await getModuleServices('feeds');
 			moduleEnabled = mod.module_enabled;
 			moduleServices = mod.services;
@@ -315,8 +315,7 @@
 		<div>
 			<h1>Feed settings</h1>
 			<p class="hint">
-				Edit subscriptions, categories, and poll defaults. Saving writes
-				<code>feeds.toml</code> and resyncs the local SQLite.
+				Edit subscriptions, categories, and poll defaults. Saved straight to your local SQLite.
 			</p>
 		</div>
 		<div class="header-actions">
