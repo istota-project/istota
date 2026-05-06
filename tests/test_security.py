@@ -168,6 +168,19 @@ class TestBuildStrippedEnv:
         assert env["LANG"] == "en_US.UTF-8"
         assert env["ISTOTA_TASK_ID"] == "42"
 
+    def test_preserves_istota_secret_key(self):
+        # ISTOTA_SECRET_KEY matches the SECRET strip pattern but must survive:
+        # module-skill subprocesses (feeds, money, location) need it to
+        # decrypt per-user credentials from the secrets table.
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "ISTOTA_SECRET_KEY": "a" * 64,
+            "OTHER_SECRET": "should-be-stripped",
+        }, clear=True):
+            env = build_stripped_env()
+        assert env["ISTOTA_SECRET_KEY"] == "a" * 64
+        assert "OTHER_SECRET" not in env
+
 
 class TestBuildAllowedTools:
     def test_includes_file_tools(self):
