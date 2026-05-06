@@ -27,13 +27,15 @@
 
 	let current = $state<CurrentLocation | null>(null);
 	let pings: LocationPing[] = $state([]);
-	let summary: DaySummary | null = $state(null);
+	let summary = $state<DaySummary | null>(null);
 	let trips: Trip[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let pollInterval: ReturnType<typeof setInterval> | undefined;
 	let mapComponent: LocationMap | undefined = $state();
 	let panelOpen = $state(loadSetting('location.panelOpen', false));
+	let browserPos = $state<{ lat: number; lon: number; at: number } | null>(null);
+	let browserPosTried = false;
 
 	$effect(() => { saveSetting('location.panelOpen', panelOpen); });
 
@@ -47,7 +49,13 @@
 	let currentPos = $derived(
 		current?.last_ping
 			? { lat: current.last_ping.lat, lon: current.last_ping.lon }
-			: null
+			: browserPos
+				? { lat: browserPos.lat, lon: browserPos.lon }
+				: null
+	);
+
+	let currentSource = $derived<'tracker' | 'browser'>(
+		current?.last_ping ? 'tracker' : 'browser'
 	);
 
 	function formatDuration(minutes: number | null): string {
@@ -86,6 +94,25 @@
 		};
 	});
 
+	function tryBrowserGeolocation() {
+		if (browserPosTried) return;
+		browserPosTried = true;
+		if (typeof navigator === 'undefined' || !navigator.geolocation) return;
+		navigator.geolocation.getCurrentPosition(
+			pos => {
+				browserPos = {
+					lat: pos.coords.latitude,
+					lon: pos.coords.longitude,
+					at: Date.now(),
+				};
+			},
+			() => {
+				// Permission denied or unavailable — leave map empty
+			},
+			{ enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 },
+		);
+	}
+
 	let hasDetails = $derived(
 		(summary?.stops.length ?? 0) > 0 || trips.length > 0 || pings.length > 1
 	);
@@ -102,6 +129,7 @@
 			pings = p.pings;
 			summary = s;
 			trips = t.trips;
+			if (!current?.last_ping) tryBrowserGeolocation();
 		} catch {
 			error = 'Failed to load location data';
 		} finally {
@@ -158,6 +186,7 @@
 				{pings}
 				{places}
 				currentPosition={currentPos}
+				{currentSource}
 				showPath={true}
 				selectedPlaceId={$selectedPlaceId}
 				onPlaceMove={$onPlaceMove}
@@ -181,6 +210,11 @@
 					{#if currentLabel.battery}
 						<span class="stat">{currentLabel.battery}</span>
 					{/if}
+				</span>
+			{:else if browserPos}
+				<span class="current">
+					<span class="place dim">Browser location</span>
+					<span class="stat">set up Overland for tracking</span>
 				</span>
 			{:else}
 				<span class="stat dim">No location data</span>
