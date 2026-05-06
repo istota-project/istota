@@ -69,13 +69,17 @@
 				Google Workspace OAuth is not configured on this Istota instance.
 			</p>
 		{:else if oauthConnected}
-			<Button variant="ghost" size="sm" onclick={onDisconnect} disabled={oauthBusy}>
-				{oauthBusy ? 'Disconnecting…' : 'Disconnect'}
-			</Button>
+			<div class="oauth-actions">
+				<Button variant="ghost" size="sm" onclick={onDisconnect} disabled={oauthBusy}>
+					{oauthBusy ? 'Disconnecting…' : 'Disconnect'}
+				</Button>
+			</div>
 		{:else}
-			<Button variant="primary" size="sm" onclick={onConnect} disabled={oauthBusy}>
-				{oauthBusy ? 'Connecting…' : 'Connect'}
-			</Button>
+			<div class="oauth-actions">
+				<Button variant="primary" size="sm" onclick={onConnect} disabled={oauthBusy}>
+					{oauthBusy ? 'Connecting…' : 'Connect'}
+				</Button>
+			</div>
 		{/if}
 	{:else}
 		{#each service.fields as f (f.key)}
@@ -108,5 +112,10 @@
 		border-radius: 0.2rem;
 		font-size: 0.9em;
 		color: var(--text-muted);
+	}
+
+	.oauth-actions {
+		display: flex;
+		gap: 0.5rem;
 	}
 </style>

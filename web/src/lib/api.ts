@@ -470,10 +470,6 @@ export async function getTrips(date?: string): Promise<TripsResponse> {
 	return apiFetch<TripsResponse>(`/location/trips${qs ? '?' + qs : ''}`);
 }
 
-export async function disconnectGoogle(): Promise<void> {
-	await apiFetch('/google/disconnect', { method: 'DELETE' });
-}
-
 // ---- Settings (Phase 5) ----
 
 export interface SettingsField {
