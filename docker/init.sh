@@ -329,6 +329,12 @@ case ",$COMPOSE_PROFILES," in
     *,browser,*) VNC_PASSWORD="$(gen_pw)"; mark VNC_PASSWORD; ok "VNC_PASSWORD (browser noVNC)" ;;
     *)           VNC_PASSWORD="" ;;
 esac
+# Pin the Compose project name. Without this, Compose names the project after
+# the parent directory (typically "docker") and clones in different paths with
+# the same parent name silently merge into the same project — recreating each
+# other's containers and (worst case) mixing up volumes.
+COMPOSE_PROJECT_NAME="istota"
+mark COMPOSE_PROJECT_NAME
 
 # --- write .env ---
 # Start from .env.example and patch the values we manage; this preserves
@@ -349,6 +355,7 @@ USER_EMAIL="$USER_EMAIL" \
 CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
 VNC_PASSWORD="$VNC_PASSWORD" \
 COMPOSE_PROFILES="$COMPOSE_PROFILES" \
+COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" \
 DOMAIN="$DOMAIN" \
 ISTOTA_BOT_NAME="$ISTOTA_BOT_NAME" \
 ISTOTA_EMAIL_ENABLED="$ISTOTA_EMAIL_ENABLED" \
@@ -478,6 +485,33 @@ print_urls() {
 }
 
 if [ "$should_start" = true ]; then
+    # Footgun guard: if there's already an "istota" project running from a
+    # different path, `docker compose up` from here would merge into it —
+    # recreating its containers with our config. Refuse to proceed unless the
+    # operator explicitly takes the existing stack down or moves it aside.
+    existing_path="$(docker compose ls --format json 2>/dev/null \
+        | python3 -c '
+import json, os, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for row in rows or []:
+    if row.get("Name") == "istota":
+        files = (row.get("ConfigFiles") or "").split(",")
+        if files:
+            print(os.path.dirname(files[0]))
+        break
+' 2>/dev/null || true)"
+    if [ -n "$existing_path" ] && [ "$existing_path" != "$SCRIPT_DIR" ]; then
+        warn "An 'istota' Compose project is already running from:"
+        warn "    $existing_path"
+        warn "Bringing this stack up here would recreate that one's containers."
+        warn "Take it down first ('docker compose -f ${existing_path}/docker-compose.yml down')"
+        warn "or set COMPOSE_PROJECT_NAME to a different value in $ENV_FILE."
+        die "Refusing to start to protect the existing deployment."
+    fi
+
     section "Starting the stack"
     info "Running: docker compose up -d --build"
     if ! (cd "$SCRIPT_DIR" && docker compose up -d --build); then
