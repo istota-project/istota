@@ -123,12 +123,36 @@ fi
 read -rp "  USER_TIMEZONE (IANA, e.g. Europe/Berlin) [$default_tz]: " USER_TIMEZONE
 USER_TIMEZONE="${USER_TIMEZONE:-$default_tz}"
 
+# --- browser container default ---
+# The browser profile bundles a Chromium + bot-detection countermeasures
+# container that the `browse` skill talks to. Chrome has no ARM packages,
+# so we only enable it by default on x86_64 hosts.
+section "Optional containers"
+HOST_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+case "$HOST_ARCH" in
+    x86_64|amd64)
+        COMPOSE_PROFILES="browser"
+        ok "Browser container enabled by default (host arch: $HOST_ARCH)"
+        dim "Disable later by removing 'browser' from COMPOSE_PROFILES in .env."
+        ;;
+    *)
+        COMPOSE_PROFILES=""
+        warn "Browser container disabled (host arch: $HOST_ARCH; Chrome has no ARM packages)."
+        dim "GPS / location ingest: enable later by adding 'location' to COMPOSE_PROFILES."
+        ;;
+esac
+
 # --- generate passwords ---
 section "Generating passwords"
 ADMIN_PASSWORD="$(gen_pw)";    ok "ADMIN_PASSWORD"
 USER_PASSWORD="$(gen_pw)";     ok "USER_PASSWORD"
 BOT_PASSWORD="$(gen_pw)";      ok "BOT_PASSWORD"
 POSTGRES_PASSWORD="$(gen_pw)"; ok "POSTGRES_PASSWORD"
+if [ -n "$COMPOSE_PROFILES" ]; then
+    VNC_PASSWORD="$(gen_pw)";  ok "VNC_PASSWORD (browser container noVNC)"
+else
+    VNC_PASSWORD=""
+fi
 
 # --- write .env ---
 # Start from .env.example and patch the values we manage; this preserves
@@ -148,6 +172,8 @@ USER_PASSWORD="$USER_PASSWORD" \
 USER_DISPLAY_NAME="$USER_DISPLAY_NAME" \
 USER_TIMEZONE="$USER_TIMEZONE" \
 CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
+VNC_PASSWORD="$VNC_PASSWORD" \
+COMPOSE_PROFILES="$COMPOSE_PROFILES" \
 python3 - "$EXAMPLE_FILE" "$TMP_ENV" <<'PYEOF'
 import os, sys, re
 src, dst = sys.argv[1], sys.argv[2]
@@ -155,6 +181,7 @@ keys = (
     "ADMIN_PASSWORD", "POSTGRES_PASSWORD", "BOT_PASSWORD",
     "USER_NAME", "USER_PASSWORD", "USER_DISPLAY_NAME",
     "USER_TIMEZONE", "CLAUDE_CODE_OAUTH_TOKEN",
+    "VNC_PASSWORD", "COMPOSE_PROFILES",
 )
 overrides = {k: os.environ.get(k, "") for k in keys}
 seen = set()
@@ -191,7 +218,14 @@ echo "    Nextcloud admin   :  admin / $ADMIN_PASSWORD"
 echo "    Primary user      :  $USER_NAME / $USER_PASSWORD"
 echo "    Bot user          :  istota / $BOT_PASSWORD"
 echo "    Postgres          :  $POSTGRES_PASSWORD"
+if [ -n "$VNC_PASSWORD" ]; then
+    echo "    Browser noVNC     :  $VNC_PASSWORD"
+fi
 echo
+if [ -n "$COMPOSE_PROFILES" ]; then
+    echo -e "  ${_BOLD}Active compose profiles:${_RESET} $COMPOSE_PROFILES"
+    echo
+fi
 if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
     warn "No Claude Code token set. Edit $ENV_FILE and set"
     warn "  CLAUDE_CODE_OAUTH_TOKEN=... or ANTHROPIC_API_KEY=... before bringing the stack up."
@@ -201,5 +235,5 @@ echo -e "  ${_BOLD}Next steps:${_RESET}"
 echo "    cd $SCRIPT_DIR"
 echo "    docker compose up -d"
 echo
-dim "Tip: review $ENV_FILE for optional features (DOMAIN, email, ntfy, browser, location, …)."
+dim "Tip: review $ENV_FILE for optional features (DOMAIN, email, ntfy, location, …)."
 echo

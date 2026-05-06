@@ -38,15 +38,13 @@ Open `http://localhost:8080`, log in with your `USER_NAME` / `USER_PASSWORD`, go
 
 ### Optional services
 
-The browser container (Playwright with bot-detection countermeasures) and the GPS webhook receiver run as Docker Compose profiles:
+The browser container (Playwright with bot-detection countermeasures) and the GPS webhook receiver run as Docker Compose profiles. `init.sh` sets `COMPOSE_PROFILES=browser` by default on x86-64 hosts (Chrome has no ARM packages, so it stays off on ARM); GPS is off by default. Edit `COMPOSE_PROFILES` in `.env` — comma-separated list — or pass `--profile` flags ad-hoc:
 
 ```bash
-docker compose --profile browser up -d              # Add browser
-docker compose --profile location up -d             # Add GPS webhook receiver
+docker compose --profile browser up -d              # Browser only
+docker compose --profile location up -d             # GPS webhook receiver only
 docker compose --profile browser --profile location up -d  # Both
 ```
-
-The browser container requires an x86-64 host (Chrome has no ARM packages).
 
 ### Configuration
 
