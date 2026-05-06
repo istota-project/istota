@@ -61,6 +61,22 @@ def _config_search_dirs(
     return [data_dir / "config", workspace_root / "config"]
 
 
+def _discover_ledgers(ledgers_dir: Path) -> list[dict]:
+    """Return all top-level ``*.beancount`` files in ``ledgers_dir``.
+
+    Subdirectories (``backups/``, ``imports/``) are intentionally skipped.
+    The list is sorted by filename for deterministic ordering — routes that
+    don't pass a ledger name fall back to ``ledgers[0]``.
+    """
+    if not ledgers_dir.is_dir():
+        return []
+    return [
+        {"name": p.stem, "path": p}
+        for p in sorted(ledgers_dir.glob("*.beancount"))
+        if p.is_file()
+    ]
+
+
 def synthesize_user_context(
     workspace_root: Path,
     *,
@@ -102,10 +118,12 @@ def synthesize_user_context(
         db_path = data_dir / "data" / "money.db"
 
     if ledgers is None:
-        ledgers = [{
-            "name": "main",
-            "path": data_dir / "ledgers" / "main.beancount",
-        }]
+        ledgers = _discover_ledgers(data_dir / "ledgers")
+        if not ledgers:
+            ledgers = [{
+                "name": "main",
+                "path": data_dir / "ledgers" / "main.beancount",
+            }]
     else:
         normalized = []
         for entry in ledgers:

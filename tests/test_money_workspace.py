@@ -142,6 +142,34 @@ class TestSynthesizeUserContext:
         ctx = synthesize_user_context(tmp_path, db_path=custom_db)
         assert ctx.db_path == custom_db
 
+    def test_ledgers_autodiscovered_from_ledgers_dir(self, tmp_path):
+        # User's actual ledger files in the conventional location are
+        # discovered automatically — replaces the now-removed legacy
+        # `[[resources]] type = "money" extra.ledgers` config knob.
+        ledgers_dir = tmp_path / "money" / "ledgers"
+        ledgers_dir.mkdir(parents=True)
+        (ledgers_dir / "cynium.beancount").write_text("")
+        (ledgers_dir / "personal.beancount").write_text("")
+        (ledgers_dir / "notes.txt").write_text("")  # non-beancount, ignored
+        (ledgers_dir / "backups").mkdir()  # subdir, ignored
+        (ledgers_dir / "backups" / "old.beancount").write_text("")
+        ctx = synthesize_user_context(tmp_path)
+        assert ctx.ledgers == [
+            {"name": "cynium", "path": ledgers_dir / "cynium.beancount"},
+            {"name": "personal", "path": ledgers_dir / "personal.beancount"},
+        ]
+
+    def test_explicit_ledgers_skip_autodiscovery(self, tmp_path):
+        # An explicit ledgers list takes precedence over what's on disk.
+        ledgers_dir = tmp_path / "money" / "ledgers"
+        ledgers_dir.mkdir(parents=True)
+        (ledgers_dir / "cynium.beancount").write_text("")
+        ctx = synthesize_user_context(tmp_path, ledgers=["main"])
+        data_dir = (tmp_path / "money").resolve()
+        assert ctx.ledgers == [
+            {"name": "main", "path": data_dir / "ledgers" / "main.beancount"},
+        ]
+
     def test_ledgers_short_form_strings(self, tmp_path):
         ctx = synthesize_user_context(tmp_path, ledgers=["cynium", "personal"])
         data_dir = (tmp_path / "money").resolve()
