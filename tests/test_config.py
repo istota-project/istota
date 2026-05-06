@@ -20,8 +20,6 @@ from istota.config import (
     UserConfig,
     load_admin_users,
     load_config,
-    load_user_configs,
-    reload_user_configs,
 )
 
 
@@ -627,233 +625,6 @@ class TestResourceConfig:
         assert uc.resources[1].permissions == "write"
 
 
-class TestPerUserConfigFiles:
-    def test_load_user_configs_empty_dir(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        result = load_user_configs(users_dir)
-        assert result == {}
-
-    def test_load_user_configs_nonexistent_dir(self, tmp_path):
-        result = load_user_configs(tmp_path / "nope")
-        assert result == {}
-
-    def test_load_single_user_file(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text("""
-display_name = "Alice"
-email_addresses = ["alice@example.com"]
-timezone = "America/New_York"
-""")
-        result = load_user_configs(users_dir)
-        assert "alice" in result
-        assert result["alice"].display_name == "Alice"
-        assert result["alice"].email_addresses == ["alice@example.com"]
-        assert result["alice"].timezone == "America/New_York"
-
-    def test_load_user_with_resources(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "stefan.toml").write_text("""
-display_name = "Stefan"
-
-[[resources]]
-type = "folder"
-path = "/stefan/Projects"
-name = "Projects"
-permissions = "write"
-
-[[resources]]
-type = "todo_file"
-path = "/Users/stefan/TASKS.md"
-name = "Tasks"
-permissions = "write"
-
-[[resources]]
-type = "reminders_file"
-path = "/Users/stefan/notes/REMINDERS.md"
-name = "Reminders"
-""")
-        result = load_user_configs(users_dir)
-        assert "stefan" in result
-        stefan = result["stefan"]
-        assert len(stefan.resources) == 3
-        assert stefan.resources[0].type == "folder"
-        assert stefan.resources[0].path == "/stefan/Projects"
-        assert stefan.resources[0].name == "Projects"
-        assert stefan.resources[0].permissions == "write"
-        assert stefan.resources[1].type == "todo_file"
-        assert stefan.resources[2].type == "reminders_file"
-        assert stefan.resources[2].permissions == "read"
-
-    def test_load_user_with_karakeep_resource(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text("""
-display_name = "Alice"
-
-[[resources]]
-type = "karakeep"
-name = "Bookmarks"
-base_url = "https://keep.example.com/api/v1"
-api_key = "kk-secret-token"
-""")
-        result = load_user_configs(users_dir)
-        assert "alice" in result
-        alice = result["alice"]
-        assert len(alice.resources) == 1
-        kk = alice.resources[0]
-        assert kk.type == "karakeep"
-        assert kk.name == "Bookmarks"
-        assert kk.path == ""
-        assert kk.base_url == "https://keep.example.com/api/v1"
-        assert kk.api_key == "kk-secret-token"
-
-    def test_load_user_with_briefings(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "bob.toml").write_text("""
-display_name = "Bob"
-timezone = "Europe/Berlin"
-
-[[briefings]]
-name = "morning"
-cron = "0 7 * * *"
-conversation_token = "room1"
-
-[briefings.components]
-calendar = true
-""")
-        result = load_user_configs(users_dir)
-        bob = result["bob"]
-        assert len(bob.briefings) == 1
-        assert bob.briefings[0].name == "morning"
-        assert bob.briefings[0].cron == "0 7 * * *"
-
-    def test_load_user_ignores_sleep_cycle(self, tmp_path):
-        """Sleep cycle is global, not per-user. Per-user sleep_cycle sections are ignored."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text("""
-display_name = "Alice"
-""")
-        result = load_user_configs(users_dir)
-        assert result["alice"].display_name == "Alice"
-
-    def test_load_multiple_users(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
-        (users_dir / "bob.toml").write_text('display_name = "Bob"\n')
-        result = load_user_configs(users_dir)
-        assert len(result) == 2
-        assert "alice" in result
-        assert "bob" in result
-
-    def test_per_user_files_override_main_config(self, tmp_path):
-        # Main config with alice
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[users.alice]
-display_name = "Alice Old"
-timezone = "UTC"
-""")
-        # Per-user file overrides alice
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text("""
-display_name = "Alice New"
-timezone = "America/New_York"
-""")
-        cfg = load_config(config_file)
-        assert cfg.users["alice"].display_name == "Alice New"
-        assert cfg.users["alice"].timezone == "America/New_York"
-
-    def test_per_user_files_add_to_main_config(self, tmp_path):
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[users.alice]
-display_name = "Alice"
-""")
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "bob.toml").write_text('display_name = "Bob"\n')
-        cfg = load_config(config_file)
-        assert "alice" in cfg.users
-        assert "bob" in cfg.users
-
-    def test_users_dir_set_on_config(self, tmp_path):
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("")
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
-        cfg = load_config(config_file)
-        assert cfg.users_dir == users_dir
-
-    def test_users_dir_none_when_missing(self, tmp_path):
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("")
-        cfg = load_config(config_file)
-        assert cfg.users_dir is None
-
-    def test_skip_non_toml_files(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
-        (users_dir / "readme.md").write_text("# Users\n")
-        result = load_user_configs(users_dir)
-        assert len(result) == 1
-        assert "alice" in result
-
-    def test_skip_example_files(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
-        (users_dir / "bob.example.toml").write_text('display_name = "Bob Example"\n')
-        result = load_user_configs(users_dir)
-        assert len(result) == 1
-        assert "alice" in result
-        assert "bob.example" not in result
-
-    def test_resources_in_main_config_users_section(self, tmp_path):
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[users.alice]
-display_name = "Alice"
-
-[[users.alice.resources]]
-type = "folder"
-path = "/alice/docs"
-name = "Docs"
-permissions = "write"
-""")
-        cfg = load_config(config_file)
-        assert len(cfg.users["alice"].resources) == 1
-        assert cfg.users["alice"].resources[0].type == "folder"
-
-    def test_load_user_with_alerts_channel_and_trusted_senders(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "stefan.toml").write_text("""
-display_name = "Stefan"
-alerts_channel = "abc123"
-trusted_email_senders = ["*@cynium.com", "alice@example.com"]
-""")
-        result = load_user_configs(users_dir)
-        assert result["stefan"].alerts_channel == "abc123"
-        assert result["stefan"].trusted_email_senders == ["*@cynium.com", "alice@example.com"]
-
-    def test_load_user_without_alerts_channel_defaults(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "stefan.toml").write_text('display_name = "Stefan"\n')
-        result = load_user_configs(users_dir)
-        assert result["stefan"].alerts_channel == ""
-        assert result["stefan"].trusted_email_senders == []
-
-
 class TestDeveloperConfig:
     def test_defaults(self):
         dev = DeveloperConfig()
@@ -1005,16 +776,6 @@ site_enabled = true
         cfg = load_config(config_file)
         assert cfg.users["alice"].site_enabled is True
 
-    def test_user_site_enabled_from_per_user_file(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text("""
-display_name = "Alice"
-site_enabled = true
-""")
-        result = load_user_configs(users_dir)
-        assert result["alice"].site_enabled is True
-
     def test_user_site_enabled_default_false_in_toml(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
@@ -1025,284 +786,6 @@ display_name = "Bob"
         assert cfg.users["bob"].site_enabled is False
 
 
-class TestUserJsonOverride:
-    """Tests for .user.json files that override .toml config."""
-
-    def test_json_overrides_scalar_fields(self, tmp_path):
-        """JSON scalar fields override TOML equivalents."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text(
-            'display_name = "Alice"\n'
-            'timezone = "UTC"\n'
-        )
-        import json
-        (users_dir / "alice.user.json").write_text(json.dumps({
-            "display_name": "Alice Updated",
-            "timezone": "America/New_York",
-        }))
-        result = load_user_configs(users_dir)
-        assert result["alice"].display_name == "Alice Updated"
-        assert result["alice"].timezone == "America/New_York"
-
-    def test_json_replaces_briefings(self, tmp_path):
-        """JSON briefings list completely replaces TOML briefings."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text("""
-display_name = "Alice"
-[[briefings]]
-name = "morning"
-cron = "0 6 * * *"
-""")
-        import json
-        (users_dir / "alice.user.json").write_text(json.dumps({
-            "briefings": [
-                {"name": "evening", "cron": "0 18 * * *", "output": "email"},
-            ],
-        }))
-        result = load_user_configs(users_dir)
-        assert len(result["alice"].briefings) == 1
-        assert result["alice"].briefings[0].name == "evening"
-        assert result["alice"].briefings[0].output == "email"
-
-    def test_json_resources_replace_toml(self, tmp_path):
-        """JSON resources replace TOML resources entirely.
-
-        After the modules / connected services refactor the merger no
-        longer preserves TOML "credential resources" — credentials live in
-        the secrets table now, so resource lists are a single, replaceable
-        concept.
-        """
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text("""
-display_name = "Alice"
-[[resources]]
-type = "folder"
-path = "/alice/old"
-name = "Old"
-""")
-        import json
-        (users_dir / "alice.user.json").write_text(json.dumps({
-            "resources": [
-                {"type": "folder", "path": "/alice/Projects", "name": "Projects"},
-            ],
-        }))
-        result = load_user_configs(users_dir)
-        types = [(r.type, r.path) for r in result["alice"].resources]
-        assert types == [("folder", "/alice/Projects")]
-
-    def test_json_without_toml_ignored(self, tmp_path):
-        """A .user.json without a matching .toml is ignored."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        import json
-        (users_dir / "ghost.user.json").write_text(json.dumps({
-            "display_name": "Ghost",
-        }))
-        result = load_user_configs(users_dir)
-        assert "ghost" not in result
-
-    def test_json_partial_override(self, tmp_path):
-        """JSON only overrides fields present in the JSON; others keep TOML values."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text(
-            'display_name = "Alice"\n'
-            'timezone = "UTC"\n'
-            'ntfy_topic = "alice-topic"\n'
-        )
-        import json
-        (users_dir / "alice.user.json").write_text(json.dumps({
-            "timezone": "Europe/Berlin",
-        }))
-        result = load_user_configs(users_dir)
-        assert result["alice"].display_name == "Alice"  # from TOML
-        assert result["alice"].timezone == "Europe/Berlin"  # from JSON
-        assert result["alice"].ntfy_topic == "alice-topic"  # from TOML
-
-    def test_json_disabled_skills_override(self, tmp_path):
-        """JSON disabled_skills replaces TOML disabled_skills."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text(
-            'display_name = "Alice"\n'
-            'disabled_skills = ["browse", "whisper"]\n'
-        )
-        import json
-        (users_dir / "alice.user.json").write_text(json.dumps({
-            "disabled_skills": ["markets"],
-        }))
-        result = load_user_configs(users_dir)
-        assert result["alice"].disabled_skills == ["markets"]
-
-    def test_malformed_json_logged_and_skipped(self, tmp_path):
-        """Malformed .user.json is logged and TOML config used as-is."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
-        (users_dir / "alice.user.json").write_text("{bad json")
-        result = load_user_configs(users_dir)
-        assert result["alice"].display_name == "Alice"
-
-    def test_toml_resources_preserved_when_json_only_changes_briefings(self, tmp_path):
-        """TOML resources stay when JSON only overrides briefings."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text("""
-display_name = "Alice"
-
-[[resources]]
-type = "folder"
-path = "/Docs"
-name = "Docs"
-
-[[briefings]]
-name = "old-briefing"
-cron = "0 6 * * *"
-""")
-        import json
-        (users_dir / "alice.user.json").write_text(json.dumps({
-            "briefings": [
-                {"name": "new-briefing", "cron": "0 7 * * *"},
-            ],
-        }))
-        result = load_user_configs(users_dir)
-        # Briefings from JSON
-        assert len(result["alice"].briefings) == 1
-        assert result["alice"].briefings[0].name == "new-briefing"
-        # Resources from TOML still present (JSON didn't touch resources).
-        types = [r.type for r in result["alice"].resources]
-        assert "folder" in types
-
-
-class TestReloadUserConfigs:
-    def test_reload_detects_changed_file(self, tmp_path):
-        """Reload returns True when a user config file changes."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
-        cfg = Config(users_dir=users_dir)
-        cfg.users = load_user_configs(users_dir)
-        assert cfg.users["alice"].display_name == "Alice"
-
-        # Modify the file
-        (users_dir / "alice.toml").write_text('display_name = "Alice Updated"\n')
-        changed = reload_user_configs(cfg)
-        assert changed is True
-        assert cfg.users["alice"].display_name == "Alice Updated"
-
-    def test_reload_returns_false_when_unchanged(self, tmp_path):
-        """Reload returns False when nothing changed."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
-        cfg = Config(users_dir=users_dir)
-        cfg.users = load_user_configs(users_dir)
-
-        changed = reload_user_configs(cfg)
-        assert changed is False
-
-    def test_reload_picks_up_new_json_override(self, tmp_path):
-        """Reload detects a new .user.json file appearing."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\ntimezone = "UTC"\n')
-        cfg = Config(users_dir=users_dir)
-        cfg.users = load_user_configs(users_dir)
-        assert cfg.users["alice"].timezone == "UTC"
-
-        # Add a JSON override
-        import json
-        (users_dir / "alice.user.json").write_text(json.dumps({"timezone": "Europe/Berlin"}))
-        changed = reload_user_configs(cfg)
-        assert changed is True
-        assert cfg.users["alice"].timezone == "Europe/Berlin"
-
-    def test_reload_no_users_dir(self):
-        """Reload returns False when users_dir is None."""
-        cfg = Config()
-        assert reload_user_configs(cfg) is False
-
-    def test_reload_preserves_main_config_users(self, tmp_path):
-        """Users from [users] section in main config are not removed by reload."""
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
-        cfg = Config(users_dir=users_dir)
-        # Simulate a user from main config [users] section
-        cfg.users["bob"] = UserConfig(display_name="Bob")
-        cfg.users.update(load_user_configs(users_dir))
-
-        changed = reload_user_configs(cfg)
-        assert changed is False
-        assert "bob" in cfg.users  # bob preserved
-
-
-class TestLoadAdminUsers:
-    def test_missing_file_returns_empty_set(self, tmp_path):
-        result = load_admin_users(str(tmp_path / "nonexistent"))
-        assert result == set()
-
-    def test_valid_file_parses_users(self, tmp_path):
-        admins_file = tmp_path / "admins"
-        admins_file.write_text("alice\nbob\n")
-        result = load_admin_users(str(admins_file))
-        assert result == {"alice", "bob"}
-
-    def test_comments_and_blank_lines_ignored(self, tmp_path):
-        admins_file = tmp_path / "admins"
-        admins_file.write_text("# Admin users\nalice\n\n# Another comment\nbob\n\n")
-        result = load_admin_users(str(admins_file))
-        assert result == {"alice", "bob"}
-
-    def test_whitespace_stripped(self, tmp_path):
-        admins_file = tmp_path / "admins"
-        admins_file.write_text("  alice  \n  bob  \n")
-        result = load_admin_users(str(admins_file))
-        assert result == {"alice", "bob"}
-
-    def test_empty_file_returns_empty_set(self, tmp_path):
-        admins_file = tmp_path / "admins"
-        admins_file.write_text("")
-        result = load_admin_users(str(admins_file))
-        assert result == set()
-
-    def test_comments_only_returns_empty_set(self, tmp_path):
-        admins_file = tmp_path / "admins"
-        admins_file.write_text("# Only comments\n# Nothing else\n")
-        result = load_admin_users(str(admins_file))
-        assert result == set()
-
-    def test_env_var_override(self, tmp_path, monkeypatch):
-        admins_file = tmp_path / "custom_admins"
-        admins_file.write_text("charlie\n")
-        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(admins_file))
-        result = load_admin_users()
-        assert result == {"charlie"}
-
-
-class TestIsAdmin:
-    def test_empty_set_means_all_admin(self):
-        cfg = Config()
-        assert cfg.is_admin("anyone") is True
-
-    def test_user_in_admin_set(self):
-        cfg = Config(admin_users={"alice", "bob"})
-        assert cfg.is_admin("alice") is True
-
-    def test_user_not_in_admin_set(self):
-        cfg = Config(admin_users={"alice", "bob"})
-        assert cfg.is_admin("charlie") is False
-
-
-class TestConfigPathPropagation:
-    def test_load_config_records_loaded_path(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("")
-        cfg = load_config(config_file)
         assert cfg.config_path == config_file
 
     def test_load_config_default_has_no_path(self):
@@ -1384,15 +867,13 @@ class TestWorkerConcurrencyConfig:
     def test_user_config_worker_limits(self, tmp_path, monkeypatch):
         """Per-user worker limits parsed from TOML."""
         monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text(
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[users.alice]\n'
             'display_name = "Alice"\n'
             'max_foreground_workers = 2\n'
             'max_background_workers = 3\n'
         )
-        p = tmp_path / "config.toml"
-        p.write_text('')
         cfg = load_config(p)
         assert cfg.users["alice"].max_foreground_workers == 2
         assert cfg.users["alice"].max_background_workers == 3
@@ -1462,18 +943,18 @@ class TestWorkerConcurrencyConfig:
         assert cfg.effective_user_max_bg_workers("unknown") == 3
 
     def test_parsed_user_defaults_to_global_workers(self, tmp_path, monkeypatch):
-        """User loaded from per-user TOML without explicit worker limits uses global default."""
+        """User loaded without explicit worker limits uses global default."""
         monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text('display_name = "Alice"\n')
         p = tmp_path / "config.toml"
         p.write_text(
             '[scheduler]\n'
             'user_max_foreground_workers = 3\n'
+            '\n'
+            '[users.alice]\n'
+            'display_name = "Alice"\n'
         )
         cfg = load_config(p)
-        # alice's per-user file doesn't set worker limits, so effective should use global
+        # alice doesn't set worker limits, so effective should use global
         assert cfg.effective_user_max_fg_workers("alice") == 3
         assert cfg.users["alice"].max_foreground_workers == 0  # sentinel, not 1
 
@@ -1970,14 +1451,14 @@ class TestDisabledModules:
         assert UserConfig().disabled_modules == []
 
     def test_parsed_from_toml(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        (users_dir / "alice.toml").write_text(
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[users.alice]\n'
             'display_name = "Alice"\n'
             'disabled_modules = ["feeds", "money"]\n'
         )
-        result = load_user_configs(users_dir)
-        assert result["alice"].disabled_modules == ["feeds", "money"]
+        cfg = load_config(p)
+        assert cfg.users["alice"].disabled_modules == ["feeds", "money"]
 
     def test_is_module_enabled_default_on(self):
         cfg = Config()

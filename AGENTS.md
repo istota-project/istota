@@ -176,7 +176,7 @@ uv run istota-scheduler [-d] [-v] [--max-tasks N]
 
 Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`. Override with `-c PATH`.
 
-Per-user: `config/users/{user_id}.toml` overrides `[users]` in main config. CalDAV derived from Nextcloud. Field-by-field reference in `.claude/rules/config.md`.
+Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`) populated by `istota user|resource|briefing ensure`. The `[users.X]` block in `config.toml` (docker entrypoint path) is also accepted; DB rows win at config-load time. CalDAV derived from Nextcloud. Field-by-field reference in `.claude/rules/config.md`.
 
 ## Deployment
 

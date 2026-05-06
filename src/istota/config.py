@@ -1,6 +1,5 @@
 """Configuration loading for istota."""
 
-import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -138,7 +137,6 @@ class SchedulerConfig:
     max_subtask_prompt_chars: int = 8000  # skip deferred subtasks whose prompt exceeds this (0 = unlimited)
     talk_cache_max_per_conversation: int = 200  # max cached talk messages per conversation
     location_ping_retention_days: int = 365  # delete location pings older than this (0 = unlimited)
-    config_reload_interval: int = 300  # seconds between user config file re-reads (0 = disabled)
     log_channel_show_skills: bool = True  # include selected skills in log channel messages
 
 
@@ -178,6 +176,10 @@ class BriefingConfig:
     conversation_token: str = ""  # Talk room to post to
     output: str = "talk"  # "talk", "email", or "both"
     components: dict = field(default_factory=dict)
+    # Marks entries appended by ``_apply_user_briefings`` from the DB. The
+    # web listing endpoint skips these so post-delete in-memory staleness
+    # cannot resurface a removed briefing as "managed=config".
+    from_db: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -192,6 +194,10 @@ class ResourceConfig:
     api_key: str = ""
     # Arbitrary extra fields for plugin skills (unrecognized keys go here)
     extra: dict = field(default_factory=dict)
+    # Marks entries appended by ``_apply_user_resources`` from the DB. The
+    # web listing endpoint skips these so post-delete in-memory staleness
+    # cannot resurface a removed row as "managed=config".
+    from_db: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -424,7 +430,6 @@ class Config:
     disabled_skills: list[str] = field(default_factory=list)  # instance-wide skills to exclude
     custom_system_prompt: bool = False  # Use config/system-prompt.md instead of Claude Code's default
     temp_dir: Path = field(default_factory=lambda: Path("/tmp/istota"))
-    users_dir: Path | None = None  # config/users/ directory for per-user TOML files
     config_path: Path | None = None  # Set by load_config() to the file actually loaded
 
     @property
@@ -657,113 +662,6 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     )
 
 
-def _merge_user_configs(
-    base: UserConfig, override_data: dict, user_id: str
-) -> UserConfig:
-    """Merge a .user.json override dict onto a TOML-loaded UserConfig.
-
-    Merge rules:
-    - Scalar fields present in override_data replace the base value.
-    - ``briefings``: JSON list replaces TOML list entirely.
-    - ``resources``: JSON list replaces TOML list entirely. The legacy
-      "credential resource types" carve-out went away with the modules
-      refactor — credentials live in the secrets table now, not in
-      ``[[resources]]`` blocks.
-    """
-    override = _parse_user_data(override_data, user_id)
-
-    # Start from base, selectively apply overrides for fields present in JSON.
-    merged = UserConfig(
-        display_name=override.display_name if "display_name" in override_data else base.display_name,
-        email_addresses=override.email_addresses if "email_addresses" in override_data else base.email_addresses,
-        timezone=override.timezone if "timezone" in override_data else base.timezone,
-        ntfy_topic=override.ntfy_topic if "ntfy_topic" in override_data else base.ntfy_topic,
-        log_channel=override.log_channel if "log_channel" in override_data else base.log_channel,
-        site_enabled=override.site_enabled if "site_enabled" in override_data else base.site_enabled,
-        max_foreground_workers=override.max_foreground_workers if "max_foreground_workers" in override_data else base.max_foreground_workers,
-        max_background_workers=override.max_background_workers if "max_background_workers" in override_data else base.max_background_workers,
-        disabled_skills=override.disabled_skills if "disabled_skills" in override_data else base.disabled_skills,
-        disabled_modules=override.disabled_modules if "disabled_modules" in override_data else base.disabled_modules,
-        # Briefings: JSON replaces entirely, else keep TOML.
-        briefings=override.briefings if "briefings" in override_data else base.briefings,
-        # Resources: credential resources from TOML + non-credential from JSON (if provided).
-        resources=base.resources,  # placeholder, merged below
-    )
-
-    if "resources" in override_data:
-        merged.resources = override.resources
-    # else: keep all base resources as-is.
-
-    return merged
-
-
-def load_user_configs(users_dir: Path) -> dict[str, UserConfig]:
-    """Load per-user config files from a directory.
-
-    Each .toml file in the directory represents one user.
-    Filename (without .toml) = user_id.
-
-    If a companion .user.json file exists, its values override the TOML
-    config according to the merge rules in ``_merge_user_configs``.
-    """
-    users = {}
-    if not users_dir.is_dir():
-        return users
-
-    for toml_file in sorted(users_dir.glob("*.toml")):
-        # Skip example files (e.g., alice.example.toml)
-        if ".example" in toml_file.stem:
-            continue
-        user_id = toml_file.stem
-        try:
-            with open(toml_file, "rb") as f:
-                user_data = tomli.load(f)
-            user_config = _parse_user_data(user_data, user_id)
-
-            # Check for companion .user.json override
-            json_file = users_dir / f"{user_id}.user.json"
-            if json_file.exists():
-                try:
-                    json_data = json.loads(json_file.read_text())
-                    user_config = _merge_user_configs(user_config, json_data, user_id)
-                    logger.debug("Applied .user.json override for %s", user_id)
-                except Exception as e:
-                    logger.error("Error loading user JSON override %s: %s", json_file, e)
-
-            users[user_id] = user_config
-            logger.debug("Loaded per-user config for %s from %s", user_id, toml_file)
-        except Exception as e:
-            logger.error("Error loading user config %s: %s", toml_file, e)
-
-    return users
-
-
-def reload_user_configs(config: "Config") -> bool:
-    """Re-read per-user config files and update config.users in place.
-
-    Only reloads file-based user configs (from users_dir). Users defined
-    in the main config's ``[users]`` section are not affected.
-
-    Returns True if any user configs changed.
-    """
-    if config.users_dir is None or not config.users_dir.is_dir():
-        return False
-
-    new_users = load_user_configs(config.users_dir)
-
-    # Check if anything actually changed
-    changed = False
-    for user_id, new_uc in new_users.items():
-        if user_id not in config.users or config.users[user_id] != new_uc:
-            config.users[user_id] = new_uc
-            changed = True
-
-    if changed:
-        logger.info("Reloaded user configs (%d users from files)", len(new_users))
-
-    return changed
-
-
 def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from TOML file."""
     if config_path is None:
@@ -861,14 +759,6 @@ def load_config(config_path: Path | None = None) -> Config:
     if "users" in data:
         for nc_username, user_data in data["users"].items():
             config.users[nc_username] = _parse_user_data(user_data, nc_username)
-
-    # Load per-user config files from users/ directory (sibling to config file)
-    users_dir = config_path.parent / "users"
-    if users_dir.is_dir():
-        config.users_dir = users_dir
-        per_user_configs = load_user_configs(users_dir)
-        # Per-user files take precedence over [users] section in main config
-        config.users.update(per_user_configs)
 
     if "email" in data:
         email = data["email"]
@@ -1258,6 +1148,7 @@ def _apply_user_resources(config: "Config") -> None:
                         api_key=str(extras.pop("api_key", "")) or "",
                         extra=extras,
                     )
+                    rc.from_db = True
                     user_config.resources.append(rc)
     except Exception as e:  # pragma: no cover - defensive
         logger.debug("user_resources overlay skipped: %s", e)
@@ -1357,12 +1248,12 @@ def _apply_user_briefings(config: "Config") -> None:
         for r in db_rows:
             if not r.enabled:
                 continue
-            user_config.briefings.append(
-                BriefingConfig(
-                    name=r.name,
-                    cron=r.cron,
-                    conversation_token=r.conversation_token,
-                    output=r.output,
-                    components=dict(r.components),
-                )
+            bc = BriefingConfig(
+                name=r.name,
+                cron=r.cron,
+                conversation_token=r.conversation_token,
+                output=r.output,
+                components=dict(r.components),
             )
+            bc.from_db = True
+            user_config.briefings.append(bc)

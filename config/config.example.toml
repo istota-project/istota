@@ -362,9 +362,9 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # Money (accounting)
 # ============================================================================
 # The money skill runs in-process — there is no instance-level [money]
-# block. Per-user access is controlled via [[resources]] type = "money"
-# in each user's TOML. See config/users/alice.example.toml for the
-# resource fields (workspace mode, ledgers, etc.).
+# block. Per-user access is on by default; opt out via the user's
+# `disabled_modules` profile field. Ledger files are auto-discovered from
+# `{workspace}/money/ledgers/*.beancount`.
 
 # ============================================================================
 # Static Website Hosting
@@ -516,10 +516,6 @@ timezone = "America/Los_Angeles"
 #
 # No per-user configuration needed - just create a TASKS.md file in the
 # user's bot-managed directory (created by `istota user init`).
-#
-# Alternatively, per-user config files can be placed in config/users/:
-#   config/users/alice.toml    # User-specific settings, resources, briefings
-# See config/users/alice.example.toml for the full format.
 #
 # File format:
 #   # Tasks

@@ -752,25 +752,6 @@
   changed_when: false
   when: not istota_web_only
 
-# Per-user TOML files at config/users/{user}.toml are no longer rendered.
-# Profile fields live in `user_profiles` (Phase 6, populated by `user
-# ensure` below); resources live in `user_resources` (Phase 7a, populated
-# by `resource ensure`); briefings live in `briefing_configs` (Phase 7b,
-# populated by `briefing ensure`). The DB row wins at config-load time, so
-# any leftover TOML is harmless — but we remove existing files so the
-# deployed state matches the source of truth.
-- name: Remove obsolete per-user TOML files
-  file:
-    path: "{{ istota_repo_dir }}/config/users/{{ user_item.key }}.toml"
-    state: absent
-  loop: "{{ istota_users | dict2items }}"
-  loop_control:
-    loop_var: user_item
-    label: "{{ user_item.key }}"
-  when: not istota_web_only
-  notify:
-    - "restart istota-scheduler"
-
 - name: Initialize/migrate database schema
   command: "{{ istota_home }}/.venv/bin/python -c \"from pathlib import Path; import sys; sys.path.insert(0, 'src'); from {{ istota_package }}.db import init_db; init_db(Path('{{ istota_home }}/data/{{ istota_namespace }}.db'))\""
   args:

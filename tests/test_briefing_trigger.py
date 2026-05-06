@@ -9,9 +9,9 @@ from istota.config import BriefingConfig, Config, UserConfig
 
 class TestCheckBriefingTriggers:
     def _make_config(self, tmp_path):
-        users_dir = tmp_path / "users"
-        users_dir.mkdir()
-        cfg = Config(users_dir=users_dir, db_path=tmp_path / "test.db")
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("")
+        cfg = Config(config_path=config_path, db_path=tmp_path / "test.db")
         cfg.users["alice"] = UserConfig(
             display_name="Alice",
             timezone="UTC",
@@ -105,7 +105,7 @@ class TestCheckBriefingTriggers:
         assert result == []
         assert not (triggers_dir / "briefing_alice_nonexistent.json").exists()
 
-    def test_no_users_dir(self):
+    def test_no_config_path(self):
         cfg = Config()
         from istota.scheduler import check_briefing_triggers
         result = check_briefing_triggers(cfg.db_path, cfg)

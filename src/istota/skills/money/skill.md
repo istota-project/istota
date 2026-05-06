@@ -129,28 +129,8 @@ A wash sale occurs when you sell a security at a loss and buy substantially iden
 |---|---|
 | `MONEY_USER` | User id — set automatically from the task's user_id |
 
-## Adding the money resource
+## Workspace layout
 
-Two modes are supported. Add either form to user config (`config/users/{user}.toml`).
+Money is a default-on module — no per-user resource declaration is needed. Opt out via the user's `disabled_modules` profile field.
 
-**Workspace mode (preferred):** the user's money config lives under their istota workspace as `INVOICING.md` / `TAX.md` / `MONARCH.md` (each with a fenced ```toml block).
-
-```toml
-[[resources]]
-type = "money"
-name = "Money"
-```
-
-The skill resolves `{nextcloud_mount}/Users/{user}/{bot_dir}` as the workspace and synthesizes a `UserContext` rooted there. Override `data_dir`, `config_dir`, `db_path`, or `ledgers` on the resource as extras.
-
-**Legacy mode:** point at a money config TOML with `[users.X]` sections.
-
-```toml
-[[resources]]
-type = "money"
-name = "Money"
-config_path = "/etc/istota/money/config.toml"
-user_key = "alice"  # optional, defaults to istota user_id
-```
-
-The `moneyman` resource type is also accepted for backward compatibility with the legacy out-of-process integration.
+The skill resolves `{nextcloud_mount}/Users/{user}/{bot_dir}` as the workspace and synthesizes a `UserContext` rooted there. The user's config lives under `{workspace}/money/config/` as `INVOICING.md` / `TAX.md` / `MONARCH.md` (each with a fenced ```toml block). Ledger files are auto-discovered from `{workspace}/money/ledgers/*.beancount` (top-level only). Monarch credentials live in the encrypted `secrets` table.

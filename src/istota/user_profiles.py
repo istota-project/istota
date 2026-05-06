@@ -2,29 +2,20 @@
 
 Per-user profile fields (display_name, email_addresses, timezone, log_channel,
 alerts_channel, ntfy_topic, worker overrides, disabled_skills,
-trusted_email_senders) live in the ``user_profiles`` table. This replaces
-the per-user TOML files at ``config/users/{user}.toml``.
-
-Resource entries still live in ``config.toml`` under
-``[[users.X.resources]]`` — those are deployment-level topology and stay
-ansible-managed. Only the user *profile* moves here.
+trusted_email_senders) live in the ``user_profiles`` table.
 
 Resolution order at config-load time:
-    1. ``user_profiles`` table       (web-UI / Docker-seeded / ``istota-admin user ensure``)
-    2. ``config/users/{user}.toml``  (legacy ansible-managed; fallback)
-    3. ``[users.X]`` in main config  (legacy single-file ansible)
+    1. ``user_profiles`` table     (web-UI / Docker-seeded / ``istota user ensure``)
+    2. ``[users.X]`` in main config (single-file ansible / docker entrypoint)
 
-A user is "first seen" by the system in any of these places:
-- Ansible templates ``config/users/{user}.toml`` and runs
-  ``istota-admin user ensure`` (which writes the DB row).
-- Docker entrypoint emits ``[[users.X.resources]]`` blocks; the scheduler
-  startup auto-seeds an empty profile row from the bare key.
+A user is "first seen" by the system via:
+- Ansible runs ``istota user ensure`` against the DB.
+- Docker entrypoint emits a ``[users.X]`` block; the scheduler startup
+  auto-seeds an empty profile row from the bare key.
 - Web login: the OAuth2 callback calls ``ensure_profile`` to create the
   row from the NC username + display_name.
 
-The DB row, when present, wins. Migration from existing TOML happens once
-on scheduler startup; legacy TOML files are left in place (read-only) so
-operators can roll back without losing data.
+The DB row, when present, wins.
 """
 
 from __future__ import annotations
