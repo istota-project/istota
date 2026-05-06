@@ -1,14 +1,12 @@
 """FastAPI router for the native feeds backend.
 
-Mounted by the host application at ``/istota/api/feeds`` when
-``[feeds] backend = "native"`` is set. Reads/writes the per-user workspace
-SQLite populated by the native poller, returning the same JSON shape as
-the legacy Miniflux proxy in ``web_app.py`` so the SvelteKit reader is
-backend-agnostic.
+Mounted by the host application at ``/istota/api/feeds``. Reads/writes the
+per-user workspace SQLite populated by the native poller.
 
-Auth and per-user resolution mirror :mod:`istota.money.routes`: the host
-overrides ``require_auth`` via ``app.dependency_overrides`` and the istota
-config is read off ``request.app.state.istota_config``.
+Auth, CSRF, and per-user resolution mirror :mod:`istota.money.routes`: the
+host overrides ``require_auth`` and ``verify_origin`` via
+``app.dependency_overrides`` and the istota config is read off
+``request.app.state.istota_config``.
 """
 
 from __future__ import annotations
@@ -52,6 +50,15 @@ def require_auth(request: Request) -> dict:
     return user
 
 
+def verify_origin(request: Request) -> None:
+    """CSRF check stub for mutating routes — host overrides via dependency_overrides.
+
+    Default is a no-op so the router stays usable in isolation (tests). The host
+    app installs a real Origin/Referer check. Same shape as ``require_auth``.
+    """
+    return None
+
+
 def get_user_context(
     request: Request,
     user: dict = Depends(require_auth),
@@ -77,7 +84,7 @@ def get_user_context(
 
 
 # ---------------------------------------------------------------------------
-# Mappers — keep wire-format identical to the Miniflux proxy
+# Mappers — DB rows → JSON wire-format consumed by the SvelteKit reader
 # ---------------------------------------------------------------------------
 
 
@@ -141,7 +148,7 @@ async def api_feeds(
     starred: int = Query(default=-1),
     before: int = Query(default=0, ge=0),
 ):
-    """List feeds and entries — mirrors Miniflux ``GET /v1/entries`` + ``/v1/feeds``.
+    """List feeds and entries.
 
     ``starred`` is ``-1`` (default, no filter), ``1`` (only starred), or ``0``
     (only unstarred). Independent of ``status`` so a starred unread entry
@@ -194,6 +201,7 @@ async def api_feeds(
 @router.put("/entries/batch")
 async def api_update_entries_batch(
     request: Request,
+    _csrf: None = Depends(verify_origin),
     ctx: FeedsContext = Depends(get_user_context),
 ):
     body = await request.json()
@@ -244,6 +252,7 @@ async def api_update_entries_batch(
 async def api_update_entry(
     entry_id: int,
     request: Request,
+    _csrf: None = Depends(verify_origin),
     ctx: FeedsContext = Depends(get_user_context),
 ):
     body = await request.json()
@@ -285,6 +294,7 @@ async def api_update_entry(
 @router.post("/mark-as-read")
 async def api_mark_as_read(
     request: Request,
+    _csrf: None = Depends(verify_origin),
     ctx: FeedsContext = Depends(get_user_context),
 ):
     """Bulk mark unread entries as read.
@@ -375,6 +385,7 @@ async def api_get_config(ctx: FeedsContext = Depends(get_user_context)):
 @router.put("/config")
 async def api_put_config(
     request: Request,
+    _csrf: None = Depends(verify_origin),
     ctx: FeedsContext = Depends(get_user_context),
 ):
     """Write feeds.toml from the request body, then resync into the DB."""
@@ -411,6 +422,7 @@ async def api_export_opml(ctx: FeedsContext = Depends(get_user_context)):
 
 @router.post("/refresh")
 async def api_refresh(
+    _csrf: None = Depends(verify_origin),
     ctx: FeedsContext = Depends(get_user_context),
 ):
     """Mark every feed due now. The scheduled job ``_module.feeds.run_scheduled``
@@ -431,6 +443,7 @@ async def api_refresh(
 
 @router.post("/import-opml")
 async def api_import_opml(
+    _csrf: None = Depends(verify_origin),
     ctx: FeedsContext = Depends(get_user_context),
     file: UploadFile = FastAPIFile(...),
 ):

@@ -46,8 +46,16 @@ services:
       - nextcloud_data:/var/www/html/data
       - shared_files:/mnt/shared
       - ./istota/provision-nc.sh:/docker-entrypoint-hooks.d/post-installation/provision.sh:ro
-    ports:
-      - "${NC_PORT:-8080}:80"
+    # Internal-only — nginx fronts the public port. To bypass nginx, uncomment
+    # the ports block below, remove the nginx service, AND wipe the shared
+    # volume (or /mnt/shared/.istota-provisioned) before restarting — the
+    # OAuth2 redirect URI is registered with NC at first boot and won't pick
+    # up the new direct-access URL otherwise. `expose:` is informational only;
+    # services on the same compose network already reach each other by name.
+    # ports:
+    #   - "${NC_PORT:-8080}:80"
+    expose:
+      - "80"
     environment:
       NEXTCLOUD_ADMIN_USER: admin
       NEXTCLOUD_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
@@ -57,12 +65,33 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       REDIS_HOST: redis
       NEXTCLOUD_TRUSTED_DOMAINS: "localhost nextcloud ${DOMAIN:-}"
+      # Reverse-proxy settings — make NC generate URLs that match what the
+      # browser sees through nginx. Re-applied on every container start by
+      # the official image's entrypoint.
+      #
+      # Defaults inherit DOMAIN when set so a single env var (DOMAIN=example.com)
+      # propagates to NEXTCLOUD_TRUSTED_DOMAINS, OVERWRITEHOST, OVERWRITECLIURL,
+      # the OAuth2 redirect URI, ISTOTA_WEB_NC_EXTERNAL_URL, and SITE_HOSTNAME.
+      # Set ISTOTA_PUBLIC_PROTO=https when fronting with TLS (Caddy/Traefik/
+      # Cloudflare in front, or terminating in this nginx with a real cert).
+      OVERWRITEHOST: ${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}
+      OVERWRITEPROTOCOL: ${ISTOTA_PUBLIC_PROTO:-http}
+      OVERWRITECLIURL: ${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}
+      TRUSTED_PROXIES: ${ISTOTA_TRUSTED_PROXIES:-172.16.0.0/12 192.168.0.0/16 10.0.0.0/8}
       # Passed to provision-nc.sh
       BOT_USER: istota
       BOT_PASSWORD: ${BOT_PASSWORD:?Set BOT_PASSWORD in .env}
       USER_NAME: ${USER_NAME:?Set USER_NAME in .env}
       USER_PASSWORD: ${USER_PASSWORD:?Set USER_PASSWORD in .env}
       USER_DISPLAY_NAME: ${USER_DISPLAY_NAME:-}
+      # Web UI OAuth2 callback URL — must match what the user's browser hits.
+      # Defaults to the nginx-proxied path so the OAuth2 client NC registers
+      # matches the URL the SPA actually uses. Override either DOMAIN /
+      # ISTOTA_PUBLIC_HOST / ISTOTA_PUBLIC_PROTO or ISTOTA_WEB_CALLBACK_URL.
+      # NB: this URI is baked into NC at first provisioning. Changing DOMAIN /
+      # PUBLIC_HOST after provisioning leaves a stale registration — wipe the
+      # shared volume (or delete /mnt/shared/.istota-provisioned) to re-register.
+      ISTOTA_WEB_CALLBACK_URL: ${ISTOTA_WEB_CALLBACK_URL:-${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}/istota/callback}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost/status.php | grep -q '\"installed\":true'"]
       interval: 15s
@@ -87,6 +116,7 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       # Nextcloud / provisioning
+      BOT_USER: ${BOT_USER:-istota}
       BOT_PASSWORD: ${BOT_PASSWORD}
       USER_NAME: ${USER_NAME}
       USER_DISPLAY_NAME: ${USER_DISPLAY_NAME:-}
@@ -160,7 +190,7 @@ services:
       # Talk
       ISTOTA_TALK_ENABLED: ${ISTOTA_TALK_ENABLED:-true}
       # Email (optional)
-      ISTOTA_EMAIL_ENABLED: ${ISTOTA_EMAIL_ENABLED:-false}
+      ISTOTA_EMAIL_ENABLED: ${ISTOTA_EMAIL_ENABLED:-true}
       ISTOTA_EMAIL_IMAP_HOST: ${ISTOTA_EMAIL_IMAP_HOST:-}
       ISTOTA_EMAIL_IMAP_PORT: ${ISTOTA_EMAIL_IMAP_PORT:-993}
       ISTOTA_EMAIL_IMAP_USER: ${ISTOTA_EMAIL_IMAP_USER:-}
@@ -182,13 +212,13 @@ services:
       ISTOTA_CHANNEL_SLEEP_CYCLE_LOOKBACK_HOURS: ${ISTOTA_CHANNEL_SLEEP_CYCLE_LOOKBACK_HOURS:-24}
       ISTOTA_CHANNEL_SLEEP_CYCLE_MEMORY_RETENTION_DAYS: ${ISTOTA_CHANNEL_SLEEP_CYCLE_MEMORY_RETENTION_DAYS:-0}
       # Memory search
-      ISTOTA_MEMORY_SEARCH_ENABLED: ${ISTOTA_MEMORY_SEARCH_ENABLED:-false}
+      ISTOTA_MEMORY_SEARCH_ENABLED: ${ISTOTA_MEMORY_SEARCH_ENABLED:-true}
       ISTOTA_MEMORY_SEARCH_AUTO_INDEX_CONVERSATIONS: ${ISTOTA_MEMORY_SEARCH_AUTO_INDEX_CONVERSATIONS:-true}
       ISTOTA_MEMORY_SEARCH_AUTO_INDEX_MEMORY_FILES: ${ISTOTA_MEMORY_SEARCH_AUTO_INDEX_MEMORY_FILES:-true}
       ISTOTA_MEMORY_SEARCH_AUTO_RECALL: ${ISTOTA_MEMORY_SEARCH_AUTO_RECALL:-false}
       ISTOTA_MEMORY_SEARCH_AUTO_RECALL_LIMIT: ${ISTOTA_MEMORY_SEARCH_AUTO_RECALL_LIMIT:-5}
       # ntfy notifications (optional)
-      ISTOTA_NTFY_ENABLED: ${ISTOTA_NTFY_ENABLED:-false}
+      ISTOTA_NTFY_ENABLED: ${ISTOTA_NTFY_ENABLED:-true}
       ISTOTA_NTFY_SERVER_URL: ${ISTOTA_NTFY_SERVER_URL:-https://ntfy.sh}
       ISTOTA_NTFY_TOPIC: ${ISTOTA_NTFY_TOPIC:-}
       ISTOTA_NTFY_TOKEN: ${ISTOTA_NTFY_TOKEN:-}
@@ -196,14 +226,24 @@ services:
       ISTOTA_NTFY_PASSWORD: ${ISTOTA_NTFY_PASSWORD:-}
       ISTOTA_NTFY_PRIORITY: ${ISTOTA_NTFY_PRIORITY:-3}
       # Browser (optional)
-      ISTOTA_BROWSER_ENABLED: ${ISTOTA_BROWSER_ENABLED:-false}
+      ISTOTA_BROWSER_ENABLED: ${ISTOTA_BROWSER_ENABLED:-true}
       ISTOTA_BROWSER_API_URL: ${ISTOTA_BROWSER_API_URL:-http://localhost:9223}
       ISTOTA_BROWSER_VNC_URL: ${ISTOTA_BROWSER_VNC_URL:-}
-      # Location tracking (optional)
-      ISTOTA_LOCATION_ENABLED: ${ISTOTA_LOCATION_ENABLED:-false}
+      # Location tracking (optional). LOCATION_INGEST_TOKEN auto-generates
+      # if blank; the entrypoint persists the chosen token to the API
+      # provisioning flag so it survives restarts.
+      ISTOTA_LOCATION_ENABLED: ${ISTOTA_LOCATION_ENABLED:-true}
       ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
+      LOCATION_INGEST_TOKEN: ${LOCATION_INGEST_TOKEN:-}
+      # Feeds (RSS / Atom / Tumblr / Are.na — native, in-process)
+      ISTOTA_FEEDS_ENABLED: ${ISTOTA_FEEDS_ENABLED:-true}
+      # Money / accounting (beancount). Monarch creds optional; only
+      # consulted when ISTOTA_MONEY_ENABLED=true.
+      ISTOTA_MONEY_ENABLED: ${ISTOTA_MONEY_ENABLED:-true}
+      MONARCH_EMAIL: ${MONARCH_EMAIL:-}
+      MONARCH_PASSWORD: ${MONARCH_PASSWORD:-}
       # Developer skill (optional)
-      ISTOTA_DEVELOPER_ENABLED: ${ISTOTA_DEVELOPER_ENABLED:-false}
+      ISTOTA_DEVELOPER_ENABLED: ${ISTOTA_DEVELOPER_ENABLED:-true}
       ISTOTA_DEVELOPER_REPOS_DIR: ${ISTOTA_DEVELOPER_REPOS_DIR:-}
       ISTOTA_DEVELOPER_AUTHOR_CREDIT: ${ISTOTA_DEVELOPER_AUTHOR_CREDIT:-}
       ISTOTA_DEVELOPER_GITLAB_URL: ${ISTOTA_DEVELOPER_GITLAB_URL:-https://gitlab.com}
@@ -222,10 +262,104 @@ services:
       # Per-user overrides
       USER_EMAIL: ${USER_EMAIL:-}
       USER_LOG_CHANNEL: ${USER_LOG_CHANNEL:-}
+      USER_ALERTS_CHANNEL: ${USER_ALERTS_CHANNEL:-}
       USER_NTFY_TOPIC: ${USER_NTFY_TOPIC:-}
       USER_MAX_FOREGROUND_WORKERS: ${USER_MAX_FOREGROUND_WORKERS:-}
       USER_MAX_BACKGROUND_WORKERS: ${USER_MAX_BACKGROUND_WORKERS:-}
       USER_DISABLED_SKILLS: ${USER_DISABLED_SKILLS:-}
+      # Web UI provisioning. Defaults assume nginx fronts the stack on
+      # ${DOMAIN:-localhost}:${NC_PORT:-8080}. Set DOMAIN for a real hostname,
+      # ISTOTA_PUBLIC_PROTO=https when terminating TLS upstream. Override
+      # ISTOTA_PUBLIC_HOST when the public hostname differs from DOMAIN
+      # (e.g. behind a port-translating proxy).
+      # Also forwarded raw so the activation banner can build the Overland
+      # URL — the webhooks service binds its port directly, not via nginx.
+      DOMAIN: ${DOMAIN:-}
+      ISTOTA_PUBLIC_HOST: ${ISTOTA_PUBLIC_HOST:-}
+      ISTOTA_PUBLIC_PROTO: ${ISTOTA_PUBLIC_PROTO:-http}
+      WEB_PORT: ${WEB_PORT:-8766}
+      ISTOTA_WEB_NC_EXTERNAL_URL: ${ISTOTA_WEB_NC_EXTERNAL_URL:-${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}}
+      ISTOTA_WEB_SITE_HOSTNAME: ${ISTOTA_WEB_SITE_HOSTNAME:-${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}}
+      ISTOTA_WEB_CALLBACK_URL: ${ISTOTA_WEB_CALLBACK_URL:-${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}/istota/callback}
+    restart: unless-stopped
+
+  # Web UI service. Shares the istota image (built once) and reads the same
+  # config.toml the scheduler container generates. Depends on `istota` so the
+  # config file exists before uvicorn starts.
+  web:
+    build:
+      context: ..
+      dockerfile: docker/istota/Dockerfile
+    depends_on:
+      istota:
+        condition: service_started
+    volumes:
+      - shared_files:/mnt/shared
+      - istota_data:/data
+    # Internal-only — nginx routes /istota/ to web:${WEB_PORT}. To bypass nginx,
+    # uncomment the ports block below.
+    # ports:
+    #   - "${WEB_PORT:-8766}:${WEB_PORT:-8766}"
+    expose:
+      - "${WEB_PORT:-8766}"
+    environment:
+      WEB_PORT: ${WEB_PORT:-8766}
+      # Static SPA build location (not derivable from package path under non-editable installs).
+      ISTOTA_WEB_STATIC_DIR: /app/web/build
+      # Default Docker UX is plaintext localhost — Secure cookies would block
+      # the auth flow. Operators flip to 0 when fronting with TLS.
+      ISTOTA_WEB_INSECURE_COOKIES: ${ISTOTA_WEB_INSECURE_COOKIES:-1}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # Wait for the istota service to generate config.toml. If [web] is
+        # missing (e.g. provisioning failed), the web app stays up but returns
+        # 500 from /login — better than a restart loop.
+        for i in $$(seq 1 60); do
+          [ -f /data/config/config.toml ] && break
+          sleep 2
+        done
+        if [ ! -f /data/config/config.toml ]; then
+          echo "[web] ERROR: config.toml not found after 120s — is the istota service running?" >&2
+          exit 1
+        fi
+        if ! grep -q '^\[web\]' /data/config/config.toml; then
+          echo "[web] WARNING: config.toml has no [web] section — auth will return 500 until provisioning completes." >&2
+        fi
+        mkdir -p /app/config
+        ln -sf /data/config/config.toml /app/config/config.toml
+        exec uv run uvicorn istota.web_app:app --host 0.0.0.0 --port "$${WEB_PORT}"
+    command: []
+    restart: unless-stopped
+
+  # Reverse proxy: single public port for Nextcloud + the istota web UI.
+  # Routes / -> nextcloud:80, /istota/ -> web:${WEB_PORT}. TLS is opt-in —
+  # drop a cert into ./nginx/certs/ and supply your own server block via the
+  # template (or front this with Caddy/Traefik/Cloudflare instead).
+  nginx:
+    image: nginx:alpine
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+      web:
+        condition: service_started
+    ports:
+      - "${NC_PORT:-8080}:80"
+      # Uncomment when shipping TLS via the template:
+      # - "${NC_TLS_PORT:-8443}:443"
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+      WEB_PORT: ${WEB_PORT:-8766}
+      NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-512M}
+      # Limit envsubst to the three template knobs above. Without this filter,
+      # the nginx:alpine entrypoint would substitute every container env var
+      # — including ones whose names happen to match nginx runtime variables
+      # ($host, $remote_addr, $scheme, $proxy_add_x_forwarded_for, etc.).
+      NGINX_ENVSUBST_FILTER: '^(DOMAIN|WEB_PORT|NGINX_CLIENT_MAX_BODY_SIZE)$$'
     restart: unless-stopped
 
   browser:

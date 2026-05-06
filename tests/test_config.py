@@ -1100,7 +1100,6 @@ api_key = "secret-key"
             "resources": [
                 {"type": "karakeep", "name": "Hacked", "api_key": "evil"},
                 {"type": "monarch", "name": "Bad"},
-                {"type": "miniflux", "name": "Bad", "api_key": "evil"},
                 {"type": "moneyman", "name": "Bad", "api_key": "evil"},
                 {"type": "folder", "path": "/ok", "name": "Legit"},
             ],
@@ -1173,10 +1172,10 @@ display_name = "Alice"
 session_token = "secret-token"
 
 [[resources]]
-type = "miniflux"
-name = "Feeds"
-base_url = "https://feeds.example.com"
-api_key = "feed-key"
+type = "karakeep"
+name = "Bookmarks"
+base_url = "https://karakeep.example.com"
+api_key = "kk-key"
 
 [[briefings]]
 name = "old-briefing"
@@ -1195,7 +1194,7 @@ cron = "0 6 * * *"
         # Credential resources from TOML still present
         types = [r.type for r in result["alice"].resources]
         assert "monarch" in types
-        assert "miniflux" in types
+        assert "karakeep" in types
 
 
 class TestReloadUserConfigs:

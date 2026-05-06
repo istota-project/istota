@@ -63,8 +63,6 @@ Derived from Nextcloud credentials:
 | `KARAKEEP_BASE_URL` | From resource config `extra` |
 | `KARAKEEP_API_KEY` | From resource config `extra` |
 | `MONARCH_SESSION_TOKEN` | From resource config `extra` |
-| `MINIFLUX_BASE_URL` | From resource config (type=miniflux, legacy backend only) |
-| `MINIFLUX_API_KEY` | From resource config (type=miniflux, legacy backend only) |
 | `FEEDS_USER` | Istota user ID (set by executor for native feeds skill) |
 | `TUMBLR_API_KEY` | Optional fallback for Tumblr feeds (from resource `extra.tumblr_api_key`) |
 | `MONEY_CONFIG` | From the user's `money` resource (`config_path` extra) |
@@ -107,7 +105,6 @@ When `skill_proxy_enabled = true`, these variables are stripped from the subproc
 - `SMTP_PASSWORD`
 - `IMAP_PASSWORD`
 - `KARAKEEP_API_KEY`
-- `MINIFLUX_API_KEY`
 - `GOOGLE_WORKSPACE_CLI_TOKEN`
 - `GITLAB_TOKEN`
 - `GITHUB_TOKEN`

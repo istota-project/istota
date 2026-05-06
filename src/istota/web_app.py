@@ -42,16 +42,41 @@ _config = None
 _oauth = None
 _WEB_START_TIME = time.time()
 
-# Resolve static build directory (relative to this file or repo root)
-_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "build"
+# Resolve static build directory. Default walks up from this module's path,
+# which works for editable installs from the repo root. For non-editable installs
+# (Docker runtime), the operator sets ISTOTA_WEB_STATIC_DIR explicitly.
+_STATIC_DIR = Path(
+    os.environ.get(
+        "ISTOTA_WEB_STATIC_DIR",
+        str(Path(__file__).resolve().parent.parent.parent / "web" / "build"),
+    )
+)
 
 
 def _reload_config():
-    """Load config and register OAuth clients (Nextcloud OIDC + Google)."""
+    """Load config and register OAuth clients.
+
+    Two NC auth modes are supported. OAuth2 (NC built-in provider, auth-only)
+    wins if configured; OIDC is the legacy path. Google is unrelated.
+    """
     global _config, _oauth
     _config = load_config()
     _oauth = OAuth()
-    if _config.web.oidc_issuer and _config.web.oidc_client_id:
+    if _config.web.oauth2_client_id:
+        # NC built-in OAuth2 — no metadata discovery, register endpoints directly.
+        provider = _config.web.oauth2_provider.rstrip("/")
+        _oauth.register(
+            name="nextcloud",
+            client_id=_config.web.oauth2_client_id,
+            client_secret=_config.web.oauth2_client_secret,
+            authorize_url=f"{provider}/index.php/apps/oauth2/authorize",
+            access_token_url=(
+                _config.web.oauth2_token_endpoint
+                or f"{provider}/index.php/apps/oauth2/api/v1/token"
+            ),
+            client_kwargs={"scope": ""},  # NC built-in OAuth2 ignores scope
+        )
+    elif _config.web.oidc_issuer and _config.web.oidc_client_id:
         issuer = _config.web.oidc_issuer.rstrip("/")
         _oauth.register(
             name="nextcloud",
@@ -96,12 +121,18 @@ if _session_secret == _INSECURE_DEFAULT:
         "Set this environment variable before running in production."
     )
 
+# `https_only` defaults to True so production cookies carry `Secure`. Browsers
+# refuse Secure cookies on plaintext origins, which kills the whole auth flow
+# on local dev (Docker default = http://localhost:8766). Operators flip
+# `ISTOTA_WEB_INSECURE_COOKIES=1` for those setups.
+_https_only = os.environ.get("ISTOTA_WEB_INSECURE_COOKIES", "").strip() not in ("1", "true", "yes")
+
 app = FastAPI(title="Istota Web", lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware,
     secret_key=_session_secret,
     same_site="lax",
-    https_only=True,
+    https_only=_https_only,
     max_age=7 * 24 * 60 * 60,  # 7 days
     session_cookie="istota_session",
     path="/istota/",
@@ -163,11 +194,15 @@ def _get_external_origin() -> tuple[str, str]:
     """Get the external hostname and scheme for OAuth redirect URIs.
 
     Requires site.hostname to be configured — does not fall back to
-    request headers, which can be forged.
+    request headers, which can be forged. Scheme is `http` when hostname is
+    a literal localhost / loopback (Docker dev path); otherwise `https`.
     """
     if not _config or not _config.site.hostname:
         raise ValueError("site.hostname must be configured when web app is enabled")
-    return _config.site.hostname, "https"
+    host = _config.site.hostname
+    bare = host.split(":")[0]
+    scheme = "http" if bare in ("localhost", "127.0.0.1", "::1") else "https"
+    return host, scheme
 
 
 class _ForbiddenException(Exception):
@@ -204,10 +239,52 @@ async def _handle_login_redirect(request: Request, exc: _LoginRedirectException)
 auth_router = APIRouter(prefix="/istota")
 
 
+def _nc_redirect_uri(request: Request) -> str:
+    """Compute the OAuth redirect URI for the NC flow.
+
+    Precedence: explicit ``web.oauth2_redirect_uri`` > derived from ``site.hostname``.
+    Must match the URI registered with the NC OAuth2 client exactly.
+    """
+    if _config and _config.web.oauth2_redirect_uri:
+        return _config.web.oauth2_redirect_uri
+    hostname, scheme = _get_external_origin()
+    return f"{scheme}://{hostname}/istota/callback"
+
+
+async def _nc_oauth2_userinfo(token: dict) -> dict:
+    """Fetch identity from NC's OCS endpoint with a bearer token, then drop the token.
+
+    The endpoint returns `{ocs: {data: {id, displayname, email, ...}}}`.
+    Token is not stored — it lives only in this function's stack frame.
+    """
+    access_token = token.get("access_token")
+    if not access_token:
+        raise ValueError("token response missing access_token")
+    endpoint = (
+        _config.web.oauth2_userinfo_endpoint
+        or f"{_config.web.oauth2_provider.rstrip('/')}/ocs/v2.php/cloud/user?format=json"
+    )
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "OCS-APIRequest": "true",
+                "Accept": "application/json",
+            },
+        )
+        resp.raise_for_status()
+        body = resp.json()
+    inner = body.get("ocs", {}).get("data") or {}
+    if not isinstance(inner, dict):
+        raise ValueError("unexpected OCS userinfo shape")
+    return inner
+
+
 @auth_router.get("/login")
 async def login(request: Request):
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
-        return Response("OIDC not configured", status_code=500)
+        return Response("Auth not configured", status_code=500)
     if not request.query_params.get("go"):
         bot_name = escape(_config.bot_name) if _config else "Istota"
         return HTMLResponse(
@@ -222,26 +299,46 @@ async def login(request: Request):
             f'<body><div class="box"><h1>{bot_name}</h1>'
             f'<a href="/istota/login?go=1">Log in with Nextcloud</a></div></body></html>'
         )
-    hostname, scheme = _get_external_origin()
-    redirect_uri = f"{scheme}://{hostname}/istota/callback"
-    return await _oauth.nextcloud.authorize_redirect(request, redirect_uri)
+    return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
 
 
 @auth_router.get("/callback")
 async def callback(request: Request):
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
-        return Response("OIDC not configured", status_code=500)
+        return Response("Auth not configured", status_code=500)
     token = await _oauth.nextcloud.authorize_access_token(request)
-    userinfo = token.get("userinfo")
-    if not userinfo:
-        userinfo = await _oauth.nextcloud.userinfo(request=request, token=token)
-    username = userinfo.get("preferred_username", "")
+
+    # OAuth2 auth-only path: NC's built-in provider returns the resource owner's
+    # username inline in the token response (`user_id`), so we don't need a
+    # second HTTP round-trip. The token is dropped after we extract user_id —
+    # the OCS userinfo path is kept as a fallback for older NC versions or
+    # custom auth backends that don't include `user_id`.
+    if _config and _config.web.oauth2_client_id:
+        username = token.get("user_id") or ""
+        display_name = ""
+        if not username:
+            try:
+                data = await _nc_oauth2_userinfo(token)
+            except Exception as e:
+                logger.warning("OAuth2 userinfo fetch failed: %s", e)
+                return Response("identity verification failed", status_code=502)
+            username = data.get("id") or data.get("user_id") or ""
+            display_name = data.get("displayname") or data.get("display-name") or ""
+        if not display_name:
+            display_name = username
+    else:
+        userinfo = token.get("userinfo")
+        if not userinfo:
+            userinfo = await _oauth.nextcloud.userinfo(request=request, token=token)
+        username = userinfo.get("preferred_username", "")
+        display_name = userinfo.get("name", username)
+
     if not username or (_config and _config.users and username not in _config.users):
         return Response("Access denied: user not configured", status_code=403)
     request.session.clear()
     request.session["user"] = {
         "username": username,
-        "display_name": userinfo.get("name", username),
+        "display_name": display_name,
     }
     return RedirectResponse(url="/istota/", status_code=302)
 
@@ -314,33 +411,14 @@ async def google_callback(request: Request):
 api_router = APIRouter(prefix="/istota/api")
 
 
-def _get_miniflux_creds(username: str) -> tuple[str, str] | None:
-    """Get Miniflux base_url and api_key for a user, or None."""
-    if not _config:
-        return None
-    uc = _config.get_user(username)
-    if not uc:
-        return None
-    for r in uc.resources:
-        if r.type == "miniflux" and r.base_url and r.api_key:
-            return r.base_url, r.api_key
-    return None
-
-
 def _user_has_feeds(username: str) -> bool:
-    """True if the user has feeds available under the current backend.
-
-    Native backend: looks for a ``[[resources]] type = "feeds"`` entry.
-    Miniflux backend: looks for a ``miniflux`` resource with creds.
-    """
+    """True if the user has a ``[[resources]] type = "feeds"`` entry."""
     if not _config:
         return False
-    if _config.feeds.backend == "native":
-        uc = _config.get_user(username)
-        if not uc:
-            return False
-        return any(r.type == "feeds" for r in uc.resources)
-    return _get_miniflux_creds(username) is not None
+    uc = _config.get_user(username)
+    if not uc:
+        return False
+    return any(r.type == "feeds" for r in uc.resources)
 
 
 def _user_has_money(username: str) -> bool:
@@ -730,21 +808,10 @@ def _admin_modules_section() -> dict:
 
 
 def _admin_module_feeds() -> dict | None:
-    if _config.feeds.backend != "native":
-        # Miniflux backend — counts live in an external service. Skip.
-        users_with = sum(1 for u in _config.users.values()
-                         if any(r.type == "miniflux" for r in u.resources))
-        if not users_with:
-            return None
-        return {
-            "backend": "miniflux",
-            "users_configured": users_with,
-        }
-
-    # Native backend. Count users with a feeds resource configured even if
-    # we can't resolve their workspace (e.g. ``nextcloud_mount_path`` unset
-    # on docker-compose deploys). Returning ``None`` would silently hide a
-    # configured-but-unreachable subsystem from admins.
+    # Count users with a feeds resource configured even if we can't resolve
+    # their workspace (e.g. ``nextcloud_mount_path`` unset on docker-compose
+    # deploys). Returning ``None`` would silently hide a configured-but-
+    # unreachable subsystem from admins.
     configured = sum(1 for u in _config.users.values()
                      if any(r.type == "feeds" for r in u.resources))
     if not configured:
@@ -759,7 +826,6 @@ def _admin_module_feeds() -> dict | None:
         from istota.feeds._loader import UserNotFoundError, resolve_for_user
     except Exception:  # pragma: no cover
         return {
-            "backend": "native",
             "users_configured": configured,
             "status": "unreachable",
         }
@@ -796,7 +862,6 @@ def _admin_module_feeds() -> dict | None:
             continue
 
     out = {
-        "backend": "native",
         "users_configured": configured,
         "users_resolved": users_resolved,
         "feeds_total": feeds_total,
@@ -922,204 +987,6 @@ def _sanitize_html(content: str, max_len: int = 600) -> str:
             text_len += 1
             i += 1
     return "".join(result).strip()
-
-
-def _extract_images(entry: dict) -> list[str]:
-    """Extract image URLs from enclosures and content."""
-    images = []
-    for enc in entry.get("enclosures") or []:
-        mime = enc.get("mime_type", "")
-        url = enc.get("url", "")
-        if mime.startswith("image/") and url:
-            images.append(url)
-    # Also extract from content if no enclosure images
-    if not images:
-        content = entry.get("content", "")
-        for m in re.finditer(r'<img[^>]+src="([^"]+)"', content):
-            images.append(m.group(1))
-    return images
-
-
-def _strip_image_from_content(content: str, images: list[str]) -> str:
-    """Remove <img> tags from content that match the card images."""
-    for img_url in images:
-        content = re.sub(
-            r'<p>\s*<img[^>]+src="' + re.escape(img_url) + r'"[^>]*>\s*</p>',
-            '', content,
-        )
-        content = re.sub(
-            r'<img[^>]+src="' + re.escape(img_url) + r'"[^>]*>',
-            '', content,
-        )
-    return content.strip()
-
-
-def _map_entry(entry: dict) -> dict:
-    """Map a Miniflux entry to our API response format."""
-    images = _extract_images(entry)
-    content = entry.get("content", "")
-    if images:
-        content = _strip_image_from_content(content, images)
-    content = _sanitize_html(content)
-    return {
-        "id": entry["id"],
-        "title": entry.get("title", ""),
-        "url": entry.get("url", ""),
-        "content": content,
-        "images": images,
-        "feed": {
-            "id": entry.get("feed", {}).get("id", 0),
-            "title": entry.get("feed", {}).get("title", ""),
-            "site_url": entry.get("feed", {}).get("site_url", ""),
-            "category": {
-                "id": entry.get("feed", {}).get("category", {}).get("id", 0),
-                "title": entry.get("feed", {}).get("category", {}).get("title", ""),
-            },
-        },
-        "status": entry.get("status", ""),
-        "published_at": entry.get("published_at", ""),
-        "created_at": entry.get("created_at", ""),
-    }
-
-
-# Legacy Miniflux proxy router — included only when [feeds] backend = "miniflux".
-# When the backend flag flips to "native", istota.feeds.routes mounts at the
-# same path instead.
-miniflux_proxy_router = APIRouter(prefix="/istota/api")
-
-
-@miniflux_proxy_router.get("/feeds")
-async def api_feeds(
-    user: dict = Depends(_require_api_auth),
-    limit: int = Query(default=500, le=1000),
-    offset: int = Query(default=0, ge=0),
-    order: str = Query(default="published_at"),
-    direction: str = Query(default="desc"),
-    status: str = Query(default=""),
-    category_id: int = Query(default=0),
-    feed_id: int = Query(default=0),
-    before: int = Query(default=0, ge=0),
-):
-    username = user["username"]
-    creds = _get_miniflux_creds(username)
-    if not creds:
-        return JSONResponse({"error": "no miniflux resource configured"}, status_code=404)
-    base_url, api_key = creds
-
-    params: dict = {"limit": limit, "offset": offset, "order": order, "direction": direction}
-    if status:
-        params["status"] = status
-    if category_id:
-        params["category_id"] = category_id
-    if feed_id:
-        params["feed_id"] = feed_id
-    if before:
-        params["before"] = before
-
-    try:
-        async with httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            headers={"X-Auth-Token": api_key},
-            timeout=30.0,
-        ) as client:
-            entries_resp = await client.get("/v1/entries", params=params)
-            entries_resp.raise_for_status()
-            feeds_resp = await client.get("/v1/feeds")
-            feeds_resp.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.error("Miniflux API error for %s: %s", username, e)
-        return JSONResponse({"error": "miniflux api error"}, status_code=502)
-
-    entries_data = entries_resp.json()
-    feeds_data = feeds_resp.json()
-
-    entries = [_map_entry(e) for e in entries_data.get("entries", [])]
-    feeds = [
-        {
-            "id": f["id"],
-            "title": f.get("title", ""),
-            "site_url": f.get("site_url", ""),
-            "category": {
-                "id": f.get("category", {}).get("id", 0),
-                "title": f.get("category", {}).get("title", ""),
-            },
-        }
-        for f in feeds_data
-    ]
-
-    return {
-        "feeds": feeds,
-        "entries": entries,
-        "total": entries_data.get("total", len(entries)),
-    }
-
-
-@miniflux_proxy_router.put("/feeds/entries/batch")
-async def api_update_entries_batch(
-    request: Request,
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-):
-    username = user["username"]
-    creds = _get_miniflux_creds(username)
-    if not creds:
-        return JSONResponse({"error": "no miniflux resource configured"}, status_code=404)
-    base_url, api_key = creds
-
-    body = await request.json()
-    entry_ids = body.get("entry_ids", [])
-    if not entry_ids or not isinstance(entry_ids, list):
-        return JSONResponse({"error": "entry_ids must be a non-empty list"}, status_code=400)
-
-    try:
-        async with httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            headers={"X-Auth-Token": api_key},
-            timeout=30.0,
-        ) as client:
-            resp = await client.put("/v1/entries", json={
-                "entry_ids": entry_ids,
-                "status": body.get("status", "read"),
-            })
-            resp.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.error("Miniflux API error batch-updating entries: %s", e)
-        return JSONResponse({"error": "miniflux api error"}, status_code=502)
-
-    return {"status": "ok"}
-
-
-@miniflux_proxy_router.put("/feeds/entries/{entry_id}")
-async def api_update_entry(
-    entry_id: int,
-    request: Request,
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-):
-    username = user["username"]
-    creds = _get_miniflux_creds(username)
-    if not creds:
-        return JSONResponse({"error": "no miniflux resource configured"}, status_code=404)
-    base_url, api_key = creds
-
-    body = await request.json()
-
-    try:
-        async with httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            headers={"X-Auth-Token": api_key},
-            timeout=30.0,
-        ) as client:
-            resp = await client.put("/v1/entries", json={
-                "entry_ids": [entry_id],
-                "status": body.get("status", "read"),
-            })
-            resp.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.error("Miniflux API error updating entry %d: %s", entry_id, e)
-        return JSONResponse({"error": "miniflux api error"}, status_code=502)
-
-    return {"status": "ok"}
 
 
 # ============================================================================
@@ -1823,28 +1690,14 @@ async def api_location_trips(
 app.include_router(api_router)
 app.include_router(auth_router)
 
-# Feeds web API — the backend flag picks between the native module (SQLite)
-# and the legacy Miniflux proxy. Both surfaces use the same
-# ``/istota/api/feeds`` prefix and the same JSON shape, so the SvelteKit
-# reader is backend-agnostic. Route registration happens at import time, so
-# we load the config eagerly here; lifespan still re-runs ``_reload_config``
-# on startup and SIGHUP for everything else.
-try:
-    if _config is None:
-        _reload_config()
-    _feeds_backend = _config.feeds.backend if _config else "miniflux"
-except Exception:
-    logger.exception("feeds backend resolution failed at import; defaulting to miniflux")
-    _feeds_backend = "miniflux"
+# Feeds web API — native, in-process module backed by per-user SQLite.
+from istota.feeds.routes import require_auth as _feeds_require_auth
+from istota.feeds.routes import router as _feeds_router
+from istota.feeds.routes import verify_origin as _feeds_verify_origin
 
-if _feeds_backend == "native":
-    from istota.feeds.routes import require_auth as _feeds_require_auth
-    from istota.feeds.routes import router as _feeds_router
-
-    app.include_router(_feeds_router, prefix="/istota/api/feeds", tags=["feeds"])
-    app.dependency_overrides[_feeds_require_auth] = _require_api_auth
-else:
-    app.include_router(miniflux_proxy_router)
+app.include_router(_feeds_router, prefix="/istota/api/feeds", tags=["feeds"])
+app.dependency_overrides[_feeds_require_auth] = _require_api_auth
+app.dependency_overrides[_feeds_verify_origin] = _verify_origin
 
 # Money web API — mounted when the optional ``money`` extra is installed.
 try:

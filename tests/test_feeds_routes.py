@@ -100,7 +100,7 @@ def client(ctx: FeedsContext) -> TestClient:
 
 
 # ---------------------------------------------------------------------------
-# GET /feeds — response shape parity with the Miniflux proxy
+# GET /feeds — response shape consumed by the SvelteKit reader
 # ---------------------------------------------------------------------------
 
 
@@ -114,7 +114,7 @@ class TestGetFeeds:
         assert isinstance(body["feeds"], list)
         assert isinstance(body["entries"], list)
 
-    def test_feed_shape_matches_miniflux_proxy(self, ctx, client):
+    def test_feed_shape(self, ctx, client):
         _seed(ctx)
         body = client.get("/istota/api/feeds").json()
         # Pick the tumblr feed deterministically.
@@ -123,7 +123,7 @@ class TestGetFeeds:
         assert set(feed["category"].keys()) == {"id", "title"}
         assert feed["category"]["title"] == "Tumblr"
 
-    def test_entry_shape_matches_miniflux_proxy(self, ctx, client):
+    def test_entry_shape(self, ctx, client):
         _seed(ctx)
         body = client.get("/istota/api/feeds").json()
         entry = body["entries"][0]

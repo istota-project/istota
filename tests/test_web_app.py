@@ -38,10 +38,7 @@ def _make_config(tmp_path, users=None, mount_path=None, web=None):
         users = {
             "alice": UserConfig(
                 display_name="Alice",
-                resources=[ResourceConfig(
-                    type="miniflux", name="Feeds",
-                    base_url="http://miniflux:8080", api_key="test-key",
-                )],
+                resources=[ResourceConfig(type="feeds", name="Feeds")],
             ),
             "bob": UserConfig(display_name="Bob"),
         }
@@ -70,6 +67,7 @@ def _patch_app(config):
     """Inject config and mock OAuth into the web app module."""
     import istota.web_app as mod
     mod._config = config
+    mod.app.state.istota_config = config
     mock_oauth = MagicMock()
     mock_oauth.nextcloud = MagicMock()
     mod._oauth = mock_oauth
@@ -183,7 +181,7 @@ class TestApiMe:
         assert data["display_name"] == "Alice"
         assert data["features"]["feeds"] is True
 
-    async def test_returns_no_feeds_for_user_without_miniflux(self, client, app):
+    async def test_returns_no_feeds_for_user_without_feeds_resource(self, client, app):
         import istota.web_app as mod
 
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
@@ -196,179 +194,6 @@ class TestApiMe:
         assert resp.status_code == 200
         data = resp.json()
         assert data["features"]["feeds"] is False
-
-
-@_needs_web_deps
-class TestApiFeeds:
-    async def test_feeds_proxies_to_miniflux(self, client, app):
-        import istota.web_app as mod
-        import httpx
-
-        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
-        })
-        login_resp = await client.get("/istota/callback", follow_redirects=False)
-        cookies = login_resp.cookies
-
-        mock_entries = {
-            "total": 1,
-            "entries": [{
-                "id": 100,
-                "title": "Test Entry",
-                "url": "https://example.com/post",
-                "content": "<p>Hello world</p>",
-                "feed": {"id": 1, "title": "Test Feed"},
-                "status": "unread",
-                "published_at": "2026-03-31T10:00:00Z",
-                "created_at": "2026-03-31T11:00:00Z",
-                "enclosures": [],
-            }],
-        }
-        mock_feeds = [
-            {"id": 1, "title": "Test Feed", "site_url": "https://example.com"},
-        ]
-
-        mock_response_entries = MagicMock()
-        mock_response_entries.json.return_value = mock_entries
-        mock_response_entries.raise_for_status = MagicMock()
-
-        mock_response_feeds = MagicMock()
-        mock_response_feeds.json.return_value = mock_feeds
-        mock_response_feeds.raise_for_status = MagicMock()
-
-        async def mock_get(url, **kwargs):
-            if "entries" in url:
-                return mock_response_entries
-            return mock_response_feeds
-
-        mock_client = AsyncMock()
-        mock_client.get = mock_get
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("istota.web_app.httpx.AsyncClient", return_value=mock_client):
-            resp = await client.get("/istota/api/feeds", cookies=cookies)
-
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["total"] == 1
-        assert len(data["entries"]) == 1
-        assert data["entries"][0]["title"] == "Test Entry"
-        assert data["entries"][0]["feed"]["title"] == "Test Feed"
-        assert len(data["feeds"]) == 1
-
-    async def test_feeds_returns_404_without_miniflux(self, client, app):
-        import istota.web_app as mod
-
-        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "bob", "name": "Bob"},
-        })
-        login_resp = await client.get("/istota/callback", follow_redirects=False)
-        cookies = login_resp.cookies
-
-        resp = await client.get("/istota/api/feeds", cookies=cookies)
-        assert resp.status_code == 404
-
-    async def test_feeds_forwards_before_cursor(self, client, app):
-        import istota.web_app as mod
-
-        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
-        })
-        login_resp = await client.get("/istota/callback", follow_redirects=False)
-        cookies = login_resp.cookies
-
-        mock_response_entries = MagicMock()
-        mock_response_entries.json.return_value = {"total": 0, "entries": []}
-        mock_response_entries.raise_for_status = MagicMock()
-        mock_response_feeds = MagicMock()
-        mock_response_feeds.json.return_value = []
-        mock_response_feeds.raise_for_status = MagicMock()
-
-        captured_params: dict = {}
-
-        async def mock_get(url, **kwargs):
-            if "entries" in url:
-                captured_params.update(kwargs.get("params", {}))
-                return mock_response_entries
-            return mock_response_feeds
-
-        mock_client = AsyncMock()
-        mock_client.get = mock_get
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("istota.web_app.httpx.AsyncClient", return_value=mock_client):
-            resp = await client.get(
-                "/istota/api/feeds?status=unread&before=1700000000",
-                cookies=cookies,
-            )
-
-        assert resp.status_code == 200
-        assert captured_params.get("before") == 1700000000
-        assert captured_params.get("status") == "unread"
-
-    async def test_feeds_omits_before_when_zero(self, client, app):
-        import istota.web_app as mod
-
-        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "userinfo": {"preferred_username": "alice", "name": "Alice"},
-        })
-        login_resp = await client.get("/istota/callback", follow_redirects=False)
-        cookies = login_resp.cookies
-
-        mock_response_entries = MagicMock()
-        mock_response_entries.json.return_value = {"total": 0, "entries": []}
-        mock_response_entries.raise_for_status = MagicMock()
-        mock_response_feeds = MagicMock()
-        mock_response_feeds.json.return_value = []
-        mock_response_feeds.raise_for_status = MagicMock()
-
-        captured_params: dict = {}
-
-        async def mock_get(url, **kwargs):
-            if "entries" in url:
-                captured_params.update(kwargs.get("params", {}))
-                return mock_response_entries
-            return mock_response_feeds
-
-        mock_client = AsyncMock()
-        mock_client.get = mock_get
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("istota.web_app.httpx.AsyncClient", return_value=mock_client):
-            resp = await client.get("/istota/api/feeds", cookies=cookies)
-
-        assert resp.status_code == 200
-        assert "before" not in captured_params
-
-
-@_needs_web_deps
-class TestImageExtraction:
-    def test_extract_images_from_enclosures(self):
-        from istota.web_app import _extract_images
-        entry = {
-            "enclosures": [
-                {"mime_type": "image/jpeg", "url": "https://img.com/1.jpg"},
-                {"mime_type": "audio/mp3", "url": "https://audio.com/1.mp3"},
-            ],
-            "content": "",
-        }
-        assert _extract_images(entry) == ["https://img.com/1.jpg"]
-
-    def test_extract_images_from_content_fallback(self):
-        from istota.web_app import _extract_images
-        entry = {
-            "enclosures": [],
-            "content": '<p>Text</p><img src="https://img.com/2.jpg">',
-        }
-        assert _extract_images(entry) == ["https://img.com/2.jpg"]
-
-    def test_no_images(self):
-        from istota.web_app import _extract_images
-        entry = {"enclosures": [], "content": "<p>Just text</p>"}
-        assert _extract_images(entry) == []
 
 
 @_needs_web_deps
@@ -484,7 +309,8 @@ class TestCsrfOriginCheck:
 
     async def test_put_with_correct_origin_allowed(self, client, app):
         cookies = await self._login(client, app)
-        # Will fail at miniflux proxy (no real backend), but should not be 403
+        # May succeed or fail downstream depending on whether the user's feeds
+        # workspace exists, but must not be rejected at the CSRF gate.
         resp = await client.put(
             "/istota/api/feeds/entries/batch",
             json={"entry_ids": [1], "status": "read"},
@@ -794,7 +620,6 @@ class TestAdminStats:
             display_name="Alice",
             resources=[ResourceConfig(type="feeds", name="Feeds")],
         )
-        config.feeds.backend = "native"
         config.nextcloud_mount_path = None  # docker-compose-style deploy
 
         app = _patch_app(config)

@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-05: Miniflux backend removal (native RSS Phase 5)
+
+Production has been running native feeds since the Ansible flip on 2026-05-02 and the Flux VM was decommissioned 2026-05-04, but the codebase was still carrying the dual-backend scaffolding from the cutover-reversible Phase 3 work. This pass deletes it.
+
+The bulk of the deletion is mechanical: `feeds/_miniflux.py` (the HTTP client + `FeedItem`), the `miniflux_proxy_router` and `_map_entry` / `_extract_images` / `_strip_image_from_content` / `_get_miniflux_creds` helpers in `web_app.py`, the `MINIFLUX_*` env injection block and per-user Miniflux host lookup in `executor.py`, the `[feeds] backend` config flag and `FeedsConfig` class, the `miniflux` entry in `_CREDENTIAL_RESOURCE_TYPES` and `_CREDENTIAL_SKILL_MAP`, the Ansible user-template block, the docker-entrypoint upgrade-path writers, and the assorted prose comments that referenced "Miniflux semantics" or "Miniflux's default policy". `_native_briefing.py` and `fetch_briefing_entries` got swept up too — they only existed to dispatch on the backend flag, and grep showed no live consumers (the briefing skill never actually wired in feed news; only the test files imported them).
+
+Two non-obvious things came out of the work.
+
+**The CSRF gap.** The legacy proxy router applied `_verify_origin` to its mutating endpoints; the native router didn't. Mounting native unconditionally and dropping the proxy would have silently downgraded CSRF protection on `PUT /entries/batch`, `PUT /entries/{id}`, `POST /mark-as-read`, `PUT /config`, `POST /refresh`, and `POST /import-opml` to "rely on `same_site=lax`". The tests caught it indirectly — a CSRF test was hitting a path that no longer existed. Fix: add a `verify_origin` overridable dependency to `feeds/routes.py` (parallel to the existing `require_auth` pattern) and have `web_app.py` install `_verify_origin` for it via `app.dependency_overrides`. The router stays usable in isolation (no-op default for tests that mount it standalone); the host wires real CSRF when it mounts. Argument order on the routes was reordered too — `_csrf` ahead of `ctx` — so CSRF rejects before `get_user_context` does any user resolution or DB work.
+
+**Selective deletion of compatibility shims is harder than wholesale deletion.** Auto-mode default is "don't add backwards-compatibility hacks". The remaining `[feeds]` TOML block (now empty) gets ignored harmlessly by the loader, so it can stay in user configs without erroring. The `FeedsConfig` dataclass is gone entirely instead of left as an empty class. The `user_config` parameter on `_build_network_allowlist` was the cleanest tell — it had only one caller using it, and that caller's call site was the only thing keeping the parameter alive. Removed both, no shim.
+
+3911 tests pass, 0 unexpected failures (the 4 pre-existing failures are date-sensitive sleep-cycle / location tests already failing on `main`). Touched 48 files, net −38 lines despite preserving CSRF.
+
 ## 2026-05-05: Admin dashboard (Phase 1)
 
 Read-only system-health dashboard at `/istota/admin`, gated to allowlisted admin users. Single endpoint, single payload, single page. Phases 2 (admin CLI skill) and 3 (write-side web UI) intentionally not started — the spec at `Notes/Projects/Istota/Admin dashboard spec.md` was followed only through Phase 1.

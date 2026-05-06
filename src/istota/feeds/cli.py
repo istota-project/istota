@@ -579,7 +579,7 @@ def cmd_run_scheduled(ctx: FeedsContext, limit) -> None:
               help="After importing into the DB, regenerate feeds.toml from the DB")
 @pass_ctx
 def cmd_import_opml(ctx: FeedsContext, opml_path, write_config) -> None:
-    """Import subscriptions from an OPML file (Miniflux export, etc.)."""
+    """Import subscriptions from an OPML file."""
     from istota.feeds.opml import import_opml
 
     text = Path(opml_path).read_text()

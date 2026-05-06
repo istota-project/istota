@@ -598,9 +598,9 @@
   when: not istota_web_only
 
 # Monarch credentials are now colocated with the money resource entry in
-# the user config TOML (see user.toml.j2), matching the karakeep / miniflux
-# / overland pattern. The previous /etc/{namespace}/secrets/{user}/money.toml
-# file is no longer used — clean it up if it exists.
+# the user config TOML (see user.toml.j2), matching the karakeep / overland
+# pattern. The previous /etc/{namespace}/secrets/{user}/money.toml file is
+# no longer used — clean it up if it exists.
 - name: Remove obsolete per-user money.toml secrets file
   file:
     path: "/etc/{{ istota_namespace }}/secrets/{{ item.key }}/money.toml"

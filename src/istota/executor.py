@@ -397,7 +397,6 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "SMTP_PASSWORD",
     "IMAP_PASSWORD",
     "KARAKEEP_API_KEY",
-    "MINIFLUX_API_KEY",
     "GITLAB_TOKEN",
     "GITHUB_TOKEN",
     "GOOGLE_WORKSPACE_CLI_TOKEN",
@@ -412,7 +411,6 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "SMTP_PASSWORD": frozenset({"email"}),
     "IMAP_PASSWORD": frozenset({"email"}),
     "KARAKEEP_API_KEY": frozenset({"bookmarks"}),
-    "MINIFLUX_API_KEY": frozenset({"feeds"}),
     "GITLAB_TOKEN": frozenset({"developer"}),
     "GITHUB_TOKEN": frozenset({"developer"}),
     "GOOGLE_WORKSPACE_CLI_TOKEN": frozenset({"google_workspace"}),
@@ -435,32 +433,14 @@ _PYPI_HOSTS = frozenset({
 def _build_network_allowlist(
     config: Config,
     selected_skills: list[str],
-    user_config: "UserConfig | None" = None,
 ) -> set[str]:
-    """Build per-task network allowlist from config and selected skills.
-
-    Only the current user's resource URLs are included (not all users').
-    """
+    """Build per-task network allowlist from config and selected skills."""
     hosts: set[str] = set(_DEFAULT_NETWORK_HOSTS)
 
     if config.security.network.allow_pypi:
         hosts |= _PYPI_HOSTS
 
     hosts.update(config.security.network.extra_hosts)
-
-    user_resources_cfg = user_config.resources if user_config else []
-
-    # Feeds skill: add Miniflux host for current user only
-    if "feeds" in selected_skills:
-        from urllib.parse import urlparse
-
-        for rc in user_resources_cfg:
-            if rc.type == "miniflux" and rc.base_url:
-                parsed = urlparse(rc.base_url)
-                host = parsed.hostname
-                port = parsed.port or 443
-                if host:
-                    hosts.add(f"{host}:{port}")
 
     # Developer skill: add git remote hosts from config
     if "developer" in selected_skills and config.developer.enabled:
@@ -551,8 +531,8 @@ def _authorized_skills_from_credentials(
     The threat model is unchanged — a compromised Claude can only request
     credentials for resources the user has actually configured. But it
     eliminates the failure mode where keyword matching missed a skill the
-    user obviously needs (e.g. user has miniflux configured, prompt didn't
-    say "feed", `feeds` not selected, no MINIFLUX_API_KEY available).
+    user obviously needs (e.g. user has karakeep configured, prompt didn't
+    say "bookmark", `bookmarks` not selected, no KARAKEEP_API_KEY available).
     """
     authorized = set()
     for skill_name, meta in skill_index.items():
@@ -2192,16 +2172,6 @@ def execute_task(
                 env["KARAKEEP_BASE_URL"] = karakeep_resources[0].base_url
                 env["KARAKEEP_API_KEY"] = karakeep_resources[0].api_key
 
-        # Miniflux feeds (per-user API credentials from resource config)
-        if user_config:
-            miniflux_resources = [
-                rc for rc in user_config.resources
-                if rc.type == "miniflux" and rc.base_url and rc.api_key
-            ]
-            if miniflux_resources:
-                env["MINIFLUX_BASE_URL"] = miniflux_resources[0].base_url
-                env["MINIFLUX_API_KEY"] = miniflux_resources[0].api_key
-
         # Developer skill (git + GitLab/GitHub workflows)
         # When the skill proxy is enabled, tokens are fetched at runtime via
         # credential-fetch (a small Python script that queries the proxy socket).
@@ -2447,10 +2417,7 @@ def execute_task(
         if config.security.network.enabled and config.security.sandbox_enabled:
             from .network_proxy import NetworkProxy, write_bridge_script
 
-            allowed_hosts = _build_network_allowlist(
-                config, selected_skills,
-                user_config=config.get_user(task.user_id),
-            )
+            allowed_hosts = _build_network_allowlist(config, selected_skills)
 
             # Write bridge script to .developer/ (RO inside sandbox)
             dev_dir = Path(user_temp_dir) / ".developer"

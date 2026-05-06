@@ -193,10 +193,9 @@ istota_disabled_skills: []
 #         name: "Monarch Money"
 #         session_token: "monarch-token"
 #       - type: "feeds"
-#         # Native feeds module (used when istota_feeds_backend == "native").
-#         # Workspace mode (preferred): omit overrides. The loader
-#         # synthesizes a FeedsContext rooted at the user's istota workspace
-#         # and reads feeds.toml.
+#         # Native feeds module. Workspace mode (preferred): omit overrides.
+#         # The loader synthesizes a FeedsContext rooted at the user's istota
+#         # workspace and reads feeds.toml.
 #         # Defaults: data_dir = {workspace}/feeds,
 #         #           db_path = {data_dir}/data/feeds.db,
 #         #           config_path = {data_dir}/config/feeds.toml.
@@ -206,11 +205,6 @@ istota_disabled_skills: []
 #         #   config_path: "/srv/.../feeds.toml"
 #         #   db_path: "/srv/.../feeds.db"
 #         tumblr_api_key: "{{ vault_alice_tumblr_api_key }}"  # optional; TUMBLR_API_KEY env is the fallback
-#       # Legacy Miniflux feeds (used when istota_feeds_backend == "miniflux"):
-#       # - type: "miniflux"
-#       #   name: "Miniflux"
-#       #   base_url: "https://flux.example.com"
-#       #   api_key: "{{ vault_alice_miniflux_api_key }}"
 #       - type: "money"
 #         # Workspace mode (preferred): omit config_path. The loader
 #         # synthesizes a UserContext rooted at the user's istota workspace
@@ -398,13 +392,6 @@ istota_memory_search_auto_recall_limit: 5          # max results for auto-recall
 
 # Skills routing (LLM-based semantic routing for skill selection)
 istota_skills_semantic_routing: true  # enable Pass 2 LLM classification
-
-# Feeds backend — picks which router serves /istota/api/feeds.
-#   "miniflux" — legacy Miniflux proxy (default; needs per-user [[resources]] type = "miniflux")
-#   "native"   — in-tree istota.feeds module (per-user [[resources]] type = "feeds";
-#                per-user SQLite under {workspace}/feeds/data/feeds.db)
-# Flipping the value requires an istota service restart (registered at import time).
-istota_feeds_backend: "native"
 
 # Sleep cycle settings (nightly memory extraction, cron evaluated per-user timezone)
 istota_sleep_cycle_enabled: true

@@ -199,7 +199,7 @@
 					hasMore = false;
 				} else {
 					entries = [...entries, ...fresh];
-					// Under cursor mode miniflux returns total-matching-filter,
+					// Under cursor mode the API returns total-matching-filter,
 					// which shrinks as we paginate; keep the initial total.
 					if (!$showUnseen) total = data.total;
 					hasMore = data.entries.length >= PAGE_SIZE;

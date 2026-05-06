@@ -66,7 +66,6 @@
 	}
 
 	const FIELD_LABELS: Record<string, string> = {
-		backend: 'Backend',
 		status: 'Status',
 		users_configured: 'Users configured',
 		users_resolved: 'Users resolved',

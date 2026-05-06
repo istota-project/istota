@@ -606,7 +606,7 @@ def build_skill_manifest(
     unmet dependencies.
 
     When user_resource_types is provided, prepends a "User resources" line so
-    the classifier can disambiguate (e.g. user has miniflux → feeds is
+    the classifier can disambiguate (e.g. user has karakeep → bookmarks is
     plausible even without keyword overlap).
     """
     disabled = disabled_skills or set()

@@ -285,11 +285,11 @@ class TestAuthorizedSkillsFromCredentials:
         idx = self._index()
         assert _authorized_skills_from_credentials(idx, {}) == []
 
-    def test_user_with_only_miniflux(self):
-        """User has miniflux → only `feeds` is authorized."""
+    def test_user_with_only_karakeep(self):
+        """User has karakeep → only `bookmarks` is authorized."""
         idx = self._index()
-        result = _authorized_skills_from_credentials(idx, {"MINIFLUX_API_KEY": "x"})
-        assert result == ["feeds"]
+        result = _authorized_skills_from_credentials(idx, {"KARAKEEP_API_KEY": "x"})
+        assert result == ["bookmarks"]
 
     def test_user_with_email_creds(self):
         """SMTP+IMAP both authorize email (single skill, two cred vars)."""
@@ -316,19 +316,19 @@ class TestAuthorizedSkillsFromCredentials:
         idx = self._index()
         all_creds = {
             "CALDAV_PASSWORD": "a", "NC_PASS": "b", "SMTP_PASSWORD": "c",
-            "IMAP_PASSWORD": "d", "KARAKEEP_API_KEY": "e", "MINIFLUX_API_KEY": "f",
+            "IMAP_PASSWORD": "d", "KARAKEEP_API_KEY": "e",
             "GITLAB_TOKEN": "g", "GITHUB_TOKEN": "h", "GOOGLE_WORKSPACE_CLI_TOKEN": "i",
         }
         result = _authorized_skills_from_credentials(idx, all_creds)
         assert sorted(result) == [
-            "bookmarks", "calendar", "developer", "email", "feeds",
+            "bookmarks", "calendar", "developer", "email",
             "google_workspace", "location", "nextcloud",
         ]
 
     def test_non_cli_skills_excluded(self):
         """A skill without cli: true is never authorized even if its creds exist."""
-        idx = self._index(feeds=False)
-        result = _authorized_skills_from_credentials(idx, {"MINIFLUX_API_KEY": "x"})
+        idx = self._index(bookmarks=False)
+        result = _authorized_skills_from_credentials(idx, {"KARAKEEP_API_KEY": "x"})
         assert result == []
 
 
