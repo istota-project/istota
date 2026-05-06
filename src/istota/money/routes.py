@@ -49,6 +49,32 @@ def get_user_config(
         raise HTTPException(404, "user not configured")
 
 
+def _load_invoicing_config(user_ctx: UserContext):
+    """Load invoicing config, preferring DB over the legacy TOML path."""
+    from istota.money import config_store
+    from istota.money.core.invoicing import parse_invoicing_config
+
+    db_path = getattr(user_ctx, "db_path", None)
+    if db_path is not None and config_store.has_invoicing_data(db_path):
+        return config_store.load_invoicing(db_path)
+    if user_ctx.invoicing_config_path and user_ctx.invoicing_config_path.exists():
+        return parse_invoicing_config(user_ctx.invoicing_config_path)
+    return None
+
+
+def _load_tax_config(user_ctx: UserContext):
+    """Load tax config, preferring DB over the legacy TOML path."""
+    from istota.money import config_store
+    from istota.money.core.tax import parse_tax_config
+
+    db_path = getattr(user_ctx, "db_path", None)
+    if db_path is not None and config_store.has_tax_data(db_path):
+        return config_store.load_tax(db_path)
+    if user_ctx.tax_config_path and user_ctx.tax_config_path.exists():
+        return parse_tax_config(user_ctx.tax_config_path)
+    return None
+
+
 def _resolve_user_ledger(user_ctx: UserContext, ledger_name: str | None):
     if not user_ctx.ledgers:
         return None
@@ -251,15 +277,12 @@ async def api_ledgers(user_ctx: UserContext = Depends(get_user_config)):
 
 @router.get("/clients")
 async def api_clients(user_ctx: UserContext = Depends(get_user_config)):
-    from istota.money.core.invoicing import parse_invoicing_config
-
-    if not user_ctx.invoicing_config_path or not user_ctx.invoicing_config_path.exists():
-        return {"status": "ok", "clients": []}
-
     try:
-        config = parse_invoicing_config(user_ctx.invoicing_config_path)
+        config = _load_invoicing_config(user_ctx)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+    if config is None:
+        return {"status": "ok", "clients": []}
 
     clients = []
     for key, c in config.clients.items():
@@ -285,20 +308,19 @@ async def api_invoices(
     show_all: bool = False,
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from istota.money.core.invoicing import build_line_items, parse_invoicing_config
+    from istota.money.core.invoicing import build_line_items
     from istota.money.work import get_invoice_numbers, get_entries_for_invoice
-
-    if not user_ctx.invoicing_config_path or not user_ctx.invoicing_config_path.exists():
-        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0}
 
     data_dir = user_ctx.data_dir
     if not data_dir:
         return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0}
 
     try:
-        config = parse_invoicing_config(user_ctx.invoicing_config_path)
+        config = _load_invoicing_config(user_ctx)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+    if config is None:
+        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0}
 
     invoice_numbers = get_invoice_numbers(data_dir)
     invoices = []
@@ -345,15 +367,12 @@ async def api_invoices(
 
 @router.get("/business-settings")
 async def api_business_settings(user_ctx: UserContext = Depends(get_user_config)):
-    from istota.money.core.invoicing import parse_invoicing_config
-
-    if not user_ctx.invoicing_config_path or not user_ctx.invoicing_config_path.exists():
-        return {"status": "ok", "entities": [], "services": [], "defaults": {}}
-
     try:
-        config = parse_invoicing_config(user_ctx.invoicing_config_path)
+        config = _load_invoicing_config(user_ctx)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+    if config is None:
+        return {"status": "ok", "entities": [], "services": [], "defaults": {}}
 
     entities = [{
         "key": key,
@@ -393,20 +412,19 @@ async def api_invoice_details(
     invoice_number: str,
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from istota.money.core.invoicing import build_line_items, parse_invoicing_config
+    from istota.money.core.invoicing import build_line_items
     from istota.money.work import get_entries_for_invoice
-
-    if not user_ctx.invoicing_config_path or not user_ctx.invoicing_config_path.exists():
-        return JSONResponse({"error": "no invoicing config"}, status_code=404)
 
     data_dir = user_ctx.data_dir
     if not data_dir:
         return JSONResponse({"error": "no data dir"}, status_code=404)
 
     try:
-        config = parse_invoicing_config(user_ctx.invoicing_config_path)
+        config = _load_invoicing_config(user_ctx)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+    if config is None:
+        return JSONResponse({"error": "no invoicing config"}, status_code=404)
 
     entries = get_entries_for_invoice(data_dir, invoice_number)
     if not entries:
@@ -455,18 +473,16 @@ async def api_tax_estimate(
     from istota.money.core.tax import (
         estimate_quarterly_tax,
         load_tax_inputs,
-        parse_tax_config,
         payment_quarter_from_date,
         query_se_income,
     )
 
-    if not user_ctx.tax_config_path or not user_ctx.tax_config_path.exists():
-        return JSONResponse({"error": "no tax config"}, status_code=404)
-
     try:
-        config = parse_tax_config(user_ctx.tax_config_path)
+        config = _load_tax_config(user_ctx)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+    if config is None:
+        return JSONResponse({"error": "no tax config"}, status_code=404)
 
     saved = load_tax_inputs(user_ctx.db_path)
 
@@ -521,19 +537,17 @@ async def api_tax_estimate_recalculate(
     from istota.money.core.models import TaxConfig
     from istota.money.core.tax import (
         estimate_quarterly_tax,
-        parse_tax_config,
         payment_quarter_from_date,
         query_se_income,
         save_tax_inputs,
     )
 
-    if not user_ctx.tax_config_path or not user_ctx.tax_config_path.exists():
-        return JSONResponse({"error": "no tax config"}, status_code=404)
-
     try:
-        config = parse_tax_config(user_ctx.tax_config_path)
+        config = _load_tax_config(user_ctx)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+    if config is None:
+        return JSONResponse({"error": "no tax config"}, status_code=404)
 
     body = await request.json()
     tax_year = body.get("year", config.tax_year)
@@ -591,3 +605,644 @@ async def api_tax_estimate_recalculate(
         config=config,
     )
     return {"status": "ok", **result.__dict__}
+
+
+# =============================================================================
+# Config CRUD routes (DB-backed money config — invoicing / tax / monarch)
+# =============================================================================
+
+
+def _client_to_dict(c) -> dict:
+    return {
+        "key": c.key, "name": c.name, "address": c.address, "email": c.email,
+        "terms": c.terms, "ar_account": c.ar_account, "entity": c.entity,
+        "schedule": c.schedule, "schedule_day": c.schedule_day,
+        "reminder_days": c.reminder_days, "notifications": c.notifications,
+        "days_until_overdue": c.days_until_overdue,
+        "ledger_posting": c.ledger_posting,
+        "bundles": c.bundles, "separate": c.separate,
+    }
+
+
+def _company_to_dict(c) -> dict:
+    return {
+        "key": c.key, "name": c.name, "address": c.address, "email": c.email,
+        "payment_instructions": c.payment_instructions, "logo": c.logo,
+        "ar_account": c.ar_account, "bank_account": c.bank_account,
+        "currency": c.currency,
+    }
+
+
+def _service_to_dict(s) -> dict:
+    return {
+        "key": s.key, "display_name": s.display_name, "rate": s.rate,
+        "type": s.type, "income_account": s.income_account,
+    }
+
+
+@router.get("/config/invoicing")
+async def api_config_invoicing(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import config_store
+    cfg = config_store.load_invoicing(user_ctx.db_path)
+    return {
+        "status": "ok",
+        "settings": {
+            "accounting_path": cfg.accounting_path,
+            "invoice_output": cfg.invoice_output,
+            "next_invoice_number": cfg.next_invoice_number,
+            "default_entity": cfg.default_entity,
+            "currency": cfg.currency,
+            "default_ar_account": cfg.default_ar_account,
+            "default_bank_account": cfg.default_bank_account,
+            "notifications": cfg.notifications,
+            "days_until_overdue": cfg.days_until_overdue,
+        },
+    }
+
+
+@router.put("/config/invoicing")
+async def api_config_invoicing_put(
+    request: Request, user_ctx: UserContext = Depends(get_user_config),
+):
+    """Update scalar invoicing settings.
+
+    Body: a JSON object with any of the scalar setting keys. Unknown keys
+    are rejected. Collection edits go through the per-entity routes below.
+    """
+    from istota.money import config_store
+    body = await request.json()
+    cfg = config_store.load_invoicing(user_ctx.db_path)
+    allowed = {
+        "accounting_path", "invoice_output", "next_invoice_number",
+        "default_entity", "currency", "default_ar_account",
+        "default_bank_account", "notifications", "days_until_overdue",
+    }
+    bad = set(body) - allowed
+    if bad:
+        return JSONResponse(
+            {"status": "error", "error": f"unknown keys: {sorted(bad)}"},
+            status_code=400,
+        )
+    for k, v in body.items():
+        setattr(cfg, k, v)
+    config_store.save_invoicing(user_ctx.db_path, cfg, replace_collections=False)
+    return {"status": "ok"}
+
+
+@router.get("/config/companies")
+async def api_config_companies(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import config_store
+    cfg = config_store.load_invoicing(user_ctx.db_path)
+    return {
+        "status": "ok",
+        "companies": [_company_to_dict(c) for c in cfg.companies.values()],
+    }
+
+
+@router.post("/config/companies")
+async def api_config_companies_post(
+    request: Request, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    key = body.get("key")
+    if not key:
+        return JSONResponse({"status": "error", "error": "key required"}, 400)
+    fields = {k: v for k, v in body.items() if k != "key"}
+    comp, state = config_store.upsert_company(user_ctx.db_path, key, **fields)
+    return {"status": "ok", "state": state, "company": _company_to_dict(comp)}
+
+
+@router.put("/config/companies/{key}")
+async def api_config_companies_put(
+    key: str, request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    comp, state = config_store.upsert_company(user_ctx.db_path, key, **body)
+    return {"status": "ok", "state": state, "company": _company_to_dict(comp)}
+
+
+@router.delete("/config/companies/{key}")
+async def api_config_companies_delete(
+    key: str, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    ok = config_store.delete_company(user_ctx.db_path, key)
+    return {"status": "ok", "removed": ok}
+
+
+@router.get("/config/clients")
+async def api_config_clients(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import config_store
+    cfg = config_store.load_invoicing(user_ctx.db_path)
+    return {
+        "status": "ok",
+        "clients": [_client_to_dict(c) for c in cfg.clients.values()],
+    }
+
+
+@router.post("/config/clients")
+async def api_config_clients_post(
+    request: Request, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    key = body.get("key")
+    if not key:
+        return JSONResponse({"status": "error", "error": "key required"}, 400)
+    fields = {k: v for k, v in body.items() if k != "key"}
+    client, state = config_store.upsert_client(user_ctx.db_path, key, **fields)
+    return {"status": "ok", "state": state, "client": _client_to_dict(client)}
+
+
+@router.put("/config/clients/{key}")
+async def api_config_clients_put(
+    key: str, request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    client, state = config_store.upsert_client(user_ctx.db_path, key, **body)
+    return {"status": "ok", "state": state, "client": _client_to_dict(client)}
+
+
+@router.delete("/config/clients/{key}")
+async def api_config_clients_delete(
+    key: str, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    ok = config_store.delete_client(user_ctx.db_path, key)
+    return {"status": "ok", "removed": ok}
+
+
+@router.get("/config/services")
+async def api_config_services(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import config_store
+    cfg = config_store.load_invoicing(user_ctx.db_path)
+    return {
+        "status": "ok",
+        "services": [_service_to_dict(s) for s in cfg.services.values()],
+    }
+
+
+@router.post("/config/services")
+async def api_config_services_post(
+    request: Request, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    key = body.get("key")
+    if not key:
+        return JSONResponse({"status": "error", "error": "key required"}, 400)
+    fields = {k: v for k, v in body.items() if k != "key"}
+    svc, state = config_store.upsert_service(user_ctx.db_path, key, **fields)
+    return {"status": "ok", "state": state, "service": _service_to_dict(svc)}
+
+
+@router.put("/config/services/{key}")
+async def api_config_services_put(
+    key: str, request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    svc, state = config_store.upsert_service(user_ctx.db_path, key, **body)
+    return {"status": "ok", "state": state, "service": _service_to_dict(svc)}
+
+
+@router.delete("/config/services/{key}")
+async def api_config_services_delete(
+    key: str, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    ok = config_store.delete_service(user_ctx.db_path, key)
+    return {"status": "ok", "removed": ok}
+
+
+@router.get("/config/tax")
+async def api_config_tax(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import config_store
+    cfg = config_store.load_tax(user_ctx.db_path)
+    return {
+        "status": "ok",
+        "tax": {
+            "filing_status": cfg.filing_status,
+            "tax_year": cfg.tax_year,
+            "w2_income": cfg.w2_income,
+            "w2_federal_withholding": cfg.w2_federal_withholding,
+            "w2_state_withholding": cfg.w2_state_withholding,
+            "federal_estimated_paid": cfg.federal_estimated_paid,
+            "state_estimated_paid": cfg.state_estimated_paid,
+            "enable_qbi_deduction": cfg.enable_qbi_deduction,
+            "prior_year_federal_tax": cfg.prior_year_federal_tax,
+            "prior_year_state_tax": cfg.prior_year_state_tax,
+        },
+    }
+
+
+@router.put("/config/tax")
+async def api_config_tax_put(
+    request: Request, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    cfg = config_store.load_tax(user_ctx.db_path)
+    allowed = {
+        "filing_status", "tax_year",
+        "w2_income", "w2_federal_withholding", "w2_state_withholding",
+        "federal_estimated_paid", "state_estimated_paid",
+        "enable_qbi_deduction",
+        "prior_year_federal_tax", "prior_year_state_tax",
+    }
+    bad = set(body) - allowed
+    if bad:
+        return JSONResponse(
+            {"status": "error", "error": f"unknown keys: {sorted(bad)}"}, 400,
+        )
+    for k, v in body.items():
+        setattr(cfg, k, v)
+    config_store.save_tax(user_ctx.db_path, cfg, replace_collections=False)
+    return {"status": "ok"}
+
+
+@router.get("/config/tax/years")
+async def api_config_tax_years(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import config_store
+    return {"status": "ok", "years": config_store.list_tax_year_rates(user_ctx.db_path)}
+
+
+@router.put("/config/tax/years/{year}")
+async def api_config_tax_years_put(
+    year: int, request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    try:
+        state = config_store.upsert_tax_year_rates(user_ctx.db_path, year, **body)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok", "state": state}
+
+
+@router.delete("/config/tax/years/{year}")
+async def api_config_tax_years_delete(
+    year: int, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    ok = config_store.delete_tax_year_rates(user_ctx.db_path, year)
+    return {"status": "ok", "removed": ok}
+
+
+@router.get("/config/tax/patterns")
+async def api_config_tax_patterns(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import config_store
+    return {
+        "status": "ok",
+        "patterns": config_store.list_tax_patterns(user_ctx.db_path),
+    }
+
+
+@router.put("/config/tax/patterns")
+async def api_config_tax_patterns_put(
+    request: Request, user_ctx: UserContext = Depends(get_user_config),
+):
+    """Replace-all per-kind. Body: ``{"se_income": [...], "se_expense": [...]}``."""
+    from istota.money import config_store
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"status": "error", "error": "body must be an object"}, 400,
+        )
+    try:
+        config_store.replace_tax_patterns(
+            user_ctx.db_path,
+            {k: v for k, v in body.items() if k in ("se_income", "se_expense")},
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok"}
+
+
+@router.get("/config/monarch")
+async def api_config_monarch(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import config_store
+    cfg = config_store.load_monarch(user_ctx.db_path)
+    return {
+        "status": "ok",
+        "sync": {
+            "lookback_days": cfg.sync.lookback_days,
+            "default_account": cfg.sync.default_account,
+            "recategorize_account": cfg.sync.recategorize_account,
+        },
+    }
+
+
+@router.put("/config/monarch")
+async def api_config_monarch_put(
+    request: Request, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    allowed = {"lookback_days", "default_account", "recategorize_account"}
+    bad = set(body) - allowed
+    if bad:
+        return JSONResponse(
+            {"status": "error", "error": f"unknown keys: {sorted(bad)}"}, 400,
+        )
+    cfg = config_store.load_monarch(user_ctx.db_path)
+    for k, v in body.items():
+        setattr(cfg.sync, k, v)
+    config_store.save_monarch(user_ctx.db_path, cfg, replace_collections=False)
+    return {"status": "ok"}
+
+
+@router.get("/config/monarch/profiles")
+async def api_config_monarch_profiles(
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    return {
+        "status": "ok",
+        "profiles": config_store.list_monarch_profiles(user_ctx.db_path),
+    }
+
+
+@router.post("/config/monarch/profiles")
+async def api_config_monarch_profiles_post(
+    request: Request, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    name = body.get("name")
+    if not name:
+        return JSONResponse({"status": "error", "error": "name required"}, 400)
+    fields = {k: v for k, v in body.items() if k != "name"}
+    try:
+        prof, state = config_store.upsert_monarch_profile(
+            user_ctx.db_path, name, **fields,
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok", "state": state, "profile": prof}
+
+
+@router.put("/config/monarch/profiles/{name}")
+async def api_config_monarch_profiles_put(
+    name: str, request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    body = await request.json()
+    try:
+        prof, state = config_store.upsert_monarch_profile(
+            user_ctx.db_path, name, **body,
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok", "state": state, "profile": prof}
+
+
+@router.delete("/config/monarch/profiles/{name}")
+async def api_config_monarch_profiles_delete(
+    name: str, user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    ok = config_store.delete_monarch_profile(user_ctx.db_path, name)
+    return {"status": "ok", "removed": ok}
+
+
+def _resolve_profile_query(profile: str | None):
+    if profile is None or profile == "" or profile == "global":
+        return None
+    return profile
+
+
+@router.get("/config/monarch/account-map")
+async def api_config_monarch_account_map(
+    profile: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    p = _resolve_profile_query(profile)
+    try:
+        mapping = config_store.get_account_map(user_ctx.db_path, p)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok", "mapping": mapping}
+
+
+@router.put("/config/monarch/account-map")
+async def api_config_monarch_account_map_put(
+    request: Request,
+    profile: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    p = _resolve_profile_query(profile)
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"status": "error", "error": "body must be an object"}, 400,
+        )
+    try:
+        config_store.replace_account_map(user_ctx.db_path, p, body)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok"}
+
+
+@router.get("/config/monarch/category-map")
+async def api_config_monarch_category_map(
+    profile: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    p = _resolve_profile_query(profile)
+    try:
+        mapping = config_store.get_category_map(user_ctx.db_path, p)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok", "mapping": mapping}
+
+
+@router.put("/config/monarch/category-map")
+async def api_config_monarch_category_map_put(
+    request: Request,
+    profile: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    p = _resolve_profile_query(profile)
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"status": "error", "error": "body must be an object"}, 400,
+        )
+    try:
+        config_store.replace_category_map(user_ctx.db_path, p, body)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok"}
+
+
+@router.get("/config/monarch/tag-filters")
+async def api_config_monarch_tag_filters(
+    profile: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import config_store
+    p = _resolve_profile_query(profile)
+    try:
+        return {"status": "ok", "tags": config_store.get_tag_filters(user_ctx.db_path, p)}
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+
+
+@router.put("/config/monarch/tag-filters")
+async def api_config_monarch_tag_filters_put(
+    request: Request,
+    profile: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    """Body: ``{"include": [...], "exclude": [...]}`` — replaces both lists."""
+    from istota.money import config_store
+    p = _resolve_profile_query(profile)
+    body = await request.json()
+    include = body.get("include", []) or []
+    exclude = body.get("exclude", []) or []
+    try:
+        config_store.replace_tag_filters(user_ctx.db_path, p, include, exclude)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok"}
+
+
+@router.get("/config/export")
+async def api_config_export(
+    section: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    """Export DB config as TOML. Returns ``text/plain``."""
+    from istota.money import config_store
+    import tomli_w
+
+    db_path = user_ctx.db_path
+    if section == "invoicing":
+        body = config_store.invoicing_to_toml_dict(
+            config_store.load_invoicing(db_path),
+        )
+        text = tomli_w.dumps(_strip_none(body))
+    elif section == "tax":
+        body = config_store.tax_to_toml_dict(config_store.load_tax(db_path))
+        text = tomli_w.dumps(_strip_none(body))
+    elif section == "monarch":
+        body = config_store.monarch_to_toml_dict(
+            config_store.load_monarch(db_path),
+        )
+        text = tomli_w.dumps(_strip_none(body))
+    else:
+        combined: dict = {}
+        inv = config_store.invoicing_to_toml_dict(
+            config_store.load_invoicing(db_path),
+        )
+        if inv:
+            combined["invoicing"] = inv
+        tax = config_store.tax_to_toml_dict(config_store.load_tax(db_path))
+        if tax.get("tax"):
+            combined["tax"] = tax["tax"]
+        mon = config_store.monarch_to_toml_dict(
+            config_store.load_monarch(db_path),
+        )
+        if mon.get("monarch"):
+            combined["monarch"] = mon["monarch"]
+        text = tomli_w.dumps(_strip_none(combined))
+    return Response(content=text, media_type="text/plain")
+
+
+def _strip_none(value):
+    if isinstance(value, dict):
+        return {k: _strip_none(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_strip_none(v) for v in value]
+    return value
+
+
+@router.post("/config/import")
+async def api_config_import(
+    request: Request,
+    section: str | None = None,
+    dry_run: int = 0,
+    replace: int = 0,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    """Import a TOML payload (multipart or JSON {text: ...}).
+
+    Returns a per-section list of ``STATE: …`` entries. With ``dry_run=1``
+    nothing is written.
+    """
+    import tomli
+    from istota.money import config_store
+
+    text: str | None = None
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        f = form.get("file")
+        if f is not None:
+            text = (await f.read()).decode()
+    if text is None:
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"status": "error", "error": "no payload"}, 400)
+        text = body.get("text") if isinstance(body, dict) else None
+    if not text:
+        return JSONResponse({"status": "error", "error": "no payload"}, 400)
+
+    try:
+        parsed = tomli.loads(text)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {"status": "error", "error": f"unparseable TOML: {exc}"}, 400,
+        )
+
+    sections: list[str] = []
+    if section in ("invoicing", "tax", "monarch"):
+        sections = [section]
+    else:
+        invoicing_keys = (
+            "companies", "clients", "services", "company",
+            "accounting_path", "next_invoice_number", "invoicing",
+        )
+        if any(k in parsed for k in invoicing_keys):
+            sections.append("invoicing")
+        if "tax" in parsed:
+            sections.append("tax")
+        if "monarch" in parsed:
+            sections.append("monarch")
+    if not sections:
+        return JSONResponse(
+            {"status": "error", "error": "no recognized sections"}, 400,
+        )
+
+    from istota.cli_money import (
+        _apply_section_import, _compute_section_diff, _extract_section_data,
+    )
+
+    sections_out = []
+    for sec in sections:
+        section_data = _extract_section_data(parsed, sec)
+        if section_data is None:
+            continue
+        diff = _compute_section_diff(user_ctx, sec, section_data, bool(replace))
+        if not dry_run:
+            _apply_section_import(user_ctx, sec, section_data, bool(replace))
+        sections_out.append({
+            "section": sec,
+            "states": [{"state": s, "message": m} for s, m in diff],
+        })
+
+    return {"status": "ok", "dry_run": bool(dry_run), "sections": sections_out}

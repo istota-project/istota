@@ -156,12 +156,19 @@ def _load_invoicing_config(ctx: Context):
     that PDF writes always land inside the data directory, regardless of what
     ``accounting_path`` points to.
     """
+    from istota.money import config_store
     from istota.money.core.invoicing import parse_invoicing_config
-    if not ctx.invoicing_config_path:
-        raise click.ClickException("No invoicing_config set in config")
-    if not ctx.invoicing_config_path.exists():
-        raise click.ClickException(f"Config not found: {ctx.invoicing_config_path}")
-    config = parse_invoicing_config(ctx.invoicing_config_path)
+    if ctx.db_path is not None and config_store.has_invoicing_data(ctx.db_path):
+        config = config_store.load_invoicing(ctx.db_path)
+    elif ctx.invoicing_config_path and ctx.invoicing_config_path.exists():
+        # Standalone CLI escape hatch: read TOML directly when the DB hasn't
+        # been seeded. In-istota always hits the DB branch above.
+        config = parse_invoicing_config(ctx.invoicing_config_path)
+    else:
+        raise click.ClickException(
+            "No invoicing config available — DB is empty and no "
+            "invoicing.toml found",
+        )
     if ctx.data_dir:
         accounting_path = _resolve(ctx.data_dir, config.accounting_path)
         invoice_output_dir = _resolve(ctx.data_dir, config.invoice_output)
@@ -647,16 +654,24 @@ def _run_monarch_sync(ctx, dry_run: bool, ledger: str | None) -> dict:
     Used by the ``sync-monarch`` command and folded into ``run-scheduled``
     so periodic syncs happen as part of the daily run.
     """
+    from istota.money import config_store
     from istota.money.core.transactions import (
         parse_monarch_config,
         sync_all_profiles,
         sync_monarch as core_sync,
     )
-    if not ctx.monarch_config_path:
-        return {"status": "error", "error": "No monarch_config set in config"}
-    if not ctx.monarch_config_path.exists():
-        return {"status": "error", "error": f"Config not found: {ctx.monarch_config_path}"}
-    config = parse_monarch_config(ctx.monarch_config_path, secrets=ctx.secrets)
+    if ctx.db_path is not None and config_store.has_monarch_data(ctx.db_path):
+        config = config_store.load_monarch(ctx.db_path, secrets=ctx.secrets)
+    elif ctx.monarch_config_path and ctx.monarch_config_path.exists():
+        config = parse_monarch_config(
+            ctx.monarch_config_path, secrets=ctx.secrets,
+        )
+    else:
+        return {
+            "status": "error",
+            "error": "No monarch config available — DB is empty and no "
+                     "monarch.toml found",
+        }
     db_conn = _get_db_conn(ctx)
     try:
         if ledger:

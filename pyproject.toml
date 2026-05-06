@@ -55,6 +55,7 @@ web = [
 ]
 money = [
     "click>=8.0",
+    "tomli-w>=1.0.0",
     "beancount>=3.0.0",
     "beanquery>=0.1.0",
     "weasyprint>=62.0",

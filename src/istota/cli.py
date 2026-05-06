@@ -1343,6 +1343,10 @@ def main():
     kv_ns_parser = kv_subparsers.add_parser("namespaces", help="List namespaces")
     kv_ns_parser.add_argument("-u", "--user", required=True, help="User ID")
 
+    # money (with subparsers)
+    from istota import cli_money
+    cli_money.add_subparser(subparsers)
+
     args = parser.parse_args()
 
     # Load config and setup logging (except for init which doesn't need full config)
@@ -1394,6 +1398,10 @@ def main():
             "namespaces": cmd_kv_namespaces,
         }
         kv_commands[args.kv_action](args)
+    elif args.command == "money":
+        rc = cli_money.dispatch(args, config)
+        if rc:
+            sys.exit(rc)
     else:
         commands[args.command](args)
 
