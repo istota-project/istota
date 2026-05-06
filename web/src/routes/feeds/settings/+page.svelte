@@ -1,18 +1,22 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { base } from '$app/paths';
 	import {
 		getFeedsConfig,
 		putFeedsConfig,
 		importOpml,
 		exportOpmlUrl,
 		refreshFeeds,
+		getModuleServices,
 		type FeedsConfigPayload,
 		type FeedsConfigFeed,
 		type FeedsConfigCategory,
 		type FeedsDiagnostics,
 		type FeedsFeedState,
+		type ServiceCard as ServiceCardData,
 	} from '$lib/api';
 	import { Button, Modal } from '$lib/components/ui';
+	import { ServiceCard } from '$lib/components/settings';
 
 	let loading = $state(true);
 	let saving = $state(false);
@@ -28,6 +32,8 @@
 	});
 	let diagnostics: FeedsDiagnostics | null = $state(null);
 	let feedStateByUrl: Record<string, FeedsFeedState> = $state({});
+	let moduleServices: ServiceCardData[] = $state([]);
+	let moduleEnabled = $state(true);
 
 	// Track whether the loaded config has been mutated (dirty flag).
 	let initialJson = $state('');
@@ -51,6 +57,14 @@
 		loading = true;
 		error = '';
 		try {
+			// Module endpoint first — if the user has feeds disabled we skip
+			// the heavier feeds.toml read and render a banner instead.
+			const mod = await getModuleServices('feeds');
+			moduleEnabled = mod.module_enabled;
+			moduleServices = mod.services;
+			if (!moduleEnabled) {
+				return;
+			}
 			const data = await getFeedsConfig();
 			config = data.config;
 			diagnostics = data.diagnostics;
@@ -62,6 +76,16 @@
 			error = e instanceof Error ? e.message : 'Failed to load settings';
 		} finally {
 			loading = false;
+		}
+	}
+
+	async function reloadServices() {
+		try {
+			const mod = await getModuleServices('feeds');
+			moduleServices = mod.services;
+			moduleEnabled = mod.module_enabled;
+		} catch {
+			// non-fatal — the panel just won't update its configured state
 		}
 	}
 
@@ -314,6 +338,12 @@
 
 	{#if loading}
 		<div class="placeholder">Loading…</div>
+	{:else if !moduleEnabled}
+		<div class="banner info">
+			Feeds module is disabled. Enable it in
+			<a href="{base}/settings">Settings → Preferences</a> to manage
+			subscriptions.
+		</div>
 	{:else}
 		{#if diagnostics}
 			<section class="card">
@@ -550,17 +580,9 @@
 			/>
 		</section>
 
-		<section class="card">
-			<h2>Tumblr API</h2>
-			<p class="hint">
-				The Tumblr API key for <code>tumblr:</code> sources is read from the
-				<code>extra.tumblr_api_key</code> field on the user's
-				<code>[[resources]] type = "feeds"</code> entry, with
-				<code>TUMBLR_API_KEY</code> as a fallback. To rotate it, edit
-				<code>config/users/&lt;user&gt;.toml</code> on the server. This UI
-				doesn't store credentials.
-			</p>
-		</section>
+		{#each moduleServices as svc (svc.service)}
+			<ServiceCard service={svc} onChanged={reloadServices} />
+		{/each}
 	{/if}
 </div>
 

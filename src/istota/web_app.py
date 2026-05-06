@@ -441,23 +441,26 @@ api_router = APIRouter(prefix="/istota/api")
 
 
 def _user_has_feeds(username: str) -> bool:
-    """True if the user has a ``[[resources]] type = "feeds"`` entry."""
+    """True if the feeds module is enabled for the user (default-on)."""
     if not _config:
         return False
-    uc = _config.get_user(username)
-    if not uc:
-        return False
-    return any(r.type == "feeds" for r in uc.resources)
+    return _config.is_module_enabled(username, "feeds")
 
 
 def _user_has_money(username: str) -> bool:
-    """True if the user has a money/moneyman resource configured."""
+    """True if the money module is enabled for the user (default-on)."""
     if not _config:
         return False
-    uc = _config.get_user(username)
-    if not uc:
+    return _config.is_module_enabled(username, "money")
+
+
+def _user_has_location(username: str) -> bool:
+    """True if the location module is enabled for the user (default-on)."""
+    if not _config:
         return False
-    return any(r.type in ("money", "moneyman") for r in uc.resources)
+    if not _config.location.enabled:
+        return False
+    return _config.is_module_enabled(username, "location")
 
 
 def _has_google_token(username: str) -> bool:
@@ -509,7 +512,7 @@ async def api_me(user: dict = Depends(_require_api_auth)):
     }
     if _config:
         features["feeds"] = _user_has_feeds(username)
-        features["location"] = _config.location.enabled
+        features["location"] = _user_has_location(username)
         features["money"] = _user_has_money(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
         if _config.google_workspace.enabled:
@@ -831,18 +834,27 @@ def _admin_modules_section() -> dict:
         modules["money"] = money
 
     if _config.location.enabled:
-        modules["location"] = _admin_module_location()
+        location_users = sum(
+            1 for uid in _config.users
+            if _config.is_module_enabled(uid, "location")
+        )
+        if location_users:
+            loc = _admin_module_location()
+            loc["users_configured"] = location_users
+            modules["location"] = loc
 
     return modules
 
 
 def _admin_module_feeds() -> dict | None:
-    # Count users with a feeds resource configured even if we can't resolve
+    # Count users with the feeds module enabled even if we can't resolve
     # their workspace (e.g. ``nextcloud_mount_path`` unset on docker-compose
     # deploys). Returning ``None`` would silently hide a configured-but-
     # unreachable subsystem from admins.
-    configured = sum(1 for u in _config.users.values()
-                     if any(r.type == "feeds" for r in u.resources))
+    configured = sum(
+        1 for uid in _config.users
+        if _config.is_module_enabled(uid, "feeds")
+    )
     if not configured:
         return None
 
@@ -907,8 +919,10 @@ def _admin_module_feeds() -> dict | None:
 
 
 def _admin_module_money() -> dict | None:
-    users_with = sum(1 for u in _config.users.values()
-                     if any(r.type in ("money", "moneyman") for r in u.resources))
+    users_with = sum(
+        1 for uid in _config.users
+        if _config.is_module_enabled(uid, "money")
+    )
     if not users_with:
         return None
     return {"users_configured": users_with}
@@ -967,47 +981,100 @@ async def google_disconnect(
 # values are never returned — the UI only sees a "configured" badge per
 # (service, key) pair.
 
-# Schema for what credential keys each service expects. The UI uses this to
-# render forms; the backend uses it for validation. Adding a new service
-# means adding an entry here plus optional connectivity checks.
-_SERVICE_SCHEMA: dict[str, dict] = {
-    "monarch": {
-        "label": "Monarch Money",
-        "resource_types": ("money", "monarch", "moneyman"),
-        "fields": [
-            {"key": "email", "label": "Email", "type": "email"},
-            {"key": "password", "label": "Password", "type": "password"},
-            {"key": "session_token", "label": "Session token (optional)", "type": "password"},
-        ],
-    },
+# ``_CONNECTED_SERVICE_SCHEMA`` powers the /settings page Connected services
+# section: cross-cutting credentials that aren't owned by any single module.
+# Each entry carries ``used_by`` so the card can show "Used by: <skill>" —
+# this is purely informational; credential availability gates execution at
+# the skill proxy, not here.
+_CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
     "karakeep": {
-        # base_url stays in config.toml — it's a service endpoint, not a
-        # credential. The web UI only manages the API key.
         "label": "Karakeep",
-        "resource_types": ("karakeep",),
+        "used_by": ("bookmarks",),
         "fields": [
-            {"key": "api_key", "label": "API key", "type": "password"},
+            {"key": "base_url", "label": "Base URL", "type": "url"},
+            {"key": "api_key",  "label": "API key",  "type": "password"},
         ],
     },
+    "google_workspace": {
+        "label": "Google Workspace",
+        "used_by": ("google_workspace",),
+        # OAuth flow lives at /istota/google/connect — UI shows a Connect
+        # button instead of fields when this is set.
+        "oauth": True,
+        "fields": [],
+    },
+}
+
+# ``_MODULE_SERVICE_SCHEMA`` powers the per-module settings pages
+# (/feeds/settings, /money/settings, /location/settings). Each module owns
+# its own subset of services so the main /settings page stays focused on
+# generic credentials. Reachable via /settings/module-services/{module}.
+_MODULE_SERVICE_SCHEMA: dict[str, dict[str, dict]] = {
     "feeds": {
-        "label": "Feeds (Tumblr)",
-        "resource_types": ("feeds",),
-        "fields": [
-            {"key": "tumblr_api_key", "label": "Tumblr API key (optional)", "type": "password"},
-        ],
+        "feeds": {
+            "label": "Feeds (Tumblr)",
+            "used_by": ("feeds",),
+            "fields": [
+                {"key": "tumblr_api_key", "label": "Tumblr API key (optional)",
+                 "type": "password"},
+            ],
+        },
+    },
+    "money": {
+        "monarch": {
+            "label": "Monarch Money",
+            "used_by": ("money",),
+            "fields": [
+                {"key": "email",         "label": "Email",                     "type": "email"},
+                {"key": "password",      "label": "Password",                  "type": "password"},
+                {"key": "session_token", "label": "Session token (optional)",  "type": "password"},
+            ],
+        },
+    },
+    "location": {
+        "overland": {
+            "label": "Overland GPS",
+            "used_by": ("location",),
+            "fields": [
+                {"key": "ingest_token", "label": "Ingest token", "type": "password"},
+            ],
+        },
     },
 }
 
 
-def _service_status(
-    service: str, schema: dict, configured_keys: set[str], user_resource_types: set[str],
-) -> str:
-    """Compute card status: configured / partial / missing / unavailable."""
-    if not (set(schema["resource_types"]) & user_resource_types):
-        return "unavailable"  # user has no resource declaration for this service
-    required = {f["key"] for f in schema["fields"] if "optional" not in f.get("label", "").lower()}
+def _all_known_services() -> dict[str, dict]:
+    """Union of connected + module-owned service schemas.
+
+    Used by the secret PUT/DELETE handlers so they accept module-owned
+    services (e.g. ``monarch``, ``overland``) even though those don't show
+    up on /settings/services. The frontend uses the per-module endpoint to
+    resolve the schema for those secrets.
+    """
+    out: dict[str, dict] = dict(_CONNECTED_SERVICE_SCHEMA)
+    for mod_services in _MODULE_SERVICE_SCHEMA.values():
+        for service, schema in mod_services.items():
+            # Module-service schemas have no resource_types — they're gated
+            # by is_module_enabled at request time, not by the schema.
+            out[service] = schema
+    return out
+
+
+def _service_status(schema: dict, configured_keys: set[str]) -> str:
+    """Compute card status: configured / partial / missing.
+
+    A field is "required" unless its label contains the word "optional".
+    Status:
+    * ``configured`` — every required key is set.
+    * ``partial``    — some but not all required keys set.
+    * ``missing``    — no required keys set.
+    """
+    required = {
+        f["key"] for f in schema["fields"]
+        if "optional" not in f.get("label", "").lower()
+    }
     if not required:
-        # All-optional services are "configured" once any key is set, else "missing".
+        # All-optional services: any key set → configured, else missing.
         return "configured" if configured_keys else "missing"
     if required.issubset(configured_keys):
         return "configured"
@@ -1016,12 +1083,40 @@ def _service_status(
     return "missing"
 
 
+def _build_service_card(
+    service: str,
+    schema: dict,
+    stored: dict[str, list[dict]],
+    *,
+    extra: dict | None = None,
+) -> dict:
+    configured = {entry["key"] for entry in stored.get(service, [])}
+    last_updated = max(
+        (entry["updated_at"] or "" for entry in stored.get(service, [])),
+        default="",
+    ) or None
+    card = {
+        "service": service,
+        "label": schema["label"],
+        "status": _service_status(schema, configured),
+        "fields": schema["fields"],
+        "configured_keys": sorted(configured),
+        "last_updated": last_updated,
+        "used_by": list(schema.get("used_by", ())),
+        "oauth": bool(schema.get("oauth", False)),
+    }
+    if extra:
+        card.update(extra)
+    return card
+
+
 @api_router.get("/settings/services")
 async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
-    """Per-service status cards for the current user.
+    """Connected services for the current user.
 
-    Returns ``{"services": [{"service": ..., "label": ..., "status": ...,
-    "fields": [...], "configured_keys": [...]}]}``. No plaintext values.
+    Returns only services in ``_CONNECTED_SERVICE_SCHEMA`` — module-specific
+    services live on their per-module settings pages and are reachable via
+    ``/settings/module-services/{module}``.
     """
     from . import secrets_store
 
@@ -1029,28 +1124,91 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
         return {"services": []}
 
     username = user["username"]
-    uc = _config.get_user(username)
-    user_resource_types: set[str] = (
-        {r.type for r in uc.resources} if uc else set()
-    )
-
     stored = secrets_store.list_user_services(_config.db_path, username)
 
-    cards = []
-    for service, schema in _SERVICE_SCHEMA.items():
-        configured = {entry["key"] for entry in stored.get(service, [])}
-        cards.append({
-            "service": service,
-            "label": schema["label"],
-            "status": _service_status(service, schema, configured, user_resource_types),
-            "fields": schema["fields"],
-            "configured_keys": sorted(configured),
-            "last_updated": max(
-                (entry["updated_at"] or "" for entry in stored.get(service, [])),
-                default=None,
-            ) or None,
-        })
+    cards: list[dict] = []
+    for service, schema in _CONNECTED_SERVICE_SCHEMA.items():
+        extra: dict = {}
+        if service == "google_workspace":
+            extra["connected"] = _has_google_token(username)
+            extra["enabled"] = bool(
+                _config.google_workspace and _config.google_workspace.enabled
+            )
+        cards.append(_build_service_card(service, schema, stored, extra=extra))
     return {"services": cards}
+
+
+@api_router.get("/settings/modules")
+async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
+    """Module registry + per-user enabled state.
+
+    Modules are on by default. The web UI uses this to render the
+    "Disabled modules" multiselect in /settings → Preferences and to gate
+    each module's settings page with a banner.
+    """
+    from .modules import MODULE_NAMES
+
+    if not _config:
+        modules = sorted(MODULE_NAMES)
+        return {
+            "modules": modules,
+            "disabled": [],
+            "enabled_for_user": {m: True for m in modules},
+        }
+
+    username = user["username"]
+    modules = sorted(MODULE_NAMES)
+    uc = _config.get_user(username)
+    disabled = list(uc.disabled_modules) if uc else []
+    return {
+        "modules": modules,
+        "disabled": [m for m in disabled if m in MODULE_NAMES],
+        "enabled_for_user": {
+            m: _config.is_module_enabled(username, m) for m in modules
+        },
+    }
+
+
+@api_router.get("/settings/module-services/{module}")
+async def settings_module_services(
+    module: str,
+    user: dict = Depends(_require_api_auth),
+) -> dict:
+    """Service cards belonging to a single module's settings page.
+
+    Returns ``{"module": ..., "module_enabled": bool, "services": [...]}``.
+    Unknown module names return 404. The status pills here use the same
+    rules as /settings/services; ``module_enabled=false`` is the signal for
+    the module page to render its "module disabled" banner instead of the
+    config UI.
+    """
+    from fastapi import HTTPException
+    from . import secrets_store
+    from .modules import MODULE_NAMES
+
+    if module not in MODULE_NAMES:
+        raise HTTPException(status_code=404, detail=f"Unknown module: {module}")
+
+    schemas = _MODULE_SERVICE_SCHEMA.get(module, {})
+    if not _config:
+        return {
+            "module": module,
+            "module_enabled": True,
+            "services": [],
+        }
+
+    username = user["username"]
+    enabled = _config.is_module_enabled(username, module)
+    stored = secrets_store.list_user_services(_config.db_path, username)
+    cards = [
+        _build_service_card(service, schema, stored)
+        for service, schema in schemas.items()
+    ]
+    return {
+        "module": module,
+        "module_enabled": enabled,
+        "services": cards,
+    }
 
 
 @api_router.put("/settings/secrets/{service}/{key}")
@@ -1069,7 +1227,7 @@ async def settings_set_secret(
     from . import secrets_store
     from fastapi import HTTPException
 
-    schema = _SERVICE_SCHEMA.get(service)
+    schema = _all_known_services().get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
     valid_keys = {f["key"] for f in schema["fields"]}
@@ -1108,7 +1266,7 @@ async def settings_delete_secret(
     from . import secrets_store
     from fastapi import HTTPException
 
-    schema = _SERVICE_SCHEMA.get(service)
+    schema = _all_known_services().get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
     valid_keys = {f["key"] for f in schema["fields"]}
@@ -1140,6 +1298,7 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "email_addresses":        {"type": "list[str]"},
     "trusted_email_senders":  {"type": "list[str]"},
     "disabled_skills":        {"type": "list[str]"},
+    "disabled_modules":       {"type": "list[str]"},
     "max_foreground_workers": {"type": "int"},
     "max_background_workers": {"type": "int"},
     "site_enabled":           {"type": "bool"},
@@ -1170,6 +1329,11 @@ def _coerce_profile_value(field: str, value: object) -> object:
             v = v.strip()
             if v:
                 out.append(v)
+        if field == "disabled_modules":
+            from .modules import MODULE_NAMES
+            for v in out:
+                if v not in MODULE_NAMES:
+                    raise ValueError(f"unknown module: {v}")
         return out
     if t == "int":
         try:
@@ -1213,6 +1377,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "log_channel": profile.log_channel,
         "alerts_channel": profile.alerts_channel,
         "disabled_skills": profile.disabled_skills,
+        "disabled_modules": profile.disabled_modules,
         "max_foreground_workers": profile.max_foreground_workers,
         "max_background_workers": profile.max_background_workers,
         "site_enabled": profile.site_enabled,
@@ -1284,11 +1449,6 @@ _RESOURCE_TYPE_SCHEMA: dict[str, dict] = {
     "notes_folder":  {"label": "Notes folder",             "needs_path": True,  "permissions": ("read", "readwrite")},
     "email_folder":  {"label": "Email folder (IMAP)",      "needs_path": True,  "permissions": ("read",)},
     "reminders_file":{"label": "Reminders (markdown)",     "needs_path": True,  "permissions": ("read", "readwrite")},
-    "feeds":         {"label": "Feeds (RSS/Atom)",         "needs_path": False, "permissions": ("read",)},
-    "money":         {"label": "Money (beancount)",        "needs_path": False, "permissions": ("read",)},
-    "overland":      {"label": "Location (Overland GPS)",  "needs_path": False, "permissions": ("read",)},
-    "karakeep":      {"label": "Karakeep bookmarks",       "needs_path": False, "permissions": ("read",)},
-    "monarch":       {"label": "Monarch Money",            "needs_path": False, "permissions": ("read",)},
 }
 
 
@@ -2205,6 +2365,34 @@ def _build_trip(pings: list[dict]) -> dict:
         "ping_count": len(pings),
         "activity_type": dominant,
         "max_speed": round(max_speed, 1) if max_speed else None,
+    }
+
+
+@api_router.get("/location/settings-info")
+async def api_location_settings_info(user: dict = Depends(_require_api_auth)):
+    """Non-secret bits the /location/settings page needs to render.
+
+    Returns the webhook URL the user should paste into Overland — the
+    backend never echoes the ingest_token back, so the URL contains a
+    ``<token>`` placeholder. Also exposes the instance-wide place-detection
+    knobs as read-only context.
+    """
+    if not _config:
+        return {"webhook_url": "", "place_detection": {}}
+    hostname = _config.site.hostname or ""
+    scheme = "https" if hostname else ""
+    webhook_url = (
+        f"{scheme}://{hostname}/webhooks/location?token=<token>"
+        if hostname else "/webhooks/location?token=<token>"
+    )
+    loc = _config.location
+    return {
+        "webhook_url": webhook_url,
+        "module_enabled": _user_has_location(user["username"]),
+        "place_detection": {
+            "accuracy_threshold_m": loc.accuracy_threshold_m,
+            "visit_exit_minutes": loc.visit_exit_minutes,
+        },
     }
 
 

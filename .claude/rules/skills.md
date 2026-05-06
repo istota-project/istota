@@ -126,14 +126,16 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `notes` | — | note, save, write, markdown | notes_folder | — |
 | `developer` | — | git, gitlab, repo, repository, commit, branch, MR, ... | — | — |
 | `location` | — | location, gps, where, place, tracking, ... | — | — |
-| `bookmarks` | — | bookmark, karakeep, save, read later, ... | karakeep | — |
+| `bookmarks` | — | bookmark, karakeep, save, read later, ... | — | — |
 | `website` | — | website, site, publish, blog, ... | — | — |
-| `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe, opml | feeds | — |
+| `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe, opml | — | — |
 | `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws | — | — |
-| `money` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | money (legacy `moneyman` accepted) | — |
+| `money` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | — | — |
 | `untrusted_input` | — | — | — | — |
 
 Note: `money` is the sole accounting skill. It runs in-process via the vendored `money` package (no subprocess, no HTTP).
+
+**Module-shaped skills (`feeds`, `money`, `bookmarks`, `location`)** dropped their `resource_types` fields with Phase 1 of the modules / connected services refactor. Selection is keyword-only — the credential / module gate enforced by the proxy + the in-process loader (`feeds.resolve_for_user`, `money.resolve_for_user`) decides whether the skill can actually do anything. The bookmarks `env` block reads both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` from the encrypted `secrets` table via the new `from: "secret"` env-spec source.
 
 `untrusted_input` is a doc-only companion skill — no triggers, no source_types, never selected directly. It loads via `companion_skills` declarations on the seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`) so its rules ride along whenever a task is processing content from outside the trust boundary. Paired with `sensitive_actions`: outbound rules in that one, inbound-reading rules here, per-action authorization principle stated in both.
 

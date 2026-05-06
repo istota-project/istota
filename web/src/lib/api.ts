@@ -489,6 +489,10 @@ export interface ServiceCard {
 	fields: SettingsField[];
 	configured_keys: string[];
 	last_updated: string | null;
+	used_by?: string[];
+	oauth?: boolean;
+	connected?: boolean;  // google_workspace OAuth state
+	enabled?: boolean;    // google_workspace module flag
 }
 
 export interface ServicesResponse {
@@ -497,6 +501,43 @@ export interface ServicesResponse {
 
 export async function getSettingsServices(): Promise<ServicesResponse> {
 	return apiFetch<ServicesResponse>('/settings/services');
+}
+
+// --- modules + per-module services ---
+
+export interface ModulesResponse {
+	modules: string[];
+	disabled: string[];
+	enabled_for_user: Record<string, boolean>;
+}
+
+export async function getModules(): Promise<ModulesResponse> {
+	return apiFetch<ModulesResponse>('/settings/modules');
+}
+
+export interface ModuleServicesResponse {
+	module: string;
+	module_enabled: boolean;
+	services: ServiceCard[];
+}
+
+export async function getModuleServices(
+	module: string,
+): Promise<ModuleServicesResponse> {
+	return apiFetch<ModuleServicesResponse>(`/settings/module-services/${module}`);
+}
+
+export interface LocationSettingsInfo {
+	webhook_url: string;
+	module_enabled: boolean;
+	place_detection: {
+		accuracy_threshold_m: number;
+		visit_exit_minutes: number;
+	};
+}
+
+export async function getLocationSettingsInfo(): Promise<LocationSettingsInfo> {
+	return apiFetch<LocationSettingsInfo>('/location/settings-info');
 }
 
 export async function setSecret(
@@ -532,6 +573,7 @@ export interface UserProfile {
 	log_channel: string;
 	alerts_channel: string;
 	disabled_skills: string[];
+	disabled_modules: string[];
 	max_foreground_workers: number;
 	max_background_workers: number;
 	site_enabled: boolean;

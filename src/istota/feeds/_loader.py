@@ -3,9 +3,14 @@
 Single entry point for the web routes, scheduler hooks, and the CLI/skill
 facade. Mirrors :mod:`istota.money._loader`.
 
-Only "workspace mode" is supported — there's no legacy multi-user config
-file to migrate from. Users either have a ``[[resources]] type = "feeds"``
-entry that points the loader at their workspace, or they don't.
+Feeds is a "module" in the modules/connected-services taxonomy: on by
+default for every configured user, gated by
+``Config.is_module_enabled(user_id, "feeds")``. The user's workspace path is
+derived from ``nextcloud_mount_path`` + ``get_user_bot_path``; per-user
+overrides (``data_dir``, ``db_path``, …) and the Tumblr API key live in the
+encrypted secrets table once Phase 2 of the refactor lands. For now the
+loader still consults the secrets table as the only source of
+``tumblr_api_key``.
 """
 
 from __future__ import annotations
@@ -16,9 +21,6 @@ from istota.feeds.models import FeedsContext
 from istota.feeds.workspace import synthesize_feeds_context
 
 
-_FEEDS_RESOURCE_TYPES = ("feeds",)
-
-
 class UserNotFoundError(Exception):
     """The user has no usable feeds configuration."""
 
@@ -26,64 +28,59 @@ class UserNotFoundError(Exception):
 def resolve_for_user(user_id: str, istota_config) -> FeedsContext:
     """Build a feeds context for ``user_id``.
 
-    Resolution order, in line with the money loader:
-
-    1. The user's ``[[resources]] type = "feeds"`` entry. ``extra`` keys
-       (``data_dir``, ``config_dir``, ``db_path``, ``config_path``,
-       ``tumblr_api_key``) override the workspace defaults.
-    2. The workspace root is computed as
-       ``{nextcloud_mount}/{get_user_bot_path(user_id, bot_dir_name)}``.
+    Gated on ``Config.is_module_enabled(user_id, "feeds")``. The workspace
+    root is always ``{nextcloud_mount}/{get_user_bot_path(...)}``.
     """
     if istota_config is None:
         raise UserNotFoundError("istota config not loaded")
+
+    if not istota_config.is_module_enabled(user_id, "feeds"):
+        raise UserNotFoundError(f"feeds module disabled for '{user_id}'")
 
     uc = istota_config.get_user(user_id)
     if not uc:
         raise UserNotFoundError(f"user '{user_id}' not in istota config")
 
-    for r in uc.resources:
-        if r.type not in _FEEDS_RESOURCE_TYPES:
-            continue
-
-        extra = getattr(r, "extra", {}) or {}
-
-        mount = getattr(istota_config, "nextcloud_mount_path", None)
-        if not mount:
-            raise UserNotFoundError(
-                f"feeds resource for '{user_id}' has no nextcloud mount "
-                "configured; set nextcloud_mount_path or override "
-                "data_dir/db_path on the resource"
-            )
-
-        from istota.storage import get_user_bot_path
-
-        workspace = Path(mount) / get_user_bot_path(
-            user_id, istota_config.bot_dir_name,
-        ).lstrip("/")
-
-        return synthesize_feeds_context(
-            user_id,
-            workspace,
-            data_dir=Path(extra["data_dir"]) if extra.get("data_dir") else None,
-            config_dir=Path(extra["config_dir"]) if extra.get("config_dir") else None,
-            db_path=Path(extra["db_path"]) if extra.get("db_path") else None,
-            config_path=(
-                Path(extra["config_path"]) if extra.get("config_path") else None
-            ),
-            tumblr_api_key=str(extra.get("tumblr_api_key") or ""),
+    mount = getattr(istota_config, "nextcloud_mount_path", None)
+    if not mount:
+        raise UserNotFoundError(
+            f"feeds module for '{user_id}' has no nextcloud mount configured"
         )
 
-    raise UserNotFoundError(f"no feeds resource for user '{user_id}'")
+    from istota.storage import get_user_bot_path
+
+    workspace = Path(mount) / get_user_bot_path(
+        user_id, istota_config.bot_dir_name,
+    ).lstrip("/")
+
+    tumblr_api_key = ""
+    try:
+        from istota import secrets_store  # noqa: PLC0415
+
+        db_path = getattr(istota_config, "db_path", None)
+        if db_path is not None:
+            stored = secrets_store.get_secret(
+                db_path, user_id, "feeds", "tumblr_api_key",
+            )
+            if stored:
+                tumblr_api_key = stored
+    except Exception:  # noqa: BLE001
+        # Best-effort — fall back to empty key if the secrets store is
+        # unavailable (no key, no cryptography, etc.).
+        pass
+
+    return synthesize_feeds_context(
+        user_id,
+        workspace,
+        tumblr_api_key=tumblr_api_key,
+    )
 
 
 def list_users(istota_config) -> list[str]:
-    """Istota usernames with a feeds resource configured."""
+    """Istota usernames with the feeds module enabled."""
     if istota_config is None:
         return []
-    out: list[str] = []
-    for username, uc in (istota_config.users or {}).items():
-        for r in uc.resources:
-            if r.type in _FEEDS_RESOURCE_TYPES:
-                out.append(username)
-                break
-    return out
+    return [
+        uid for uid in (istota_config.users or {})
+        if istota_config.is_module_enabled(uid, "feeds")
+    ]

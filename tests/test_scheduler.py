@@ -1034,7 +1034,8 @@ class TestSyncCronFiles:
 
         mount = tmp_path / "mount"
         mount.mkdir()
-        user = UserConfig(timezone="UTC")
+        # Disable on-by-default modules so the test only sees its own job.
+        user = UserConfig(timezone="UTC", disabled_modules=["feeds", "money", "location"])
         config = Config(
             db_path=db_path, users={"alice": user},
             nextcloud_mount_path=mount,
@@ -1072,7 +1073,8 @@ class TestSyncCronFiles:
 
         mount = tmp_path / "mount"
         mount.mkdir()
-        user = UserConfig(timezone="UTC")
+        # Disable on-by-default modules so the test only checks user's own jobs.
+        user = UserConfig(timezone="UTC", disabled_modules=["feeds", "money", "location"])
         config = Config(
             db_path=db_path, users={"alice": user},
             nextcloud_mount_path=mount,

@@ -13,7 +13,7 @@ class EnvSpec:
     """
 
     var: str
-    source: str  # "config", "resource", "resource_json", "user_resource_config", "template_file"
+    source: str  # "config", "resource", "resource_json", "user_resource_config", "template_file", "user_id", "secret"
     # For source="config"
     config_path: str = ""
     when: str = ""  # guard: dotted config path that must be truthy
@@ -27,6 +27,9 @@ class EnvSpec:
     # For source="template_file"
     template: str = ""
     user_path_fn: str = ""
+    # For source="secret"
+    service: str = ""
+    key: str = ""
 
 
 @dataclass

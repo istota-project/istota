@@ -203,9 +203,10 @@ class TestImport:
         secrets_store.import_from_user_configs(db_path, users)
         assert secrets_store.get_secret(db_path, "alice", "monarch", "email") == "set-via-web"
 
-    def test_imports_karakeep_api_key_only(self, db_path, secret_key_env):
-        """base_url is a service endpoint, not a credential — only api_key
-        flows into the encrypted store. base_url stays in TOML."""
+    def test_imports_karakeep_base_url_and_api_key(self, db_path, secret_key_env):
+        """Both endpoint and key now flow into the encrypted store — once
+        the karakeep resource type is retired by the modules refactor, the
+        secrets table is the only place these values live."""
         uc = UserConfig(
             display_name="Alice", timezone="UTC",
             resources=[
@@ -218,9 +219,26 @@ class TestImport:
             ],
         )
         n = secrets_store.import_from_user_configs(db_path, {"alice": uc})
-        assert n == 1
+        assert n == 2
         assert secrets_store.get_secret(db_path, "alice", "karakeep", "api_key") == "abcd"
-        assert secrets_store.get_secret(db_path, "alice", "karakeep", "base_url") is None
+        assert secrets_store.get_secret(db_path, "alice", "karakeep", "base_url") == "https://k.example"
+
+    def test_imports_overland_ingest_token(self, db_path, secret_key_env):
+        """Overland ingest_token migrates from `[[resources]] extras` into
+        the secrets table — webhook_receiver scans the table at startup."""
+        uc = UserConfig(
+            display_name="Alice", timezone="UTC",
+            resources=[
+                ResourceConfig(
+                    type="overland",
+                    name="GPS",
+                    extra={"ingest_token": "tok-xyz"},
+                ),
+            ],
+        )
+        n = secrets_store.import_from_user_configs(db_path, {"alice": uc})
+        assert n == 1
+        assert secrets_store.get_secret(db_path, "alice", "overland", "ingest_token") == "tok-xyz"
 
     def test_skips_when_key_missing(self, db_path):
         """No-op when ISTOTA_SECRET_KEY isn't set — best-effort, falls back to

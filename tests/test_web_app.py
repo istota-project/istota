@@ -35,12 +35,15 @@ from istota.config import (
 def _make_config(tmp_path, users=None, mount_path=None, web=None):
     """Build a Config for testing."""
     if users is None:
+        # Modules (feeds, money, location) are on by default. Bob explicitly
+        # opts out of feeds via ``disabled_modules`` so the
+        # "feeds=False" assertion in TestApiMe still has a way to fire.
         users = {
-            "alice": UserConfig(
-                display_name="Alice",
-                resources=[ResourceConfig(type="feeds", name="Feeds")],
+            "alice": UserConfig(display_name="Alice"),
+            "bob": UserConfig(
+                display_name="Bob",
+                disabled_modules=["feeds", "money", "location"],
             ),
-            "bob": UserConfig(display_name="Bob"),
         }
     return Config(
         nextcloud_mount_path=Path(mount_path) if mount_path else tmp_path / "mount",
@@ -786,7 +789,10 @@ class TestSettingsEndpoints:
                                        base_url="https://k.example", api_key=""),
                     ],
                 ),
-                "bob": UserConfig(display_name="Bob"),  # no money/karakeep resources
+                "bob": UserConfig(
+                    display_name="Bob",
+                    disabled_modules=["feeds", "money", "location"],
+                ),
             },
         )
         cfg.db_path = self._db_path
@@ -800,32 +806,81 @@ class TestSettingsEndpoints:
         resp = await client.get("/istota/callback", follow_redirects=False)
         return resp.cookies
 
-    async def test_services_returns_cards(self, tmp_path, client, app):
+    async def test_services_returns_only_connected_cards(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         cookies = await self._login_alice(client, app)
         resp = await client.get("/istota/api/settings/services", cookies=cookies)
         assert resp.status_code == 200
         services = {s["service"]: s for s in resp.json()["services"]}
-        # money resource → monarch card available
-        assert services["monarch"]["status"] in ("missing", "partial", "configured")
-        # karakeep resource present
+        # Connected services only — karakeep + google_workspace (OAuth).
+        # Module-owned services (monarch, feeds, overland) live on the
+        # per-module endpoint and must NOT leak into /settings/services.
+        assert "karakeep" in services
+        assert "monarch" not in services
+        assert "feeds" not in services
+        assert "overland" not in services
         assert services["karakeep"]["status"] in ("missing", "partial", "configured")
+        assert services["karakeep"]["used_by"] == ["bookmarks"]
 
-    async def test_services_unavailable_when_no_resource(self, tmp_path, client, app):
+    async def test_module_services_endpoint(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
-        # Bob has no resources at all.
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.get(
+            "/istota/api/settings/module-services/money", cookies=cookies,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["module"] == "money"
+        assert body["module_enabled"] is True
+        services = {s["service"]: s for s in body["services"]}
+        assert "monarch" in services
+        assert services["monarch"]["used_by"] == ["money"]
+
+        resp = await client.get(
+            "/istota/api/settings/module-services/location", cookies=cookies,
+        )
+        body = resp.json()
+        services = {s["service"]: s for s in body["services"]}
+        assert "overland" in services
+
+        # Unknown module → 404.
+        resp = await client.get(
+            "/istota/api/settings/module-services/bogus", cookies=cookies,
+        )
+        assert resp.status_code == 404
+
+    async def test_module_services_disabled_module(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        # Bob has every module disabled in the shared fixture.
+        _patch_app(cfg)
         import istota.web_app as mod
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "userinfo": {"preferred_username": "bob", "name": "Bob"},
         })
         resp = await client.get("/istota/callback", follow_redirects=False)
         cookies = resp.cookies
-        resp = await client.get("/istota/api/settings/services", cookies=cookies)
-        services = {s["service"]: s for s in resp.json()["services"]}
-        assert services["monarch"]["status"] == "unavailable"
-        assert services["karakeep"]["status"] == "unavailable"
+        resp = await client.get(
+            "/istota/api/settings/module-services/money", cookies=cookies,
+        )
+        body = resp.json()
+        assert body["module_enabled"] is False
+        # Schema is still served so the page can render the banner + a
+        # placeholder list, but the user is meant to see the banner first.
+
+    async def test_modules_endpoint(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/settings/modules", cookies=cookies)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body["modules"]) == {"feeds", "money", "location"}
+        # Alice has no disabled_modules in the fixture.
+        assert body["disabled"] == []
+        assert body["enabled_for_user"]["feeds"] is True
 
     async def test_services_never_returns_plaintext(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
@@ -1108,7 +1163,11 @@ class TestResourceEndpoints:
             users={
                 "alice": UserConfig(
                     display_name="Alice",
-                    resources=[ResourceConfig(type="feeds", name="Feeds (TOML)")],
+                    resources=[
+                        ResourceConfig(
+                            type="folder", path="/Notes-toml", name="Notes (TOML)",
+                        ),
+                    ],
                 ),
             },
         )
@@ -1137,9 +1196,14 @@ class TestResourceEndpoints:
         assert resp.status_code == 200
         body = resp.json()
         types = {t["type"] for t in body["types"]}
-        assert "calendar" in types and "feeds" in types
+        # The modules refactor pruned `feeds`, `money`, `overland`, etc.
+        # from the resource picker — those flow through the modules /
+        # connected services paths now. The picker only exposes true
+        # path/identifier resources.
+        assert "calendar" in types and "folder" in types
+        assert "feeds" not in types
         managed = {(r["type"], r["managed"]) for r in body["resources"]}
-        assert ("feeds", "config") in managed
+        assert ("folder", "config") in managed
         assert ("folder", "db") in managed
 
     async def test_add_resource(self, tmp_path, client, app):
@@ -1185,7 +1249,11 @@ class TestResourceEndpoints:
         )
         assert resp.status_code == 400
 
-    async def test_add_resource_no_path_for_module_types(self, tmp_path, client, app):
+    async def test_add_resource_rejects_retired_module_types(self, tmp_path, client, app):
+        # The modules refactor retired `feeds`, `money`, `overland`,
+        # `karakeep`, `monarch` from the resource picker. POSTs for those
+        # types now fail validation — they belong on /<module>/settings or
+        # /settings → connected services.
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         cookies = await self._login(client)
@@ -1195,7 +1263,7 @@ class TestResourceEndpoints:
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 400
 
     async def test_delete_db_resource(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
@@ -1251,17 +1319,19 @@ class TestResourceEndpoints:
         assert resp.status_code == 400
 
     async def test_add_resource_with_extras_persists(self, tmp_path, client, app):
-        # Module-shaped resources carry their config in extras (overland's
-        # ingest_token, money's data_dir, feeds' tumblr_api_key, etc.).
-        # Without this the web UI can't fully replace the per-user TOML.
+        # `extras` is still a generic JSON dict on each row even though the
+        # specific extras-bearing resource types (overland.ingest_token,
+        # feeds.tumblr_api_key, monarch creds) moved into the secrets
+        # store. This guards the round-trip for any future extras-bearing
+        # type the picker accepts.
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         cookies = await self._login(client)
         resp = await client.post(
             "/istota/api/settings/resources",
             json={
-                "type": "overland", "name": "GPS",
-                "extras": {"ingest_token": "tok-xyz", "default_radius": 75},
+                "type": "folder", "path": "/Docs", "name": "Docs",
+                "extras": {"meta_key": "meta-val", "meta_count": 75},
             },
             cookies=cookies,
             headers={"origin": "https://example.com"},
@@ -1269,8 +1339,8 @@ class TestResourceEndpoints:
         assert resp.status_code == 200
         from istota import db
         with db.get_db(self._db_path) as conn:
-            rows = db.get_user_resources(conn, "alice", resource_type="overland")
-        assert rows[0].extras == {"ingest_token": "tok-xyz", "default_radius": 75}
+            rows = db.get_user_resources(conn, "alice", resource_type="folder")
+        assert rows[0].extras == {"meta_key": "meta-val", "meta_count": 75}
 
     async def test_list_returns_extras_on_db_rows(self, tmp_path, client, app):
         # The UI needs to read back extras to render an editable form;
@@ -1280,16 +1350,16 @@ class TestResourceEndpoints:
         from istota import db
         with db.get_db(self._db_path) as conn:
             db.add_user_resource(
-                conn, user_id="alice", resource_type="overland",
-                resource_path="overland", display_name="GPS",
-                extras={"ingest_token": "tok-xyz"},
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Notes", display_name="Notes",
+                extras={"meta_key": "meta-val"},
             )
         cookies = await self._login(client)
         resp = await client.get("/istota/api/settings/resources", cookies=cookies)
         assert resp.status_code == 200
         db_rows = [r for r in resp.json()["resources"] if r["managed"] == "db"]
-        overland = next(r for r in db_rows if r["type"] == "overland")
-        assert overland["extras"] == {"ingest_token": "tok-xyz"}
+        notes = next(r for r in db_rows if r["path"] == "/Notes")
+        assert notes["extras"] == {"meta_key": "meta-val"}
 
     async def test_add_resource_rejects_non_dict_extras(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
@@ -1297,7 +1367,7 @@ class TestResourceEndpoints:
         cookies = await self._login(client)
         resp = await client.post(
             "/istota/api/settings/resources",
-            json={"type": "feeds", "name": "Feeds", "extras": "not a dict"},
+            json={"type": "folder", "path": "/x", "name": "X", "extras": "not a dict"},
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
@@ -1311,23 +1381,25 @@ class TestResourceEndpoints:
         from istota import db
         with db.get_db(self._db_path) as conn:
             db.add_user_resource(
-                conn, user_id="alice", resource_type="overland",
-                resource_path="overland", display_name="GPS",
-                extras={"ingest_token": "tok-xyz"},
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Notes", display_name="Notes",
+                extras={"meta_key": "meta-val"},
             )
         # Build a config whose UserConfig already holds the DB row (as
-        # _apply_user_resources would have done) plus a separate TOML feed
-        # entry.
+        # _apply_user_resources would have done) plus a separate TOML
+        # entry of a different path.
         cfg = _make_config(
             tmp_path,
             users={
                 "alice": UserConfig(
                     display_name="Alice",
                     resources=[
-                        ResourceConfig(type="feeds", name="Feeds (TOML)"),
                         ResourceConfig(
-                            type="overland", path="overland",
-                            name="GPS", extra={"ingest_token": "tok-xyz"},
+                            type="folder", path="/Other", name="Other (TOML)",
+                        ),
+                        ResourceConfig(
+                            type="folder", path="/Notes",
+                            name="Notes", extra={"meta_key": "meta-val"},
                         ),
                     ],
                 ),
@@ -1339,12 +1411,12 @@ class TestResourceEndpoints:
         resp = await client.get("/istota/api/settings/resources", cookies=cookies)
         assert resp.status_code == 200
         rows = resp.json()["resources"]
-        overlands = [r for r in rows if r["type"] == "overland"]
-        assert len(overlands) == 1
-        assert overlands[0]["managed"] == "db"
-        # The unrelated TOML feed entry still renders as config.
-        feeds = [r for r in rows if r["type"] == "feeds"]
-        assert feeds[0]["managed"] == "config"
+        notes = [r for r in rows if r["path"] == "/Notes"]
+        assert len(notes) == 1
+        assert notes[0]["managed"] == "db"
+        # The unrelated TOML folder entry still renders as config.
+        others = [r for r in rows if r["path"] == "/Other"]
+        assert others[0]["managed"] == "config"
 
 
 @_needs_web_deps

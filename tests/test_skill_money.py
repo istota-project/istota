@@ -14,7 +14,7 @@ def _empty_skills_dir(tmp_path):
 
 
 class TestMoneySkillManifest:
-    """skill.md is loaded with the new name and resource types."""
+    """skill.md loads as a keyword-only skill after the modules refactor."""
 
     def test_load_skill(self, tmp_path):
         from istota.skills._loader import load_skill_index
@@ -23,37 +23,24 @@ class TestMoneySkillManifest:
         assert "money" in index
         meta = index["money"]
         assert meta.cli is True
-        # Both new and legacy resource types are accepted
-        assert "money" in meta.resource_types
-        assert "moneyman" in meta.resource_types
+        # Module-shaped skills no longer carry resource_types; selection is
+        # keyword-only and execution is gated by is_module_enabled.
+        assert meta.resource_types == []
         assert "accounting" in meta.keywords
 
-    def test_selected_with_money_resource(self, tmp_path):
+    def test_selected_by_keyword(self, tmp_path):
         from istota.skills._loader import load_skill_index, select_skills
 
         index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
         selected = select_skills(
             prompt="check my balances",
             source_type="talk",
-            user_resource_types={"money"},
+            user_resource_types=set(),
             skill_index=index,
         )
         assert "money" in selected
 
-    def test_selected_with_legacy_moneyman_resource(self, tmp_path):
-        """Existing user configs that still declare type=moneyman keep working."""
-        from istota.skills._loader import load_skill_index, select_skills
-
-        index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
-        selected = select_skills(
-            prompt="check my balances",
-            source_type="talk",
-            user_resource_types={"moneyman"},
-            skill_index=index,
-        )
-        assert "money" in selected
-
-    def test_not_selected_without_resource_or_keyword(self, tmp_path):
+    def test_not_selected_without_keyword(self, tmp_path):
         from istota.skills._loader import load_skill_index, select_skills
 
         index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))

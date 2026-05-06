@@ -23,7 +23,11 @@ type = "reminders_file"
 path = "/Users/alice/workspace/REMINDERS.md"
 name = "Reminders"
 
-# Karakeep bookmarks (per-user API credentials)
+# Karakeep bookmarks: now a "connected service" — both the base URL and
+# API key live in the encrypted secrets table, set via the web UI at
+# /settings → Connected services → Karakeep. Anything you put in the
+# legacy [[resources]] block below will be migrated into the secrets
+# table on next startup and the resource row will be cleaned up.
 # [[resources]]
 # type = "karakeep"
 # name = "Bookmarks"
@@ -53,35 +57,16 @@ name = "Reminders"
 # Per-user disabled skills (excluded from keyword matching and loading)
 # disabled_skills = ["browse", "whisper"]
 
-# Money (accounting). The skill runs in-process — no separate service.
-# Workspace mode (preferred): the loader synthesizes a UserContext from
-# the user's istota workspace ({nextcloud}/Users/<user>/<bot_dir>/) and
-# reads INVOICING.md / TAX.md / MONARCH.md (with .toml fallback) under
-# {data_dir}/config/. Defaults: data_dir = {workspace}/money,
-# db_path = {data_dir}/data/money.db, single 'main' ledger at
-# {data_dir}/ledgers/main.beancount.
-# [[resources]]
-# type = "money"
-# name = "Money"
-# ledgers = ["personal", "business"]
-# # data_dir = "/srv/mount/.../shared/Money"   # override default
-# # db_path = "/srv/mount/.../money.db"
-# # config_dir = "/srv/mount/.../config"
-#
-# Legacy mode: point config_path at a money config TOML with [users.X]
-# sections; user_key defaults to the istota username when omitted.
-# [[resources]]
-# type = "money"
-# name = "Money"
-# config_path = "/path/to/money/config.toml"
-# # user_key = "alice"
-
-# Monarch Money session token (server-side only, not synced to Nextcloud)
-# Can also use [monarch] section syntax (auto-converted to resource)
-# [[resources]]
-# type = "monarch"
-# name = "Monarch Money"
-# session_token = "your-session-token"
+# Modules (feeds, money, location) are on by default for every configured
+# user. Opt out per-user by listing module names here:
+# disabled_modules = ["money", "location"]
+# Module credentials live on the per-module settings page:
+#   /money/settings   → Monarch Money
+#   /feeds/settings   → Tumblr API key
+#   /location/settings → Overland ingest token
+# The legacy [[resources]] type = "money" / "monarch" / "feeds" /
+# "overland" blocks are removed at next startup; their credentials
+# (where present) migrate into the encrypted secrets table.
 
 # Briefings (can also be configured in workspace/BRIEFINGS.md, which takes precedence)
 [[briefings]]

@@ -246,6 +246,17 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # User profiles: per-user disabled modules list (Phase 1 of the modules /
+    # connected services refactor). Default-on, JSON array of disabled module
+    # names from istota.modules.MODULE_NAMES.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "disabled_modules TEXT NOT NULL DEFAULT '[]'"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError
     # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id
@@ -934,6 +945,36 @@ def delete_user_resource(
         (resource_id, user_id),
     )
     return cur.rowcount > 0
+
+
+# Resource types retired by the modules / connected services refactor.
+# Their data flows through is_module_enabled (feeds, money, location) or the
+# encrypted secrets table (karakeep, monarch). Cleaning them out of
+# user_resources keeps stale rows from leaking into the executor / web UI.
+_OBSOLETE_RESOURCE_TYPES = (
+    "feeds", "money", "monarch", "moneyman", "karakeep", "overland",
+)
+
+
+def cleanup_obsolete_resources(db_path: Path) -> int:
+    """Delete rows from ``user_resources`` whose type is no longer recognized.
+
+    Idempotent: a missing DB or table is treated as a no-op. Returns the
+    number of rows removed; intended to run once at scheduler startup after
+    the secrets-store import has absorbed the credentials.
+    """
+    if db_path is None or not Path(db_path).exists():
+        return 0
+    placeholders = ",".join("?" * len(_OBSOLETE_RESOURCE_TYPES))
+    try:
+        with get_db(db_path) as conn:
+            cur = conn.execute(
+                f"DELETE FROM user_resources WHERE resource_type IN ({placeholders})",
+                _OBSOLETE_RESOURCE_TYPES,
+            )
+            return cur.rowcount or 0
+    except sqlite3.OperationalError:
+        return 0
 
 
 def get_briefing_last_run(conn: sqlite3.Connection, user_id: str, briefing_name: str) -> str | None:
