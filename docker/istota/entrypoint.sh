@@ -900,8 +900,11 @@ if [ -z "${ISTOTA_SECRET_KEY:-}" ] && [ -f "$SECRET_KEY_FILE" ]; then
 fi
 if [ -z "${ISTOTA_SECRET_KEY:-}" ]; then
     ISTOTA_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-    umask 077
-    printf '%s' "$ISTOTA_SECRET_KEY" > "$SECRET_KEY_FILE"
+    # Subshell so the restrictive umask doesn't leak into the rest of this
+    # script — the Python scheduler later seeds workspace files (README.md,
+    # notes/, scripts/) on the shared NC volume, and a leaked 0077 umask
+    # made them unreadable to NC's www-data.
+    ( umask 077 && printf '%s' "$ISTOTA_SECRET_KEY" > "$SECRET_KEY_FILE" )
     chmod 600 "$SECRET_KEY_FILE"
     echo "[istota] Generated new ISTOTA_SECRET_KEY (persisted to ${SECRET_KEY_FILE})."
 fi
@@ -933,6 +936,31 @@ fi
 if claude --version >/dev/null 2>&1; then
     echo "[istota] Claude Code: $(claude --version 2>&1 | head -1)"
 fi
+
+# --- Workspace perms — make NC (www-data, uid 33) co-owner ---
+#
+# The istota container runs as root, but NC's PHP runs as www-data (uid 33)
+# against the same /mnt/shared volume. The scheduler seeds workspace files
+# (README.md, notes/, scripts/, config/*.md, …) lazily AFTER this script
+# execs to the daemon, so we can't chown them post-hoc here. Instead:
+#
+#   - chown /mnt/shared to 33:33 — current files are now www-data-owned.
+#   - setgid (chmod 2775) every dir — files Python creates inside inherit
+#     group=33 automatically (kernel rule for setgid dirs).
+#   - umask 002 below — files come out 664, dirs 2775; combined with the
+#     inherited group=33, www-data has read AND write access.
+#
+# Idempotent — safe on every boot, including restarts after the volume is
+# already populated. The whole block is best-effort; failures (e.g. files
+# the scheduler is mid-write to) shouldn't block startup.
+for d in /mnt/shared/Users /mnt/shared/Channels; do
+    if [ -d "$d" ]; then
+        chown -R 33:33 "$d" 2>/dev/null || true
+        find "$d" -type d -exec chmod 2775 {} + 2>/dev/null || true
+        find "$d" -type f -exec chmod 664 {} + 2>/dev/null || true
+    fi
+done
+umask 002
 
 # --- Start scheduler ---
 
