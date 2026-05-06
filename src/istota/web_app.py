@@ -981,83 +981,11 @@ async def google_disconnect(
 # values are never returned — the UI only sees a "configured" badge per
 # (service, key) pair.
 
-# ``_CONNECTED_SERVICE_SCHEMA`` powers the /settings page Connected services
-# section: cross-cutting credentials that aren't owned by any single module.
-# Each entry carries ``used_by`` so the card can show "Used by: <skill>" —
-# this is purely informational; credential availability gates execution at
-# the skill proxy, not here.
-_CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
-    "karakeep": {
-        "label": "Karakeep",
-        "used_by": ("bookmarks",),
-        "fields": [
-            {"key": "base_url", "label": "Base URL", "type": "url"},
-            {"key": "api_key",  "label": "API key",  "type": "password"},
-        ],
-    },
-    "google_workspace": {
-        "label": "Google Workspace",
-        "used_by": ("google_workspace",),
-        # OAuth flow lives at /istota/google/connect — UI shows a Connect
-        # button instead of fields when this is set.
-        "oauth": True,
-        "fields": [],
-    },
-}
-
-# ``_MODULE_SERVICE_SCHEMA`` powers the per-module settings pages
-# (/feeds/settings, /money/settings, /location/settings). Each module owns
-# its own subset of services so the main /settings page stays focused on
-# generic credentials. Reachable via /settings/module-services/{module}.
-_MODULE_SERVICE_SCHEMA: dict[str, dict[str, dict]] = {
-    "feeds": {
-        "feeds": {
-            "label": "Feeds (Tumblr)",
-            "used_by": ("feeds",),
-            "fields": [
-                {"key": "tumblr_api_key", "label": "Tumblr API key (optional)",
-                 "type": "password"},
-            ],
-        },
-    },
-    "money": {
-        "monarch": {
-            "label": "Monarch Money",
-            "used_by": ("money",),
-            "fields": [
-                {"key": "email",         "label": "Email",                     "type": "email"},
-                {"key": "password",      "label": "Password",                  "type": "password"},
-                {"key": "session_token", "label": "Session token (optional)",  "type": "password"},
-            ],
-        },
-    },
-    "location": {
-        "overland": {
-            "label": "Overland GPS",
-            "used_by": ("location",),
-            "fields": [
-                {"key": "ingest_token", "label": "Ingest token", "type": "password"},
-            ],
-        },
-    },
-}
-
-
-def _all_known_services() -> dict[str, dict]:
-    """Union of connected + module-owned service schemas.
-
-    Used by the secret PUT/DELETE handlers so they accept module-owned
-    services (e.g. ``monarch``, ``overland``) even though those don't show
-    up on /settings/services. The frontend uses the per-module endpoint to
-    resolve the schema for those secrets.
-    """
-    out: dict[str, dict] = dict(_CONNECTED_SERVICE_SCHEMA)
-    for mod_services in _MODULE_SERVICE_SCHEMA.values():
-        for service, schema in mod_services.items():
-            # Module-service schemas have no resource_types — they're gated
-            # by is_module_enabled at request time, not by the schema.
-            out[service] = schema
-    return out
+from .secret_schema import (
+    CONNECTED_SERVICE_SCHEMA as _CONNECTED_SERVICE_SCHEMA,
+    MODULE_SERVICE_SCHEMA as _MODULE_SERVICE_SCHEMA,
+    all_known_services as _all_known_services,
+)
 
 
 def _service_status(schema: dict, configured_keys: set[str]) -> str:

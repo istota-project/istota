@@ -159,8 +159,24 @@ istota_admin_users: []
 # Example: ["browse", "whisper"]
 istota_disabled_skills: []
 
-# Users configuration (dict of user_id -> user config)
-# Each user gets a per-user config file at config/users/{user_id}.toml
+# Users configuration (dict of user_id -> user config).
+#
+# After the modules / connected services refactor, the data model is split
+# three ways:
+#
+#   * Profile fields           → user_profiles DB table (`istota user ensure`)
+#   * Resources (paths only)   → user_resources DB table (`istota resource ensure`)
+#   * Briefings                → briefing_configs DB table (`istota briefing ensure`)
+#   * Tier-2 credentials       → encrypted secrets table (`istota secret ensure`,
+#                                see `istota_user_secrets` below)
+#   * Module opt-outs          → `disabled_modules:` list (Phase 1)
+#
+# Resource types in this dict are PATH-shaped only: folder, calendar,
+# todo_file, notes_folder, email_folder, reminders_file, ledger. The old
+# module/credential-shaped types (feeds, money, monarch, karakeep,
+# overland) are retired — they're auto-cleaned from user_resources on
+# scheduler startup, and their values now live in the secrets table.
+#
 # Example:
 # istota_users:
 #   alice:
@@ -176,6 +192,7 @@ istota_disabled_skills: []
 #     max_foreground_workers: 2    # per-user override (0 or omit = use global default)
 #     max_background_workers: 1    # per-user override (0 or omit = use global default)
 #     disabled_skills: []          # per-user skill exclusion list
+#     disabled_modules: []         # per-user module opt-outs; one of: feeds, money, location
 #     resources:
 #       - type: "folder"
 #         path: "/alice/Projects"
@@ -189,44 +206,6 @@ istota_disabled_skills: []
 #         path: "/Users/alice/beancount/main.beancount"
 #         name: "Personal"
 #         permissions: "write"
-#       - type: "monarch"
-#         name: "Monarch Money"
-#         session_token: "monarch-token"
-#       - type: "feeds"
-#         # Native feeds module. Workspace mode (preferred): omit overrides.
-#         # The loader synthesizes a FeedsContext rooted at the user's istota
-#         # workspace and reads feeds.toml.
-#         # Defaults: data_dir = {workspace}/feeds,
-#         #           db_path = {data_dir}/data/feeds.db,
-#         #           config_path = {data_dir}/config/feeds.toml.
-#         # Overrides (rare):
-#         #   data_dir: "/srv/.../alice/istota/feeds"
-#         #   config_dir: "/srv/.../alice/istota/feeds/config"
-#         #   config_path: "/srv/.../feeds.toml"
-#         #   db_path: "/srv/.../feeds.db"
-#         tumblr_api_key: "{{ vault_alice_tumblr_api_key }}"  # optional; TUMBLR_API_KEY env is the fallback
-#       - type: "money"
-#         # Workspace mode (preferred): omit config_path. The loader
-#         # synthesizes a UserContext rooted at the user's istota workspace
-#         # and reads INVOICING.md / TAX.md / MONARCH.md (with .toml
-#         # fallback) from {data_dir}/config/ first, then {workspace}/config/.
-#         # Defaults: data_dir = {workspace}/money,
-#         #           db_path = {data_dir}/data/money.db,
-#         #           ledgers = single 'main' at {data_dir}/ledgers/main.beancount.
-#         # Overrides:
-#         #   data_dir: "/srv/mount/.../shared/Money"
-#         #   db_path: "/srv/mount/.../money.db"
-#         #   config_dir: "/srv/mount/.../config"
-#         ledgers: ["personal", "business"]
-#         monarch_session_token: "{{ vault_alice_monarch_token }}"
-#         # Legacy mode (alternative): point config_path at a money config
-#         # TOML with [users.X] sections. user_key defaults to the istota
-#         # username when omitted.
-#         # config_path: "/srv/app/zorg/money-config.toml"
-#       - type: "overland"
-#         name: "GPS"
-#         ingest_token: "your-overland-secret"
-#         default_radius: 25
 #     briefings:
 #       - name: "morning"
 #         cron: "0 6 * * *"
@@ -242,6 +221,32 @@ istota_disabled_skills: []
 #           reminders:
 #             enabled: true
 istota_users: {}
+
+# Per-user encrypted secrets (Karakeep, Monarch, Tumblr API key, Overland
+# ingest token, ...). Each row is upserted via `istota secret ensure` and
+# stored in the encrypted `secrets` table — never in plaintext on disk.
+# `istota_secret_key` (above) must be set; the role exports it through the
+# secrets.env file consumed by the systemd units.
+#
+# Schema is validated server-side; a typo in `service` or `key` fails the
+# play. Known services / keys (as of the current refactor):
+#
+#   karakeep         base_url, api_key
+#   monarch          email, password, session_token
+#   feeds            tumblr_api_key
+#   overland         ingest_token
+#   google_workspace (OAuth-only, not provisionable from Ansible)
+#
+# Example:
+# istota_user_secrets:
+#   alice:
+#     - { service: karakeep, key: base_url,     value: "https://kk.example.com" }
+#     - { service: karakeep, key: api_key,      value: "{{ vault_alice_kk_token }}" }
+#     - { service: monarch,  key: email,        value: "alice@example.com" }
+#     - { service: monarch,  key: password,     value: "{{ vault_alice_monarch_password }}" }
+#     - { service: overland, key: ingest_token, value: "{{ vault_alice_overland_token }}" }
+#     - { service: feeds,    key: tumblr_api_key, value: "{{ vault_alice_tumblr_api_key }}" }
+istota_user_secrets: {}
 
 # Briefing defaults (expanded when user sets `markets = true` or `news = true`)
 # markets futures/indices symbols default from markets.py — only override if needed
@@ -284,38 +289,13 @@ istota_rclone_password_obscured: ""
 istota_use_nextcloud_mount: true
 istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 
-# Money integration. The skill is in-process — no separate service, no
-# api_url/api_key/cli_path/config_path. Per-user money config is declared
-# on the user's `money` resource entry (see istota_users below).
-
-# Per-user money configuration goes inside the istota_users dict, on the
-# money resource entry itself. Only `monarch_session_token` is needed;
-# `monarch_email` / `monarch_password` are optional fallbacks for reauth.
-#
-#   istota_users:
-#     alice:
-#       resources:
-#         - type: "money"
-#           # Workspace mode (preferred): no config_path. The loader
-#           # synthesizes a UserContext rooted at the user's istota
-#           # workspace and reads INVOICING.md / TAX.md / MONARCH.md (with
-#           # .toml fallback). Search order: {data_dir}/config/ first, then
-#           # {workspace}/config/.
-#           # Defaults: data_dir = {workspace}/money,
-#           #           db_path = {data_dir}/data/money.db,
-#           #           ledgers = single 'main' at {data_dir}/ledgers/main.beancount.
-#           # Override fields are optional:
-#           #   data_dir: "/srv/mount/.../shared/Money"
-#           #   db_path:  "/srv/mount/.../money.db"
-#           #   config_dir: "/srv/mount/.../config"
-#           ledgers: ["personal", "business"]
-#           monarch_session_token: "{{ vault_alice_monarch_token }}"
-#
-#           # Legacy mode (alternative): set config_path to a money config
-#           # TOML with [users.<key>] sections. user_key defaults to the
-#           # istota username when omitted.
-#           # config_path: "/srv/app/zorg/money-config.toml"
-#           # user_key: "alice"
+# Money integration. The skill is in-process — no separate service. Per-
+# user Monarch credentials are stored in the encrypted secrets table; see
+# `istota_user_secrets` above. Workspace layout is auto-derived from the
+# user's istota workspace (data_dir = {workspace}/money, ledgers default
+# to a single 'main' beancount file at {data_dir}/ledgers/main.beancount).
+# Per-user `[[resources]] type = "money"` is no longer used; the loader
+# synthesizes the UserContext from the workspace.
 
 # Browser container settings (for web browsing skill)
 istota_browser_enabled: false
