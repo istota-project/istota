@@ -9,6 +9,25 @@ PROVISION_FLAG="/mnt/shared/.istota-provisioned"
 API_PROVISION_FLAG="/data/config/.api-provisioned"
 NC_URL="${NC_INTERNAL_URL:-http://nextcloud}"
 
+# --- Admin allowlist ---
+#
+# Web admin dashboard (`/istota/admin`) gates on ISTOTA_ADMINS_FILE via
+# `_user_is_web_admin`, which fails closed on an empty allowlist (distinct
+# from `Config.is_admin`'s legacy "empty = all admin" behaviour). Seed
+# USER_NAME on first boot so the dashboard is reachable in a fresh deploy;
+# operators can edit the file directly to grant access to additional users.
+# Done up front (before NC provisioning) because the web service polls for
+# config.toml to start serving — if the admins file landed after config.toml,
+# web could cache an empty allowlist and 403 the dashboard until restart.
+ADMINS_FILE="/data/config/admins"
+mkdir -p /data/config
+touch "$ADMINS_FILE"
+if [ -n "${USER_NAME:-}" ] && ! grep -qxF "$USER_NAME" "$ADMINS_FILE"; then
+    printf '%s\n' "$USER_NAME" >> "$ADMINS_FILE"
+    echo "[istota] Added '${USER_NAME}' to admin allowlist (${ADMINS_FILE})."
+fi
+export ISTOTA_ADMINS_FILE="$ADMINS_FILE"
+
 # --- Wait for Nextcloud provisioning (occ-based, runs in NC container) ---
 
 echo "[istota] Waiting for Nextcloud provisioning..."
