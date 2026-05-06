@@ -257,12 +257,14 @@
 				<NavLink href="{base}/location/history" active={isActive('/location/history')}>History</NavLink>
 			{/snippet}
 			{#snippet tools()}
-				<SidebarToggle
-					open={sidebarOpen}
-					label="Places"
-					count={places.length}
-					onclick={() => (sidebarOpen = !sidebarOpen)}
-				/>
+				{#if !onSettings}
+					<SidebarToggle
+						open={sidebarOpen}
+						label="Places"
+						count={places.length}
+						onclick={() => (sidebarOpen = !sidebarOpen)}
+					/>
+				{/if}
 				<Chip icon checked={onSettings} onclick={toggleSettings} title="Location settings">
 					<Cog size={14} />
 				</Chip>
@@ -271,12 +273,13 @@
 	{/snippet}
 
 	{#snippet sidebar()}
-		<Sidebar
-			title="Places"
-			count={places.length}
-			open={sidebarOpen}
-			onClose={() => (sidebarOpen = false)}
-		>
+		{#if !onSettings}
+			<Sidebar
+				title="Places"
+				count={places.length}
+				open={sidebarOpen}
+				onClose={() => (sidebarOpen = false)}
+			>
 			{#snippet extras()}
 				<div class="sidebar-actions">
 					<button
@@ -363,7 +366,8 @@
 					{/each}
 				</CategoryGroup>
 			{/each}
-		</Sidebar>
+			</Sidebar>
+		{/if}
 	{/snippet}
 
 	{@render children()}

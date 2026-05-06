@@ -55,16 +55,20 @@
 	color: #d6a000;
 }
 
-.settings .banner {
+/* Banners are unscoped so they work both inside .settings wrappers and in
+   Modal contents (e.g. add/edit forms). The two flavours are visually
+   distinct enough that a global .banner / .banner.error / .banner.info is
+   acceptable. */
+.banner {
 	padding: 0.4rem 0.75rem;
 	border-radius: var(--radius-card);
 	font-size: var(--text-sm);
 }
-.settings .banner.error {
+.banner.error {
 	background: rgba(204, 102, 102, 0.15);
 	color: #e88;
 }
-.settings .banner.info {
+.banner.info {
 	background: rgba(110, 184, 132, 0.15);
 	color: #8d8;
 }

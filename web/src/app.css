@@ -1,3 +1,5 @@
+@import './lib/styles/settings.css';
+
 :root {
 	/* Surfaces */
 	--surface-base: #111;
