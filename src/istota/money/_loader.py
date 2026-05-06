@@ -40,10 +40,15 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
 
     1. ``MONEY_SECRETS_FILE`` env var (escape hatch for direct ``money`` CLI
        invocations and tests).
-    2. The user's ``[[resources]] type = "money"`` entry in the istota config
+    2. The encrypted ``secrets`` table (web-UI-managed, per Phase 5).
+    3. The user's ``[[resources]] type = "money"`` entry in the istota config
        — credentials are colocated with the resource as ``monarch_session_token``
        / ``monarch_email`` / ``monarch_password``, the same pattern used by
        karakeep / overland.
+
+    Secrets-table values fully replace TOML extras when present (per-key
+    granularity — having ``session_token`` in the DB while ``email`` is
+    still in TOML is fine and works as expected).
 
     Returns ``{}`` if no credentials are configured — sync commands that
     require them will surface their own error.
@@ -64,11 +69,26 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
         if r.type not in _MONEY_RESOURCE_TYPES:
             continue
         extra = getattr(r, "extra", {}) or {}
+        # Start with TOML-based monarch extras (legacy / Ansible path).
         monarch = {
             k.removeprefix("monarch_"): v
             for k, v in extra.items()
             if k.startswith("monarch_") and v
         }
+        # Layer secrets-table values on top — DB wins per-key when set.
+        try:
+            from istota import secrets_store  # noqa: PLC0415
+
+            db_path = getattr(istota_config, "db_path", None)
+            if db_path is not None:
+                for sk in ("email", "password", "session_token"):
+                    val = secrets_store.get_secret(db_path, user_id, "monarch", sk)
+                    if val:
+                        monarch[sk] = val
+        except Exception:  # noqa: BLE001
+            # Secrets store is best-effort here; falling back to TOML extras
+            # is the safe behavior if cryptography or the DB is unavailable.
+            pass
         return {"monarch": monarch} if monarch else {}
     return {}
 

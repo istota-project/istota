@@ -931,6 +931,170 @@ async def google_disconnect(
     return {"ok": True, "was_connected": deleted}
 
 
+# ---- Settings: per-service credential management (Phase 5) ----
+#
+# Service cards are computed from the user's resource declarations + the
+# set of secrets currently stored in the encrypted DB table. Plaintext
+# values are never returned — the UI only sees a "configured" badge per
+# (service, key) pair.
+
+# Schema for what credential keys each service expects. The UI uses this to
+# render forms; the backend uses it for validation. Adding a new service
+# means adding an entry here plus optional connectivity checks.
+_SERVICE_SCHEMA: dict[str, dict] = {
+    "monarch": {
+        "label": "Monarch Money",
+        "resource_types": ("money", "monarch", "moneyman"),
+        "fields": [
+            {"key": "email", "label": "Email", "type": "email"},
+            {"key": "password", "label": "Password", "type": "password"},
+            {"key": "session_token", "label": "Session token (optional)", "type": "password"},
+        ],
+    },
+    "karakeep": {
+        # base_url stays in config.toml — it's a service endpoint, not a
+        # credential. The web UI only manages the API key.
+        "label": "Karakeep",
+        "resource_types": ("karakeep",),
+        "fields": [
+            {"key": "api_key", "label": "API key", "type": "password"},
+        ],
+    },
+    "feeds": {
+        "label": "Feeds (Tumblr)",
+        "resource_types": ("feeds",),
+        "fields": [
+            {"key": "tumblr_api_key", "label": "Tumblr API key (optional)", "type": "password"},
+        ],
+    },
+}
+
+
+def _service_status(
+    service: str, schema: dict, configured_keys: set[str], user_resource_types: set[str],
+) -> str:
+    """Compute card status: configured / partial / missing / unavailable."""
+    if not (set(schema["resource_types"]) & user_resource_types):
+        return "unavailable"  # user has no resource declaration for this service
+    required = {f["key"] for f in schema["fields"] if "optional" not in f.get("label", "").lower()}
+    if not required:
+        # All-optional services are "configured" once any key is set, else "missing".
+        return "configured" if configured_keys else "missing"
+    if required.issubset(configured_keys):
+        return "configured"
+    if configured_keys & required:
+        return "partial"
+    return "missing"
+
+
+@api_router.get("/settings/services")
+async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
+    """Per-service status cards for the current user.
+
+    Returns ``{"services": [{"service": ..., "label": ..., "status": ...,
+    "fields": [...], "configured_keys": [...]}]}``. No plaintext values.
+    """
+    from . import secrets_store
+
+    if not _config:
+        return {"services": []}
+
+    username = user["username"]
+    uc = _config.get_user(username)
+    user_resource_types: set[str] = (
+        {r.type for r in uc.resources} if uc else set()
+    )
+
+    stored = secrets_store.list_user_services(_config.db_path, username)
+
+    cards = []
+    for service, schema in _SERVICE_SCHEMA.items():
+        configured = {entry["key"] for entry in stored.get(service, [])}
+        cards.append({
+            "service": service,
+            "label": schema["label"],
+            "status": _service_status(service, schema, configured, user_resource_types),
+            "fields": schema["fields"],
+            "configured_keys": sorted(configured),
+            "last_updated": max(
+                (entry["updated_at"] or "" for entry in stored.get(service, [])),
+                default=None,
+            ) or None,
+        })
+    return {"services": cards}
+
+
+@api_router.put("/settings/secrets/{service}/{key}")
+async def settings_set_secret(
+    service: str,
+    key: str,
+    payload: dict,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Set or clear a single (service, key) secret for the current user.
+
+    Body: ``{"value": "<plaintext>"}``. Empty value deletes the row.
+    Service + key must match the schema (rejects typos and unknown services).
+    """
+    from . import secrets_store
+    from fastapi import HTTPException
+
+    schema = _SERVICE_SCHEMA.get(service)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
+    valid_keys = {f["key"] for f in schema["fields"]}
+    if key not in valid_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown key '{key}' for service '{service}'",
+        )
+
+    value = (payload.get("value") or "").strip() if isinstance(payload, dict) else ""
+
+    try:
+        secrets_store.set_secret(_config.db_path, user["username"], service, key, value)
+    except secrets_store.SecretKeyMissingError:
+        raise HTTPException(
+            status_code=503,
+            detail="ISTOTA_SECRET_KEY is not set; cannot store secrets.",
+        )
+
+    logger.info(
+        "settings: %s %s/%s for user=%s",
+        "cleared" if not value else "stored",
+        service, key, user["username"],
+    )
+    return {"ok": True, "service": service, "key": key, "configured": bool(value)}
+
+
+@api_router.delete("/settings/secrets/{service}/{key}")
+async def settings_delete_secret(
+    service: str,
+    key: str,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Delete a single (service, key) secret for the current user."""
+    from . import secrets_store
+    from fastapi import HTTPException
+
+    schema = _SERVICE_SCHEMA.get(service)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
+    valid_keys = {f["key"] for f in schema["fields"]}
+    if key not in valid_keys:
+        # Symmetric with the PUT handler — never let a caller delete arbitrary
+        # rows by sending a key string that isn't part of the schema.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown key '{key}' for service '{service}'",
+        )
+
+    deleted = secrets_store.delete_secret(_config.db_path, user["username"], service, key)
+    return {"ok": True, "deleted": deleted}
+
+
 # Tags allowed in feed card excerpts
 _ALLOWED_TAGS = {"a", "b", "strong", "i", "em", "br", "p", "ul", "ol", "li", "blockquote", "code", "pre", "img"}
 

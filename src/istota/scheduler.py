@@ -3358,6 +3358,17 @@ def run_daemon(config: Config) -> None:
         except Exception as e:
             logger.warning("Failed to ensure directories for %s: %s", user_id, e)
 
+    # One-time / idempotent: copy tier-2 credentials declared in TOML resource
+    # extras (monarch_email/password, karakeep api_key, …) into the encrypted
+    # secrets table so the web UI can read them. Skipped when ISTOTA_SECRET_KEY
+    # is unset; later starts skip rows that already exist.
+    try:
+        from . import secrets_store  # noqa: PLC0415
+
+        secrets_store.import_from_user_configs(config.db_path, config.users)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Secrets import skipped: %s", e)
+
     # Start Talk polling in background thread so it runs independently of task processing
     if config.talk.enabled:
         talk_thread = threading.Thread(
