@@ -146,8 +146,6 @@ def cmd_run_scheduled(args):
 
 def cmd_import_opml(args):
     cli_args = ["import-opml", args.path]
-    if args.no_write_config:
-        cli_args.append("--no-write-config")
     _output(_run(cli_args))
 
 
@@ -205,8 +203,6 @@ def build_parser():
 
     p_imp = sub.add_parser("import-opml", help="Import an OPML file")
     p_imp.add_argument("path", help="Path to OPML file")
-    p_imp.add_argument("--no-write-config", action="store_true",
-                       help="Don't regenerate feeds.toml from the imported DB rows")
 
     p_exp = sub.add_parser("export-opml", help="Export subscriptions as OPML")
     p_exp.add_argument("--output", "-o", help="Write to file instead of stdout")

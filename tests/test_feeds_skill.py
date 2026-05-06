@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from istota.config import Config, ResourceConfig, UserConfig
-from istota.feeds._config_io import write_feeds_config
 
 
 @pytest.fixture
@@ -27,7 +24,6 @@ def istota_config(tmp_path, monkeypatch):
                         type="feeds",
                         extra={
                             "data_dir": str(workspace / "feeds"),
-                            "config_path": str(workspace / "feeds" / "feeds.toml"),
                             "db_path": str(workspace / "feeds" / "feeds.db"),
                         },
                     ),
@@ -37,7 +33,6 @@ def istota_config(tmp_path, monkeypatch):
     )
 
     # Stub load_config so the skill picks up our test config.
-    import istota.skills.feeds as feeds_skill
     monkeypatch.setattr(
         "istota.config.load_config",
         lambda *a, **kw: config,
@@ -47,20 +42,13 @@ def istota_config(tmp_path, monkeypatch):
 
 
 class TestSkillRun:
-    def test_list_empty(self, istota_config, tmp_path):
-        # Empty config -> empty list
-        cfg_path = tmp_path / "workspace" / "feeds" / "feeds.toml"
-        write_feeds_config(cfg_path, {"settings": {}, "categories": [], "feeds": []})
-
+    def test_list_empty(self, istota_config):
         from istota.skills.feeds import _run
         out = _run(["list"])
         assert out["status"] == "ok"
         assert out["count"] == 0
 
-    def test_add_then_list(self, istota_config, tmp_path):
-        cfg_path = tmp_path / "workspace" / "feeds" / "feeds.toml"
-        write_feeds_config(cfg_path, {"settings": {}, "categories": [], "feeds": []})
-
+    def test_add_then_list(self, istota_config):
         from istota.skills.feeds import _run
         added = _run(["add", "--url", "https://example.com/feed.xml", "--category", "blogs"])
         assert added["status"] == "ok"
@@ -84,17 +72,14 @@ class TestSkillExitCodes:
     returncode (with a JSON-envelope fallback as defense-in-depth), so a
     silent zero exit lets failed runs masquerade as successful."""
 
-    def test_main_exits_nonzero_on_error_envelope(self, monkeypatch, capsys):
+    def test_main_exits_nonzero_on_error_envelope(self, monkeypatch):
         monkeypatch.delenv("FEEDS_USER", raising=False)
         from istota.skills.feeds import main
         with pytest.raises(SystemExit) as exc_info:
             main(["list"])
         assert exc_info.value.code == 1
 
-    def test_main_exits_zero_on_ok(self, istota_config, tmp_path):
-        cfg_path = tmp_path / "workspace" / "feeds" / "feeds.toml"
-        from istota.feeds._config_io import write_feeds_config
-        write_feeds_config(cfg_path, {"settings": {}, "categories": [], "feeds": []})
+    def test_main_exits_zero_on_ok(self, istota_config):
         from istota.skills.feeds import main
         # No SystemExit raised, or SystemExit with code 0/None.
         try:
@@ -111,7 +96,6 @@ class TestParser:
                     "refresh", "poll", "run-scheduled", "import-opml",
                     "export-opml"]:
             args = p.parse_args([cmd] + (["--url", "u"] if cmd == "add"
-                                          else ["--path", "/tmp/x"] if False
                                           else ["x"] if cmd == "import-opml"
                                           else []))
             assert args.command == cmd

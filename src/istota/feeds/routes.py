@@ -18,11 +18,9 @@ from fastapi import File as FastAPIFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from istota.feeds import db as feeds_db
-from istota.feeds._config_io import read_feeds_config, write_feeds_config
 from istota.feeds._loader import UserNotFoundError, resolve_for_user
 from istota.feeds._migrate import ensure_initialised
 from istota.feeds.models import (
-    DEFAULT_POLL_INTERVAL_MINUTES,
     FeedsContext,
     default_poll_interval_for,
     detect_source_type,
@@ -343,20 +341,24 @@ async def api_mark_as_read(
 
 
 # ---------------------------------------------------------------------------
-# Settings — feeds.toml CRUD + OPML
+# Settings — DB-backed CRUD + OPML
 # ---------------------------------------------------------------------------
 
 
 @router.get("/config")
 async def api_get_config(ctx: FeedsContext = Depends(get_user_context)):
-    """Return the parsed feeds.toml plus runtime diagnostics."""
+    """Return the user's subscription config (built from the DB) plus
+    runtime diagnostics. Wire shape mirrors what the SvelteKit settings
+    page sends back on PUT."""
 
     def _read():
-        cfg = read_feeds_config(ctx.config_path)
         with feeds_db.connect(ctx.db_path) as conn:
+            cats = feeds_db.list_categories(conn)
             feeds = feeds_db.list_feeds(conn)
+            default_interval = feeds_db.get_default_poll_interval(conn)
             total_entries = feeds_db.count_entries(conn)
             unread = feeds_db.count_entries(conn, status="unread")
+        cfg = _config_payload_from_db(cats, feeds, default_interval)
         diagnostics = {
             "total_feeds": len(feeds),
             "total_entries": total_entries,
@@ -392,7 +394,9 @@ async def api_put_config(
     _csrf: None = Depends(verify_origin),
     ctx: FeedsContext = Depends(get_user_context),
 ):
-    """Write feeds.toml from the request body, then resync into the DB."""
+    """Replace the user's subscriptions with the request body. Wholesale-
+    replace semantics: feeds and categories not in the payload are removed.
+    """
     body = await request.json()
     config_payload = body.get("config")
     if not isinstance(config_payload, dict):
@@ -404,11 +408,7 @@ async def api_put_config(
     if err:
         return JSONResponse({"error": err}, status_code=400)
 
-    def _save():
-        write_feeds_config(ctx.config_path, config_payload)
-        return _sync_config_to_db(ctx)
-
-    summary = await asyncio.to_thread(_save)
+    summary = await asyncio.to_thread(_apply_config_to_db, ctx, config_payload)
     return {"status": "ok", "sync": summary}
 
 
@@ -469,9 +469,6 @@ async def api_import_opml(
     except Exception as e:
         return JSONResponse({"error": f"OPML parse failed: {e}"}, status_code=400)
 
-    # Project the DB back to feeds.toml so the settings UI sees the new state.
-    await asyncio.to_thread(_dump_db_to_config, ctx)
-
     return {
         "status": "ok",
         "feeds_added": result.feeds_added,
@@ -512,55 +509,89 @@ def _validate_feeds_config(cfg: dict) -> str | None:
     return None
 
 
-def _sync_config_to_db(ctx: FeedsContext) -> dict:
-    """Reconcile the feeds DB to match feeds.toml.
+def _config_payload_from_db(cats, feeds, default_interval) -> dict:
+    """Project DB rows to the wire shape the settings page expects."""
+    cat_by_id = {c.id: c for c in cats}
+    settings: dict = {}
+    if default_interval is not None:
+        settings["default_poll_interval_minutes"] = default_interval
+    feed_payload: list[dict] = []
+    for f in feeds:
+        entry: dict = {"url": f.url}
+        if f.title:
+            entry["title"] = f.title
+        if f.site_url:
+            entry["site_url"] = f.site_url
+        if f.category_id and f.category_id in cat_by_id:
+            entry["category"] = cat_by_id[f.category_id].slug
+        if f.poll_interval_minutes != default_poll_interval_for(f.source_type):
+            entry["poll_interval_minutes"] = f.poll_interval_minutes
+        feed_payload.append(entry)
+    return {
+        "settings": settings,
+        "categories": [{"slug": c.slug, "title": c.title} for c in cats],
+        "feeds": feed_payload,
+    }
 
-    Unlike :func:`istota.feeds.cli._sync_config_to_db` (which is upsert-only
-    so ``feeds add`` can't clobber a typo'd save), this is wholesale-replace
-    semantics: the settings UI saves the entire feeds.toml at once, so feeds
-    and categories that disappeared from the payload must be removed from the
-    DB. Without this, a feed deleted in the UI keeps showing in the sidebar
-    because its DB row never goes away.
+
+def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
+    """Replace the user's feeds + categories with ``payload``.
+
+    Wholesale-replace semantics: feeds and categories that disappeared
+    from the payload are removed from the DB. Without this, a feed
+    deleted in the UI would keep showing in the sidebar because its row
+    never went away.
     """
-    cfg = read_feeds_config(ctx.config_path)
-    feeds_db.init_db(ctx.db_path)
-
     cats_added = 0
     feeds_added = 0
     feeds_updated = 0
     feeds_removed = 0
     categories_removed = 0
+
     with feeds_db.connect(ctx.db_path) as conn:
         slug_to_id: dict[str, int] = {}
-        config_slugs: set[str] = set()
-        for c in cfg.get("categories") or []:
+        payload_slugs: set[str] = set()
+        for c in payload.get("categories") or []:
             slug = str(c.get("slug") or "").strip()
-            title = str(c.get("title") or slug or "").strip()
             if not slug:
                 continue
-            config_slugs.add(slug)
+            raw_title = str(c.get("title") or "").strip()
+            payload_slugs.add(slug)
             existing = feeds_db.get_category_by_slug(conn, slug)
-            cat_id = feeds_db.upsert_category(conn, slug, title)
+            if raw_title:
+                cat_id = feeds_db.upsert_category(conn, slug, raw_title)
+            else:
+                cat_id = feeds_db.ensure_category(conn, slug)
             slug_to_id[slug] = cat_id
             if existing is None:
                 cats_added += 1
 
-        explicit_default = cfg.get("settings", {}).get("default_poll_interval_minutes")
-        explicit_default = int(explicit_default) if explicit_default else None
+        explicit_default_raw = (payload.get("settings") or {}).get(
+            "default_poll_interval_minutes"
+        )
+        try:
+            explicit_default = (
+                int(explicit_default_raw) if explicit_default_raw else None
+            )
+        except (TypeError, ValueError):
+            explicit_default = None
+        feeds_db.set_default_poll_interval(conn, explicit_default)
 
-        config_urls: set[str] = set()
-        for f in cfg.get("feeds") or []:
+        payload_urls: set[str] = set()
+        for f in payload.get("feeds") or []:
             url = str(f.get("url") or "").strip()
             if not url:
                 continue
-            config_urls.add(url)
+            payload_urls.add(url)
             cat_slug = f.get("category")
             cat_id = slug_to_id.get(cat_slug) if cat_slug else None
             if cat_slug and cat_id is None:
-                cat_id = feeds_db.upsert_category(conn, cat_slug, cat_slug)
+                existing_cat = feeds_db.get_category_by_slug(conn, cat_slug)
+                cat_id = feeds_db.ensure_category(conn, cat_slug)
                 slug_to_id[cat_slug] = cat_id
-                config_slugs.add(cat_slug)
-                cats_added += 1
+                payload_slugs.add(cat_slug)
+                if existing_cat is None:
+                    cats_added += 1
             source_type = detect_source_type(url)
             per_feed = f.get("poll_interval_minutes")
             if per_feed:
@@ -585,12 +616,12 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
                 feeds_updated += 1
 
         for feed in feeds_db.list_feeds(conn):
-            if feed.url not in config_urls:
+            if feed.url not in payload_urls:
                 feeds_db.delete_feed(conn, feed.url)
                 feeds_removed += 1
 
         for cat in feeds_db.list_categories(conn):
-            if cat.slug not in config_slugs:
+            if cat.slug not in payload_slugs:
                 feeds_db.delete_category(conn, cat.slug)
                 categories_removed += 1
 
@@ -603,27 +634,3 @@ def _sync_config_to_db(ctx: FeedsContext) -> dict:
         "feeds_updated": feeds_updated,
         "feeds_removed": feeds_removed,
     }
-
-
-def _dump_db_to_config(ctx: FeedsContext) -> None:
-    """Project the DB back to feeds.toml after an OPML import."""
-    feeds_db.init_db(ctx.db_path)
-    with feeds_db.connect(ctx.db_path) as conn:
-        cats = feeds_db.list_categories(conn)
-        feeds = feeds_db.list_feeds(conn)
-    cat_by_id = {c.id: c for c in cats}
-    data: dict = {
-        "settings": {"default_poll_interval_minutes": DEFAULT_POLL_INTERVAL_MINUTES},
-        "categories": [{"slug": c.slug, "title": c.title} for c in cats],
-        "feeds": [],
-    }
-    for f in feeds:
-        entry: dict = {"url": f.url}
-        if f.title:
-            entry["title"] = f.title
-        if f.category_id and f.category_id in cat_by_id:
-            entry["category"] = cat_by_id[f.category_id].slug
-        if f.poll_interval_minutes != default_poll_interval_for(f.source_type):
-            entry["poll_interval_minutes"] = f.poll_interval_minutes
-        data["feeds"].append(entry)
-    write_feeds_config(ctx.config_path, data)

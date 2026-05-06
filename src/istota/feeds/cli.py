@@ -20,10 +20,8 @@ from pathlib import Path
 import click
 
 from istota.feeds import db as feeds_db
-from istota.feeds._config_io import read_feeds_config, write_feeds_config
 from istota.feeds._migrate import ensure_initialised
 from istota.feeds.models import (
-    DEFAULT_POLL_INTERVAL_MINUTES,
     default_poll_interval_for,
     FeedsContext,
     detect_source_type,
@@ -84,92 +82,20 @@ def cli(ctx: click.Context, user_key: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sync feeds.toml -> SQLite (idempotent)
+# Interval resolution
 # ---------------------------------------------------------------------------
 
 
-def _sync_config_to_db(ctx: FeedsContext) -> dict:
-    """Push categories + feeds from feeds.toml into the feeds DB.
-
-    Only adds/updates rows. Doesn't remove feeds that disappeared from the
-    config — deleting subscriptions goes through ``feeds remove`` so we
-    don't clobber a typo'd save. Returns a small summary dict.
-    """
-    cfg = read_feeds_config(ctx.config_path)
-    feeds_db.init_db(ctx.db_path)
-
-    cats_added = 0
-    cats_updated = 0
-    feeds_added = 0
-    feeds_updated = 0
-    with feeds_db.connect(ctx.db_path) as conn:
-        slug_to_id: dict[str, int] = {}
-        for c in cfg.get("categories") or []:
-            slug = str(c.get("slug") or "").strip()
-            title = str(c.get("title") or slug or "").strip()
-            if not slug:
-                continue
-            existing = feeds_db.get_category_by_slug(conn, slug)
-            cat_id = feeds_db.upsert_category(conn, slug, title)
-            slug_to_id[slug] = cat_id
-            if existing is None:
-                cats_added += 1
-            elif existing.title != title:
-                cats_updated += 1
-
-        explicit_default = cfg.get("settings", {}).get("default_poll_interval_minutes")
-        explicit_default = int(explicit_default) if explicit_default else None
-
-        for f in cfg.get("feeds") or []:
-            url = str(f.get("url") or "").strip()
-            if not url:
-                continue
-            title = f.get("title")
-            cat_slug = f.get("category")
-            cat_id = slug_to_id.get(cat_slug) if cat_slug else None
-            if cat_slug and cat_id is None:
-                cat_id = feeds_db.upsert_category(conn, cat_slug, cat_slug)
-                slug_to_id[cat_slug] = cat_id
-                cats_added += 1
-            source_type = detect_source_type(url)
-            per_feed = f.get("poll_interval_minutes")
-            if per_feed:
-                interval = int(per_feed)
-            elif explicit_default is not None:
-                interval = explicit_default
-            else:
-                interval = default_poll_interval_for(source_type)
-            existing = feeds_db.get_feed_by_url(conn, url)
-            feeds_db.upsert_feed(
-                conn,
-                url=url,
-                title=title,
-                site_url=f.get("site_url"),
-                source_type=source_type,
-                category_id=cat_id,
-                poll_interval_minutes=interval,
-            )
-            if existing is None:
-                feeds_added += 1
-            else:
-                feeds_updated += 1
-        conn.commit()
-
-    return {
-        "categories_added": cats_added,
-        "categories_updated": cats_updated,
-        "feeds_added": feeds_added,
-        "feeds_updated": feeds_updated,
-    }
-
-
-def _config_data(ctx: FeedsContext) -> dict:
-    """Read feeds.toml or return the empty default."""
-    return read_feeds_config(ctx.config_path)
-
-
-def _save_config(ctx: FeedsContext, data: dict) -> None:
-    write_feeds_config(ctx.config_path, data)
+def _resolve_interval(
+    conn, source_type: str, override: int | None,
+) -> int:
+    """Per-feed override > user-set default > per-source-type default."""
+    if override is not None:
+        return int(override)
+    user_default = feeds_db.get_default_poll_interval(conn)
+    if user_default is not None:
+        return user_default
+    return default_poll_interval_for(source_type)
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +106,7 @@ def _save_config(ctx: FeedsContext, data: dict) -> None:
 @cli.command("list")
 @pass_ctx
 def cmd_list(ctx: FeedsContext) -> None:
-    """List subscribed feeds (DB view, after syncing feeds.toml)."""
-    _sync_config_to_db(ctx)
+    """List subscribed feeds."""
     with feeds_db.connect(ctx.db_path) as conn:
         cats = {c.id: c for c in feeds_db.list_categories(conn)}
         feeds = feeds_db.list_feeds(conn)
@@ -208,8 +133,7 @@ def cmd_list(ctx: FeedsContext) -> None:
 @cli.command("categories")
 @pass_ctx
 def cmd_categories(ctx: FeedsContext) -> None:
-    """List categories from feeds.toml (synced into the DB)."""
-    _sync_config_to_db(ctx)
+    """List categories."""
     with feeds_db.connect(ctx.db_path) as conn:
         cats = feeds_db.list_categories(conn)
     rows = [{"id": c.id, "slug": c.slug, "title": c.title} for c in cats]
@@ -406,7 +330,7 @@ def cmd_mark_read(
 
 
 # ---------------------------------------------------------------------------
-# add / remove (mutate feeds.toml + sync)
+# add / remove
 # ---------------------------------------------------------------------------
 
 
@@ -417,32 +341,35 @@ def cmd_mark_read(
 @click.option("--poll-interval-minutes", type=int, help="Override per-feed poll interval")
 @pass_ctx
 def cmd_add(ctx: FeedsContext, url, title, category, poll_interval_minutes) -> None:
-    """Add a feed by writing feeds.toml then syncing into the DB."""
-    cfg = _config_data(ctx)
-    feeds = cfg.setdefault("feeds", [])
-    cats = cfg.setdefault("categories", [])
-
-    for f in feeds:
-        if str(f.get("url")) == url:
+    """Subscribe to a feed."""
+    with feeds_db.connect(ctx.db_path) as conn:
+        existing = feeds_db.get_feed_by_url(conn, url)
+        if existing is not None:
             _output(_err(f"feed already exists: {url}"))
             return
 
-    if category:
-        if not any(str(c.get("slug")) == category for c in cats):
-            cats.append({"slug": category, "title": category})
+        cat_id = feeds_db.ensure_category(conn, category) if category else None
+        source_type = detect_source_type(url)
+        interval = _resolve_interval(conn, source_type, poll_interval_minutes)
+        feeds_db.upsert_feed(
+            conn,
+            url=url,
+            title=title,
+            site_url=None,
+            source_type=source_type,
+            category_id=cat_id,
+            poll_interval_minutes=interval,
+        )
+        conn.commit()
 
-    new_feed: dict = {"url": url}
+    feed_payload: dict = {"url": url}
     if title:
-        new_feed["title"] = title
+        feed_payload["title"] = title
     if category:
-        new_feed["category"] = category
+        feed_payload["category"] = category
     if poll_interval_minutes is not None:
-        new_feed["poll_interval_minutes"] = poll_interval_minutes
-    feeds.append(new_feed)
-    _save_config(ctx, cfg)
-
-    summary = _sync_config_to_db(ctx)
-    _output(_ok(feed=new_feed, sync=summary))
+        feed_payload["poll_interval_minutes"] = poll_interval_minutes
+    _output(_ok(feed=feed_payload))
 
 
 @cli.command("remove")
@@ -450,14 +377,13 @@ def cmd_add(ctx: FeedsContext, url, title, category, poll_interval_minutes) -> N
 @click.option("--id", "feed_id", type=int, help="DB feed id")
 @pass_ctx
 def cmd_remove(ctx: FeedsContext, url, feed_id) -> None:
-    """Unsubscribe by URL or DB id. Removes the row from feeds.toml and DB."""
+    """Unsubscribe by URL or DB id."""
     if not url and not feed_id:
         _output(_err("specify --url or --id"))
         return
 
-    if feed_id and not url:
-        feeds_db.init_db(ctx.db_path)
-        with feeds_db.connect(ctx.db_path) as conn:
+    with feeds_db.connect(ctx.db_path) as conn:
+        if feed_id and not url:
             row = conn.execute(
                 "SELECT url FROM feeds WHERE id = ?", (feed_id,),
             ).fetchone()
@@ -466,18 +392,14 @@ def cmd_remove(ctx: FeedsContext, url, feed_id) -> None:
                 return
             url = row["url"]
 
-    cfg = _config_data(ctx)
-    before = len(cfg.get("feeds") or [])
-    cfg["feeds"] = [f for f in cfg.get("feeds") or [] if str(f.get("url")) != url]
-    removed_from_config = before - len(cfg["feeds"])
-    _save_config(ctx, cfg)
+        if feeds_db.get_feed_by_url(conn, url) is None:
+            _output(_err(f"no feed with url {url}"))
+            return
 
-    feeds_db.init_db(ctx.db_path)
-    with feeds_db.connect(ctx.db_path) as conn:
         feeds_db.delete_feed(conn, url)
         conn.commit()
 
-    _output(_ok(removed_url=url, removed_from_config=removed_from_config))
+    _output(_ok(removed_url=url))
 
 
 # ---------------------------------------------------------------------------
@@ -505,10 +427,8 @@ def cmd_refresh(ctx: FeedsContext, feed_id) -> None:
 def _poll_due(ctx: FeedsContext, limit) -> None:
     from istota.feeds.poller import poll_due_feeds
 
-    _sync_config_to_db(ctx)
     api_key = ctx.tumblr_api_key or os.environ.get("TUMBLR_API_KEY", "")
 
-    feeds_db.init_db(ctx.db_path)
     with feeds_db.connect(ctx.db_path) as conn:
         outcomes = poll_due_feeds(
             conn, tumblr_api_key=api_key, limit=limit,
@@ -578,26 +498,19 @@ def cmd_run_scheduled(ctx: FeedsContext, limit) -> None:
 
 @cli.command("import-opml")
 @click.argument("opml_path", type=click.Path(exists=True, dir_okay=False))
-@click.option("--write-config/--no-write-config", default=True,
-              help="After importing into the DB, regenerate feeds.toml from the DB")
 @pass_ctx
-def cmd_import_opml(ctx: FeedsContext, opml_path, write_config) -> None:
+def cmd_import_opml(ctx: FeedsContext, opml_path) -> None:
     """Import subscriptions from an OPML file."""
     from istota.feeds.opml import import_opml
 
     text = Path(opml_path).read_text()
     result = import_opml(ctx, text)
-
-    if write_config:
-        _dump_db_to_config(ctx)
-
     _output(_ok(
         feeds_added=result.feeds_added,
         feeds_updated=result.feeds_updated,
         feeds_skipped=result.feeds_skipped,
         categories_added=result.categories_added,
         rewritten_bridger_urls=result.rewritten_bridger_urls,
-        wrote_config=write_config,
     ))
 
 
@@ -615,30 +528,6 @@ def cmd_export_opml(ctx: FeedsContext, output) -> None:
     else:
         # Raw OPML on stdout — caller asked for it; bypass JSON wrapping.
         click.echo(text)
-
-
-def _dump_db_to_config(ctx: FeedsContext) -> None:
-    """Project the DB (which OPML import populated) back to feeds.toml."""
-    feeds_db.init_db(ctx.db_path)
-    with feeds_db.connect(ctx.db_path) as conn:
-        cats = feeds_db.list_categories(conn)
-        feeds = feeds_db.list_feeds(conn)
-    cat_by_id = {c.id: c for c in cats}
-    data: dict = {
-        "settings": {"default_poll_interval_minutes": DEFAULT_POLL_INTERVAL_MINUTES},
-        "categories": [{"slug": c.slug, "title": c.title} for c in cats],
-        "feeds": [],
-    }
-    for f in feeds:
-        entry: dict = {"url": f.url}
-        if f.title:
-            entry["title"] = f.title
-        if f.category_id and f.category_id in cat_by_id:
-            entry["category"] = cat_by_id[f.category_id].slug
-        if f.poll_interval_minutes != default_poll_interval_for(f.source_type):
-            entry["poll_interval_minutes"] = f.poll_interval_minutes
-        data["feeds"].append(entry)
-    _save_config(ctx, data)
 
 
 if __name__ == "__main__":

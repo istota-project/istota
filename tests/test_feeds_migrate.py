@@ -23,6 +23,11 @@ def ctx(tmp_path):
     return c
 
 
+def _legacy_path(ctx):
+    """The primary location the migrator searches first."""
+    return ctx.data_dir / "config" / "feeds.toml"
+
+
 def _write_toml(path, body: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
@@ -63,7 +68,7 @@ class TestNoSourceFile:
 
 class TestImport:
     def test_imports_categories_and_feeds(self, ctx):
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         result = migrate_legacy_toml(ctx)
         assert result is not None
         assert result["categories_added"] == 1
@@ -78,18 +83,13 @@ class TestImport:
         assert slugs == {"blogs"}
 
     def test_writes_default_interval_to_schema_meta(self, ctx):
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         migrate_legacy_toml(ctx)
         with feeds_db.connect(ctx.db_path) as conn:
-            row = conn.execute(
-                "SELECT value FROM schema_meta WHERE key = ?",
-                (_DEFAULT_INTERVAL_SETTING_KEY,),
-            ).fetchone()
-            assert row is not None
-            assert row["value"] == "45"
+            assert feeds_db.get_default_poll_interval(conn) == 45
 
     def test_per_feed_interval_overrides_default(self, ctx):
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         migrate_legacy_toml(ctx)
         with feeds_db.connect(ctx.db_path) as conn:
             row = conn.execute(
@@ -104,14 +104,14 @@ class TestImport:
             assert row["poll_interval_minutes"] == 45
 
     def test_leaves_source_file_in_place(self, ctx):
-        # Operators confirm via the log line and `rm` manually. The migrator
+        # Operators confirm via the log line and rm manually. The migrator
         # never deletes user data.
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         migrate_legacy_toml(ctx)
-        assert ctx.config_path.exists()
+        assert _legacy_path(ctx).exists()
 
     def test_writes_sentinel(self, ctx):
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         migrate_legacy_toml(ctx)
         with feeds_db.connect(ctx.db_path) as conn:
             row = conn.execute(
@@ -123,11 +123,11 @@ class TestImport:
 
 class TestIdempotence:
     def test_second_run_is_noop(self, ctx):
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         first = migrate_legacy_toml(ctx)
         assert first is not None
         # Recreate the file (simulating a stale operator-saved copy).
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         second = migrate_legacy_toml(ctx)
         assert second is None
         with feeds_db.connect(ctx.db_path) as conn:
@@ -147,7 +147,7 @@ class TestIdempotence:
                 category_id=None, poll_interval_minutes=30,
             )
             conn.commit()
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
 
         with caplog.at_level(logging.WARNING):
             result = migrate_legacy_toml(ctx)
@@ -168,10 +168,10 @@ class TestIdempotence:
         """After import, an operator may drop a fresh feeds.toml back. The
         sentinel should suppress re-import; we should log so the operator
         notices the file is dead."""
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         migrate_legacy_toml(ctx)
         # Operator drops a new file.
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         with caplog.at_level(logging.WARNING):
             assert migrate_legacy_toml(ctx) is None
         assert any(
@@ -196,14 +196,8 @@ class TestSearchPaths:
             urls = {r["url"] for r in conn.execute("SELECT url FROM feeds")}
         assert urls == {"https://example.com/feed.xml", "tumblr:nemfrog"}
 
-    def test_falls_back_to_workspace_config(self, tmp_path):
-        # Skip the default config_path resolution by pointing config_path at
-        # a non-existent file, then drop the toml at workspace_root/config.
-        ctx = synthesize_feeds_context(
-            "alice", tmp_path,
-            config_path=tmp_path / "noexist" / "feeds.toml",
-        )
-        ctx.ensure_dirs()
+    def test_falls_back_to_workspace_config(self, ctx, tmp_path):
+        # No primary; only the workspace-root fallback.
         secondary = tmp_path / "config" / "feeds.toml"
         _write_toml(
             secondary,
@@ -216,7 +210,7 @@ class TestSearchPaths:
 
 class TestParseErrors:
     def test_unparseable_toml_does_not_raise(self, ctx, caplog):
-        _write_toml(ctx.config_path, "not = valid = toml = ===\n")
+        _write_toml(_legacy_path(ctx), "not = valid = toml = ===\n")
         with caplog.at_level(logging.WARNING):
             assert migrate_legacy_toml(ctx) is None
         # No sentinel — a fix-and-retry should succeed later.
@@ -229,14 +223,14 @@ class TestParseErrors:
 
 class TestEnsureInitialised:
     def test_runs_init_and_migration(self, ctx):
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         ensure_initialised(ctx)
         with feeds_db.connect(ctx.db_path) as conn:
             count = conn.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"]
         assert count == 2
 
     def test_idempotent(self, ctx):
-        _write_toml(ctx.config_path, _SAMPLE)
+        _write_toml(_legacy_path(ctx), _SAMPLE)
         ensure_initialised(ctx)
         ensure_initialised(ctx)  # must not crash, must not re-import
         with feeds_db.connect(ctx.db_path) as conn:

@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 
 _SENTINEL_KEY = "feeds_legacy_toml_imported_at"
-_DEFAULT_INTERVAL_SETTING_KEY = "feeds_settings.default_poll_interval_minutes"
+# Re-exported for tests; canonical home is db.py.
+_DEFAULT_INTERVAL_SETTING_KEY = feeds_db._DEFAULT_INTERVAL_KEY
 
 
 def _legacy_toml_candidates(ctx: FeedsContext) -> list[Path]:
@@ -165,9 +166,13 @@ def migrate_legacy_toml(ctx: FeedsContext) -> dict | None:
             if not slug:
                 continue
             raw_title = str(c.get("title") or "").strip()
-            title = raw_title or slug
             existing_cat = feeds_db.get_category_by_slug(conn, slug)
-            cat_id = feeds_db.upsert_category(conn, slug, title)
+            if raw_title:
+                # Caller provided a real title — upsert it.
+                cat_id = feeds_db.upsert_category(conn, slug, raw_title)
+            else:
+                # No title in TOML; don't stomp an existing one.
+                cat_id = feeds_db.ensure_category(conn, slug)
             slug_to_id[slug] = cat_id
             if existing_cat is None:
                 cats_added += 1
@@ -190,9 +195,11 @@ def migrate_legacy_toml(ctx: FeedsContext) -> dict | None:
             cat_slug = f.get("category")
             cat_id = slug_to_id.get(cat_slug) if cat_slug else None
             if cat_slug and cat_id is None:
-                cat_id = feeds_db.upsert_category(conn, cat_slug, cat_slug)
+                existing_cat = feeds_db.get_category_by_slug(conn, cat_slug)
+                cat_id = feeds_db.ensure_category(conn, cat_slug)
                 slug_to_id[cat_slug] = cat_id
-                cats_added += 1
+                if existing_cat is None:
+                    cats_added += 1
             source_type = detect_source_type(url)
             per_feed = f.get("poll_interval_minutes")
             if per_feed:
@@ -215,10 +222,7 @@ def migrate_legacy_toml(ctx: FeedsContext) -> dict | None:
                 feeds_added += 1
 
         if explicit_default is not None:
-            conn.execute(
-                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
-                (_DEFAULT_INTERVAL_SETTING_KEY, str(explicit_default)),
-            )
+            feeds_db.set_default_poll_interval(conn, explicit_default)
 
         conn.commit()
 
