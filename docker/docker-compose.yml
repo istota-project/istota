@@ -328,6 +328,9 @@ services:
       - /bin/sh
       - -c
       - |
+        # Match the istota service: any file we write to /mnt/shared needs
+        # to land mode 664 with group=33 so NC's www-data can edit it back.
+        umask 002
         # Wait for the istota service to generate config.toml. If [web] is
         # missing (e.g. provisioning failed), the web app stays up but returns
         # 500 from /login — better than a restart loop.
@@ -427,7 +430,7 @@ services:
       ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
       # Admin allowlist (shared with the istota and web services).
       ISTOTA_ADMINS_FILE: /data/config/admins
-    entrypoint: ["/bin/sh", "-c", "mkdir -p /app/config && ln -sf /data/config/config.toml /app/config/config.toml && exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port ${ISTOTA_WEBHOOKS_PORT:-8765}"]
+    entrypoint: ["/bin/sh", "-c", "umask 002 && mkdir -p /app/config && ln -sf /data/config/config.toml /app/config/config.toml && exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port ${ISTOTA_WEBHOOKS_PORT:-8765}"]
     command: []
     restart: unless-stopped
 
