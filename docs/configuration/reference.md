@@ -273,10 +273,13 @@ See [Google Workspace](../features/google-workspace.md) for setup instructions.
 |---|---|---|
 | `enabled` | `false` | Enable web interface |
 | `port` | `8766` | Web app port |
-| `oidc_issuer` | `""` | Nextcloud OIDC issuer URL |
-| `oidc_client_id` | `""` | OAuth client ID |
-| `oidc_client_secret` | `""` | OAuth client secret |
-| `session_secret_key` | `""` | Session encryption key |
+| `oauth2_provider` | `""` | Public Nextcloud URL (browser-facing), no trailing slash |
+| `oauth2_client_id` | `""` | NC OAuth 2.0 client ID |
+| `oauth2_client_secret` | `""` | NC OAuth 2.0 client secret (or `ISTOTA_OAUTH2_CLIENT_SECRET` env) |
+| `oauth2_token_endpoint` | `""` | Optional server-to-server token URL override |
+| `oauth2_userinfo_endpoint` | `""` | Optional server-to-server userinfo URL override |
+| `oauth2_redirect_uri` | `""` | Explicit redirect URI override; otherwise derived from request |
+| `session_secret_key` | `""` | Session signing key (or `ISTOTA_WEB_SECRET_KEY` env) |
 
 ## `[location]`
 

@@ -284,18 +284,11 @@ class LocationReceiverConfig:
 class WebConfig:
     """Authenticated web interface configuration.
 
-    Two auth modes are supported, OAuth2 wins when both are configured:
-    - `oauth2_*`: NC's built-in OAuth2 provider (no extra apps required).
-      Auth-only flow: code exchange → identity check via OCS → discard token.
-    - `oidc_*`: third-party OIDC provider (legacy / external IDPs).
+    Auth uses Nextcloud's built-in OAuth2 provider (no extra NC apps required).
+    Auth-only flow: code exchange → identity check via OCS → discard token.
     """
     enabled: bool = False
     port: int = 8766
-    # OIDC (legacy / external IDPs)
-    oidc_issuer: str = ""
-    oidc_client_id: str = ""
-    oidc_client_secret: str = ""
-    # OAuth2 auth-only (NC built-in provider).
     # `oauth2_provider` is the user-facing NC URL — what the browser hits to
     # authorize. `oauth2_token_endpoint` and `oauth2_userinfo_endpoint` are
     # server-to-server; in Docker they typically point at the internal
@@ -1075,9 +1068,6 @@ def load_config(config_path: Path | None = None) -> Config:
         config.web = WebConfig(
             enabled=w.get("enabled", False),
             port=w.get("port", 8766),
-            oidc_issuer=w.get("oidc_issuer", ""),
-            oidc_client_id=w.get("oidc_client_id", ""),
-            oidc_client_secret=w.get("oidc_client_secret", ""),
             oauth2_provider=w.get("oauth2_provider", ""),
             oauth2_client_id=w.get("oauth2_client_id", ""),
             oauth2_client_secret=w.get("oauth2_client_secret", ""),
@@ -1142,7 +1132,6 @@ def load_config(config_path: Path | None = None) -> Config:
         ("ISTOTA_NTFY_TOKEN", "ntfy", "token"),
         ("ISTOTA_NTFY_PASSWORD", "ntfy", "password"),
         ("ISTOTA_GOOGLE_CLIENT_SECRET", "google_workspace", "client_secret"),
-        ("ISTOTA_OIDC_CLIENT_SECRET", "web", "oidc_client_secret"),
         ("ISTOTA_OAUTH2_CLIENT_SECRET", "web", "oauth2_client_secret"),
         ("ISTOTA_WEB_SECRET_KEY", "web", "session_secret_key"),
     ]

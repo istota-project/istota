@@ -378,19 +378,26 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # base_path = "/srv/app/istota/html"       # local directory for site files
 
 # ============================================================================
-# Authenticated Web Interface (Nextcloud OIDC)
+# Authenticated Web Interface (Nextcloud built-in OAuth2)
 # ============================================================================
-# Provides a login-protected web UI. Requires registering an OAuth 2.0 client
-# in Nextcloud: Settings > Administration > Security > OAuth 2.0 clients,
-# redirect URI https://{hostname}/istota/callback
+# Login-protected web UI backed by Nextcloud's built-in OAuth2 provider
+# (no extra NC apps required). Register an OAuth 2.0 client in
+# Nextcloud: Settings > Administration > Security > OAuth 2.0 clients,
+# redirect URI https://{hostname}/istota/callback. Auth-only flow:
+# code exchange → identity check via OCS → token discarded.
 
 # [web]
 # enabled = false
 # port = 8766
-# oidc_issuer = "https://cloud.example.com"
-# oidc_client_id = "istota-web"
-# oidc_client_secret = ""    # or ISTOTA_OIDC_CLIENT_SECRET env var
-# session_secret_key = ""    # or ISTOTA_WEB_SECRET_KEY env var
+# oauth2_provider = "https://cloud.example.com"   # public NC URL the browser hits
+# oauth2_client_id = "istota-web"
+# oauth2_client_secret = ""                        # or ISTOTA_OAUTH2_CLIENT_SECRET env var
+# session_secret_key = ""                          # or ISTOTA_WEB_SECRET_KEY env var
+#
+# Optional overrides (defaults derive from oauth2_provider):
+# oauth2_token_endpoint = ""                       # server-to-server token URL
+# oauth2_userinfo_endpoint = ""                    # server-to-server identity URL
+# oauth2_redirect_uri = ""                         # explicit override; otherwise derived from request
 
 # ============================================================================
 # Google Workspace Integration

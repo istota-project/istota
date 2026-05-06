@@ -274,10 +274,19 @@ reconcile_min_dwell_sec = {{ istota_location_reconcile_min_dwell_sec }}
 [web]
 enabled = true
 port = {{ istota_web_port }}
-oidc_issuer = "{{ istota_web_oidc_issuer }}"
-oidc_client_id = "{{ istota_web_oidc_client_id }}"
+oauth2_provider = "{{ istota_web_oauth2_provider }}"
+oauth2_client_id = "{{ istota_web_oauth2_client_id }}"
+{% if istota_web_oauth2_token_endpoint %}
+oauth2_token_endpoint = "{{ istota_web_oauth2_token_endpoint }}"
+{% endif %}
+{% if istota_web_oauth2_userinfo_endpoint %}
+oauth2_userinfo_endpoint = "{{ istota_web_oauth2_userinfo_endpoint }}"
+{% endif %}
+{% if istota_web_oauth2_redirect_uri %}
+oauth2_redirect_uri = "{{ istota_web_oauth2_redirect_uri }}"
+{% endif %}
 {% if not istota_use_environment_file %}
-oidc_client_secret = "{{ istota_web_oidc_client_secret }}"
+oauth2_client_secret = "{{ istota_web_oauth2_client_secret }}"
 session_secret_key = "{{ istota_web_secret_key }}"
 {% endif %}
 {% endif %}
@@ -329,5 +338,7 @@ github_api_allowlist = [
 ]
 {% endif %}
 
-# User configuration is in per-user files: config/users/{user_id}.toml
-# See user.toml.j2 template
+# User profiles, resources, and briefings live in the DB (user_profiles,
+# user_resources, briefing_configs tables). They are populated by
+# `istota user/resource/briefing ensure` invocations in the playbook —
+# config.toml does not render any per-user data.

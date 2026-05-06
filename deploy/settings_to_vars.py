@@ -202,9 +202,12 @@ _SECTION_FLAT_KEYS = {
     "web": {
         "enabled": "istota_web_enabled",
         "port": "istota_web_port",
-        "oidc_issuer": "istota_web_oidc_issuer",
-        "oidc_client_id": "istota_web_oidc_client_id",
-        "oidc_client_secret": "istota_web_oidc_client_secret",
+        "oauth2_provider": "istota_web_oauth2_provider",
+        "oauth2_client_id": "istota_web_oauth2_client_id",
+        "oauth2_client_secret": "istota_web_oauth2_client_secret",
+        "oauth2_token_endpoint": "istota_web_oauth2_token_endpoint",
+        "oauth2_userinfo_endpoint": "istota_web_oauth2_userinfo_endpoint",
+        "oauth2_redirect_uri": "istota_web_oauth2_redirect_uri",
         "secret_key": "istota_web_secret_key",
     },
 }

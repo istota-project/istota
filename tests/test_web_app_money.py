@@ -71,9 +71,9 @@ def _istota_config(tmp_path, money_config_path: Path | None = None) -> Config:
         web=WebConfig(
             enabled=True,
             port=8766,
-            oidc_issuer="https://cloud.example.com",
-            oidc_client_id="istota-web",
-            oidc_client_secret="test-secret",
+            oauth2_provider="https://cloud.example.com",
+            oauth2_client_id="istota-web",
+            oauth2_client_secret="test-secret",
             session_secret_key="test-session-key",
         ),
         bot_name="Istota",
@@ -117,9 +117,7 @@ async def client_without_money(app_without_money):
 
 async def _login_as(client, username):
     import istota.web_app as mod
-    mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-        "userinfo": {"preferred_username": username, "name": username.title()},
-    })
+    mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": username})
     resp = await client.get("/istota/callback", follow_redirects=False)
     return resp.cookies
 

@@ -330,13 +330,23 @@ istota_location_reconcile_grace_minutes: 10.0
 istota_location_reconcile_min_pings: 3
 istota_location_reconcile_min_dwell_sec: 60
 
-# Authenticated web interface (Nextcloud OIDC)
-istota_web_enabled: false
+# Authenticated web interface (Nextcloud built-in OAuth2)
+#
+# Auth-only flow against NC's built-in OAuth2 provider. Set up the client in
+# Settings → Security → OAuth 2.0 clients on the target Nextcloud, then put
+# the client_id/secret here (vault the secret). Redirect URI must match
+# {istota_web_oauth2_redirect_uri} or the derived default
+# `https://{istota_hostname}/istota/callback`.
+istota_web_enabled: true
 istota_web_port: 8766
-istota_web_oidc_issuer: ""
-istota_web_oidc_client_id: ""
-istota_web_oidc_client_secret: ""
-istota_web_secret_key: ""
+
+istota_web_oauth2_provider: ""           # Public NC URL (what the browser hits), no trailing slash
+istota_web_oauth2_client_id: ""
+istota_web_oauth2_client_secret: ""
+istota_web_oauth2_token_endpoint: ""     # Optional override; defaults derive from oauth2_provider
+istota_web_oauth2_userinfo_endpoint: ""  # Optional override
+istota_web_oauth2_redirect_uri: ""       # Optional override; defaults to https://{site_hostname}/istota/callback
+istota_web_secret_key: ""                # Session signing key (vault); generate with `python3 -c 'import secrets;print(secrets.token_hex(32))'`
 
 # Master key for the encrypted ``secrets`` table (Phase 5). Populated into
 # /etc/{{ istota_namespace }}/secrets.env as ISTOTA_SECRET_KEY. Generate
