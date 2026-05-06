@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-06
+
 ### Added
 - **Modules / connected services UI split (Phase 2 + 3 of the modules refactor).** New `web/src/lib/components/settings/ServiceCard.svelte` wraps the "service name + status pill + updated meta + used-by line + secret fields / OAuth button" pattern; replaces the inline secret blocks each settings page used to maintain. New endpoints: `GET /istota/api/settings/modules` returns the module registry plus per-user `disabled_modules`; `GET /istota/api/settings/module-services/{module}` returns the service cards belonging to one module's settings page (currently `feeds → tumblr_api_key`, `money → monarch.{email,password,session_token}`, `location → overland.ingest_token`); both signal `module_enabled: bool` so per-module pages can render a "module disabled — enable in /settings → Preferences" banner instead of the configuration UI. `GET /istota/api/settings/services` now returns only Connected services (`karakeep`, `google_workspace`); module-owned services no longer leak through. New "Disabled modules" multiselect on `/settings → Preferences`; values are validated server-side against `MODULE_NAMES`. New `/location/settings` page with the Overland ingest-token SecretField, a webhook-URL hint (`https://<host>/webhooks/location?token=<token>` — the token never leaves the server, so the URL shown uses a placeholder), and read-only place-detection knobs. Cog icon added to `/location/+layout.svelte` mirroring the feeds and money toggle pattern.
 - **Karakeep base URL is now an encrypted secret.** Both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` resolve from the secrets table at task time. The legacy `[[resources]] type = "karakeep" base_url = "…"` form still works on first startup — the value is migrated into the secrets table and the resource row is cleaned up by `db.cleanup_obsolete_resources` (already in the modules-refactor Phase 1 migration).
@@ -456,7 +458,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.9.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.10.0...main
+[0.10.0]: https://gitlab.com/cynium/istota/-/releases/v0.10.0
 [0.9.0]: https://gitlab.com/cynium/istota/-/releases/v0.9.0
 [0.8.2]: https://gitlab.com/cynium/istota/-/releases/v0.8.2
 [0.8.1]: https://gitlab.com/cynium/istota/-/releases/v0.8.1
