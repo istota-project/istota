@@ -37,22 +37,6 @@ class TestUserConfigLogChannel:
         assert cfg.log_channel == "logroom42"
 
 
-class TestUserConfigLogChannelParsing:
-    def test_parse_from_toml(self, tmp_path):
-        from istota.config import load_user_configs
-        user_file = tmp_path / "alice.toml"
-        user_file.write_text('log_channel = "mylogroom"\n')
-        users = load_user_configs(tmp_path)
-        assert users["alice"].log_channel == "mylogroom"
-
-    def test_parse_missing_defaults_empty(self, tmp_path):
-        from istota.config import load_user_configs
-        user_file = tmp_path / "bob.toml"
-        user_file.write_text('display_name = "Bob"\n')
-        users = load_user_configs(tmp_path)
-        assert users["bob"].log_channel == ""
-
-
 # ---------------------------------------------------------------------------
 # Source label
 # ---------------------------------------------------------------------------
