@@ -22,12 +22,19 @@
 # Environment overrides (curl-pipe path):
 #   ISTOTA_REPO_URL     Repo to clone (default: https://github.com/istota-project/istota.git)
 #   ISTOTA_REPO_BRANCH  Branch / tag to clone (default: main)
+#   ISTOTA_CLONE_DIR    Where to clone the repo. Defaults to /tmp/istota-install
+#                       for bare metal (the Ansible deploy lands in
+#                       /srv/app/istota regardless) and ~/istota for docker
+#                       (so you can come back for `docker compose` ops).
 
 set -euo pipefail
 
 REPO_URL="${ISTOTA_REPO_URL:-https://github.com/istota-project/istota.git}"
 REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
-CLONE_DIR="${ISTOTA_CLONE_DIR:-/tmp/istota-install}"
+# CLONE_DIR default is mode-dependent; bare metal uses a temp clone (the
+# Ansible deploy lands in /srv/app/istota anyway), docker uses a stable
+# user-visible path so the user can come back for `docker compose` ops.
+CLONE_DIR="${ISTOTA_CLONE_DIR:-}"
 
 _BOLD="\033[1m"; _BLUE="\033[1;34m"; _GREEN="\033[1;32m"
 _YELLOW="\033[1;33m"; _RED="\033[1;31m"; _DIM="\033[2m"; _RESET="\033[0m"
@@ -115,6 +122,7 @@ run_bare() {
   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash"
     fi
 
+    : "${CLONE_DIR:=/tmp/istota-install}"
     ensure_repo
     reattach_tty_if_needed
     local target="$REPO_ROOT/deploy/install.sh"
@@ -140,6 +148,7 @@ run_docker() {
         die "'docker compose' plugin not available. Install docker-compose-plugin."
     fi
 
+    : "${CLONE_DIR:=${HOME:-/root}/istota}"
     ensure_repo
     reattach_tty_if_needed
     local target="$REPO_ROOT/docker/init.sh"
