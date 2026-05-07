@@ -2,17 +2,48 @@
 
 An octopus-shaped, self-hosted AI agent that lives in your Nextcloud. ([istota.xyz](https://istota.xyz))
 
-## Quick start (Docker)
+## Quick start
 
-> **Experimental.** The Docker deployment is functional but should be considered unstable. The stable, canonical deployment method is to a dedicated Debian/Ubuntu VM using the [install script](#quick-start-bare-metal) or the Ansible role at `deploy/ansible/`.
+One installer, two paths. Bare metal is the canonical deployment; Docker is for evaluation.
 
-The Docker setup spins up a complete stack from scratch: Postgres, Redis, a fresh Nextcloud instance, and the Istota scheduler. If you already have a Nextcloud instance, skip to [bare metal](#quick-start-bare-metal) — the Docker Compose creates its own Nextcloud and is meant for evaluation or standalone deployments, not for connecting to an existing one.
+```bash
+# Bare metal (Debian/Ubuntu VM, connects to your existing Nextcloud) — recommended
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash
+
+# Docker (bundles its own Nextcloud, experimental)
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
+```
+
+Both run the same interactive wizard. `--help` lists flags; the dispatcher forwards everything except `--docker` to the chosen path.
+
+## Bare metal install
+
+Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a Claude Code OAuth token.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh -o install.sh
+sudo bash install.sh
+```
+
+The installer walks you through connecting to Nextcloud, setting up users, and choosing optional features. After installation:
+
+```bash
+sudo -u istota HOME=/srv/app/istota claude login
+```
+
+To update: `sudo bash install.sh --update`. An Ansible role is also available at `deploy/ansible/`.
+
+## Docker install
+
+> **Experimental.** The Docker deployment is functional but should be considered unstable. The canonical deployment method is the [bare metal installer](#bare-metal-install) or the Ansible role at `deploy/ansible/`.
+
+The Docker setup spins up a complete stack from scratch: Postgres, Redis, a fresh Nextcloud instance, and the Istota scheduler. If you already have a Nextcloud instance, use the bare-metal path instead — Compose creates its own Nextcloud and is meant for evaluation or standalone deployments, not for connecting to an existing one.
 
 ### 1. Configure
 
 ```bash
-cd docker
-bash init.sh
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
+# or, from a clone: bash docker/init.sh
 ```
 
 `init.sh` is a guided wizard that mirrors the bare-metal install flow. It auto-generates passwords for the Nextcloud admin, Postgres, the bot account, and your user; auto-detects your timezone; and walks through the same optional-feature prompts you'd see on a real install:
@@ -72,23 +103,6 @@ The Docker deployment differs from a bare metal / Ansible installation in a few 
 - **Bundled Nextcloud.** The Compose file creates a new Nextcloud instance. If you already run Nextcloud, use the bare metal installer or Ansible role instead — they connect to your existing instance without creating a second one.
 - **No backups or auto-update.** The Ansible role sets up cron-based DB backups and optional auto-update. In Docker, volume backups are your responsibility.
 - **All Python extras installed.** The Docker image includes every optional dependency (whisper, memory-search, etc.) so all skills are available without rebuilding.
-
-## Quick start (bare metal)
-
-Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a Claude Code OAuth token.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/muinyc/istota/main/deploy/install.sh -o install.sh
-sudo bash install.sh
-```
-
-The installer walks you through connecting to Nextcloud, setting up users, and choosing optional features. After installation:
-
-```bash
-sudo -u istota HOME=/srv/app/istota claude login
-```
-
-To update: `sudo bash install.sh --update`. An Ansible role is also available at `deploy/ansible/`.
 
 ## How it works
 

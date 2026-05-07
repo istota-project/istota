@@ -14,7 +14,7 @@ set -euo pipefail
 SETTINGS_FILE="${ISTOTA_SETTINGS_FILE:-/etc/istota/settings.toml}"
 ISTOTA_HOME="${ISTOTA_HOME:-/srv/app/istota}"
 ISTOTA_NAMESPACE="${ISTOTA_NAMESPACE:-istota}"
-REPO_URL="${ISTOTA_REPO_URL:-https://github.com/muinyc/istota.git}"
+REPO_URL="${ISTOTA_REPO_URL:-https://github.com/istota-project/istota.git}"
 REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
 
 # Wizard state

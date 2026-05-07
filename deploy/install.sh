@@ -3,7 +3,7 @@
 # Ensures Ansible is available, then delegates to the Ansible role.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/muinyc/istota/main/deploy/install.sh -o install.sh
+#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh -o install.sh
 #   sudo bash install.sh
 #
 #   install.sh [OPTIONS]
@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" 2>/dev/null)" && pwd 2>/dev/null
 # Defaults
 SETTINGS_FILE="${ISTOTA_SETTINGS_FILE:-/etc/istota/settings.toml}"
 VARS_FILE="${ISTOTA_VARS_FILE:-/etc/istota/vars.yml}"
-REPO_URL="${ISTOTA_REPO_URL:-https://github.com/muinyc/istota.git}"
+REPO_URL="${ISTOTA_REPO_URL:-https://github.com/istota-project/istota.git}"
 REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
 INSTALL_DIR=""  # Set after repo is available
 UPDATE_ONLY=false
