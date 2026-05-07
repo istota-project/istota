@@ -13,8 +13,11 @@
 #     --help          Show this help
 #
 # All other flags pass through to the chosen subscript:
-#   bare metal: --interactive, --update, --dry-run, --settings PATH
+#   bare metal: --headless, --update, --dry-run, --settings PATH
 #   docker:     --minimal, --force, --start, --no-start
+#
+# Both paths default to running an interactive wizard. Pass --headless
+# (bare metal) or use --force / a pre-existing .env (docker) to skip it.
 #
 # Environment overrides (curl-pipe path):
 #   ISTOTA_REPO_URL     Repo to clone (default: https://github.com/istota-project/istota.git)

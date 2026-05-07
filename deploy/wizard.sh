@@ -5,8 +5,8 @@
 # Usage:
 #   bash wizard.sh [--settings /path/to/settings.toml]
 #
-# This script is called by install.sh --interactive, but can also be run
-# standalone to (re)generate a settings file.
+# This script is called by install.sh by default (skipped under --headless),
+# but can also be run standalone to (re)generate a settings file.
 
 set -euo pipefail
 
