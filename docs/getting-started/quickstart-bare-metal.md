@@ -5,7 +5,7 @@ Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a Claude Code OAuth 
 ## Quick install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/muinyc/istota/main/deploy/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh -o install.sh
 sudo bash install.sh
 ```
 
