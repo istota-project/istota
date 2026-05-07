@@ -56,7 +56,7 @@ The executor builds a minimal, clean environment for the subprocess. `build_clea
 
 When the skill proxy is enabled (default), credential vars are split out via `_split_credential_env()` and routed through a Unix socket proxy instead of being in Claude's environment. The proxy is instantiated with two distinct skill sets: `allowed_skills` (the global CLI whitelist, used to reject typos) and `authorized_skills` (per-task subset returned by `_authorized_skills_from_credentials()`, used for credential scoping and informative rejection messages). The authorized set is derived from credential presence in the task env — not from skill selection — so a keyword miss in Pass 1/Pass 2 doesn't lock out a skill the user has clearly configured. See [security](../deployment/security.md#authorization-model) for the full model.
 
-See [environment variables reference](../reference/environment-variables.md) for the full mapping.
+See [environment variables reference](../reference/environment-variables.md) for the full mapping and [credentials](../configuration/credentials.md) for the two-tier credential architecture (global vs per-user).
 
 ## Streaming events
 

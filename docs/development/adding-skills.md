@@ -94,7 +94,7 @@ from istota.skills.my_skill import main
 main()
 ```
 
-Pattern: `build_parser()` + `main()`, JSON output, credentials via env vars.
+Pattern: `build_parser()` + `main()`, JSON output, credentials via env vars. See [credentials](../configuration/credentials.md) for the two-tier model and how to wire new credentials into the proxy.
 
 ## 4. (Optional) Add env var mapping
 
