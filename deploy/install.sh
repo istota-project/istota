@@ -7,7 +7,8 @@
 #   sudo bash install.sh
 #
 #   install.sh [OPTIONS]
-#     --interactive     Guided setup wizard (writes settings file, default on first run)
+#     --headless        Skip the setup wizard. Requires an existing settings file
+#                       (or --settings PATH). The default is to run the wizard.
 #     --update          Update only (pull code + config + restart, skip full system setup)
 #     --dry-run         Run wizard, generate Ansible vars, show what would change
 #     --settings PATH   Settings file path (default: /etc/istota/settings.toml)
@@ -24,8 +25,9 @@ REPO_URL="${ISTOTA_REPO_URL:-https://github.com/istota-project/istota.git}"
 REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
 INSTALL_DIR=""  # Set after repo is available
 UPDATE_ONLY=false
-INTERACTIVE=false
+HEADLESS=false
 DRY_RUN=false
+RUN_WIZARD=false  # Resolved in main() based on flags + settings file + TTY
 
 # Output helpers
 _BOLD="\033[1m"
@@ -51,9 +53,9 @@ command_exists() { command -v "$1" &>/dev/null; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --interactive)  INTERACTIVE=true; shift ;;
+        --headless)     HEADLESS=true; shift ;;
         --update)       UPDATE_ONLY=true; shift ;;
-        --dry-run)      DRY_RUN=true; INTERACTIVE=true; shift ;;
+        --dry-run)      DRY_RUN=true; shift ;;
         --settings)     SETTINGS_FILE="$2"; shift 2 ;;
         --help|-h)
             sed -n '2,/^$/s/^# \?//p' "$0"
@@ -114,18 +116,9 @@ preflight() {
         warn "Python not found (will be installed)"
     fi
 
-    # Existing settings
+    # Existing settings — the wizard-or-not decision is resolved in main()
     if [ -f "$SETTINGS_FILE" ]; then
         ok "Existing settings found at $SETTINGS_FILE"
-        if [ "$INTERACTIVE" = true ]; then
-            echo
-            local overwrite
-            read -rp "  Overwrite existing settings with new wizard? [y/N]: " overwrite
-            case "$overwrite" in
-                [yY]*) : ;;
-                *)     INTERACTIVE=false; info "Skipping wizard, using existing settings" ;;
-            esac
-        fi
     fi
 }
 
@@ -216,7 +209,7 @@ ensure_repo() {
 
 convert_settings() {
     if [ ! -f "$SETTINGS_FILE" ]; then
-        die "No settings file found at $SETTINGS_FILE. Run with --interactive for guided setup."
+        die "No settings file found at $SETTINGS_FILE. Re-run without --headless for guided setup, or pass --settings PATH."
     fi
 
     info "Converting settings to Ansible vars"
@@ -315,15 +308,36 @@ main() {
 
     preflight
 
-    # Auto-detect interactive mode for first-time installs
-    if [ "$INTERACTIVE" = false ] && [ "$UPDATE_ONLY" = false ] && [ ! -f "$SETTINGS_FILE" ]; then
+    # Decide whether to run the wizard. Default is interactive (run it);
+    # --headless or --update opts out. If we'd need to prompt but stdin
+    # isn't a TTY (and no settings yet), bail with a clear message instead
+    # of silently producing nothing.
+    if [ "$UPDATE_ONLY" = true ]; then
+        RUN_WIZARD=false
+    elif [ "$HEADLESS" = true ]; then
+        if [ ! -f "$SETTINGS_FILE" ]; then
+            die "--headless requires existing settings at $SETTINGS_FILE.
+  Run interactively first, or pass --settings /path/to/settings.toml."
+        fi
+        RUN_WIZARD=false
+    elif [ ! -f "$SETTINGS_FILE" ]; then
         if [ -t 0 ]; then
-            INTERACTIVE=true
+            RUN_WIZARD=true
         else
             die "No settings file found and stdin is not a terminal.
-  For interactive setup: bash install.sh --interactive
-  Or provide a settings file: bash install.sh --settings /path/to/settings.toml"
+  Re-run from a terminal, or pass --headless with --settings /path/to/settings.toml."
         fi
+    elif [ -t 0 ]; then
+        # Settings exist + interactive + TTY available → ask whether to overwrite
+        echo
+        read -rp "  Overwrite existing settings with new wizard? [y/N]: " overwrite
+        case "$overwrite" in
+            [yY]*) RUN_WIZARD=true ;;
+            *)     RUN_WIZARD=false; info "Skipping wizard, using existing settings" ;;
+        esac
+    else
+        # Settings exist + no TTY → just proceed with what we have
+        RUN_WIZARD=false
     fi
 
     # Step 1: Ensure Python, pipx, Ansible
@@ -336,8 +350,8 @@ main() {
     # Step 2: Get the repo
     ensure_repo
 
-    # Step 3: Run wizard if interactive
-    if [ "$INTERACTIVE" = true ]; then
+    # Step 3: Run wizard if needed
+    if [ "$RUN_WIZARD" = true ]; then
         bash "$INSTALL_DIR/wizard.sh" --settings "$SETTINGS_FILE"
     fi
 
@@ -361,7 +375,7 @@ main() {
     print_next_steps
 
     echo -e "  To update: ${_DIM}sudo bash install.sh --update${_RESET}"
-    echo -e "  To reconfigure: ${_DIM}sudo bash install.sh --interactive${_RESET}"
+    echo -e "  To reconfigure: ${_DIM}sudo bash install.sh${_RESET}"
     echo
 }
 

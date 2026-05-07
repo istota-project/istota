@@ -18,15 +18,18 @@ The script is a ~250-line bootstrap that:
 1. Ensures Python 3.11+, pipx, and ansible-core are installed
 2. Installs required Ansible collections (`community.general`, `ansible.posix`)
 3. Gets the Ansible role (from local repo or cloned copy)
-4. Runs the setup wizard if `--interactive` (writes `/etc/istota/settings.toml`)
+4. Runs the setup wizard by default (writes `/etc/istota/settings.toml`); skipped under `--headless` or `--update`
 5. Converts `settings.toml` to Ansible vars via `settings_to_vars.py`
 6. Runs `ansible-playbook` in local connection mode
 
 ### Common commands
 
 ```bash
-# Interactive setup (recommended for first install)
-sudo ./install.sh --interactive
+# Default: runs the interactive setup wizard
+sudo ./install.sh
+
+# Skip the wizard — requires existing settings (or --settings PATH)
+sudo ./install.sh --headless
 
 # Update existing installation
 sudo ./install.sh --update
