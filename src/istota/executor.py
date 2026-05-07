@@ -390,10 +390,10 @@ def build_stripped_env() -> dict[str, str]:
 
 
 # Env vars that match a strip pattern but must survive build_stripped_env().
-# ISTOTA_SECRET_KEY is the master key needed by module-skill subprocesses
-# (feeds, money, location) to decrypt the secrets table — without it
-# secrets_store.get_secret() returns None and per-user credentials configured
-# via the web UI are invisible.
+# Used by the cron command-task path (_execute_command_task). The interactive
+# task path uses build_clean_env() + the skill-proxy credential split — see
+# _PROXY_CREDENTIAL_VARS / _CREDENTIAL_SKILL_MAP below for ISTOTA_SECRET_KEY's
+# routing on that path.
 _STRIPPED_ENV_PRESERVE = frozenset({"ISTOTA_SECRET_KEY"})
 
 
@@ -411,6 +411,13 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "GOOGLE_WORKSPACE_CLI_TOKEN",
     "NTFY_TOKEN",
     "NTFY_PASSWORD",
+    # Master key for the encrypted secrets table. Routed through the proxy so
+    # skill CLIs that resolve secrets at runtime (money's Monarch creds,
+    # feeds' Tumblr key) can call secrets_store.get_secret() — without it
+    # the call returns None and the credentials are silently invisible.
+    # Claude never sees this; _split_credential_env() strips it from the
+    # brain's env before the subprocess is spawned. (See ISSUE-082.)
+    "ISTOTA_SECRET_KEY",
 })
 
 
@@ -427,6 +434,13 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "GOOGLE_WORKSPACE_CLI_TOKEN": frozenset({"google_workspace"}),
     "NTFY_TOKEN": frozenset({"ntfy"}),
     "NTFY_PASSWORD": frozenset({"ntfy"}),
+    # money / feeds resolve their per-user secrets (Monarch creds, Tumblr
+    # key) at runtime via secrets_store.get_secret(). They need the master
+    # key in their subprocess env. Per-skill pre-extraction (the bookmarks
+    # pattern) is preferred for skills with a small fixed set of credentials
+    # — narrower blast radius — but money/feeds resolve dynamically and
+    # would otherwise drift.
+    "ISTOTA_SECRET_KEY": frozenset({"money", "feeds"}),
 }
 
 
@@ -2139,6 +2153,16 @@ def execute_task(
             "ISTOTA_CONVERSATION_TOKEN": task.conversation_token or "",
             "ISTOTA_DEFERRED_DIR": str(user_temp_dir),
         })
+
+        # Master key for the encrypted secrets table. Listed in
+        # _PROXY_CREDENTIAL_VARS so _split_credential_env() routes it to the
+        # proxy and strips it from Claude's env. The proxy injects it only
+        # into skill subprocesses listed in
+        # _CREDENTIAL_SKILL_MAP[ISTOTA_SECRET_KEY] (money, feeds), which call
+        # secrets_store.get_secret() to decrypt their per-user credentials.
+        secret_key = os.environ.get("ISTOTA_SECRET_KEY", "")
+        if secret_key:
+            env["ISTOTA_SECRET_KEY"] = secret_key
 
         # CalDAV credentials — only for users with discovered calendars
         # to prevent leaking other users' calendar data (see ISSUE-015)
