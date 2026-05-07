@@ -409,6 +409,8 @@ _PROXY_CREDENTIAL_VARS = frozenset({
     "GITLAB_TOKEN",
     "GITHUB_TOKEN",
     "GOOGLE_WORKSPACE_CLI_TOKEN",
+    "NTFY_TOKEN",
+    "NTFY_PASSWORD",
 })
 
 
@@ -423,6 +425,8 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
     "GITLAB_TOKEN": frozenset({"developer"}),
     "GITHUB_TOKEN": frozenset({"developer"}),
     "GOOGLE_WORKSPACE_CLI_TOKEN": frozenset({"google_workspace"}),
+    "NTFY_TOKEN": frozenset({"ntfy"}),
+    "NTFY_PASSWORD": frozenset({"ntfy"}),
 }
 
 
