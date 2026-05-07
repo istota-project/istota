@@ -14,9 +14,11 @@ file is left in place so an operator can confirm the import landed
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import tomllib
 from datetime import datetime, timezone
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
@@ -32,8 +34,32 @@ logger = logging.getLogger(__name__)
 
 
 _SENTINEL_KEY = "feeds_legacy_toml_imported_at"
+_DEFAULTS_SENTINEL_KEY = "feeds_default_opml_seeded_at"
 # Re-exported for tests; canonical home is db.py.
 _DEFAULT_INTERVAL_SETTING_KEY = feeds_db._DEFAULT_INTERVAL_KEY
+
+_BUNDLED_LABEL = "<bundled:istota.feeds:data/feeds-defaults.opml>"
+
+
+def _read_bundled_defaults_opml() -> str | None:
+    """Read the package-shipped ``feeds-defaults.opml`` as text.
+
+    Uses ``importlib.resources`` so this works from a wheel install, an
+    editable checkout, or a zipapp/PyInstaller bundle (where ``__file__``
+    can point inside an archive). Returns ``None`` if the package was
+    built without the data file.
+    """
+    try:
+        resource = files("istota.feeds").joinpath("data/feeds-defaults.opml")
+    except (ModuleNotFoundError, FileNotFoundError):
+        return None
+    try:
+        with as_file(resource) as concrete:
+            if not concrete.is_file():
+                return None
+            return concrete.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
 
 
 def _legacy_toml_candidates(ctx: FeedsContext) -> list[Path]:
@@ -238,13 +264,184 @@ def migrate_legacy_toml(ctx: FeedsContext) -> dict | None:
     }
 
 
+def _default_opml_fs_candidates(ctx: FeedsContext) -> list[Path]:
+    """Filesystem paths to probe for a ``feeds-defaults.opml`` override.
+
+    Per-user override wins over workspace-level override. The bundled
+    default (resolved via :func:`_read_bundled_defaults_opml`) is the
+    final fallback and intentionally not included here.
+    """
+    out: list[Path] = []
+    seen: set[Path] = set()
+
+    primary = Path(ctx.data_dir) / "config" / "feeds-defaults.opml"
+    out.append(primary)
+    seen.add(primary)
+
+    # Workspace-level override. Prefer the explicit ``workspace_root`` on the
+    # context; fall back to ``data_dir.parent`` only for the default layout
+    # (``data_dir = {workspace}/feeds``) when ``workspace_root`` is unset.
+    if ctx.workspace_root is not None:
+        workspace = Path(ctx.workspace_root) / "config" / "feeds-defaults.opml"
+    else:
+        workspace = Path(ctx.data_dir).parent / "config" / "feeds-defaults.opml"
+    if workspace not in seen:
+        out.append(workspace)
+
+    return out
+
+
+def _resolve_default_opml(ctx: FeedsContext) -> tuple[str, str] | None:
+    """Return ``(opml_text, source_label)`` for the highest-priority
+    available defaults file, or ``None`` if none are available.
+
+    File-system override paths are tried first (see
+    :func:`_default_opml_fs_candidates`); on miss we fall back to the
+    package-shipped bundled OPML. The label is the absolute path for FS
+    sources and a stable sentinel string for the bundled resource.
+    """
+    for candidate in _default_opml_fs_candidates(ctx):
+        if not candidate.is_file():
+            continue
+        try:
+            return candidate.read_text(encoding="utf-8"), str(candidate)
+        except OSError as e:
+            logger.warning(
+                "feeds_default_opml_unreadable path=%s error=%s", candidate, e,
+            )
+            return None
+    bundled = _read_bundled_defaults_opml()
+    if bundled is not None:
+        return bundled, _BUNDLED_LABEL
+    return None
+
+
+def _try_write_defaults_sentinel(ctx: FeedsContext) -> bool:
+    """Insert the ``feeds_default_opml_seeded_at`` row.
+
+    Returns True on success, False on PK collision (another process or
+    a previous run already claimed the slot). Independent connection so
+    callers can decide when to commit.
+    """
+    with feeds_db.connect(ctx.db_path) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
+                (_DEFAULTS_SENTINEL_KEY, _iso_now()),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return False
+    return True
+
+
+def seed_default_opml(ctx: FeedsContext) -> dict | None:
+    """Seed the per-user feeds DB with example subscriptions.
+
+    Runs at most once per user. Successful runs write a
+    ``feeds_default_opml_seeded_at`` row in ``schema_meta``; the next
+    call sees the row and bails. Skip / abort cases:
+
+    * ``ISTOTA_FEEDS_SKIP_DEFAULT_SEED`` is set (ops opt-out / test
+      suite). No sentinel is written — clearing the env var lets
+      seeding run on the next call.
+    * Sentinel already set — no-op.
+    * DB already has feeds (legacy TOML, ``feeds add``, OPML import) —
+      we record the sentinel so we don't probe the FS on every boot.
+    * No defaults file found anywhere — return without writing the
+      sentinel, so a later release shipping the OPML or an operator
+      drop-in still triggers seeding on a subsequent boot.
+    * Defaults file unreadable / malformed — return without writing the
+      sentinel, so fixing the file unblocks seeding.
+
+    Resolution order: ``{data_dir}/config/feeds-defaults.opml`` →
+    ``{workspace_root}/config/feeds-defaults.opml`` → bundled
+    ``istota.feeds:data/feeds-defaults.opml`` (resolved via
+    ``importlib.resources``).
+
+    Reset incantation for an operator who wants to re-seed:
+    ``DELETE FROM schema_meta WHERE key='feeds_default_opml_seeded_at'``
+    against the user's per-user feeds DB.
+
+    Race-safety: two processes racing into an empty DB may both pass
+    the ``has_feeds=False`` gate and both call :func:`import_opml`.
+    That's fine — ``feeds_db.upsert_feed`` is keyed on URL so
+    re-imports are no-ops, and only one of the two ``INSERT INTO
+    schema_meta`` calls below wins; the other returns having done
+    redundant-but-safe work.
+    """
+    if os.environ.get("ISTOTA_FEEDS_SKIP_DEFAULT_SEED"):
+        return None
+
+    feeds_db.init_db(ctx.db_path)
+
+    with feeds_db.connect(ctx.db_path) as conn:
+        already = conn.execute(
+            "SELECT 1 FROM schema_meta WHERE key = ?",
+            (_DEFAULTS_SENTINEL_KEY,),
+        ).fetchone()
+        if already:
+            return None
+        has_feeds = conn.execute(
+            "SELECT 1 FROM feeds LIMIT 1",
+        ).fetchone()
+
+    if has_feeds:
+        # User got rows from another path (TOML migration, manual `feeds
+        # add`, OPML import). Burn the sentinel so we don't re-probe the
+        # FS forever; seeding is no longer applicable for this user.
+        _try_write_defaults_sentinel(ctx)
+        return None
+
+    resolved = _resolve_default_opml(ctx)
+    if resolved is None:
+        # No FS override and no bundled file — nothing to do, but
+        # intentionally don't write the sentinel: a later release that
+        # ships the bundled OPML, or an operator drop-in, should still
+        # be picked up on a subsequent call.
+        logger.debug("feeds_default_opml_no_source ctx_user=%s", ctx.user_id)
+        return None
+
+    opml_text, source_label = resolved
+
+    from istota.feeds.opml import import_opml  # noqa: PLC0415
+
+    try:
+        result = import_opml(ctx, opml_text)
+    except Exception as e:  # noqa: BLE001
+        # Don't write the sentinel — fixing the override file should
+        # unblock seeding without operator surgery on schema_meta.
+        logger.warning(
+            "feeds_default_opml_import_failed source=%s error=%s",
+            source_label, e,
+        )
+        return None
+
+    # Import committed; claim the sentinel slot. Loser of a multi-
+    # process race silently bails (their import was already a no-op
+    # via upsert).
+    _try_write_defaults_sentinel(ctx)
+
+    logger.info(
+        "feeds_default_opml_seeded source=%s feeds=%d categories=%d",
+        source_label, result.feeds_added, result.categories_added,
+    )
+    return {
+        "path": source_label,
+        "feeds_added": result.feeds_added,
+        "categories_added": result.categories_added,
+    }
+
+
 def ensure_initialised(ctx: FeedsContext) -> None:
     """Wire up a feeds workspace for use.
 
-    Creates the dirs, runs schema migrations on the SQLite, and (once)
-    imports any legacy ``feeds.toml`` into the DB. Safe to call from
-    every entry point — web routes, CLI subcommands, skill facade.
+    Creates the dirs, runs schema migrations on the SQLite, imports any
+    legacy ``feeds.toml`` (once), then seeds default subscriptions from
+    OPML (once). Safe to call from every entry point — web routes, CLI
+    subcommands, skill facade.
     """
     ctx.ensure_dirs()
     feeds_db.init_db(ctx.db_path)
     migrate_legacy_toml(ctx)
+    seed_default_opml(ctx)

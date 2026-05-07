@@ -9,15 +9,18 @@ import pytest
 from istota.feeds import db as feeds_db
 from istota.feeds._migrate import (
     _DEFAULT_INTERVAL_SETTING_KEY,
+    _DEFAULTS_SENTINEL_KEY,
     _SENTINEL_KEY,
     ensure_initialised,
     migrate_legacy_toml,
+    seed_default_opml,
 )
 from istota.feeds.workspace import synthesize_feeds_context
 
 
 @pytest.fixture
-def ctx(tmp_path):
+def ctx(tmp_path, monkeypatch):
+    monkeypatch.delenv("ISTOTA_FEEDS_SKIP_DEFAULT_SEED", raising=False)
     c = synthesize_feeds_context("alice", tmp_path)
     c.ensure_dirs()
     return c
@@ -236,3 +239,228 @@ class TestEnsureInitialised:
         with feeds_db.connect(ctx.db_path) as conn:
             count = conn.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"]
         assert count == 2
+
+
+_OVERRIDE_OPML = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>override</title></head>
+  <body>
+    <outline text="news" title="news">
+      <outline type="rss" text="Override Feed"
+        xmlUrl="https://override.example.com/feed.xml"
+        htmlUrl="https://override.example.com/" />
+    </outline>
+  </body>
+</opml>
+"""
+
+
+class TestSeedDefaultOpml:
+    def test_seeds_bundled_defaults_into_empty_db(self, ctx):
+        result = seed_default_opml(ctx)
+        assert result is not None
+        assert result["feeds_added"] >= 1
+        with feeds_db.connect(ctx.db_path) as conn:
+            count = conn.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"]
+        assert count >= 1
+
+    def test_writes_sentinel_on_success(self, ctx):
+        seed_default_opml(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = ?",
+                (_DEFAULTS_SENTINEL_KEY,),
+            ).fetchone()
+            assert row is not None
+
+    def test_second_run_is_noop(self, ctx):
+        first = seed_default_opml(ctx)
+        assert first is not None
+        with feeds_db.connect(ctx.db_path) as conn:
+            count1 = conn.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"]
+        second = seed_default_opml(ctx)
+        assert second is None
+        with feeds_db.connect(ctx.db_path) as conn:
+            count2 = conn.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"]
+        assert count1 == count2
+
+    def test_skips_when_db_already_populated(self, ctx):
+        feeds_db.init_db(ctx.db_path)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.upsert_feed(
+                conn,
+                url="https://added-via-cli.test/feed",
+                title=None, site_url=None, source_type="rss",
+                category_id=None, poll_interval_minutes=30,
+            )
+            conn.commit()
+        result = seed_default_opml(ctx)
+        assert result is None
+        # Sentinel still written so we don't re-check on every boot.
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM schema_meta WHERE key = ?",
+                (_DEFAULTS_SENTINEL_KEY,),
+            ).fetchone()
+            assert row is not None
+            urls = {r["url"] for r in conn.execute("SELECT url FROM feeds")}
+        # User's own feed left intact.
+        assert urls == {"https://added-via-cli.test/feed"}
+
+    def test_per_user_override_wins_over_bundled(self, ctx):
+        override = ctx.data_dir / "config" / "feeds-defaults.opml"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(_OVERRIDE_OPML)
+        result = seed_default_opml(ctx)
+        assert result is not None
+        assert result["path"] == str(override)
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = {r["url"] for r in conn.execute("SELECT url FROM feeds")}
+        assert urls == {"https://override.example.com/feed.xml"}
+
+    def test_workspace_override_beats_bundled(self, ctx, tmp_path):
+        # data_dir.parent is the workspace root (synthesize_feeds_context layout).
+        override = tmp_path / "config" / "feeds-defaults.opml"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(_OVERRIDE_OPML)
+        result = seed_default_opml(ctx)
+        assert result is not None
+        assert result["path"] == str(override)
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = {r["url"] for r in conn.execute("SELECT url FROM feeds")}
+        assert urls == {"https://override.example.com/feed.xml"}
+
+    def test_data_dir_override_wins_over_workspace_override(self, ctx, tmp_path):
+        primary = ctx.data_dir / "config" / "feeds-defaults.opml"
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        primary.write_text(_OVERRIDE_OPML)
+        secondary = tmp_path / "config" / "feeds-defaults.opml"
+        secondary.parent.mkdir(parents=True, exist_ok=True)
+        secondary.write_text(
+            '<?xml version="1.0"?><opml version="2.0"><body>'
+            '<outline type="rss" xmlUrl="https://wrong.example.com/feed.xml" />'
+            '</body></opml>'
+        )
+        result = seed_default_opml(ctx)
+        assert result is not None
+        assert result["path"] == str(primary)
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = {r["url"] for r in conn.execute("SELECT url FROM feeds")}
+        assert urls == {"https://override.example.com/feed.xml"}
+
+
+class TestSeedDefaultOpmlFootguns:
+    """Behaviour around the lockout cases scully flagged: a parse error
+    or a missing bundled file must not write the sentinel — fixing the
+    underlying issue should unblock seeding without operator surgery on
+    ``schema_meta``."""
+
+    def test_parse_error_does_not_lock_out(self, ctx, caplog):
+        # Per-user override wins over bundled, so a malformed override
+        # actually exercises the import-error branch.
+        override = ctx.data_dir / "config" / "feeds-defaults.opml"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text("not valid xml at all <<<>>>")
+        with caplog.at_level(logging.WARNING):
+            assert seed_default_opml(ctx) is None
+        assert any(
+            "feeds_default_opml_import_failed" in rec.message
+            for rec in caplog.records
+        )
+        # No sentinel — fixing the override file should let seeding run.
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM schema_meta WHERE key = ?",
+                (_DEFAULTS_SENTINEL_KEY,),
+            ).fetchone()
+            assert row is None
+
+        # Replace with a valid override and re-run.
+        override.write_text(_OVERRIDE_OPML)
+        result = seed_default_opml(ctx)
+        assert result is not None
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = {r["url"] for r in conn.execute("SELECT url FROM feeds")}
+        assert urls == {"https://override.example.com/feed.xml"}
+
+    def test_missing_bundled_does_not_lock_out(self, ctx, monkeypatch):
+        # Simulate a build that ships without the bundled OPML and no
+        # operator override on disk.
+        from istota.feeds import _migrate as mig
+        monkeypatch.setattr(mig, "_read_bundled_defaults_opml", lambda: None)
+
+        result = seed_default_opml(ctx)
+        assert result is None
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM schema_meta WHERE key = ?",
+                (_DEFAULTS_SENTINEL_KEY,),
+            ).fetchone()
+            assert row is None
+
+        # Operator drops a file later — seeding picks it up.
+        override = ctx.data_dir / "config" / "feeds-defaults.opml"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(_OVERRIDE_OPML)
+        result = seed_default_opml(ctx)
+        assert result is not None
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = {r["url"] for r in conn.execute("SELECT url FROM feeds")}
+        assert urls == {"https://override.example.com/feed.xml"}
+
+
+class TestSeedDefaultOpmlWorkspaceRoot:
+    """Operator overrides at the workspace level must work even when
+    ``data_dir`` is overridden to a non-workspace path."""
+
+    def test_explicit_workspace_root_used_when_data_dir_is_remote(
+        self, tmp_path, monkeypatch,
+    ):
+        from istota.feeds.workspace import synthesize_feeds_context
+
+        monkeypatch.delenv("ISTOTA_FEEDS_SKIP_DEFAULT_SEED", raising=False)
+
+        workspace = tmp_path / "workspace"
+        remote_data = tmp_path / "remote-data" / "feeds-store"
+        workspace.mkdir()
+        ctx = synthesize_feeds_context(
+            "alice",
+            workspace,
+            data_dir=remote_data,
+            db_path=remote_data / "feeds.db",
+        )
+        ctx.ensure_dirs()
+
+        override = workspace / "config" / "feeds-defaults.opml"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(_OVERRIDE_OPML)
+
+        result = seed_default_opml(ctx)
+        assert result is not None
+        assert result["path"] == str(override)
+        with feeds_db.connect(ctx.db_path) as conn:
+            urls = {r["url"] for r in conn.execute("SELECT url FROM feeds")}
+        assert urls == {"https://override.example.com/feed.xml"}
+
+
+class TestEnsureInitialisedSeedsDefaults:
+    def test_seeds_when_no_legacy_toml(self, ctx):
+        ensure_initialised(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            count = conn.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"]
+            sentinel = conn.execute(
+                "SELECT 1 FROM schema_meta WHERE key = ?",
+                (_DEFAULTS_SENTINEL_KEY,),
+            ).fetchone()
+        assert count >= 1
+        assert sentinel is not None
+
+    def test_legacy_toml_takes_precedence_over_defaults(self, ctx):
+        # When the operator already has a populated TOML, the migration
+        # imports it and the default OPML must not pile on more entries.
+        _write_toml(_legacy_path(ctx), _SAMPLE)
+        ensure_initialised(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            count = conn.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"]
+        assert count == 2  # only the TOML rows
