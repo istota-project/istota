@@ -45,11 +45,20 @@ class FeedsContext:
     All paths are absolute. The data dir / db path are materialised by
     the workspace loader; ``tumblr_api_key`` and other credentials come
     from the user's encrypted secrets.
+
+    ``workspace_root`` is the user's bot workspace dir (parent of
+    ``feeds/``). When ``data_dir`` follows the default layout
+    ``{workspace}/feeds`` it equals ``data_dir.parent``, but when an
+    operator overrides ``data_dir`` to a non-workspace path, callers
+    that need workspace-level config drop-ins (e.g. seed-OPML override
+    discovery) must consult this field — ``data_dir.parent`` is
+    unreliable in that case.
     """
     user_id: str
     data_dir: Path
     db_path: Path
     tumblr_api_key: str = ""
+    workspace_root: Path | None = None
 
     def ensure_dirs(self) -> None:
         """Create the data dir and the SQLite parent dir."""

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head>
+    <title>istota — default feeds</title>
+  </head>
+  <body>
+    <outline text="rss" title="rss">
+      <outline type="rss" text="Pirate Utopia"
+        title="Pirate Utopia"
+        xmlUrl="https://kubicki.org/rss/newsletters/2.xml"
+        htmlUrl="https://kubicki.org/" />
+      <outline type="rss" text="Daring Fireball"
+        title="Daring Fireball"
+        xmlUrl="https://daringfireball.net/feeds/main"
+        htmlUrl="https://daringfireball.net/" />
+      <outline type="rss" text="Robin Sloan"
+        title="Robin Sloan"
+        xmlUrl="https://www.robinsloan.com/lab.xml"
+        htmlUrl="https://www.robinsloan.com/" />
+    </outline>
+    <outline text="tumblr" title="tumblr">
+      <outline type="rss" text="Nemfrog"
+        title="Nemfrog"
+        xmlUrl="https://nemfrog.tumblr.com/rss"
+        htmlUrl="https://nemfrog.tumblr.com/" />
+    </outline>
+    <outline text="arena" title="arena">
+      <outline type="rss" text="Cats in a channel"
+        title="Cats in a channel"
+        xmlUrl="arena:cats-in-a-channel" />
+    </outline>
+    <outline text="comics" title="comics">
+      <outline type="rss" text="xkcd"
+        title="xkcd"
+        xmlUrl="https://xkcd.com/rss.xml"
+        htmlUrl="https://xkcd.com/" />
+    </outline>
+  </body>
+</opml>

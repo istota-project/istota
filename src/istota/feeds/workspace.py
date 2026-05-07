@@ -49,4 +49,5 @@ def synthesize_feeds_context(
         data_dir=data_dir,
         db_path=db_path,
         tumblr_api_key=tumblr_api_key,
+        workspace_root=workspace_root,
     )
