@@ -109,8 +109,9 @@ When `skill_proxy_enabled = true`, these variables are stripped from the subproc
 - `GITLAB_TOKEN`
 - `GITHUB_TOKEN`
 - `MONARCH_SESSION_TOKEN`
+- `ISTOTA_SECRET_KEY`
 
-The proxy injects each credential only into the skill CLIs that are mapped to it (`_CREDENTIAL_SKILL_MAP` in `executor.py`). Authorization is based on credential presence in the task env — not skill selection — so any CLI skill whose credentials the user has configured can request them at runtime. See [security: credential proxy](../deployment/security.md#credential-proxy) for the authorization model and rejection logging.
+The proxy injects each credential only into the skill CLIs that are mapped to it (`_CREDENTIAL_SKILL_MAP` in `executor.py`). Authorization is based on credential presence in the task env — not skill selection — so any CLI skill whose credentials the user has configured can request them at runtime. See [security: credential proxy](../deployment/security.md#credential-proxy) for the authorization model and rejection logging. See [credentials](../configuration/credentials.md) for the full two-tier credential inventory and provisioning guide.
 
 ## Secret overrides
 
@@ -126,3 +127,5 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_GOOGLE_CLIENT_SECRET` | `google_workspace.client_secret` |
 | `ISTOTA_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
 | `ISTOTA_WEB_SECRET_KEY` | `web.session_secret_key` |
+
+See [credentials](../configuration/credentials.md) for what each override covers and the full env var → config mapping.

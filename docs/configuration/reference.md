@@ -234,7 +234,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 
 ## ntfy push notifications
 
-ntfy is a **per-user connected service** — there is no `[ntfy]` config block. Each user supplies their own server URL, topic, and (optional) auth via the encrypted `secrets` table:
+ntfy is a **per-user connected service** — there is no `[ntfy]` config block. Each user supplies their own server URL, topic, and (optional) auth via the encrypted `secrets` table (see [credentials](credentials.md) for the full per-user credential inventory):
 
 ```bash
 istota secret ensure --user alice --service ntfy --key topic --value alice-alerts

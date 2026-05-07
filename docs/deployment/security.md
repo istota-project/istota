@@ -41,13 +41,16 @@ Linux-only and merged-usr compatible for Debian 13+. See [Supported deployment](
 
 ## Credential proxy
 
-When `skill_proxy_enabled = true` (default), secret env vars are stripped from Claude's environment:
+When `skill_proxy_enabled = true` (default), secret env vars are stripped from Claude's environment and routed through a Unix socket proxy instead. See [credentials](../configuration/credentials.md) for the full inventory of which credentials are global vs per-user and how they're provisioned.
+
+Stripped variables:
 
 - `CALDAV_PASSWORD`, `NC_PASS`, `SMTP_PASSWORD`, `IMAP_PASSWORD`
 - `KARAKEEP_API_KEY`
 - `GITLAB_TOKEN`, `GITHUB_TOKEN`, `MONARCH_SESSION_TOKEN`, `GOOGLE_WORKSPACE_CLI_TOKEN`
+- `ISTOTA_SECRET_KEY`
 
-Skill CLI commands run through a Unix socket proxy (`skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped per skill: `_CREDENTIAL_SKILL_MAP` maps each credential to the set of skills that may use it, so a CLI invocation only ever sees the credentials its own skill is mapped to. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
+Skill CLI commands run through the proxy (`skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped per skill: `_CREDENTIAL_SKILL_MAP` maps each credential to the set of skills that may use it, so a CLI invocation only ever sees the credentials its own skill is mapped to. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
 
 ### Authorization model
 

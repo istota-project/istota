@@ -6,7 +6,7 @@ Per-user data lives in three DB tables and (optionally) the user's Nextcloud wor
    - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, disabled_skills, **disabled_modules**
    - `user_resources` — resources (calendar, folder, todo_file, notes_folder, email_folder, reminders_file). The `extras` JSON column carries resource-type-specific config.
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
-   - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, etc.)
+   - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, ntfy, etc.). See [credentials](credentials.md) for the full per-user inventory.
 2. `[users.alice]` block in main `config/config.toml` (the docker entrypoint path) — DB rows still win at config-load time.
 3. User workspace files in Nextcloud (`PERSONA.md`, `BRIEFINGS.md`, `CRON.md`, `HEARTBEAT.md`, `TASKS.md`, `USER.md`).
 
