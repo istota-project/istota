@@ -74,11 +74,47 @@ except Exception:
 '
 }
 
-# Helper: look up a Talk room by exact displayName, return its token (or empty).
-# Used to recover tokens after API_PROVISION_FLAG loss without creating duplicates.
+# Helper: check whether a user is a participant of a given room. Used to
+# scope name-based room lookups to USER_NAME so the bot doesn't return
+# another deployment's identically-named room on a shared NC instance.
+room_has_participant() {
+    local token="$1"
+    local user="$2"
+    local body_file found
+    body_file=$(mktemp)
+    curl -sS -o "$body_file" \
+        -u "${BOT_USER:-istota}:${BOT_PASSWORD}" \
+        -H "OCS-APIRequest: true" \
+        -X GET "${NC_URL}/ocs/v2.php/apps/spreed/api/v4/room/${token}/participants?format=json" \
+        2>/dev/null || true
+
+    found=$(python3 - "$user" <<'PY' < "$body_file"
+import json, sys
+target = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+    parts = data.get("ocs", {}).get("data") or []
+    if isinstance(parts, list):
+        for p in parts:
+            if p.get("actorId") == target or p.get("userId") == target:
+                print("yes")
+                break
+except Exception:
+    pass
+PY
+    )
+    rm -f "$body_file"
+    [ "$found" = "yes" ]
+}
+
+# Helper: look up a Talk room by exact displayName where USER_NAME is also
+# a participant, return its token (or empty). Used to recover tokens after
+# API_PROVISION_FLAG loss without creating duplicates. Scoping to USER_NAME
+# prevents collisions when the bot is in multiple users' identically-named
+# rooms (e.g. each user's own #general).
 find_room_by_name() {
     local room_name="$1"
-    local body_file
+    local body_file candidates token
     body_file=$(mktemp)
     curl -sS -o "$body_file" \
         -u "${BOT_USER:-istota}:${BOT_PASSWORD}" \
@@ -86,7 +122,7 @@ find_room_by_name() {
         -X GET "${NC_URL}/ocs/v2.php/apps/spreed/api/v4/room?format=json" \
         2>/dev/null || true
 
-    python3 - "$room_name" <<'PY' < "$body_file"
+    candidates=$(python3 - "$room_name" <<'PY' < "$body_file"
 import json, sys
 target = sys.argv[1]
 try:
@@ -95,12 +131,21 @@ try:
     if isinstance(rooms, list):
         for r in rooms:
             if r.get("displayName") == target or r.get("name") == target:
-                print(r.get("token", ""))
-                break
+                tok = r.get("token", "")
+                if tok:
+                    print(tok)
 except Exception:
     pass
 PY
+    )
     rm -f "$body_file"
+
+    for token in $candidates; do
+        if room_has_participant "$token" "$USER_NAME"; then
+            printf '%s' "$token"
+            return 0
+        fi
+    done
 }
 
 # Helper: create a Talk group room (roomType=3) and invite USER_NAME.
@@ -219,11 +264,12 @@ if [ -z "${ROOM_TOKEN:-}" ] || [ -z "${GENERAL_TOKEN:-}" ] || \
         fi
     fi
 
-    # Default channels: #general, {user}-log, {user}-alerts. Helpers reuse
-    # existing rooms by name when they already exist.
+    # Default channels: #general, #logs, #alerts. Names are not user-prefixed —
+    # find_room_by_name() scopes lookups by USER_NAME participation, so each
+    # user gets their own set of identically-named rooms without collision.
     [ -z "${GENERAL_TOKEN:-}" ] && GENERAL_TOKEN=$(create_group_room "general")
-    [ -z "${LOG_TOKEN:-}" ] && LOG_TOKEN=$(create_group_room "${USER_NAME}-log")
-    [ -z "${ALERTS_TOKEN:-}" ] && ALERTS_TOKEN=$(create_group_room "${USER_NAME}-alerts")
+    [ -z "${LOG_TOKEN:-}" ] && LOG_TOKEN=$(create_group_room "logs")
+    [ -z "${ALERTS_TOKEN:-}" ] && ALERTS_TOKEN=$(create_group_room "alerts")
 
     # Seed CHANNEL.md for #general only (log/alerts are bot-write-only).
     # chown to www-data (uid 33) so the NC container can also access via WebDAV.
