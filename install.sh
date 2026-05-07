@@ -68,6 +68,17 @@ repo_root_or_empty() {
 
 REPO_ROOT="$(repo_root_or_empty "$SCRIPT_DIR")"
 
+# When curl-piped, stdin is the pipe carrying the script, not a TTY — so any
+# wizard `read` calls in the subscripts will fail. Reattach stdin to /dev/tty
+# if we have one, so `[ -t 0 ]` checks pass downstream. Best-effort: if
+# /dev/tty isn't available (true non-interactive run), leave stdin alone and
+# let the subscript decide whether it can proceed.
+reattach_tty_if_needed() {
+    if [ ! -t 0 ] && [ -e /dev/tty ]; then
+        exec < /dev/tty
+    fi
+}
+
 ensure_repo() {
     [ -n "$REPO_ROOT" ] && return 0
 
@@ -102,6 +113,7 @@ run_bare() {
     fi
 
     ensure_repo
+    reattach_tty_if_needed
     local target="$REPO_ROOT/deploy/install.sh"
     [ -f "$target" ] || die "deploy/install.sh not found at $target"
 
@@ -126,6 +138,7 @@ run_docker() {
     fi
 
     ensure_repo
+    reattach_tty_if_needed
     local target="$REPO_ROOT/docker/init.sh"
     [ -f "$target" ] || die "docker/init.sh not found at $target"
     exec bash "$target" "${FORWARD_ARGS[@]}"
