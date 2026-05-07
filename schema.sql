@@ -574,7 +574,6 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     timezone TEXT NOT NULL DEFAULT 'UTC',
     log_channel TEXT NOT NULL DEFAULT '',                -- Talk room token
     alerts_channel TEXT NOT NULL DEFAULT '',             -- Talk room token
-    ntfy_topic TEXT NOT NULL DEFAULT '',
     site_enabled INTEGER NOT NULL DEFAULT 0,
     max_foreground_workers INTEGER NOT NULL DEFAULT 0,   -- 0 = use global default
     max_background_workers INTEGER NOT NULL DEFAULT 0,

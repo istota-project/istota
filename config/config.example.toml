@@ -62,7 +62,7 @@ temp_dir = "/tmp/istota"
 # the skill proxy (enabled by default) for credential isolation.
 # Secrets can be provided via env vars (e.g. from systemd EnvironmentFile=):
 #   ISTOTA_NC_APP_PASSWORD, ISTOTA_IMAP_PASSWORD, ISTOTA_SMTP_PASSWORD,
-#   ISTOTA_GITLAB_TOKEN, ISTOTA_GITHUB_TOKEN, ISTOTA_NTFY_TOKEN, ISTOTA_NTFY_PASSWORD
+#   ISTOTA_GITLAB_TOKEN, ISTOTA_GITHUB_TOKEN
 
 # [security]
 # sandbox_enabled = true           # bwrap filesystem isolation per user (Linux only)
@@ -345,18 +345,10 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # ============================================================================
 # ntfy Push Notifications
 # ============================================================================
-# Send one-way broadcast notifications via ntfy (https://ntfy.sh).
-# Used by heartbeat alerts and scheduled job output.
-# Per-user topic overrides via ntfy_topic in user config.
-
-# [ntfy]
-# enabled = false
-# server_url = "https://ntfy.sh"        # self-hosted or ntfy.sh
-# topic = "istota-notifications"           # default topic (per-user override available)
-# token = ""                             # bearer token auth (preferred)
-# username = ""                          # basic auth (alternative to token)
-# password = ""
-# priority = 3                           # default priority (1=min, 3=default, 5=max)
+# ntfy is a per-user connected service, configured by each user via the web
+# settings UI (`/istota/settings`) or `istota secret ensure -s ntfy ...`.
+# There is no operator-shared block — each user supplies their own server,
+# topic, and (optional) auth.
 
 # ============================================================================
 # Money (accounting)

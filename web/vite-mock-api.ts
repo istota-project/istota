@@ -678,7 +678,6 @@ const handlers: MockHandler[] = [
 			timezone: 'UTC',
 			email_addresses: ['user@example.com'],
 			trusted_email_senders: [],
-			ntfy_topic: '',
 			log_channel: '',
 			alerts_channel: '',
 			disabled_skills: [],

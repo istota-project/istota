@@ -581,7 +581,6 @@ export interface UserProfile {
 	timezone: string;
 	email_addresses: string[];
 	trusted_email_senders: string[];
-	ntfy_topic: string;
 	log_channel: string;
 	alerts_channel: string;
 	disabled_skills: string[];

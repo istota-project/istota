@@ -311,14 +311,9 @@ istota_browser_cpu_limit: "{{ ansible_facts['processor_vcpus'] }}"
 istota_browser_memory_limit: "3G"
 istota_browser_restart_cron: "0 5 * * *"  # Daily restart (5 AM)
 
-# ntfy push notification settings (one-way broadcast notifications)
-istota_ntfy_enabled: false
-istota_ntfy_server_url: "https://ntfy.sh"
-istota_ntfy_topic: ""                      # default topic (per-user override via ntfy_topic)
-istota_ntfy_token: ""                      # bearer token auth (preferred)
-istota_ntfy_username: ""                   # basic auth (alternative to token)
-istota_ntfy_password: ""
-istota_ntfy_priority: 3                    # default priority (1=min, 3=default, 5=max)
+# ntfy push notifications are configured per-user via the encrypted secrets
+# table (`istota secret ensure -s ntfy ...` or web settings). There is no
+# operator-shared ntfy config — each user supplies their own server/topic/auth.
 
 # Location tracking (Overland GPS receiver)
 istota_location_enabled: false

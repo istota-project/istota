@@ -3,7 +3,7 @@
 After deploying via [Docker](quickstart-docker.md) or [bare metal](quickstart-bare-metal.md), complete these steps.
 
 !!! tip "Phase 6 — DB-backed user profiles"
-    Profile fields (display_name, timezone, email addresses, log/alerts channels, ntfy topic, worker overrides, trusted email senders, disabled skills) live in the `user_profiles` SQLite table. They're auto-seeded the first time a user logs into the web UI, or you can pre-seed via Ansible:
+    Profile fields (display_name, timezone, email addresses, log/alerts channels, worker overrides, trusted email senders, disabled skills) live in the `user_profiles` SQLite table. They're auto-seeded the first time a user logs into the web UI, or you can pre-seed via Ansible:
     ```bash
     istota user ensure --name alice --display-name "Alice" \
       --tz "America/Los_Angeles" --email alice@example.com

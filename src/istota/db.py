@@ -257,6 +257,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # User profiles: drop legacy ntfy_topic column. ntfy is now a per-user
+    # connected service stored in the encrypted secrets table; the profile
+    # column is unused.
+    try:
+        conn.execute("ALTER TABLE user_profiles DROP COLUMN ntfy_topic")
+    except sqlite3.OperationalError:
+        pass  # Column already dropped or never existed.
+
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError
     # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id

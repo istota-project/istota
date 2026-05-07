@@ -94,7 +94,12 @@ Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped m
 ### Modules vs resources vs connected services
 - **Resources** — paths/identifiers a user owns (calendars, folders, todo files, notes folders, email folders, reminders files). Multiple per user. Live in `[[users.X.resources]]` + the `user_resources` DB table.
 - **Modules** — on-by-default features with their own UI tab and a settings page reachable via a cog icon (`feeds`, `money`, `location`). Names live in `istota.modules.MODULE_NAMES`. Per-user opt-out via `disabled_modules`. Single source of truth: `Config.is_module_enabled(user_id, module)`.
-- **Connected services** — per-user external API credentials consumed by skills (`karakeep`, `google_workspace`). Stored encrypted in the `secrets` table (Fernet over scrypt-derived key from `ISTOTA_SECRET_KEY`); the bookmarks skill resolves both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` from there. Provisioned via `istota secret ensure|list|remove` (Ansible) or `/istota/settings` (web). Schema for both surfaces lives in `secret_schema.py`.
+- **Connected services** — per-user external API credentials consumed by skills (`karakeep`, `google_workspace`, `ntfy`). Stored encrypted in the `secrets` table (Fernet over scrypt-derived key from `ISTOTA_SECRET_KEY`); the bookmarks skill resolves both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` from there. Provisioned via `istota secret ensure|list|remove` (Ansible) or `/istota/settings` (web). Schema for both surfaces lives in `secret_schema.py`.
+
+### ntfy push notifications
+ntfy is a per-user connected service — there is no global `[ntfy]` block. Each user supplies their own server URL, topic, and (optional) auth via the encrypted `secrets` table (web settings or `istota secret ensure -s ntfy ...`). `notifications._send_ntfy` reads everything from the user's secret rows; if the user has no `topic` set, ntfy is a no-op for them. Default priority is hardcoded to `3`; per-call overrides flow through `send_notification(...)`.
+
+What it IS: a one-way push channel (bot → device) used by heartbeat alerts, scheduled-job output (when `output_target=ntfy`), and `surface="ntfy"` notifications. What it ISN'T: two-way (you can't reply over ntfy), a Talk replacement, operator-shared infrastructure, or required (most users won't configure it).
 
 ### Memory System
 - `USER.md` — auto-loaded, optional nightly op-based curation. Runtime writes go through the `memory` skill CLI (`istota-skill memory append|add-heading|remove|show|headings`) — never `echo >>`. The CLI shares the curation `apply_ops` engine, takes a per-file flock, and writes a `source="runtime"` audit entry per call.

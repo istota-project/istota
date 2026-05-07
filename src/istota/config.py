@@ -62,18 +62,6 @@ class EmailConfig:
 
 
 @dataclass
-class NtfyConfig:
-    """ntfy push notification configuration."""
-    enabled: bool = False
-    server_url: str = "https://ntfy.sh"
-    topic: str = ""
-    token: str = ""       # bearer token auth
-    username: str = ""     # basic auth (alternative to token)
-    password: str = ""
-    priority: int = 3
-
-
-@dataclass
 class BrowserConfig:
     """Browser container configuration."""
     enabled: bool = False
@@ -208,7 +196,6 @@ class UserConfig:
     timezone: str = "UTC"  # user's timezone for briefing scheduling
     briefings: list[BriefingConfig] = field(default_factory=list)
     resources: list[ResourceConfig] = field(default_factory=list)
-    ntfy_topic: str = ""  # per-user ntfy topic override
     log_channel: str = ""  # Talk room token for verbose task execution logs
     alerts_channel: str = ""  # Talk room token for confirmations and alerts
     site_enabled: bool = False  # static website hosting at /~user/
@@ -406,7 +393,6 @@ class Config:
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
-    ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefing_defaults: BriefingDefaultsConfig = field(default_factory=BriefingDefaultsConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
@@ -667,7 +653,6 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         timezone=user_data.get("timezone", "UTC"),
         briefings=briefings,
         resources=resources,
-        ntfy_topic=user_data.get("ntfy_topic", ""),
         log_channel=user_data.get("log_channel", ""),
         alerts_channel=user_data.get("alerts_channel", ""),
         site_enabled=user_data.get("site_enabled", False),
@@ -855,15 +840,9 @@ def load_config(config_path: Path | None = None) -> Config:
         )
 
     if "ntfy" in data:
-        n = data["ntfy"]
-        config.ntfy = NtfyConfig(
-            enabled=n.get("enabled", False),
-            server_url=n.get("server_url", "https://ntfy.sh"),
-            topic=n.get("topic", ""),
-            token=n.get("token", ""),
-            username=n.get("username", ""),
-            password=n.get("password", ""),
-            priority=n.get("priority", 3),
+        logger.warning(
+            "[ntfy] block in config.toml is no longer used — ntfy is now per-user "
+            "and configured via the secrets table (web settings or `istota secret`)."
         )
 
     if "skills" in data:
@@ -1037,8 +1016,6 @@ def load_config(config_path: Path | None = None) -> Config:
         ("ISTOTA_SMTP_PASSWORD", "email", "smtp_password"),
         ("ISTOTA_GITLAB_TOKEN", "developer", "gitlab_token"),
         ("ISTOTA_GITHUB_TOKEN", "developer", "github_token"),
-        ("ISTOTA_NTFY_TOKEN", "ntfy", "token"),
-        ("ISTOTA_NTFY_PASSWORD", "ntfy", "password"),
         ("ISTOTA_GOOGLE_CLIENT_SECRET", "google_workspace", "client_secret"),
         ("ISTOTA_OAUTH2_CLIENT_SECRET", "web", "oauth2_client_secret"),
         ("ISTOTA_WEB_SECRET_KEY", "web", "session_secret_key"),

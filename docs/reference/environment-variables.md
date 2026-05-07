@@ -123,8 +123,6 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_SMTP_PASSWORD` | `email.smtp_password` |
 | `ISTOTA_GITLAB_TOKEN` | `developer.gitlab_token` |
 | `ISTOTA_GITHUB_TOKEN` | `developer.github_token` |
-| `ISTOTA_NTFY_TOKEN` | `ntfy.token` |
-| `ISTOTA_NTFY_PASSWORD` | `ntfy.password` |
 | `ISTOTA_GOOGLE_CLIENT_SECRET` | `google_workspace.client_secret` |
 | `ISTOTA_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
 | `ISTOTA_WEB_SECRET_KEY` | `web.session_secret_key` |

@@ -33,10 +33,6 @@ _WIZ_SLEEP_CYCLE_ENABLED=true
 _WIZ_CHANNEL_SLEEP_ENABLED=true
 _WIZ_WHISPER_ENABLED=true
 _WIZ_WHISPER_MODEL="small"
-_WIZ_NTFY_ENABLED=false
-_WIZ_NTFY_SERVER=""
-_WIZ_NTFY_TOPIC=""
-_WIZ_NTFY_TOKEN=""
 _WIZ_LOCATION_ENABLED=false
 _WIZ_WEBHOOKS_PORT=8765
 _WIZ_BACKUP_ENABLED=true
@@ -396,16 +392,8 @@ wiz_features() {
         prompt_value _WIZ_WHISPER_MODEL "Whisper model" "small"
     fi
 
-    # ntfy
-    echo
-    dim "ntfy enables push notifications to phones/desktops via ntfy.sh."
-    prompt_bool _WIZ_NTFY_ENABLED "Enable ntfy push notifications?" "n"
-    if [ "$_WIZ_NTFY_ENABLED" = "true" ]; then
-        echo
-        prompt_value _WIZ_NTFY_SERVER "ntfy server URL" "https://ntfy.sh"
-        prompt_value _WIZ_NTFY_TOPIC "ntfy topic" ""
-        prompt_secret _WIZ_NTFY_TOKEN "ntfy access token (optional, press Enter to skip)"
-    fi
+    # ntfy is now configured per-user via the web settings UI (or
+    # `istota secret ensure -s ntfy ...`); the operator wizard skips it.
 
     # Location tracking
     echo
@@ -551,7 +539,6 @@ wiz_review() {
     echo -e "  ${_BOLD}Sleep cycle:${_RESET}       $_WIZ_SLEEP_CYCLE_ENABLED"
     echo -e "  ${_BOLD}Channel sleep:${_RESET}     $_WIZ_CHANNEL_SLEEP_ENABLED"
     echo -e "  ${_BOLD}Whisper:${_RESET}           $_WIZ_WHISPER_ENABLED$([ "$_WIZ_WHISPER_ENABLED" = "true" ] && echo " (model: $_WIZ_WHISPER_MODEL)")"
-    echo -e "  ${_BOLD}ntfy:${_RESET}              $_WIZ_NTFY_ENABLED$([ "$_WIZ_NTFY_ENABLED" = "true" ] && echo " (topic: $_WIZ_NTFY_TOPIC)")"
     echo -e "  ${_BOLD}Location:${_RESET}          $_WIZ_LOCATION_ENABLED$([ "$_WIZ_LOCATION_ENABLED" = "true" ] && echo " (port: $_WIZ_WEBHOOKS_PORT)")"
     echo -e "  ${_BOLD}Backups:${_RESET}           $_WIZ_BACKUP_ENABLED"
     echo -e "  ${_BOLD}Browser:${_RESET}           $_WIZ_BROWSER_ENABLED"
@@ -650,12 +637,6 @@ enabled = $_WIZ_CHANNEL_SLEEP_ENABLED
 [whisper]
 enabled = $_WIZ_WHISPER_ENABLED
 model = "$_WIZ_WHISPER_MODEL"
-
-[ntfy]
-enabled = $_WIZ_NTFY_ENABLED
-server_url = "$_WIZ_NTFY_SERVER"
-topic = "$_WIZ_NTFY_TOPIC"
-token = "$_WIZ_NTFY_TOKEN"
 
 [location]
 enabled = $_WIZ_LOCATION_ENABLED

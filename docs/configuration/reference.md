@@ -232,17 +232,19 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 | `github_default_owner` | `""` | Default org/user for short repo names |
 | `github_reviewer` | `""` | PR reviewer username |
 
-## `[ntfy]`
+## ntfy push notifications
 
-| Setting | Default | Description |
-|---|---|---|
-| `enabled` | `false` | Enable ntfy notifications |
-| `server_url` | `"https://ntfy.sh"` | ntfy server URL |
-| `topic` | `""` | Default topic |
-| `token` | `""` | Bearer token auth |
-| `username` | `""` | Basic auth username |
-| `password` | `""` | Basic auth password |
-| `priority` | `3` | Default priority (1-5) |
+ntfy is a **per-user connected service** — there is no `[ntfy]` config block. Each user supplies their own server URL, topic, and (optional) auth via the encrypted `secrets` table:
+
+```bash
+istota secret ensure --user alice --service ntfy --key topic --value alice-alerts
+istota secret ensure --user alice --service ntfy --key server_url --value https://ntfy.example.com
+istota secret ensure --user alice --service ntfy --key token --value tk_…
+```
+
+Or via the web UI at `/istota/settings` (Connected services → ntfy push). Priority is hardcoded to `3` (the ntfy default).
+
+What it IS: a one-way push channel (bot → device) used by heartbeat alerts and scheduled-job output (`output_target = "ntfy"`). What it ISN'T: two-way (no replies), a Talk replacement, operator-shared infrastructure, or required.
 
 ## Money
 

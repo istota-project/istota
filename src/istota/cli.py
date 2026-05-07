@@ -755,8 +755,6 @@ def cmd_user_ensure(args):
         updates["email_addresses"] = list(args.email)
     if args.trusted_sender is not None:
         updates["trusted_email_senders"] = list(args.trusted_sender)
-    if args.ntfy_topic is not None:
-        updates["ntfy_topic"] = args.ntfy_topic
     if args.log_channel is not None:
         updates["log_channel"] = args.log_channel
     if args.alerts_channel is not None:
@@ -842,7 +840,6 @@ def cmd_user_show(args):
         "timezone": profile.timezone,
         "log_channel": profile.log_channel,
         "alerts_channel": profile.alerts_channel,
-        "ntfy_topic": profile.ntfy_topic,
         "site_enabled": profile.site_enabled,
         "max_foreground_workers": profile.max_foreground_workers,
         "max_background_workers": profile.max_background_workers,
@@ -1255,7 +1252,6 @@ def main():
         "--trusted-sender", action="append",
         help="Trusted email sender pattern (repeatable; fnmatch syntax)",
     )
-    user_ensure_parser.add_argument("--ntfy-topic", help="Per-user ntfy topic override")
     user_ensure_parser.add_argument("--log-channel", help="Talk room token for verbose execution logs")
     user_ensure_parser.add_argument("--alerts-channel", help="Talk room token for confirmations and alerts")
     user_ensure_parser.add_argument("--max-foreground-workers", type=int, help="Per-user fg worker cap (0 = global default)")

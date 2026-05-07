@@ -761,11 +761,10 @@
 
 # Phase 6: write user profile rows into the user_profiles DB table.
 # Profile-shaped fields (display_name, timezone, email_addresses, log/alerts
-# channels, ntfy_topic, worker overrides, disabled_skills,
-# trusted_email_senders, disabled_modules) are authoritatively stored in
-# the DB. The `user ensure` CLI is idempotent, prints STATE: created|
-# updated|noop per call, and is the only path Ansible uses to provision
-# user profiles.
+# channels, worker overrides, disabled_skills, trusted_email_senders,
+# disabled_modules) are authoritatively stored in the DB. The `user ensure`
+# CLI is idempotent, prints STATE: created|updated|noop per call, and is the
+# only path Ansible uses to provision user profiles.
 - name: Ensure user_profiles rows (Phase 6)
   command: >
     {{ istota_home }}/.venv/bin/{{ istota_package }}
@@ -776,7 +775,6 @@
     {% if (user_item.value.timezone | default('')) %}--tz "{{ user_item.value.timezone }}"{% endif %}
     {% for email in user_item.value.email_addresses | default([]) %}--email "{{ email }}" {% endfor %}
     {% for sender in user_item.value.trusted_email_senders | default([]) %}--trusted-sender "{{ sender }}" {% endfor %}
-    {% if (user_item.value.ntfy_topic | default('')) %}--ntfy-topic "{{ user_item.value.ntfy_topic }}"{% endif %}
     {% if (user_item.value.log_channel | default('')) %}--log-channel "{{ user_item.value.log_channel }}"{% endif %}
     {% if (user_item.value.alerts_channel | default('')) %}--alerts-channel "{{ user_item.value.alerts_channel }}"{% endif %}
     {% if user_item.value.max_foreground_workers is defined %}--max-foreground-workers {{ user_item.value.max_foreground_workers }}{% endif %}

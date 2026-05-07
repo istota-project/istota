@@ -165,15 +165,6 @@ _SECTION_FLAT_KEYS = {
         "poll_folder": "istota_email_poll_folder",
         "bot_email": "istota_email_bot_address",
     },
-    "ntfy": {
-        "enabled": "istota_ntfy_enabled",
-        "server_url": "istota_ntfy_server_url",
-        "topic": "istota_ntfy_topic",
-        "token": "istota_ntfy_token",
-        "username": "istota_ntfy_username",
-        "password": "istota_ntfy_password",
-        "priority": "istota_ntfy_priority",
-    },
     "browser": {
         "enabled": "istota_browser_enabled",
         "api_port": "istota_browser_api_port",

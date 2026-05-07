@@ -31,7 +31,6 @@ class _FakeArgs:
             "tz": None,
             "email": None,
             "trusted_sender": None,
-            "ntfy_topic": None,
             "log_channel": None,
             "alerts_channel": None,
             "max_foreground_workers": None,

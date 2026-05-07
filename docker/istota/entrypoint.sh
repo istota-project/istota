@@ -478,24 +478,8 @@ auto_recall_limit = ${ISTOTA_MEMORY_SEARCH_AUTO_RECALL_LIMIT:-5}
 TOML
     fi
 
-    # ntfy notifications (optional)
-    if [ "${ISTOTA_NTFY_ENABLED:-false}" = "true" ]; then
-        cat >> "$CONFIG_FILE" <<TOML
-
-[ntfy]
-enabled = true
-server_url = "${ISTOTA_NTFY_SERVER_URL:-https://ntfy.sh}"
-topic = "${ISTOTA_NTFY_TOPIC:-}"
-priority = ${ISTOTA_NTFY_PRIORITY:-3}
-TOML
-        if [ -n "${ISTOTA_NTFY_TOKEN:-}" ]; then
-            echo "token = \"${ISTOTA_NTFY_TOKEN}\"" >> "$CONFIG_FILE"
-        fi
-        if [ -n "${ISTOTA_NTFY_USERNAME:-}" ]; then
-            echo "username = \"${ISTOTA_NTFY_USERNAME}\"" >> "$CONFIG_FILE"
-            echo "password = \"${ISTOTA_NTFY_PASSWORD:-}\"" >> "$CONFIG_FILE"
-        fi
-    fi
+    # ntfy push notifications are configured per-user via the web settings UI
+    # (`/istota/settings`). No operator-shared block is written.
 
     # Browser (optional)
     if [ "${ISTOTA_BROWSER_ENABLED:-false}" = "true" ]; then
@@ -609,9 +593,6 @@ TOML
     EFFECTIVE_ALERTS_CHANNEL="${USER_ALERTS_CHANNEL:-${ALERTS_TOKEN:-}}"
     if [ -n "$EFFECTIVE_ALERTS_CHANNEL" ]; then
         echo "alerts_channel = \"${EFFECTIVE_ALERTS_CHANNEL}\"" >> "$CONFIG_FILE"
-    fi
-    if [ -n "${USER_NTFY_TOPIC:-}" ]; then
-        echo "ntfy_topic = \"${USER_NTFY_TOPIC}\"" >> "$CONFIG_FILE"
     fi
     if [ -n "${USER_MAX_FOREGROUND_WORKERS:-}" ]; then
         echo "max_foreground_workers = ${USER_MAX_FOREGROUND_WORKERS}" >> "$CONFIG_FILE"

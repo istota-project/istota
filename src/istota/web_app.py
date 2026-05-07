@@ -323,7 +323,7 @@ async def callback(request: Request):
     # Phase 6: auto-seed the user_profiles row on first login.
     # Idempotent — existing rows are not overwritten on subsequent logins.
     # The TOML UserConfig is passed as ``seed_from`` so the row carries the
-    # full operator-supplied profile (emails, channels, ntfy_topic, …) the
+    # full operator-supplied profile (emails, channels, …) the
     # moment it's created, even if the scheduler's startup migration hasn't
     # run yet (web service may boot first). The ``created`` signal gates
     # the NC display_name refresh to first-login only — any subsequent
@@ -1066,7 +1066,8 @@ from .secret_schema import (
 def _service_status(schema: dict, configured_keys: set[str]) -> str:
     """Compute card status: configured / partial / missing.
 
-    A field is "required" unless its label contains the word "optional".
+    A field is "required" unless ``optional: True`` is set on the field
+    spec, or — for back-compat — the label contains the word "optional".
     Status:
     * ``configured`` — every required key is set.
     * ``partial``    — some but not all required keys set.
@@ -1074,7 +1075,8 @@ def _service_status(schema: dict, configured_keys: set[str]) -> str:
     """
     required = {
         f["key"] for f in schema["fields"]
-        if "optional" not in f.get("label", "").lower()
+        if not f.get("optional")
+        and "optional" not in f.get("label", "").lower()
     }
     if not required:
         # All-optional services: any key set → configured, else missing.
@@ -1295,7 +1297,6 @@ async def settings_delete_secret(
 _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "display_name":           {"type": "str"},
     "timezone":               {"type": "str"},
-    "ntfy_topic":             {"type": "str"},
     "log_channel":            {"type": "str"},
     "alerts_channel":         {"type": "str"},
     "email_addresses":        {"type": "list[str]"},
@@ -1376,7 +1377,6 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "timezone": profile.timezone,
         "email_addresses": profile.email_addresses,
         "trusted_email_senders": profile.trusted_email_senders,
-        "ntfy_topic": profile.ntfy_topic,
         "log_channel": profile.log_channel,
         "alerts_channel": profile.alerts_channel,
         "disabled_skills": profile.disabled_skills,

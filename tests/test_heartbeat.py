@@ -22,7 +22,7 @@ from istota.heartbeat import (
     _check_shell_command,
     _check_url_health,
 )
-from istota.config import Config, SecurityConfig, UserConfig
+from istota.config import Config, NextcloudConfig, SecurityConfig, UserConfig
 from istota import db
 
 
@@ -646,6 +646,7 @@ path = "/nonexistent.txt"
         config = Config(
             db_path=db_path,
             nextcloud_mount_path=mount,
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig(timezone="UTC")},
         )
 
@@ -659,6 +660,57 @@ path = "/nonexistent.txt"
 
         assert result == ["alice"]
         mock_alert.assert_called_once()
+
+    @patch("istota.heartbeat.send_heartbeat_alert")
+    def test_unconfigured_channel_skips_alert_without_bumping_errors(
+        self, mock_alert, db_path, tmp_path,
+    ):
+        """A check whose channel isn't configured for the user is skipped
+        with a log warning — not counted as an alert-pipeline failure.
+
+        Regression: previously, a heartbeat with `channel = "ntfy"` and no
+        per-user ntfy topic would call send_notification, get back False,
+        and bump consecutive_errors on every cycle. The fix introduces
+        `is_channel_configured` which short-circuits the alert path
+        without touching error state.
+        """
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        users_dir = mount / "Users" / "alice" / "istota" / "config"
+        users_dir.mkdir(parents=True)
+        (users_dir / "HEARTBEAT.md").write_text("""
+```toml
+[settings]
+conversation_token = "room123"
+
+[[checks]]
+name = "missing-file"
+type = "file-watch"
+path = "/nonexistent.txt"
+channel = "ntfy"
+```
+""")
+
+        # Config has no ntfy secret → ntfy channel is "not configured".
+        config = Config(
+            db_path=db_path,
+            nextcloud_mount_path=mount,
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
+            users={"alice": UserConfig(timezone="UTC")},
+        )
+
+        with db.get_db(db_path) as conn:
+            check_heartbeats(conn, config)
+            state = db.get_heartbeat_state(conn, "alice", "missing-file")
+            assert state is not None
+            # Skip-without-bump: alert was never recorded, errors stayed at 0,
+            # last_error_at was not stamped.
+            assert state.last_alert_at is None
+            assert state.consecutive_errors == 0
+            assert state.last_error_at is None
+
+        # send_heartbeat_alert is short-circuited before being called.
+        mock_alert.assert_not_called()
 
     @patch("istota.heartbeat.send_heartbeat_alert")
     @patch("istota.heartbeat.run_check")

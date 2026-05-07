@@ -245,6 +245,59 @@ def secret_exists(db_path: Path, user_id: str, service: str, key: str) -> bool:
     return row is not None
 
 
+def get_service_secrets(db_path: Path, user_id: str, service: str) -> dict[str, str]:
+    """Return all decrypted (key, value) pairs for ``(user_id, service)``.
+
+    Single-query, single-connection alternative to looping ``get_secret``
+    once per key. Skips rows that fail to decrypt (e.g. after key rotation)
+    and bumps ``last_accessed_at`` for every successfully decrypted row in
+    one UPDATE. Returns ``{}`` when nothing is configured or the master key
+    is missing.
+
+    Notifications dispatch reads several keys per call (topic, server_url,
+    token, username, password); using this avoids 5× connect+PRAGMA WAL
+    overhead per send.
+    """
+    if not secret_key_available():
+        return {}
+    try:
+        fernet = _get_fernet()
+    except SecretKeyMissingError:
+        return {}
+
+    out: dict[str, str] = {}
+    seen_ids: list[int] = []
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, key, encrypted_value FROM secrets "
+            "WHERE user_id = ? AND service = ?",
+            (user_id, service),
+        ).fetchall()
+        for secret_id, key, ciphertext in rows:
+            try:
+                out[key] = fernet.decrypt(ciphertext).decode("utf-8")
+                seen_ids.append(secret_id)
+            except Exception as e:
+                logger.warning(
+                    "secret decrypt failed user=%s service=%s key=%s: %s "
+                    "(stale ISTOTA_SECRET_KEY?)",
+                    user_id, service, key, e,
+                )
+
+        if seen_ids:
+            try:
+                conn.execute("PRAGMA busy_timeout = 100")
+                placeholders = ",".join("?" * len(seen_ids))
+                conn.execute(
+                    f"UPDATE secrets SET last_accessed_at = datetime('now') "
+                    f"WHERE id IN ({placeholders})",
+                    seen_ids,
+                )
+            except sqlite3.OperationalError as e:
+                logger.debug("skipped last_accessed_at update (locked?): %s", e)
+    return out
+
+
 def list_user_services(db_path: Path, user_id: str) -> dict[str, list[dict]]:
     """List which (service, key) pairs the user has configured.
 
