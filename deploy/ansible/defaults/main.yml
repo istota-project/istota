@@ -218,6 +218,8 @@ istota_disabled_skills: []
 #             enabled: true
 #           news:
 #             enabled: true
+#           headlines:
+#             enabled: true
 #           reminders:
 #             enabled: true
 istota_users: {}
