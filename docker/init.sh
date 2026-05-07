@@ -293,14 +293,24 @@ fi  # end optional features
 # --- browser container default ---
 # The browser profile bundles a Chromium + bot-detection countermeasures
 # container that the `browse` skill talks to. Chrome has no ARM packages,
-# so we only enable it by default on x86_64 hosts.
+# so we enable it by default on x86_64 hosts and on Apple Silicon (where
+# Docker Desktop's Rosetta lets the linux/amd64 image run, slowly).
 section "Container profiles"
 HOST_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+HOST_OS="$(uname -s 2>/dev/null || echo unknown)"
 COMPOSE_PROFILES=""
 case "$HOST_ARCH" in
     x86_64|amd64)
         COMPOSE_PROFILES="browser"
         ok "Browser container enabled (host arch: $HOST_ARCH)"
+        ;;
+    arm64|aarch64)
+        if [ "$HOST_OS" = "Darwin" ]; then
+            COMPOSE_PROFILES="browser"
+            warn "Browser container enabled under Rosetta emulation (host: $HOST_OS/$HOST_ARCH). Expect slow page loads; suitable for previews only."
+        else
+            warn "Browser container disabled (host: $HOST_OS/$HOST_ARCH; Chrome has no ARM packages and qemu emulation is unreliable)."
+        fi
         ;;
     *)
         warn "Browser container disabled (host arch: $HOST_ARCH; Chrome has no ARM packages)."
