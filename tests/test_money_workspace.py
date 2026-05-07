@@ -321,19 +321,18 @@ class TestMigrationScript:
 class TestLoadUserSecrets:
     """load_user_secrets returns per-user money credentials.
 
-    Resolution order: MONEY_SECRETS_FILE env var (escape hatch), then the
-    user's money resource entry on the istota config (the production path).
+    Resolution order after the modules refactor: MONEY_SECRETS_FILE env var
+    (escape hatch), then the encrypted ``secrets`` table.
     """
 
-    def _cfg_with_resource(self, user_id="alice", **monarch_fields):
-        from istota.config import Config, ResourceConfig, UserConfig
+    def _cfg_with_db(self, tmp_path, user_id="alice"):
+        from istota import db
+        from istota.config import Config, UserConfig
 
-        extra = {f"monarch_{k}": v for k, v in monarch_fields.items() if v is not None}
-        cfg = Config()
-        cfg.users[user_id] = UserConfig(
-            display_name=user_id,
-            resources=[ResourceConfig(type="money", name="Money", extra=extra)],
-        )
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        cfg = Config(db_path=db_path)
+        cfg.users[user_id] = UserConfig(display_name=user_id)
         return cfg
 
     def test_reads_from_env_var_when_set(self, monkeypatch, tmp_path):
@@ -343,26 +342,34 @@ class TestLoadUserSecrets:
         secrets_file.write_text('[monarch]\nsession_token = "tok-from-env"\n')
         monkeypatch.setenv("MONEY_SECRETS_FILE", str(secrets_file))
 
-        result = load_user_secrets("alice", self._cfg_with_resource())
+        result = load_user_secrets("alice", self._cfg_with_db(tmp_path))
         assert result["monarch"]["session_token"] == "tok-from-env"
 
-    def test_reads_from_resource_entry(self, monkeypatch):
+    def test_reads_from_secrets_store(self, monkeypatch, tmp_path):
+        from istota import secrets_store
         from istota.money import load_user_secrets
 
         monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
-        cfg = self._cfg_with_resource(session_token="tok-resource")
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+
+        cfg = self._cfg_with_db(tmp_path)
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "session_token", "tok-resource")
+
         result = load_user_secrets("alice", cfg)
         assert result["monarch"]["session_token"] == "tok-resource"
 
-    def test_includes_email_and_password_when_present(self, monkeypatch):
+    def test_includes_email_and_password_when_present(self, monkeypatch, tmp_path):
+        from istota import secrets_store
         from istota.money import load_user_secrets
 
         monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
-        cfg = self._cfg_with_resource(
-            session_token="tok",
-            email="alice@example.com",
-            password="hunter2",
-        )
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+
+        cfg = self._cfg_with_db(tmp_path)
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "session_token", "tok")
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "email", "alice@example.com")
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "password", "hunter2")
+
         result = load_user_secrets("alice", cfg)
         assert result["monarch"] == {
             "session_token": "tok",
@@ -370,22 +377,18 @@ class TestLoadUserSecrets:
             "password": "hunter2",
         }
 
-    def test_returns_empty_when_no_resource(self, monkeypatch):
-        from istota.config import Config
+    def test_returns_empty_when_no_secrets_stored(self, monkeypatch, tmp_path):
         from istota.money import load_user_secrets
 
         monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
-        assert load_user_secrets("alice", Config()) == {}
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
 
-    def test_returns_empty_when_resource_has_no_creds(self, monkeypatch):
-        from istota.money import load_user_secrets
-
-        monkeypatch.delenv("MONEY_SECRETS_FILE", raising=False)
-        cfg = self._cfg_with_resource()  # no monarch fields
+        cfg = self._cfg_with_db(tmp_path)
         assert load_user_secrets("alice", cfg) == {}
 
     def test_returns_empty_when_env_file_missing(self, monkeypatch, tmp_path):
         from istota.money import load_user_secrets
 
         monkeypatch.setenv("MONEY_SECRETS_FILE", str(tmp_path / "does-not-exist.toml"))
-        assert load_user_secrets("alice", self._cfg_with_resource()) == {}
+        # Env-var path short-circuits before consulting the secrets table.
+        assert load_user_secrets("alice", self._cfg_with_db(tmp_path)) == {}

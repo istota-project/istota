@@ -44,10 +44,23 @@ def jobs_for_user(user_context, user_id: str) -> list[dict]:
     ``user_context`` is the resolved :class:`istota.money.cli.UserContext`.
     Skips ``run-scheduled`` entirely when neither monarch nor invoicing is
     configured (nothing periodic to do).
+
+    Detection looks at both the workspace files (legacy / fresh setup) and
+    the per-user money DB — once :func:`ensure_initialised` migrates a
+    legacy ``monarch.toml`` / ``invoicing.toml`` into the DB it renames the
+    file to ``*.imported``, so on every subsequent sync the file-based
+    paths would be empty and the cleanup pass would tear down the seeded
+    job. The DB check keeps it stable.
     """
     has_periodic_work = bool(
         user_context.monarch_config_path or user_context.invoicing_config_path
     )
+    if not has_periodic_work and user_context.db_path:
+        from istota.money.config_store import has_invoicing_data, has_monarch_data
+        has_periodic_work = (
+            has_monarch_data(user_context.db_path)
+            or has_invoicing_data(user_context.db_path)
+        )
     if not has_periodic_work:
         return []
     return [

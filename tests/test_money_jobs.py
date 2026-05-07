@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from istota import db
-from istota.config import Config, ResourceConfig, UserConfig
+from istota.config import Config, UserConfig
 from istota.cron_loader import (
     CronJob,
     _MODULE_JOB_PREFIX,
@@ -29,7 +29,11 @@ def _conn(tmp_path: Path):
 
 
 def _money_toml(data_dir: Path, *, with_invoicing: bool, with_monarch: bool) -> Path:
-    """Write a minimal money config TOML and required referenced files."""
+    """Write a legacy money config TOML for ``TestJobsForUser`` (pure-logic tests).
+
+    The standalone ``money.cli.load_context`` still accepts this form;
+    workspace-mode integration tests should use :func:`_make_workspace`.
+    """
     cfg_path = data_dir / "money.toml"
     ledger = data_dir / "main.beancount"
     ledger.write_text("")
@@ -59,14 +63,47 @@ def _money_toml(data_dir: Path, *, with_invoicing: bool, with_monarch: bool) -> 
     return cfg_path
 
 
-def _make_app_config(tmp_path: Path, users: dict[str, list[ResourceConfig]]) -> Config:
+def _make_workspace(
+    mount: Path, user_id: str, *, with_invoicing: bool, with_monarch: bool,
+) -> Path:
+    """Create a money workspace under ``{mount}/Users/{user_id}/istota``.
+
+    Drops legacy-named ``invoicing.toml`` / ``monarch.toml`` into
+    ``{workspace}/money/config/`` (resolved by ``synthesize_user_context``)
+    so :func:`jobs_for_user` will see the relevant features as configured.
+    The contents are minimal but rich enough to populate the per-user money
+    DB collections that ``has_invoicing_data`` / ``has_monarch_data`` look
+    at — without that, the post-migration DB-fallback check would still
+    return empty after :func:`ensure_initialised` renames the legacy files.
+    """
+    workspace = mount / "Users" / user_id / "istota"
+    cfg_dir = workspace / "money" / "config"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (workspace / "money" / "ledgers").mkdir(parents=True, exist_ok=True)
+    if with_invoicing:
+        (cfg_dir / "invoicing.toml").write_text(
+            '[companies.default]\n'
+            'name = "Acme"\n'
+            'address = "1 Way"\n'
+            'email = "x@y.z"\n'
+            'tax_id = "0"\n'
+        )
+    if with_monarch:
+        (cfg_dir / "monarch.toml").write_text(
+            '[monarch]\nemail = "x@y.z"\n\n'
+            '[monarch.profiles.default]\nledger = "main"\n'
+        )
+    return workspace
+
+
+def _make_app_config(
+    tmp_path: Path, users: list[str], *, mount: Path | None = None,
+) -> Config:
     return Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "tmp",
-        users={
-            uid: UserConfig(resources=resources)
-            for uid, resources in users.items()
-        },
+        nextcloud_mount_path=mount,
+        users={uid: UserConfig() for uid in users},
     )
 
 
@@ -133,12 +170,10 @@ class TestJobsForUser:
 
 
 class TestSyncMoneyModuleJobs:
-    def test_seeds_run_scheduled_for_user_with_money_resource(self, tmp_path):
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg)})]},
-        )
+    def test_seeds_run_scheduled_for_configured_user(self, tmp_path):
+        mount = tmp_path / "mount"
+        _make_workspace(mount, "alice", with_invoicing=True, with_monarch=True)
+        app_config = _make_app_config(tmp_path, ["alice"], mount=mount)
         conn = _conn(tmp_path)
         _sync_money_module_jobs(conn, app_config)
         rows = conn.execute(
@@ -148,8 +183,11 @@ class TestSyncMoneyModuleJobs:
         names = [r[0] for r in rows]
         assert names == [f"{MODULE_PREFIX}run_scheduled"]
 
-    def test_user_without_money_resource_has_no_module_jobs(self, tmp_path):
-        app_config = _make_app_config(tmp_path, {"bob": []})
+    def test_user_with_module_disabled_has_no_module_jobs(self, tmp_path):
+        mount = tmp_path / "mount"
+        _make_workspace(mount, "bob", with_invoicing=True, with_monarch=True)
+        app_config = _make_app_config(tmp_path, ["bob"], mount=mount)
+        app_config.users["bob"].disabled_modules = ["money"]
         conn = _conn(tmp_path)
         _sync_money_module_jobs(conn, app_config)
         rows = conn.execute(
@@ -159,11 +197,9 @@ class TestSyncMoneyModuleJobs:
         assert rows == []
 
     def test_idempotent_no_duplicate_inserts(self, tmp_path):
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg)})]},
-        )
+        mount = tmp_path / "mount"
+        _make_workspace(mount, "alice", with_invoicing=True, with_monarch=True)
+        app_config = _make_app_config(tmp_path, ["alice"], mount=mount)
         conn = _conn(tmp_path)
         _sync_money_module_jobs(conn, app_config)
         _sync_money_module_jobs(conn, app_config)
@@ -173,17 +209,15 @@ class TestSyncMoneyModuleJobs:
         ).fetchone()[0]
         assert count == 1
 
-    def test_removes_module_jobs_when_resource_disappears(self, tmp_path):
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg)})]},
-        )
+    def test_removes_module_jobs_when_module_disabled(self, tmp_path):
+        mount = tmp_path / "mount"
+        _make_workspace(mount, "alice", with_invoicing=True, with_monarch=True)
+        app_config = _make_app_config(tmp_path, ["alice"], mount=mount)
         conn = _conn(tmp_path)
         _sync_money_module_jobs(conn, app_config)
-        # Now drop the resource
-        app_config2 = _make_app_config(tmp_path, {"alice": []})
-        _sync_money_module_jobs(conn, app_config2)
+        # Now disable the module for alice
+        app_config.users["alice"].disabled_modules = ["money"]
+        _sync_money_module_jobs(conn, app_config)
         rows = conn.execute(
             "SELECT 1 FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             ("alice", f"{MODULE_PREFIX}%"),
@@ -191,12 +225,17 @@ class TestSyncMoneyModuleJobs:
         assert rows == []
 
     def test_removes_run_scheduled_when_both_features_removed(self, tmp_path):
-        # Start with both monarch + invoicing → run_scheduled seeded
-        cfg_full = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg_full)})]},
+        # Start with both monarch + invoicing → run_scheduled seeded.
+        from istota.money import resolve_for_user
+        from istota.money.core.models import (
+            CompanyConfig, InvoicingConfig, MonarchCredentials, MonarchConfig,
+            MonarchSyncSettings, MonarchTagFilters,
         )
+        from istota.money.config_store import save_invoicing, save_monarch
+
+        mount = tmp_path / "mount"
+        _make_workspace(mount, "alice", with_invoicing=True, with_monarch=True)
+        app_config = _make_app_config(tmp_path, ["alice"], mount=mount)
         conn = _conn(tmp_path)
         _sync_money_module_jobs(conn, app_config)
         assert conn.execute(
@@ -204,15 +243,24 @@ class TestSyncMoneyModuleJobs:
             ("alice", f"{MODULE_PREFIX}%"),
         ).fetchone()[0] == 1
 
-        # Now point at a config without monarch or invoicing
-        cfg_bare_dir = tmp_path / "alt"
-        cfg_bare_dir.mkdir()
-        cfg_bare = _money_toml(cfg_bare_dir, with_invoicing=False, with_monarch=False)
-        app_config2 = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg_bare)})]},
+        # ensure_initialised renames the legacy TOMLs to *.imported on first
+        # sync, so the file-based detection is already empty. Wipe the
+        # DB-backed feature collections to simulate "both features removed."
+        ctx = resolve_for_user("alice", app_config)
+        empty_invoicing = InvoicingConfig(
+            accounting_path="", invoice_output="", next_invoice_number=1,
+            company=CompanyConfig(name=""), clients={}, services={},
         )
-        _sync_money_module_jobs(conn, app_config2)
+        empty_monarch = MonarchConfig(
+            credentials=MonarchCredentials(),
+            sync=MonarchSyncSettings(),
+            accounts={}, categories={},
+            tags=MonarchTagFilters(),
+        )
+        save_invoicing(ctx.db_path, empty_invoicing, replace_collections=True)
+        save_monarch(ctx.db_path, empty_monarch, replace_collections=True)
+
+        _sync_money_module_jobs(conn, app_config)
         names = [
             r[0] for r in conn.execute(
                 "SELECT name FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
@@ -224,11 +272,9 @@ class TestSyncMoneyModuleJobs:
     def test_seeds_with_skip_log_channel_set(self, tmp_path):
         # Module jobs run on a cadence and emit structured JSON envelopes —
         # they must never post to the user's log channel.
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg)})]},
-        )
+        mount = tmp_path / "mount"
+        _make_workspace(mount, "alice", with_invoicing=True, with_monarch=True)
+        app_config = _make_app_config(tmp_path, ["alice"], mount=mount)
         conn = _conn(tmp_path)
         _sync_money_module_jobs(conn, app_config)
         row = conn.execute(
@@ -242,11 +288,9 @@ class TestSyncMoneyModuleJobs:
         # Pre-fix rows have skip_log_channel=0 and should flip to 1 on the
         # next sync. Critically, backfilling must NOT bump last_run_at — for
         # a daily money job that would mean losing one whole day's run.
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="money", extra={"config_path": str(cfg)})]},
-        )
+        mount = tmp_path / "mount"
+        _make_workspace(mount, "alice", with_invoicing=True, with_monarch=True)
+        app_config = _make_app_config(tmp_path, ["alice"], mount=mount)
         conn = _conn(tmp_path)
         original_last_run = "2026-05-03 08:00:01"
         conn.execute(
@@ -267,20 +311,6 @@ class TestSyncMoneyModuleJobs:
         ).fetchone()
         assert row[0] == 1
         assert row[1] == original_last_run
-
-    def test_legacy_moneyman_resource_type_accepted(self, tmp_path):
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="moneyman", extra={"config_path": str(cfg)})]},
-        )
-        conn = _conn(tmp_path)
-        _sync_money_module_jobs(conn, app_config)
-        count = conn.execute(
-            "SELECT COUNT(*) FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
-        ).fetchone()[0]
-        assert count == 1
 
 
 # ---------------------------------------------------------------------------
