@@ -91,6 +91,21 @@ def check(ledger_path: Path) -> dict:
         }
 
 
+def list_open_accounts(ledger_path: Path) -> list[str]:
+    """Return all accounts opened in the ledger via ``open`` directives.
+
+    Useful when bean-query's posting-based aggregations miss accounts that
+    have been opened but not yet posted to — a freshly seeded ledger has
+    open directives and zero transactions, so
+    ``SELECT account, sum(position) GROUP BY account`` returns no rows.
+    """
+    from beancount.core.data import Open
+    from beancount.loader import load_file
+
+    entries, _errors, _options = load_file(str(ledger_path))
+    return sorted({e.account for e in entries if isinstance(e, Open)})
+
+
 def _sanitize_bql_string(value: str) -> str:
     """Escape single quotes in a value interpolated into a BQL query string."""
     return value.replace("'", "''")
