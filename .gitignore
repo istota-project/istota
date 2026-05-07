@@ -50,6 +50,7 @@ site/
 
 # Test artifacts
 .pytest_cache/
+.testmondata
 .coverage
 htmlcov/
 .mypy_cache/
