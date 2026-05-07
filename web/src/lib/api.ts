@@ -31,6 +31,12 @@ export interface User {
 	};
 }
 
+export interface AdminStatsUserSource {
+	count: number;
+	failed: number;
+	avg_duration_seconds: number | null;
+}
+
 export interface AdminStatsUser {
 	username: string;
 	display_name: string;
@@ -38,6 +44,10 @@ export interface AdminStatsUser {
 	tasks_total: number;
 	tasks_last_24h: number;
 	tasks_avg_per_day: number;
+	tasks_by_source_24h: Record<string, AdminStatsUserSource>;
+	tasks_interactive_24h: number;
+	tasks_automated_24h: number;
+	tasks_failed_24h: number;
 	last_active: string | null;
 }
 
@@ -76,8 +86,14 @@ export interface AdminStats {
 		last_24h: number;
 		avg_per_day_30d: number;
 		by_source: Record<string, number>;
+		failed_by_source_24h: Record<string, number>;
 		avg_duration_seconds: number;
 		error_rate_24h: number;
+		failed_24h: number;
+		interactive_24h: number;
+		automated_24h: number;
+		interactive_avg_per_day_30d: number;
+		automated_avg_per_day_30d: number;
 	};
 	storage: {
 		db_size_bytes: number;
