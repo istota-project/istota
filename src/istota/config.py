@@ -885,6 +885,7 @@ def load_config(config_path: Path | None = None) -> Config:
         config.briefing_defaults = BriefingDefaultsConfig(
             markets=bd.get("markets", {}),
             news=bd.get("news", {}),
+            headlines=bd.get("headlines", {}),
         )
 
     if "logging" in data:

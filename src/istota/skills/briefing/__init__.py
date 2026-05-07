@@ -951,22 +951,27 @@ def _expand_boolean_components(
     defaults: BriefingDefaultsConfig,
 ) -> dict:
     """
-    Expand boolean component values using admin defaults.
+    Merge admin defaults into component values.
 
-    - `markets = true` → expands to defaults.markets with `enabled: true`
-    - `news = true` → expands to defaults.news with `enabled: true`
-    - Dict values pass through unchanged
-    - Simple booleans (calendar, todos, etc.) stay as-is
+    - `markets = true` → `{enabled: true, **defaults.markets}`
+    - `markets = {enabled: true}` → same — user-supplied keys win, default keys fill the gaps
+    - Dict with explicit overrides (e.g. `sources = [...]`) keeps the overrides
+    - Simple booleans without defaults stay as-is
     """
     expanded = {}
     for key, value in components.items():
+        default_dict = getattr(defaults, key, None)
+        has_defaults = isinstance(default_dict, dict) and bool(default_dict)
+
         if isinstance(value, bool) and value:
-            # Check if there's a default dict to expand from
-            default_dict = getattr(defaults, key, None)
-            if isinstance(default_dict, dict) and default_dict:
+            if has_defaults:
                 expanded[key] = {"enabled": True, **default_dict}
             else:
                 expanded[key] = value
+        elif isinstance(value, dict) and has_defaults:
+            # Merge defaults under user-supplied keys (user wins)
+            merged = {**default_dict, **value}
+            expanded[key] = merged
         else:
             expanded[key] = value
     return expanded
