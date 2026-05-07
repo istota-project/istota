@@ -49,6 +49,12 @@ _WIZ_EMAIL_SMTP_HOST=""
 _WIZ_EMAIL_BOT_ADDRESS=""
 _WIZ_CLAUDE_TOKEN=""
 _WIZ_USER_IDS=()
+_WIZ_HOSTNAME=""
+_WIZ_WEB_ENABLED=true
+_WIZ_WEB_OAUTH2_CLIENT_ID=""
+_WIZ_WEB_OAUTH2_CLIENT_SECRET=""
+_WIZ_WEB_SECRET_KEY=""
+_WIZ_SECRET_KEY=""
 
 # ============================================================
 # Output helpers
@@ -72,6 +78,17 @@ dim()     { echo -e "${_DIM}  $*${_RESET}"; }
 
 command_exists() {
     command -v "$1" &>/dev/null
+}
+
+# Generate a 64-char hex secret (32 random bytes). Falls back to /dev/urandom
+# if Python is unavailable for some reason.
+generate_hex_secret() {
+    if command_exists python3; then
+        python3 -c 'import secrets; print(secrets.token_hex(32))'
+    else
+        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+        echo
+    fi
 }
 
 # ============================================================
@@ -133,6 +150,39 @@ done
 # ============================================================
 # Wizard sections
 # ============================================================
+
+# Pull keys we never want to rotate (master secret key, web session key)
+# out of an existing settings file so re-running the wizard doesn't
+# silently lock the operator out of encrypted secrets.
+wiz_load_existing_secrets() {
+    [ -f "$SETTINGS_FILE" ] || return 0
+    if ! command_exists python3; then
+        return 0
+    fi
+    local extracted
+    extracted=$(python3 - "$SETTINGS_FILE" <<'PY' 2>/dev/null || true
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as f:
+        data = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+print((data.get("secret_key") or "").strip())
+print(((data.get("web") or {}).get("secret_key") or "").strip())
+PY
+)
+    local existing_master existing_web
+    existing_master=$(echo "$extracted" | sed -n '1p')
+    existing_web=$(echo "$extracted" | sed -n '2p')
+    if [ -n "$existing_master" ]; then
+        _WIZ_SECRET_KEY="$existing_master"
+        ok "Preserving existing secrets master key"
+    fi
+    if [ -n "$existing_web" ]; then
+        _WIZ_WEB_SECRET_KEY="$existing_web"
+        ok "Preserving existing web session key"
+    fi
+}
 
 wiz_basics() {
     section "1. Basics"
@@ -378,8 +428,80 @@ wiz_features() {
     fi
 }
 
+wiz_hostname() {
+    section "6. Public Hostname"
+
+    dim "Several features need a public DNS name pointing at this server:"
+    dim "  • web UI (Nextcloud OAuth2 redirect must be HTTPS)"
+    dim "  • GPS location webhook (Overland posts here)"
+    dim "  • per-user static sites (when site_enabled is set)"
+    echo
+    dim "The role installs nginx and renders /etc/nginx/conf.d/<hostname>.conf"
+    dim "with a self-signed snakeoil cert. DNS, Let's Encrypt, and any extra"
+    dim "reverse-proxy plumbing are out of scope — you handle them after install."
+    echo
+    dim "Enter a placeholder if you don't have DNS yet; you can edit"
+    dim "$SETTINGS_FILE and re-run with --update later."
+    echo
+
+    local default_hostname="${ISTOTA_NAMESPACE}.example.com"
+    prompt_value _WIZ_HOSTNAME "Public hostname" "$default_hostname"
+    # Strip protocol if user pasted a URL by mistake
+    _WIZ_HOSTNAME="${_WIZ_HOSTNAME#https://}"
+    _WIZ_HOSTNAME="${_WIZ_HOSTNAME#http://}"
+    _WIZ_HOSTNAME="${_WIZ_HOSTNAME%/}"
+}
+
+wiz_web_ui() {
+    section "7. Web UI (Nextcloud OAuth2)"
+
+    dim "The web UI authenticates users via your Nextcloud's built-in OAuth2"
+    dim "provider. Disable it here if you only want the Talk/email/CLI surfaces."
+    echo
+
+    prompt_bool _WIZ_WEB_ENABLED "Enable web UI?" "y"
+    if [ "$_WIZ_WEB_ENABLED" != "true" ]; then
+        return
+    fi
+
+    echo
+    dim "Before istota can complete the OAuth2 handshake, register a client in"
+    dim "your Nextcloud (admin login required):"
+    echo
+    dim "  1. Open  $_WIZ_NC_URL/settings/admin/security"
+    dim "  2. Under 'OAuth 2.0 clients', click 'Add client'"
+    dim "  3. Name:          ${_WIZ_BOT_NAME:-Istota}"
+    dim "     Redirection URI: https://$_WIZ_HOSTNAME/istota/callback"
+    dim "  4. Copy the generated Client Identifier and Secret"
+    echo
+    dim "You can paste them now, or skip and fill them into $SETTINGS_FILE later"
+    dim "(istota will install but log in won't work until they're set)."
+    echo
+
+    local have_oauth
+    prompt_bool have_oauth "Paste OAuth2 client credentials now?" "y"
+    if [ "$have_oauth" = "true" ]; then
+        prompt_value _WIZ_WEB_OAUTH2_CLIENT_ID "Client ID" ""
+        prompt_secret _WIZ_WEB_OAUTH2_CLIENT_SECRET "Client secret"
+    fi
+
+    # Auto-generate the session signing key — there's no reason to make the
+    # operator type a 64-char hex string.
+    _WIZ_WEB_SECRET_KEY="$(generate_hex_secret)"
+    ok "Generated session signing key"
+}
+
+wiz_secrets_store() {
+    # Master key for the encrypted secrets table. Always auto-generated;
+    # the operator never sees it but it's persisted in the settings file
+    # (mode 0600) so re-running the wizard or --update keeps the same key.
+    if [ -z "$_WIZ_SECRET_KEY" ]; then
+        _WIZ_SECRET_KEY="$(generate_hex_secret)"
+    fi
+}
+
 wiz_claude_auth() {
-    section "6. Claude Authentication"
+    section "8. Claude Authentication"
 
     dim "Istota uses the Claude CLI which needs authentication."
     dim "You can either provide an OAuth token now, or authenticate"
@@ -397,7 +519,7 @@ wiz_claude_auth() {
 }
 
 wiz_review() {
-    section "7. Review Configuration"
+    section "9. Review Configuration"
 
     echo -e "  ${_BOLD}Bot name:${_RESET}          $_WIZ_BOT_NAME"
     echo -e "  ${_BOLD}Install dir:${_RESET}       $ISTOTA_HOME"
@@ -427,6 +549,19 @@ wiz_review() {
     echo -e "  ${_BOLD}Location:${_RESET}          $_WIZ_LOCATION_ENABLED$([ "$_WIZ_LOCATION_ENABLED" = "true" ] && echo " (port: $_WIZ_WEBHOOKS_PORT)")"
     echo -e "  ${_BOLD}Backups:${_RESET}           $_WIZ_BACKUP_ENABLED"
     echo -e "  ${_BOLD}Browser:${_RESET}           $_WIZ_BROWSER_ENABLED"
+    echo
+    echo -e "  ${_BOLD}Hostname:${_RESET}          $_WIZ_HOSTNAME"
+    echo -e "  ${_BOLD}Web UI:${_RESET}            $_WIZ_WEB_ENABLED"
+    if [ "$_WIZ_WEB_ENABLED" = "true" ]; then
+        local oauth_status
+        if [ -n "$_WIZ_WEB_OAUTH2_CLIENT_ID" ] && [ -n "$_WIZ_WEB_OAUTH2_CLIENT_SECRET" ]; then
+            oauth_status="configured"
+        else
+            oauth_status="${_YELLOW}set later in $SETTINGS_FILE${_RESET}"
+        fi
+        echo -e "  ${_BOLD}OAuth2:${_RESET}            $oauth_status"
+    fi
+    echo -e "  ${_BOLD}Secrets master key:${_RESET} auto-generated (stored in $SETTINGS_FILE)"
     echo -e "  ${_BOLD}Claude token:${_RESET}      $([ -n "$_WIZ_CLAUDE_TOKEN" ] && echo "provided" || echo "authenticate later")"
     echo
 
@@ -468,6 +603,19 @@ rclone_password_obscured = "$_WIZ_RCLONE_PASS_OBSCURED"
 
 $_WIZ_ADMIN_BLOCK
 claude_oauth_token = "$_WIZ_CLAUDE_TOKEN"
+secret_key = "$_WIZ_SECRET_KEY"
+
+[site]
+# Public hostname for nginx (used by the web UI redirect, location webhook,
+# and any per-user static sites). DNS + TLS are operator-managed.
+hostname = "$_WIZ_HOSTNAME"
+
+[web]
+enabled = $_WIZ_WEB_ENABLED
+oauth2_provider = "$_WIZ_NC_URL"
+oauth2_client_id = "$_WIZ_WEB_OAUTH2_CLIENT_ID"
+oauth2_client_secret = "$_WIZ_WEB_OAUTH2_CLIENT_SECRET"
+secret_key = "$_WIZ_WEB_SECRET_KEY"
 
 [security]
 sandbox_enabled = true
@@ -531,11 +679,15 @@ main() {
     dim "Press Enter to accept defaults shown in [brackets]."
     echo
 
+    wiz_load_existing_secrets
     wiz_basics
     wiz_nextcloud
     wiz_mount
     wiz_users
     wiz_features
+    wiz_hostname
+    wiz_web_ui
+    wiz_secrets_store
     wiz_claude_auth
     wiz_review
     wiz_write_settings

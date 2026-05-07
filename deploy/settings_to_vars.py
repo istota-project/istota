@@ -139,6 +139,7 @@ _DIRECT_KEYS = {
     "nextcloud_username": "istota_nextcloud_username",
     "nextcloud_app_password": "istota_nextcloud_app_password",
     "claude_oauth_token": "istota_claude_code_oauth_token",
+    "secret_key": "istota_secret_key",
     "admin_users": "istota_admin_users",
     "disabled_skills": "istota_disabled_skills",
     "use_environment_file": "istota_use_environment_file",

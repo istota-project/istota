@@ -357,8 +357,118 @@ main() {
     echo -e "  ${_BOLD}Settings:${_RESET}  $SETTINGS_FILE"
     echo -e "  ${_BOLD}Service:${_RESET}   journalctl -u istota-scheduler -f"
     echo
+
+    print_next_steps
+
     echo -e "  To update: ${_DIM}sudo bash install.sh --update${_RESET}"
     echo -e "  To reconfigure: ${_DIM}sudo bash install.sh --interactive${_RESET}"
+    echo
+}
+
+# Pull a few values out of settings.toml so we can tailor the next-steps
+# message (web UI enabled? oauth2 client filled in? hostname placeholder?).
+# Best-effort — if Python or the file is unavailable we just print the
+# generic version.
+print_next_steps() {
+    [ -f "$SETTINGS_FILE" ] || return 0
+    command_exists python3 || return 0
+
+    local meta
+    meta=$(python3 - "$SETTINGS_FILE" <<'PY' 2>/dev/null || true
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as f:
+        data = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+web = data.get("web") or {}
+site = data.get("site") or {}
+location = data.get("location") or {}
+print(data.get("nextcloud_url", "").rstrip("/"))
+print(site.get("hostname", ""))
+print("1" if web.get("enabled", True) else "0")
+print("1" if (web.get("oauth2_client_id") and web.get("oauth2_client_secret")) else "0")
+print("1" if data.get("claude_oauth_token") else "0")
+print("1" if location.get("enabled") else "0")
+print("1" if (data.get("secret_key") or "") else "0")
+PY
+)
+    [ -z "$meta" ] && return 0
+
+    local nc_url hostname web_on oauth_set claude_set location_on master_set
+    nc_url=$(echo "$meta"     | sed -n '1p')
+    hostname=$(echo "$meta"   | sed -n '2p')
+    web_on=$(echo "$meta"     | sed -n '3p')
+    oauth_set=$(echo "$meta"  | sed -n '4p')
+    claude_set=$(echo "$meta" | sed -n '5p')
+    location_on=$(echo "$meta"| sed -n '6p')
+    master_set=$(echo "$meta" | sed -n '7p')
+
+    section "Next Steps"
+
+    local n=1
+
+    # 1. DNS / TLS — always relevant when nginx config was rendered
+    if [ "$web_on" = "1" ] || [ "$location_on" = "1" ]; then
+        echo -e "  ${_BOLD}$n.${_RESET} Point DNS at this server"
+        echo "     Make sure ${hostname:-<your hostname>} resolves here."
+        echo
+        n=$((n+1))
+
+        echo -e "  ${_BOLD}$n.${_RESET} Obtain a TLS certificate (Let's Encrypt etc.)"
+        echo "     The role rendered /etc/nginx/conf.d/${hostname:-<hostname>}.conf with"
+        echo "     a self-signed cert. After running certbot, uncomment the"
+        echo "     three ssl_certificate* lines in that file and remove the"
+        echo "     'include /etc/nginx/snippets/snakeoil.conf;' line, then"
+        echo "     'sudo systemctl reload nginx'."
+        echo
+        echo -e "     ${_DIM}Reverse-proxying, DNS, and certbot are out of scope for this installer.${_RESET}"
+        echo
+        n=$((n+1))
+    fi
+
+    # 2. OAuth2 client registration
+    if [ "$web_on" = "1" ] && [ "$oauth_set" != "1" ]; then
+        echo -e "  ${_BOLD}$n.${_RESET} Register a Nextcloud OAuth2 client (web UI is dark until this is done)"
+        echo "     Visit ${nc_url:-<your-nextcloud>}/settings/admin/security"
+        echo "     Under 'OAuth 2.0 clients' add one with:"
+        echo "       Redirection URI: https://${hostname:-<hostname>}/istota/callback"
+        echo "     Then put the Client ID and Secret into:"
+        echo "       $SETTINGS_FILE  (oauth2_client_id, oauth2_client_secret under [web])"
+        echo "     and re-run: ${_DIM}sudo bash install.sh --update${_RESET}"
+        echo
+        n=$((n+1))
+    fi
+
+    # 3. Claude CLI auth
+    if [ "$claude_set" != "1" ]; then
+        echo -e "  ${_BOLD}$n.${_RESET} Authenticate the Claude CLI"
+        echo "     The scheduler can't run tasks until Claude has a credential."
+        echo "     Generate a token: ${_DIM}claude setup-token${_RESET}"
+        echo "     Then add it to $SETTINGS_FILE as claude_oauth_token and re-run --update,"
+        echo "     or log in directly on the server with:"
+        echo "       ${_DIM}sudo -u istota HOME=/srv/app/istota claude login${_RESET}"
+        echo
+        n=$((n+1))
+    fi
+
+    # 4. Master secret key sanity check
+    if [ "$master_set" != "1" ]; then
+        echo -e "  ${_BOLD}$n.${_RESET} ${_YELLOW}!${_RESET} secret_key is unset — the encrypted secrets table is disabled"
+        echo "     Connected services (karakeep, google_workspace, monarch tokens, etc.)"
+        echo "     won't work until you generate one and put it in $SETTINGS_FILE:"
+        echo "       ${_DIM}python3 -c 'import secrets; print(secrets.token_hex(32))'${_RESET}"
+        echo
+        n=$((n+1))
+    fi
+
+    # 5. Smoke test
+    echo -e "  ${_BOLD}$n.${_RESET} Smoke test"
+    if [ "$web_on" = "1" ] && [ "$oauth_set" = "1" ]; then
+        echo "     • Open https://${hostname:-<hostname>}/istota and sign in."
+    fi
+    echo "     • Send a Talk DM to the bot user — it should reply within ~10s."
+    echo "     • Tail the log: ${_DIM}journalctl -u istota-scheduler -f${_RESET}"
     echo
 }
 
