@@ -43,6 +43,29 @@ CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
         "oauth": True,
         "fields": [],
     },
+    "ntfy": {
+        "label": "ntfy push",
+        # ntfy is consumed by `notifications._send_ntfy`, which is called
+        # from heartbeat alerts and scheduled-job output (`output_target=ntfy`).
+        # Neither is a skill, but `used_by` shape is shared with skill-backed
+        # services, so we list the dispatch surfaces for the UI hint.
+        "used_by": ("heartbeat", "scheduler"),
+        # One-way push channel to the user's own ntfy account/server.
+        # ``topic`` is the only required field; auth is optional and only
+        # needed for protected ntfy instances. Priority is hardcoded to the
+        # ntfy default (3) — per-call overrides flow through the API.
+        "fields": [
+            # server_url defaults to https://ntfy.sh when unset — only
+            # operators of self-hosted servers need to fill it in. Marking
+            # it optional means topic-only users see "configured" rather
+            # than "partial" in the settings UI.
+            {"key": "server_url", "label": "Server URL", "type": "url",      "optional": True},
+            {"key": "topic",      "label": "Topic",      "type": "text"},
+            {"key": "token",      "label": "Access token (optional)", "type": "password"},
+            {"key": "username",   "label": "Username (optional)",     "type": "text"},
+            {"key": "password",   "label": "Password (optional)",     "type": "password"},
+        ],
+    },
 }
 
 # Module-owned credential blocks. Outer dict key = module name (must be in

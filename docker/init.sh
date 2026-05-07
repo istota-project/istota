@@ -157,10 +157,6 @@ ISTOTA_EMAIL_IMAP_USER=""
 ISTOTA_EMAIL_IMAP_PASSWORD=""
 ISTOTA_EMAIL_SMTP_HOST=""
 ISTOTA_EMAIL_BOT_ADDRESS=""
-ISTOTA_NTFY_ENABLED="false"
-ISTOTA_NTFY_SERVER_URL="https://ntfy.sh"
-ISTOTA_NTFY_TOPIC=""
-ISTOTA_NTFY_TOKEN=""
 ISTOTA_DEVELOPER_GITLAB_TOKEN=""
 ISTOTA_DEVELOPER_GITLAB_USERNAME=""
 ISTOTA_DEVELOPER_GITHUB_TOKEN=""
@@ -284,24 +280,8 @@ if [ "$MINIMAL" = false ]; then
         mark ISTOTA_EMAIL_ENABLED
     fi
 
-    # ntfy
-    section "ntfy push notifications"
-    dim "Sends alerts and confirmations to your phone via ntfy.sh (or self-hosted)."
-    prompt_bool ntfy_enabled "Enable ntfy push notifications?" "n"
-    if [ "$ntfy_enabled" = "true" ]; then
-        ISTOTA_NTFY_ENABLED="true"
-        echo
-        prompt_value  ISTOTA_NTFY_SERVER_URL "ntfy server URL" "https://ntfy.sh"
-        prompt_value  ISTOTA_NTFY_TOPIC      "ntfy topic" ""
-        prompt_secret ISTOTA_NTFY_TOKEN      "ntfy access token (optional, press Enter to skip)"
-        mark ISTOTA_NTFY_ENABLED
-        mark ISTOTA_NTFY_SERVER_URL
-        mark ISTOTA_NTFY_TOPIC
-        [ -n "$ISTOTA_NTFY_TOKEN" ] && mark ISTOTA_NTFY_TOKEN
-    else
-        ISTOTA_NTFY_ENABLED="false"
-        mark ISTOTA_NTFY_ENABLED
-    fi
+    # ntfy push notifications: configured per-user via web settings
+    # (no operator-shared block).
 
     # GPS location
     section "GPS location tracking"
@@ -427,10 +407,6 @@ ISTOTA_EMAIL_IMAP_USER="$ISTOTA_EMAIL_IMAP_USER" \
 ISTOTA_EMAIL_IMAP_PASSWORD="$ISTOTA_EMAIL_IMAP_PASSWORD" \
 ISTOTA_EMAIL_SMTP_HOST="$ISTOTA_EMAIL_SMTP_HOST" \
 ISTOTA_EMAIL_BOT_ADDRESS="$ISTOTA_EMAIL_BOT_ADDRESS" \
-ISTOTA_NTFY_ENABLED="$ISTOTA_NTFY_ENABLED" \
-ISTOTA_NTFY_SERVER_URL="$ISTOTA_NTFY_SERVER_URL" \
-ISTOTA_NTFY_TOPIC="$ISTOTA_NTFY_TOPIC" \
-ISTOTA_NTFY_TOKEN="$ISTOTA_NTFY_TOKEN" \
 ISTOTA_DEVELOPER_GITLAB_TOKEN="$ISTOTA_DEVELOPER_GITLAB_TOKEN" \
 ISTOTA_DEVELOPER_GITLAB_USERNAME="$ISTOTA_DEVELOPER_GITLAB_USERNAME" \
 ISTOTA_DEVELOPER_GITHUB_TOKEN="$ISTOTA_DEVELOPER_GITHUB_TOKEN" \
@@ -485,7 +461,6 @@ echo "    Bot name          :  $ISTOTA_BOT_NAME"
 echo "    Public hostname   :  ${DOMAIN:-(localhost-only)}"
 echo "    Compose profiles  :  ${COMPOSE_PROFILES:-(none — only the core stack)}"
 echo "    Email             :  $ISTOTA_EMAIL_ENABLED"
-echo "    ntfy              :  $ISTOTA_NTFY_ENABLED"
 [ -n "$ISTOTA_DEVELOPER_GITLAB_USERNAME" ] && echo "    Developer GitLab  :  $ISTOTA_DEVELOPER_GITLAB_USERNAME"
 [ -n "$ISTOTA_DEVELOPER_GITHUB_USERNAME" ] && echo "    Developer GitHub  :  $ISTOTA_DEVELOPER_GITHUB_USERNAME"
 echo

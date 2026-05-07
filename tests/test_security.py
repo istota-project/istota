@@ -11,7 +11,6 @@ from istota.config import (
     DeveloperConfig,
     EmailConfig,
     NextcloudConfig,
-    NtfyConfig,
     SecurityConfig,
     load_config,
 )
@@ -212,7 +211,6 @@ class TestConfigEnvVarOverrides:
             'app_password = "toml-password"\n'
             '[email]\nimap_password = "toml-imap"\nsmtp_password = "toml-smtp"\n'
             '[developer]\ngitlab_token = "toml-token"\n'
-            '[ntfy]\ntoken = "toml-ntfy-token"\npassword = "toml-ntfy-pw"\n'
         )
         return config_file
 
@@ -240,18 +238,6 @@ class TestConfigEnvVarOverrides:
             config = load_config(config_file)
         assert config.developer.gitlab_token == "env-gl-token"
 
-    def test_ntfy_token_override(self, tmp_path):
-        config_file = self._write_minimal_config(tmp_path)
-        with patch.dict(os.environ, {"ISTOTA_NTFY_TOKEN": "env-ntfy-tok"}, clear=False):
-            config = load_config(config_file)
-        assert config.ntfy.token == "env-ntfy-tok"
-
-    def test_ntfy_password_override(self, tmp_path):
-        config_file = self._write_minimal_config(tmp_path)
-        with patch.dict(os.environ, {"ISTOTA_NTFY_PASSWORD": "env-ntfy-pw"}, clear=False):
-            config = load_config(config_file)
-        assert config.ntfy.password == "env-ntfy-pw"
-
     def test_missing_env_var_keeps_toml_value(self, tmp_path):
         config_file = self._write_minimal_config(tmp_path)
         # Ensure none of the override env vars are set
@@ -259,7 +245,7 @@ class TestConfigEnvVarOverrides:
             k: v for k, v in os.environ.items()
             if k not in {
                 "ISTOTA_NC_APP_PASSWORD", "ISTOTA_IMAP_PASSWORD", "ISTOTA_SMTP_PASSWORD",
-                "ISTOTA_GITLAB_TOKEN", "ISTOTA_NTFY_TOKEN", "ISTOTA_NTFY_PASSWORD",
+                "ISTOTA_GITLAB_TOKEN",
             }
         }
         with patch.dict(os.environ, env_clean, clear=True):
@@ -268,8 +254,6 @@ class TestConfigEnvVarOverrides:
         assert config.email.imap_password == "toml-imap"
         assert config.email.smtp_password == "toml-smtp"
         assert config.developer.gitlab_token == "toml-token"
-        assert config.ntfy.token == "toml-ntfy-token"
-        assert config.ntfy.password == "toml-ntfy-pw"
 
     def test_security_config_defaults(self, tmp_path):
         config_file = tmp_path / "config.toml"

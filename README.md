@@ -52,7 +52,6 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
 - **Claude auth** — paste a token from `claude setup-token` (instructions printed inline), or skip and set `ANTHROPIC_API_KEY` later.
 - **Primary user** — login id, display name, timezone, optional email address.
 - **Email integration** — IMAP/SMTP host, user, password (skipped if you say no).
-- **ntfy push notifications** — server URL, topic, optional bearer token.
 - **GPS location tracking** — toggles the `location` compose profile so the Overland webhook receiver starts.
 - **Developer credentials** — optional GitLab / GitHub personal access tokens.
 - **Browser container** — auto-enabled on x86-64 Linux hosts and Apple Silicon under Rosetta (slow, preview-grade); disabled on Linux ARM, where Chrome has no native packages and qemu emulation is unreliable.
@@ -85,7 +84,7 @@ docker compose --profile browser --profile location up -d  # Both
 
 ### Configuration
 
-The `.env` file exposes most of the same settings available in the Ansible role: scheduler intervals, conversation context tuning, progress updates, sleep cycle, memory search, email (IMAP/SMTP), ntfy notifications, developer skill (git/gitlab/github), and per-user overrides. See `.env.example` for the full list with defaults.
+The `.env` file exposes most of the same settings available in the Ansible role: scheduler intervals, conversation context tuning, progress updates, sleep cycle, memory search, email (IMAP/SMTP), developer skill (git/gitlab/github), and per-user overrides. See `.env.example` for the full list with defaults. Per-user features like ntfy push notifications, Karakeep bookmarks, Google Workspace, and Monarch are configured per-user in the web settings (`/istota/settings`) — there are no operator-shared blocks for those.
 
 The config file at `/data/config/config.toml` inside the container is generated on first start and not overwritten on subsequent starts. To change settings after initial setup, either delete the config and restart (it regenerates from env vars), or edit it directly:
 

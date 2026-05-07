@@ -25,13 +25,13 @@ smtp_host/port/user/password                                 bot_email: str = ""
 ```
 Properties: `effective_smtp_user` (L53), `effective_smtp_password` (L57) — fall back to imap creds
 
-### `NtfyConfig`
-```
-enabled: bool = False        server_url: str = "https://ntfy.sh"
-topic: str = ""              token: str = ""
-username: str = ""           password: str = ""
-priority: int = 3
-```
+### ntfy push notifications
+
+ntfy is a per-user connected service — there is no global `[ntfy]` block or
+`NtfyConfig` dataclass. Each user supplies their own server URL, topic, and
+(optional) auth via the encrypted `secrets` table. See "ntfy" under
+`secret_schema.CONNECTED_SERVICE_SCHEMA`. Priority is hardcoded to 3 (the
+ntfy default); per-call overrides flow through `send_notification(...)`.
 
 ### `BrowserConfig`
 ```
@@ -130,7 +130,7 @@ extra: dict = {}            # unrecognized TOML keys
 display_name: str = ""                    email_addresses: list[str] = []
 timezone: str = "UTC"                     briefings: list[BriefingConfig] = []
 resources: list[ResourceConfig] = []
-ntfy_topic: str = ""                      log_channel: str = ""
+log_channel: str = ""                     # Talk room for verbose execution logs
 alerts_channel: str = ""                  # Talk room for confirmations/alerts
 site_enabled: bool = False
 max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 = use global default
@@ -176,7 +176,7 @@ custom_system_prompt: bool = False  # Use config/system-prompt.md instead of CC 
 nextcloud: NextcloudConfig          talk: TalkConfig
 email: EmailConfig                  conversation: ConversationConfig
 scheduler: SchedulerConfig          browser: BrowserConfig
-ntfy: NtfyConfig                    logging: LoggingConfig
+logging: LoggingConfig
 briefing_defaults: BriefingDefaultsConfig   skills: SkillsConfig
 brain: BrainConfig                          # selects model-invocation backend
 security: SecurityConfig
@@ -219,7 +219,7 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 4. Parse `[security]` section → `SecurityConfig`
 5. Call `load_admin_users()` → `config.admin_users`
 6. Apply env var overrides for secrets (`ISTOTA_NC_APP_PASSWORD` → `nextcloud.app_password`, etc.)
-7. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, ntfy_topic, site_enabled, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
+7. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, site_enabled, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
 8. **Phase 7a**: `_apply_user_resources(config)` overlays the `user_resources` DB table onto `config.users[*].resources`. Each row becomes a `ResourceConfig` entry with extras decoded from JSON. Dedup is keyed on `(type, path)` — DB wins. Distinct paths coexist.
 9. **Modules refactor (between 7a and 7b)**: `_migrate_obsolete_resources(config)` first calls `secrets_store.import_from_user_configs` (idempotent — extends `_IMPORT_MAP` to absorb karakeep `base_url`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources(db_path)` deletes `user_resources` rows whose type is in the retired set (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`), then filters those types out of `uc.resources` in memory so the rest of the load cycle sees post-cleanup state.
 10. **Phase 7b**: `_apply_user_briefings(config)` overlays the `briefing_configs` DB table onto `config.users[*].briefings`. Each row becomes a `BriefingConfig` entry. Dedup is keyed on `name` — DB wins. Disabled DB rows (`enabled=0`) drop the matching TOML name without scheduling, so the web UI can mute a TOML-templated briefing without re-templating.
@@ -254,8 +254,6 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 | `ISTOTA_SMTP_PASSWORD` | `email.smtp_password` |
 | `ISTOTA_GITLAB_TOKEN` | `developer.gitlab_token` |
 | `ISTOTA_GITHUB_TOKEN` | `developer.github_token` |
-| `ISTOTA_NTFY_TOKEN` | `ntfy.token` |
-| `ISTOTA_NTFY_PASSWORD` | `ntfy.password` |
 
 ### `load_admin_users(path=None) -> set[str]`
 Loads admin user IDs from plain text file (one per line, `#` comments, blank lines ignored).

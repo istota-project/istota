@@ -113,7 +113,6 @@ The core install covers Talk integration, email, scheduling, and Claude Code exe
 - Memory search (semantic search over conversations)
 - Sleep cycle (nightly memory extraction)
 - Whisper (audio transcription)
-- ntfy (push notifications)
 - GPS location tracking
 - Automated backups
 - Browser container (web browsing via Docker)

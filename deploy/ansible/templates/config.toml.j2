@@ -183,24 +183,6 @@ sources = {{ istota_briefing_defaults.headlines.sources | to_json }}
 {% endif %}
 {% endif %}
 
-{% if istota_ntfy_enabled %}
-
-[ntfy]
-enabled = true
-server_url = "{{ istota_ntfy_server_url }}"
-topic = "{{ istota_ntfy_topic }}"
-{% if istota_ntfy_token and not istota_use_environment_file %}
-token = "{{ istota_ntfy_token }}"
-{% endif %}
-{% if istota_ntfy_username %}
-username = "{{ istota_ntfy_username }}"
-{% if not istota_use_environment_file %}
-password = "{{ istota_ntfy_password }}"
-{% endif %}
-{% endif %}
-priority = {{ istota_ntfy_priority }}
-{% endif %}
-
 {% if istota_browser_enabled %}
 
 [browser]

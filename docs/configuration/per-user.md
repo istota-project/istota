@@ -3,7 +3,7 @@
 Per-user data lives in three DB tables and (optionally) the user's Nextcloud workspace:
 
 1. **DB tables** (authoritative)
-   - `user_profiles` — display_name, timezone, channels, ntfy_topic, worker overrides, email lists, trusted senders, disabled_skills, **disabled_modules**
+   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, disabled_skills, **disabled_modules**
    - `user_resources` — resources (calendar, folder, todo_file, notes_folder, email_folder, reminders_file). The `extras` JSON column carries resource-type-specific config.
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
    - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, etc.)
@@ -46,12 +46,11 @@ trusted_email_senders = ["*@company.com", "boss@other.com"]
 # Static website at /~alice/
 site_enabled = true
 
-# ntfy topic override
-ntfy_topic = "alice-alerts"
-
 # Modules to opt out of (default-on otherwise)
 disabled_modules = ["money"]
 ```
+
+> ntfy push notifications are **not** a profile field. They live in the encrypted `secrets` table — provision via the web UI (`/istota/settings` → Connected services → ntfy push) or `istota secret ensure --user alice --service ntfy --key topic --value …`.
 
 ### Resources
 

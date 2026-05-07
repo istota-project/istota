@@ -1220,7 +1220,7 @@ class TestProfileEndpoints:
         cookies = await self._login(client, "alice", "Alice")
         resp = await client.put(
             "/istota/api/settings/profile",
-            json={"timezone": "America/Los_Angeles", "ntfy_topic": "alice-alerts"},
+            json={"timezone": "America/Los_Angeles", "log_channel": "alice-logs"},
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
@@ -1228,7 +1228,7 @@ class TestProfileEndpoints:
         from istota import user_profiles
         p = user_profiles.get_profile(self._db_path, "alice")
         assert p.timezone == "America/Los_Angeles"
-        assert p.ntfy_topic == "alice-alerts"
+        assert p.log_channel == "alice-logs"
         assert p.display_name == "Alice"  # untouched
 
     async def test_update_profile_lists(self, tmp_path, client, app):
@@ -1299,7 +1299,7 @@ class TestProfileEndpoints:
         cookies = await self._login(client, "alice", "Alice")
         await client.put(
             "/istota/api/settings/profile",
-            json={"ntfy_topic": "alice-only"},
+            json={"log_channel": "alice-only"},
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )

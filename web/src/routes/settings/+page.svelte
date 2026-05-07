@@ -153,7 +153,6 @@
 			const patch: Partial<UserProfile> = {
 				display_name: profile.display_name,
 				timezone: profile.timezone,
-				ntfy_topic: profile.ntfy_topic,
 				email_addresses: profile.email_addresses,
 				trusted_email_senders: profile.trusted_email_senders,
 				disabled_skills: profile.disabled_skills,
@@ -386,9 +385,6 @@
 							);
 					}}
 				/>
-			</SettingsField>
-			<SettingsField label="ntfy topic (optional)">
-				<input type="text" bind:value={profile.ntfy_topic} />
 			</SettingsField>
 		</SettingsCard>
 

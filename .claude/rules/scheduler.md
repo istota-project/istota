@@ -215,7 +215,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `sent_emails` | — | id, user_id, task_id, message_id, to_addr, subject, thread_id, in_reply_to, references, conversation_token, talk_delivery_token, sent_at |
 | `task_logs` | — | task_id, level, message, timestamp |
 | `memory_chunks` | — | (from memory_search.py schema) |
-| `user_profiles` | — | user_id, display_name, timezone, log_channel, alerts_channel, ntfy_topic, site_enabled, max_foreground_workers, max_background_workers, email_addresses (JSON), disabled_skills (JSON), disabled_modules (JSON), trusted_email_senders (JSON) |
+| `user_profiles` | — | user_id, display_name, timezone, log_channel, alerts_channel, site_enabled, max_foreground_workers, max_background_workers, email_addresses (JSON), disabled_skills (JSON), disabled_modules (JSON), trusted_email_senders (JSON) |
 | `secrets` | — | user_id, service, key, value (Fernet ciphertext), created_at, updated_at, last_accessed_at |
 | `knowledge_facts` | — | id, user_id, subject, predicate, object, source, source_task_id, valid_from, valid_to, created_at |
 | `knowledge_facts_audit` | — | id, fact_id, user_id, op, payload (JSON), source_task_id, created_at |

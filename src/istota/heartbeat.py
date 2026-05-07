@@ -790,6 +790,23 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
             else:
                 # Check if we should alert
                 if should_alert(conn, user_id, check, check_result, settings, user_tz):
+                    # Distinguish "user hasn't configured this channel" from
+                    # "delivery failed". Bumping consecutive_errors for an
+                    # unconfigured channel turns a config gap into a fake
+                    # alert-pipeline outage; we log instead and move on.
+                    from .notifications import is_channel_configured
+
+                    if not is_channel_configured(
+                        config, user_id, check.channel,
+                        conversation_token=settings.conversation_token,
+                    ):
+                        logger.warning(
+                            "heartbeat %r for user %s: channel %r not configured "
+                            "— alert skipped (configure via /istota/settings)",
+                            check.name, user_id, check.channel,
+                        )
+                        continue
+
                     sent = send_heartbeat_alert(config, user_id, check, check_result, settings)
                     if sent:
                         db.update_heartbeat_state(

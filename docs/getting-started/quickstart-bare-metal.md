@@ -91,7 +91,6 @@ The wizard prompts for these and configures them automatically:
 - Memory search (semantic search over conversations)
 - Sleep cycle (nightly memory extraction)
 - Whisper (audio transcription)
-- ntfy (push notifications)
 - GPS location tracking
 - Automated backups
 - Browser container (web browsing via Docker)

@@ -1,8 +1,8 @@
 """User profile store (Phase 6 of the Docker onboarding spec).
 
 Per-user profile fields (display_name, email_addresses, timezone, log_channel,
-alerts_channel, ntfy_topic, worker overrides, disabled_skills,
-trusted_email_senders) live in the ``user_profiles`` table.
+alerts_channel, worker overrides, disabled_skills, trusted_email_senders)
+live in the ``user_profiles`` table.
 
 Resolution order at config-load time:
     1. ``user_profiles`` table     (web-UI / Docker-seeded / ``istota user ensure``)
@@ -45,7 +45,6 @@ class UserProfile:
     timezone: str = "UTC"
     log_channel: str = ""
     alerts_channel: str = ""
-    ntfy_topic: str = ""
     site_enabled: bool = False
     max_foreground_workers: int = 0
     max_background_workers: int = 0
@@ -56,7 +55,7 @@ class UserProfile:
 
 _PROFILE_COLUMNS = (
     "display_name", "email_addresses", "timezone",
-    "log_channel", "alerts_channel", "ntfy_topic",
+    "log_channel", "alerts_channel",
     "site_enabled", "max_foreground_workers", "max_background_workers",
     "disabled_skills", "trusted_email_senders",
     "disabled_modules",
@@ -84,7 +83,6 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         timezone=row["timezone"] or "UTC",
         log_channel=row["log_channel"] or "",
         alerts_channel=row["alerts_channel"] or "",
-        ntfy_topic=row["ntfy_topic"] or "",
         site_enabled=bool(row["site_enabled"]),
         max_foreground_workers=int(row["max_foreground_workers"] or 0),
         max_background_workers=int(row["max_background_workers"] or 0),
@@ -155,7 +153,7 @@ def ensure_profile(
     derived defaults (e.g. NC display_name).
 
     If ``seed_from`` is a ``UserConfig`` (or any object with the matching
-    attributes), its list fields and channel/ntfy/worker scalars are copied
+    attributes), its list fields and channel/worker scalars are copied
     into the new row so the DB row carries the full TOML payload from the
     moment it exists. This eliminates the "DB has display_name but TOML
     has email_addresses" split-brain that would otherwise happen when the
@@ -171,7 +169,6 @@ def ensure_profile(
         timezone=timezone or _attr(seed_from, "timezone") or "UTC",
         log_channel=_attr(seed_from, "log_channel") or "",
         alerts_channel=_attr(seed_from, "alerts_channel") or "",
-        ntfy_topic=_attr(seed_from, "ntfy_topic") or "",
         site_enabled=bool(_attr(seed_from, "site_enabled") or False),
         max_foreground_workers=int(_attr(seed_from, "max_foreground_workers") or 0),
         max_background_workers=int(_attr(seed_from, "max_background_workers") or 0),
@@ -302,7 +299,6 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         profile.timezone,
         profile.log_channel,
         profile.alerts_channel,
-        profile.ntfy_topic,
         1 if profile.site_enabled else 0,
         int(profile.max_foreground_workers or 0),
         int(profile.max_background_workers or 0),
@@ -362,7 +358,6 @@ def import_from_user_configs(
             timezone=getattr(user_config, "timezone", "") or "UTC",
             log_channel=getattr(user_config, "log_channel", "") or "",
             alerts_channel=getattr(user_config, "alerts_channel", "") or "",
-            ntfy_topic=getattr(user_config, "ntfy_topic", "") or "",
             site_enabled=bool(getattr(user_config, "site_enabled", False)),
             max_foreground_workers=int(getattr(user_config, "max_foreground_workers", 0) or 0),
             max_background_workers=int(getattr(user_config, "max_background_workers", 0) or 0),
@@ -401,7 +396,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "display_name", profile.display_name or getattr(user_config, "display_name", "") or profile.user_id)
     setattr(user_config, "timezone", profile.timezone or "UTC")
     for attr in (
-        "log_channel", "alerts_channel", "ntfy_topic",
+        "log_channel", "alerts_channel",
         "site_enabled", "max_foreground_workers", "max_background_workers",
     ):
         setattr(user_config, attr, getattr(profile, attr))

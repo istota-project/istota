@@ -70,8 +70,6 @@ Instance-wide secrets can be provided via environment variables (e.g., from syst
 | `ISTOTA_SMTP_PASSWORD` | `email.smtp_password` |
 | `ISTOTA_GITLAB_TOKEN` | `developer.gitlab_token` |
 | `ISTOTA_GITHUB_TOKEN` | `developer.github_token` |
-| `ISTOTA_NTFY_TOKEN` | `ntfy.token` |
-| `ISTOTA_NTFY_PASSWORD` | `ntfy.password` |
 | `ISTOTA_OAUTH2_CLIENT_SECRET` | `web.oauth2.client_secret` |
 | `ISTOTA_SECRET_KEY` | Master key for the encrypted `secrets` table (≥32 chars, scrypt-derived Fernet key) |
 

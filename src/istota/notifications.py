@@ -105,38 +105,73 @@ def _send_email(
         return False
 
 
+_NTFY_DEFAULT_PRIORITY = 3
+_NTFY_DEFAULT_SERVER = "https://ntfy.sh"
+
+
+def _ntfy_settings(config: "Config", user_id: str) -> dict[str, str] | None:
+    """Resolve the user's ntfy settings from the encrypted secrets table.
+
+    Returns None if the user hasn't configured a topic, or if the secrets
+    DB is unreachable (missing path, no secrets table). Notifications are
+    best-effort: a misconfigured DB must not raise into a heartbeat or
+    scheduler loop.
+
+    Uses a single SELECT to fetch all ntfy keys at once — heartbeat polling
+    fires this on every check, and 5× separate connections per send adds
+    real WAL contention.
+    """
+    import sqlite3
+
+    from . import secrets_store
+
+    db_path = config.db_path
+    if not db_path:
+        return None
+
+    try:
+        rows = secrets_store.get_service_secrets(db_path, user_id, "ntfy")
+    except (sqlite3.Error, OSError, TypeError) as e:
+        logger.warning("ntfy settings lookup failed for user %s: %s", user_id, e)
+        return None
+
+    topic = rows.get("topic")
+    if not topic:
+        return None
+    return {
+        "topic": topic,
+        "server_url": rows.get("server_url") or _NTFY_DEFAULT_SERVER,
+        "token": rows.get("token", ""),
+        "username": rows.get("username", ""),
+        "password": rows.get("password", ""),
+    }
+
+
 def _send_ntfy(
     config: "Config", user_id: str, message: str,
     title: str | None = None,
     priority: int | None = None,
     tags: str | None = None,
-    ntfy_topic: str | None = None,
 ) -> bool:
-    """Send a notification via ntfy. Returns True on success."""
-    if not config.ntfy.enabled:
-        logger.warning("ntfy not configured for notifications")
+    """Send a notification via the user's own ntfy server. Returns True on success."""
+    settings = _ntfy_settings(config, user_id)
+    if settings is None:
+        logger.warning("ntfy not configured for user %s", user_id)
         return False
 
-    # Resolve topic: explicit > per-user > global
-    user_config = config.users.get(user_id)
-    topic = ntfy_topic or (user_config.ntfy_topic if user_config else "") or config.ntfy.topic
-    if not topic:
-        logger.warning("No ntfy topic for notification (user: %s)", user_id)
-        return False
-
-    url = f"{config.ntfy.server_url.rstrip('/')}/{topic}"
+    url = f"{settings['server_url'].rstrip('/')}/{settings['topic']}"
     headers = {}
-    if config.ntfy.token:
-        headers["Authorization"] = f"Bearer {config.ntfy.token}"
-    elif config.ntfy.username:
+    if settings["token"]:
+        headers["Authorization"] = f"Bearer {settings['token']}"
+    elif settings["username"]:
         import base64
         credentials = base64.b64encode(
-            f"{config.ntfy.username}:{config.ntfy.password}".encode()
+            f"{settings['username']}:{settings['password']}".encode()
         ).decode()
         headers["Authorization"] = f"Basic {credentials}"
     if title:
         headers["Title"] = title.replace("\r", "").replace("\n", " ")
-    headers["Priority"] = str(priority if priority is not None else config.ntfy.priority)
+    headers["Priority"] = str(priority if priority is not None else _NTFY_DEFAULT_PRIORITY)
     if tags:
         headers["Tags"] = tags.replace("\r", "").replace("\n", " ")
 
@@ -149,6 +184,55 @@ def _send_ntfy(
         return False
 
 
+def is_channel_configured(
+    config: "Config",
+    user_id: str,
+    surface: str,
+    *,
+    conversation_token: str | None = None,
+) -> bool:
+    """Probe: does the user have this notification channel set up?
+
+    Distinguishes "user hasn't configured this channel" from "tried to send
+    and the network/server failed". Heartbeat uses this to avoid bumping
+    ``consecutive_errors`` when a check is misconfigured (e.g. ``channel =
+    "ntfy"`` but the user never set their ntfy topic).
+
+    Compound surfaces (``both``, ``all``) are configured if **any** of
+    their leaf channels are.
+    """
+    user_config = config.users.get(user_id)
+
+    def _talk_ok() -> bool:
+        if not config.nextcloud.url:
+            return False
+        if conversation_token:
+            return True
+        return resolve_conversation_token(config, user_id) is not None
+
+    def _email_ok() -> bool:
+        return bool(
+            config.email.enabled
+            and user_config
+            and user_config.email_addresses
+        )
+
+    def _ntfy_ok() -> bool:
+        return _ntfy_settings(config, user_id) is not None
+
+    if surface == "talk":
+        return _talk_ok()
+    if surface == "email":
+        return _email_ok()
+    if surface == "ntfy":
+        return _ntfy_ok()
+    if surface == "both":
+        return _talk_ok() or _email_ok()
+    if surface == "all":
+        return _talk_ok() or _email_ok() or _ntfy_ok()
+    return False
+
+
 def send_notification(
     config: "Config",
     user_id: str,
@@ -159,14 +243,12 @@ def send_notification(
     title: str | None = None,
     priority: int | None = None,
     tags: str | None = None,
-    ntfy_topic: str | None = None,
 ) -> bool:
     """Send a notification via the specified surface.
 
     Args:
         surface: "talk", "email", "ntfy", "both" (talk+email), or "all" (talk+email+ntfy).
         conversation_token: Talk room override (falls back to user config resolution).
-        ntfy_topic: ntfy topic override (falls back to user > global config).
     """
     import asyncio
 
@@ -181,7 +263,7 @@ def send_notification(
             sent = True
 
     if surface in ("ntfy", "all"):
-        if _send_ntfy(config, user_id, message, title=title, priority=priority, tags=tags, ntfy_topic=ntfy_topic):
+        if _send_ntfy(config, user_id, message, title=title, priority=priority, tags=tags):
             sent = True
 
     if not sent:
