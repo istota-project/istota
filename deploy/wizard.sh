@@ -187,6 +187,12 @@ PY
 wiz_basics() {
     section "1. Basics"
 
+    dim "Choose carefully — this is the name your bot will go by, in Talk,"
+    dim "in emails, on the web. It also defines workspace folder names"
+    dim "(e.g. /Users/<you>/<bot_name>/), so changing it later would orphan"
+    dim "memories, briefings and skill data already saved under the old name."
+    dim "(You wouldn't rename your child or pet either.)"
+    echo
     prompt_value _WIZ_BOT_NAME "Bot name (user-facing identity)" "Istota"
     prompt_value ISTOTA_HOME "Install directory" "$ISTOTA_HOME"
 
@@ -670,10 +676,22 @@ TOML
 # ============================================================
 
 main() {
+    # ANSI Shadow figlet rendering of "ISTOTA". Hardcoded so a fresh box
+    # without `toilet` / `figlet` installed still gets the welcome screen.
     echo
-    echo -e "${_BOLD}╔══════════════════════════════════════╗${_RESET}"
-    echo -e "${_BOLD}║       Istota Setup Wizard            ║${_RESET}"
-    echo -e "${_BOLD}╚══════════════════════════════════════╝${_RESET}"
+    printf "${_BLUE}"
+    cat <<'EOF'
+  ██╗███████╗████████╗ ██████╗ ████████╗ █████╗
+  ██║██╔════╝╚══██╔══╝██╔═══██╗╚══██╔══╝██╔══██╗
+  ██║███████╗   ██║   ██║   ██║   ██║   ███████║
+  ██║╚════██║   ██║   ██║   ██║   ██║   ██╔══██║
+  ██║███████║   ██║   ╚██████╔╝   ██║   ██║  ██║
+  ╚═╝╚══════╝   ╚═╝    ╚═════╝    ╚═╝   ╚═╝  ╚═╝
+EOF
+    printf "${_RESET}"
+    echo
+    dim "A CYNIUM Lamplight Release"
+    dim "setup wizard"
     echo
     dim "This wizard will guide you through configuring istota."
     dim "Press Enter to accept defaults shown in [brackets]."
