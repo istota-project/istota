@@ -262,3 +262,153 @@ class TestSentinelLifecycle:
         assert config_store.get_meta(
             ctx.db_path, "_migrate_lock_invoicing",
         ) is None
+
+
+_OVERRIDE_LEDGER = """\
+;; operator override
+option "title" "Override"
+option "operating_currency" "EUR"
+
+2010-01-01 open Assets:Override EUR
+"""
+
+
+@pytest.fixture
+def seed_ctx(tmp_path, monkeypatch):
+    """A clean UserContext with default-ledger seeding enabled."""
+    monkeypatch.delenv("ISTOTA_MONEY_SKIP_DEFAULT_SEED", raising=False)
+    return _make_ctx(tmp_path)
+
+
+class TestSeedDefaultLedger:
+    def test_seeds_bundled_template_into_empty_workspace(self, seed_ctx):
+        result = _migrate.seed_default_ledger(seed_ctx)
+        assert result is not None
+        assert result["source"] == _migrate._BUNDLED_LEDGER_LABEL
+        target = Path(seed_ctx.data_dir) / "ledgers" / "main.beancount"
+        assert target.is_file()
+        body = target.read_text()
+        assert "operating_currency" in body
+        assert "USD" in body
+        assert "Equity:Opening-Balances" in body
+
+    def test_writes_sentinel_on_success(self, seed_ctx):
+        _migrate.seed_default_ledger(seed_ctx)
+        assert config_store.get_meta(
+            seed_ctx.db_path, _migrate._DEFAULT_LEDGER_SENTINEL_KEY,
+        ) is not None
+
+    def test_second_run_is_noop(self, seed_ctx):
+        first = _migrate.seed_default_ledger(seed_ctx)
+        assert first is not None
+        target = Path(seed_ctx.data_dir) / "ledgers" / "main.beancount"
+        first_mtime = target.stat().st_mtime_ns
+        second = _migrate.seed_default_ledger(seed_ctx)
+        assert second is None
+        # File untouched.
+        assert target.stat().st_mtime_ns == first_mtime
+
+    def test_skips_when_ledger_already_present(self, seed_ctx):
+        ledgers_dir = Path(seed_ctx.data_dir) / "ledgers"
+        ledgers_dir.mkdir(parents=True, exist_ok=True)
+        existing = ledgers_dir / "user.beancount"
+        existing.write_text("; user-authored\n")
+        result = _migrate.seed_default_ledger(seed_ctx)
+        assert result is None
+        # Sentinel still written so we don't re-probe forever.
+        assert config_store.get_meta(
+            seed_ctx.db_path, _migrate._DEFAULT_LEDGER_SENTINEL_KEY,
+        ) is not None
+        # User file untouched, no main.beancount created.
+        assert existing.read_text() == "; user-authored\n"
+        assert not (ledgers_dir / "main.beancount").exists()
+
+    def test_per_user_override_wins_over_bundled(self, seed_ctx):
+        override = Path(seed_ctx.data_dir) / "config" / "main.beancount"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(_OVERRIDE_LEDGER)
+        result = _migrate.seed_default_ledger(seed_ctx)
+        assert result is not None
+        assert result["source"] == str(override)
+        target = Path(seed_ctx.data_dir) / "ledgers" / "main.beancount"
+        assert target.read_text() == _OVERRIDE_LEDGER
+
+    def test_workspace_override_beats_bundled(self, seed_ctx, tmp_path):
+        # In the default workspace layout, data_dir.parent == workspace_root.
+        override = tmp_path / "config" / "main.beancount"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(_OVERRIDE_LEDGER)
+        result = _migrate.seed_default_ledger(seed_ctx)
+        assert result is not None
+        assert result["source"] == str(override)
+        target = Path(seed_ctx.data_dir) / "ledgers" / "main.beancount"
+        assert target.read_text() == _OVERRIDE_LEDGER
+
+    def test_data_dir_override_wins_over_workspace_override(
+        self, seed_ctx, tmp_path,
+    ):
+        primary = Path(seed_ctx.data_dir) / "config" / "main.beancount"
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        primary.write_text(_OVERRIDE_LEDGER)
+        secondary = tmp_path / "config" / "main.beancount"
+        secondary.parent.mkdir(parents=True, exist_ok=True)
+        secondary.write_text("; wrong\n")
+        result = _migrate.seed_default_ledger(seed_ctx)
+        assert result is not None
+        assert result["source"] == str(primary)
+        target = Path(seed_ctx.data_dir) / "ledgers" / "main.beancount"
+        assert target.read_text() == _OVERRIDE_LEDGER
+
+    def test_env_opt_out_disables_seeding(self, seed_ctx, monkeypatch):
+        monkeypatch.setenv("ISTOTA_MONEY_SKIP_DEFAULT_SEED", "1")
+        result = _migrate.seed_default_ledger(seed_ctx)
+        assert result is None
+        assert not (Path(seed_ctx.data_dir) / "ledgers" / "main.beancount").exists()
+        # No sentinel — clearing the env var lets seeding run later.
+        assert config_store.get_meta(
+            seed_ctx.db_path, _migrate._DEFAULT_LEDGER_SENTINEL_KEY,
+        ) is None
+
+    def test_missing_bundled_does_not_lock_out(self, seed_ctx, monkeypatch):
+        monkeypatch.setattr(
+            _migrate, "_read_bundled_default_ledger", lambda: None,
+        )
+        result = _migrate.seed_default_ledger(seed_ctx)
+        assert result is None
+        # No sentinel — operator drop-in later should still seed.
+        assert config_store.get_meta(
+            seed_ctx.db_path, _migrate._DEFAULT_LEDGER_SENTINEL_KEY,
+        ) is None
+
+        override = Path(seed_ctx.data_dir) / "config" / "main.beancount"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(_OVERRIDE_LEDGER)
+        result = _migrate.seed_default_ledger(seed_ctx)
+        assert result is not None
+        assert result["source"] == str(override)
+
+
+class TestEnsureInitialisedSeedsLedger:
+    def test_seeds_when_no_legacy_toml(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ISTOTA_MONEY_SKIP_DEFAULT_SEED", raising=False)
+        ctx = _make_ctx(tmp_path)
+        _migrate.ensure_initialised(ctx)
+        target = Path(ctx.data_dir) / "ledgers" / "main.beancount"
+        assert target.is_file()
+        assert config_store.get_meta(
+            ctx.db_path, _migrate._DEFAULT_LEDGER_SENTINEL_KEY,
+        ) is not None
+
+    def test_legacy_toml_import_and_ledger_seed_coexist(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.delenv("ISTOTA_MONEY_SKIP_DEFAULT_SEED", raising=False)
+        ctx = _make_ctx(tmp_path)
+        _write_workspace_config(tmp_path, "invoicing.toml", INVOICING_TOML)
+        _migrate.ensure_initialised(ctx)
+        # Legacy import ran.
+        assert config_store.get_meta(
+            ctx.db_path, "invoicing_legacy_imported_at",
+        ) is not None
+        # Ledger seed also ran.
+        assert (Path(ctx.data_dir) / "ledgers" / "main.beancount").is_file()

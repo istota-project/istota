@@ -30,6 +30,10 @@ _load_dotenv()
 # Default-off in tests: most feeds tests expect an empty DB. The seed
 # tests in test_feeds_migrate.py monkeypatch this var off explicitly.
 os.environ.setdefault("ISTOTA_FEEDS_SKIP_DEFAULT_SEED", "1")
+# Same pattern for the money default-ledger seed: most money tests
+# expect a clean ledgers/ dir. The seed tests in test_migrate.py
+# monkeypatch this var off explicitly.
+os.environ.setdefault("ISTOTA_MONEY_SKIP_DEFAULT_SEED", "1")
 
 from istota import db
 from istota.config import Config, UserConfig

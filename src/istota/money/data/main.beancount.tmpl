@@ -1,0 +1,28 @@
+;; Chart of accounts — seeded by istota on first touch.
+;; Edit freely. New accounts must include an `open` directive.
+;;
+;; Currency defaults to USD; change `operating_currency` and the per-account
+;; commodities together if you want a different home currency.
+
+option "title" "Personal Ledger"
+option "operating_currency" "USD"
+
+2000-01-01 open Assets:Checking              USD
+2000-01-01 open Assets:Savings               USD
+2000-01-01 open Assets:Cash                  USD
+
+2000-01-01 open Liabilities:CreditCard       USD
+
+2000-01-01 open Equity:Opening-Balances      USD
+
+2000-01-01 open Income:Salary                USD
+2000-01-01 open Income:Other                 USD
+
+2000-01-01 open Expenses:Food:Groceries      USD
+2000-01-01 open Expenses:Food:Restaurants    USD
+2000-01-01 open Expenses:Housing:Rent        USD
+2000-01-01 open Expenses:Housing:Utilities   USD
+2000-01-01 open Expenses:Transportation      USD
+2000-01-01 open Expenses:Health              USD
+2000-01-01 open Expenses:Entertainment       USD
+2000-01-01 open Expenses:Other               USD

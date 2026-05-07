@@ -39,6 +39,7 @@ ENV/
 # Project specific
 data/
 !src/istota/feeds/data/
+!src/istota/money/data/
 config/config.toml
 /tmp/istota/
 .env
