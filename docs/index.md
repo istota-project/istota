@@ -33,6 +33,7 @@ It runs as a regular Nextcloud user. File sharing, calendars, contacts, and Talk
 - [Bare metal install](getting-started/quickstart-bare-metal.md) -- production deployment on Debian/Ubuntu
 - [Architecture overview](architecture/overview.md) -- how the system works
 - [Configuration reference](configuration/reference.md) -- all config options
+- [Credentials](configuration/credentials.md) -- global and per-user credential architecture
 - [Skills index](reference/skills-index.md) -- every built-in skill
 
 ## Why Nextcloud?
