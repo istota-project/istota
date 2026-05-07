@@ -12,6 +12,7 @@ from istota.money.core.ledger import (
     run_bean_query,
     check,
     balances,
+    list_open_accounts,
     query,
     report,
     lots,
@@ -118,6 +119,43 @@ class TestBalances:
         result = balances(Path("/test/ledger.beancount"), account="Assets:Bank")
         assert result["status"] == "ok"
         assert "Assets:Bank" in mock_query.call_args[0][1]
+
+
+class TestListOpenAccounts:
+    def test_returns_opened_accounts_without_postings(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            '2020-01-01 open Assets:Bank:Checking USD\n'
+            '2020-01-01 open Expenses:Food USD\n'
+            '2020-01-01 open Income:Salary USD\n'
+        )
+        accounts = list_open_accounts(ledger)
+        assert accounts == [
+            "Assets:Bank:Checking",
+            "Expenses:Food",
+            "Income:Salary",
+        ]
+
+    def test_includes_accounts_with_postings(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            '2020-01-01 open Assets:Bank:Checking USD\n'
+            '2020-01-01 open Expenses:Food USD\n'
+            '2020-01-01 open Equity:Opening-Balances USD\n'
+            '\n'
+            '2024-06-01 * "Lunch"\n'
+            '  Expenses:Food         12.50 USD\n'
+            '  Assets:Bank:Checking\n'
+        )
+        accounts = list_open_accounts(ledger)
+        assert "Assets:Bank:Checking" in accounts
+        assert "Expenses:Food" in accounts
+        assert "Equity:Opening-Balances" in accounts
+
+    def test_empty_ledger(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("")
+        assert list_open_accounts(ledger) == []
 
 
 class TestQuery:

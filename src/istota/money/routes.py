@@ -118,7 +118,7 @@ async def api_accounts(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     """Return account tree with balances for the authenticated user."""
-    from istota.money.core.ledger import run_bean_query
+    from istota.money.core.ledger import list_open_accounts, run_bean_query
 
     ledger_path = _resolve_user_ledger(user_ctx, ledger)
     if not ledger_path:
@@ -129,9 +129,23 @@ async def api_accounts(
 
     try:
         rows = run_bean_query(ledger_path, bql)
-        return {"status": "ok", "accounts": rows}
     except ValueError as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    # On the all-time view, surface accounts that have been opened but
+    # not yet posted to. Without this, a freshly-seeded ledger renders
+    # as "No accounts found" because BQL aggregates over postings only.
+    if year is None:
+        seen = {r["account"] for r in rows}
+        try:
+            extra = list_open_accounts(ledger_path)
+        except Exception:
+            extra = []
+        for acct in extra:
+            if acct not in seen:
+                rows.append({"account": acct, "sum(position)": ""})
+        rows.sort(key=lambda r: r["account"])
+    return {"status": "ok", "accounts": rows}
 
 
 @router.get("/transactions")
