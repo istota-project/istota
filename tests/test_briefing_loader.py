@@ -65,6 +65,37 @@ class TestExpandBooleanComponents:
         result = _expand_boolean_components({"markets": True}, defaults)
         assert result == {"markets": True}
 
+    def test_dict_enabled_only_merges_defaults(self):
+        # Regression: stored components like {"news": {"enabled": true}} from
+        # the briefing_configs DB row used to drop defaults entirely. Defaults
+        # should still merge in for keys the user didn't override.
+        defaults = BriefingDefaultsConfig(
+            news={
+                "lookback_hours": 12,
+                "sources": [{"type": "domain", "value": "semafor.com"}],
+            },
+        )
+        result = _expand_boolean_components({"news": {"enabled": True}}, defaults)
+        assert result == {
+            "news": {
+                "enabled": True,
+                "lookback_hours": 12,
+                "sources": [{"type": "domain", "value": "semafor.com"}],
+            },
+        }
+
+    def test_dict_user_keys_win(self):
+        defaults = BriefingDefaultsConfig(
+            news={"lookback_hours": 12, "sources": [{"type": "domain", "value": "default.com"}]},
+        )
+        result = _expand_boolean_components(
+            {"news": {"enabled": True, "lookback_hours": 3}},
+            defaults,
+        )
+        assert result["news"]["lookback_hours"] == 3
+        assert result["news"]["sources"] == [{"type": "domain", "value": "default.com"}]
+        assert result["news"]["enabled"] is True
+
     def test_mixed_components(self):
         defaults = BriefingDefaultsConfig(
             markets={"futures": ["ES=F"]},

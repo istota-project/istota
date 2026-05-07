@@ -248,6 +248,39 @@ class TestConfigLoading:
         assert cfg.logging.max_size_mb == 50
         assert cfg.logging.backup_count == 10
 
+    def test_load_briefing_defaults_section(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[briefing_defaults.news]\n'
+            'lookback_hours = 12\n'
+            'sources = [\n'
+            '    { type = "domain", value = "semafor.com" },\n'
+            '    { type = "email", value = "briefing@nytimes.com" },\n'
+            ']\n'
+            '\n'
+            '[briefing_defaults.headlines]\n'
+            'sources = ["ap", "reuters", "guardian"]\n'
+            '\n'
+            '[briefing_defaults.markets]\n'
+            'futures = ["ES=F", "NQ=F"]\n'
+        )
+        cfg = load_config(p)
+        assert cfg.briefing_defaults.news.get("lookback_hours") == 12
+        assert len(cfg.briefing_defaults.news.get("sources", [])) == 2
+        assert cfg.briefing_defaults.headlines.get("sources") == ["ap", "reuters", "guardian"]
+        assert cfg.briefing_defaults.markets.get("futures") == ["ES=F", "NQ=F"]
+
+    def test_load_briefing_defaults_headlines_only(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[briefing_defaults.headlines]\n'
+            'sources = ["ap", "guardian"]\n'
+        )
+        cfg = load_config(p)
+        assert cfg.briefing_defaults.headlines.get("sources") == ["ap", "guardian"]
+        assert cfg.briefing_defaults.news == {}
+        assert cfg.briefing_defaults.markets == {}
+
     def test_load_users_section(self, tmp_path):
         p = tmp_path / "config.toml"
         p.write_text(
