@@ -389,6 +389,7 @@ services:
       context: browser/
       dockerfile: Dockerfile
     container_name: istota-browser
+    platform: ${BROWSER_PLATFORM:-linux/amd64}
     profiles:
       - browser
     ports:
