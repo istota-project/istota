@@ -487,6 +487,160 @@ class TestAdminStats:
             bob_row = next(u for u in data["users"] if u["username"] == "bob")
             assert bob_row["tasks_total"] == 1
 
+    async def test_admin_stats_user_source_breakdown(self, tmp_path):
+        """Per-user 24h breakdown must split by source_type so module pollers
+        don't mask interactive activity."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.create_task(conn, "talk 1", "alice", source_type="talk")
+            db.create_task(conn, "talk 2", "alice", source_type="talk")
+            db.create_task(conn, "email 1", "alice", source_type="email")
+            for _ in range(20):
+                db.create_task(conn, "tick", "alice", source_type="scheduled")
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            alice = next(u for u in data["users"] if u["username"] == "alice")
+
+            assert alice["tasks_by_source_24h"]["talk"]["count"] == 2
+            assert alice["tasks_by_source_24h"]["email"]["count"] == 1
+            assert alice["tasks_by_source_24h"]["scheduled"]["count"] == 20
+
+            assert alice["tasks_interactive_24h"] == 3
+            assert alice["tasks_automated_24h"] == 20
+            assert alice["tasks_failed_24h"] == 0
+
+    async def test_admin_stats_user_failures_per_source(self, tmp_path):
+        """Per-user failed counts must aggregate across source_types."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            t_talk = db.create_task(conn, "talk fail", "alice", source_type="talk")
+            t_sched = db.create_task(conn, "sched fail", "alice", source_type="scheduled")
+            db.create_task(conn, "talk ok", "alice", source_type="talk")
+            conn.execute("UPDATE tasks SET status = 'failed' WHERE id IN (?, ?)",
+                         (t_talk, t_sched))
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            alice = next(u for u in data["users"] if u["username"] == "alice")
+            assert alice["tasks_failed_24h"] == 2
+            assert alice["tasks_by_source_24h"]["talk"]["failed"] == 1
+            assert alice["tasks_by_source_24h"]["scheduled"]["failed"] == 1
+
+    async def test_admin_stats_interactive_vs_automated_split(self, tmp_path):
+        """Headline must split interactive (talk/email/cli/tasks_file) from
+        automated (scheduled/briefing/heartbeat/subtask)."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.create_task(conn, "talk 1", "alice", source_type="talk")
+            db.create_task(conn, "email 1", "alice", source_type="email")
+            for _ in range(10):
+                db.create_task(conn, "tick", "alice", source_type="scheduled")
+            db.create_task(conn, "brief", "alice", source_type="briefing")
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            tasks = resp.json()["tasks"]
+            assert tasks["interactive_24h"] == 2
+            assert tasks["automated_24h"] == 11
+
+    async def test_admin_stats_unknown_sources_classified_as_automated(self, tmp_path):
+        """``interactive_24h + automated_24h`` must equal ``last_24h``.
+
+        Unrecognized ``source_type`` values used to land in an ``other``
+        bucket excluded from both interactive and automated counters,
+        which silently undercounted the headline split. Pin the invariant
+        so adding a future source_type without updating the classifier
+        doesn't quietly drift the headline.
+        """
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.create_task(conn, "talk", "alice", source_type="talk")
+            db.create_task(conn, "sched", "alice", source_type="scheduled")
+            db.create_task(conn, "future thing", "alice", source_type="totally_new_kind")
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            tasks = resp.json()["tasks"]
+            assert tasks["interactive_24h"] + tasks["automated_24h"] == tasks["last_24h"]
+            assert tasks["interactive_24h"] == 1
+            assert tasks["automated_24h"] == 2  # scheduled + unrecognized
+
+    async def test_admin_stats_failed_count_and_per_source(self, tmp_path):
+        """Tasks card must surface both failed_24h and per-source failures."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            t_talk_fail = db.create_task(conn, "talk fail", "alice", source_type="talk")
+            t_sched_fail_a = db.create_task(conn, "sched fail a", "alice", source_type="scheduled")
+            t_sched_fail_b = db.create_task(conn, "sched fail b", "bob", source_type="scheduled")
+            db.create_task(conn, "ok", "alice", source_type="talk")
+            conn.execute(
+                "UPDATE tasks SET status = 'failed' WHERE id IN (?, ?, ?)",
+                (t_talk_fail, t_sched_fail_a, t_sched_fail_b),
+            )
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            tasks = resp.json()["tasks"]
+            assert tasks["failed_24h"] == 3
+            assert tasks["failed_by_source_24h"]["talk"] == 1
+            assert tasks["failed_by_source_24h"]["scheduled"] == 2
+
+    async def test_admin_stats_user_avg_duration_per_source(self, tmp_path):
+        """Per-user avg duration must be reported per source_type."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            t_talk = db.create_task(conn, "talk", "alice", source_type="talk")
+            t_sched = db.create_task(conn, "sched", "alice", source_type="scheduled")
+            conn.execute(
+                "UPDATE tasks SET status='completed', "
+                "started_at='2026-05-06 12:00:00', completed_at='2026-05-06 12:00:30' "
+                "WHERE id = ?",
+                (t_talk,),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='completed', "
+                "started_at='2026-05-06 12:00:00', completed_at='2026-05-06 12:00:02' "
+                "WHERE id = ?",
+                (t_sched,),
+            )
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            alice = next(u for u in data["users"] if u["username"] == "alice")
+            assert alice["tasks_by_source_24h"]["talk"]["avg_duration_seconds"] == pytest.approx(30.0, abs=0.5)
+            assert alice["tasks_by_source_24h"]["scheduled"]["avg_duration_seconds"] == pytest.approx(2.0, abs=0.5)
+
     async def test_me_admin_fails_closed_when_admins_unset(self, tmp_path):
         """Empty ``admin_users`` set must NOT grant admin via the web UI.
 

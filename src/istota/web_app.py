@@ -640,6 +640,26 @@ def _scan_db_backups(backups_dir: Path) -> tuple[int, str | None]:
     return count, iso
 
 
+_INTERACTIVE_SOURCES = frozenset({"talk", "email", "tasks_file", "cli"})
+_AUTOMATED_SOURCES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"})
+
+
+def _classify_source(source_type: str | None) -> str:
+    """Classify a ``source_type`` as ``interactive``/``automated``.
+
+    Used to keep the headline numbers honest when module pollers
+    (``_module.feeds.run_scheduled`` etc., source_type=``scheduled``) dwarf
+    real user-driven traffic. Unknown / NULL source_types fall into
+    ``automated`` so the headline split never silently undercounts —
+    ``interactive_24h + automated_24h`` always equals ``last_24h``. The
+    risk of misclassifying a future interactive type is preferred to
+    silent drift.
+    """
+    if source_type in _INTERACTIVE_SOURCES:
+        return "interactive"
+    return "automated"
+
+
 def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
     """Per-user task counts, joined with config metadata.
 
@@ -664,6 +684,34 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
     ).fetchall()
     by_user = {r["user_id"]: r for r in rows}
 
+    breakdown_rows = conn.execute(
+        """
+        SELECT user_id, source_type,
+               COUNT(*) AS n,
+               SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+               AVG(CASE WHEN status = 'completed'
+                         AND started_at IS NOT NULL
+                         AND completed_at IS NOT NULL
+                        THEN (julianday(completed_at) - julianday(started_at)) * 86400
+                   END) AS avg_sec
+        FROM tasks
+        WHERE created_at >= ?
+        GROUP BY user_id, source_type
+        """,
+        (cutoff_24h,),
+    ).fetchall()
+    breakdown: dict[str, dict[str, dict]] = {}
+    for r in breakdown_rows:
+        src = r["source_type"] or "unknown"
+        entry = breakdown.setdefault(r["user_id"], {})
+        entry[src] = {
+            "count": int(r["n"]),
+            "failed": int(r["failed"] or 0),
+            "avg_duration_seconds": (
+                round(float(r["avg_sec"]), 2) if r["avg_sec"] is not None else None
+            ),
+        }
+
     out = []
     user_ids = set(_config.users.keys()) | set(by_user.keys()) if _config else set(by_user.keys())
     for user_id in sorted(user_ids):
@@ -673,6 +721,14 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
         last_24h = int(row["last_24h"] or 0) if row else 0
         last_30d = int(row["last_30d"] or 0) if row else 0
         avg_per_day = round(last_30d / 30.0, 2) if last_30d else 0.0
+        per_source = breakdown.get(user_id, {})
+        interactive_24h = sum(
+            v["count"] for s, v in per_source.items() if _classify_source(s) == "interactive"
+        )
+        automated_24h = sum(
+            v["count"] for s, v in per_source.items() if _classify_source(s) == "automated"
+        )
+        failed_24h = sum(v["failed"] for v in per_source.values())
         out.append({
             "username": user_id,
             "display_name": uc.display_name if uc else user_id,
@@ -680,6 +736,10 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
             "tasks_total": total,
             "tasks_last_24h": last_24h,
             "tasks_avg_per_day": avg_per_day,
+            "tasks_by_source_24h": per_source,
+            "tasks_interactive_24h": interactive_24h,
+            "tasks_automated_24h": automated_24h,
+            "tasks_failed_24h": failed_24h,
             "last_active": _iso_utc(row["last_active"]) if row else None,
         })
     return out
@@ -750,18 +810,43 @@ def _admin_tasks_section(conn: sqlite3.Connection, now: datetime) -> dict:
     cutoff_30d = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
     total = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
-    last_24h = conn.execute(
-        "SELECT COUNT(*) AS n FROM tasks WHERE created_at >= ?", (cutoff_24h,),
-    ).fetchone()["n"]
-    last_30d = conn.execute(
-        "SELECT COUNT(*) AS n FROM tasks WHERE created_at >= ?", (cutoff_30d,),
-    ).fetchone()["n"]
 
     by_source_rows = conn.execute(
-        "SELECT source_type, COUNT(*) AS n FROM tasks WHERE created_at >= ? GROUP BY source_type",
-        (cutoff_24h,),
+        """
+        SELECT source_type,
+               SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS n_24h,
+               SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS n_30d,
+               SUM(CASE WHEN created_at >= ? AND status = 'failed' THEN 1 ELSE 0 END) AS failed_24h
+        FROM tasks
+        WHERE created_at >= ?
+        GROUP BY source_type
+        """,
+        (cutoff_24h, cutoff_30d, cutoff_24h, cutoff_30d),
     ).fetchall()
-    by_source = {r["source_type"]: r["n"] for r in by_source_rows}
+    by_source: dict[str, int] = {}
+    failed_by_source: dict[str, int] = {}
+    last_24h = 0
+    last_30d = 0
+    interactive_24h = automated_24h = 0
+    interactive_30d = automated_30d = 0
+    for r in by_source_rows:
+        src = r["source_type"] or "unknown"
+        n24 = int(r["n_24h"] or 0)
+        n30 = int(r["n_30d"] or 0)
+        f24 = int(r["failed_24h"] or 0)
+        last_24h += n24
+        last_30d += n30
+        if n24:
+            by_source[src] = n24
+        if f24:
+            failed_by_source[src] = f24
+        bucket = _classify_source(src)
+        if bucket == "interactive":
+            interactive_24h += n24
+            interactive_30d += n30
+        elif bucket == "automated":
+            automated_24h += n24
+            automated_30d += n30
 
     duration_row = conn.execute(
         """
@@ -798,8 +883,14 @@ def _admin_tasks_section(conn: sqlite3.Connection, now: datetime) -> dict:
         "last_24h": last_24h,
         "avg_per_day_30d": round(last_30d / 30.0, 2) if last_30d else 0.0,
         "by_source": by_source,
+        "failed_by_source_24h": failed_by_source,
         "avg_duration_seconds": round(avg_duration, 2),
         "error_rate_24h": round(error_rate, 4),
+        "failed_24h": failed_24h,
+        "interactive_24h": interactive_24h,
+        "automated_24h": automated_24h,
+        "interactive_avg_per_day_30d": round(interactive_30d / 30.0, 2) if interactive_30d else 0.0,
+        "automated_avg_per_day_30d": round(automated_30d / 30.0, 2) if automated_30d else 0.0,
     }
 
 
