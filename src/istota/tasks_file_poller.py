@@ -50,7 +50,7 @@ def discover_tasks_files(config: Config) -> list[DiscoveredTasksFile]:
     """
     Discover TASKS.md files in users' bot-managed directories.
 
-    Scans /Users/{user_id}/istota/config/ for TASKS.md files.
+    Scans /Users/{user_id}/{bot_dir_name}/config/ for TASKS.md files.
     The owner is known from the path structure.
 
     Args:

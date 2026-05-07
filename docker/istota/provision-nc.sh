@@ -65,9 +65,11 @@ echo "[istota-provision] Creating directory structure..."
 SHARED="/mnt/shared"
 USER_BASE="${SHARED}/Users/${USER_NAME}"
 
-mkdir -p "${USER_BASE}/istota/config"
-mkdir -p "${USER_BASE}/istota/exports"
-mkdir -p "${USER_BASE}/istota/examples"
+# The bot directory ({user}/<bot_dir_name>/{config,exports,examples,...}) is
+# created by the istota container's storage.ensure_user_directories_v2(), which
+# derives the name from ISTOTA_BOT_NAME via Config.bot_dir_name. Don't seed it
+# here — hardcoding "istota/" leaves a stray empty folder next to the real one
+# whenever the bot is renamed.
 mkdir -p "${USER_BASE}/inbox"
 mkdir -p "${USER_BASE}/memories"
 mkdir -p "${USER_BASE}/shared"
