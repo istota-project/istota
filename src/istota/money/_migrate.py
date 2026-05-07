@@ -13,9 +13,11 @@ gets the monarch sentinel set and leaves the other two unset.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import tomllib
 from datetime import datetime, timezone
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,10 @@ _TOML_FILENAMES = {
     "tax": ("tax.toml", "TAX.md"),
     "monarch": ("monarch.toml", "MONARCH.md"),
 }
+
+_DEFAULT_LEDGER_SENTINEL_KEY = "money_default_ledger_seeded_at"
+_DEFAULT_LEDGER_FILENAME = "main.beancount"
+_BUNDLED_LEDGER_LABEL = "<bundled:istota.money:data/main.beancount.tmpl>"
 
 
 def _iso_now() -> str:
@@ -265,12 +271,198 @@ def migrate_legacy_workspace_config(ctx: UserContext) -> dict | None:
     return summaries or None
 
 
+def _read_bundled_default_ledger() -> str | None:
+    """Read the package-shipped ``main.beancount.tmpl`` as text.
+
+    Uses :mod:`importlib.resources` so the lookup works from a wheel
+    install, an editable checkout, or a zipapp/PyInstaller bundle.
+    Returns ``None`` if the package was built without the data file.
+    """
+    try:
+        resource = files("istota.money").joinpath("data/main.beancount.tmpl")
+    except (ModuleNotFoundError, FileNotFoundError):
+        return None
+    try:
+        with as_file(resource) as concrete:
+            if not concrete.is_file():
+                return None
+            return concrete.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _default_ledger_fs_candidates(ctx: UserContext) -> list[Path]:
+    """Filesystem paths to probe for a ``main.beancount`` override.
+
+    Per-user override (``{data_dir}/config/main.beancount``) wins over
+    the workspace-level override (``{data_dir.parent}/config/main.beancount``
+    in the default workspace layout). The bundled default is the final
+    fallback and intentionally not included here.
+    """
+    out: list[Path] = []
+    seen: set[Path] = set()
+
+    data_dir = Path(ctx.data_dir)
+    primary = data_dir / "config" / _DEFAULT_LEDGER_FILENAME
+    out.append(primary)
+    seen.add(primary)
+
+    workspace = data_dir.parent / "config" / _DEFAULT_LEDGER_FILENAME
+    if workspace not in seen:
+        out.append(workspace)
+
+    return out
+
+
+def _resolve_default_ledger(ctx: UserContext) -> tuple[str, str] | None:
+    """Return ``(ledger_text, source_label)`` for the highest-priority
+    available defaults file, or ``None`` if none are available.
+
+    File-system override paths are tried first; on miss we fall back to
+    the package-shipped bundled template. The label is the absolute path
+    for FS sources and a stable sentinel string for the bundled resource.
+    """
+    for candidate in _default_ledger_fs_candidates(ctx):
+        if not candidate.is_file():
+            continue
+        try:
+            return candidate.read_text(encoding="utf-8"), str(candidate)
+        except OSError as e:
+            logger.warning(
+                "money_default_ledger_unreadable path=%s error=%s",
+                candidate, e,
+            )
+            return None
+    bundled = _read_bundled_default_ledger()
+    if bundled is not None:
+        return bundled, _BUNDLED_LEDGER_LABEL
+    return None
+
+
+def _ledgers_dir_has_beancount(ledgers_dir: Path) -> bool:
+    if not ledgers_dir.is_dir():
+        return False
+    for entry in ledgers_dir.iterdir():
+        if entry.is_file() and entry.suffix == ".beancount":
+            return True
+    return False
+
+
+def _try_write_ledger_sentinel(db_path: Path) -> bool:
+    """Insert the ``money_default_ledger_seeded_at`` row.
+
+    Returns True on success, False on PK collision (another process or
+    a previous run already claimed the slot).
+    """
+    config_store.init_db(db_path)
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
+                (_DEFAULT_LEDGER_SENTINEL_KEY, _iso_now()),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError:
+        return False
+    return True
+
+
+def seed_default_ledger(ctx: UserContext) -> dict | None:
+    """Seed the per-user money workspace with a starter beancount ledger.
+
+    Runs at most once per user. Mirrors
+    :func:`istota.feeds._migrate.seed_default_opml`. Successful runs write a
+    ``money_default_ledger_seeded_at`` row in ``schema_meta``; the next
+    call sees the row and bails. Skip / abort cases:
+
+    * ``ISTOTA_MONEY_SKIP_DEFAULT_SEED`` is set (ops opt-out / test
+      suite). No sentinel is written — clearing the env var lets seeding
+      run on the next call.
+    * Sentinel already set — no-op.
+    * ``{data_dir}/ledgers/`` already contains a ``*.beancount`` file
+      (legacy / manual setup) — we record the sentinel so we don't
+      re-probe on every boot.
+    * No defaults file found anywhere — return without writing the
+      sentinel, so a later release shipping the template or an operator
+      drop-in still triggers seeding on a subsequent boot.
+    * Defaults file unreadable — return without writing the sentinel,
+      so fixing the file unblocks seeding.
+
+    Resolution order: ``{data_dir}/config/main.beancount`` →
+    ``{data_dir.parent}/config/main.beancount`` → bundled
+    ``istota.money:data/main.beancount.tmpl``.
+
+    Reset incantation: ``DELETE FROM schema_meta WHERE
+    key='money_default_ledger_seeded_at'`` against the per-user money DB,
+    and remove ``{data_dir}/ledgers/main.beancount`` if you want it
+    re-seeded.
+    """
+    if os.environ.get("ISTOTA_MONEY_SKIP_DEFAULT_SEED"):
+        return None
+
+    data_dir = Path(ctx.data_dir)
+    db_path = Path(ctx.db_path) if ctx.db_path else (data_dir / "data" / "money.db")
+    config_store.init_db(db_path)
+
+    if config_store.get_meta(db_path, _DEFAULT_LEDGER_SENTINEL_KEY):
+        return None
+
+    ledgers_dir = data_dir / "ledgers"
+    if _ledgers_dir_has_beancount(ledgers_dir):
+        # User got a ledger from another path (manual create, restore from
+        # backup, etc). Burn the sentinel so we don't re-probe forever.
+        _try_write_ledger_sentinel(db_path)
+        return None
+
+    resolved = _resolve_default_ledger(ctx)
+    if resolved is None:
+        # Nothing to do, but intentionally don't write the sentinel: a
+        # later release that ships the bundled template, or an operator
+        # drop-in, should still be picked up on a subsequent call.
+        logger.debug(
+            "money_default_ledger_no_source data_dir=%s", data_dir,
+        )
+        return None
+
+    ledger_text, source_label = resolved
+
+    ledgers_dir.mkdir(parents=True, exist_ok=True)
+    target = ledgers_dir / _DEFAULT_LEDGER_FILENAME
+    if target.exists():
+        # Defensive: we already passed the .beancount-presence check, but
+        # something raced us. Burn the sentinel and bail rather than
+        # overwrite the user's file.
+        _try_write_ledger_sentinel(db_path)
+        return None
+
+    try:
+        target.write_text(ledger_text, encoding="utf-8")
+    except OSError as exc:
+        logger.warning(
+            "money_default_ledger_write_failed path=%s error=%s",
+            target, exc,
+        )
+        return None
+
+    _try_write_ledger_sentinel(db_path)
+
+    logger.info(
+        "money_default_ledger_seeded source=%s target=%s",
+        source_label, target,
+    )
+    return {
+        "source": source_label,
+        "path": str(target),
+    }
+
+
 def ensure_initialised(ctx: UserContext) -> None:
     """Wire up a money workspace for use.
 
     Creates the data + ledgers dirs (idempotent), initialises the DB schema,
-    and runs the legacy migration (which itself no-ops on subsequent runs).
-    Safe to call from every entry point.
+    runs the legacy migration (no-ops on subsequent runs), and seeds a
+    starter beancount ledger if the workspace is empty. Safe to call from
+    every entry point.
     """
     data_dir = Path(ctx.data_dir)
     (data_dir / "data").mkdir(parents=True, exist_ok=True)
@@ -282,3 +474,4 @@ def ensure_initialised(ctx: UserContext) -> None:
         ctx.db_path = db_path
 
     migrate_legacy_workspace_config(ctx)
+    seed_default_ledger(ctx)
