@@ -4,7 +4,7 @@ An octopus-shaped, self-hosted AI agent that lives in your Nextcloud. ([istota.x
 
 ## Quick start
 
-One installer, two paths. Bare metal is the canonical deployment; Docker is for evaluation.
+One installer, two paths. Bare metal/VM is the canonical deployment. Docker is more for evaluation since it spins up its own Nextcloud.
 
 ```bash
 # Bare metal (Debian/Ubuntu VM, connects to your existing Nextcloud) — recommended
@@ -14,9 +14,9 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
 ```
 
-Both run the same interactive wizard. `--help` lists flags; the dispatcher forwards everything except `--docker` to the chosen path.
+Both run the same interactive wizard. `--help` lists flags; the dispatcher forwards everything except `--docker` to the chosen path. At least glance at [`install.sh`](install.sh) (or [`docker/init.sh`](docker/init.sh)) before you pipe it into a shell.
 
-## Bare metal install
+## Bare metal/VM install
 
 Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a Claude Code OAuth token.
 
@@ -37,7 +37,7 @@ To update: `sudo bash install.sh --update`. An Ansible role is also available at
 
 > **Experimental.** The Docker deployment is functional but should be considered unstable. The canonical deployment method is the [bare metal installer](#bare-metal-install) or the Ansible role at `deploy/ansible/`.
 
-The Docker setup spins up a complete stack from scratch: Postgres, Redis, a fresh Nextcloud instance, and the Istota scheduler. If you already have a Nextcloud instance, use the bare-metal path instead — Compose creates its own Nextcloud and is meant for evaluation or standalone deployments, not for connecting to an existing one.
+The Docker setup spins up a complete stack from scratch: Postgres, Redis, a fresh Nextcloud instance, the Istota scheduler, the SvelteKit web UI, an nginx reverse proxy on a single host port (Nextcloud at `/`, the Istota dashboard at `/istota/`), and — on x86-64 Linux hosts and Apple Silicon under Rosetta — a Playwright browser container with bot-detection countermeasures that the `browse` skill drives. The GPS webhook receiver is opt-in. If you already have a Nextcloud instance, use the bare-metal path instead — Compose creates its own Nextcloud and is meant for evaluation or standalone deployments, not for connecting to an existing one.
 
 ### 1. Configure
 
@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
 - **ntfy push notifications** — server URL, topic, optional bearer token.
 - **GPS location tracking** — toggles the `location` compose profile so the Overland webhook receiver starts.
 - **Developer credentials** — optional GitLab / GitHub personal access tokens.
-- **Browser container** — auto-enabled on x86-64 hosts (Chrome has no ARM packages).
+- **Browser container** — auto-enabled on x86-64 Linux hosts and Apple Silicon under Rosetta (slow, preview-grade); disabled on Linux ARM, where Chrome has no native packages and qemu emulation is unreliable.
 
 The script writes `docker/.env` (mode 600) and prints the generated passwords once — copy them somewhere safe. Flags: `--minimal` skips the optional-feature sections (passwords + Claude + user only), `--force` overwrites an existing `.env` without asking.
 
@@ -67,15 +67,15 @@ If you'd rather configure by hand, copy `.env.example` to `.env` and edit it dir
 docker compose up -d
 ```
 
-First start takes a few minutes: Nextcloud initializes the database, creates user accounts, installs apps (Talk, Calendar, External Storage), sets up shared folders, and creates a Talk room between you and the bot. The Istota container waits for all of this before starting the scheduler.
+First start takes a few minutes: Nextcloud initializes the database, creates user accounts, installs apps (Talk, Calendar, External Storage), sets up shared folders, registers an OAuth2 client for the web dashboard, and creates a Talk room between you and the bot. The Istota container waits for all of this before starting the scheduler. On first boot it also generates a `LOCATION_INGEST_TOKEN` and an `ISTOTA_SECRET_KEY` (the master key for the encrypted `secrets` table) and persists them under `/data/`.
 
 ### 3. Chat
 
-Open `http://localhost:8080`, log in with your `USER_NAME` / `USER_PASSWORD`, go to Talk, and start chatting. The bot responds through the same Talk interface.
+Open `http://localhost:8080`, log in with your `USER_NAME` / `USER_PASSWORD`, go to Talk, and start chatting. The bot responds through the same Talk interface. The web dashboard lives at `http://localhost:8080/istota/` (Nextcloud OAuth2 — same login).
 
 ### Optional services
 
-The browser container (Playwright with bot-detection countermeasures) and the GPS webhook receiver run as Docker Compose profiles. `init.sh` sets `COMPOSE_PROFILES=browser` by default on x86-64 hosts (Chrome has no ARM packages, so it stays off on ARM); GPS is off by default. Edit `COMPOSE_PROFILES` in `.env` — comma-separated list — or pass `--profile` flags ad-hoc:
+The browser container (Playwright with bot-detection countermeasures) and the GPS webhook receiver run as Docker Compose profiles. `init.sh` sets `COMPOSE_PROFILES=browser` by default on x86-64 Linux and Apple Silicon (with a 5G memory bump for Rosetta-emulated Chromium); on Linux ARM Chrome has no native packages so it stays off. GPS is off by default. Edit `COMPOSE_PROFILES` in `.env` — comma-separated list — or pass `--profile` flags ad-hoc:
 
 ```bash
 docker compose --profile browser up -d              # Browser only
