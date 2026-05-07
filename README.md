@@ -10,7 +10,7 @@ Bare metal/VM is the canonical deployment and requires an existing Nextcloud ins
 # Bare metal (Debian/Ubuntu VM, connects to your existing Nextcloud) — recommended
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash
 
-# Docker (bundles its own Nextcloud, experimental)
+# Docker (bundles its own Nextcloud)
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
 ```
 
@@ -33,8 +33,6 @@ sudo -u istota HOME=/srv/app/istota claude login
 To update: `sudo bash install.sh --update`. An Ansible role is also available at `deploy/ansible/`.
 
 ## Docker install
-
-> **Experimental.** The Docker deployment is functional but should be considered unstable. The canonical deployment method is the [bare metal installer](#bare-metal-install) or the Ansible role at `deploy/ansible/`.
 
 The Docker setup spins up a complete stack from scratch: Postgres, Redis, a fresh Nextcloud instance, the Istota scheduler, the SvelteKit web UI, an nginx reverse proxy on a single host port (Nextcloud at `/`, the Istota dashboard at `/istota/`), and — on x86-64 Linux hosts and Apple Silicon under Rosetta — a Playwright browser container with bot-detection countermeasures that the `browse` skill drives. The GPS webhook receiver is opt-in. If you already have a Nextcloud instance, use the bare-metal path instead — Compose creates its own Nextcloud and is meant for evaluation or standalone deployments, not for connecting to an existing one.
 
