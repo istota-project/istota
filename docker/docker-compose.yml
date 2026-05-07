@@ -79,8 +79,9 @@ services:
       OVERWRITECLIURL: ${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}
       TRUSTED_PROXIES: ${ISTOTA_TRUSTED_PROXIES:-172.16.0.0/12 192.168.0.0/16 10.0.0.0/8}
       # Passed to provision-nc.sh
-      BOT_USER: istota
+      BOT_USER: ${BOT_USER:-istota}
       BOT_PASSWORD: ${BOT_PASSWORD:?Set BOT_PASSWORD in .env}
+      ISTOTA_BOT_NAME: ${ISTOTA_BOT_NAME:-Istota}
       USER_NAME: ${USER_NAME:?Set USER_NAME in .env}
       USER_PASSWORD: ${USER_PASSWORD:?Set USER_PASSWORD in .env}
       USER_DISPLAY_NAME: ${USER_DISPLAY_NAME:-}

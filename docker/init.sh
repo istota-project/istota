@@ -82,6 +82,25 @@ prompt_secret() {
     eval "$varname=\"\$value\""
 }
 
+# --- splash ---
+# ANSI Shadow figlet rendering of "ISTOTA". Hardcoded so a fresh box without
+# `toilet` / `figlet` installed still gets the welcome screen.
+echo
+printf "${_BLUE}"
+cat <<'EOF'
+  ██╗███████╗████████╗ ██████╗ ████████╗ █████╗
+  ██║██╔════╝╚══██╔══╝██╔═══██╗╚══██╔══╝██╔══██╗
+  ██║███████╗   ██║   ██║   ██║   ██║   ███████║
+  ██║╚════██║   ██║   ██║   ██║   ██║   ██╔══██║
+  ██║███████║   ██║   ╚██████╔╝   ██║   ██║  ██║
+  ╚═╝╚══════╝   ╚═╝    ╚═════╝    ╚═╝   ╚═╝  ╚═╝
+EOF
+printf "${_RESET}"
+echo
+dim "A CYNIUM Lamplight Release"
+dim "first-run setup wizard"
+echo
+
 # --- preflight ---
 [ -f "$EXAMPLE_FILE" ] || die ".env.example not found at $EXAMPLE_FILE"
 command -v openssl >/dev/null 2>&1 || die "openssl is required (used to generate passwords)"
@@ -150,8 +169,33 @@ LOCATION_ENABLED=false  # internal flag — adds "location" to COMPOSE_PROFILES
 
 # --- bot identity & public hostname ---
 section "Bot identity"
+dim "Choose carefully — this is the name your bot will go by, in Nextcloud,"
+dim "in Talk, in emails, on the web. The Nextcloud login is derived from it"
+dim "(lowercased, ASCII), and Nextcloud has no clean way to rename a user"
+dim "after creation. You can't change it once the stack is provisioned."
+dim "(You wouldn't rename your child or pet either.)"
+echo
 prompt_value ISTOTA_BOT_NAME "User-facing bot name" "Istota"
 mark ISTOTA_BOT_NAME
+
+# Derive the Nextcloud bot username from the bot name (same sanitizer as
+# the istota entrypoint's bot_dir_name): lowercase ASCII, spaces→underscore,
+# fall back to "istota" if the result is empty or hits a reserved NC name.
+# This is set in stone at first provisioning — NC has no clean rename — so
+# changing ISTOTA_BOT_NAME post-boot only updates display name, not username.
+BOT_USER="$(ISTOTA_BOT_NAME="$ISTOTA_BOT_NAME" python3 -c '
+import os, re
+name = os.environ["ISTOTA_BOT_NAME"].lower().strip()
+name = re.sub(r"\s+", "_", name)
+name = re.sub(r"[^a-z0-9_\-]", "", name)
+if not name or name in {"admin", "guest", "root", "nextcloud"}:
+    name = "istota"
+print(name)
+')"
+mark BOT_USER
+if [ "$BOT_USER" != "istota" ]; then
+    dim "Nextcloud bot login: ${BOT_USER}"
+fi
 echo
 dim "Public hostname this stack will be reached at. Leave empty for"
 dim "localhost-only evaluation; set it once and OAuth2 callback URL,"
@@ -356,6 +400,7 @@ trap 'rm -f "$TMP_ENV"' EXIT
 # avoids any shell expansion of the rendered passwords/tokens.
 ADMIN_PASSWORD="$ADMIN_PASSWORD" \
 POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+BOT_USER="$BOT_USER" \
 BOT_PASSWORD="$BOT_PASSWORD" \
 USER_NAME="$USER_NAME" \
 USER_PASSWORD="$USER_PASSWORD" \
@@ -421,7 +466,7 @@ echo
 echo -e "  ${_BOLD}Generated credentials${_RESET} (also saved in $ENV_FILE):"
 echo "    Nextcloud admin   :  admin / $ADMIN_PASSWORD"
 echo "    Primary user      :  $USER_NAME / $USER_PASSWORD"
-echo "    Bot user          :  istota / $BOT_PASSWORD"
+echo "    Bot user          :  $BOT_USER / $BOT_PASSWORD"
 echo "    Postgres          :  $POSTGRES_PASSWORD"
 [ -n "$VNC_PASSWORD" ] && echo "    Browser noVNC     :  $VNC_PASSWORD"
 echo
@@ -520,6 +565,35 @@ for row in rows or []:
         warn "Take it down first ('docker compose -f ${existing_path}/docker-compose.yml down')"
         warn "or set COMPOSE_PROJECT_NAME to a different value in $ENV_FILE."
         die "Refusing to start to protect the existing deployment."
+    fi
+
+    # Stale-volume guard: postgres only initializes the DB on first volume
+    # create. If istota_postgres_data exists from a prior run, the new
+    # POSTGRES_PASSWORD in .env won't take effect — Nextcloud's installer
+    # will fail with "password authentication failed for user nextcloud".
+    stale_volumes=()
+    for v in postgres_data nextcloud_html nextcloud_data shared_files istota_data; do
+        if docker volume inspect "${COMPOSE_PROJECT_NAME}_${v}" >/dev/null 2>&1; then
+            stale_volumes+=("${COMPOSE_PROJECT_NAME}_${v}")
+        fi
+    done
+    if [ ${#stale_volumes[@]} -gt 0 ]; then
+        warn "Found existing Docker volumes from a previous run:"
+        for v in "${stale_volumes[@]}"; do
+            echo "    $v"
+        done
+        warn "Postgres won't pick up the new POSTGRES_PASSWORD from .env, so"
+        warn "Nextcloud's first-boot installer will fail with an auth error."
+        echo
+        prompt_bool _wipe_volumes "Remove these volumes and start fresh?" "n"
+        if [ "$_wipe_volumes" = true ]; then
+            info "Running: docker compose down -v"
+            (cd "$SCRIPT_DIR" && docker compose down -v) || \
+                die "docker compose down -v failed. Inspect the output above."
+        else
+            warn "Keeping existing volumes. If startup fails with a postgres auth"
+            warn "  error, re-run with --force after 'docker compose down -v'."
+        fi
     fi
 
     section "Starting the stack"
