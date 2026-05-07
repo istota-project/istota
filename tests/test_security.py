@@ -344,3 +344,35 @@ class TestCredentialSkillScoping:
         from istota.executor import _PROXY_CREDENTIAL_VARS
         mapped_vars = set(_CREDENTIAL_SKILL_MAP.keys())
         assert mapped_vars == _PROXY_CREDENTIAL_VARS
+
+    def test_money_and_feeds_get_master_secret_key(self):
+        """money and feeds resolve per-user secrets at runtime via
+        secrets_store.get_secret(); they need ISTOTA_SECRET_KEY in their
+        subprocess env. (Regression for ISSUE-082.)"""
+        assert _allowed_credentials_for_skills(["money"]) == {"ISTOTA_SECRET_KEY"}
+        assert _allowed_credentials_for_skills(["feeds"]) == {"ISTOTA_SECRET_KEY"}
+
+    def test_unrelated_skills_do_not_get_master_secret_key(self):
+        """Skills that don't decrypt secrets at runtime must not be
+        authorized for ISTOTA_SECRET_KEY — narrower blast radius."""
+        for skill in ["email", "calendar", "developer", "browse",
+                      "markets", "transcribe", "bookmarks"]:
+            assert "ISTOTA_SECRET_KEY" not in _allowed_credentials_for_skills([skill])
+
+    def test_split_credential_env_routes_master_key_to_proxy(self):
+        """ISTOTA_SECRET_KEY must be split out of Claude's clean env so the
+        brain subprocess never sees it; only the proxy injects it into
+        authorized skill subprocesses. (Regression for ISSUE-082.)"""
+        from istota.executor import _split_credential_env
+        env = {
+            "PATH": "/usr/bin",
+            "HOME": "/tmp",
+            "ISTOTA_SECRET_KEY": "a" * 64,
+            "ISTOTA_TASK_ID": "42",
+        }
+        credential_env, clean_env = _split_credential_env(env)
+        assert "ISTOTA_SECRET_KEY" not in clean_env
+        assert credential_env["ISTOTA_SECRET_KEY"] == "a" * 64
+        # Non-credential vars stay in clean env
+        assert clean_env["PATH"] == "/usr/bin"
+        assert clean_env["ISTOTA_TASK_ID"] == "42"
