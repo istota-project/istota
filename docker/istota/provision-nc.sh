@@ -22,7 +22,7 @@ OCC="php /var/www/html/occ"
 # --- Users ---
 
 echo "[istota-provision] Creating bot user: ${BOT_USER}"
-OC_PASS="$BOT_PASSWORD" $OCC user:add "${BOT_USER}" --password-from-env --display-name "Istota" || true
+OC_PASS="$BOT_PASSWORD" $OCC user:add "${BOT_USER}" --password-from-env --display-name "${ISTOTA_BOT_NAME:-Istota}" || true
 
 echo "[istota-provision] Creating human user: ${USER_NAME}"
 DISPLAY_NAME="${USER_DISPLAY_NAME:-$USER_NAME}"
@@ -50,7 +50,7 @@ else
     echo "[istota-provision] Warning: could not create external storage mount for bot."
 fi
 
-USER_MOUNT_ID=$($OCC files_external:create "Istota" local null::null \
+USER_MOUNT_ID=$($OCC files_external:create "${ISTOTA_BOT_NAME:-Istota}" local null::null \
     -c "datadir=/mnt/shared/Users/${USER_NAME}" 2>&1 | grep -o '[0-9]*$') || true
 
 if [ -n "$USER_MOUNT_ID" ] && [ "$USER_MOUNT_ID" -gt 0 ] 2>/dev/null; then
