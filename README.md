@@ -21,8 +21,7 @@ Both run the same interactive wizard. `--help` lists flags; the dispatcher forwa
 Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a Claude Code OAuth token.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh -o install.sh
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash
 ```
 
 The installer walks you through connecting to Nextcloud, setting up users, and choosing optional features. After installation:
