@@ -165,6 +165,8 @@ ISTOTA_DEVELOPER_GITLAB_TOKEN=""
 ISTOTA_DEVELOPER_GITLAB_USERNAME=""
 ISTOTA_DEVELOPER_GITHUB_TOKEN=""
 ISTOTA_DEVELOPER_GITHUB_USERNAME=""
+BROWSER_MEMORY_LIMIT=""
+BROWSER_SHM_SIZE=""
 LOCATION_ENABLED=false  # internal flag — adds "location" to COMPOSE_PROFILES
 
 # --- bot identity & public hostname ---
@@ -351,7 +353,13 @@ case "$HOST_ARCH" in
     arm64|aarch64)
         if [ "$HOST_OS" = "Darwin" ]; then
             COMPOSE_PROFILES="browser"
+            # Rosetta-emulated Chromium OOMs at the 3G default — bump it.
+            BROWSER_MEMORY_LIMIT="5G"
+            BROWSER_SHM_SIZE="4gb"
+            mark BROWSER_MEMORY_LIMIT
+            mark BROWSER_SHM_SIZE
             warn "Browser container enabled under Rosetta emulation (host: $HOST_OS/$HOST_ARCH). Expect slow page loads; suitable for previews only."
+            dim "BROWSER_MEMORY_LIMIT=${BROWSER_MEMORY_LIMIT}, BROWSER_SHM_SIZE=${BROWSER_SHM_SIZE} (Rosetta Chromium OOMs at the 3G default)"
         else
             warn "Browser container disabled (host: $HOST_OS/$HOST_ARCH; Chrome has no ARM packages and qemu emulation is unreliable)."
         fi
@@ -427,6 +435,8 @@ ISTOTA_DEVELOPER_GITLAB_TOKEN="$ISTOTA_DEVELOPER_GITLAB_TOKEN" \
 ISTOTA_DEVELOPER_GITLAB_USERNAME="$ISTOTA_DEVELOPER_GITLAB_USERNAME" \
 ISTOTA_DEVELOPER_GITHUB_TOKEN="$ISTOTA_DEVELOPER_GITHUB_TOKEN" \
 ISTOTA_DEVELOPER_GITHUB_USERNAME="$ISTOTA_DEVELOPER_GITHUB_USERNAME" \
+BROWSER_MEMORY_LIMIT="$BROWSER_MEMORY_LIMIT" \
+BROWSER_SHM_SIZE="$BROWSER_SHM_SIZE" \
 ACTIVE_KEYS="$(IFS=,; echo "${ACTIVE_KEYS[*]}")" \
 python3 - "$EXAMPLE_FILE" "$TMP_ENV" <<'PYEOF'
 import os, sys, re
