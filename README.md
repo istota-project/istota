@@ -4,7 +4,7 @@ An octopus-shaped, self-hosted AI agent that lives in your Nextcloud. ([istota.x
 
 ## Quick start
 
-One installer, two paths. Bare metal/VM is the canonical deployment. Docker is more for evaluation since it spins up its own Nextcloud.
+Bare metal/VM is the canonical deployment and requires an existing Nextcloud installation on the network/internet. Docker is more for evaluation since it spins up its own fresh Nextcloud.
 
 ```bash
 # Bare metal (Debian/Ubuntu VM, connects to your existing Nextcloud) — recommended
