@@ -3013,13 +3013,13 @@ class TestCmdDaySummary:
 
     def test_single_stop_at_saved_place(self, tmp_path):
         """Pings at a saved place should use the place name."""
-        # March 8 in PST = UTC 2026-03-08T08:00:00Z to 2026-03-09T08:00:00Z
+        # March 8 in PST = UTC 2026-03-08T08:00:00Z to 2026-03-09T08:00:00Z.
+        # Pings must be spaced within cluster_pings.max_gap_seconds (300s).
         places = [{"name": "home", "lat": 34.05, "lon": -118.25, "radius_meters": 150}]
-        # Insert a place and get its ID — we use place_id=1 since it's the first insert
         pings = [
             {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.05, "lon": -118.25, "place_id": 1},
-            {"timestamp": "2026-03-08T17:00:00Z", "lat": 34.0501, "lon": -118.2501, "place_id": 1},
-            {"timestamp": "2026-03-08T18:00:00Z", "lat": 34.0502, "lon": -118.2502, "place_id": 1},
+            {"timestamp": "2026-03-08T16:02:00Z", "lat": 34.0501, "lon": -118.2501, "place_id": 1},
+            {"timestamp": "2026-03-08T16:04:00Z", "lat": 34.0502, "lon": -118.2502, "place_id": 1},
         ]
         result = self._run_day_summary(tmp_path, pings=pings, places=places)
         assert len(result["stops"]) == 1
@@ -3148,14 +3148,19 @@ class TestCmdDaySummary:
         places = [
             {"name": "Home", "lat": 34.1025, "lon": -118.3059, "radius_meters": 100},
         ]
+        # Each side needs ≥3 pings tagged with the place_id to get attributed
+        # (MIN_PLACE_PINGS=3); ping spacing must be ≤300s for cluster_pings to
+        # keep them in one cluster on each side of the sleep gap.
         pings = [
             # Home cluster 1
+            {"timestamp": "2026-03-09T00:48:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
             {"timestamp": "2026-03-09T00:50:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
             {"timestamp": "2026-03-09T00:52:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
             # 2-hour gap (phone sleeping, no pings at all)
             # Home cluster 2
             {"timestamp": "2026-03-09T02:46:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
             {"timestamp": "2026-03-09T02:48:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
+            {"timestamp": "2026-03-09T02:50:00Z", "lat": 34.1025, "lon": -118.3059, "place_id": 1},
         ]
         result = self._run_day_summary(tmp_path, pings=pings, places=places,
                                         date="2026-03-08", tz="America/Los_Angeles")
@@ -3201,11 +3206,17 @@ class TestCmdDaySummary:
     def test_duration_minutes_in_output(self, tmp_path):
         """Each stop should include a pre-computed duration_minutes field (ISSUE-047 bug B)."""
         places = [{"name": "home", "lat": 34.05, "lon": -118.25, "radius_meters": 150}]
-        # 2 hours at home (16:00-18:00 UTC on March 8 = within PST day)
+        # 2 hours at home (16:00-18:00 UTC on March 8 = within PST day).
+        # Pings every 5 minutes keep them in a single cluster
+        # (cluster_pings.max_gap_seconds=300).
         pings = [
-            {"timestamp": "2026-03-08T16:00:00Z", "lat": 34.05, "lon": -118.25, "place_id": 1},
-            {"timestamp": "2026-03-08T17:00:00Z", "lat": 34.0501, "lon": -118.2501, "place_id": 1},
-            {"timestamp": "2026-03-08T18:00:00Z", "lat": 34.0502, "lon": -118.2502, "place_id": 1},
+            {
+                "timestamp": f"2026-03-08T{16 + (5 * i) // 60:02d}:{(5 * i) % 60:02d}:00Z",
+                "lat": 34.05 + i * 0.00001,
+                "lon": -118.25,
+                "place_id": 1,
+            }
+            for i in range(25)  # 0, 5, 10, …, 120 minutes — 25 pings
         ]
         result = self._run_day_summary(tmp_path, pings=pings, places=places)
         assert len(result["stops"]) == 1
