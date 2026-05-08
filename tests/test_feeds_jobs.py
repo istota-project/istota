@@ -236,6 +236,90 @@ class TestSyncFeedsModuleJobs:
         assert row[1] == "feeds"
         assert json.loads(row[2]) == ["run-scheduled"]
 
+    def test_rescues_post_migration_auto_disabled_row(self, tmp_path):
+        """Sequence: row was first migrated from command→skill shape,
+        then auto-disabled because in-flight tasks created before the
+        migration kept hitting the admin gate. Next sync must un-stick
+        the row instead of leaving it paused forever."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        # Already-migrated shape (command=NULL, skill set) but
+        # enabled=0 + the admin-gate failure recorded.
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 6, ?)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]',
+             "command-type tasks are admin-only"),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT enabled, consecutive_failures, last_error "
+            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert row[0] == 1
+        assert row[1] == 0
+        assert row[2] is None
+
+    def test_legacy_command_migration_also_clears_auto_disable(self, tmp_path):
+        """One-step migration path: the row is still in command shape AND
+        has been auto-disabled by the admin gate. The sync must do both."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error) "
+            "VALUES (?, ?, ?, '', ?, NULL, NULL, 0, 1, 6, ?)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "FEEDS_USER=alice istota-skill feeds run-scheduled",
+             "command-type tasks are admin-only"),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT command, skill, enabled, consecutive_failures, last_error "
+            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert row[0] is None
+        assert row[1] == "feeds"
+        assert row[2] == 1
+        assert row[3] == 0
+        assert row[4] is None
+
+    def test_rescue_does_not_touch_unrelated_disabled_row(self, tmp_path):
+        """Operator-disabled rows or rows disabled for other failure
+        reasons must stay disabled — the rescue is keyed on the specific
+        admin-gate error string."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 6, ?)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]',
+             "Some other error"),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT enabled, last_error "
+            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert row[0] == 0
+        assert row[1] == "Some other error"
+
 
 # ---------------------------------------------------------------------------
 # CRON.md sync must not touch _module.feeds.* jobs

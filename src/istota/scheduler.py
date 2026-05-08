@@ -3073,6 +3073,23 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
         wanted = jobs_for_user(money_ctx, user_id)
         wanted_by_name = {j["name"]: j for j in wanted}
 
+        # Rescue rows that hit the admin-gate failure on the legacy
+        # command-task path before commit cc0bd54 migrated module jobs to
+        # skill-task shape. Targets the specific failure string so healthy
+        # rows are untouched.
+        rescued = conn.execute(
+            "UPDATE scheduled_jobs "
+            "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
+            "WHERE user_id = ? AND name LIKE ? AND enabled = 0 "
+            "AND last_error LIKE '%command-type tasks are admin-only%'",
+            (user_id, f"{MODULE_PREFIX}%"),
+        ).rowcount
+        if rescued:
+            logger.info(
+                "Re-enabled %d auto-disabled module job(s) for user %s "
+                "(legacy admin-gate failure)", rescued, user_id,
+            )
+
         existing_rows = list(conn.execute(
             "SELECT id, name, cron_expression, command, skill, skill_args, "
             "skip_log_channel "
@@ -3095,9 +3112,10 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
                     "Seeded module job '%s' for user %s", name, user_id,
                 )
             else:
+                legacy_command = row[3] is not None
                 drift = (
                     row[2] != j["cron"]
-                    or row[3] is not None  # legacy command shape — migrate
+                    or legacy_command  # legacy command shape — migrate
                     or row[4] != j["skill"]
                     or row[5] != j["skill_args"]
                     or not bool(row[6])
@@ -3106,15 +3124,29 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
                     # Don't bump last_run_at here — backfilling skip_log_channel
                     # on existing rows would otherwise defer the next scheduled
                     # run by one full cron interval (up to 24h for daily jobs).
+                    extra_sql = ""
+                    if legacy_command:
+                        # Non-admin users hit the admin gate on the old
+                        # command-task path and got auto-disabled. The migration
+                        # to skill-task shape removes that failure mode, so
+                        # rescue the row's enabled/failure state in the same
+                        # update.
+                        extra_sql = (
+                            ", enabled = 1, consecutive_failures = 0, "
+                            "last_error = NULL"
+                        )
                     conn.execute(
                         "UPDATE scheduled_jobs "
                         "SET cron_expression = ?, command = NULL, "
-                        "skill = ?, skill_args = ?, skip_log_channel = 1 "
+                        "skill = ?, skill_args = ?, skip_log_channel = 1"
+                        f"{extra_sql} "
                         "WHERE id = ?",
                         (j["cron"], j["skill"], j["skill_args"], row[0]),
                     )
                     logger.info(
-                        "Updated module job '%s' for user %s", name, user_id,
+                        "Updated module job '%s' for user %s%s",
+                        name, user_id,
+                        " (rescued from auto-disable)" if legacy_command else "",
                     )
 
         for name, row in existing_by_name.items():
@@ -3163,6 +3195,23 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
         wanted = jobs_for_user(feeds_ctx, user_id)
         wanted_by_name = {j["name"]: j for j in wanted}
 
+        # Rescue rows that hit the admin-gate failure on the legacy
+        # command-task path before commit cc0bd54 migrated module jobs to
+        # skill-task shape. Targets the specific failure string so healthy
+        # rows are untouched.
+        rescued = conn.execute(
+            "UPDATE scheduled_jobs "
+            "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
+            "WHERE user_id = ? AND name LIKE ? AND enabled = 0 "
+            "AND last_error LIKE '%command-type tasks are admin-only%'",
+            (user_id, f"{MODULE_PREFIX}%"),
+        ).rowcount
+        if rescued:
+            logger.info(
+                "Re-enabled %d auto-disabled module job(s) for user %s "
+                "(legacy admin-gate failure)", rescued, user_id,
+            )
+
         existing_rows = list(conn.execute(
             "SELECT id, name, cron_expression, command, skill, skill_args, "
             "skip_log_channel "
@@ -3204,9 +3253,10 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
                         user_id, task_id,
                     )
             else:
+                legacy_command = row[3] is not None
                 drift = (
                     row[2] != j["cron"]
-                    or row[3] is not None  # legacy command shape — migrate
+                    or legacy_command  # legacy command shape — migrate
                     or row[4] != j["skill"]
                     or row[5] != j["skill_args"]
                     or not bool(row[6])
@@ -3215,15 +3265,29 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
                     # Don't bump last_run_at here — backfilling skip_log_channel
                     # on existing rows would otherwise defer the next scheduled
                     # run by one full cron interval (up to 24h for daily jobs).
+                    extra_sql = ""
+                    if legacy_command:
+                        # Non-admin users hit the admin gate on the old
+                        # command-task path and got auto-disabled. The migration
+                        # to skill-task shape removes that failure mode, so
+                        # rescue the row's enabled/failure state in the same
+                        # update.
+                        extra_sql = (
+                            ", enabled = 1, consecutive_failures = 0, "
+                            "last_error = NULL"
+                        )
                     conn.execute(
                         "UPDATE scheduled_jobs "
                         "SET cron_expression = ?, command = NULL, "
-                        "skill = ?, skill_args = ?, skip_log_channel = 1 "
+                        "skill = ?, skill_args = ?, skip_log_channel = 1"
+                        f"{extra_sql} "
                         "WHERE id = ?",
                         (j["cron"], j["skill"], j["skill_args"], row[0]),
                     )
                     logger.info(
-                        "Updated module job '%s' for user %s", name, user_id,
+                        "Updated module job '%s' for user %s%s",
+                        name, user_id,
+                        " (rescued from auto-disable)" if legacy_command else "",
                     )
 
         for name, row in existing_by_name.items():
