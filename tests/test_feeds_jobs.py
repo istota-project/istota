@@ -245,12 +245,14 @@ class TestSyncFeedsModuleJobs:
         conn = _conn(tmp_path)
         # Already-migrated shape (command=NULL, skill set) but
         # enabled=0 + the admin-gate failure recorded.
+        # last_run_at is old enough to clear the 1h cooldown.
         conn.execute(
             "INSERT INTO scheduled_jobs "
             "(user_id, name, cron_expression, prompt, command, skill, "
             "skill_args, enabled, skip_log_channel, consecutive_failures, "
-            "last_error) "
-            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 6, ?)",
+            "last_error, last_run_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 6, ?, "
+            "datetime('now', '-2 hours'))",
             ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
              "feeds", '["run-scheduled"]',
              "command-type tasks are admin-only"),
@@ -266,17 +268,80 @@ class TestSyncFeedsModuleJobs:
         assert row[1] == 0
         assert row[2] is None
 
-    def test_legacy_command_migration_also_clears_auto_disable(self, tmp_path):
-        """One-step migration path: the row is still in command shape AND
-        has been auto-disabled by the admin gate. The sync must do both."""
+    def test_rescues_row_disabled_by_non_admin_gate_failure(self, tmp_path):
+        """Wave 2: post-cc0bd54-but-pre-027eb1a, claim_task didn't return
+        the skill columns, so module rows fell through to the LLM path
+        with an empty prompt and accumulated 5 timeouts / malformed-output
+        failures before auto-disabling. The rescue can't key on a single
+        error string for this wave — any auto-disabled module row whose
+        last_run_at predates the 1h cooldown gets rescued."""
         app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         conn.execute(
             "INSERT INTO scheduled_jobs "
             "(user_id, name, cron_expression, prompt, command, skill, "
             "skill_args, enabled, skip_log_channel, consecutive_failures, "
-            "last_error) "
-            "VALUES (?, ?, ?, '', ?, NULL, NULL, 0, 1, 6, ?)",
+            "last_error, last_run_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 5, ?, "
+            "datetime('now', '-9 hours'))",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]',
+             "Task timed out after 30 minutes"),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT enabled, consecutive_failures, last_error "
+            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert row[0] == 1
+        assert row[1] == 0
+        assert row[2] is None
+
+    def test_rescue_skips_recently_disabled_row(self, tmp_path):
+        """1h cooldown gate: a row that was auto-disabled within the last
+        hour stays disabled. This caps the rescue→fail→rescue loop rate
+        for genuinely broken rows — without it, every */5 cron tick we'd
+        retry 5 more times and re-disable, indefinitely."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 5, ?, "
+            "datetime('now', '-10 minutes'))",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]',
+             "Task timed out after 30 minutes"),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT enabled, consecutive_failures FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert row[0] == 0
+        assert row[1] == 5
+
+    def test_legacy_command_migration_also_clears_auto_disable(self, tmp_path):
+        """One-step migration path: the row is still in command shape AND
+        has been auto-disabled by the admin gate. The drift-driven update
+        must do both — even when last_run_at is recent (the broad rescue
+        skips inside the 1h cooldown, but legacy_command drift fires
+        unconditionally)."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at) "
+            "VALUES (?, ?, ?, '', ?, NULL, NULL, 0, 1, 6, ?, "
+            "datetime('now', '-10 minutes'))",
             ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
              "FEEDS_USER=alice istota-skill feeds run-scheduled",
              "command-type tasks are admin-only"),
@@ -294,31 +359,33 @@ class TestSyncFeedsModuleJobs:
         assert row[3] == 0
         assert row[4] is None
 
-    def test_rescue_does_not_touch_unrelated_disabled_row(self, tmp_path):
-        """Operator-disabled rows or rows disabled for other failure
-        reasons must stay disabled — the rescue is keyed on the specific
-        admin-gate error string."""
+    def test_rescue_does_not_touch_operator_paused_row(self, tmp_path):
+        """consecutive_failures=0 means the row was paused by an operator
+        (or never failed), not auto-disabled. Module rows have no
+        operator-pause UI today, but the rescue still respects the
+        distinguisher so a future surface — or a direct DB edit — won't
+        get clobbered."""
         app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         conn.execute(
             "INSERT INTO scheduled_jobs "
             "(user_id, name, cron_expression, prompt, command, skill, "
             "skill_args, enabled, skip_log_channel, consecutive_failures, "
-            "last_error) "
-            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 6, ?)",
+            "last_error, last_run_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 0, NULL, "
+            "datetime('now', '-9 hours'))",
             ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
-             "feeds", '["run-scheduled"]',
-             "Some other error"),
+             "feeds", '["run-scheduled"]'),
         )
         conn.commit()
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
-            "SELECT enabled, last_error "
-            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            "SELECT enabled, consecutive_failures FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ?",
             ("alice", f"{MODULE_PREFIX}%"),
         ).fetchone()
         assert row[0] == 0
-        assert row[1] == "Some other error"
+        assert row[1] == 0
 
 
 # ---------------------------------------------------------------------------
