@@ -8,8 +8,12 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 
 | Table | Purpose |
 |---|---|
-| `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, priority, attempts, execution trace |
+| `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempts, execution trace, model/effort overrides, plus `skill` / `skill_args` for skill-task dispatch |
 | `user_resources` | Per-user resource permissions (calendar, folder, todo_file, email_folder, ledger, etc.) |
+| `user_profiles` | Per-user profile fields (display_name, timezone, channels, worker overrides, disabled_skills, disabled_modules, email_addresses, trusted_email_senders) |
+| `briefing_configs` | DB-stored briefing configurations (cron, components, conversation_token, enabled flag) |
+| `secrets` | Per-user encrypted credentials (Fernet over scrypt-derived `ISTOTA_SECRET_KEY`) |
+| `google_oauth_tokens` | Google OAuth access/refresh token pairs (Fernet-encrypted at rest) |
 | `task_logs` | Structured task-level observability |
 | `istota_kv` | Key-value store for script runtime state |
 
@@ -100,6 +104,10 @@ expire_stale_confirmations(conn, timeout_minutes)  # -> list of expired tasks
 fail_ancient_pending_tasks(conn, fail_hours)        # -> list of failed tasks
 cleanup_old_tasks(conn, retention_days)             # -> count deleted
 ```
+
+## Single source of truth for `Task` columns
+
+Every `Task`-returning helper (`claim_task`, `get_task`, `get_pending_confirmation*`, `get_reply_parent_task`, `get_stale_pending_tasks`, `get_completed_*_since`) routes its `SELECT` / `RETURNING` clause through a single `_TASK_COLUMNS` constant. Adding a column means editing one place; missing columns now raise `IndexError` rather than silently returning `None`.
 
 ## WAL mode
 

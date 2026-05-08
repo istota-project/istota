@@ -27,6 +27,7 @@ istota user list                             # List configured users
 istota user lookup EMAIL                     # Find user by email
 istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
+istota user ensure -u USER --name NAME [--timezone TZ] [--log-channel TOKEN] [--alerts-channel TOKEN] [--email k=v ...] [--max-fg N] [--max-bg N] [--site-enabled]
 ```
 
 ### Resources
@@ -53,6 +54,12 @@ istota secret ensure -u USER -s SERVICE -k KEY -v VALUE   # value via flag, env,
 istota secret list   -u USER                               # service/key/last_accessed; values never printed
 istota secret remove -u USER -s SERVICE -k KEY
 ```
+
+### Ensure-CLI state contract
+
+All four `* ensure` subcommands (`user`, `resource`, `briefing`, `secret`) share a uniform contract: each computes `created` / `updated` / `noop` honestly by comparing the requested fields against the existing row, writes only when state would change, and prints a final `STATE: created|updated|noop` line. Ansible roles use `changed_when: "'STATE: noop' not in stdout"` for accurate change reporting.
+
+Subsystem helpers that own the contract: `db.upsert_user_resource`, `secrets_store.upsert_secret`, `user_profiles.update_profile_with_status`, and `db.upsert_briefing_config` (via the existing briefing helper). Each returns `(thing, state)` (or just the state string) so the CLI is a thin printer.
 
 ### Email
 

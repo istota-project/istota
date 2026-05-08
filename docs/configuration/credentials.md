@@ -75,34 +75,45 @@ Users connect their Google account through the web dashboard at `/istota/` (the 
 ## How credentials flow at runtime
 
 ```
-config.toml / env vars
+config.toml / env vars / encrypted secrets table
         │
         ▼
-  build_credential_env()     ← collects all credentials the task needs
+  build_skill_env(skill_index, ctx)   ← walks every skill manifest, resolves each EnvSpec
         │
         ▼
-  _split_credential_env()    ← splits into (credential_env, clean_env)
+  _split_credential_env(env, derive_credential_set(skill_index))
         │                │
         │                └──▶ Claude subprocess (clean_env — no secrets)
         ▼
-  SkillProxy(credential_env) ← holds credentials in memory
+  SkillProxy(credential_env, derive_skill_credential_map(...), derive_lookup_allowlist(...))
         │
         ▼
-  credential-fetch <VAR>     ← skill CLI requests a specific var
-        │                       proxy checks _CREDENTIAL_SKILL_MAP
-        ▼                       returns value only if skill is authorized
+  credential-fetch <VAR>      ← skill CLI requests a specific var
+        │                        proxy checks the per-skill credential map
+        ▼                        and the lookup allowlist (minus _PROXY_LOOKUP_BLOCKED)
   skill subprocess env
 ```
 
-The `_CREDENTIAL_SKILL_MAP` in `executor.py` is the authorization matrix: each env var maps to the set of skills allowed to request it. Claude's subprocess never sees credential values directly.
+The credential set, per-skill scope, and lookup allowlist are all **derived from skill manifests** by four pure helpers in `executor.py`:
 
-Authorization is **decoupled from skill selection**. A skill is authorized for credential access whenever its mapped credentials are present in the user's task environment — not when the skill is selected into the prompt. This prevents keyword-miss lockouts: if a user has Karakeep configured, the bookmarks skill can always request `KARAKEEP_API_KEY` at runtime, even if "bookmark" wasn't in the prompt.
+| Helper | Returns |
+|---|---|
+| `derive_credential_set(skill_index)` | every env var declared with `sensitive: true` across all skills |
+| `derive_authorized_skills(selected, skill_index, ctx)` | selected skills ∪ skills whose sensitive `EnvSpec`s actually resolve under this task's context |
+| `derive_skill_credential_map(authorized, skill_index)` | per-skill credential map (proxy uses this to scope injection) |
+| `derive_lookup_allowlist(authorized, skill_index)` | vars the proxy will respond to over `credential-fetch`, minus `_PROXY_LOOKUP_BLOCKED` |
 
-For more on the proxy architecture, credential stripping, and rejection logging, see [security: credential proxy](../deployment/security.md#credential-proxy).
+There is no longer a hand-maintained `_PROXY_CREDENTIAL_VARS` constant or `_CREDENTIAL_SKILL_MAP` in code. Adding a credential is a manifest edit; everything else falls out of `derive_*`.
+
+Authorization is **decoupled from skill selection**. A skill is authorized for credential access whenever its sensitive credentials actually resolve for this user — not when the skill is selected into the prompt. This prevents keyword-miss lockouts: if a user has Karakeep configured, the bookmarks skill can always request `KARAKEEP_API_KEY` at runtime, even if "bookmark" wasn't in the prompt. Doc-only skills like `developer` (no CLI module) are eligible too — they consume credentials via `credential-fetch` from helper scripts the skill's `setup_env` hook bind-mounts into the sandbox.
+
+Auto-authorization passes `fallbacks_disabled=True` to the resolver: an instance-wide `EnvironmentFile` fallback for an operator-set value cannot fan out and auto-authorize every user, defeating the per-user privacy posture.
+
+For more on the proxy architecture, PID-scoped socket paths, and rejection logging, see [security: credential proxy](../deployment/security.md#credential-proxy).
 
 ## Credential proxy variables
 
-These env vars are stripped from the Claude subprocess and injected server-side by the proxy:
+The proxy strips these env vars from the Claude subprocess and injects them server-side. The list is manifest-derived (every `EnvSpec` with `sensitive: true`); today's set:
 
 - `CALDAV_PASSWORD`
 - `NC_PASS`
@@ -113,7 +124,9 @@ These env vars are stripped from the Claude subprocess and injected server-side 
 - `GITLAB_TOKEN`
 - `GITHUB_TOKEN`
 - `MONARCH_SESSION_TOKEN`
-- `ISTOTA_SECRET_KEY`
+- `NTFY_TOKEN`, `NTFY_PASSWORD`
+- `TUMBLR_API_KEY`
+- `ISTOTA_SECRET_KEY` — routed to module-skill subprocesses that need to decrypt per-user secrets, but blocked at the lookup endpoint via `_PROXY_LOOKUP_BLOCKED` so `credential-fetch ISTOTA_SECRET_KEY` from inside Claude is rejected
 
 See [environment variables](../reference/environment-variables.md) for the complete env var reference.
 
@@ -122,8 +135,8 @@ See [environment variables](../reference/environment-variables.md) for the compl
 When adding a new service integration, follow this decision tree:
 
 1. **Who authenticates?** If the bot logs in as itself (a service account, a bot token), it's global. If it accesses a user's personal account, it's per-user.
-2. **Global** → add to the relevant `config.toml` section, wire the env var in `build_credential_env()`, add to `_PROXY_CREDENTIAL_VARS` and `_CREDENTIAL_SKILL_MAP` in `executor.py`, and document the env var override.
-3. **Per-user** → add the service and keys to `secret_schema.py` (connected service or module service), wire the skill CLI to resolve via `secrets_store.get_secret()`. The `ISTOTA_SECRET_KEY` routing handles decryption.
+2. **Global** → add the field to the relevant config dataclass + `[section]` in `config.toml`, declare the env var in the consuming skill's `skill.md` `env:` block with `from: "config"`, `sensitive: true`, and an optional `fallback_var` for `EnvironmentFile` overrides. The proxy strip-set, auth map, and lookup allowlist update automatically via `derive_*`.
+3. **Per-user** → add the service and keys to `secret_schema.py` (connected service or module service), then declare the env var in the consuming skill's `skill.md` `env:` block with `from: "secret"` (and `sensitive: true` if it's a credential rather than a host/URL). For complex setup (e.g., `developer`'s git credential helper), use `from: "setup_env"` and write a `setup_env(ctx) -> dict[str, str]` hook in the skill's `__init__.py`.
 4. **OAuth** → if the service uses OAuth, consider a dedicated table (like `google_oauth_tokens`) or store the refresh token as a regular secret. OAuth flows need a web UI endpoint for the redirect dance.
 
 For the full skill development workflow including env var mapping, see [adding skills](../development/adding-skills.md).
