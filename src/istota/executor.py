@@ -565,11 +565,18 @@ def _authorized_skills_from_credentials(
 ) -> list[str]:
     """Skills authorized for credential access this task.
 
-    Decouples credential authorization from skill selection: a CLI skill is
+    Decouples credential authorization from skill selection: a skill is
     authorized if at least one of the credentials it would use is actually
     present in the user's environment. Skill selection (Pass 1 + Pass 2)
     still controls which docs go in the prompt; this controls what creds
     can be requested at runtime.
+
+    Both CLI skills (cred injected into subprocess env via
+    skill_credential_map) and doc-only skills (cred consumed via
+    `credential-fetch` lookups from helper scripts the executor writes,
+    e.g. developer's git credential helper and gitlab-api wrapper) are
+    eligible. The cli=true gate that used to live here locked out
+    developer entirely.
 
     The threat model is unchanged — a compromised Claude can only request
     credentials for resources the user has actually configured. But it
@@ -582,9 +589,7 @@ def _authorized_skills_from_credentials(
     resources the user configured.
     """
     authorized = set()
-    for skill_name, meta in skill_index.items():
-        if not getattr(meta, "cli", False):
-            continue
+    for skill_name in skill_index:
         for var, allowed_skills in _CREDENTIAL_SKILL_MAP.items():
             if var in _LOOKUP_DENIED_VARS:
                 continue
