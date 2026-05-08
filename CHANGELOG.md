@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-08
+
 ### Added
 - **`/spec` skill** — codifies a spec-driven development workflow against the user's `notes_folder`. Specs default to `{notes_folder}/Specs/{Drafts,Active,Done}/`, branch into a project subfolder only when the user names one explicitly. Doc-only — filesystem ops piggyback on the always-include `files` skill. Triggers: `spec`, `draft spec`, `design doc`, etc. The skill frames specs as detailed implementation documents fit for blind handoff to a coding agent (named files/interfaces, edge cases, schema/config changes, test strategy, ordered stages, recorded decisions, explicit open questions); thin drafts shouldn't leave `Drafts/`.
 - **`!model <alias> <prompt>` Talk prefix** — per-task model override. Aliases: `default`, role aliases (`fast`, `general`, `smart`, plus operator-defined custom roles), provider aliases (`opus`, `opus-high`, `opus-xhigh`, `opus-max`, `opus-46`, `opus-46-high`, `sonnet`, `sonnet-high`, `haiku`). Stored canonical on the task row so the DB stays version-pinned. Companion `!models` command lists the resolved alias table; `!help` mentions the prefix. Empty-remainder + attachments path is a valid intent ("read this image with opus") and falls through to the default attachment-processing prompt.
@@ -489,7 +491,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.10.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.11.0...main
+[0.11.0]: https://gitlab.com/cynium/istota/-/releases/v0.11.0
 [0.10.0]: https://gitlab.com/cynium/istota/-/releases/v0.10.0
 [0.9.0]: https://gitlab.com/cynium/istota/-/releases/v0.9.0
 [0.8.2]: https://gitlab.com/cynium/istota/-/releases/v0.8.2
