@@ -28,37 +28,27 @@ if _has_web_deps and _has_money:
 
 from istota.config import (
     Config,
-    ResourceConfig,
     SiteConfig,
     UserConfig,
     WebConfig,
 )
 
 
-def _money_config(tmp_path: Path) -> Path:
-    """Build a minimal money config TOML on disk and return its path."""
-    data_dir = tmp_path / "money_data"
-    (data_dir / "ledgers").mkdir(parents=True)
-    (data_dir / "ledgers" / "main.beancount").write_text("")
-    config = tmp_path / "money_config.toml"
-    config.write_text(
-        f'[users.alice]\n'
-        f'data_dir = "{data_dir}"\n'
-        f'ledgers = ["main"]\n'
+def _seed_money_workspace(tmp_path: Path) -> None:
+    """Drop a beancount file inside alice's workspace so ``_discover_ledgers``
+    finds it. Workspace is ``{mount}/Users/{user}/{bot_dir}/money/ledgers/``."""
+    ledgers_dir = (
+        tmp_path / "mount" / "Users" / "alice" / "istota" / "money" / "ledgers"
     )
-    return config
+    ledgers_dir.mkdir(parents=True)
+    (ledgers_dir / "main.beancount").write_text("")
 
 
-def _istota_config(tmp_path, money_config_path: Path | None = None) -> Config:
-    resources = []
-    if money_config_path is not None:
-        resources.append(ResourceConfig(
-            type="money",
-            name="Money",
-            extra={"config_path": str(money_config_path), "user_key": "alice"},
-        ))
+def _istota_config(tmp_path, *, with_money: bool = False) -> Config:
+    if with_money:
+        _seed_money_workspace(tmp_path)
     users = {
-        "alice": UserConfig(display_name="Alice", resources=resources),
+        "alice": UserConfig(display_name="Alice"),
         # Money module is on by default after the modules refactor; bob
         # opts out explicitly so the "module disabled" code path stays
         # testable.
@@ -92,13 +82,12 @@ def _patch_app(config: Config):
 
 @pytest.fixture
 def app_with_money(tmp_path):
-    money_config = _money_config(tmp_path)
-    return _patch_app(_istota_config(tmp_path, money_config_path=money_config))
+    return _patch_app(_istota_config(tmp_path, with_money=True))
 
 
 @pytest.fixture
 def app_without_money(tmp_path):
-    return _patch_app(_istota_config(tmp_path, money_config_path=None))
+    return _patch_app(_istota_config(tmp_path, with_money=False))
 
 
 @pytest.fixture

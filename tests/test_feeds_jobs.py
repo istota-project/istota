@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from istota import db
-from istota.config import Config, ResourceConfig, UserConfig
+from istota.config import Config, UserConfig
 from istota.cron_loader import _MODULE_JOB_PREFIX, sync_cron_jobs_to_db
 from istota.feeds.jobs import DEFAULT_JOBS, MODULE_PREFIX, jobs_for_user
 from istota.feeds.workspace import synthesize_feeds_context
@@ -23,22 +23,25 @@ def _conn(tmp_path: Path):
 
 def _make_app_config(
     tmp_path: Path,
-    users: dict[str, list[ResourceConfig]],
+    user_ids: list[str],
     *,
     nextcloud_mount: Path | None = None,
     disabled_modules: dict[str, list[str]] | None = None,
 ) -> Config:
+    """Build a Config with the given users.
+
+    Module gating is on by default (``Config.is_module_enabled`` returns True
+    unless the user is in ``disabled_modules``); a per-user opt-out goes in
+    the ``disabled_modules`` mapping.
+    """
     disabled_modules = disabled_modules or {}
     return Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "tmp",
         nextcloud_mount_path=nextcloud_mount or tmp_path,
         users={
-            uid: UserConfig(
-                resources=resources,
-                disabled_modules=disabled_modules.get(uid, []),
-            )
-            for uid, resources in users.items()
+            uid: UserConfig(disabled_modules=disabled_modules.get(uid, []))
+            for uid in user_ids
         },
     )
 
@@ -78,10 +81,7 @@ class TestJobsForUser:
 
 class TestSyncFeedsModuleJobs:
     def test_seeds_for_user_with_feeds_resource(self, tmp_path):
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="feeds")]},
-        )
+        app_config = _make_app_config(tmp_path, ["alice"])
         # Make sure the user has a bot dir (storage helper expects path)
         import istota.storage as storage  # noqa: F401
         conn = _conn(tmp_path)
@@ -95,7 +95,7 @@ class TestSyncFeedsModuleJobs:
 
     def test_user_with_feeds_module_disabled_has_no_module_jobs(self, tmp_path):
         app_config = _make_app_config(
-            tmp_path, {"bob": []},
+            tmp_path, ["bob"],
             disabled_modules={"bob": ["feeds"]},
         )
         conn = _conn(tmp_path)
@@ -107,10 +107,7 @@ class TestSyncFeedsModuleJobs:
         assert rows == []
 
     def test_idempotent_no_duplicate_inserts(self, tmp_path):
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="feeds")]},
-        )
+        app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         _sync_feeds_module_jobs(conn, app_config)
@@ -121,15 +118,12 @@ class TestSyncFeedsModuleJobs:
         assert count == 1
 
     def test_removes_module_jobs_when_module_disabled(self, tmp_path):
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="feeds")]},
-        )
+        app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         # Disable the feeds module for alice
         app_config2 = _make_app_config(
-            tmp_path, {"alice": []},
+            tmp_path, ["alice"],
             disabled_modules={"alice": ["feeds"]},
         )
         _sync_feeds_module_jobs(conn, app_config2)
@@ -142,10 +136,7 @@ class TestSyncFeedsModuleJobs:
     def test_seeds_with_skip_log_channel_set(self, tmp_path):
         # Module jobs run on a noisy cadence (*/5 min) and emit structured
         # JSON envelopes — they must never post to the user's log channel.
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="feeds")]},
-        )
+        app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
@@ -160,10 +151,7 @@ class TestSyncFeedsModuleJobs:
         # skip_log_channel=0 and should be flipped to 1 on the next sync.
         # Critically, backfilling must NOT bump last_run_at — doing so would
         # defer the next scheduled run by one full cron interval.
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="feeds")]},
-        )
+        app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         original_last_run = "2026-05-03 07:55:00"
         conn.execute(
@@ -188,10 +176,7 @@ class TestSyncFeedsModuleJobs:
     def test_first_seed_queues_immediate_poll_task(self, tmp_path):
         # Newly provisioned users shouldn't have to wait up to 5 minutes for
         # the first cron tick — first seed enqueues a one-shot command task.
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="feeds")]},
-        )
+        app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         rows = conn.execute(
@@ -208,10 +193,7 @@ class TestSyncFeedsModuleJobs:
     def test_resync_does_not_requeue_immediate_poll(self, tmp_path):
         # Subsequent restarts must not flood the queue — the immediate-poll
         # task is a one-time hook, only fired when the job row is absent.
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="feeds")]},
-        )
+        app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         _sync_feeds_module_jobs(conn, app_config)
@@ -222,10 +204,7 @@ class TestSyncFeedsModuleJobs:
         assert count == 1
 
     def test_updates_when_command_changes(self, tmp_path):
-        app_config = _make_app_config(
-            tmp_path,
-            {"alice": [ResourceConfig(type="feeds")]},
-        )
+        app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         # Manually mangle the command to simulate drift

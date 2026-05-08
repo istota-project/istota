@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from istota.config import (
     BriefingConfig,
     ChannelSleepCycleConfig,
@@ -633,16 +635,24 @@ class TestResourceConfig:
         assert rc.base_url == ""
         assert rc.api_key == ""
 
-    def test_karakeep_resource_with_credentials(self):
+    def test_obsolete_type_raises(self):
+        """Direct construction with retired types raises — protects fixtures
+        from drifting after the modules / connected services refactor (the
+        c1423ba class of bugs)."""
+        with pytest.raises(ValueError, match="retired"):
+            ResourceConfig(type="karakeep", base_url="https://x")
+        with pytest.raises(ValueError, match="retired"):
+            ResourceConfig(type="feeds")
+        with pytest.raises(ValueError, match="retired"):
+            ResourceConfig(type="money")
+
+    def test_obsolete_type_allowed_via_flag(self):
+        """The TOML/DB loaders set ``_allow_obsolete=True`` so the migration
+        step can absorb credentials before dropping the rows."""
         rc = ResourceConfig(
-            type="karakeep", name="Bookmarks",
-            base_url="https://keep.example.com/api/v1",
-            api_key="secret-key",
+            type="karakeep", base_url="https://x", _allow_obsolete=True,
         )
         assert rc.type == "karakeep"
-        assert rc.path == ""
-        assert rc.base_url == "https://keep.example.com/api/v1"
-        assert rc.api_key == "secret-key"
 
     def test_user_config_default_empty_resources(self):
         uc = UserConfig()
@@ -725,20 +735,12 @@ github_api_allowlist = ["GET /repos/*"]
         cfg = load_config(config_file)
         assert cfg.developer.github_api_allowlist == ["GET /repos/*"]
 
-    def test_github_env_var_override(self, tmp_path):
-        import os
+    def test_github_env_var_override(self, tmp_path, monkeypatch):
         config_file = tmp_path / "config.toml"
         config_file.write_text("")
-        old = os.environ.get("ISTOTA_DEVELOPER_GITHUB_TOKEN")
-        try:
-            os.environ["ISTOTA_DEVELOPER_GITHUB_TOKEN"] = "ghp_env_override"
-            cfg = load_config(config_file)
-            assert cfg.developer.github_token == "ghp_env_override"
-        finally:
-            if old is None:
-                os.environ.pop("ISTOTA_DEVELOPER_GITHUB_TOKEN", None)
-            else:
-                os.environ["ISTOTA_DEVELOPER_GITHUB_TOKEN"] = old
+        monkeypatch.setenv("ISTOTA_DEVELOPER_GITHUB_TOKEN", "ghp_env_override")
+        cfg = load_config(config_file)
+        assert cfg.developer.github_token == "ghp_env_override"
 
     def test_load_defaults_when_not_set(self, tmp_path):
         config_file = tmp_path / "config.toml"
