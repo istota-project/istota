@@ -13,6 +13,38 @@
 # - Restart web service
 
 # ============================================================
+# OPERATOR ASSERTIONS
+# ============================================================
+# Catch common "skill enabled but unconfigured" foot-guns at deploy time
+# instead of as runtime "no creds" errors inside skills. Each entry names
+# the specific vault key the operator needs to set. Add similar blocks
+# here when introducing new skill toggles that depend on a vault secret.
+
+- name: Assert developer skill has at least one API token configured
+  assert:
+    that:
+      - (istota_developer_gitlab_token | length > 0) or
+        (istota_developer_github_token | length > 0)
+    fail_msg: |
+      istota_developer_enabled=true but both istota_developer_gitlab_token and
+      istota_developer_github_token are empty. The developer skill needs at
+      least one to do anything useful (MR/PR creation, repo browsing). Set
+      one (or both) in your vault. To install without the skill, set
+      istota_developer_enabled=false.
+  when: istota_developer_enabled | bool
+
+- name: Assert google_workspace skill has client_secret configured
+  assert:
+    that:
+      - istota_google_workspace_client_secret | length > 0
+    fail_msg: |
+      istota_google_workspace_enabled=true but
+      istota_google_workspace_client_secret is empty. Set it in your vault
+      (the OAuth client secret from Google Cloud Console). To install
+      without the skill, set istota_google_workspace_enabled=false.
+  when: istota_google_workspace_enabled | bool
+
+# ============================================================
 # FULL INSTALL TASKS (skipped when istota_update_only=true)
 # ============================================================
 
@@ -415,21 +447,6 @@
   changed_when: "'UPDATED' in claude_update_result.stdout"
   when: not istota_web_only
 
-- name: Forward deprecated istota_gitlab_token to istota_repo_clone_token
-  set_fact:
-    istota_repo_clone_token: "{{ istota_gitlab_token }}"
-  when:
-    - istota_gitlab_token | length > 0
-    - istota_repo_clone_token | length == 0
-
-- name: Warn when deprecated istota_gitlab_token is used
-  debug:
-    msg: >-
-      DEPRECATION: istota_gitlab_token is renamed to istota_repo_clone_token.
-      Update your vault to use the new name; the alias will be removed in a
-      future release. (See deploy/ansible/defaults/main.yml.)
-  when: istota_gitlab_token | length > 0
-
 - name: Build authenticated repo URL
   set_fact:
     istota_repo_url_auth: "{{ istota_repo_url | regex_replace('^https://', 'https://oauth2:' + istota_repo_clone_token + '@') }}"
@@ -570,18 +587,6 @@
     group: "{{ istota_group }}"
   when: not istota_web_only
 
-- name: Remove old config symlink if present
-  file:
-    path: "{{ istota_repo_dir }}/config/config.toml"
-    state: absent
-  when: not istota_web_only
-
-- name: Remove old separate config directory
-  file:
-    path: "{{ istota_home }}/config"
-    state: absent
-  when: not istota_web_only
-
 - name: "Ensure /etc/{{ istota_namespace }} directory exists"
   file:
     path: "/etc/{{ istota_namespace }}"
@@ -610,31 +615,6 @@
          | selectattr('value.resources', 'iterable')
          | rejectattr('value.resources', 'equalto', [])
          | list }}
-  when: not istota_web_only
-
-# Monarch credentials live in the encrypted secrets table (Phase 5)
-# alongside karakeep / overland. The previous
-# /etc/{namespace}/secrets/{user}/money.toml file is no longer used —
-# clean it up if it exists.
-- name: Remove obsolete per-user money.toml secrets file
-  file:
-    path: "/etc/{{ istota_namespace }}/secrets/{{ item.key }}/money.toml"
-    state: absent
-  loop: "{{ _istota_money_users | default([]) }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: not istota_web_only
-  notify:
-    - "restart istota-scheduler"
-    - "restart istota-web"
-
-- name: Remove obsolete per-user moneyman.toml secrets file
-  file:
-    path: "/etc/{{ istota_namespace }}/secrets/{{ item.key }}/moneyman.toml"
-    state: absent
-  loop: "{{ _istota_money_users | default([]) }}"
-  loop_control:
-    label: "{{ item.key }}"
   when: not istota_web_only
 
 # Money workspace bootstrap. For each user with a [[resources]] type =
@@ -814,38 +794,18 @@
 # independently. type/path/name/permissions are extracted as flags and
 # any remaining keys are passed as --extras-json so nested values
 # round-trip cleanly.
-#
-# Obsolete types (feeds, money, monarch, moneyman, karakeep, overland) are
-# filtered out: their values now live in the encrypted secrets table (see
-# `istota_user_secrets`) and the scheduler runs `cleanup_obsolete_resources`
-# at startup to delete any stragglers. Pushing them here would just create
-# audit-log churn — the row would be deleted before any task could read it.
 - name: Plan user_resources ensure invocations
   set_fact:
     _istota_resource_targets: "{{ _resource_targets_json | from_json }}"
   vars:
-    _obsolete_resource_types:
-      - feeds
-      - money
-      - monarch
-      - moneyman
-      - karakeep
-      - overland
     _resource_targets_json: |-
       {%- set ns = namespace(out=[]) -%}
       {%- for user_id, user_cfg in istota_users.items() -%}
       {%- for r in (user_cfg.resources | default([])) -%}
-      {%- if r.type not in _obsolete_resource_types -%}
       {%- set rkey = ['type','path','name','permissions'] -%}
       {%- set extras = dict(r.items() | rejectattr(0, 'in', rkey) | list) -%}
       {%- set _ = ns.out.append({'user': user_id, 'type': r.type, 'path': r.path | default(''), 'name': r.name | default(''), 'permissions': r.permissions | default('read'), 'extras': extras}) -%}
-      {%- endif -%}
       {%- endfor -%}
-      {# Backward-compat: a flat `reminders_file: /path` on the user entry
-         is provisioned as a synthetic reminders_file resource. #}
-      {%- if user_cfg.reminders_file is defined and user_cfg.reminders_file -%}
-      {%- set _ = ns.out.append({'user': user_id, 'type': 'reminders_file', 'path': user_cfg.reminders_file, 'name': 'Reminders', 'permissions': 'read', 'extras': {}}) -%}
-      {%- endif -%}
       {%- endfor -%}
       {{ ns.out | to_json }}
   when: not istota_web_only
@@ -1006,22 +966,6 @@
     - reload systemd
     - "restart istota-scheduler"
 
-- name: Stop and disable istota-webhook service (no longer needed)
-  systemd:
-    name: "{{ istota_namespace }}-webhook"
-    enabled: no
-    state: stopped
-  failed_when: false
-  when: not istota_web_only
-
-- name: Remove old istota-webhook systemd service file
-  file:
-    path: "/etc/systemd/system/{{ istota_namespace }}-webhook.service"
-    state: absent
-  when: not istota_web_only
-  notify:
-    - reload systemd
-
 - name: Deploy browser container docker-compose
   template:
     src: docker-compose.browser.yml.j2
@@ -1117,22 +1061,6 @@
     state: started
     daemon_reload: yes
   when: istota_location_enabled | default(false) and not istota_web_only
-
-- name: Stop and disable old location service (migration)
-  systemd:
-    name: "{{ istota_namespace }}-location"
-    enabled: no
-    state: stopped
-  failed_when: false
-  when: not istota_web_only
-
-- name: Remove old location service file (migration)
-  file:
-    path: "/etc/systemd/system/{{ istota_namespace }}-location.service"
-    state: absent
-  when: not istota_web_only
-  notify:
-    - reload systemd
 
 - name: Find existing webhooks service
   stat:
@@ -1385,12 +1313,6 @@
   loop_control:
     label: "{{ item.key }}"
   when: istota_site_enabled and not istota_web_only
-
-- name: Remove obsolete moneyman nginx include
-  file:
-    path: /etc/nginx/includes/moneyman-web.inc
-    state: absent
-  when: not istota_web_only
 
 - name: Deploy nginx config
   template:
