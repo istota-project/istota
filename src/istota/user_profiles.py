@@ -225,6 +225,75 @@ def upsert_profile(db_path: Path, profile: UserProfile) -> None:
     _insert(db_path, profile, replace=True)
 
 
+def update_profile_with_status(
+    db_path: Path,
+    user_id: str,
+    **fields: object,
+) -> "tuple[UserProfile, str]":
+    """Idempotent partial update. Returns ``(profile, state)``.
+
+    ``state`` is one of ``"created"``, ``"updated"``, ``"noop"`` — same
+    contract as ``user_briefings.ensure_briefing``,
+    ``db.upsert_user_resource``, and ``secrets_store.upsert_secret``.
+
+    Behavior:
+    - If no row exists: insert via :func:`ensure_profile` (seeded from
+      ``display_name`` / ``timezone`` in ``fields`` when present), then
+      apply remaining ``fields`` via :func:`update_profile`. State is
+      ``"created"``.
+    - If row exists and every field in ``fields`` already matches: no
+      write. State is ``"noop"``.
+    - Otherwise: apply via :func:`update_profile`. State is ``"updated"``.
+    """
+    existing = get_profile(db_path, user_id)
+    if existing is None:
+        seed_display = fields.get("display_name")
+        seed_tz = fields.get("timezone")
+        ensure_profile(
+            db_path, user_id,
+            display_name=seed_display if isinstance(seed_display, str) else "",
+            timezone=seed_tz if isinstance(seed_tz, str) else "",
+        )
+        if fields:
+            profile = update_profile(db_path, user_id, **fields)
+        else:
+            profile = get_profile(db_path, user_id)
+            assert profile is not None
+        return profile, "created"
+
+    if not fields:
+        return existing, "noop"
+
+    same = True
+    for col, value in fields.items():
+        if col not in _PROFILE_COLUMNS:
+            same = False  # update_profile will raise — let it; treat as change
+            break
+        current = getattr(existing, col)
+        if col in {"email_addresses", "disabled_skills", "trusted_email_senders", "disabled_modules"}:
+            if list(current or []) != list(value or []):
+                same = False
+                break
+        elif col == "site_enabled":
+            if bool(current) != bool(value):
+                same = False
+                break
+        elif col in {"max_foreground_workers", "max_background_workers"}:
+            if int(current or 0) != int(value or 0):
+                same = False
+                break
+        else:
+            if (current or "") != (value or ""):
+                same = False
+                break
+
+    if same:
+        return existing, "noop"
+
+    profile = update_profile(db_path, user_id, **fields)
+    return profile, "updated"
+
+
 def update_profile(
     db_path: Path,
     user_id: str,

@@ -143,6 +143,34 @@ def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def upsert_secret(
+    db_path: Path, user_id: str, service: str, key: str, value: str,
+) -> str:
+    """Idempotent secret upsert. Returns ``"created"``, ``"updated"``, or ``"noop"``.
+
+    Same contract as ``user_briefings.ensure_briefing`` and
+    ``db.upsert_user_resource``: compute the final state, only write when
+    the value actually changes, return the state literal so the CLI / web UI
+    can report it without re-deriving it.
+
+    Empty ``value`` is rejected — use :func:`delete_secret` to clear.
+    """
+    if not value:
+        raise ValueError("upsert_secret requires a non-empty value; use delete_secret to clear")
+
+    existing = get_secret(db_path, user_id, service, key)
+    if existing is None:
+        state = "created"
+    elif existing == value:
+        state = "noop"
+    else:
+        state = "updated"
+
+    if state != "noop":
+        set_secret(db_path, user_id, service, key, value)
+    return state
+
+
 def set_secret(db_path: Path, user_id: str, service: str, key: str, value: str) -> None:
     """Encrypt and upsert a secret.
 

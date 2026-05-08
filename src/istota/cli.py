@@ -330,35 +330,17 @@ def cmd_resource(args):
         permissions = args.permissions or "read"
         new_extras = _build_resource_extras(args)
 
+        kwargs: dict[str, object] = {
+            "user_id": args.user,
+            "resource_type": args.type,
+            "resource_path": resource_path,
+            "display_name": display_name,
+            "permissions": permissions,
+        }
+        if new_extras is not None:
+            kwargs["extras"] = new_extras
         with db.get_db(config.db_path) as conn:
-            existing = next(
-                (r for r in db.get_user_resources(conn, args.user)
-                 if r.resource_type == args.type and r.resource_path == resource_path),
-                None,
-            )
-
-            if existing is None:
-                state = "created"
-            else:
-                # Compute would-be values (so omitted extras = preserve).
-                next_extras = existing.extras if new_extras is None else new_extras
-                same = (
-                    (existing.display_name or "") == (display_name or "")
-                    and (existing.permissions or "read") == permissions
-                    and (existing.extras or {}) == (next_extras or {})
-                )
-                state = "noop" if same else "updated"
-
-            kwargs: dict[str, object] = {
-                "user_id": args.user,
-                "resource_type": args.type,
-                "resource_path": resource_path,
-                "display_name": display_name,
-                "permissions": permissions,
-            }
-            if new_extras is not None:
-                kwargs["extras"] = new_extras
-            db.add_user_resource(conn, **kwargs)
+            _, state = db.upsert_user_resource(conn, **kwargs)
 
         print(f"Resource ensured for {args.user!r}: type={args.type} path={resource_path}")
         print(f"STATE: {state}")
@@ -567,17 +549,9 @@ def cmd_secret(args):
                 file=sys.stderr,
             )
             sys.exit(1)
-        existing = secrets_store.get_secret(db_path, args.user, args.service, args.key)
-        if existing is None:
-            state = "created"
-        elif existing == args.value:
-            state = "noop"
-        else:
-            state = "updated"
-        if state != "noop":
-            secrets_store.set_secret(
-                db_path, args.user, args.service, args.key, args.value,
-            )
+        state = secrets_store.upsert_secret(
+            db_path, args.user, args.service, args.key, args.value,
+        )
         print(f"Secret ensured for {args.user!r}: service={args.service} key={args.key}")
         print(f"STATE: {state}")
         return
@@ -804,23 +778,7 @@ def cmd_user_ensure(args):
     if args.site_enabled is not None:
         updates["site_enabled"] = args.site_enabled
 
-    existing = user_profiles.get_profile(db_path, user_id)
-    if existing is None:
-        seed_display = (
-            updates.get("display_name")
-            if isinstance(updates.get("display_name"), str)
-            else user_id
-        )
-        seed_tz = updates.get("timezone") if isinstance(updates.get("timezone"), str) else "UTC"
-        user_profiles.ensure_profile(db_path, user_id, display_name=seed_display, timezone=seed_tz)
-
-    if updates:
-        user_profiles.update_profile(db_path, user_id, **updates)
-
-    profile = user_profiles.get_profile(db_path, user_id)
-    if profile is None:
-        print(f"Error: failed to ensure user {user_id!r}", file=sys.stderr)
-        sys.exit(1)
+    profile, state = user_profiles.update_profile_with_status(db_path, user_id, **updates)
 
     print(f"User {user_id!r} ensured.")
     print(f"  display_name: {profile.display_name}")
@@ -835,6 +793,7 @@ def cmd_user_ensure(args):
         print(f"  trusted_senders: {', '.join(profile.trusted_email_senders)}")
     if profile.disabled_modules:
         print(f"  disabled_modules: {', '.join(profile.disabled_modules)}")
+    print(f"STATE: {state}")
 
 
 def cmd_user_show(args):
