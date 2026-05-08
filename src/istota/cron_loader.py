@@ -23,6 +23,11 @@ _MODULE_JOB_PREFIX = "_module."
 _KNOWN_EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
 
 
+def fj_is_disallowed_command(job: "CronJob", is_admin: bool) -> bool:
+    """True if a CRON.md job is a non-admin command-type job."""
+    return bool(job.command) and not is_admin
+
+
 def _validate_model(name: str, user_id: str, model: str) -> None:
     """Warn on suspicious model names; never reject.
 
@@ -204,7 +209,13 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
     return "\n".join(lines)
 
 
-def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
+def sync_cron_jobs_to_db(
+    conn,
+    user_id: str,
+    file_jobs: list[CronJob],
+    *,
+    is_admin: bool = True,
+) -> None:
     """
     Sync CRON.md job definitions into the scheduled_jobs DB table.
 
@@ -212,19 +223,28 @@ def sync_cron_jobs_to_db(conn, user_id: str, file_jobs: list[CronJob]) -> None:
     - Existing jobs have definition fields updated (preserving state fields)
     - Orphaned DB jobs (not in file) are deleted
     - enabled logic: file is authoritative (symmetric: file false → DB 0, file true → DB 1)
+    - command-type jobs are rejected for non-admin users (the executor passes
+      ISTOTA_SECRET_KEY into the subprocess env so module-skill CLIs can
+      decrypt secrets; arbitrary user shell would inherit that)
     """
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
     # Module-managed jobs are owned by their integration (see jobs.py in the
     # respective module package); CRON.md must not touch them.
     db_jobs = [j for j in db_jobs if not j.name.startswith(_MODULE_JOB_PREFIX)]
     db_by_name = {j.name: j for j in db_jobs}
-    file_names = {j.name for j in file_jobs}
+    file_names = {j.name for j in file_jobs if not (fj_is_disallowed_command(j, is_admin))}
 
     for fj in file_jobs:
         if fj.name.startswith(_MODULE_JOB_PREFIX):
             logger.warning(
                 "Skipping CRON.md job '%s' for %s: '%s' prefix is reserved",
                 fj.name, user_id, _MODULE_JOB_PREFIX,
+            )
+            continue
+        if fj_is_disallowed_command(fj, is_admin):
+            logger.warning(
+                "Skipping CRON.md job '%s' for %s: command-type jobs are admin-only",
+                fj.name, user_id,
             )
             continue
         existing = db_by_name.get(fj.name)

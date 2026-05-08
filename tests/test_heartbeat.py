@@ -441,6 +441,51 @@ class TestCheckShellCommand:
 
 
 # ---------------------------------------------------------------------------
+# TestRunCheckAdminGate
+# ---------------------------------------------------------------------------
+
+
+class TestRunCheckAdminGate:
+    """shell-command heartbeats are admin-only because the subprocess env
+    inherits ISTOTA_SECRET_KEY (the master Fernet key for the secrets table)."""
+
+    def test_admin_shell_command_runs(self, tmp_path):
+        config = Config(nextcloud_mount_path=tmp_path, admin_users={"alice"})
+        check = HeartbeatCheck(
+            name="t", type="shell-command", config={"command": "echo ok"},
+        )
+        result = run_check(check, config, "alice")
+        assert result.healthy is True
+
+    def test_non_admin_shell_command_rejected(self, tmp_path):
+        config = Config(nextcloud_mount_path=tmp_path, admin_users={"root"})
+        check = HeartbeatCheck(
+            name="t", type="shell-command", config={"command": "echo PWNED"},
+        )
+        result = run_check(check, config, "alice")
+        assert result.healthy is False
+        assert "admin-only" in result.message
+
+    def test_non_admin_other_check_types_unaffected(self, tmp_path):
+        config = Config(nextcloud_mount_path=tmp_path, admin_users={"root"})
+        url_check = HeartbeatCheck(
+            name="t", type="url-health", config={"url": ""},
+        )
+        result = run_check(url_check, config, "alice")
+        # Fails for "no URL" reasons, not for admin-only — distinct path.
+        assert "admin-only" not in result.message
+
+    def test_empty_admin_users_treats_all_as_admin(self, tmp_path):
+        """Back-compat: empty admin_users = all users admin (Config.is_admin)."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="t", type="shell-command", config={"command": "echo ok"},
+        )
+        result = run_check(check, config, "alice")
+        assert result.healthy is True
+
+
+# ---------------------------------------------------------------------------
 # TestCheckUrlHealth
 # ---------------------------------------------------------------------------
 

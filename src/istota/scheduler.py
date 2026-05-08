@@ -1449,6 +1449,14 @@ def _execute_command_task(
 
     Returns (success, result) — same interface as execute_task().
     """
+    # Defense in depth — cron_loader rejects command-type CRON.md entries from
+    # non-admins at sync time, but a stale row could have been inserted by an
+    # earlier admin or a direct DB write. The build_stripped_env() below
+    # preserves ISTOTA_SECRET_KEY so module-skill CLIs can decrypt secrets;
+    # arbitrary user shell must never inherit it.
+    if not config.is_admin(task.user_id):
+        return False, "command-type tasks are admin-only"
+
     timeout = config.scheduler.task_timeout_minutes * 60
 
     from .executor import build_stripped_env
@@ -2827,7 +2835,10 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                     # write DB jobs into the file instead of wiping them
                     migrate_db_jobs_to_file(conn, app_config, user_id, overwrite=True)
                 else:
-                    sync_cron_jobs_to_db(conn, user_id, file_jobs)
+                    sync_cron_jobs_to_db(
+                        conn, user_id, file_jobs,
+                        is_admin=app_config.is_admin(user_id),
+                    )
             else:
                 # No CRON.md — try one-time migration from DB
                 migrate_db_jobs_to_file(conn, app_config, user_id)

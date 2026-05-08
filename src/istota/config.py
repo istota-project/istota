@@ -173,7 +173,7 @@ class BriefingConfig:
 @dataclass
 class ResourceConfig:
     """User resource configuration (defined in per-user TOML files)."""
-    type: str           # calendar, folder, todo_file, email_folder, shared_file, reminders_file, karakeep
+    type: str           # calendar, folder, todo_file, email_folder, shared_file, reminders_file, notes_folder
     path: str = ""
     name: str = ""
     permissions: str = "read"
@@ -186,6 +186,23 @@ class ResourceConfig:
     # web listing endpoint skips these so post-delete in-memory staleness
     # cannot resurface a removed row as "managed=config".
     from_db: bool = field(default=False, repr=False, compare=False)
+    # Set by the TOML/DB loaders so the migration step can construct obsolete
+    # types in flight (it absorbs their credentials into the secrets table
+    # and then drops the rows). Tests that bypass load_config see the guard.
+    _allow_obsolete: bool = field(default=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._allow_obsolete:
+            return
+        from . import db as _db
+        if self.type in _db._OBSOLETE_RESOURCE_TYPES:
+            raise ValueError(
+                f"ResourceConfig type {self.type!r} was retired by the modules "
+                f"refactor. Live data flows through is_module_enabled "
+                f"(feeds, money, location) or the encrypted secrets table "
+                f"(karakeep, monarch, overland). Update the fixture or pass "
+                f"_allow_obsolete=True if this is a load-time migration path."
+            )
 
 
 @dataclass
@@ -626,6 +643,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             base_url=r.get("base_url", ""),
             api_key=r.get("api_key", ""),
             extra=extra,
+            _allow_obsolete=True,
         ))
 
     # Backward-compat: migrate reminders_file string to a resource
@@ -645,6 +663,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             type="monarch",
             name="Monarch Money",
             extra={k: v for k, v in monarch_data.items()},
+            _allow_obsolete=True,
         ))
 
     return UserConfig(
@@ -1135,6 +1154,9 @@ def _apply_user_resources(config: "Config") -> None:
                 # the loader normally splits out (base_url, api_key) into
                 # the dataclass's flat fields so secrets_store._IMPORT_MAP
                 # and Karakeep's loader keep working unchanged.
+                # _allow_obsolete: a stale obsolete-type row may still exist
+                # on first startup after the modules refactor; the next
+                # _migrate_obsolete_resources pass absorbs and deletes it.
                 for r in db_resources:
                     extras = dict(r.extras or {})
                     rc = ResourceConfig(
@@ -1145,6 +1167,7 @@ def _apply_user_resources(config: "Config") -> None:
                         base_url=str(extras.pop("base_url", "")) or "",
                         api_key=str(extras.pop("api_key", "")) or "",
                         extra=extras,
+                        _allow_obsolete=True,
                     )
                     rc.from_db = True
                     user_config.resources.append(rc)

@@ -701,6 +701,65 @@ target = "talk"
 
 
 # ---------------------------------------------------------------------------
+# TestAdminGate
+# ---------------------------------------------------------------------------
+
+
+class TestAdminGate:
+    """command-type CRON.md jobs require admin privileges."""
+
+    def test_admin_command_job_inserted(self, db_path):
+        file_jobs = [CronJob(name="cmd1", cron="0 6 * * *", command="echo hi")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=True)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].command == "echo hi"
+
+    def test_non_admin_command_job_skipped(self, db_path, caplog):
+        file_jobs = [CronJob(name="cmd1", cron="0 6 * * *", command="echo hi")]
+        with caplog.at_level("WARNING", logger="istota.cron_loader"):
+            with db.get_db(db_path) as conn:
+                sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=False)
+                jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert jobs == []
+        assert any("admin-only" in r.message for r in caplog.records)
+
+    def test_non_admin_prompt_job_inserted(self, db_path):
+        """Prompt jobs are unaffected — only `command` is gated."""
+        file_jobs = [CronJob(name="p1", cron="0 6 * * *", prompt="hello")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=False)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].prompt == "hello"
+
+    def test_non_admin_existing_command_row_orphan_deleted(self, db_path):
+        """If a previous admin sync inserted a command row and the user is
+        later demoted, the next sync drops the row (not in file_names)."""
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, command, enabled)
+                   VALUES (?, ?, ?, ?, ?, 1)""",
+                ("alice", "cmd1", "0 6 * * *", "", "echo hi"),
+            )
+        file_jobs = [CronJob(name="cmd1", cron="0 6 * * *", command="echo hi")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=False)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert jobs == []
+
+    def test_default_is_admin_true(self, db_path):
+        """Backward compat: existing callers (and tests) default to admin."""
+        file_jobs = [CronJob(name="cmd1", cron="0 6 * * *", command="echo hi")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert len(jobs) == 1
+
+
+# ---------------------------------------------------------------------------
 # TestOnceField
 # ---------------------------------------------------------------------------
 

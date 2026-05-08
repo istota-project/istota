@@ -4,32 +4,22 @@ from __future__ import annotations
 
 import pytest
 
-from istota.config import Config, ResourceConfig, UserConfig
+from istota.config import Config, UserConfig
 
 
 @pytest.fixture
 def istota_config(tmp_path, monkeypatch):
-    """Build a minimal istota Config that resolves to a workspace under tmp_path."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "feeds").mkdir()
+    """Build a minimal istota Config that resolves to a workspace under tmp_path.
+
+    Workspace mode is the only resolution path now; ``resolve_for_user``
+    derives ``{nextcloud_mount}/{get_user_bot_path}`` automatically and
+    creates ``feeds/`` lazily — no ResourceConfig needed.
+    """
     config = Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "tmp",
         nextcloud_mount_path=tmp_path,
-        users={
-            "alice": UserConfig(
-                resources=[
-                    ResourceConfig(
-                        type="feeds",
-                        extra={
-                            "data_dir": str(workspace / "feeds"),
-                            "db_path": str(workspace / "feeds" / "feeds.db"),
-                        },
-                    ),
-                ],
-            ),
-        },
+        users={"alice": UserConfig()},
     )
 
     # Stub load_config so the skill picks up our test config.

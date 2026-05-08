@@ -69,6 +69,22 @@ else
     SCRIPT_DIR=""
 fi
 
+_default_clone_dir() {
+    # Docker default lands at $HOME/istota so the user can come back for
+    # `docker compose` ops. When invoked via `sudo bash`, sudo's default
+    # `env_reset` strips HOME, leaving root's home — which surprises users
+    # following the curl-pipe install instructions. Fall back to the
+    # invoking user's home when SUDO_USER is set, then HOME, then /root.
+    local home_dir=""
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        home_dir="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+    fi
+    if [ -z "$home_dir" ]; then
+        home_dir="${HOME:-/root}"
+    fi
+    echo "${home_dir}/istota"
+}
+
 repo_root_or_empty() {
     local d="$1"
     if [ -n "$d" ] && [ -d "$d/deploy" ] && [ -d "$d/docker" ] && [ -f "$d/deploy/install.sh" ]; then
@@ -148,7 +164,7 @@ run_docker() {
         die "'docker compose' plugin not available. Install docker-compose-plugin."
     fi
 
-    : "${CLONE_DIR:=${HOME:-/root}/istota}"
+    : "${CLONE_DIR:=$(_default_clone_dir)}"
     ensure_repo
     reattach_tty_if_needed
     local target="$REPO_ROOT/docker/init.sh"

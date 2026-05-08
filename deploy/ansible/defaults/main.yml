@@ -54,8 +54,17 @@ istota_repo_branch: main
 istota_repo_tag: "latest"  # "latest" = highest semver tag, "v0.2.0" = specific tag, "" = use branch
 istota_repo_dir: "{{ istota_home }}/istota"
 
-# GitLab access token (for private repos)
-# Generate at: GitLab > Settings > Access Tokens (read_repository scope)
+# GitLab access token used to clone the istota repo itself (for private repos).
+# Generate at: GitLab > Settings > Access Tokens (read_repository scope).
+# NOT the same as istota_developer_gitlab_token — that one feeds the
+# developer skill's API access. Operators upgrading from before the rename
+# can keep setting istota_gitlab_token; the pre_tasks shim below will
+# forward it to the new name with a deprecation warning.
+istota_repo_clone_token: ""
+
+# Deprecated alias for istota_repo_clone_token. Kept so old vault entries
+# keep working through one release cycle. Remove once all environments
+# have migrated.
 istota_gitlab_token: ""
 
 # Scheduler settings

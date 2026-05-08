@@ -415,10 +415,25 @@
   changed_when: "'UPDATED' in claude_update_result.stdout"
   when: not istota_web_only
 
+- name: Forward deprecated istota_gitlab_token to istota_repo_clone_token
+  set_fact:
+    istota_repo_clone_token: "{{ istota_gitlab_token }}"
+  when:
+    - istota_gitlab_token | length > 0
+    - istota_repo_clone_token | length == 0
+
+- name: Warn when deprecated istota_gitlab_token is used
+  debug:
+    msg: >-
+      DEPRECATION: istota_gitlab_token is renamed to istota_repo_clone_token.
+      Update your vault to use the new name; the alias will be removed in a
+      future release. (See deploy/ansible/defaults/main.yml.)
+  when: istota_gitlab_token | length > 0
+
 - name: Build authenticated repo URL
   set_fact:
-    istota_repo_url_auth: "{{ istota_repo_url | regex_replace('^https://', 'https://oauth2:' + istota_gitlab_token + '@') }}"
-  when: istota_gitlab_token | length > 0
+    istota_repo_url_auth: "{{ istota_repo_url | regex_replace('^https://', 'https://oauth2:' + istota_repo_clone_token + '@') }}"
+  when: istota_repo_clone_token | length > 0
   no_log: true
 
 - name: Configure git safe.directory
@@ -433,7 +448,7 @@
     dest: "{{ istota_repo_dir }}"
     version: "{{ istota_repo_branch }}"
     force: yes
-  no_log: "{{ istota_gitlab_token | length > 0 }}"
+  no_log: "{{ istota_repo_clone_token | length > 0 }}"
   notify:
     - "restart istota-scheduler"
     - "restart istota-browser"

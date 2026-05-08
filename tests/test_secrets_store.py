@@ -158,6 +158,10 @@ class TestResolution:
 
 class TestImport:
     def _user_config_with_money(self, **monarch_extras) -> UserConfig:
+        # _allow_obsolete=True: this fixture simulates the load-time
+        # migration window where TOML still carries the retired type and
+        # import_from_user_configs is meant to absorb its credentials
+        # before the row is dropped.
         return UserConfig(
             display_name="Alice",
             timezone="UTC",
@@ -166,6 +170,7 @@ class TestImport:
                     type="money",
                     name="Money",
                     extra=monarch_extras,
+                    _allow_obsolete=True,
                 )
             ],
         )
@@ -215,6 +220,7 @@ class TestImport:
                     name="Karakeep",
                     base_url="https://k.example",
                     api_key="abcd",
+                    _allow_obsolete=True,
                 ),
             ],
         )
@@ -233,6 +239,7 @@ class TestImport:
                     type="overland",
                     name="GPS",
                     extra={"ingest_token": "tok-xyz"},
+                    _allow_obsolete=True,
                 ),
             ],
         )

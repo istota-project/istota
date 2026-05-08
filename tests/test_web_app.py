@@ -777,10 +777,7 @@ class TestAdminStats:
     async def test_admin_stats_feeds_module_unreachable_no_mount(self, tmp_path):
         """Native feeds users without resolvable mount must not vanish."""
         config = self._config_with_admin(tmp_path)
-        config.users["alice"] = UserConfig(
-            display_name="Alice",
-            resources=[ResourceConfig(type="feeds", name="Feeds")],
-        )
+        config.users["alice"] = UserConfig(display_name="Alice")
         config.nextcloud_mount_path = None  # docker-compose-style deploy
 
         app = _patch_app(config)
@@ -939,14 +936,7 @@ class TestSettingsEndpoints:
         cfg = _make_config(
             tmp_path,
             users={
-                "alice": UserConfig(
-                    display_name="Alice",
-                    resources=[
-                        ResourceConfig(type="money", name="Money"),
-                        ResourceConfig(type="karakeep", name="Karakeep",
-                                       base_url="https://k.example", api_key=""),
-                    ],
-                ),
+                "alice": UserConfig(display_name="Alice"),
                 "bob": UserConfig(
                     display_name="Bob",
                     disabled_modules=["feeds", "money", "location"],

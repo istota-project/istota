@@ -2302,6 +2302,25 @@ class TestExecuteCommandTask:
         success, result = _execute_command_task(task, config)
         assert success is True
 
+    def test_non_admin_user_rejected(self, db_path, tmp_path):
+        """Defense in depth — even if a stale row sneaks past cron sync, the
+        executor must refuse to spawn the subprocess for non-admins because
+        build_stripped_env() preserves ISTOTA_SECRET_KEY."""
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"root"}
+        task = self._make_task(user_id="alice", command="echo PWNED")
+        success, result = _execute_command_task(task, config)
+        assert success is False
+        assert "admin-only" in result
+
+    def test_admin_user_proceeds(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"alice"}
+        task = self._make_task(user_id="alice", command="echo ok")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "ok" in result
+
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_command_task_flows_through_process_one_task(self, mock_arun, mock_exec, db_path, tmp_path):
