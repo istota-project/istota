@@ -37,7 +37,7 @@ istota_effort: ""
 istota_custom_system_prompt: true
 
 # Brain — selects which model-invocation backend the executor uses.
-# "claude_code" wraps the `claude` CLI subprocess (the only Phase 1 option).
+# "claude_code" wraps the `claude` CLI subprocess (the only current option).
 # Future values: "openrouter", "anthropic". The Brain protocol lives in
 # src/istota/brain/ and lets us swap backends without touching executor
 # orchestration (memory, skills, sandbox, deferred DB writes).
@@ -172,7 +172,7 @@ istota_disabled_skills: []
 #   * Briefings                → briefing_configs DB table (`istota briefing ensure`)
 #   * Tier-2 credentials       → encrypted secrets table (`istota secret ensure`,
 #                                see `istota_user_secrets` below)
-#   * Module opt-outs          → `disabled_modules:` list (Phase 1)
+#   * Module opt-outs          → `disabled_modules:` list
 #
 # Resource types in this dict are PATH-shaped only: folder, calendar,
 # todo_file, notes_folder, email_folder, reminders_file, ledger. The old
@@ -348,7 +348,7 @@ istota_web_oauth2_userinfo_endpoint: ""  # Optional override
 istota_web_oauth2_redirect_uri: ""       # Optional override; defaults to https://{site_hostname}/istota/callback
 istota_web_secret_key: ""                # Session signing key (vault); generate with `python3 -c 'import secrets;print(secrets.token_hex(32))'`
 
-# Master key for the encrypted ``secrets`` table (Phase 5). Populated into
+# Master key for the encrypted ``secrets`` table. Populated into
 # /etc/{{ istota_namespace }}/secrets.env as ISTOTA_SECRET_KEY. Generate
 # with: ``python3 -c "import secrets; print(secrets.token_hex(32))"`` and
 # store via ansible-vault. Empty disables the secrets store; tier-2
