@@ -119,13 +119,13 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 
 | Env var | Config field |
 |---|---|
-| `ISTOTA_NC_APP_PASSWORD` | `nextcloud.app_password` |
-| `ISTOTA_IMAP_PASSWORD` | `email.imap_password` |
-| `ISTOTA_SMTP_PASSWORD` | `email.smtp_password` |
-| `ISTOTA_GITLAB_TOKEN` | `developer.gitlab_token` |
-| `ISTOTA_GITHUB_TOKEN` | `developer.github_token` |
-| `ISTOTA_GOOGLE_CLIENT_SECRET` | `google_workspace.client_secret` |
-| `ISTOTA_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
-| `ISTOTA_WEB_SECRET_KEY` | `web.session_secret_key` |
+| `ISTOTA_NEXTCLOUD_APP_PASSWORD` | `nextcloud.app_password` |
+| `ISTOTA_EMAIL_IMAP_PASSWORD` | `email.imap_password` |
+| `ISTOTA_EMAIL_SMTP_PASSWORD` | `email.smtp_password` |
+| `ISTOTA_DEVELOPER_GITLAB_TOKEN` | `developer.gitlab_token` |
+| `ISTOTA_DEVELOPER_GITHUB_TOKEN` | `developer.github_token` |
+| `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET` | `google_workspace.client_secret` |
+| `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
+| `ISTOTA_WEB_SESSION_SECRET_KEY` | `web.session_secret_key` |
 
 See [credentials](../configuration/credentials.md) for what each override covers and the full env var → config mapping.

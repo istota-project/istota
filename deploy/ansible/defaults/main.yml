@@ -7,7 +7,8 @@ istota_namespace: "istota"
 
 # Python package name - always "istota" regardless of namespace
 # Used for Python module imports (python -m istota.scheduler, from istota.db, etc.)
-# and for environment variable prefixes (ISTOTA_NC_APP_PASSWORD, etc.)
+# Env vars are not derived from this; they always use the literal ISTOTA_ prefix
+# (e.g. ISTOTA_DEVELOPER_GITLAB_TOKEN). See deploy/ansible/templates/secrets.env.j2.
 istota_package: "istota"
 
 # Update mode - skip full installation, just pull code and update config

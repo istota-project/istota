@@ -83,7 +83,7 @@ scopes = ["https://www.googleapis.com/auth/drive"]
 enabled = true
 client_id = "id"
 """)
-        with mock.patch.dict("os.environ", {"ISTOTA_GOOGLE_CLIENT_SECRET": "from-env"}):
+        with mock.patch.dict("os.environ", {"ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET": "from-env"}):
             c = config.load_config(toml_file)
         assert c.google_workspace.client_secret == "from-env"
 
