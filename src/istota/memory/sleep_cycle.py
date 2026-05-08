@@ -141,7 +141,7 @@ def _run_sleep_cycle_brain(
         cwd=Path(config.temp_dir) if config.temp_dir else Path("/tmp"),
         env=dict(os.environ),
         timeout_seconds=_SLEEP_CYCLE_TIMEOUT_SECONDS,
-        model=model,
+        model=make_brain(config.brain).resolve_model_name(model),
         streaming=False,
         on_progress=None,
         cancel_check=None,

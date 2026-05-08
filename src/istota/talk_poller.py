@@ -365,10 +365,39 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 )
                 attachments = extract_attachments(msg)
 
+                # !model prefix — strip and capture per-task overrides before
+                # dispatching commands or creating the task. Unknown alias →
+                # post usage and stop; valid alias → carry overrides forward.
+                # The active brain owns the alias namespace.
+                model_override: str | None = None
+                effort_override: str | None = None
+                from .brain import make_brain
+                from .commands import (
+                    dispatch as dispatch_command,
+                    model_prefix_usage,
+                    parse_model_prefix,
+                )
+
+                brain = make_brain(config.brain)
+                model_prefix = parse_model_prefix(content, brain)
+                if model_prefix is not None:
+                    if model_prefix.unknown_alias is not None:
+                        await client.send_message(conversation_token, model_prefix_usage(brain))
+                        continue
+                    # Empty remainder is only an error when there's nothing
+                    # to do at all. With attachments present, "!model opus"
+                    # is a valid intent ("process this attachment with opus")
+                    # and falls through to the default attachment-processing
+                    # prompt below.
+                    if not model_prefix.remainder.strip() and not attachments:
+                        await client.send_message(conversation_token, model_prefix_usage(brain))
+                        continue
+                    model_override = model_prefix.model
+                    effort_override = model_prefix.effort
+                    content = model_prefix.remainder
+
                 # !command dispatch — intercept before task creation
                 if content.strip().startswith("!"):
-                    from .commands import dispatch as dispatch_command
-
                     handled = await dispatch_command(
                         config, conn, actor_id, conversation_token, content
                     )
@@ -447,6 +476,8 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     talk_message_id=message_id,
                     reply_to_talk_id=reply_to_talk_id,
                     reply_to_content=reply_to_content,
+                    model=model_override,
+                    effort=effort_override,
                 )
 
                 created_tasks.append(task_id)

@@ -23,6 +23,7 @@ from croniter import croniter
 logger = logging.getLogger("istota.scheduler")
 
 from . import db
+from .brain import make_brain
 from .skills.briefing import (
     build_briefing_prompt,
     get_briefings_for_user,
@@ -2879,7 +2880,11 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     skill=job.skill,
                     skill_args=job.skill_args,
                     queue="background",
-                    model=job.model or None,
+                    # Resolve aliases (role / provider) to canonical IDs at
+                    # task-creation time so the DB stays canonical, matching
+                    # the talk-poller's !model prefix path. Executor also
+                    # resolves as defense-in-depth, so legacy rows still work.
+                    model=make_brain(app_config.brain).resolve_model_name(job.model) or None,
                     effort=job.effort or None,
                 )
                 db.set_scheduled_job_last_run(conn, job.id)

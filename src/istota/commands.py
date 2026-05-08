@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 from . import db
+from .brain import Brain, make_brain
 from .memory import search as memory_search_mod
 from .config import Config
 from .nextcloud_client import ocs_get
@@ -52,6 +53,58 @@ def parse_command(content: str) -> tuple[str, str] | None:
     if not match:
         return None
     return (match.group(1).lower(), match.group(2).strip())
+
+
+# `!model <alias> <prompt>` — one-shot model override for a single task.
+# The alias table is owned by the active brain (each brain implementation
+# carries its own provider-specific model namespace); this surface is just
+# the user-facing parser plus a usage helper. Roles like ``smart`` are
+# resolved by the brain through the global operator-override table in
+# ``brain._roles``.
+
+
+@dataclass
+class ModelPrefix:
+    """Result of parsing a `!model` prefix.
+
+    `unknown_alias` is set when the prefix matched but the alias wasn't in
+    `MODEL_ALIASES` (or no alias was supplied) — caller posts a usage message.
+    Otherwise `model`/`effort` carry the override (both may be None for the
+    explicit "default" alias) and `remainder` is the prompt with the prefix
+    stripped.
+    """
+
+    model: str | None
+    effort: str | None
+    remainder: str
+    unknown_alias: str | None = None
+
+
+def parse_model_prefix(content: str, brain: Brain) -> ModelPrefix | None:
+    """Parse a `!model <alias> <prompt>` prefix using ``brain`` for alias lookup.
+
+    Returns None when `content` is not a `!model` prefix at all (so the
+    caller's normal command-dispatch path runs unchanged). The active
+    brain owns the alias namespace, so this parser is pure syntax and
+    delegates resolution.
+    """
+    stripped = content.strip()
+    match = re.match(r"^!model\b\s*(\S+)?\s*(.*)", stripped, re.DOTALL | re.IGNORECASE)
+    if not match:
+        return None
+    alias = (match.group(1) or "").lower()
+    remainder = match.group(2).strip()
+    resolved = brain.resolve_alias(alias) if alias else None
+    if resolved is None:
+        return ModelPrefix(model=None, effort=None, remainder=remainder, unknown_alias=alias)
+    model, effort = resolved
+    return ModelPrefix(model=model, effort=effort, remainder=remainder)
+
+
+def model_prefix_usage(brain: Brain) -> str:
+    """User-facing help string listing the active brain's `!model` aliases."""
+    aliases = [alias for alias, _model, _effort in brain.list_aliases()]
+    return f"Usage: `!model <alias> <prompt>`. Aliases: {', '.join(f'`{a}`' for a in aliases)}."
 
 
 async def dispatch(
@@ -105,6 +158,11 @@ async def cmd_help(config, conn, user_id, conversation_token, args, client):
     lines = ["**Available commands:**", ""]
     for name, (_, help_text) in sorted(COMMANDS.items()):
         lines.append(f"- `!{name}` -- {help_text}")
+    lines.append("")
+    lines.append("**Per-task model override:**")
+    lines.append("")
+    aliases = [alias for alias, _m, _e in make_brain(config.brain).list_aliases()]
+    lines.append(f"- `!model <alias> <prompt>` — one-shot. Aliases: {', '.join(f'`{a}`' for a in aliases)}.")
     return "\n".join(lines)
 
 
@@ -146,6 +204,20 @@ async def cmd_stop(config, conn, user_id, conversation_token, args, client):
 
     preview = prompt[:80] + "..." if len(prompt) > 80 else prompt
     return f"Cancelling task #{task_id}: {preview}"
+
+
+@command("models", "List available model aliases (and what they resolve to)")
+async def cmd_models(config, conn, user_id, conversation_token, args, client):
+    lines = ["**Model aliases**", "", "Use `!model <alias> <prompt>` to override the model for a single task.", ""]
+    for alias, model, effort in make_brain(config.brain).list_aliases():
+        if model is None:
+            target = "(no override — use default)"
+        elif effort:
+            target = f"`{model}` + effort `{effort}`"
+        else:
+            target = f"`{model}`"
+        lines.append(f"- `{alias}` → {target}")
+    return "\n".join(lines)
 
 
 @command("status", "Show your running/pending tasks and system status")

@@ -33,7 +33,7 @@ from .storage import (
     read_dated_memories,
     read_user_memory_v2,
 )
-from .brain import StreamEvent, TextEvent, ToolUseEvent
+from .brain import StreamEvent, TextEvent, ToolUseEvent, make_brain
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 
 logger = logging.getLogger("istota.executor")
@@ -1951,7 +1951,7 @@ def execute_task(
             already_selected=set(selected_skills),
             disabled_skills=_disabled if _disabled else None,
             is_admin=is_admin,
-            model=config.skills.semantic_routing_model,
+            model=make_brain(config.brain).resolve_model_name(config.skills.semantic_routing_model),
             timeout=config.skills.semantic_routing_timeout,
             user_resource_types=user_resource_types,
         )
@@ -2423,15 +2423,20 @@ def execute_task(
         if config.custom_system_prompt:
             sp_path = config.skills_dir.parent / "system-prompt.md"
 
-        from .brain import BrainRequest, make_brain
+        from .brain import BrainRequest
         brain = make_brain(config.brain)
+        # Resolve aliases (role, provider) to a canonical model ID. Talk-poller
+        # tasks already arrive resolved via the !model prefix path; cron jobs,
+        # briefings, email, and operator istota_model defaults can still carry
+        # an alias string here, which the brain CLI doesn't accept directly.
+        # `resolve_model_name` is a no-op for canonical IDs and unknown strings.
         req = BrainRequest(
             prompt=prompt,
             allowed_tools=allowed,
             cwd=Path(config.temp_dir),
             env=env,
             timeout_seconds=config.scheduler.task_timeout_minutes * 60,
-            model=(task.model or "").strip() or config.model,
+            model=brain.resolve_model_name((task.model or "").strip() or config.model),
             effort=_resolve_effort(task, config),
             custom_system_prompt_path=sp_path,
             streaming=use_streaming,

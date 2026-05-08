@@ -28,6 +28,7 @@ from ._events import (
     ToolUseEvent,
     make_stream_parser,
 )
+from ._roles import get_role_overrides
 from ._types import BrainRequest, BrainResult
 
 logger = logging.getLogger("istota.brain.claude_code")
@@ -72,8 +73,159 @@ def is_transient_api_error(text: str) -> bool:
     return parsed["status_code"] in TRANSIENT_STATUS_CODES or parsed["status_code"] == 429
 
 
+# ---------------------------------------------------------------------------
+# Anthropic model namespace
+#
+# These tables describe the models *this* brain can run. A future
+# OpenRouter / Anthropic-direct brain ships its own analogous tables in
+# its own module; consumers never reach in here directly — they go through
+# Brain.resolve_alias / Brain.resolve_model_name.
+#
+# Versioning: bare aliases like ``opus`` always resolve to a *specific*
+# version constant (``OPUS = "claude-opus-4-7"``) so a model release can't
+# silently re-route us. Prior versions get first-class constants
+# (``OPUS_46``) only when there's a concrete reason to pin to them
+# (e.g., production stability) — this is not meant to be exhaustive.
+# ---------------------------------------------------------------------------
+
+OPUS: str = "claude-opus-4-7"
+OPUS_46: str = "claude-opus-4-6"
+SONNET: str = "claude-sonnet-4-6"
+HAIKU: str = "claude-haiku-4-5"
+
+# Provider aliases — `(model_id, effort)` pairs. ``effort=None`` means "let
+# the model decide" (no ``--effort`` flag). Adding an alias here is the only
+# place a new shortcut needs to be defined; every surface (``!model`` prefix,
+# ``!help`` output, scheduled-job model overrides) reads from this table.
+MODEL_ALIASES: dict[str, tuple[str | None, str | None]] = {
+    "default":      (None, None),
+    "opus":         (OPUS, None),
+    "opus-high":    (OPUS, "high"),
+    "opus-xhigh":   (OPUS, "xhigh"),
+    "opus-max":     (OPUS, "max"),
+    "opus-46":      (OPUS_46, None),
+    "opus-46-high": (OPUS_46, "high"),
+    "sonnet":       (SONNET, None),
+    "sonnet-high":  (SONNET, "high"),
+    "haiku":        (HAIKU, None),
+}
+
+# Default role-target mapping for *this brain*. Operators override the
+# target via [models.roles] TOML; the override RHS is resolved through
+# MODEL_ALIASES so they can write provider-aware shortcuts like
+# ``smart = "opus-46-high"`` without having to type the canonical ID.
+DEFAULT_ROLE_TARGETS: dict[str, str] = {
+    "fast":    HAIKU,
+    "general": SONNET,
+    "smart":   OPUS,
+}
+
+
+def _resolve_target(target: str) -> str:
+    """Translate an override RHS through MODEL_ALIASES to a canonical ID.
+
+    Operator wrote e.g. ``smart = "opus-46-high"``: this returns
+    ``"claude-opus-4-6"``. Unknown strings pass through unchanged so raw
+    canonical IDs (``"claude-opus-4-7"``) work as override targets too.
+    """
+    if not target:
+        return target
+    pair = MODEL_ALIASES.get(target.lower())
+    if pair is not None and pair[0] is not None:
+        return pair[0]
+    return target
+
+
 class ClaudeCodeBrain:
     """Brain that delegates to the `claude` CLI as a subprocess."""
+
+    # --- Model resolution (Brain Protocol) ---------------------------------
+
+    def resolve_alias(
+        self, alias: str
+    ) -> tuple[str | None, str | None] | None:
+        """Resolve a `!model <alias>` to (model_id, effort).
+
+        Roles win over provider aliases (operator override > default role
+        target > MODEL_ALIASES). Returns None for unknown.
+        """
+        alias_lower = alias.lower()
+        # 1. Operator-overridden role
+        override = get_role_overrides().get(alias_lower)
+        if override is not None:
+            return (_resolve_target(override), None)
+        # 2. Default role target
+        if alias_lower in DEFAULT_ROLE_TARGETS:
+            return (DEFAULT_ROLE_TARGETS[alias_lower], None)
+        # 3. Provider alias
+        return MODEL_ALIASES.get(alias_lower)
+
+    def resolve_model_name(self, name: str | None) -> str:
+        """Resolve any name to a canonical Anthropic model ID.
+
+        Empty/None → ``""`` (caller falls back to brain default).
+        Unknown → pass-through (raw IDs typed into config still work).
+        """
+        if not name:
+            return ""
+        resolved = self.resolve_alias(name)
+        if resolved is not None and resolved[0] is not None:
+            return resolved[0]
+        return name
+
+    def validate_role_override(self, role: str, target: str) -> list[str]:
+        """Surface operator typos at load time.
+
+        Two checks:
+        1. Role name shadows a provider alias (e.g. ``[models.roles] opus = "haiku"``
+           silently makes ``!model opus`` resolve to Haiku — almost always a typo).
+        2. Override target is neither a known provider alias nor a canonical
+           ``claude-*`` ID (it'll pass through to the CLI and fail at task time).
+        """
+        warnings: list[str] = []
+        role_lower = role.lower()
+        if role_lower in MODEL_ALIASES:
+            warnings.append(
+                f"role override {role!r} shadows the provider alias of the "
+                f"same name; future `!model {role}` calls will resolve to "
+                f"{target!r} instead of the built-in alias"
+            )
+        if target:
+            target_lower = target.lower()
+            looks_canonical = target.startswith("claude-")
+            known_alias = target_lower in MODEL_ALIASES
+            if not looks_canonical and not known_alias:
+                warnings.append(
+                    f"role override {role!r} target {target!r} is neither a "
+                    f"canonical model id nor a known provider alias; tasks "
+                    f"using this role will fail at execution time"
+                )
+        return warnings
+
+    def list_aliases(self) -> list[tuple[str, str | None, str | None]]:
+        """Merged alias table for display.
+
+        Roles first (sorted, with operator overrides reflected), then
+        provider aliases in declaration order. Used by the ``!models``
+        Talk command and any other surface that wants "what does X
+        resolve to right now".
+        """
+        out: list[tuple[str, str | None, str | None]] = []
+        seen: set[str] = set()
+        # Roles: defaults merged with overrides; overrides win.
+        roles: dict[str, str] = dict(DEFAULT_ROLE_TARGETS)
+        for role, override in get_role_overrides().items():
+            roles[role] = _resolve_target(override)
+        for role in sorted(roles):
+            out.append((role, roles[role], None))
+            seen.add(role)
+        for alias, (model, effort) in MODEL_ALIASES.items():
+            if alias in seen:
+                continue
+            out.append((alias, model, effort))
+        return out
+
+    # --- Execution (Brain Protocol) ----------------------------------------
 
     def execute(self, req: BrainRequest) -> BrainResult:
         try:

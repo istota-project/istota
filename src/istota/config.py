@@ -73,7 +73,7 @@ class BrowserConfig:
 class ConversationConfig:
     enabled: bool = True
     lookback_count: int = 25
-    selection_model: str = "haiku"  # Haiku sufficient for relevance matching
+    selection_model: str = "fast"  # role alias — resolves to HAIKU by default; operator-overridable
     selection_timeout: float = 30.0
     skip_selection_threshold: int = 3  # Include all messages if history ≤ this
     use_selection: bool = True  # If False, include all messages without LLM selection
@@ -138,8 +138,8 @@ class SleepCycleConfig:
     auto_load_dated_days: int = 3  # auto-load N days of dated memories into prompts (0 = disabled)
     curate_user_memory: bool = False  # nightly USER.md curation from dated memories
     curation_log_summary: bool = True  # post one-line summary to user's log_channel after applied ops
-    extraction_model: str = "sonnet"  # model for nightly memory extraction (passed to brain)
-    curation_model: str = "sonnet"  # model for op-based USER.md curation
+    extraction_model: str = "general"  # role alias — resolves to SONNET by default; operator-overridable
+    curation_model: str = "general"  # role alias — resolves to SONNET by default; operator-overridable
     # Independent of memory_retention_days so default deployments still
     # prune the audit table — KG audit rows are tiny but accumulate
     # several per night per user. 0 = unlimited.
@@ -153,7 +153,7 @@ class ChannelSleepCycleConfig:
     cron: str = "0 3 * * *"  # UTC (after user sleep cycles)
     lookback_hours: int = 24
     memory_retention_days: int = 0  # 0 = unlimited retention
-    extraction_model: str = "sonnet"  # model for channel memory extraction
+    extraction_model: str = "general"  # role alias — resolves to SONNET by default; operator-overridable
 
 
 @dataclass
@@ -372,7 +372,7 @@ class MoneymanConfig:
 class SkillsConfig:
     """Skill routing configuration."""
     semantic_routing: bool = True  # enable LLM-based Pass 2 skill classification
-    semantic_routing_model: str = "haiku"  # model for classification
+    semantic_routing_model: str = "fast"  # role alias — resolves to HAIKU by default; operator-overridable
     semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
 
 
@@ -392,6 +392,24 @@ class BriefingDefaultsConfig:
     markets: dict = field(default_factory=dict)
     news: dict = field(default_factory=dict)
     headlines: dict = field(default_factory=dict)
+
+
+@dataclass
+class ModelsConfig:
+    """Operator-controlled model role aliases.
+
+    The default role mapping (``fast``→Haiku, ``general``→Sonnet,
+    ``smart``→Opus for ``ClaudeCodeBrain``) lives on the active brain in
+    ``brain.claude_code.DEFAULT_ROLE_TARGETS``. Operators set
+    ``[models.roles]`` in TOML to rebind any role to a different canonical
+    ID or provider alias — e.g., a deployment that wants to stay on Opus
+    4.6 in prod can write ``smart = "opus-46-high"`` here and every call
+    site that reads ``smart`` follows. Role names beyond the three
+    defaults are accepted, so operators can introduce custom roles like
+    ``deep`` or ``cheap``.
+    """
+
+    roles: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -424,6 +442,7 @@ class Config:
     moneyman: MoneymanConfig = field(default_factory=MoneymanConfig)
     google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    models: ModelsConfig = field(default_factory=ModelsConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     rclone_remote: str = "nextcloud"  # rclone remote name
@@ -802,7 +821,7 @@ def load_config(config_path: Path | None = None) -> Config:
         config.conversation = ConversationConfig(
             enabled=conv.get("enabled", True),
             lookback_count=conv.get("lookback_count", 10),
-            selection_model=conv.get("selection_model", "haiku"),
+            selection_model=conv.get("selection_model", "fast"),
             selection_timeout=conv.get("selection_timeout", 30.0),
             skip_selection_threshold=conv.get("skip_selection_threshold", 3),
             use_selection=conv.get("use_selection", True),
@@ -868,7 +887,7 @@ def load_config(config_path: Path | None = None) -> Config:
         sk = data["skills"]
         config.skills = SkillsConfig(
             semantic_routing=sk.get("semantic_routing", True),
-            semantic_routing_model=sk.get("semantic_routing_model", "haiku"),
+            semantic_routing_model=sk.get("semantic_routing_model", "fast"),
             semantic_routing_timeout=sk.get("semantic_routing_timeout", 3.0),
         )
 
@@ -877,6 +896,17 @@ def load_config(config_path: Path | None = None) -> Config:
         config.brain = BrainConfig(
             kind=br.get("kind", "claude_code"),
         )
+
+    # [models] table — operator-controlled role aliases. The mapping is
+    # parsed here, then applied globally below via brain._roles.set_role_overrides
+    # after every other config layer has settled. Each brain consults the
+    # global override table inside its own resolve_alias() call.
+    if "models" in data:
+        models_section = data["models"]
+        roles = models_section.get("roles", {}) if isinstance(models_section, dict) else {}
+        if not isinstance(roles, dict):
+            roles = {}
+        config.models = ModelsConfig(roles={str(k): str(v) for k, v in roles.items()})
 
     if "briefing_defaults" in data:
         bd = data["briefing_defaults"]
@@ -1072,6 +1102,22 @@ def load_config(config_path: Path | None = None) -> Config:
     # ``check_briefings`` and ``get_briefings_for_user`` keep reading
     # ``user_config.briefings`` unchanged.
     _apply_user_briefings(config)
+
+    # Apply operator role-alias overrides globally so every downstream call
+    # to ``brain.resolve_model_name`` / ``brain.resolve_alias`` picks up the
+    # operator's mapping. Done last so it sees any TOML edits.
+    #
+    # Per-entry semantic validation is delegated to the active brain (it
+    # knows its own provider alias namespace) so operators see typos
+    # surfaced at startup rather than at task time.
+    from .brain import make_brain, set_role_overrides
+    if config.models.roles:
+        _logger = logging.getLogger("istota.config")
+        _brain = make_brain(config.brain)
+        for _role, _target in config.models.roles.items():
+            for _msg in _brain.validate_role_override(_role, _target):
+                _logger.warning("[models.roles] %s", _msg)
+    set_role_overrides(config.models.roles)
 
     return config
 

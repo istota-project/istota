@@ -80,9 +80,50 @@ class BrainResult:
 
 
 class Brain(Protocol):
-    """The single boundary every brain implementation satisfies."""
+    """The single boundary every brain implementation satisfies.
+
+    Beyond the actual model call (``execute``), each brain owns its model
+    namespace — canonical IDs, provider aliases, and how role aliases like
+    ``smart`` map to a real model. Centralizing this on the Brain interface
+    means a future OpenRouter / Anthropic-direct backend can ship its own
+    naming scheme without any caller changes; consumers always go through
+    ``make_brain(config.brain).resolve_*``.
+    """
 
     def execute(self, req: BrainRequest) -> BrainResult: ...
+
+    def resolve_alias(self, alias: str) -> tuple[str | None, str | None] | None:
+        """Resolve a ``!model <alias>`` name to ``(model_id, effort)`` or None.
+
+        Roles (``fast``/``general``/``smart`` plus operator-defined custom
+        roles) take precedence over provider aliases. Roles always carry
+        ``effort=None`` since they don't connote an effort tier; provider
+        aliases like ``opus-high`` carry an explicit effort.
+        """
+        ...
+
+    def resolve_model_name(self, name: str | None) -> str:
+        """Resolve any name (role, provider alias, canonical ID) to a canonical ID.
+
+        Returns ``""`` for empty/None so callers can pass through to the
+        brain default. Pass-through for unknown names — keeps backward
+        compat for raw model IDs typed directly into config.
+        """
+        ...
+
+    def list_aliases(self) -> list[tuple[str, str | None, str | None]]:
+        """Return the merged alias table (roles + provider aliases) for display."""
+        ...
+
+    def validate_role_override(self, role: str, target: str) -> list[str]:
+        """Return human-readable warnings for an operator role override.
+
+        Called once per ``[models.roles]`` entry at config-load time so the
+        operator sees obvious typos in their logs immediately, rather than
+        finding out at runtime when a task fails. Empty list = no warnings.
+        Brains that don't care about this can return ``[]``.
+        """
+        ...
 
 
 @dataclass

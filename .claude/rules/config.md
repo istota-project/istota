@@ -41,7 +41,7 @@ enabled: bool = False        api_url: str = "http://localhost:9223"    vnc_url: 
 ### `ConversationConfig`
 ```
 enabled: bool = True                lookback_count: int = 25
-selection_model: str = "haiku"      selection_timeout: float = 30.0
+selection_model: str = "fast"       selection_timeout: float = 30.0
 skip_selection_threshold: int = 3   use_selection: bool = True
 always_include_recent: int = 5      context_truncation: int = 0
 context_recency_hours: float = 0    context_min_messages: int = 10
@@ -57,7 +57,7 @@ enabled: bool = True               cron: str = "0 2 * * *"
 memory_retention_days: int = 0     lookback_hours: int = 24
 auto_load_dated_days: int = 3      curate_user_memory: bool = False
 curation_log_summary: bool = True
-extraction_model: str = "sonnet"   curation_model: str = "sonnet"
+extraction_model: str = "general"  curation_model: str = "general"
 knowledge_graph_audit_retention_days: int = 365  # KG audit pruning; independent of memory_retention_days
 ```
 
@@ -101,7 +101,7 @@ network: NetworkConfig = NetworkConfig()
 ### `SkillsConfig`
 ```
 semantic_routing: bool = True          # enable LLM-based Pass 2 skill classification
-semantic_routing_model: str = "haiku"  # model for classification
+semantic_routing_model: str = "fast"   # model for classification (role alias)
 semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
 ```
 
@@ -111,6 +111,23 @@ kind: str = "claude_code"  # "claude_code" (Phase 1 only); future: "openrouter",
 ```
 Selects which `Brain` implementation handles model invocation. See
 `.claude/rules/brain.md` for the protocol and ClaudeCodeBrain internals.
+
+### `ModelsConfig`
+```
+roles: dict[str, str] = {}   # operator-rebound role aliases ([models.roles] in TOML)
+```
+Provider-agnostic role aliases. Defaults (`fast`→Haiku, `general`→Sonnet,
+`smart`→Opus) live in the active brain (e.g.
+`brain.claude_code.DEFAULT_ROLE_TARGETS`). Operators rebind via
+`[models.roles]` — values may be canonical IDs or any provider alias from
+the active brain's `MODEL_ALIASES`. `_apply_user_resources` is followed
+by `set_role_overrides(config.models.roles)` so every consumer that calls
+`brain.resolve_model_name(...)` picks up the operator mapping. Custom
+role names beyond the three defaults are accepted (e.g. `deep`,
+`cheap`). Every wired field that takes a model name (`selection_model`,
+`extraction_model`, `curation_model`, `semantic_routing_model`, the
+top-level `model`, per-task `model`, `[[jobs]] model`) accepts canonical
+IDs, provider aliases, or role aliases.
 
 ### `BriefingConfig`
 ```

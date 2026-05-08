@@ -157,6 +157,11 @@ def _process_deferred_subtasks(
                 queue=task.queue,
                 output_target=output_target,
                 talk_delivery_token=task.talk_delivery_token,
+                # Inherit parent's model / effort overrides — a task spawned
+                # via `!model opus-46-high` should run its children at the
+                # same level unless the deferred JSON explicitly overrides.
+                model=entry.get("model") or task.model,
+                effort=entry.get("effort") or task.effort,
             )
             count += 1
 

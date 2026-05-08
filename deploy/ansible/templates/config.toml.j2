@@ -85,6 +85,13 @@ poll_folder = "{{ istota_email_poll_folder }}"
 bot_email = "{{ istota_email_bot_address }}"
 {% endif %}
 
+{% if istota_models_roles %}
+[models.roles]
+{% for role, target in istota_models_roles.items() %}
+{{ role }} = "{{ target }}"
+{% endfor %}
+
+{% endif %}
 [conversation]
 enabled = {{ istota_conversation_enabled | lower }}
 lookback_count = {{ istota_conversation_lookback_count }}

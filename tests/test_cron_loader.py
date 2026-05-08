@@ -6,8 +6,10 @@ import pytest
 
 from istota import db
 from istota.config import Config, UserConfig
+from istota.brain import set_role_overrides
 from istota.cron_loader import (
     CronJob,
+    _validate_model,
     generate_cron_md,
     load_cron_jobs,
     migrate_db_jobs_to_file,
@@ -1347,6 +1349,55 @@ class TestSyncPromotesSkillCommand:
             sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=False)
             jobs = db.get_user_scheduled_jobs(conn, "alice")
         assert jobs == []
+
+
+class TestValidateModel:
+    """`_validate_model` should warn only on real typos.
+
+    The brain-scoped model namespace refactor introduced provider aliases
+    (``opus-high``, ``opus-46``) and role aliases (``smart``, ``general``,
+    ``fast``) — both must pass through silently. Operator-defined custom
+    roles via [models.roles] also count as known.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_role_overrides(self):
+        set_role_overrides({})
+        yield
+        set_role_overrides({})
+
+    def test_canonical_id_passes_silently(self, caplog):
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "claude-opus-4-7")
+        assert not caplog.records
+
+    def test_provider_alias_passes_silently(self, caplog):
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "opus-high")
+        assert not caplog.records
+
+    def test_role_alias_passes_silently(self, caplog):
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "smart")
+            _validate_model("job", "alice", "general")
+            _validate_model("job", "alice", "fast")
+        assert not caplog.records
+
+    def test_operator_custom_role_passes_silently(self, caplog):
+        set_role_overrides({"deep": "opus-46-high"})
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "deep")
+        assert not caplog.records
+
+    def test_unknown_string_warns(self, caplog):
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "gpt-4")
+        assert any("typo" in r.message.lower() for r in caplog.records)
+
+    def test_whitespace_warns(self, caplog):
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "claude opus")
+        assert any("whitespace" in r.message.lower() for r in caplog.records)
 
 
 class TestMigrateRoundTripsSkillTask:

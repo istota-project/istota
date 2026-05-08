@@ -12,8 +12,18 @@ from istota.commands import (
     cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_more, cmd_search,
     cmd_skills, cmd_status, cmd_stop,
     dispatch, parse_command,
+    model_prefix_usage, parse_model_prefix,
 )
+from istota.brain import BrainConfig, make_brain, set_role_overrides
+from istota.brain.claude_code import HAIKU, MODEL_ALIASES, OPUS, OPUS_46, SONNET
 from istota.config import Config, NextcloudConfig, SchedulerConfig, SecurityConfig, TalkConfig, UserConfig
+
+
+@pytest.fixture
+def brain():
+    """Default brain instance for parser tests — ClaudeCodeBrain."""
+    set_role_overrides({})
+    return make_brain(BrainConfig(kind="claude_code"))
 
 
 @pytest.fixture
@@ -92,6 +102,157 @@ class TestParseCommand:
 
 
 # =============================================================================
+# TestParseModelPrefix
+# =============================================================================
+
+
+class TestParseModelPrefix:
+    def test_not_a_model_prefix_returns_none(self, brain):
+        assert parse_model_prefix("hello world", brain) is None
+        assert parse_model_prefix("!stop", brain) is None
+        assert parse_model_prefix("", brain) is None
+
+    def test_word_boundary_does_not_match_modelfoo(self, brain):
+        # !modelfoo / !models should NOT be parsed as a model prefix
+        assert parse_model_prefix("!modelfoo bar", brain) is None
+        assert parse_model_prefix("!models", brain) is None
+
+    def test_known_alias_opus(self, brain):
+        result = parse_model_prefix("!model opus draft a spec for X", brain)
+        assert result is not None
+        assert result.unknown_alias is None
+        assert result.model == OPUS
+        assert result.effort is None
+        assert result.remainder == "draft a spec for X"
+
+    def test_known_alias_opus_high(self, brain):
+        result = parse_model_prefix("!model opus-high tackle this", brain)
+        assert result is not None
+        assert result.unknown_alias is None
+        assert result.model == OPUS
+        assert result.effort == "high"
+        assert result.remainder == "tackle this"
+
+    def test_known_alias_haiku(self, brain):
+        result = parse_model_prefix("!model haiku one-liner", brain)
+        assert result is not None
+        assert result.model == HAIKU
+        assert result.effort is None
+        assert result.remainder == "one-liner"
+
+    def test_known_alias_opus_xhigh(self, brain):
+        result = parse_model_prefix("!model opus-xhigh think hard", brain)
+        assert result is not None
+        assert result.unknown_alias is None
+        assert result.model == OPUS
+        assert result.effort == "xhigh"
+        assert result.remainder == "think hard"
+
+    def test_known_alias_opus_max(self, brain):
+        result = parse_model_prefix("!model opus-max go deepest", brain)
+        assert result is not None
+        assert result.model == OPUS
+        assert result.effort == "max"
+
+    def test_default_alias_clears_overrides(self, brain):
+        result = parse_model_prefix("!model default just do it", brain)
+        assert result is not None
+        assert result.unknown_alias is None
+        assert result.model is None
+        assert result.effort is None
+        assert result.remainder == "just do it"
+
+    def test_unknown_alias_flagged(self, brain):
+        result = parse_model_prefix("!model gpt-4 do a thing", brain)
+        assert result is not None
+        assert result.unknown_alias == "gpt-4"
+        assert result.model is None
+        assert result.effort is None
+        # remainder still captured so the caller can decide what to do
+        assert result.remainder == "do a thing"
+
+    def test_no_alias_flagged_as_unknown(self, brain):
+        result = parse_model_prefix("!model", brain)
+        assert result is not None
+        assert result.unknown_alias == ""
+        assert result.remainder == ""
+
+    def test_alias_only_no_remainder(self, brain):
+        result = parse_model_prefix("!model opus", brain)
+        assert result is not None
+        assert result.unknown_alias is None
+        assert result.model == OPUS
+        assert result.remainder == ""
+
+    def test_case_insensitive_keyword_and_alias(self, brain):
+        result = parse_model_prefix("!MODEL OPUS draft something", brain)
+        assert result is not None
+        assert result.unknown_alias is None
+        assert result.model == OPUS
+        assert result.remainder == "draft something"
+
+    def test_leading_whitespace_tolerated(self, brain):
+        result = parse_model_prefix("  !model sonnet hi", brain)
+        assert result is not None
+        assert result.model == SONNET
+        assert result.remainder == "hi"
+
+    def test_multiline_remainder(self, brain):
+        result = parse_model_prefix("!model opus line1\nline2\nline3", brain)
+        assert result is not None
+        assert result.remainder == "line1\nline2\nline3"
+
+    def test_aliases_are_pinned_to_specific_model_ids(self):
+        # Guard against accidental alias-table changes that drop pinning.
+        # Reaches into the ClaudeCodeBrain's table directly since pinning
+        # is a brain-implementation invariant, not user-facing behaviour.
+        for alias, (model, _effort) in MODEL_ALIASES.items():
+            if alias == "default":
+                assert model is None, "default alias must not pin a model"
+                continue
+            assert model is not None, f"alias {alias} must pin a model"
+            assert model.startswith("claude-"), (
+                f"alias {alias} must use a versioned claude-* model id, got {model}"
+            )
+
+    def test_role_alias_resolves_with_no_effort(self, brain):
+        result = parse_model_prefix("!model smart think hard", brain)
+        assert result is not None
+        assert result.unknown_alias is None
+        # default mapping: smart → OPUS, no effort
+        assert result.model is not None and result.model.startswith("claude-opus-")
+        assert result.effort is None
+        assert result.remainder == "think hard"
+
+    def test_fast_role_alias_resolves(self, brain):
+        result = parse_model_prefix("!model fast quick answer", brain)
+        assert result is not None
+        assert result.model is not None and result.model.startswith("claude-haiku-")
+        assert result.effort is None
+
+    def test_general_role_alias_resolves(self, brain):
+        result = parse_model_prefix("!model general write a draft", brain)
+        assert result is not None
+        assert result.model is not None and result.model.startswith("claude-sonnet-")
+        assert result.effort is None
+
+    def test_opus_46_alias_pins_to_prior_opus(self, brain):
+        result = parse_model_prefix("!model opus-46-high run a job", brain)
+        assert result is not None
+        assert result.model == OPUS_46
+        assert result.effort == "high"
+
+    def test_usage_string_lists_all_aliases(self, brain):
+        usage = model_prefix_usage(brain)
+        for alias in MODEL_ALIASES:
+            assert alias in usage
+        # Roles surface via brain.list_aliases(), so they appear too.
+        assert "smart" in usage
+        assert "general" in usage
+        assert "fast" in usage
+
+
+# =============================================================================
 # TestDispatch
 # =============================================================================
 
@@ -153,6 +314,17 @@ class TestCmdHelp:
         assert "!stop" in result
         assert "!status" in result
         assert "!memory" in result
+
+    @pytest.mark.asyncio
+    async def test_help_mentions_model_prefix(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            client = AsyncMock()
+            result = await cmd_help(config, conn, "alice", "room1", "", client)
+
+        assert "!model" in result
+        # at least one alias surfaces so users can discover them from !help
+        assert "opus" in result
 
 
 # =============================================================================
