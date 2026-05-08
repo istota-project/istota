@@ -40,19 +40,28 @@ Default location is `{notes_folder}/Specs/`:
 
 A spec moves through these folders left-to-right. It never skips a state and rarely moves backwards (only if work is abandoned mid-flight, in which case it goes back to `Drafts/`).
 
-## Project subfolders
+## Project specs
 
-Default to the flat `{notes_folder}/Specs/` tree above. Only branch into a project-scoped subfolder when the user's request explicitly names a project — e.g., "draft a spec for the Acme retry logic" or "list Acme specs". In that case the layout becomes:
+`{notes_folder}/Specs/` is for cross-project / personal specs only. When a request explicitly names a project — e.g., "draft a spec for the Acme retry logic" or "list Acme specs" — the spec lives in **that project's own folder**, not under `{notes_folder}/Specs/`.
+
+Where each project lives is deployment-specific — the skill does not assume a layout. Resolve the project folder for the named project in this order, stopping at the first hit:
+
+1. A path the user gives in the request itself ("the spec for Acme — its folder is `~/work/acme`").
+2. Channel memory (`CHANNEL.md`) — channel-scoped projects often record their working directory there.
+3. A configured resource for that project (a `folder` resource whose `display_name` matches, etc.).
+4. User memory (`USER.md`) — long-running projects usually have their root path noted there, sometimes alongside a convention like "all my projects live under `<some-root>/Projects/<name>/`". Honour whatever convention USER.md states.
+
+If none of those resolve, ask the user where the project's folder is. Do **not** invent a path or fall back to `{notes_folder}/Specs/<Project>/` — that path is reserved for the bot's own notes.
+
+Once the project folder is resolved, the layout is:
 
 ```
-{notes_folder}/Specs/<Project>/{Drafts,Active,Done}/
+<project-folder>/Specs/{Drafts,Active,Done}/
 ```
 
-Use the project name verbatim from the request (no slugification — these are folder names humans browse). Create the `<Project>/{Drafts,Active,Done}` subfolders on first use without asking.
+Create the `Specs/{Drafts,Active,Done}` subfolders inside the project folder on first use without asking — the convention is fixed.
 
-If a request is ambiguous about whether a project is meant, default to the flat tree and ask only if the user pushes back.
-
-If `Specs/Drafts`, `Specs/Active`, or `Specs/Done` is missing, create the missing subfolders without asking — the convention is fixed.
+If a request is ambiguous about whether a project is meant, default to `{notes_folder}/Specs/` and ask only if the user pushes back.
 
 ## Operations
 
