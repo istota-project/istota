@@ -424,11 +424,16 @@ class TestNetworkAllowlist:
 # ============================================================================
 
 class TestCredentialProxy:
+    def _idx(self):
+        from istota.skills._loader import load_skill_index
+        from pathlib import Path
+        return load_skill_index(Path("config/skills"), bundled_dir=None)
+
     def test_token_in_proxy_vars(self):
-        from istota.executor import _PROXY_CREDENTIAL_VARS
-        assert "GOOGLE_WORKSPACE_CLI_TOKEN" in _PROXY_CREDENTIAL_VARS
+        from istota.executor import derive_credential_set
+        assert "GOOGLE_WORKSPACE_CLI_TOKEN" in derive_credential_set(self._idx())
 
     def test_token_mapped_to_skill(self):
-        from istota.executor import _CREDENTIAL_SKILL_MAP
-        assert "GOOGLE_WORKSPACE_CLI_TOKEN" in _CREDENTIAL_SKILL_MAP
-        assert "google_workspace" in _CREDENTIAL_SKILL_MAP["GOOGLE_WORKSPACE_CLI_TOKEN"]
+        from istota.executor import derive_skill_credential_map
+        result = derive_skill_credential_map(["google_workspace"], self._idx())
+        assert "GOOGLE_WORKSPACE_CLI_TOKEN" in result.get("google_workspace", set())

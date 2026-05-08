@@ -15,6 +15,7 @@ loader still consults the secrets table as the only source of
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from istota.feeds.models import FeedsContext
@@ -23,6 +24,40 @@ from istota.feeds.workspace import synthesize_feeds_context
 
 class UserNotFoundError(Exception):
     """The user has no usable feeds configuration."""
+
+
+def _read_credential(
+    istota_config, user_id: str, service: str, key: str, env_var: str,
+) -> str:
+    """Env-first credential read.
+
+    In subprocess context (Phase 1.4+), the executor pre-resolves
+    credentials via build_skill_env and injects them through the skill
+    proxy — the env var is set; the master Fernet key is not in os.environ
+    so secrets_store would silently fail anyway.
+
+    In trusted-daemon context (scheduler-internal calls like
+    _sync_feeds_module_jobs that enumerate users without spawning a task)
+    the env var is unset but ISTOTA_SECRET_KEY is present, so the
+    secrets_store fallback works.
+
+    Empty strings are treated as unset to match _resolve_env_spec.
+    """
+    val = os.environ.get(env_var)
+    if val:
+        return val
+    if istota_config is None:
+        return ""
+    try:
+        from istota import secrets_store  # noqa: PLC0415
+
+        db_path = getattr(istota_config, "db_path", None)
+        if db_path is None:
+            return ""
+        stored = secrets_store.get_secret(db_path, user_id, service, key)
+        return stored or ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def resolve_for_user(user_id: str, istota_config) -> FeedsContext:
@@ -53,21 +88,9 @@ def resolve_for_user(user_id: str, istota_config) -> FeedsContext:
         user_id, istota_config.bot_dir_name,
     ).lstrip("/")
 
-    tumblr_api_key = ""
-    try:
-        from istota import secrets_store  # noqa: PLC0415
-
-        db_path = getattr(istota_config, "db_path", None)
-        if db_path is not None:
-            stored = secrets_store.get_secret(
-                db_path, user_id, "feeds", "tumblr_api_key",
-            )
-            if stored:
-                tumblr_api_key = stored
-    except Exception:  # noqa: BLE001
-        # Best-effort — fall back to empty key if the secrets store is
-        # unavailable (no key, no cryptography, etc.).
-        pass
+    tumblr_api_key = _read_credential(
+        istota_config, user_id, "feeds", "tumblr_api_key", "TUMBLR_API_KEY",
+    )
 
     return synthesize_feeds_context(
         user_id,

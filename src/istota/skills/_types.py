@@ -13,10 +13,15 @@ class EnvSpec:
     """
 
     var: str
-    source: str  # "config", "resource", "resource_json", "user_resource_config", "template_file", "user_id", "secret"
+    source: str  # "config" | "resource" | "resource_json" | "user_resource_config"
+                 # | "template_file" | "user_id" | "secret" | "setup_env"
     # For source="config"
     config_path: str = ""
-    when: str = ""  # guard: dotted config path that must be truthy
+    # Guard: dotted config path(s) that must all be truthy. Accepts a
+    # single string ("developer.gitlab_token") or a list of strings
+    # (["developer.enabled", "developer.gitlab_token"]) — all paths in
+    # the list must be truthy for the spec to resolve.
+    when: "str | list[str]" = ""
     # For source="resource" / "resource_json" / "user_resource_config".
     # ``resource_types`` matches any of the listed types; ``resource_type`` is
     # the singular shortcut still supported for skills with a single type.
@@ -30,6 +35,23 @@ class EnvSpec:
     # For source="secret"
     service: str = ""
     key: str = ""
+    # Marks this var as a credential — routed through the skill proxy and
+    # stripped from Claude's subprocess env. Used by derive_credential_set
+    # / derive_skill_credential_map (Phase 3) to compute the proxy auth map
+    # from manifests.
+    sensitive: bool = False
+    # Migration helper: read this os.environ var if primary resolution
+    # fails. Honored on the value path only — derive_authorized_skills
+    # passes ``fallbacks_disabled=True`` so an instance-wide
+    # EnvironmentFile value cannot fan out to per-user auto-authorization.
+    fallback_var: str = ""
+    # If set, the spec resolves only when the user owns at least one
+    # resource of this resource_type.
+    gate_user_has_resource: str = ""
+    # If true, the spec resolves only when CalDAV discovery returned at
+    # least one calendar for this user (preserves the existing per-user
+    # privacy gate on CALDAV credentials).
+    gate_has_discovered_calendars: bool = False
 
 
 @dataclass

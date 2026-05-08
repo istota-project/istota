@@ -95,3 +95,36 @@ class TestParser:
         p = build_parser()
         with pytest.raises(SystemExit):
             p.parse_args(["add"])
+
+
+class TestLoaderEnvFirst:
+    """Phase 1.2 — feeds loader reads env vars before consulting secrets_store.
+
+    Pinned because Phase 1.4 strips ISTOTA_SECRET_KEY from subprocess env;
+    once that lands the secrets_store fallback returns None silently and
+    cron module jobs would lose access to TUMBLR_API_KEY without env-first
+    resolution.
+    """
+
+    def test_env_takes_precedence_over_store(self, istota_config, monkeypatch):
+        from istota.feeds import _loader
+        monkeypatch.setenv("TUMBLR_API_KEY", "from-env")
+        called = []
+        monkeypatch.setattr(
+            "istota.secrets_store.get_secret",
+            lambda *a, **kw: called.append(a) or "from-store",
+        )
+        ctx = _loader.resolve_for_user("alice", istota_config)
+        assert ctx.tumblr_api_key == "from-env"
+        assert called == []
+
+    def test_store_fallback_when_env_unset(self, istota_config, monkeypatch):
+        """Daemon-context: env is unset, master key is present, store wins."""
+        from istota.feeds import _loader
+        monkeypatch.delenv("TUMBLR_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "istota.secrets_store.get_secret",
+            lambda db, u, s, k: "from-store" if (s, k) == ("feeds", "tumblr_api_key") else None,
+        )
+        ctx = _loader.resolve_for_user("alice", istota_config)
+        assert ctx.tumblr_api_key == "from-store"

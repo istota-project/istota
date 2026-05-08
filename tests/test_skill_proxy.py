@@ -16,10 +16,23 @@ import pytest
 from istota.skill_proxy import SkillProxy
 from istota.executor import (
     _split_credential_env,
-    _PROXY_CREDENTIAL_VARS,
-    _authorized_skills_from_credentials,
+    derive_authorized_skills,
+    derive_credential_set,
+    derive_skill_credential_map,
 )
-from istota.skills._types import SkillMeta
+from istota.skills._env import EnvContext
+from istota.skills._types import EnvSpec, SkillMeta
+
+
+# Credential set used by the manifest-agnostic _split_credential_env tests.
+# Mirrors the bundled-manifest derivation for the skills these tests touch.
+_TEST_CREDENTIAL_SET = frozenset({
+    "CALDAV_PASSWORD", "NC_PASS", "SMTP_PASSWORD", "IMAP_PASSWORD",
+    "KARAKEEP_API_KEY", "GITLAB_TOKEN", "GITHUB_TOKEN",
+    "GOOGLE_WORKSPACE_CLI_TOKEN", "NTFY_TOKEN", "NTFY_PASSWORD",
+    "MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_SESSION_TOKEN",
+    "TUMBLR_API_KEY",
+})
 
 
 @pytest.fixture
@@ -49,7 +62,7 @@ class TestSplitCredentialEnv:
             "CALDAV_URL": "https://dav.example.com",
             "NC_URL": "https://cloud.example.com",
         }
-        cred, clean = _split_credential_env(env)
+        cred, clean = _split_credential_env(env, _TEST_CREDENTIAL_SET)
         assert cred == {
             "CALDAV_PASSWORD": "secret1",
             "NC_PASS": "secret2",
@@ -64,19 +77,19 @@ class TestSplitCredentialEnv:
         assert clean["NC_URL"] == "https://cloud.example.com"
 
     def test_empty_env(self):
-        cred, clean = _split_credential_env({})
+        cred, clean = _split_credential_env({}, _TEST_CREDENTIAL_SET)
         assert cred == {}
         assert clean == {}
 
     def test_no_credentials_present(self):
         env = {"PATH": "/usr/bin", "HOME": "/home/user"}
-        cred, clean = _split_credential_env(env)
+        cred, clean = _split_credential_env(env, _TEST_CREDENTIAL_SET)
         assert cred == {}
         assert clean == env
 
     def test_only_credentials(self):
         env = {"CALDAV_PASSWORD": "x", "NC_PASS": "y"}
-        cred, clean = _split_credential_env(env)
+        cred, clean = _split_credential_env(env, _TEST_CREDENTIAL_SET)
         assert len(cred) == 2
         assert clean == {}
 
@@ -87,7 +100,7 @@ class TestSplitCredentialEnv:
             "GITHUB_TOKEN": "ghp_xxx",
             "CALDAV_PASSWORD": "secret",
         }
-        cred, clean = _split_credential_env(env)
+        cred, clean = _split_credential_env(env, _TEST_CREDENTIAL_SET)
         assert "GITLAB_TOKEN" in cred
         assert "GITHUB_TOKEN" in cred
         assert "GITLAB_TOKEN" not in clean
@@ -265,88 +278,154 @@ class TestProxyScopedCredentials:
         assert called_env["GITLAB_TOKEN"] == "gl_secret"
 
 
-class TestAuthorizedSkillsFromCredentials:
-    """Decoupled authorization: cred-presence in env determines authorization."""
+class TestDeriveAuthorizedSkills:
+    """Decoupled authorization (Phase 3): manifest-derived. A skill is
+    authorized if it was selected OR if any of its sensitive specs
+    resolves for the current user."""
 
-    def _index(self, **cli_overrides) -> dict[str, SkillMeta]:
-        # Mirror real CLI metadata for the cred-mapped skills
-        defaults = {
+    def _stub_index(self, **cli_overrides) -> dict[str, SkillMeta]:
+        """Build a stub skill index with sensitive specs pointing at
+        ``ctx.config.<attr>`` flags so individual tests can flip them on
+        and off without coupling to bundled manifests."""
+        cli = {
             "files": True, "calendar": True, "email": True, "bookmarks": True,
             "feeds": True, "developer": True, "google_workspace": True,
             "nextcloud": True, "location": True, "notes": True,
         }
-        defaults.update(cli_overrides)
-        return {
-            name: SkillMeta(name=name, description="", cli=is_cli)
-            for name, is_cli in defaults.items()
+        cli.update(cli_overrides)
+
+        def _spec(var, path):
+            return EnvSpec(
+                var=var, source="config", config_path=path,
+                when=path, sensitive=True,
+            )
+
+        env_specs = {
+            "calendar": [_spec("CALDAV_PASSWORD", "caldav_password")],
+            "location": [_spec("CALDAV_PASSWORD", "caldav_password")],
+            "email": [
+                _spec("SMTP_PASSWORD", "email.smtp_password"),
+                _spec("IMAP_PASSWORD", "email.imap_password"),
+            ],
+            "bookmarks": [_spec("KARAKEEP_API_KEY", "karakeep.api_key")],
+            "developer": [
+                _spec("GITLAB_TOKEN", "developer.gitlab_token"),
+                _spec("GITHUB_TOKEN", "developer.github_token"),
+            ],
+            "google_workspace": [_spec("GOOGLE_WORKSPACE_CLI_TOKEN", "gw.token")],
+            "nextcloud": [_spec("NC_PASS", "nextcloud.app_password")],
         }
+        return {
+            name: SkillMeta(
+                name=name, description="", cli=cli[name],
+                env_specs=env_specs.get(name, []),
+            )
+            for name in cli
+        }
+
+    def _ctx_with_attrs(self, **attrs) -> EnvContext:
+        """Build an EnvContext whose config exposes the given attrs."""
+        class _Cfg:
+            pass
+        cfg = _Cfg()
+        for k, v in attrs.items():
+            head, _, rest = k.partition(".")
+            if not rest:
+                setattr(cfg, head, v)
+                continue
+            sub = getattr(cfg, head, None)
+            if sub is None:
+                sub = _Cfg()
+                setattr(cfg, head, sub)
+            setattr(sub, rest, v)
+
+        class _T:
+            user_id = "alice"
+
+        return EnvContext(
+            config=cfg, task=_T(), user_resources=[],
+            user_config=None, user_temp_dir=Path("/tmp"), is_admin=False,
+        )
 
     def test_no_creds_no_authorization(self):
-        idx = self._index()
-        assert _authorized_skills_from_credentials(idx, {}) == []
+        idx = self._stub_index()
+        ctx = self._ctx_with_attrs()
+        assert derive_authorized_skills([], idx, ctx) == []
 
     def test_user_with_only_karakeep(self):
-        """User has karakeep → only `bookmarks` is authorized."""
-        idx = self._index()
-        result = _authorized_skills_from_credentials(idx, {"KARAKEEP_API_KEY": "x"})
-        assert result == ["bookmarks"]
+        """User has karakeep → only `bookmarks` is auto-authorized."""
+        idx = self._stub_index()
+        ctx = self._ctx_with_attrs(**{"karakeep.api_key": "x"})
+        assert derive_authorized_skills([], idx, ctx) == ["bookmarks"]
 
     def test_user_with_email_creds(self):
-        """SMTP+IMAP both authorize email (single skill, two cred vars)."""
-        idx = self._index()
-        result = _authorized_skills_from_credentials(idx, {
-            "SMTP_PASSWORD": "x", "IMAP_PASSWORD": "y",
-        })
-        assert result == ["email"]
+        idx = self._stub_index()
+        ctx = self._ctx_with_attrs(
+            **{"email.smtp_password": "x", "email.imap_password": "y"},
+        )
+        assert derive_authorized_skills([], idx, ctx) == ["email"]
 
     def test_developer_creds_authorize_developer(self):
-        idx = self._index()
-        result = _authorized_skills_from_credentials(idx, {
-            "GITLAB_TOKEN": "x", "GITHUB_TOKEN": "y",
-        })
-        assert result == ["developer"]
+        idx = self._stub_index()
+        ctx = self._ctx_with_attrs(
+            **{"developer.gitlab_token": "x", "developer.github_token": "y"},
+        )
+        assert derive_authorized_skills([], idx, ctx) == ["developer"]
+
+    def test_developer_one_token_only_authorizes(self):
+        """``any``, not ``all``: a single configured provider triggers
+        auto-auth (developer, ntfy multi-provider pattern)."""
+        idx = self._stub_index()
+        ctx = self._ctx_with_attrs(**{"developer.gitlab_token": "x"})
+        assert derive_authorized_skills([], idx, ctx) == ["developer"]
 
     def test_caldav_authorizes_calendar_and_location(self):
-        """CALDAV_PASSWORD is shared between calendar and location skills."""
-        idx = self._index()
-        result = _authorized_skills_from_credentials(idx, {"CALDAV_PASSWORD": "x"})
-        assert sorted(result) == ["calendar", "location"]
+        idx = self._stub_index()
+        ctx = self._ctx_with_attrs(caldav_password="x")
+        assert derive_authorized_skills([], idx, ctx) == ["calendar", "location"]
 
     def test_admin_with_all_creds(self):
-        idx = self._index()
-        all_creds = {
-            "CALDAV_PASSWORD": "a", "NC_PASS": "b", "SMTP_PASSWORD": "c",
-            "IMAP_PASSWORD": "d", "KARAKEEP_API_KEY": "e",
-            "GITLAB_TOKEN": "g", "GITHUB_TOKEN": "h", "GOOGLE_WORKSPACE_CLI_TOKEN": "i",
-        }
-        result = _authorized_skills_from_credentials(idx, all_creds)
-        assert sorted(result) == [
+        idx = self._stub_index()
+        ctx = self._ctx_with_attrs(
+            caldav_password="a",
+            **{
+                "nextcloud.app_password": "b",
+                "email.smtp_password": "c",
+                "email.imap_password": "d",
+                "karakeep.api_key": "e",
+                "developer.gitlab_token": "g",
+                "developer.github_token": "h",
+                "gw.token": "i",
+            },
+        )
+        assert derive_authorized_skills([], idx, ctx) == [
             "bookmarks", "calendar", "developer", "email",
             "google_workspace", "location", "nextcloud",
         ]
 
-    def test_doc_only_skill_in_credential_map_is_authorized(self):
-        """Doc-only skills (no CLI) listed in _CREDENTIAL_SKILL_MAP must
-        still be authorized when their creds are present.
+    def test_doc_only_skill_is_authorized(self):
+        """Doc-only skills (no CLI) auto-authorize when their sensitive
+        specs resolve. The developer skill is doc-only but consumes its
+        tokens via credential-fetch from helper scripts."""
+        idx = self._stub_index(developer=False)
+        ctx = self._ctx_with_attrs(**{"developer.gitlab_token": "x"})
+        assert derive_authorized_skills([], idx, ctx) == ["developer"]
 
-        The developer skill is the canonical case: it has no CLI module,
-        but the executor writes helper scripts (git credential helper,
-        gitlab-api wrapper) that call `credential-fetch GITLAB_TOKEN`
-        through the proxy lookup endpoint. Gating that lookup on cli=true
-        broke git/GitLab/GitHub access entirely.
-        """
-        idx = self._index(developer=False)
-        result = _authorized_skills_from_credentials(idx, {
-            "GITLAB_TOKEN": "x", "GITHUB_TOKEN": "y",
-        })
-        assert result == ["developer"]
+    def test_selected_skills_carried_through(self):
+        """Selection always authorizes — keyword-driven selection still
+        flows through, even when the user has no credentials yet."""
+        idx = self._stub_index()
+        ctx = self._ctx_with_attrs()
+        assert derive_authorized_skills(["browse"], idx, ctx) == ["browse"]
 
-    def test_doc_only_skill_not_in_credential_map_still_excluded(self):
-        """Doc-only skills with no entry in _CREDENTIAL_SKILL_MAP get
-        no authorization either way — there's nothing to authorize."""
-        idx = self._index(notes=False)
-        result = _authorized_skills_from_credentials(idx, {"KARAKEEP_API_KEY": "x"})
-        assert "notes" not in result
+    def test_selected_unioned_with_auto_authorized(self):
+        idx = self._stub_index()
+        ctx = self._ctx_with_attrs(**{"karakeep.api_key": "x"})
+        # selected skill `browse` doesn't have credentials but is included;
+        # `bookmarks` auto-authorizes via karakeep.
+        assert derive_authorized_skills(["browse"], idx, ctx) == [
+            "bookmarks", "browse",
+        ]
 
 
 class TestProxyInformativeRejections:
@@ -449,29 +528,36 @@ class TestProxyInformativeRejections:
         assert "reason=unknown_skill" in rejection_logs[0].message
 
 
-class TestProxyCredentialVarsCompleteness:
-    """Verify the credential var set covers what executor.py actually injects."""
+class TestDeriveCredentialSetCoverage:
+    """Verify the manifest-derived credential set covers what executor.py
+    actually injects (Phase 3: derived from bundled skill manifests, no
+    hand-maintained constant)."""
+
+    def _set(self):
+        from istota.skills._loader import load_skill_index
+        idx = load_skill_index(Path("config/skills"), bundled_dir=None)
+        return derive_credential_set(idx)
 
     def test_caldav_password_in_set(self):
-        assert "CALDAV_PASSWORD" in _PROXY_CREDENTIAL_VARS
+        assert "CALDAV_PASSWORD" in self._set()
 
     def test_nc_pass_in_set(self):
-        assert "NC_PASS" in _PROXY_CREDENTIAL_VARS
+        assert "NC_PASS" in self._set()
 
     def test_smtp_password_in_set(self):
-        assert "SMTP_PASSWORD" in _PROXY_CREDENTIAL_VARS
+        assert "SMTP_PASSWORD" in self._set()
 
     def test_imap_password_in_set(self):
-        assert "IMAP_PASSWORD" in _PROXY_CREDENTIAL_VARS
+        assert "IMAP_PASSWORD" in self._set()
 
     def test_karakeep_api_key_in_set(self):
-        assert "KARAKEEP_API_KEY" in _PROXY_CREDENTIAL_VARS
+        assert "KARAKEEP_API_KEY" in self._set()
 
     def test_gitlab_token_in_set(self):
-        assert "GITLAB_TOKEN" in _PROXY_CREDENTIAL_VARS
+        assert "GITLAB_TOKEN" in self._set()
 
     def test_github_token_in_set(self):
-        assert "GITHUB_TOKEN" in _PROXY_CREDENTIAL_VARS
+        assert "GITHUB_TOKEN" in self._set()
 
 
 # ---------------------------------------------------------------------------
@@ -766,10 +852,10 @@ class TestExecutorProxyIntegration:
             "KARAKEEP_API_KEY": "secret5",
             "CALDAV_URL": "https://dav.example.com",
         }
-        cred, clean = _split_credential_env(env)
+        cred, clean = _split_credential_env(env, _TEST_CREDENTIAL_SET)
 
         # Clean env should not have any credential vars
-        for var in _PROXY_CREDENTIAL_VARS:
+        for var in _TEST_CREDENTIAL_SET:
             assert var not in clean
 
         # All non-credential vars should remain

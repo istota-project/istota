@@ -286,6 +286,28 @@ def get_user_temp_dir(config: Config, user_id: str) -> Path:
     return config.temp_dir / user_id
 
 
+def discover_calendars_for_task(
+    task, config: Config,
+) -> list[tuple[str, str, bool]]:
+    """Best-effort CalDAV discovery for the task's user.
+
+    Returns ``[]`` when CalDAV is not configured, the server is
+    unreachable, or the user owns no calendars. Used by the LLM,
+    skill-task, and command-task code paths so manifest specs gated on
+    ``gate_has_discovered_calendars`` resolve consistently across all
+    three.
+    """
+    if not (config.caldav_url and config.caldav_username and config.caldav_password):
+        return []
+    try:
+        client = get_caldav_client(
+            config.caldav_url, config.caldav_username, config.caldav_password,
+        )
+        return get_calendars_for_user(client, task.user_id) or []
+    except Exception:
+        return []
+
+
 def _resolve_effort(task, config: Config) -> str:
     """Resolve the effort flag for a task.
 
@@ -381,83 +403,32 @@ def build_clean_env(config: Config) -> dict[str, str]:
 
 
 def build_stripped_env() -> dict[str, str]:
-    """Build os.environ minus credential vars. For heartbeat/cron commands."""
+    """Build os.environ minus credential vars. For heartbeat/cron commands.
+
+    Phase 1.4 of the unified credential resolution refactor: the master
+    Fernet key (``ISTOTA_SECRET_KEY``) is no longer preserved here. Skill
+    subprocesses that need per-user encrypted secrets get them
+    pre-resolved via the manifest ``env:`` blocks.
+    """
     return {
         k: v for k, v in os.environ.items()
-        if k in _STRIPPED_ENV_PRESERVE
-        or not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
+        if not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
     }
 
 
-# Env vars that match a strip pattern but must survive build_stripped_env().
-# Used by the cron command-task path (_execute_command_task). The interactive
-# task path uses build_clean_env() + the skill-proxy credential split — see
-# _PROXY_CREDENTIAL_VARS / _CREDENTIAL_SKILL_MAP below for ISTOTA_SECRET_KEY's
-# routing on that path.
-_STRIPPED_ENV_PRESERVE = frozenset({"ISTOTA_SECRET_KEY"})
-
-
-# Env vars that carry secrets and should be routed through the skill proxy.
-# Skill CLIs get these via subprocess env merge; developer shell scripts
-# (git credential helpers, API wrappers) fetch them via credential-fetch.
-_PROXY_CREDENTIAL_VARS = frozenset({
-    "CALDAV_PASSWORD",
-    "NC_PASS",
-    "SMTP_PASSWORD",
-    "IMAP_PASSWORD",
-    "KARAKEEP_API_KEY",
-    "GITLAB_TOKEN",
-    "GITHUB_TOKEN",
-    "GOOGLE_WORKSPACE_CLI_TOKEN",
-    "NTFY_TOKEN",
-    "NTFY_PASSWORD",
-    # Master key for the encrypted secrets table. Routed through the proxy so
-    # skill CLIs that resolve secrets at runtime (money's Monarch creds,
-    # feeds' Tumblr key) can call secrets_store.get_secret() — without it
-    # the call returns None and the credentials are silently invisible.
-    # Claude never sees this; _split_credential_env() strips it from the
-    # brain's env before the subprocess is spawned. (See ISSUE-082.)
-    "ISTOTA_SECRET_KEY",
-})
-
-
-# Maps each credential env var to the set of skills that need it.
-# Used to scope both credential-fetch responses and skill CLI env merging.
-_CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
-    "CALDAV_PASSWORD": frozenset({"calendar", "location"}),
-    "NC_PASS": frozenset({"nextcloud"}),
-    "SMTP_PASSWORD": frozenset({"email"}),
-    "IMAP_PASSWORD": frozenset({"email"}),
-    "KARAKEEP_API_KEY": frozenset({"bookmarks"}),
-    "GITLAB_TOKEN": frozenset({"developer"}),
-    "GITHUB_TOKEN": frozenset({"developer"}),
-    "GOOGLE_WORKSPACE_CLI_TOKEN": frozenset({"google_workspace"}),
-    "NTFY_TOKEN": frozenset({"ntfy"}),
-    "NTFY_PASSWORD": frozenset({"ntfy"}),
-    # money / feeds resolve their per-user secrets (Monarch creds, Tumblr
-    # key) at runtime via secrets_store.get_secret(). They need the master
-    # key in their subprocess env. Per-skill pre-extraction (the bookmarks
-    # pattern) is preferred for skills with a small fixed set of credentials
-    # — narrower blast radius — but money/feeds resolve dynamically and
-    # would otherwise drift.
-    "ISTOTA_SECRET_KEY": frozenset({"money", "feeds"}),
-}
-
-
-# Credentials that may be injected into a specific skill subprocess env (via
-# _CREDENTIAL_SKILL_MAP) but must never be returned by the proxy's
-# credential-lookup endpoint, and must not auto-authorize their mapped skills
-# in _authorized_skills_from_credentials.
+# Defense-in-depth: instance-wide credentials that must never be returned
+# by the proxy's credential-lookup endpoint, even if a buggy or hostile
+# setup_env hook accidentally injects them into the credential env.
 #
-# The other entries in _CREDENTIAL_SKILL_MAP are per-user signals — their
-# presence means "the user configured this resource," which is a legitimate
-# basis for keyword-miss safety net authorization. ISTOTA_SECRET_KEY is
-# instance-wide: it's always set on every host, so it isn't a "user has X
-# configured" signal at all. Letting it auto-authorize money/feeds means
-# they're authorized on every task; letting it flow through credential-fetch
-# means a compromised Claude can extract the master Fernet key directly via
-# `bash -c '.developer/credential-fetch ISTOTA_SECRET_KEY'`.
-_LOOKUP_DENIED_VARS = frozenset({"ISTOTA_SECRET_KEY"})
+# After Phase 1.4 the master Fernet key never enters any subprocess env;
+# manifests can only declare per-user secrets, and the trusted-side
+# resolver returns plaintext values. This frozenset closes the residual
+# hole of a setup_env hook doing
+# ``env["ISTOTA_SECRET_KEY"] = os.environ["ISTOTA_SECRET_KEY"]``.
+# ``derive_lookup_allowlist`` subtracts this set from its return value so
+# ``credential-fetch ISTOTA_SECRET_KEY`` is rejected by the proxy even if
+# the var sneaks into ``credential_env``.
+_PROXY_LOOKUP_BLOCKED = frozenset({"ISTOTA_SECRET_KEY"})
 
 
 # --- Network proxy allowlist ---
@@ -475,9 +446,15 @@ _PYPI_HOSTS = frozenset({
 
 def _build_network_allowlist(
     config: Config,
-    selected_skills: list[str],
+    authorized_skills: list[str],
 ) -> set[str]:
-    """Build per-task network allowlist from config and selected skills."""
+    """Build per-task network allowlist from config and authorized skills.
+
+    Phase 3: keyed on ``authorized_skills`` (the union of selected skills
+    and skills auto-authorized via credential presence) so a user with
+    GitLab tokens configured can reach gitlab.com even when ``developer``
+    wasn't selected — symmetric with credential authorization.
+    """
     hosts: set[str] = set(_DEFAULT_NETWORK_HOSTS)
 
     if config.security.network.allow_pypi:
@@ -486,7 +463,7 @@ def _build_network_allowlist(
     hosts.update(config.security.network.extra_hosts)
 
     # Developer skill: add git remote hosts from config
-    if "developer" in selected_skills and config.developer.enabled:
+    if "developer" in authorized_skills and config.developer.enabled:
         from urllib.parse import urlparse
 
         for url in [config.developer.gitlab_url, config.developer.github_url]:
@@ -504,7 +481,7 @@ def _build_network_allowlist(
                 hosts.add("api.github.com:443")
 
     # Google Workspace skill: Google API hosts
-    if "google_workspace" in selected_skills:
+    if "google_workspace" in authorized_skills:
         hosts.update({
             "oauth2.googleapis.com:443",
             "www.googleapis.com:443",
@@ -521,82 +498,129 @@ def _build_network_allowlist(
     return hosts
 
 
-def _allowed_credentials_for_skills(selected_skills: list[str]) -> set[str]:
-    """Return the set of credential env var names needed by selected skills."""
-    skills_set = set(selected_skills)
-    return {
-        var for var, allowed_skills in _CREDENTIAL_SKILL_MAP.items()
-        if skills_set & allowed_skills
-    }
+# --- Manifest-derived credential / authorization helpers (Phase 3) ---
 
 
-def _build_skill_credential_map(selected_skills: list[str]) -> dict[str, set[str]]:
-    """Return per-skill mapping: skill_name -> {credential var names it needs}."""
+def derive_credential_set(skill_index: dict) -> frozenset[str]:
+    """All sensitive env-var names declared by any skill manifest.
+
+    Replaces the hand-maintained ``_PROXY_CREDENTIAL_VARS`` constant.
+    Includes vars whose source is ``setup_env`` (the manifest declares
+    the var name and ``sensitive: true``; the actual value comes from the
+    skill's setup_env hook) so the var is split out of Claude's clean env
+    and routed through the proxy.
+    """
+    return frozenset(
+        spec.var
+        for meta in skill_index.values()
+        for spec in meta.env_specs
+        if spec.sensitive and spec.var
+    )
+
+
+def derive_authorized_skills(
+    selected_skills: list[str],
+    skill_index: dict,
+    ctx: object,
+) -> list[str]:
+    """Skills authorized for credential access this task.
+
+    A skill is authorized if EITHER:
+      (a) it was selected (Pass 1 / Pass 2 picked it), OR
+      (b) ANY of its sensitive EnvSpecs resolves successfully — the user
+          has at least one of its credentials configured.
+
+    Replaces ``_authorized_skills_from_credentials``. The auto-auth signal
+    is now manifest-derived: adding a credential to a skill's ``env:``
+    block is the only step needed to enroll it; no hand-maintained map.
+
+    Three design choices:
+
+    - ``any``, not ``all``. Multi-provider skills (e.g. ``developer`` —
+      GitLab token OR GitHub token) auto-authorize when one provider is
+      configured.
+    - No ``meta.cli`` gate. The ``developer`` skill is doc-only but
+      consumes its tokens via ``credential-fetch`` from helper scripts;
+      gating on ``cli=true`` would lock it out (regression of e675ed9).
+    - ``fallback_var`` does NOT contribute to authorization. An
+      operator-set EnvironmentFile fallback is an instance-wide signal
+      and would otherwise auto-authorize every user, defeating the
+      per-user privacy posture. Resolution passes
+      ``fallbacks_disabled=True``.
+    """
+    from .skills._env import _resolve_env_spec  # noqa: PLC0415
+
+    authorized: set[str] = set(selected_skills)
+    for name, meta in skill_index.items():
+        if name in authorized:
+            continue
+        sensitive_specs = [s for s in meta.env_specs if s.sensitive]
+        if not sensitive_specs:
+            continue
+        if any(
+            _resolve_env_spec(s, ctx, fallbacks_disabled=True)
+            for s in sensitive_specs
+        ):
+            authorized.add(name)
+    return sorted(authorized)
+
+
+def derive_skill_credential_map(
+    authorized_skills: list[str],
+    skill_index: dict,
+) -> dict[str, set[str]]:
+    """Per-skill: which sensitive env vars its manifest declares.
+
+    Replaces ``_build_skill_credential_map``. Used by the proxy to scope
+    credential injection: a skill CLI invocation only sees credentials
+    its own manifest declared.
+    """
     result: dict[str, set[str]] = {}
-    for skill in selected_skills:
-        creds = set()
-        for var, allowed_skills in _CREDENTIAL_SKILL_MAP.items():
-            if skill in allowed_skills:
-                creds.add(var)
+    for skill in authorized_skills:
+        meta = skill_index.get(skill)
+        if not meta:
+            continue
+        creds = {s.var for s in meta.env_specs if s.sensitive and s.var}
         if creds:
             result[skill] = creds
     return result
 
 
-def _split_credential_env(env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
-    """Split env into (credential_env, clean_env).
+def derive_lookup_allowlist(
+    authorized_skills: list[str],
+    skill_index: dict,
+) -> set[str]:
+    """Union of credentials any authorized skill may fetch via credential-fetch.
 
-    Returns credentials removed from the main env dict. The credential dict
-    is passed to the skill proxy; the clean dict goes to Claude's subprocess.
+    Replaces ``_allowed_credentials_for_skills``. Subtracts
+    ``_PROXY_LOOKUP_BLOCKED`` as a defense-in-depth hard-reject list
+    (today: ``ISTOTA_SECRET_KEY``).
     """
-    credential_env = {}
-    clean_env = {}
+    allowed: set[str] = set()
+    for creds in derive_skill_credential_map(authorized_skills, skill_index).values():
+        allowed |= creds
+    return allowed - _PROXY_LOOKUP_BLOCKED
+
+
+def _split_credential_env(
+    env: dict[str, str],
+    credential_set: frozenset[str] | set[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Split env into (credential_env, clean_env) using ``credential_set``.
+
+    Phase 3: ``credential_set`` is derived per-task from the loaded skill
+    index (``derive_credential_set(skill_index)``) instead of a
+    module-level constant. The credential dict is passed to the skill
+    proxy; the clean dict goes to Claude's subprocess.
+    """
+    credential_env: dict[str, str] = {}
+    clean_env: dict[str, str] = {}
     for k, v in env.items():
-        if k in _PROXY_CREDENTIAL_VARS:
+        if k in credential_set:
             credential_env[k] = v
         else:
             clean_env[k] = v
     return credential_env, clean_env
-
-
-def _authorized_skills_from_credentials(
-    skill_index: dict,
-    credential_env: dict[str, str],
-) -> list[str]:
-    """Skills authorized for credential access this task.
-
-    Decouples credential authorization from skill selection: a skill is
-    authorized if at least one of the credentials it would use is actually
-    present in the user's environment. Skill selection (Pass 1 + Pass 2)
-    still controls which docs go in the prompt; this controls what creds
-    can be requested at runtime.
-
-    Both CLI skills (cred injected into subprocess env via
-    skill_credential_map) and doc-only skills (cred consumed via
-    `credential-fetch` lookups from helper scripts the executor writes,
-    e.g. developer's git credential helper and gitlab-api wrapper) are
-    eligible. The cli=true gate that used to live here locked out
-    developer entirely.
-
-    The threat model is unchanged — a compromised Claude can only request
-    credentials for resources the user has actually configured. But it
-    eliminates the failure mode where keyword matching missed a skill the
-    user obviously needs (e.g. user has karakeep configured, prompt didn't
-    say "bookmark", `bookmarks` not selected, no KARAKEEP_API_KEY available).
-
-    Vars in _LOOKUP_DENIED_VARS (instance-wide, not per-user) don't count as
-    auto-authorization signals: they're set on every host regardless of which
-    resources the user configured.
-    """
-    authorized = set()
-    for skill_name in skill_index:
-        for var, allowed_skills in _CREDENTIAL_SKILL_MAP.items():
-            if var in _LOOKUP_DENIED_VARS:
-                continue
-            if skill_name in allowed_skills and var in credential_env:
-                authorized.add(skill_name)
-                break
-    return sorted(authorized)
 
 
 def build_allowed_tools(is_admin: bool, skill_names: list[str]) -> list[str]:
@@ -2026,18 +2050,7 @@ def execute_task(
             pass  # Graceful degradation
 
     # Auto-discover calendars for user
-    discovered_calendars = None
-    if config.caldav_url and config.caldav_username and config.caldav_password:
-        try:
-            caldav_client = get_caldav_client(
-                config.caldav_url,
-                config.caldav_username,
-                config.caldav_password,
-            )
-            discovered_calendars = get_calendars_for_user(caldav_client, task.user_id)
-        except Exception:
-            # Graceful degradation if CalDAV unavailable
-            pass
+    discovered_calendars = discover_calendars_for_task(task, config)
 
     # Auto-load recent dated memories if enabled
     dated_memories = None
@@ -2173,30 +2186,9 @@ def execute_task(
             "ISTOTA_TASK_ID": str(task.id),
             "ISTOTA_USER_ID": task.user_id,
             "ISTOTA_BOT_DIR_NAME": config.bot_dir_name,
-            # Nextcloud OCS API credentials
-            "NC_URL": config.nextcloud.url or "",
-            "NC_USER": config.nextcloud.username or "",
-            "NC_PASS": config.nextcloud.app_password or "",
             "ISTOTA_CONVERSATION_TOKEN": task.conversation_token or "",
             "ISTOTA_DEFERRED_DIR": str(user_temp_dir),
         })
-
-        # Master key for the encrypted secrets table. Listed in
-        # _PROXY_CREDENTIAL_VARS so _split_credential_env() routes it to the
-        # proxy and strips it from Claude's env. The proxy injects it only
-        # into skill subprocesses listed in
-        # _CREDENTIAL_SKILL_MAP[ISTOTA_SECRET_KEY] (money, feeds), which call
-        # secrets_store.get_secret() to decrypt their per-user credentials.
-        secret_key = os.environ.get("ISTOTA_SECRET_KEY", "")
-        if secret_key:
-            env["ISTOTA_SECRET_KEY"] = secret_key
-
-        # CalDAV credentials — only for users with discovered calendars
-        # to prevent leaking other users' calendar data (see ISSUE-015)
-        if discovered_calendars:
-            env["CALDAV_URL"] = config.caldav_url or ""
-            env["CALDAV_USERNAME"] = config.caldav_username or ""
-            env["CALDAV_PASSWORD"] = config.caldav_password or ""
 
         # Admin users get full DB and mount access; non-admin users get scoped paths
         if is_admin:
@@ -2212,200 +2204,6 @@ def execute_task(
         if config.browser.enabled:
             env["BROWSER_API_URL"] = config.browser.api_url
             env["BROWSER_VNC_URL"] = config.browser.vnc_url
-
-        # Email credentials for direct sending from Claude Code
-        if config.email.enabled:
-            env["SMTP_HOST"] = config.email.smtp_host
-            env["SMTP_PORT"] = str(config.email.smtp_port)
-            env["SMTP_USER"] = config.email.effective_smtp_user
-            env["SMTP_PASSWORD"] = config.email.effective_smtp_password
-            env["SMTP_FROM"] = config.email.bot_email
-            env["IMAP_HOST"] = config.email.imap_host
-            env["IMAP_PORT"] = str(config.email.imap_port)
-            env["IMAP_USER"] = config.email.imap_user
-            env["IMAP_PASSWORD"] = config.email.imap_password
-
-        # Karakeep bookmarks (per-user API credentials).
-        # Both endpoint and key come from the encrypted secrets table — the
-        # karakeep "resource" went away with the modules / connected
-        # services refactor. Skip env injection when either half is missing.
-        if user_config:
-            from . import secrets_store  # local import — avoids cycles at module load
-
-            base_url = secrets_store.get_secret(
-                config.db_path, task.user_id, "karakeep", "base_url",
-            )
-            api_key = secrets_store.get_secret(
-                config.db_path, task.user_id, "karakeep", "api_key",
-            )
-            if base_url and api_key:
-                env["KARAKEEP_BASE_URL"] = base_url
-                env["KARAKEEP_API_KEY"] = api_key
-
-        # Developer skill (git + GitLab/GitHub workflows)
-        # When the skill proxy is enabled, tokens are fetched at runtime via
-        # credential-fetch (a small Python script that queries the proxy socket).
-        # When disabled, tokens are read from env vars directly.
-        if config.developer.enabled and config.developer.repos_dir:
-            env["DEVELOPER_REPOS_DIR"] = config.developer.repos_dir
-            env["GITLAB_URL"] = config.developer.gitlab_url
-            env["GITHUB_URL"] = config.developer.github_url
-            if config.developer.gitlab_default_namespace:
-                env["GITLAB_DEFAULT_NAMESPACE"] = config.developer.gitlab_default_namespace
-            if config.developer.gitlab_reviewer_id:
-                env["GITLAB_REVIEWER_ID"] = config.developer.gitlab_reviewer_id
-            if config.developer.github_default_owner:
-                env["GITHUB_DEFAULT_OWNER"] = config.developer.github_default_owner
-            if config.developer.github_reviewer:
-                env["GITHUB_REVIEWER"] = config.developer.github_reviewer
-            if config.developer.author_credit:
-                env["DEVELOPER_AUTHOR_CREDIT"] = config.developer.author_credit
-
-            dev_bin = Path(user_temp_dir) / ".developer"
-            dev_bin.mkdir(parents=True, exist_ok=True)
-            git_config_index = 0
-            _use_proxy = config.security.skill_proxy_enabled
-
-            # Write credential-fetch helper when proxy is enabled.
-            # Shell scripts call this instead of reading env vars directly.
-            if _use_proxy:
-                cred_fetch = dev_bin / "credential-fetch"
-                cred_fetch.write_text(
-                    "#!/usr/bin/env python3\n"
-                    "import json, socket, sys\n"
-                    "import os\n"
-                    "sock_path = os.environ.get('ISTOTA_SKILL_PROXY_SOCK', '')\n"
-                    "if not sock_path:\n"
-                    "    print('ISTOTA_SKILL_PROXY_SOCK not set', file=sys.stderr)\n"
-                    "    sys.exit(1)\n"
-                    "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
-                    "s.connect(sock_path)\n"
-                    "s.sendall(json.dumps({'type': 'credential', 'name': sys.argv[1]}).encode() + b'\\n')\n"
-                    "d = b''\n"
-                    "while b'\\n' not in d:\n"
-                    "    c = s.recv(4096)\n"
-                    "    if not c: break\n"
-                    "    d += c\n"
-                    "s.close()\n"
-                    "r = json.loads(d)\n"
-                    "if 'error' in r:\n"
-                    "    print(r['error'], file=sys.stderr)\n"
-                    "    sys.exit(1)\n"
-                    "print(r.get('value', ''), end='')\n"
-                )
-                cred_fetch.chmod(0o700)
-                _cred_fetch_cmd = str(cred_fetch)
-
-            # Helper: token expression for shell scripts
-            def _token_expr(var_name: str) -> str:
-                if _use_proxy:
-                    return f"$({_cred_fetch_cmd} {var_name})"
-                return f"${var_name}"
-
-            if config.developer.gitlab_token:
-                env["GITLAB_TOKEN"] = config.developer.gitlab_token
-
-                # Git credential helper — git calls this automatically for HTTPS auth
-                git_cred = dev_bin / "git-credential-helper"
-                git_cred.write_text(
-                    "#!/bin/sh\n"
-                    '[ "$1" = "get" ] || exit 0\n'
-                    f"echo username={config.developer.gitlab_username}\n"
-                    f"echo password={_token_expr('GITLAB_TOKEN')}\n"
-                )
-                git_cred.chmod(0o700)
-                gitlab_host = config.developer.gitlab_url.rstrip("/")
-                env[f"GIT_CONFIG_KEY_{git_config_index}"] = f"credential.{gitlab_host}.helper"
-                env[f"GIT_CONFIG_VALUE_{git_config_index}"] = str(git_cred)
-                git_config_index += 1
-
-                # GitLab API wrapper — usage: gitlab-api METHOD /api/v4/... [curl args]
-                # Enforces an endpoint allowlist and strips query strings for matching.
-                api_script = dev_bin / "gitlab-api"
-                allowlist_cases = "\n".join(
-                    f"  {_allowlist_pattern_to_case(p)}) ;;"
-                    for p in config.developer.gitlab_api_allowlist
-                )
-                if _use_proxy:
-                    token_line = f'TOKEN=$({_cred_fetch_cmd} GITLAB_TOKEN)\n'
-                    curl_header = '"PRIVATE-TOKEN: $TOKEN"'
-                else:
-                    token_line = ""
-                    curl_header = '"PRIVATE-TOKEN: $GITLAB_TOKEN"'
-                api_script.write_text(
-                    "#!/bin/sh\n"
-                    'METHOD="$1"; shift\n'
-                    'ENDPOINT="$1"; shift\n'
-                    'CLEAN="${ENDPOINT%%\\?*}"\n'
-                    'case "$METHOD $CLEAN" in\n'
-                    f"{allowlist_cases}\n"
-                    '  *) printf \'{"error":"endpoint not allowed: %s %s"}\\n\' '
-                    '"$METHOD" "$CLEAN" >&2; exit 1 ;;\n'
-                    "esac\n"
-                    f'{token_line}'
-                    f'curl -s --header {curl_header} '
-                    f'--request "$METHOD" "{gitlab_host}$ENDPOINT" "$@"\n'
-                )
-                api_script.chmod(0o700)
-                env["GITLAB_API_CMD"] = str(api_script)
-
-            if config.developer.github_token:
-                env["GITHUB_TOKEN"] = config.developer.github_token
-
-                # Git credential helper for GitHub
-                gh_username = config.developer.github_username or "x-access-token"
-                gh_cred = dev_bin / "git-credential-helper-github"
-                gh_cred.write_text(
-                    "#!/bin/sh\n"
-                    '[ "$1" = "get" ] || exit 0\n'
-                    f"echo username={gh_username}\n"
-                    f"echo password={_token_expr('GITHUB_TOKEN')}\n"
-                )
-                gh_cred.chmod(0o700)
-                github_host = config.developer.github_url.rstrip("/")
-                env[f"GIT_CONFIG_KEY_{git_config_index}"] = f"credential.{github_host}.helper"
-                env[f"GIT_CONFIG_VALUE_{git_config_index}"] = str(gh_cred)
-                git_config_index += 1
-
-                # GitHub API wrapper — usage: github-api METHOD /endpoint [curl args]
-                # Enforces an endpoint allowlist and strips query strings for matching.
-                gh_api_script = dev_bin / "github-api"
-                gh_allowlist_cases = "\n".join(
-                    f"  {_allowlist_pattern_to_case(p)}) ;;"
-                    for p in config.developer.github_api_allowlist
-                )
-                # GitHub Enterprise uses {url}/api/v3, github.com uses api.github.com
-                gh_host_stripped = github_host.rstrip("/")
-                if "github.com" == gh_host_stripped.split("//")[-1]:
-                    gh_api_base = "https://api.github.com"
-                else:
-                    gh_api_base = f"{gh_host_stripped}/api/v3"
-                if _use_proxy:
-                    gh_token_line = f'TOKEN=$({_cred_fetch_cmd} GITHUB_TOKEN)\n'
-                    gh_curl_header = '"Authorization: Bearer $TOKEN"'
-                else:
-                    gh_token_line = ""
-                    gh_curl_header = '"Authorization: Bearer $GITHUB_TOKEN"'
-                gh_api_script.write_text(
-                    "#!/bin/sh\n"
-                    'METHOD="$1"; shift\n'
-                    'ENDPOINT="$1"; shift\n'
-                    'CLEAN="${ENDPOINT%%\\?*}"\n'
-                    'case "$METHOD $CLEAN" in\n'
-                    f"{gh_allowlist_cases}\n"
-                    '  *) printf \'{"error":"endpoint not allowed: %s %s"}\\n\' '
-                    '"$METHOD" "$CLEAN" >&2; exit 1 ;;\n'
-                    "esac\n"
-                    f'{gh_token_line}'
-                    f'curl -s --header {gh_curl_header} '
-                    f'--header "Accept: application/vnd.github+json" '
-                    f'--request "$METHOD" "{gh_api_base}$ENDPOINT" "$@"\n'
-                )
-                gh_api_script.chmod(0o700)
-                env["GITHUB_API_CMD"] = str(gh_api_script)
-
-            if git_config_index > 0:
-                env["GIT_CONFIG_COUNT"] = str(git_config_index)
 
         # Static website hosting
         if config.site.enabled and task:
@@ -2424,14 +2222,26 @@ def execute_task(
             user_config=user_config,
             user_temp_dir=Path(user_temp_dir),
             is_admin=is_admin,
+            discovered_calendars=list(discovered_calendars or []),
         )
-        skill_env = build_skill_env(selected_skills, skill_index, env_ctx)
+        # Phase 3: resolve manifest env vars for ``authorized_skills`` —
+        # the union of selected skills and skills auto-authorized via
+        # credential presence. ``derive_authorized_skills`` walks each
+        # skill's sensitive specs with ``fallbacks_disabled=True`` so
+        # operator-set EnvironmentFile fallbacks cannot fan out to per-
+        # user auto-authorization. Resolution itself (below) honors
+        # fallbacks for the value path.
+        authorized_skills = derive_authorized_skills(
+            selected_skills, skill_index, env_ctx,
+        )
+        skill_env = build_skill_env(authorized_skills, skill_index, env_ctx)
         # Declarative env vars don't override hardcoded ones
         for k, v in skill_env.items():
             if k not in env:
                 env[k] = v
-        # setup_env hooks (for complex skills like developer)
-        hook_env = dispatch_setup_env_hooks(selected_skills, skill_index, env_ctx)
+        # setup_env hooks self-gate; the dispatcher iterates the full
+        # skill_index regardless of the argument it's given.
+        hook_env = dispatch_setup_env_hooks(authorized_skills, skill_index, env_ctx)
         for k, v in hook_env.items():
             if k not in env:
                 env[k] = v
@@ -2442,7 +2252,11 @@ def execute_task(
         _proxy_sock = None
         if config.security.skill_proxy_enabled:
             from .skill_proxy import SkillProxy
-            credential_env, env = _split_credential_env(env)
+            # Phase 3: credential set is derived from the loaded skill
+            # index; no hand-maintained constant. Same for the per-skill
+            # credential map and the lookup-endpoint allowlist.
+            credential_set = derive_credential_set(skill_index)
+            credential_env, env = _split_credential_env(env, credential_set)
             if credential_env:
                 # Use /tmp for socket path to stay within AF_UNIX length limit (~104 chars).
                 # build_bwrap_cmd() bind-mounts this file into the sandbox.
@@ -2452,47 +2266,21 @@ def execute_task(
                 # its own DB.
                 _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{os.getpid()}-{task.id}.sock"
                 env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
-                # Credential authorization combines two signals:
-                #   1. Auto-authorization from credential presence — any CLI
-                #      skill whose per-user credentials are in the env is
-                #      authorized regardless of selection (keyword-miss
-                #      safety net).  Instance-wide vars (_LOOKUP_DENIED_VARS)
-                #      don't count here — they're not per-user signals.
-                #   2. Selection — any CLI skill picked by Pass 1 / Pass 2
-                #      gets its mapped credentials, including the master key
-                #      for money / feeds when they're actually selected.
-                # Threat model unchanged: per-user creds only exist for
-                # resources the user configured; selection still flows
-                # through the same Pass 1 / Pass 2 gates.
-                auto_authorized = _authorized_skills_from_credentials(
-                    skill_index, credential_env,
+                allowed_creds = derive_lookup_allowlist(
+                    authorized_skills, skill_index,
                 )
-                selected_cli_skills = [
-                    s for s in selected_skills
-                    if s in skill_index and skill_index[s].cli
-                ]
-                cred_skill_names = sorted(
-                    set(auto_authorized) | set(selected_cli_skills)
+                skill_cred_map = derive_skill_credential_map(
+                    authorized_skills, skill_index,
                 )
-                # Filter _LOOKUP_DENIED_VARS out of the lookup-endpoint allow
-                # list. They still flow through skill_credential_map, so the
-                # proxy can inject them into specific skill subprocess envs,
-                # but `credential-fetch ISTOTA_SECRET_KEY` from inside Claude
-                # gets rejected.
-                allowed_creds = (
-                    _allowed_credentials_for_skills(cred_skill_names)
-                    - _LOOKUP_DENIED_VARS
-                )
-                skill_cred_map = _build_skill_credential_map(cred_skill_names)
                 cli_skills = frozenset(
                     name for name, meta in skill_index.items() if meta.cli
                 )
                 logger.info(
                     "proxy_authorization task_id=%d selected=%d authorized=%d "
                     "selected_skills=%s authorized_skills=%s",
-                    task.id, len(selected_skills), len(cred_skill_names),
+                    task.id, len(selected_skills), len(authorized_skills),
                     ",".join(sorted(selected_skills)),
-                    ",".join(cred_skill_names),
+                    ",".join(authorized_skills),
                 )
                 _proxy_ctx = SkillProxy(
                     _proxy_sock, credential_env, env,
@@ -2500,7 +2288,7 @@ def execute_task(
                     allowed_credentials=allowed_creds,
                     skill_credential_map=skill_cred_map,
                     allowed_skills=cli_skills,
-                    authorized_skills=frozenset(cred_skill_names),
+                    authorized_skills=frozenset(authorized_skills),
                     task_id=task.id,
                 )
 
@@ -2511,7 +2299,7 @@ def execute_task(
         if config.security.network.enabled and config.security.sandbox_enabled:
             from .network_proxy import NetworkProxy, write_bridge_script
 
-            allowed_hosts = _build_network_allowlist(config, selected_skills)
+            allowed_hosts = _build_network_allowlist(config, authorized_skills)
 
             # Write bridge script to .developer/ (RO inside sandbox)
             dev_dir = Path(user_temp_dir) / ".developer"

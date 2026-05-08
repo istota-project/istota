@@ -3,6 +3,7 @@ name: nextcloud
 triggers: [share, sharing, shared, public link, unshare, nextcloud, permission, access]
 description: Nextcloud OCS API (sharing, user lookup)
 cli: true
+env: [{"var":"NC_URL","from":"config","config_path":"nextcloud.url"},{"var":"NC_USER","from":"config","config_path":"nextcloud.username"},{"var":"NC_PASS","from":"config","config_path":"nextcloud.app_password","sensitive":true}]
 ---
 Nextcloud OCS API for sharing and user lookup. Use the CLI tool for all sharing operations:
 

@@ -3,6 +3,7 @@ name: google_workspace
 triggers: [google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws]
 description: Google Workspace operations via gws CLI (Drive, Gmail, Docs, Sheets, Calendar, Chat)
 cli: true
+env: [{"var":"GOOGLE_WORKSPACE_CLI_TOKEN","from":"setup_env","sensitive":true},{"var":"GOOGLE_WORKSPACE_CLI_CONFIG_DIR","from":"setup_env"}]
 ---
 # Google Workspace skill
 

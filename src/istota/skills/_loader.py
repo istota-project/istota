@@ -44,6 +44,12 @@ def _parse_env_specs(data: list[dict]) -> list[EnvSpec]:
             user_path_fn=entry.get("user_path_fn", ""),
             service=entry.get("service", ""),
             key=entry.get("key", ""),
+            sensitive=bool(entry.get("sensitive", False)),
+            fallback_var=entry.get("fallback_var", ""),
+            gate_user_has_resource=entry.get("gate_user_has_resource", ""),
+            gate_has_discovered_calendars=bool(
+                entry.get("gate_has_discovered_calendars", False)
+            ),
         ))
     return specs
 

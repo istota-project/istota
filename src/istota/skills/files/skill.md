@@ -2,6 +2,7 @@
 name: files
 description: File operations with rclone
 always_include: true
+env: [{"var":"NC_URL","from":"config","config_path":"nextcloud.url"},{"var":"NC_USER","from":"config","config_path":"nextcloud.username"},{"var":"NC_PASS","from":"config","config_path":"nextcloud.app_password","sensitive":true}]
 ---
 Nextcloud files are mounted at `/srv/mount/nextcloud/content`. Use standard filesystem operations:
 

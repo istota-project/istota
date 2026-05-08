@@ -50,18 +50,37 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
         return {}
 
     monarch: dict[str, str] = {}
-    try:
-        from istota import secrets_store  # noqa: PLC0415
+    env_vars = {
+        "email": "MONARCH_EMAIL",
+        "password": "MONARCH_PASSWORD",
+        "session_token": "MONARCH_SESSION_TOKEN",
+    }
+    # Env-first: subprocess context (Phase 1.4+) gets these pre-resolved
+    # by build_skill_env. Trusted-daemon context falls back to the
+    # secrets_store. Master key is no longer in subprocess env, so the
+    # store fallback works only in the daemon process.
+    for sk, env_var in env_vars.items():
+        val = os.environ.get(env_var)
+        if val:
+            monarch[sk] = val
 
-        db_path = getattr(istota_config, "db_path", None)
-        if db_path is not None:
-            for sk in ("email", "password", "session_token"):
-                val = secrets_store.get_secret(db_path, user_id, "monarch", sk)
-                if val:
-                    monarch[sk] = val
-    except Exception:  # noqa: BLE001
-        # Best-effort: a missing/unavailable secrets store yields no creds.
-        pass
+    if len(monarch) < len(env_vars):
+        try:
+            from istota import secrets_store  # noqa: PLC0415
+
+            db_path = getattr(istota_config, "db_path", None)
+            if db_path is not None:
+                for sk in env_vars:
+                    if sk in monarch:
+                        continue
+                    val = secrets_store.get_secret(
+                        db_path, user_id, "monarch", sk,
+                    )
+                    if val:
+                        monarch[sk] = val
+        except Exception:  # noqa: BLE001
+            # Best-effort: a missing/unavailable secrets store yields no creds.
+            pass
 
     return {"monarch": monarch} if monarch else {}
 

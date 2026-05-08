@@ -48,6 +48,15 @@ class Task:
     model: str | None = None  # Per-task model override; empty/None = use config default
     effort: str | None = None  # Per-task effort override; empty/None = use config default
     talk_delivery_token: str | None = None  # Real Talk room for this task's notifications; NULL falls back to conversation_token
+    # Phase 1.3 (unified credential resolution refactor): skill-task
+    # dispatch. Set when the task should run a single CLI skill (e.g.
+    # auto-seeded `_module.feeds.run_scheduled`) without going through
+    # Claude. ``skill_args`` is a JSON-encoded ``list[str]`` of argv to
+    # the skill module. When ``skill`` is non-NULL the scheduler routes
+    # the task through ``_execute_skill_task`` instead of the prompt /
+    # command paths.
+    skill: str | None = None
+    skill_args: str | None = None
 
 
 @dataclass
@@ -134,6 +143,9 @@ class ScheduledJob:
     once: bool = False
     model: str | None = None  # Per-job model override; empty/None = use config default
     effort: str | None = None  # Per-job effort override; empty/None = use config default
+    # Phase 1.3 — skill-task dispatch (mirrors ``Task.skill`` / ``skill_args``).
+    skill: str | None = None
+    skill_args: str | None = None
 
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
@@ -157,6 +169,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("model", "TEXT"),
         ("effort", "TEXT"),
         ("talk_delivery_token", "TEXT"),
+        # Phase 1.3 — skill-task dispatch
+        ("skill", "TEXT"),
+        ("skill_args", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
@@ -184,6 +199,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("skip_log_channel", "INTEGER DEFAULT 0"),
         ("model", "TEXT"),
         ("effort", "TEXT"),
+        # Phase 1.3 — skill-task dispatch
+        ("skill", "TEXT"),
+        ("skill_args", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE scheduled_jobs ADD COLUMN {col} {col_type}")
@@ -339,6 +357,8 @@ def create_task(
     model: str | None = None,
     effort: str | None = None,
     talk_delivery_token: str | None = None,
+    skill: str | None = None,
+    skill_args: str | None = None,
 ) -> int:
     """Create a new task and return its ID."""
     # Guard against duplicate Talk messages (race between overlapping poll cycles)
@@ -362,8 +382,8 @@ def create_task(
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
             heartbeat_silent, skip_log_channel, scheduled_job_id, queue, model, effort,
-            talk_delivery_token
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            talk_delivery_token, skill, skill_args
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -388,6 +408,8 @@ def create_task(
             model or None,
             effort or None,
             talk_delivery_token,
+            skill,
+            skill_args,
         ),
     )
     task_id = cursor.fetchone()[0]
@@ -432,6 +454,8 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         model=row["model"] if "model" in row.keys() else None,
         effort=row["effort"] if "effort" in row.keys() else None,
         talk_delivery_token=row["talk_delivery_token"] if "talk_delivery_token" in row.keys() else None,
+        skill=row["skill"] if "skill" in row.keys() else None,
+        skill_args=row["skill_args"] if "skill_args" in row.keys() else None,
     )
 
 
@@ -2227,7 +2251,7 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once, model, effort
+               once, model, effort, skill, skill_args
         FROM scheduled_jobs
         WHERE enabled = 1
         """
@@ -2243,7 +2267,7 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once, model, effort
+               once, model, effort, skill, skill_args
         FROM scheduled_jobs
         WHERE user_id = ?
         ORDER BY name
@@ -2275,6 +2299,8 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
         once=bool(row["once"]) if "once" in row.keys() else False,
         model=row["model"] if "model" in row.keys() else None,
         effort=row["effort"] if "effort" in row.keys() else None,
+        skill=row["skill"] if "skill" in row.keys() else None,
+        skill_args=row["skill_args"] if "skill_args" in row.keys() else None,
     )
 
 
@@ -2339,7 +2365,7 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once, model, effort
+               once, model, effort, skill, skill_args
         FROM scheduled_jobs
         WHERE id = ?
         """,
@@ -2384,7 +2410,7 @@ def get_scheduled_job_by_name(
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once, model, effort
+               once, model, effort, skill, skill_args
         FROM scheduled_jobs
         WHERE user_id = ? AND name = ?
         """,
