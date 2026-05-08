@@ -325,11 +325,28 @@ class TestAuthorizedSkillsFromCredentials:
             "google_workspace", "location", "nextcloud",
         ]
 
-    def test_non_cli_skills_excluded(self):
-        """A skill without cli: true is never authorized even if its creds exist."""
-        idx = self._index(bookmarks=False)
+    def test_doc_only_skill_in_credential_map_is_authorized(self):
+        """Doc-only skills (no CLI) listed in _CREDENTIAL_SKILL_MAP must
+        still be authorized when their creds are present.
+
+        The developer skill is the canonical case: it has no CLI module,
+        but the executor writes helper scripts (git credential helper,
+        gitlab-api wrapper) that call `credential-fetch GITLAB_TOKEN`
+        through the proxy lookup endpoint. Gating that lookup on cli=true
+        broke git/GitLab/GitHub access entirely.
+        """
+        idx = self._index(developer=False)
+        result = _authorized_skills_from_credentials(idx, {
+            "GITLAB_TOKEN": "x", "GITHUB_TOKEN": "y",
+        })
+        assert result == ["developer"]
+
+    def test_doc_only_skill_not_in_credential_map_still_excluded(self):
+        """Doc-only skills with no entry in _CREDENTIAL_SKILL_MAP get
+        no authorization either way — there's nothing to authorize."""
+        idx = self._index(notes=False)
         result = _authorized_skills_from_credentials(idx, {"KARAKEEP_API_KEY": "x"})
-        assert result == []
+        assert "notes" not in result
 
 
 class TestProxyInformativeRejections:
