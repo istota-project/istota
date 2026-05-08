@@ -537,7 +537,10 @@ class TestDeveloperEnvVars:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
+            # Use the real bundled skills dir so the developer manifest +
+            # setup_env hook are loaded. Phase 2 moved env injection out of
+            # the executor and into manifests / hooks.
+            bundled_skills_dir=None,
             temp_dir=tmp_path / "temp",
             developer=dev,
             security=SecurityConfig(skill_proxy_enabled=False),
@@ -709,7 +712,9 @@ class TestGitHubEnvVars:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
+            # Use the real bundled skills dir so the developer manifest +
+            # setup_env hook are loaded.
+            bundled_skills_dir=None,
             temp_dir=tmp_path / "temp",
             developer=dev,
             security=SecurityConfig(skill_proxy_enabled=False),
@@ -793,6 +798,10 @@ class TestGitHubEnvVars:
 
     @patch("istota.executor.subprocess.run")
     def test_github_not_set_when_no_token(self, mock_run, tmp_path):
+        # Phase 3: build_skill_env runs over authorized_skills only. With
+        # neither GitLab nor GitHub tokens configured and ``developer``
+        # not selected, the skill is not authorized — none of its env
+        # vars (sensitive or not) flow into the subprocess env.
         config = self._make_config(tmp_path, github_token="")
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -805,8 +814,7 @@ class TestGitHubEnvVars:
         env = mock_run.call_args[1]["env"]
         assert "GITHUB_API_CMD" not in env
         assert "GITHUB_TOKEN" not in env
-        # URL and owner are still set (for clone URLs, etc.)
-        assert env["GITHUB_URL"] == "https://github.com"
+        assert "GITHUB_URL" not in env
 
     @patch("istota.executor.subprocess.run")
     def test_both_platforms_configured(self, mock_run, tmp_path):
@@ -896,7 +904,8 @@ class TestDeveloperProxyAwareScripts:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
+            # Real bundled skills dir so the developer setup_env hook fires.
+            bundled_skills_dir=None,
             temp_dir=tmp_path / "temp",
             developer=dev,
             security=SecurityConfig(
@@ -1187,7 +1196,8 @@ class TestKarakeepEnvVars:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
+            # Real bundled skills dir so the bookmarks manifest is loaded.
+            bundled_skills_dir=None,
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=mount_path,
             users=users,
@@ -1241,9 +1251,13 @@ class TestKarakeepEnvVars:
         assert "KARAKEEP_API_KEY" not in env
 
     @patch("istota.executor.subprocess.run")
-    def test_karakeep_env_vars_not_set_when_only_one_secret(self, mock_run, tmp_path, monkeypatch):
-        # Without both halves the env injection is skipped — half-configured
-        # credentials would just give a 403 from karakeep at runtime.
+    def test_karakeep_env_vars_partial_when_only_one_secret(self, mock_run, tmp_path, monkeypatch):
+        # Phase 3: ``bookmarks`` auto-authorizes only when its sensitive
+        # spec (``KARAKEEP_API_KEY``) resolves. With only ``base_url``
+        # configured and ``bookmarks`` not selected, the skill is not
+        # authorized and none of its env vars flow. The user-facing
+        # signal is "the half-configured user gets nothing" — a cleaner
+        # failure mode than the Phase 2 partial-env shape.
         from istota import secrets_store
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "x" * 64)
@@ -1608,7 +1622,9 @@ class TestCalDAVCredentialScoping:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
+            # Real bundled skills dir so the calendar manifest's
+            # gate_has_discovered_calendars CALDAV_* specs are loaded.
+            bundled_skills_dir=None,
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=mount_path,
             nextcloud=NextcloudConfig(
@@ -3291,7 +3307,8 @@ class TestSmtpFrom:
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
-            bundled_skills_dir=tmp_path / "_empty_bundled",
+            # Real bundled skills dir so the email manifest is loaded.
+            bundled_skills_dir=None,
             temp_dir=tmp_path / "temp",
             email=AppEmailConfig(
                 enabled=True,

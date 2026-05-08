@@ -16,16 +16,18 @@ from istota.config import (
 )
 from istota.executor import (
     _CREDENTIAL_ENV_PATTERNS,
-    _CREDENTIAL_SKILL_MAP,
-    _LOOKUP_DENIED_VARS,
-    _allowed_credentials_for_skills,
-    _authorized_skills_from_credentials,
-    _build_skill_credential_map,
+    _PROXY_LOOKUP_BLOCKED,
+    _split_credential_env,
     build_allowed_tools,
     build_clean_env,
     build_stripped_env,
+    derive_authorized_skills,
+    derive_credential_set,
+    derive_lookup_allowlist,
+    derive_skill_credential_map,
 )
-from istota.skills._types import SkillMeta
+from istota.skills._env import EnvContext
+from istota.skills._types import EnvSpec, SkillMeta
 
 
 class TestBuildCleanEnv:
@@ -170,17 +172,18 @@ class TestBuildStrippedEnv:
         assert env["LANG"] == "en_US.UTF-8"
         assert env["ISTOTA_TASK_ID"] == "42"
 
-    def test_preserves_istota_secret_key(self):
-        # ISTOTA_SECRET_KEY matches the SECRET strip pattern but must survive:
-        # module-skill subprocesses (feeds, money, location) need it to
-        # decrypt per-user credentials from the secrets table.
+    def test_strips_istota_secret_key(self):
+        # Phase 1.4 of the unified credential resolution refactor: the
+        # master Fernet key never enters any subprocess env. Per-user
+        # secrets are pre-resolved on the trusted side via skill manifest
+        # ``env: from: "secret"`` blocks and routed through the proxy.
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",
             "ISTOTA_SECRET_KEY": "a" * 64,
             "OTHER_SECRET": "should-be-stripped",
         }, clear=True):
             env = build_stripped_env()
-        assert env["ISTOTA_SECRET_KEY"] == "a" * 64
+        assert "ISTOTA_SECRET_KEY" not in env
         assert "OTHER_SECRET" not in env
 
 
@@ -275,166 +278,210 @@ class TestConfigEnvVarOverrides:
         assert config.security.skill_proxy_enabled is False
 
 
-class TestCredentialSkillScoping:
-    """Tests for per-skill credential scoping helpers."""
+def _bundled_skill_index():
+    """Load the real bundled skill manifests for credential-derivation tests."""
+    from istota.skills._loader import load_skill_index
+    return load_skill_index(Path("config/skills"), bundled_dir=None)
+
+
+def _ctx_with_config(config: Config) -> EnvContext:
+    """Minimal EnvContext for resolution tests."""
+    class _T:
+        user_id = "alice"
+    return EnvContext(
+        config=config,
+        task=_T(),
+        user_resources=[],
+        user_config=None,
+        user_temp_dir=Path("/tmp"),
+        is_admin=False,
+    )
+
+
+class TestDeriveSkillCredentialMap:
+    """Per-skill credential map derived from manifests."""
 
     def test_email_skills_get_email_credentials(self):
-        result = _allowed_credentials_for_skills(["email"])
-        assert result == {"SMTP_PASSWORD", "IMAP_PASSWORD"}
+        idx = _bundled_skill_index()
+        result = derive_skill_credential_map(["email"], idx)
+        assert result == {"email": {"SMTP_PASSWORD", "IMAP_PASSWORD"}}
 
     def test_developer_skills_get_developer_credentials(self):
-        result = _allowed_credentials_for_skills(["developer"])
-        assert result == {"GITLAB_TOKEN", "GITHUB_TOKEN"}
+        idx = _bundled_skill_index()
+        result = derive_skill_credential_map(["developer"], idx)
+        assert result == {"developer": {"GITLAB_TOKEN", "GITHUB_TOKEN"}}
 
     def test_calendar_gets_caldav_password(self):
-        result = _allowed_credentials_for_skills(["calendar"])
-        assert result == {"CALDAV_PASSWORD"}
+        idx = _bundled_skill_index()
+        result = derive_skill_credential_map(["calendar"], idx)
+        assert result == {"calendar": {"CALDAV_PASSWORD"}}
 
     def test_location_gets_caldav_password(self):
         """Location skill needs CALDAV_PASSWORD for attendance subcommand."""
-        result = _allowed_credentials_for_skills(["location"])
-        assert result == {"CALDAV_PASSWORD"}
+        idx = _bundled_skill_index()
+        result = derive_skill_credential_map(["location"], idx)
+        assert result == {"location": {"CALDAV_PASSWORD"}}
+
+    def test_no_creds_returns_empty(self):
+        idx = _bundled_skill_index()
+        result = derive_skill_credential_map(["browse", "markets"], idx)
+        assert result == {}
+
+    def test_empty_skill_list(self):
+        idx = _bundled_skill_index()
+        assert derive_skill_credential_map([], idx) == {}
+
+    def test_nextcloud_gets_nc_pass(self):
+        idx = _bundled_skill_index()
+        result = derive_skill_credential_map(["nextcloud"], idx)
+        assert "NC_PASS" in result["nextcloud"]
+
+    def test_bookmarks_gets_karakeep(self):
+        idx = _bundled_skill_index()
+        result = derive_skill_credential_map(["bookmarks"], idx)
+        assert result == {"bookmarks": {"KARAKEEP_API_KEY"}}
+
+    def test_money_gets_monarch_credentials(self):
+        """money's Monarch credentials are pre-resolved on the trusted
+        side via the manifest ``from: "secret"`` blocks."""
+        idx = _bundled_skill_index()
+        result = derive_skill_credential_map(["money"], idx)
+        assert result == {
+            "money": {"MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_SESSION_TOKEN"},
+        }
+
+    def test_feeds_gets_tumblr_key(self):
+        idx = _bundled_skill_index()
+        assert derive_skill_credential_map(["feeds"], idx) == {
+            "feeds": {"TUMBLR_API_KEY"},
+        }
+
+
+class TestDeriveLookupAllowlist:
+    """Lookup allowlist is the union of per-skill credentials, minus the
+    instance-wide block list."""
+
+    def test_email_skills_get_email_credentials(self):
+        idx = _bundled_skill_index()
+        assert derive_lookup_allowlist(["email"], idx) == {
+            "SMTP_PASSWORD", "IMAP_PASSWORD",
+        }
 
     def test_multiple_skills_union(self):
-        result = _allowed_credentials_for_skills(["email", "developer", "calendar"])
-        assert result == {
+        idx = _bundled_skill_index()
+        assert derive_lookup_allowlist(
+            ["email", "developer", "calendar"], idx,
+        ) == {
             "SMTP_PASSWORD", "IMAP_PASSWORD",
             "GITLAB_TOKEN", "GITHUB_TOKEN",
             "CALDAV_PASSWORD",
         }
 
     def test_skills_with_no_credentials(self):
-        result = _allowed_credentials_for_skills(["browse", "transcribe", "markets"])
-        assert result == set()
+        idx = _bundled_skill_index()
+        assert derive_lookup_allowlist(
+            ["browse", "transcribe", "markets"], idx,
+        ) == set()
 
-    def test_empty_skills_list(self):
-        result = _allowed_credentials_for_skills([])
-        assert result == set()
+    def test_master_key_blocked_even_if_injected(self):
+        """Defense-in-depth: a setup_env hook injecting ISTOTA_SECRET_KEY
+        cannot make it through the lookup endpoint. Build an ad-hoc skill
+        that declares the var sensitive and verify subtraction."""
+        idx = {
+            "evil": SkillMeta(
+                name="evil",
+                description="",
+                env_specs=[EnvSpec(
+                    var="ISTOTA_SECRET_KEY", source="setup_env",
+                    sensitive=True,
+                )],
+            ),
+        }
+        assert derive_lookup_allowlist(["evil"], idx) == set()
 
-    def test_nextcloud_gets_nc_pass(self):
-        result = _allowed_credentials_for_skills(["nextcloud"])
-        assert result == {"NC_PASS"}
 
-    def test_files_has_no_credentials(self):
-        """files skill is doc-only (no CLI), works via mount — no creds needed."""
-        result = _allowed_credentials_for_skills(["files"])
-        assert result == set()
+class TestSplitCredentialEnv:
+    """``_split_credential_env`` takes the credential set and partitions
+    the env dict."""
 
-    def test_bookmarks_gets_karakeep(self):
-        result = _allowed_credentials_for_skills(["bookmarks"])
-        assert result == {"KARAKEEP_API_KEY"}
-
-    def test_build_skill_credential_map_email(self):
-        result = _build_skill_credential_map(["email"])
-        assert result == {"email": {"SMTP_PASSWORD", "IMAP_PASSWORD"}}
-
-    def test_build_skill_credential_map_developer(self):
-        result = _build_skill_credential_map(["developer"])
-        assert result == {"developer": {"GITLAB_TOKEN", "GITHUB_TOKEN"}}
-
-    def test_build_skill_credential_map_no_creds(self):
-        result = _build_skill_credential_map(["browse", "markets"])
-        assert result == {}
-
-    def test_build_skill_credential_map_mixed(self):
-        result = _build_skill_credential_map(["email", "browse", "calendar"])
-        assert "email" in result
-        assert "calendar" in result
-        assert "browse" not in result
-
-    def test_credential_skill_map_covers_all_proxy_vars(self):
-        """Every var in _PROXY_CREDENTIAL_VARS should appear in _CREDENTIAL_SKILL_MAP."""
-        from istota.executor import _PROXY_CREDENTIAL_VARS
-        mapped_vars = set(_CREDENTIAL_SKILL_MAP.keys())
-        assert mapped_vars == _PROXY_CREDENTIAL_VARS
-
-    def test_money_and_feeds_get_master_secret_key(self):
-        """money and feeds resolve per-user secrets at runtime via
-        secrets_store.get_secret(); they need ISTOTA_SECRET_KEY in their
-        subprocess env. (Regression for ISSUE-082.)"""
-        assert _allowed_credentials_for_skills(["money"]) == {"ISTOTA_SECRET_KEY"}
-        assert _allowed_credentials_for_skills(["feeds"]) == {"ISTOTA_SECRET_KEY"}
-
-    def test_unrelated_skills_do_not_get_master_secret_key(self):
-        """Skills that don't decrypt secrets at runtime must not be
-        authorized for ISTOTA_SECRET_KEY — narrower blast radius."""
-        for skill in ["email", "calendar", "developer", "browse",
-                      "markets", "transcribe", "bookmarks"]:
-            assert "ISTOTA_SECRET_KEY" not in _allowed_credentials_for_skills([skill])
-
-    def test_split_credential_env_routes_master_key_to_proxy(self):
-        """ISTOTA_SECRET_KEY must be split out of Claude's clean env so the
-        brain subprocess never sees it; only the proxy injects it into
-        authorized skill subprocesses. (Regression for ISSUE-082.)"""
-        from istota.executor import _split_credential_env
+    def test_routes_pre_resolved_secrets(self):
         env = {
             "PATH": "/usr/bin",
             "HOME": "/tmp",
-            "ISTOTA_SECRET_KEY": "a" * 64,
+            "MONARCH_SESSION_TOKEN": "tok-abc",
+            "TUMBLR_API_KEY": "tk-xyz",
             "ISTOTA_TASK_ID": "42",
         }
-        credential_env, clean_env = _split_credential_env(env)
-        assert "ISTOTA_SECRET_KEY" not in clean_env
-        assert credential_env["ISTOTA_SECRET_KEY"] == "a" * 64
-        # Non-credential vars stay in clean env
+        credential_env, clean_env = _split_credential_env(
+            env, frozenset({"MONARCH_SESSION_TOKEN", "TUMBLR_API_KEY"}),
+        )
+        assert credential_env == {
+            "MONARCH_SESSION_TOKEN": "tok-abc",
+            "TUMBLR_API_KEY": "tk-xyz",
+        }
+        assert "MONARCH_SESSION_TOKEN" not in clean_env
+        assert "TUMBLR_API_KEY" not in clean_env
         assert clean_env["PATH"] == "/usr/bin"
         assert clean_env["ISTOTA_TASK_ID"] == "42"
 
+    def test_empty_credential_set_passes_env_through(self):
+        env = {"PATH": "/usr/bin", "TOKEN": "tok"}
+        credential_env, clean_env = _split_credential_env(env, frozenset())
+        assert credential_env == {}
+        assert clean_env == env
 
-class TestLookupDeniedVars:
-    """ISTOTA_SECRET_KEY may flow into specific skill subprocess envs but must
-    never be returned by the proxy's credential-lookup endpoint, and must not
-    auto-authorize its mapped skills via credential presence alone.
+
+class TestProxyLookupBlocked:
+    """ISTOTA_SECRET_KEY is on the defense-in-depth block list so a
+    setup_env hook injecting it cannot leak it via credential-fetch.
 
     (Regression for the c1055d0 follow-up: pre-patch, money/feeds were
-    auto-authorized on every host because the master key is set instance-wide,
-    and `bash -c '.developer/credential-fetch ISTOTA_SECRET_KEY'` returned the
-    raw Fernet key.)
+    auto-authorized on every host because the master key was set
+    instance-wide, and `.developer/credential-fetch ISTOTA_SECRET_KEY`
+    returned the raw Fernet key.)
     """
 
-    def test_master_key_in_lookup_denied_set(self):
-        assert "ISTOTA_SECRET_KEY" in _LOOKUP_DENIED_VARS
+    def test_master_key_in_block_set(self):
+        assert "ISTOTA_SECRET_KEY" in _PROXY_LOOKUP_BLOCKED
 
-    def _index(self):
-        return {
-            name: SkillMeta(name=name, description="", cli=True)
-            for name in (
-                "money", "feeds", "bookmarks", "email",
-                "calendar", "developer", "nextcloud",
-            )
-        }
 
-    def test_master_key_alone_does_not_auto_authorize_money_or_feeds(self):
-        """Instance-wide vars (master key) must not auto-authorize any
-        skill — the auto-authorization safety net is for per-user signals."""
-        result = _authorized_skills_from_credentials(
-            self._index(), {"ISTOTA_SECRET_KEY": "k" * 64},
-        )
-        assert "money" not in result
-        assert "feeds" not in result
-        assert result == []
+class TestPhase1MasterKeyEgress:
+    """Phase 1 acceptance: ISTOTA_SECRET_KEY must never enter any
+    subprocess env after Phase 1.4."""
 
-    def test_other_creds_still_auto_authorize_their_skills(self):
-        """Per-user creds keep auto-authorizing their skills even when the
-        master key is also present (the common production env shape)."""
-        result = _authorized_skills_from_credentials(self._index(), {
+    def test_credential_set_excludes_master_key(self):
+        """ISTOTA_SECRET_KEY is not declared sensitive on any skill
+        manifest, so it never appears in the derived credential set —
+        it stays on the clean env (the trusted daemon needs it)."""
+        idx = _bundled_skill_index()
+        assert "ISTOTA_SECRET_KEY" not in derive_credential_set(idx)
+
+    def test_skill_credential_map_excludes_master_key(self):
+        idx = _bundled_skill_index()
+        result = derive_skill_credential_map(list(idx.keys()), idx)
+        for creds in result.values():
+            assert "ISTOTA_SECRET_KEY" not in creds
+
+    def test_build_clean_env_excludes_master_key(self):
+        """Even with the master key in the parent env, Claude's clean env
+        omits it. (build_clean_env strictly allowlists what flows through.)"""
+        from istota.executor import build_clean_env
+        from istota.config import Config
+        with patch.dict(os.environ, {
             "ISTOTA_SECRET_KEY": "k" * 64,
-            "KARAKEEP_API_KEY": "x",
-            "GITLAB_TOKEN": "y",
-        })
-        assert sorted(result) == ["bookmarks", "developer"]
-        assert "money" not in result
-        assert "feeds" not in result
+            "PATH": "/usr/bin",
+        }, clear=True):
+            env = build_clean_env(Config())
+        assert "ISTOTA_SECRET_KEY" not in env
 
-    def test_money_still_gets_master_key_in_credential_map(self):
-        """Selection-driven authorization (executor unions selected CLI
-        skills into cred_skill_names) is still expected to give money/feeds
-        their master key via skill_credential_map.  This pins the underlying
-        per-skill mapping: when money is in cred_skill_names, its credential
-        set still includes the master key."""
-        assert _build_skill_credential_map(["money"]) == {
-            "money": {"ISTOTA_SECRET_KEY"},
-        }
-        assert _build_skill_credential_map(["feeds"]) == {
-            "feeds": {"ISTOTA_SECRET_KEY"},
-        }
+    def test_build_stripped_env_excludes_master_key(self):
+        """Phase 1.4 — build_stripped_env (heartbeat / command-task path)
+        also strips the master key. Operator-defined heartbeat shells that
+        called istota-skill feeds/money directly stop working; documented
+        in CHANGELOG."""
+        with patch.dict(os.environ, {
+            "ISTOTA_SECRET_KEY": "k" * 64,
+            "PATH": "/usr/bin",
+        }, clear=True):
+            env = build_stripped_env()
+        assert "ISTOTA_SECRET_KEY" not in env

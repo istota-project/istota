@@ -27,6 +27,8 @@ from istota.scheduler import (
     _post_policy_refusal_alert,
     _strip_action_prefix,
     _execute_command_task,
+    _execute_skill_task,
+    _purge_obsolete_skill_jobs,
     _talk_target_for_delivery,
     check_briefings,
     check_scheduled_jobs,
@@ -2303,9 +2305,9 @@ class TestExecuteCommandTask:
         assert success is True
 
     def test_non_admin_user_rejected(self, db_path, tmp_path):
-        """Defense in depth — even if a stale row sneaks past cron sync, the
-        executor must refuse to spawn the subprocess for non-admins because
-        build_stripped_env() preserves ISTOTA_SECRET_KEY."""
+        """Defense in depth — even if a stale row sneaks past cron sync,
+        the executor must refuse to spawn arbitrary user shell-command
+        tasks for non-admins."""
         config = self._make_config(db_path, tmp_path)
         config.admin_users = {"root"}
         task = self._make_task(user_id="alice", command="echo PWNED")
@@ -2392,6 +2394,10 @@ class TestExecuteCommandTask:
         assert job.consecutive_failures == 1
 
     def test_caldav_env_vars_passed(self, db_path, tmp_path):
+        """Command-tasks resolve NC_* and CALDAV_* through the same skill
+        manifest path the LLM uses. CalDAV vars are gated on
+        ``gate_has_discovered_calendars`` — mock discovery to return a
+        calendar so the gate fires positive. NC_* has no gate."""
         config = Config(
             db_path=db_path,
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="ncuser", app_password="ncpass"),
@@ -2404,10 +2410,310 @@ class TestExecuteCommandTask:
         task = self._make_task(
             command="echo $CALDAV_URL:$CALDAV_USERNAME:$NC_URL:$NC_USER",
         )
-        success, result = _execute_command_task(task, config)
+        with patch(
+            "istota.scheduler.discover_calendars_for_task",
+            return_value=[("primary", "https://cal.example.com/p", True)],
+        ):
+            success, result = _execute_command_task(task, config)
         assert success is True
         assert "https://nc.example.com/remote.php/dav" in result
         assert "ncuser" in result
+        assert "https://nc.example.com" in result  # NC_URL
+
+    def test_caldav_env_omitted_when_no_calendars_discovered(self, db_path, tmp_path):
+        """Gap 3 regression: ``gate_has_discovered_calendars`` on the
+        calendar manifest must drop CALDAV_* when the user owns no
+        calendars. NC_* is ungated and remains."""
+        config = Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example.com", username="ncuser", app_password="ncpass"),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+        (tmp_path / "temp").mkdir(exist_ok=True)
+        task = self._make_task(
+            command="echo caldav=[$CALDAV_URL]:nc=[$NC_URL]",
+        )
+        with patch(
+            "istota.scheduler.discover_calendars_for_task", return_value=[],
+        ):
+            success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "caldav=[]" in result
+        assert "nc=[https://nc.example.com]" in result
+
+    def test_master_key_never_in_command_env(self, db_path, tmp_path, monkeypatch):
+        """Phase 4 acceptance — the operator command-task path must not
+        propagate ``ISTOTA_SECRET_KEY`` to the subprocess. Phase 1.4
+        already removed direct injection; this regression pins the
+        property end-to-end in case a future commit re-introduces it via
+        ``build_stripped_env`` or otherwise."""
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 64)
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"alice"}
+        task = self._make_task(
+            user_id="alice",
+            command="echo key=[$ISTOTA_SECRET_KEY]",
+        )
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "key=[]" in result
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.3: TestExecuteSkillTask
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteSkillTask:
+    """Phase 1.3 of the unified credential resolution refactor: cron-driven
+    `_module.<name>.*` jobs run as `python -m istota.skills.<skill>`
+    subprocesses with credentials pre-resolved on the trusted side. The
+    master Fernet key never leaves the daemon."""
+
+    def _make_config(self, db_path, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        temp = tmp_path / "temp"
+        temp.mkdir(exist_ok=True)
+        return Config(
+            db_path=db_path,
+            nextcloud_mount_path=mount,
+            temp_dir=temp,
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+            users={"alice": UserConfig()},
+        )
+
+    def _task(self, **kwargs):
+        defaults = dict(
+            id=1,
+            status="running",
+            source_type="scheduled",
+            user_id="alice",
+            prompt="",
+        )
+        defaults.update(kwargs)
+        return db.Task(**defaults)
+
+    def test_unknown_skill_fails(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(skill="not_a_skill", skill_args='[]')
+        success, result = _execute_skill_task(task, config)
+        assert success is False
+        assert "unknown skill" in result.lower()
+
+    def test_invalid_skill_args_fails(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(skill="feeds", skill_args="not-json")
+        success, result = _execute_skill_task(task, config)
+        assert success is False
+        assert "invalid skill_args" in result.lower()
+
+    def test_non_admin_user_allowed(self, db_path, tmp_path):
+        """Skill-tasks run a trusted CLI, not arbitrary shell — no admin
+        gate. Verifies the function does not reject before reaching the
+        skill index check."""
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"root"}  # alice is not admin
+        task = self._task(
+            user_id="alice", skill="not_a_skill", skill_args='[]',
+        )
+        success, result = _execute_skill_task(task, config)
+        # Falls through to "unknown skill" rather than admin-gating.
+        assert success is False
+        assert "unknown skill" in result.lower()
+
+    def test_co_declared_credentials_resolve_for_skill_task(
+        self, db_path, tmp_path,
+    ):
+        """Gap 2 regression: env resolution covers the full skill_index,
+        not just the requested skill. NC_URL is declared on ``files``
+        (always_include) and ``nextcloud``; a feeds skill-task must still
+        receive it so any future co-declared credential reaches the
+        subprocess.
+
+        Asserts the env dict the dispatcher hands to ``subprocess.run``,
+        not the subprocess's own visible env — that decouples the test
+        from whether the feeds CLI happens to print it."""
+        config = Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(
+                url="https://nc.example.com",
+                username="ncuser",
+                app_password="ncpass",
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+            users={"alice": UserConfig()},
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+        (tmp_path / "temp").mkdir(exist_ok=True)
+        task = self._task(skill="feeds", skill_args='["--help"]')
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with patch("istota.scheduler.subprocess.run", side_effect=_fake_run):
+            with patch(
+                "istota.scheduler.discover_calendars_for_task",
+                return_value=[],
+            ):
+                success, _ = _execute_skill_task(task, config)
+        assert success is True
+        env = captured["env"]
+        assert env.get("NC_URL") == "https://nc.example.com"
+        assert env.get("NC_USER") == "ncuser"
+        assert env.get("FEEDS_USER") == "alice"
+
+    def test_caldav_env_resolved_when_calendars_discovered(
+        self, db_path, tmp_path,
+    ):
+        """Gap 1 regression: skill-tasks must populate
+        ``EnvContext.discovered_calendars`` so manifest specs gated on
+        ``gate_has_discovered_calendars`` (calendar / location) can
+        resolve."""
+        config = Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(
+                url="https://nc.example.com",
+                username="ncuser",
+                app_password="ncpass",
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+            users={"alice": UserConfig()},
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+        (tmp_path / "temp").mkdir(exist_ok=True)
+        task = self._task(skill="feeds", skill_args='["--help"]')
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with patch("istota.scheduler.subprocess.run", side_effect=_fake_run):
+            with patch(
+                "istota.scheduler.discover_calendars_for_task",
+                return_value=[("primary", "https://cal.example.com/p", True)],
+            ):
+                _execute_skill_task(task, config)
+        env = captured["env"]
+        assert "CALDAV_URL" in env
+        assert env["CALDAV_URL"] == "https://nc.example.com/remote.php/dav"
+        assert env["CALDAV_USERNAME"] == "ncuser"
+        assert env["CALDAV_PASSWORD"] == "ncpass"
+
+    def test_caldav_env_omitted_when_no_calendars_discovered(
+        self, db_path, tmp_path,
+    ):
+        """Negative case: empty discovery means CALDAV_* stays out of the
+        env (the gate's whole purpose)."""
+        config = Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(
+                url="https://nc.example.com",
+                username="ncuser",
+                app_password="ncpass",
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+            users={"alice": UserConfig()},
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+        (tmp_path / "temp").mkdir(exist_ok=True)
+        task = self._task(skill="feeds", skill_args='["--help"]')
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with patch("istota.scheduler.subprocess.run", side_effect=_fake_run):
+            with patch(
+                "istota.scheduler.discover_calendars_for_task",
+                return_value=[],
+            ):
+                _execute_skill_task(task, config)
+        env = captured["env"]
+        assert "CALDAV_URL" not in env
+        assert "CALDAV_PASSWORD" not in env
+
+
+class TestPurgeObsoleteSkillJobs:
+    def test_deletes_orphan_scheduled_job(self, tmp_path):
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "INSERT INTO scheduled_jobs (user_id, name, cron_expression, "
+            "prompt, skill, skill_args, enabled) VALUES "
+            "(?, ?, ?, '', ?, ?, 1)",
+            ("alice", "_module.feeds.run_scheduled", "*/5 * * * *",
+             "renamed_skill", '["run-scheduled"]'),
+        )
+        conn.commit()
+        # Skill index missing the renamed name
+        idx = {"feeds": object()}
+        _purge_obsolete_skill_jobs(conn, idx)
+        rows = conn.execute(
+            "SELECT 1 FROM scheduled_jobs WHERE user_id = ?", ("alice",),
+        ).fetchall()
+        assert rows == []
+
+    def test_marks_pending_orphan_task_failed(self, tmp_path):
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        task_id = db.create_task(
+            conn,
+            prompt="",
+            user_id="alice",
+            source_type="scheduled",
+            skill="renamed_skill",
+            skill_args='["run-scheduled"]',
+            queue="background",
+        )
+        conn.commit()
+        idx = {"feeds": object()}
+        _purge_obsolete_skill_jobs(conn, idx)
+        row = conn.execute(
+            "SELECT status, error FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        assert row[0] == "failed"
+        assert "unknown skill" in row[1]
+
+    def test_leaves_known_skill_alone(self, tmp_path):
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "INSERT INTO scheduled_jobs (user_id, name, cron_expression, "
+            "prompt, skill, skill_args, enabled) VALUES "
+            "(?, ?, ?, '', ?, ?, 1)",
+            ("alice", "_module.feeds.run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]'),
+        )
+        conn.commit()
+        idx = {"feeds": object()}
+        _purge_obsolete_skill_jobs(conn, idx)
+        rows = conn.execute(
+            "SELECT name FROM scheduled_jobs WHERE user_id = ?", ("alice",),
+        ).fetchall()
+        assert len(rows) == 1
 
 
 # ---------------------------------------------------------------------------

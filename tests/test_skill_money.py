@@ -53,13 +53,24 @@ class TestMoneySkillManifest:
         assert "money" not in selected
 
     def test_env_specs(self, tmp_path):
-        """The skill resolves UserContext in-process; only MONEY_USER is declarative."""
+        """MONEY_USER plus the Monarch credential triple."""
         from istota.skills._loader import load_skill_index
 
         index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
         meta = index["money"]
         env_vars = {spec.var for spec in meta.env_specs}
-        assert env_vars == {"MONEY_USER"}
+        assert env_vars == {
+            "MONEY_USER",
+            "MONARCH_EMAIL",
+            "MONARCH_PASSWORD",
+            "MONARCH_SESSION_TOKEN",
+        }
+        sensitive = {s.var for s in meta.env_specs if s.sensitive}
+        assert sensitive == {
+            "MONARCH_EMAIL",
+            "MONARCH_PASSWORD",
+            "MONARCH_SESSION_TOKEN",
+        }
 
 
 class TestRunInProcess:
@@ -275,17 +286,110 @@ class TestCommandDispatch:
 class TestExecutorIntegration:
     """The in-process skill needs neither an API-key proxy var nor a network host."""
 
-    def test_no_money_api_key_in_proxy_vars(self):
-        from istota.executor import _PROXY_CREDENTIAL_VARS
+    def _idx(self):
+        from istota.skills._loader import load_skill_index
+        from pathlib import Path
+        return load_skill_index(Path("config/skills"), bundled_dir=None)
 
+    def test_no_money_api_key_in_proxy_vars(self):
+        from istota.executor import derive_credential_set
+
+        creds = derive_credential_set(self._idx())
         # Legacy out-of-process names that used to live here.
-        assert "MONEYMAN_API_KEY" not in _PROXY_CREDENTIAL_VARS
-        assert "MONEY_API_KEY" not in _PROXY_CREDENTIAL_VARS
+        assert "MONEYMAN_API_KEY" not in creds
+        assert "MONEY_API_KEY" not in creds
 
     def test_no_money_api_key_in_credential_skill_map(self):
-        from istota.executor import _CREDENTIAL_SKILL_MAP
+        from istota.executor import derive_skill_credential_map
 
-        assert "MONEYMAN_API_KEY" not in _CREDENTIAL_SKILL_MAP
-        assert "MONEY_API_KEY" not in _CREDENTIAL_SKILL_MAP
+        idx = self._idx()
+        result = derive_skill_credential_map(list(idx.keys()), idx)
+        for creds in result.values():
+            assert "MONEYMAN_API_KEY" not in creds
+            assert "MONEY_API_KEY" not in creds
 
 
+
+
+class TestMoneyLoaderEnvFirst:
+    """Phase 1.2 — money loader reads env vars before consulting secrets_store.
+
+    Pinned because Phase 1.4 strips ISTOTA_SECRET_KEY from subprocess env;
+    once that lands the secrets_store fallback returns None silently and
+    cron module jobs would lose access to MONARCH_* without env-first
+    resolution.
+    """
+
+    def test_env_takes_precedence_over_store(self, tmp_path, monkeypatch):
+        from istota.config import Config, UserConfig
+        from istota.money._loader import load_user_secrets
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            users={"alice": UserConfig()},
+        )
+        monkeypatch.setenv("MONARCH_EMAIL", "env@example.com")
+        monkeypatch.setenv("MONARCH_PASSWORD", "env-pw")
+        monkeypatch.setenv("MONARCH_SESSION_TOKEN", "env-tok")
+        called = []
+        monkeypatch.setattr(
+            "istota.secrets_store.get_secret",
+            lambda *a, **kw: called.append(a) or "from-store",
+        )
+
+        result = load_user_secrets("alice", cfg)
+        assert result == {"monarch": {
+            "email": "env@example.com",
+            "password": "env-pw",
+            "session_token": "env-tok",
+        }}
+        assert called == []
+
+    def test_store_fallback_when_env_unset(self, tmp_path, monkeypatch):
+        """Daemon-context: env unset, store wins."""
+        from istota.config import Config, UserConfig
+        from istota.money._loader import load_user_secrets
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            users={"alice": UserConfig()},
+        )
+        for v in ("MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_SESSION_TOKEN"):
+            monkeypatch.delenv(v, raising=False)
+
+        def fake_get(db, u, s, k):
+            return {"email": "store@x", "password": "store-pw",
+                    "session_token": "store-tok"}.get(k)
+
+        monkeypatch.setattr("istota.secrets_store.get_secret", fake_get)
+        result = load_user_secrets("alice", cfg)
+        assert result == {"monarch": {
+            "email": "store@x",
+            "password": "store-pw",
+            "session_token": "store-tok",
+        }}
+
+    def test_partial_env_partial_store(self, tmp_path, monkeypatch):
+        """Mixed: env supplies some, store fills the rest. (Operator-only env
+        vars during the migration window combined with per-user store rows.)"""
+        from istota.config import Config, UserConfig
+        from istota.money._loader import load_user_secrets
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            users={"alice": UserConfig()},
+        )
+        monkeypatch.setenv("MONARCH_SESSION_TOKEN", "env-tok")
+        monkeypatch.delenv("MONARCH_EMAIL", raising=False)
+        monkeypatch.delenv("MONARCH_PASSWORD", raising=False)
+
+        def fake_get(db, u, s, k):
+            return {"email": "store@x", "password": "store-pw"}.get(k)
+
+        monkeypatch.setattr("istota.secrets_store.get_secret", fake_get)
+        result = load_user_secrets("alice", cfg)
+        assert result == {"monarch": {
+            "email": "store@x",
+            "password": "store-pw",
+            "session_token": "env-tok",
+        }}

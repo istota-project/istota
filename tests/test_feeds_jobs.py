@@ -61,12 +61,16 @@ class TestJobsForUser:
     def test_returns_empty_when_no_context(self):
         assert jobs_for_user(None, "alice") == []
 
-    def test_command_uses_istota_skill_with_feeds_user(self, tmp_path):
+    def test_dispatch_shape_is_skill_task(self, tmp_path):
+        """Phase 1.3: jobs are skill-tasks, not shell command-tasks. The
+        master Fernet key never enters the subprocess env on this path."""
+        import json
         ctx = synthesize_feeds_context("alice", tmp_path)
         jobs = jobs_for_user(ctx, "alice")
         for j in jobs:
-            assert "FEEDS_USER=alice" in j["command"]
-            assert "istota-skill feeds run-scheduled" in j["command"]
+            assert "command" not in j
+            assert j["skill"] == "feeds"
+            assert json.loads(j["skill_args"]) == ["run-scheduled"]
 
     def test_default_cron_every_5_min(self, tmp_path):
         ctx = synthesize_feeds_context("alice", tmp_path)
@@ -175,20 +179,23 @@ class TestSyncFeedsModuleJobs:
 
     def test_first_seed_queues_immediate_poll_task(self, tmp_path):
         # Newly provisioned users shouldn't have to wait up to 5 minutes for
-        # the first cron tick — first seed enqueues a one-shot command task.
+        # the first cron tick — first seed enqueues a one-shot skill task.
+        import json
         app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         rows = conn.execute(
-            "SELECT command, queue, source_type, skip_log_channel "
-            "FROM tasks WHERE user_id = ?",
+            "SELECT skill, skill_args, command, queue, source_type, "
+            "skip_log_channel FROM tasks WHERE user_id = ?",
             ("alice",),
         ).fetchall()
         assert len(rows) == 1
-        assert "istota-skill feeds run-scheduled" in rows[0][0]
-        assert rows[0][1] == "background"
-        assert rows[0][2] == "scheduled"
-        assert rows[0][3] == 1
+        assert rows[0][0] == "feeds"
+        assert json.loads(rows[0][1]) == ["run-scheduled"]
+        assert rows[0][2] is None
+        assert rows[0][3] == "background"
+        assert rows[0][4] == "scheduled"
+        assert rows[0][5] == 1
 
     def test_resync_does_not_requeue_immediate_poll(self, tmp_path):
         # Subsequent restarts must not flood the queue — the immediate-poll
@@ -203,23 +210,31 @@ class TestSyncFeedsModuleJobs:
         ).fetchone()[0]
         assert count == 1
 
-    def test_updates_when_command_changes(self, tmp_path):
+    def test_migrates_legacy_command_row_to_skill_shape(self, tmp_path):
+        """Pre-Phase-1.3 hosts have command-shape rows; the next sync
+        rewrites them to the skill/skill_args shape and clears command."""
+        import json
         app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
-        _sync_feeds_module_jobs(conn, app_config)
-        # Manually mangle the command to simulate drift
+        # Pre-seed a legacy command-shape row
         conn.execute(
-            "UPDATE scheduled_jobs SET command = 'OLD' WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel) "
+            "VALUES (?, ?, ?, '', ?, NULL, NULL, 1, 1)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "FEEDS_USER=alice istota-skill feeds run-scheduled"),
         )
         conn.commit()
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
-            "SELECT command FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            "SELECT command, skill, skill_args FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ?",
             ("alice", f"{MODULE_PREFIX}%"),
         ).fetchone()
-        assert row[0] != "OLD"
-        assert "FEEDS_USER=alice" in row[0]
+        assert row[0] is None
+        assert row[1] == "feeds"
+        assert json.loads(row[2]) == ["run-scheduled"]
 
 
 # ---------------------------------------------------------------------------

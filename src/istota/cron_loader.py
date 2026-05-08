@@ -1,7 +1,9 @@
 """Load scheduled job definitions from CRON.md files and sync to DB."""
 
+import json
 import logging
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,10 +24,71 @@ _MODULE_JOB_PREFIX = "_module."
 # don't reject — so a future addition doesn't silently break user CRON.md.
 _KNOWN_EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
 
+# Phase 4 — operator CRON.md ``command:`` rows that are pure
+# ``istota-skill <name> [args...]`` invocations are equivalent to
+# skill-tasks and rewritten on sync to bypass the admin gate. Anything
+# with shell metachars, env-var prefix, or non-trivial quoting stays a
+# command-task and keeps the admin gate.
+_SKILL_CLI_NAME = "istota-skill"
+_SHELL_METACHARS = frozenset("|&;<>(){}*?$`\\\n")
+
+
+def _parse_skill_command(command: str) -> tuple[str, str] | None:
+    """If ``command`` is a pure ``istota-skill <skill> [args...]`` invocation,
+    return ``(skill_name, skill_args_json)``. Otherwise ``None``.
+
+    "Pure" means: no shell metacharacters, ``istota-skill`` is the head
+    token (no env-var prefix like ``MONEY_USER=foo istota-skill ...``),
+    and the skill name is a plain identifier.
+    """
+    command = command.strip()
+    if not command:
+        return None
+    if any(ch in command for ch in _SHELL_METACHARS):
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if len(tokens) < 2 or tokens[0] != _SKILL_CLI_NAME:
+        return None
+    skill_name = tokens[1]
+    if not skill_name or not all(c.isalnum() or c == "_" for c in skill_name):
+        return None
+    args = tokens[2:]
+    return skill_name, json.dumps(args)
+
+
+def _resolve_job_dispatch(fj: "CronJob") -> tuple[str | None, str | None, str | None]:
+    """Resolve a CronJob's dispatch shape for the DB row.
+
+    Returns ``(command, skill, skill_args)`` — exactly one of ``command``
+    or ``skill`` is set (or all None for prompt-type rows). Operator
+    ``command:`` rows that match the pure ``istota-skill ...`` shape are
+    promoted to skill-task rows so they bypass the admin gate.
+    """
+    if not fj.command:
+        return None, None, None
+    parsed = _parse_skill_command(fj.command)
+    if parsed is None:
+        return fj.command, None, None
+    skill_name, skill_args = parsed
+    return None, skill_name, skill_args
+
 
 def fj_is_disallowed_command(job: "CronJob", is_admin: bool) -> bool:
-    """True if a CRON.md job is a non-admin command-type job."""
-    return bool(job.command) and not is_admin
+    """True if a CRON.md job is a non-admin command-type job.
+
+    Pure ``istota-skill <name> [args...]`` invocations are NOT
+    command-type — they auto-promote to skill-tasks at sync time, which
+    aren't admin-gated. Anything else with ``command:`` set requires
+    admin.
+    """
+    if not job.command:
+        return False
+    if _parse_skill_command(job.command) is not None:
+        return False
+    return not is_admin
 
 
 def _validate_model(name: str, user_id: str, model: str) -> None:
@@ -223,9 +286,8 @@ def sync_cron_jobs_to_db(
     - Existing jobs have definition fields updated (preserving state fields)
     - Orphaned DB jobs (not in file) are deleted
     - enabled logic: file is authoritative (symmetric: file false → DB 0, file true → DB 1)
-    - command-type jobs are rejected for non-admin users (the executor passes
-      ISTOTA_SECRET_KEY into the subprocess env so module-skill CLIs can
-      decrypt secrets; arbitrary user shell would inherit that)
+    - command-type jobs are rejected for non-admin users (arbitrary user
+      shell-command tasks must remain admin-only)
     """
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
     # Module-managed jobs are owned by their integration (see jobs.py in the
@@ -247,13 +309,16 @@ def sync_cron_jobs_to_db(
                 fj.name, user_id,
             )
             continue
+        cmd_val, skill_val, skill_args_val = _resolve_job_dispatch(fj)
         existing = db_by_name.get(fj.name)
         if existing:
             # Update definition fields, preserve state
             updates = {
                 "cron_expression": fj.cron,
                 "prompt": fj.prompt,
-                "command": fj.command or None,
+                "command": cmd_val,
+                "skill": skill_val,
+                "skill_args": skill_args_val,
                 "conversation_token": fj.room or None,
                 "output_target": fj.target or None,
                 "silent_unless_action": 1 if fj.silent_unless_action else 0,
@@ -275,6 +340,17 @@ def sync_cron_jobs_to_db(
                     fj.name, user_id, existing.cron_expression, fj.cron,
                 )
 
+            if (
+                skill_val
+                and existing.command
+                and not existing.skill
+            ):
+                logger.info(
+                    "Promoting CRON.md job '%s' (user %s) from command-task "
+                    "to skill-task: skill=%s",
+                    fj.name, user_id, skill_val,
+                )
+
             set_parts = [f"{k} = ?" for k in updates]
             values = list(updates.values())
             if cron_changed:
@@ -286,16 +362,23 @@ def sync_cron_jobs_to_db(
                 values,
             )
         else:
+            if skill_val:
+                logger.info(
+                    "Inserting CRON.md job '%s' (user %s) as skill-task: skill=%s",
+                    fj.name, user_id, skill_val,
+                )
             # Insert new job
             conn.execute(
                 """INSERT INTO scheduled_jobs
                    (user_id, name, cron_expression, prompt, command,
+                    skill, skill_args,
                     conversation_token, output_target, enabled, silent_unless_action,
                     skip_log_channel, once, model, effort)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id, fj.name, fj.cron, fj.prompt,
-                    fj.command or None,
+                    cmd_val,
+                    skill_val, skill_args_val,
                     fj.room or None, fj.target or None,
                     1 if fj.enabled else 0,
                     1 if fj.silent_unless_action else 0,
@@ -342,12 +425,26 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
     if not db_jobs:
         return False
 
-    file_jobs = [
-        CronJob(
+    file_jobs = []
+    for j in db_jobs:
+        # Round-trip skill-task rows back to the CRON.md ``command:`` shape
+        # operators write. ``sync_cron_jobs_to_db`` will re-parse and
+        # re-promote them on the next sync — idempotent.
+        cmd = j.command or ""
+        if not cmd and j.skill:
+            try:
+                args = json.loads(j.skill_args or "[]")
+            except (ValueError, TypeError):
+                args = []
+            if isinstance(args, list) and all(isinstance(a, str) for a in args):
+                cmd = " ".join(
+                    shlex.quote(t) for t in [_SKILL_CLI_NAME, j.skill, *args]
+                )
+        file_jobs.append(CronJob(
             name=j.name,
             cron=j.cron_expression,
             prompt=j.prompt,
-            command=j.command or "",
+            command=cmd,
             target=j.output_target or "",
             room=j.conversation_token or "",
             enabled=j.enabled,
@@ -356,9 +453,7 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             once=j.once,
             model=j.model or "",
             effort=j.effort or "",
-        )
-        for j in db_jobs
-    ]
+        ))
 
     cron_path.parent.mkdir(parents=True, exist_ok=True)
     cron_path.write_text(generate_cron_md(file_jobs))

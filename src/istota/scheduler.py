@@ -10,6 +10,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -30,7 +31,13 @@ from .skills.briefing import (
     strip_markdown as _strip_markdown,
 )
 from .config import Config, load_config
-from .executor import detect_malformed_result, execute_task, is_transient_api_error, parse_api_error
+from .executor import (
+    detect_malformed_result,
+    discover_calendars_for_task,
+    execute_task,
+    is_transient_api_error,
+    parse_api_error,
+)
 from .nextcloud_api import hydrate_user_configs
 from .notifications import send_notification
 from .talk import TalkClient, split_message
@@ -1442,6 +1449,158 @@ def _deliver_deferred_email_output(
         path.unlink(missing_ok=True)
 
 
+def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
+    """Delete scheduled_jobs rows AND fail pending tasks rows whose
+    ``skill`` field no longer exists in the skill index.
+
+    Symmetric with cron_loader's CRON.md-orphan deletion, but for
+    auto-seeded skill-task rows. The seeders re-create scheduled_jobs
+    rows for skills that still exist on the next tick. Pending tasks
+    rows are marked failed (not deleted) so audit / delivery state is
+    preserved; rename is operator-driven and rare.
+    """
+    cur = conn.execute(
+        "SELECT id, name, user_id, skill FROM scheduled_jobs "
+        "WHERE skill IS NOT NULL"
+    )
+    for row in cur.fetchall():
+        skill = row["skill"] if hasattr(row, "keys") else row[3]
+        if skill not in skill_index:
+            logger.warning(
+                "Removing obsolete skill scheduled_job '%s' user=%s skill=%s "
+                "(skill no longer exists in index)",
+                row["name"], row["user_id"], skill,
+            )
+            conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (row["id"],))
+
+    cur = conn.execute(
+        "SELECT id, user_id, skill FROM tasks "
+        "WHERE skill IS NOT NULL AND status IN ('pending', 'locked')"
+    )
+    for row in cur.fetchall():
+        skill = row["skill"] if hasattr(row, "keys") else row[2]
+        if skill not in skill_index:
+            logger.warning(
+                "Failing pending skill task #%d user=%s skill=%s "
+                "(skill no longer exists in index)",
+                row["id"], row["user_id"], skill,
+            )
+            conn.execute(
+                "UPDATE tasks SET status='failed', error=?, "
+                "completed_at=datetime('now'), updated_at=datetime('now') "
+                "WHERE id = ?",
+                (f"unknown skill: {skill}", row["id"]),
+            )
+    conn.commit()
+
+
+def _execute_skill_task(
+    task: db.Task, config: Config,
+) -> tuple[bool, str]:
+    """Execute an auto-seeded skill-task in a single subprocess.
+
+    Phase 1.3 of the unified credential resolution refactor: cron-driven
+    `_module.<name>.*` jobs run as ``istota.skills.<skill>`` subprocesses
+    with credentials pre-resolved via :func:`build_skill_env` on the
+    trusted side. The master Fernet key never leaves the daemon.
+
+    Skill-tasks are not arbitrary shell, so they are not admin-gated.
+    """
+    from .executor import build_clean_env, get_user_temp_dir
+    from .skills._env import EnvContext, build_skill_env
+    from .skills._loader import load_skill_index
+
+    skill_name = task.skill or ""
+    try:
+        skill_args = json.loads(task.skill_args or "[]")
+    except (json.JSONDecodeError, ValueError):
+        return False, f"invalid skill_args JSON: {task.skill_args!r}"
+    if not isinstance(skill_args, list) or not all(
+        isinstance(a, str) for a in skill_args
+    ):
+        return False, "skill_args must be a JSON list of strings"
+
+    skill_index = load_skill_index(
+        config.skills_dir, config.bundled_skills_dir,
+    )
+    if skill_name not in skill_index:
+        return False, f"unknown skill: {skill_name}"
+
+    timeout = config.scheduler.task_timeout_minutes * 60
+    user_temp_dir = get_user_temp_dir(config, task.user_id)
+    user_temp_dir.mkdir(parents=True, exist_ok=True)
+
+    with db.get_db(config.db_path) as conn:
+        user_resources = db.get_user_resources(conn, task.user_id)
+    user_cfg = config.get_user(task.user_id)
+
+    ctx = EnvContext(
+        config=config,
+        task=task,
+        user_resources=user_resources,
+        user_config=user_cfg,
+        user_temp_dir=user_temp_dir,
+        is_admin=config.is_admin(task.user_id),
+        discovered_calendars=discover_calendars_for_task(task, config),
+    )
+
+    env = build_clean_env(config)
+    env["ISTOTA_TASK_ID"] = str(task.id)
+    env["ISTOTA_USER_ID"] = task.user_id
+    env["ISTOTA_DEFERRED_DIR"] = str(user_temp_dir)
+    if config.config_path:
+        env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
+    if config.db_path:
+        env["ISTOTA_DB_PATH"] = str(config.db_path)
+    if config.nextcloud_mount_path:
+        env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path)
+    if task.conversation_token:
+        env["ISTOTA_CONVERSATION_TOKEN"] = task.conversation_token
+
+    # Resolve declarative env from the full skill_index — co-declared
+    # vars (e.g. NC_URL on both ``files`` and ``nextcloud``) must reach
+    # the subprocess regardless of which skill the task names. No proxy
+    # split: skill-tasks run a trusted CLI, not an LLM, so credentials
+    # flow directly. ``build_skill_env`` warns on real value conflicts.
+    env.update(build_skill_env(list(skill_index), skill_index, ctx))
+
+    cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(config.temp_dir),
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            False,
+            f"Skill timed out after {config.scheduler.task_timeout_minutes} minutes",
+        )
+    except Exception as e:
+        return False, f"Skill execution error: {e}"
+
+    if proc.returncode == 0:
+        result = proc.stdout.strip() if proc.stdout else "(no output)"
+        # Module-skill subprocesses (feeds, money) catch their own errors
+        # and print `{"status":"error","error":"…"}` while exiting 0;
+        # treat that envelope as failure (defense in depth — the facades
+        # also call sys.exit(1) on the error envelope).
+        if result.startswith("{"):
+            try:
+                parsed = json.loads(result)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict) and parsed.get("status") == "error":
+                err_msg = parsed.get("error") or "skill reported status=error"
+                return False, str(err_msg)
+        return True, result
+    error = proc.stderr.strip() if proc.stderr else f"Exit code {proc.returncode}"
+    return False, error
+
+
 def _execute_command_task(
     task: db.Task, config: Config,
 ) -> tuple[bool, str]:
@@ -1449,17 +1608,19 @@ def _execute_command_task(
 
     Returns (success, result) — same interface as execute_task().
     """
-    # Defense in depth — cron_loader rejects command-type CRON.md entries from
-    # non-admins at sync time, but a stale row could have been inserted by an
-    # earlier admin or a direct DB write. The build_stripped_env() below
-    # preserves ISTOTA_SECRET_KEY so module-skill CLIs can decrypt secrets;
-    # arbitrary user shell must never inherit it.
+    # Defense in depth — cron_loader rejects command-type CRON.md entries
+    # from non-admins at sync time, but a stale row could have been inserted
+    # by an earlier admin or a direct DB write. Auto-seeded module skill
+    # tasks (feeds, money) now go through ``_execute_skill_task``; only
+    # operator-defined CRON.md ``command:`` rows remain on this path.
     if not config.is_admin(task.user_id):
         return False, "command-type tasks are admin-only"
 
     timeout = config.scheduler.task_timeout_minutes * 60
 
-    from .executor import build_stripped_env
+    from .executor import build_stripped_env, get_user_temp_dir
+    from .skills._env import EnvContext, build_skill_env
+    from .skills._loader import load_skill_index
     env = build_stripped_env()
     env["ISTOTA_TASK_ID"] = str(task.id)
     env["ISTOTA_USER_ID"] = task.user_id
@@ -1475,20 +1636,30 @@ def _execute_command_task(
         env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path)
     if task.conversation_token:
         env["ISTOTA_CONVERSATION_TOKEN"] = task.conversation_token
-    # CalDAV credentials so command tasks can use the calendar skill
-    if config.caldav_url:
-        env["CALDAV_URL"] = config.caldav_url
-    if config.caldav_username:
-        env["CALDAV_USERNAME"] = config.caldav_username
-    if config.caldav_password:
-        env["CALDAV_PASSWORD"] = config.caldav_password
-    # Nextcloud OCS API credentials
-    if config.nextcloud.url:
-        env["NC_URL"] = config.nextcloud.url
-    if config.nextcloud.username:
-        env["NC_USER"] = config.nextcloud.username
-    if config.nextcloud.app_password:
-        env["NC_PASS"] = config.nextcloud.app_password
+
+    # Resolve credential / connection env vars from skill manifests
+    # (NC_URL/USER/PASS, CALDAV_*, etc.) instead of hardcoding them.
+    # Same trusted resolution path the skill-task dispatcher uses; the
+    # operator's command may invoke any istota-skill CLI, so we expose
+    # the union over the full skill_index. CalDAV vars are gated on
+    # discovered calendars to mirror the LLM path.
+    user_temp_dir = get_user_temp_dir(config, task.user_id)
+    user_temp_dir.mkdir(parents=True, exist_ok=True)
+    with db.get_db(config.db_path) as conn:
+        user_resources = db.get_user_resources(conn, task.user_id)
+    skill_index = load_skill_index(config.skills_dir, config.bundled_skills_dir)
+    ctx = EnvContext(
+        config=config,
+        task=task,
+        user_resources=user_resources,
+        user_config=config.get_user(task.user_id),
+        user_temp_dir=user_temp_dir,
+        is_admin=config.is_admin(task.user_id),
+        discovered_calendars=discover_calendars_for_task(task, config),
+    )
+    for k, v in build_skill_env(list(skill_index), skill_index, ctx).items():
+        if k not in env:
+            env[k] = v
     try:
         proc = subprocess.run(
             task.command,
@@ -1585,9 +1756,14 @@ def process_one_task(
             logger.debug("Removing stale email output file from prior execution of task %d", task.id)
             _stale.unlink(missing_ok=True)
 
-    # Command tasks skip Talk ack, attachment download, and resource loading
+    # Command and skill tasks skip Talk ack, attachment download, and
+    # resource loading (cron-driven, no live user behind a Talk session).
     progress_callback = None
-    if task.command:
+    if task.skill:
+        success, result = _execute_skill_task(task, config)
+        actions_taken = None
+        execution_trace = None
+    elif task.command:
         success, result = _execute_command_task(task, config)
         actions_taken = None
         execution_trace = None
@@ -2898,7 +3074,8 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
         wanted_by_name = {j["name"]: j for j in wanted}
 
         existing_rows = list(conn.execute(
-            "SELECT id, name, cron_expression, command, skip_log_channel "
+            "SELECT id, name, cron_expression, command, skill, skill_args, "
+            "skip_log_channel "
             "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             (user_id, f"{MODULE_PREFIX}%"),
         ))
@@ -2909,10 +3086,10 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
             if row is None:
                 conn.execute(
                     "INSERT INTO scheduled_jobs "
-                    "(user_id, name, cron_expression, prompt, command, enabled, "
-                    "skip_log_channel) "
-                    "VALUES (?, ?, ?, '', ?, 1, 1)",
-                    (user_id, name, j["cron"], j["command"]),
+                    "(user_id, name, cron_expression, prompt, command, "
+                    "skill, skill_args, enabled, skip_log_channel) "
+                    "VALUES (?, ?, ?, '', NULL, ?, ?, 1, 1)",
+                    (user_id, name, j["cron"], j["skill"], j["skill_args"]),
                 )
                 logger.info(
                     "Seeded module job '%s' for user %s", name, user_id,
@@ -2920,8 +3097,10 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
             else:
                 drift = (
                     row[2] != j["cron"]
-                    or row[3] != j["command"]
-                    or not bool(row[4])
+                    or row[3] is not None  # legacy command shape — migrate
+                    or row[4] != j["skill"]
+                    or row[5] != j["skill_args"]
+                    or not bool(row[6])
                 )
                 if drift:
                     # Don't bump last_run_at here — backfilling skip_log_channel
@@ -2929,10 +3108,10 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
                     # run by one full cron interval (up to 24h for daily jobs).
                     conn.execute(
                         "UPDATE scheduled_jobs "
-                        "SET cron_expression = ?, command = ?, "
-                        "skip_log_channel = 1 "
+                        "SET cron_expression = ?, command = NULL, "
+                        "skill = ?, skill_args = ?, skip_log_channel = 1 "
                         "WHERE id = ?",
-                        (j["cron"], j["command"], row[0]),
+                        (j["cron"], j["skill"], j["skill_args"], row[0]),
                     )
                     logger.info(
                         "Updated module job '%s' for user %s", name, user_id,
@@ -2985,7 +3164,8 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
         wanted_by_name = {j["name"]: j for j in wanted}
 
         existing_rows = list(conn.execute(
-            "SELECT id, name, cron_expression, command, skip_log_channel "
+            "SELECT id, name, cron_expression, command, skill, skill_args, "
+            "skip_log_channel "
             "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             (user_id, f"{MODULE_PREFIX}%"),
         ))
@@ -2996,10 +3176,10 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
             if row is None:
                 conn.execute(
                     "INSERT INTO scheduled_jobs "
-                    "(user_id, name, cron_expression, prompt, command, enabled, "
-                    "skip_log_channel) "
-                    "VALUES (?, ?, ?, '', ?, 1, 1)",
-                    (user_id, name, j["cron"], j["command"]),
+                    "(user_id, name, cron_expression, prompt, command, "
+                    "skill, skill_args, enabled, skip_log_channel) "
+                    "VALUES (?, ?, ?, '', NULL, ?, ?, 1, 1)",
+                    (user_id, name, j["cron"], j["skill"], j["skill_args"]),
                 )
                 logger.info(
                     "Seeded module job '%s' for user %s", name, user_id,
@@ -3015,7 +3195,8 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
                         source_type="scheduled",
                         priority=5,
                         skip_log_channel=True,
-                        command=j["command"],
+                        skill=j["skill"],
+                        skill_args=j["skill_args"],
                         queue="background",
                     )
                     logger.info(
@@ -3025,8 +3206,10 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
             else:
                 drift = (
                     row[2] != j["cron"]
-                    or row[3] != j["command"]
-                    or not bool(row[4])
+                    or row[3] is not None  # legacy command shape — migrate
+                    or row[4] != j["skill"]
+                    or row[5] != j["skill_args"]
+                    or not bool(row[6])
                 )
                 if drift:
                     # Don't bump last_run_at here — backfilling skip_log_channel
@@ -3034,10 +3217,10 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
                     # run by one full cron interval (up to 24h for daily jobs).
                     conn.execute(
                         "UPDATE scheduled_jobs "
-                        "SET cron_expression = ?, command = ?, "
-                        "skip_log_channel = 1 "
+                        "SET cron_expression = ?, command = NULL, "
+                        "skill = ?, skill_args = ?, skip_log_channel = 1 "
                         "WHERE id = ?",
-                        (j["cron"], j["command"], row[0]),
+                        (j["cron"], j["skill"], j["skill_args"], row[0]),
                     )
                     logger.info(
                         "Updated module job '%s' for user %s", name, user_id,
@@ -3143,6 +3326,8 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     skip_log_channel=job.skip_log_channel,
                     scheduled_job_id=job.id,
                     command=job.command,
+                    skill=job.skill,
+                    skill_args=job.skill_args,
                     queue="background",
                     model=job.model or None,
                     effort=job.effort or None,
@@ -3403,6 +3588,19 @@ def run_daemon(config: Config) -> None:
         _apply_user_briefings(config)
     except Exception as e:  # noqa: BLE001
         logger.warning("user_briefings migration skipped: %s", e)
+
+    # Phase 1.3: purge orphan skill scheduled_jobs / pending skill tasks
+    # whose skill name no longer exists in the index (e.g. operator
+    # renamed `feeds` → `feed_reader`). Runs once per startup; the
+    # seeders re-populate fresh rows on the next sync tick.
+    try:
+        from .skills._loader import load_skill_index as _lsi  # noqa: PLC0415
+
+        _idx = _lsi(config.skills_dir, config.bundled_skills_dir)
+        with db.get_db(config.db_path) as conn:
+            _purge_obsolete_skill_jobs(conn, _idx)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Skill-job purge skipped: %s", e)
 
     # Start Talk polling in background thread so it runs independently of task processing
     if config.talk.enabled:

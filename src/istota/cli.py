@@ -153,9 +153,21 @@ def cmd_list(args):
         return
 
     for t in tasks:
-        prompt_preview = t.prompt[:60] + "..." if len(t.prompt) > 60 else t.prompt
-        prompt_preview = prompt_preview.replace("\n", " ")
-        print(f"[{t.id}] {t.status:20} {t.user_id:15} {prompt_preview}")
+        # Skill-tasks and command-tasks don't have a prompt; fall back to
+        # whichever shape was actually populated so the operator sees what
+        # ran. Mirrored in cmd_show.
+        if t.prompt:
+            label = t.prompt
+        elif t.skill:
+            args_label = (t.skill_args or "").strip()
+            label = f"<skill:{t.skill}> {args_label}".rstrip()
+        elif t.command:
+            label = f"<cmd> {t.command}"
+        else:
+            label = ""
+        preview = label[:60] + "..." if len(label) > 60 else label
+        preview = preview.replace("\n", " ")
+        print(f"[{t.id}] {t.status:20} {t.user_id:15} {preview}")
 
 
 def cmd_show(args):
@@ -176,7 +188,14 @@ def cmd_show(args):
     print(f"Source: {task.source_type}")
     print(f"Created: {task.created_at}")
     print(f"Attempts: {task.attempt_count}/{task.max_attempts}")
-    print(f"\nPrompt:\n{task.prompt}")
+    if task.prompt:
+        print(f"\nPrompt:\n{task.prompt}")
+    elif task.skill:
+        print(f"\nSkill: {task.skill}")
+        if task.skill_args:
+            print(f"Skill args: {task.skill_args}")
+    elif task.command:
+        print(f"\nCommand:\n{task.command}")
 
     if task.result:
         print(f"\nResult:\n{task.result}")

@@ -3,7 +3,7 @@ name: money
 triggers: [accounting, ledger, beancount, invoice, invoicing, expense, transaction, balance, tax, wash sale, bookkeeping, finances, billing, receivable, work log, work entry, monarch, sync-monarch, money, moneyman]
 description: Accounting operations (ledger, invoicing, transactions, work log) — runs in-process via the vendored money package
 cli: true
-env: [{"var":"MONEY_USER","from":"user_id"}]
+env: [{"var":"MONEY_USER","from":"user_id"},{"var":"MONARCH_EMAIL","from":"secret","service":"monarch","key":"email","sensitive":true,"fallback_var":"MONARCH_EMAIL"},{"var":"MONARCH_PASSWORD","from":"secret","service":"monarch","key":"password","sensitive":true,"fallback_var":"MONARCH_PASSWORD"},{"var":"MONARCH_SESSION_TOKEN","from":"secret","service":"monarch","key":"session_token","sensitive":true,"fallback_var":"MONARCH_SESSION_TOKEN"}]
 ---
 # Money Accounting Operations
 

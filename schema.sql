@@ -79,6 +79,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- email-source tasks. NULL falls back to conversation_token at delivery time.
     talk_delivery_token TEXT,
 
+    -- Skill-task dispatch (Phase 1.3 of unified credential resolution).
+    -- When skill is non-NULL the scheduler runs `python -m istota.skills.<skill>`
+    -- with skill_args (JSON list[str]) and credentials pre-resolved on the
+    -- trusted side. Mutually exclusive with prompt and command.
+    skill TEXT,
+    skill_args TEXT,
+
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
 );
 
@@ -209,6 +216,9 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     skip_log_channel INTEGER DEFAULT 0,     -- Suppress log channel output for tasks from this job
     model TEXT,                             -- Per-job model override; empty = use config default
     effort TEXT,                            -- Per-job effort override; empty = use config default
+    -- Skill-task dispatch (Phase 1.3). Mutually exclusive with command.
+    skill TEXT,
+    skill_args TEXT,
     UNIQUE(user_id, name)
 );
 

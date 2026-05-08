@@ -144,24 +144,17 @@ class TestJobsForUser:
         jobs = jobs_for_user(ctx.users["alice"], "alice")
         assert jobs == []
 
-    def test_command_uses_istota_skill_with_money_user(self, tmp_path):
+    def test_dispatch_shape_is_skill_task(self, tmp_path):
+        """Phase 1.3: jobs are skill-tasks, not shell command-tasks."""
+        import json
         from istota.money.cli import load_context
         cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
         ctx = load_context(str(cfg))
         jobs = jobs_for_user(ctx.users["alice"], "alice")
         for j in jobs:
-            assert "MONEY_USER=alice" in j["command"]
-            assert "istota-skill money" in j["command"]
-
-    def test_no_secrets_env_in_command(self, tmp_path):
-        # Credentials live on the user's resource entry now; the cron command
-        # does not need MONEY_SECRETS_FILE indirection.
-        from istota.money.cli import load_context
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], "alice")
-        for j in jobs:
-            assert "MONEY_SECRETS_FILE" not in j["command"]
+            assert "command" not in j
+            assert j["skill"] == "money"
+            assert json.loads(j["skill_args"]) == ["run-scheduled"]
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +281,8 @@ class TestSyncMoneyModuleJobs:
         # Pre-fix rows have skip_log_channel=0 and should flip to 1 on the
         # next sync. Critically, backfilling must NOT bump last_run_at — for
         # a daily money job that would mean losing one whole day's run.
+        # Phase 1.3 also migrates the legacy command shape to skill/skill_args.
+        import json
         mount = tmp_path / "mount"
         _make_workspace(mount, "alice", with_invoicing=True, with_monarch=True)
         app_config = _make_app_config(tmp_path, ["alice"], mount=mount)
@@ -295,9 +290,9 @@ class TestSyncMoneyModuleJobs:
         original_last_run = "2026-05-03 08:00:01"
         conn.execute(
             "INSERT INTO scheduled_jobs "
-            "(user_id, name, cron_expression, prompt, command, enabled, "
-            "skip_log_channel, last_run_at) "
-            "VALUES (?, ?, ?, '', ?, 1, 0, ?)",
+            "(user_id, name, cron_expression, prompt, command, "
+            "skill, skill_args, enabled, skip_log_channel, last_run_at) "
+            "VALUES (?, ?, ?, '', ?, NULL, NULL, 1, 0, ?)",
             ("alice", f"{MODULE_PREFIX}run_scheduled", "0 8 * * *",
              "MONEY_USER=alice istota-skill money run-scheduled",
              original_last_run),
@@ -305,12 +300,15 @@ class TestSyncMoneyModuleJobs:
         conn.commit()
         _sync_money_module_jobs(conn, app_config)
         row = conn.execute(
-            "SELECT skip_log_channel, last_run_at FROM scheduled_jobs "
-            "WHERE user_id = ? AND name LIKE ?",
+            "SELECT skip_log_channel, last_run_at, command, skill, skill_args "
+            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             ("alice", f"{MODULE_PREFIX}%"),
         ).fetchone()
         assert row[0] == 1
         assert row[1] == original_last_run
+        assert row[2] is None
+        assert row[3] == "money"
+        assert json.loads(row[4]) == ["run-scheduled"]
 
 
 # ---------------------------------------------------------------------------

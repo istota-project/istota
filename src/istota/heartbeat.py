@@ -658,9 +658,8 @@ def run_check(
             message=f"Unknown check type: {check.type}",
         )
 
-    # _check_shell_command pulls build_stripped_env() which preserves
-    # ISTOTA_SECRET_KEY so module-skill CLIs can decrypt secrets; non-admin
-    # arbitrary shell must never inherit it.
+    # _check_shell_command pulls build_stripped_env(); non-admins must
+    # not be able to run arbitrary shell.
     if check.type == "shell-command" and not config.is_admin(user_id):
         return CheckResult(
             healthy=False,

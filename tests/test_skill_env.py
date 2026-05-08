@@ -468,3 +468,335 @@ class TestResourceConfigExtra:
         user_data = {"resources": []}
         uc = _parse_user_data(user_data, "test_user")
         assert uc.resources == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — manifest migration regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestWhenAcceptsList:
+    """Phase 2.5: ``when`` accepts a list of paths (all must be truthy).
+
+    Required for the developer manifest, which must gate tokens on BOTH
+    ``developer.enabled`` AND ``developer.gitlab_token`` — neither alone is
+    sufficient, and ``when`` was previously a single string.
+    """
+
+    def test_list_when_all_truthy_resolves(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.browser.enabled = True
+        config.browser.api_url = "http://x:1"
+        ctx = _make_ctx(tmp_path, config=config)
+
+        meta = SkillMeta(
+            name="browse",
+            description="Browser",
+            env_specs=[EnvSpec(
+                var="BROWSER_API_URL",
+                source="config",
+                config_path="browser.api_url",
+                when=["browser.enabled", "browser.api_url"],
+            )],
+        )
+        env = build_skill_env(["browse"], {"browse": meta}, ctx)
+        assert env["BROWSER_API_URL"] == "http://x:1"
+
+    def test_list_when_one_falsy_skips(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.browser.enabled = False  # second gate path is falsy
+        config.browser.api_url = "http://x:1"
+        ctx = _make_ctx(tmp_path, config=config)
+
+        meta = SkillMeta(
+            name="browse",
+            description="Browser",
+            env_specs=[EnvSpec(
+                var="BROWSER_API_URL",
+                source="config",
+                config_path="browser.api_url",
+                when=["browser.enabled", "browser.api_url"],
+            )],
+        )
+        env = build_skill_env(["browse"], {"browse": meta}, ctx)
+        assert "BROWSER_API_URL" not in env
+
+
+class TestEmptyStringConfigValueResolves:
+    """Phase 2.8: ``_resolve_env_spec`` skips only on ``val is None``.
+
+    The previous ``not val`` check silently dropped numeric zeros and
+    empty strings — fine for most cases but a footgun for ``SMTP_PORT``
+    type fields. The migration spec calls this out under risk #6.
+    """
+
+    def test_zero_int_value_resolves(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.browser.api_url = 0  # numeric zero, not None
+        ctx = _make_ctx(tmp_path, config=config)
+
+        meta = SkillMeta(
+            name="x",
+            description="x",
+            env_specs=[EnvSpec(var="VAL", source="config", config_path="browser.api_url")],
+        )
+        env = build_skill_env(["x"], {"x": meta}, ctx)
+        assert env.get("VAL") == "0"
+
+
+class TestSetupEnvSourceMetadataOnly:
+    """Phase 2.6: ``from: setup_env`` is a metadata-only declaration.
+
+    The actual value comes from the skill's ``setup_env`` hook; the
+    EnvSpec exists so derive_credential_set / derive_skill_credential_map
+    (Phase 3) see the var.
+    """
+
+    def test_setup_env_source_returns_none(self, tmp_path):
+        ctx = _make_ctx(tmp_path)
+        meta = SkillMeta(
+            name="gw",
+            description="GW",
+            env_specs=[EnvSpec(
+                var="GOOGLE_WORKSPACE_CLI_TOKEN",
+                source="setup_env",
+                sensitive=True,
+            )],
+        )
+        env = build_skill_env(["gw"], {"gw": meta}, ctx)
+        # Spec resolves to None; var only appears via setup_env hook.
+        assert "GOOGLE_WORKSPACE_CLI_TOKEN" not in env
+
+
+class TestDispatcherIteratesFullIndex:
+    """Phase 2.5: ``dispatch_setup_env_hooks`` iterates the full skill_index,
+    not the ``selected_skills`` argument.
+
+    Required so the developer hook fires whenever tokens are configured,
+    regardless of whether Pass 1 / Pass 2 picked the skill.
+    """
+
+    def test_unselected_skill_with_setup_env_still_fires(self, tmp_path, monkeypatch):
+        """A hook for a skill not in selected_skills still runs."""
+        ctx = _make_ctx(tmp_path)
+        called = {"count": 0}
+
+        # Monkey-patch a fake skill's setup_env. We use the real ``ntfy``
+        # module because it lives at a stable import path; we replace
+        # its setup_env and clean up afterwards.
+        import importlib
+        import istota.skills.ntfy as ntfy_mod
+
+        def fake_setup_env(_ctx):
+            called["count"] += 1
+            return {"FAKE_VAR": "yes"}
+
+        monkeypatch.setattr(ntfy_mod, "setup_env", fake_setup_env, raising=False)
+
+        # ntfy not in selected_skills, but it IS in skill_index.
+        index = {
+            "ntfy": SkillMeta(
+                name="ntfy",
+                description="ntfy",
+                skill_dir=str(Path(ntfy_mod.__file__).parent),
+            ),
+        }
+        env = dispatch_setup_env_hooks([], index, ctx)
+        assert called["count"] == 1
+        assert env["FAKE_VAR"] == "yes"
+
+
+class TestGateUserHasResource:
+    """Phase 1.1: ``gate_user_has_resource`` pre-filters resolution by
+    whether the user owns at least one resource of the named type."""
+
+    def test_resolves_when_resource_present(self, tmp_path):
+        config = _make_config(tmp_path)
+        resources = [_MockResource("calendar", "/cal/personal")]
+        ctx = _make_ctx(tmp_path, config=config, user_resources=resources)
+
+        meta = SkillMeta(
+            name="x",
+            description="x",
+            env_specs=[EnvSpec(
+                var="CAL_OWNER",
+                source="user_id",
+                gate_user_has_resource="calendar",
+            )],
+        )
+        env = build_skill_env(["x"], {"x": meta}, ctx)
+        assert env.get("CAL_OWNER") == "alice"
+
+    def test_skips_when_resource_missing(self, tmp_path):
+        config = _make_config(tmp_path)
+        ctx = _make_ctx(tmp_path, config=config, user_resources=[])
+
+        meta = SkillMeta(
+            name="x",
+            description="x",
+            env_specs=[EnvSpec(
+                var="CAL_OWNER",
+                source="user_id",
+                gate_user_has_resource="calendar",
+            )],
+        )
+        env = build_skill_env(["x"], {"x": meta}, ctx)
+        assert "CAL_OWNER" not in env
+
+
+class TestGateHasDiscoveredCalendars:
+    """Phase 2.1: ``gate_has_discovered_calendars`` preserves the
+    per-user CalDAV credential privacy gate (ISSUE-015) — CALDAV_*
+    only resolves when the user has at least one discovered calendar."""
+
+    def test_resolves_when_calendars_discovered(self, tmp_path):
+        config = _make_config(tmp_path)
+        ctx = EnvContext(
+            config=config,
+            task=MagicMock(id=1, user_id="alice", conversation_token=""),
+            user_resources=[],
+            user_config=None,
+            user_temp_dir=tmp_path / "temp",
+            is_admin=True,
+            discovered_calendars=[("Personal", "https://cal/x", True)],
+        )
+
+        meta = SkillMeta(
+            name="x",
+            description="x",
+            env_specs=[EnvSpec(
+                var="OWNER",
+                source="user_id",
+                gate_has_discovered_calendars=True,
+            )],
+        )
+        env = build_skill_env(["x"], {"x": meta}, ctx)
+        assert env.get("OWNER") == "alice"
+
+    def test_skips_when_no_calendars(self, tmp_path):
+        config = _make_config(tmp_path)
+        ctx = EnvContext(
+            config=config,
+            task=MagicMock(id=1, user_id="alice", conversation_token=""),
+            user_resources=[],
+            user_config=None,
+            user_temp_dir=tmp_path / "temp",
+            is_admin=True,
+            discovered_calendars=[],
+        )
+
+        meta = SkillMeta(
+            name="x",
+            description="x",
+            env_specs=[EnvSpec(
+                var="OWNER",
+                source="user_id",
+                gate_has_discovered_calendars=True,
+            )],
+        )
+        env = build_skill_env(["x"], {"x": meta}, ctx)
+        assert "OWNER" not in env
+
+
+class TestPhase2ManifestAcceptance:
+    """Spot-check the shipped manifests have the expected sensitive flags
+    and gates after the Phase 2 migration. Pinned so a future manifest
+    edit can't silently drop the sensitive marker.
+    """
+
+    def test_email_passwords_marked_sensitive(self):
+        from istota.skills._loader import load_skill_index
+        index = load_skill_index(Path("/nonexistent"), bundled_dir=None)
+        meta = index.get("email")
+        assert meta is not None
+        smtp_pwd = next(s for s in meta.env_specs if s.var == "SMTP_PASSWORD")
+        imap_pwd = next(s for s in meta.env_specs if s.var == "IMAP_PASSWORD")
+        assert smtp_pwd.sensitive is True
+        assert imap_pwd.sensitive is True
+
+    def test_nextcloud_pass_marked_sensitive(self):
+        from istota.skills._loader import load_skill_index
+        index = load_skill_index(Path("/nonexistent"), bundled_dir=None)
+        meta = index.get("nextcloud")
+        assert meta is not None
+        nc_pass = next(s for s in meta.env_specs if s.var == "NC_PASS")
+        assert nc_pass.sensitive is True
+
+    def test_caldav_password_gated_on_discovered_calendars(self):
+        from istota.skills._loader import load_skill_index
+        index = load_skill_index(Path("/nonexistent"), bundled_dir=None)
+        meta = index.get("calendar")
+        assert meta is not None
+        caldav_pwd = next(s for s in meta.env_specs if s.var == "CALDAV_PASSWORD")
+        assert caldav_pwd.sensitive is True
+        assert caldav_pwd.gate_has_discovered_calendars is True
+
+    def test_developer_tokens_gated_on_enabled_and_repos_dir(self):
+        from istota.skills._loader import load_skill_index
+        index = load_skill_index(Path("/nonexistent"), bundled_dir=None)
+        meta = index.get("developer")
+        assert meta is not None
+        gitlab_token = next(s for s in meta.env_specs if s.var == "GITLAB_TOKEN")
+        assert gitlab_token.sensitive is True
+        assert isinstance(gitlab_token.when, list)
+        assert "developer.enabled" in gitlab_token.when
+        assert "developer.repos_dir" in gitlab_token.when
+        assert "developer.gitlab_token" in gitlab_token.when
+
+    def test_google_workspace_token_marked_sensitive_via_setup_env(self):
+        from istota.skills._loader import load_skill_index
+        index = load_skill_index(Path("/nonexistent"), bundled_dir=None)
+        meta = index.get("google_workspace")
+        assert meta is not None
+        gws_token = next(s for s in meta.env_specs if s.var == "GOOGLE_WORKSPACE_CLI_TOKEN")
+        assert gws_token.sensitive is True
+        assert gws_token.source == "setup_env"
+
+    def test_ntfy_token_and_password_marked_sensitive(self):
+        from istota.skills._loader import load_skill_index
+        index = load_skill_index(Path("/nonexistent"), bundled_dir=None)
+        meta = index.get("ntfy")
+        assert meta is not None
+        ntfy_token = next(s for s in meta.env_specs if s.var == "NTFY_TOKEN")
+        ntfy_pwd = next(s for s in meta.env_specs if s.var == "NTFY_PASSWORD")
+        assert ntfy_token.sensitive is True
+        assert ntfy_pwd.sensitive is True
+
+
+class TestExecutorHardcodedCredentialBlockGone:
+    """Phase 2 acceptance: the hardcoded credential injection block is
+    deleted. A grep for ``env[...] =`` in executor.execute_task outside
+    the build_clean_env path and the ISTOTA_* identity block returns
+    nothing for credential-shaped vars (NC_*, CALDAV_*, SMTP/IMAP_*,
+    GITLAB_*, GITHUB_*, KARAKEEP_*).
+    """
+
+    def test_hardcoded_credential_assignments_removed(self):
+        executor_src = Path(__file__).parent.parent / "src" / "istota" / "executor.py"
+        text = executor_src.read_text()
+        # These literal substrings appeared in the deleted block; if any
+        # come back, the manifest source-of-truth principle is broken.
+        forbidden = [
+            'env["NC_URL"] =',
+            'env["NC_USER"] =',
+            'env["NC_PASS"] =',
+            'env["CALDAV_URL"] =',
+            'env["CALDAV_USERNAME"] =',
+            'env["CALDAV_PASSWORD"] =',
+            'env["SMTP_HOST"] =',
+            'env["SMTP_PORT"] =',
+            'env["SMTP_PASSWORD"] =',
+            'env["IMAP_PASSWORD"] =',
+            'env["KARAKEEP_BASE_URL"] =',
+            'env["KARAKEEP_API_KEY"] =',
+            'env["GITLAB_TOKEN"] =',
+            'env["GITHUB_TOKEN"] =',
+            'env["GITLAB_URL"] =',
+            'env["GITHUB_URL"] =',
+            'env["DEVELOPER_REPOS_DIR"] =',
+        ]
+        for needle in forbidden:
+            assert needle not in text, (
+                f"executor.py still contains hardcoded credential injection "
+                f"({needle!r}); Phase 2 should have deleted it."
+            )

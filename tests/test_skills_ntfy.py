@@ -229,21 +229,32 @@ class TestSkillFrontmatter:
 
 
 class TestProxyCredentialMapping:
-    def test_token_and_password_routed_through_proxy(self):
-        from istota.executor import _PROXY_CREDENTIAL_VARS, _CREDENTIAL_SKILL_MAP
+    def _idx(self):
+        from istota.skills._loader import load_skill_index
+        from pathlib import Path
+        return load_skill_index(Path("config/skills"), bundled_dir=None)
 
-        assert "NTFY_TOKEN" in _PROXY_CREDENTIAL_VARS
-        assert "NTFY_PASSWORD" in _PROXY_CREDENTIAL_VARS
-        assert "ntfy" in _CREDENTIAL_SKILL_MAP["NTFY_TOKEN"]
-        assert "ntfy" in _CREDENTIAL_SKILL_MAP["NTFY_PASSWORD"]
+    def test_token_and_password_routed_through_proxy(self):
+        from istota.executor import (
+            derive_credential_set, derive_skill_credential_map,
+        )
+
+        idx = self._idx()
+        creds = derive_credential_set(idx)
+        assert "NTFY_TOKEN" in creds
+        assert "NTFY_PASSWORD" in creds
+        ntfy_creds = derive_skill_credential_map(["ntfy"], idx).get("ntfy", set())
+        assert "NTFY_TOKEN" in ntfy_creds
+        assert "NTFY_PASSWORD" in ntfy_creds
 
     def test_non_credential_ntfy_vars_stay_in_clean_env(self):
         """Topic / server URL / username are passed through clean env, not proxy."""
-        from istota.executor import _PROXY_CREDENTIAL_VARS
+        from istota.executor import derive_credential_set
 
-        assert "NTFY_TOPIC" not in _PROXY_CREDENTIAL_VARS
-        assert "NTFY_SERVER_URL" not in _PROXY_CREDENTIAL_VARS
-        assert "NTFY_USERNAME" not in _PROXY_CREDENTIAL_VARS
+        creds = derive_credential_set(self._idx())
+        assert "NTFY_TOPIC" not in creds
+        assert "NTFY_SERVER_URL" not in creds
+        assert "NTFY_USERNAME" not in creds
 
 
 class TestMain:

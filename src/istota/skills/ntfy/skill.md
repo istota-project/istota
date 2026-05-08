@@ -4,7 +4,7 @@ triggers: [ntfy, push notification, notify me, notify my phone, mobile alert, al
 description: Send a push notification to the user's configured ntfy device(s). One-way (bot to phone), no reply channel.
 cli: true
 companion_skills: [sensitive_actions]
-env: [{"var":"NTFY_SERVER_URL","from":"secret","service":"ntfy","key":"server_url"},{"var":"NTFY_TOPIC","from":"secret","service":"ntfy","key":"topic"},{"var":"NTFY_TOKEN","from":"secret","service":"ntfy","key":"token"},{"var":"NTFY_USERNAME","from":"secret","service":"ntfy","key":"username"},{"var":"NTFY_PASSWORD","from":"secret","service":"ntfy","key":"password"}]
+env: [{"var":"NTFY_SERVER_URL","from":"secret","service":"ntfy","key":"server_url"},{"var":"NTFY_TOPIC","from":"secret","service":"ntfy","key":"topic"},{"var":"NTFY_TOKEN","from":"secret","service":"ntfy","key":"token","sensitive":true},{"var":"NTFY_USERNAME","from":"secret","service":"ntfy","key":"username"},{"var":"NTFY_PASSWORD","from":"secret","service":"ntfy","key":"password","sensitive":true}]
 ---
 
 # ntfy push notifications
