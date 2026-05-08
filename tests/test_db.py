@@ -209,43 +209,167 @@ class TestClaimTaskChannelGate:
             assert claimed.id == t2
 
 
-class TestClaimTaskSkillRoundTrip:
-    """Regression: skill / skill_args set on a task must survive claim_task.
+class TestTaskColumnRoundTrip:
+    """Every helper that returns a `Task` must preserve dispatch-relevant
+    columns. A missing column in `claim_task`'s RETURNING clause masked
+    `task.skill` and routed module-poller rows
+    (`_module.feeds.run_scheduled`) through the LLM path with an empty
+    prompt — producing unsolicited ntfy notifications every 5 minutes.
 
-    A missing column in claim_task's RETURNING clause caused module-poller
-    tasks (`_module.feeds.run_scheduled`) to be claimed with skill=None,
-    falling through to the LLM execution path with an empty prompt — which
-    on a memory-rich account produced unsolicited ntfy notifications.
+    Without `_TASK_COLUMNS` plus the strict `_row_to_task` (no `if X in
+    row.keys()` fallback), the next column-conditional dispatch could
+    repeat the bug. These tests trip immediately if a Task-returning
+    SELECT/RETURNING omits any column from `_TASK_COLUMNS`.
     """
 
-    def test_skill_columns_survive_claim(self, db_path):
-        with db.get_db(db_path) as conn:
-            tid = db.create_task(
-                conn, prompt="", user_id="user1",
-                source_type="scheduled", conversation_token=None,
-                queue="background",
-                skill="feeds", skill_args='["run-scheduled"]',
-            )
+    # Columns that gate execution behavior — if any of these silently
+    # become None on read, the scheduler routes the task incorrectly.
+    DISPATCH_FIELDS = (
+        "skill", "skill_args", "command", "model", "effort",
+        "talk_delivery_token", "scheduled_job_id", "skip_log_channel",
+        "queue", "heartbeat_silent", "output_target",
+    )
 
+    @staticmethod
+    def _create_rich(conn, **overrides):
+        """Create a task with every dispatch-relevant column set."""
+        defaults = dict(
+            prompt="rich",
+            user_id="user1",
+            source_type="scheduled",
+            conversation_token="room1",
+            queue="background",
+            output_target="talk",
+            skill="feeds",
+            skill_args='["run-scheduled"]',
+            command=None,
+            model="claude-sonnet-4-6",
+            effort="high",
+            talk_delivery_token="real-talk-room",
+            scheduled_job_id=42,
+            heartbeat_silent=True,
+            skip_log_channel=True,
+        )
+        defaults.update(overrides)
+        return db.create_task(conn, **defaults)
+
+    def _assert_dispatch_preserved(self, task):
+        assert task is not None
+        assert task.skill == "feeds"
+        assert task.skill_args == '["run-scheduled"]'
+        assert task.model == "claude-sonnet-4-6"
+        assert task.effort == "high"
+        assert task.talk_delivery_token == "real-talk-room"
+        assert task.scheduled_job_id == 42
+        assert task.heartbeat_silent is True
+        assert task.skip_log_channel is True
+        assert task.queue == "background"
+        assert task.output_target == "talk"
+
+    def test_claim_task(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = self._create_rich(conn)
             claimed = db.claim_task(conn, "worker-1", queue="background")
-            assert claimed is not None
             assert claimed.id == tid
-            assert claimed.skill == "feeds"
-            assert claimed.skill_args == '["run-scheduled"]'
+            self._assert_dispatch_preserved(claimed)
 
-    def test_get_task_returns_skill_columns(self, db_path):
+    def test_get_task(self, db_path):
         with db.get_db(db_path) as conn:
-            tid = db.create_task(
-                conn, prompt="", user_id="user1",
-                source_type="scheduled", conversation_token=None,
-                queue="background",
-                skill="money", skill_args='["run-scheduled"]',
+            tid = self._create_rich(conn)
+            self._assert_dispatch_preserved(db.get_task(conn, tid))
+
+    def test_get_pending_confirmation(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = self._create_rich(conn, conversation_token="conf-room")
+            conn.execute(
+                "UPDATE tasks SET status='pending_confirmation' WHERE id=?", (tid,),
+            )
+            self._assert_dispatch_preserved(
+                db.get_pending_confirmation(conn, "conf-room"),
             )
 
-            fetched = db.get_task(conn, tid)
-            assert fetched is not None
-            assert fetched.skill == "money"
-            assert fetched.skill_args == '["run-scheduled"]'
+    def test_get_pending_confirmation_for_user(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = self._create_rich(conn)
+            conn.execute(
+                "UPDATE tasks SET status='pending_confirmation' WHERE id=?", (tid,),
+            )
+            self._assert_dispatch_preserved(
+                db.get_pending_confirmation_for_user(conn, "user1"),
+            )
+
+    def test_get_pending_confirmation_by_response_id(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = self._create_rich(conn)
+            conn.execute(
+                "UPDATE tasks SET status='pending_confirmation', "
+                "talk_response_id=12345 WHERE id=?",
+                (tid,),
+            )
+            self._assert_dispatch_preserved(
+                db.get_pending_confirmation_by_response_id(conn, 12345),
+            )
+
+    def test_get_reply_parent_task(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = self._create_rich(
+                conn, conversation_token="reply-room", source_type="talk",
+            )
+            conn.execute(
+                "UPDATE tasks SET status='completed', result='ok', "
+                "talk_message_id=777 WHERE id=?",
+                (tid,),
+            )
+            self._assert_dispatch_preserved(
+                db.get_reply_parent_task(conn, "reply-room", 777),
+            )
+
+    def test_get_stale_pending_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = self._create_rich(conn)
+            conn.execute(
+                "UPDATE tasks SET created_at=datetime('now', '-10 minutes') "
+                "WHERE id=?",
+                (tid,),
+            )
+            stale = db.get_stale_pending_tasks(conn, warn_minutes=5)
+            assert len(stale) == 1
+            self._assert_dispatch_preserved(stale[0])
+
+    def test_get_completed_channel_tasks_since(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = self._create_rich(conn, conversation_token="ch-room")
+            conn.execute(
+                "UPDATE tasks SET status='completed', result='ok', "
+                "completed_at=datetime('now') WHERE id=?",
+                (tid,),
+            )
+            tasks = db.get_completed_channel_tasks_since(
+                conn, "ch-room", "2000-01-01T00:00:00",
+            )
+            assert len(tasks) == 1
+            self._assert_dispatch_preserved(tasks[0])
+
+    def test_get_completed_tasks_since(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = self._create_rich(conn)
+            conn.execute(
+                "UPDATE tasks SET status='completed', result='ok', "
+                "completed_at=datetime('now') WHERE id=?",
+                (tid,),
+            )
+            tasks = db.get_completed_tasks_since(
+                conn, "user1", "2000-01-01T00:00:00",
+            )
+            assert len(tasks) == 1
+            self._assert_dispatch_preserved(tasks[0])
+
+    def test_list_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._create_rich(conn)
+            tasks = db.list_tasks(conn, user_id="user1")
+            assert len(tasks) == 1
+            self._assert_dispatch_preserved(tasks[0])
 
 
 class TestCreateTaskTalkDedup:
