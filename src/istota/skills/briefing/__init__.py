@@ -312,40 +312,31 @@ def build_briefing_prompt(
             "and if so, lead with what changed, not the full recap."
         )
 
-    # Market data - pre-fetch and include (skip quotes on weekends)
-    has_market_quotes = False
+    # Data injection order matches the output section order (NEWS → MARKETS →
+    # CALENDAR → TODOS → NOTES → REMINDER) so the model isn't tempted to
+    # follow prompt order when emitting sections. Markets data is fetched
+    # first so the news-section instructions can reference whether quotes
+    # will actually be provided below.
+
+    market_data: str | None = None
+    finviz_content: str | None = None
     if _component_enabled(components, "markets") and not is_weekend:
         market_config = components["markets"] if isinstance(components.get("markets"), dict) else {}
         market_data = _fetch_market_data(market_config, mode)
         if market_data:
-            prompt_parts.append("")
-            prompt_parts.append(market_data)
-            prompt_parts.append(
-                "Use ONLY these yfinance quotes for the MARKETS quote lines. "
-                "Do NOT substitute prices or percentages from newsletters."
-            )
-            has_market_quotes = True
             logger.debug("Fetched market data for %s briefing", mode)
     elif _component_enabled(components, "markets") and is_weekend:
         logger.debug("Skipping market quotes on weekend")
 
-    # FinViz market data - enrich evening briefings with headlines, movers, etc.
     if _component_enabled(components, "markets") and not is_morning and not is_weekend:
         finviz_content = _fetch_finviz_market_data()
         if not finviz_content:
             logger.warning("Evening briefing for %s will have no FinViz data", user_id)
-        if finviz_content:
-            prompt_parts.append("")
-            prompt_parts.append(finviz_content)
-            prompt_parts.append(
-                "Include FinViz data in the MARKETS section: market headlines first, "
-                "then the yfinance close prices above (if available), then movers, futures, "
-                "forex/bonds, economic data, and upcoming earnings. "
-                "Use the pre-formatted FinViz sections as-is."
-            )
+        elif finviz_content:
             logger.debug("Fetched FinViz market data for evening briefing")
+    has_market_quotes = bool(market_data)
 
-    # Newsletter emails - pre-fetch full content
+    # NEWS — newsletters
     if _component_enabled(components, "news"):
         news_config = components["news"] if isinstance(components.get("news"), dict) else {}
         newsletter_content = _fetch_newsletter_content(news_config, config)
@@ -354,7 +345,7 @@ def build_briefing_prompt(
             prompt_parts.append(newsletter_content)
             prompt_parts.append("")
             quote_note = (
-                " The MARKETS quote lines are already provided above from yfinance — "
+                " The MARKETS quote lines will be provided below from yfinance — "
                 "do not replace them with numbers from newsletters."
                 if has_market_quotes
                 else ""
@@ -365,7 +356,7 @@ def build_briefing_prompt(
                 f"See the briefing skill for section format and story count targets.{quote_note}"
             )
 
-    # Headlines - pre-fetch frontpages from news sources
+    # NEWS — frontpage headlines
     if _component_enabled(components, "headlines"):
         headlines_config = components["headlines"] if isinstance(components.get("headlines"), dict) else {}
         headlines_content = _fetch_headlines(headlines_config, config)
@@ -381,7 +372,27 @@ def build_briefing_prompt(
             )
             logger.debug("Fetched headlines for briefing")
 
-    # Calendar events - pre-fetch with correct timezone
+    # MARKETS — yfinance quotes
+    if market_data:
+        prompt_parts.append("")
+        prompt_parts.append(market_data)
+        prompt_parts.append(
+            "Use ONLY these yfinance quotes for the MARKETS quote lines. "
+            "Do NOT substitute prices or percentages from newsletters."
+        )
+
+    # MARKETS — FinViz enrichment (evening only)
+    if finviz_content:
+        prompt_parts.append("")
+        prompt_parts.append(finviz_content)
+        prompt_parts.append(
+            "Include FinViz data in the MARKETS section: market headlines first, "
+            "then the yfinance close prices above (if available), then movers, futures, "
+            "forex/bonds, economic data, and upcoming earnings. "
+            "Use the pre-formatted FinViz sections as-is."
+        )
+
+    # CALENDAR — pre-fetch with correct timezone
     if components.get("calendar"):
         calendar_content = _fetch_calendar_events(config, user_id, is_morning, user_timezone)
         if calendar_content:
@@ -432,8 +443,15 @@ def build_briefing_prompt(
     prompt_parts.append(
         "Format the briefing following the section format in the briefing skill reference. "
         "Use emoji-prefixed labels as section headers (not markdown headings). "
-        "Output sections in the exact order shown in the briefing skill. "
-        "Only include sections that have data. NO tables."
+        "Output sections in EXACTLY this order, omitting any without data:\n"
+        "1. 📰 NEWS\n"
+        "2. 📈 MARKETS\n"
+        "3. 📅 CALENDAR\n"
+        "4. ✅ TODOS\n"
+        "5. 📝 NOTES\n"
+        "6. 💡 REMINDER\n"
+        "Do not reorder sections to follow the order data was provided in this prompt. "
+        "NO tables."
     )
 
     # Determine subject
