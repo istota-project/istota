@@ -3073,21 +3073,36 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
         wanted = jobs_for_user(money_ctx, user_id)
         wanted_by_name = {j["name"]: j for j in wanted}
 
-        # Rescue rows that hit the admin-gate failure on the legacy
-        # command-task path before commit cc0bd54 migrated module jobs to
-        # skill-task shape. Targets the specific failure string so healthy
-        # rows are untouched.
+        # Rescue auto-disabled module rows. Two failure waves stuck rows
+        # in the past:
+        #   1. legacy command-task shape + non-admin user → admin-gate
+        #      ("command-type tasks are admin-only"), fixed by cc0bd54.
+        #   2. migrated skill-task shape, but `claim_task` didn't return
+        #      `skill`/`skill_args` so the task fell through to the LLM
+        #      path with an empty prompt, fixed by 027eb1a.
+        #
+        # Wave 1 left a known last_error string we could match. Wave 2's
+        # last_error varies (timeouts, malformed output, …), so we drop
+        # the error-string predicate and trust two structural signals
+        # instead: ``_module.*`` rows have no operator-pause UI, so any
+        # row with ``consecutive_failures > 0`` was auto-disabled rather
+        # than operator-disabled, and the ``last_run_at < now - 1h`` gate
+        # prevents a rescue→fail→rescue loop if a row is genuinely broken
+        # (auto-disable still kicks in within ~25min of rescue at */5;
+        # the 1h cooldown caps the rescue rate).
         rescued = conn.execute(
             "UPDATE scheduled_jobs "
             "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
             "WHERE user_id = ? AND name LIKE ? AND enabled = 0 "
-            "AND last_error LIKE '%command-type tasks are admin-only%'",
+            "AND consecutive_failures > 0 "
+            "AND (last_run_at IS NULL "
+            "     OR last_run_at < datetime('now', '-1 hour'))",
             (user_id, f"{MODULE_PREFIX}%"),
         ).rowcount
         if rescued:
             logger.info(
-                "Re-enabled %d auto-disabled module job(s) for user %s "
-                "(legacy admin-gate failure)", rescued, user_id,
+                "Re-enabled %d auto-disabled module job(s) for user %s",
+                rescued, user_id,
             )
 
         existing_rows = list(conn.execute(
@@ -3195,21 +3210,21 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
         wanted = jobs_for_user(feeds_ctx, user_id)
         wanted_by_name = {j["name"]: j for j in wanted}
 
-        # Rescue rows that hit the admin-gate failure on the legacy
-        # command-task path before commit cc0bd54 migrated module jobs to
-        # skill-task shape. Targets the specific failure string so healthy
-        # rows are untouched.
+        # Rescue auto-disabled module rows. See _sync_money_module_jobs
+        # for the full rationale — same predicate, same failure waves.
         rescued = conn.execute(
             "UPDATE scheduled_jobs "
             "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
             "WHERE user_id = ? AND name LIKE ? AND enabled = 0 "
-            "AND last_error LIKE '%command-type tasks are admin-only%'",
+            "AND consecutive_failures > 0 "
+            "AND (last_run_at IS NULL "
+            "     OR last_run_at < datetime('now', '-1 hour'))",
             (user_id, f"{MODULE_PREFIX}%"),
         ).rowcount
         if rescued:
             logger.info(
-                "Re-enabled %d auto-disabled module job(s) for user %s "
-                "(legacy admin-gate failure)", rescued, user_id,
+                "Re-enabled %d auto-disabled module job(s) for user %s",
+                rescued, user_id,
             )
 
         existing_rows = list(conn.execute(
