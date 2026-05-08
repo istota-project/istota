@@ -184,7 +184,7 @@ class TestProcessChannelSleepCycle:
         assert result is True
 
         memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
         memory_file = memories_dir / f"{date_str}.md"
         assert memory_file.exists()
         assert "GraphQL" in memory_file.read_text()

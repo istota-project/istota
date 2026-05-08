@@ -4,7 +4,7 @@ An octopus-shaped, self-hosted AI agent that lives in your Nextcloud. ([istota.x
 
 ## Quick start
 
-Bare metal/VM is the canonical deployment and requires an existing Nextcloud installation on the network/internet. Docker is more for evaluation since it spins up its own fresh Nextcloud.
+Bare metal/VM is the canonical deployment and requires an existing Nextcloud installation on the network/internet.
 
 ```bash
 # Bare metal (Debian/Ubuntu VM, connects to your existing Nextcloud) — recommended
@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
 # or, from a clone: bash docker/init.sh
 ```
 
-The curl path clones the repo to `~/istota` (override with `ISTOTA_CLONE_DIR=...`) and runs the wizard from there. Keep this directory around — it holds your `.env` and is where you'll run `docker compose` commands from later. To update: `cd ~/istota && git pull && docker compose -f docker/docker-compose.yml up -d --build`. Volumes (`istota_data`, `nextcloud_data`, postgres, etc.) survive rebuilds.
+The curl path clones the repo to `~/istota` (override with `ISTOTA_CLONE_DIR=...`) and runs the wizard from there. When invoked via `sudo`, `~` resolves to the invoking user's home (via `SUDO_USER`), not `/root` — so `sudo curl … | bash -s -- --docker` still lands in your own home directory. Keep this directory around — it holds your `.env` and is where you'll run `docker compose` commands from later. To update: `cd ~/istota && git pull && docker compose -f docker/docker-compose.yml up -d --build`. Volumes (`istota_data`, `nextcloud_data`, postgres, etc.) survive rebuilds.
 
 `init.sh` is a guided wizard that mirrors the bare-metal install flow. It auto-generates passwords for the Nextcloud admin, Postgres, the bot account, and your user; auto-detects your timezone; and walks through the same optional-feature prompts you'd see on a real install:
 
