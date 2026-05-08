@@ -960,6 +960,55 @@ def add_user_resource(
     return cursor.fetchone()[0]
 
 
+def upsert_user_resource(
+    conn: sqlite3.Connection,
+    user_id: str,
+    resource_type: str,
+    resource_path: str,
+    *,
+    display_name: str | None = None,
+    permissions: str = "read",
+    extras: "dict[str, Any] | object" = _EXTRAS_UNCHANGED,
+) -> "tuple[int, str]":
+    """Idempotent resource upsert. Returns ``(resource_id, state)``.
+
+    ``state`` is one of ``"created"``, ``"updated"``, ``"noop"`` — same
+    contract as ``user_briefings.ensure_briefing`` and
+    ``secrets_store.upsert_secret``. ``extras`` follows the same partial-
+    update sentinel as :func:`add_user_resource`: omitting the kwarg
+    preserves the existing value; passing an explicit dict (including
+    ``{}``) overwrites.
+    """
+    existing = next(
+        (r for r in get_user_resources(conn, user_id)
+         if r.resource_type == resource_type and r.resource_path == resource_path),
+        None,
+    )
+
+    if existing is None:
+        state = "created"
+    else:
+        # Compute would-be value so omitted extras = preserve.
+        next_extras = existing.extras if extras is _EXTRAS_UNCHANGED else extras
+        same = (
+            (existing.display_name or "") == (display_name or "")
+            and (existing.permissions or "read") == permissions
+            and (existing.extras or {}) == (next_extras or {})
+        )
+        state = "noop" if same else "updated"
+
+    resource_id = add_user_resource(
+        conn,
+        user_id=user_id,
+        resource_type=resource_type,
+        resource_path=resource_path,
+        display_name=display_name,
+        permissions=permissions,
+        extras=extras,
+    )
+    return resource_id, state
+
+
 def delete_user_resource(
     conn: sqlite3.Connection,
     user_id: str,
