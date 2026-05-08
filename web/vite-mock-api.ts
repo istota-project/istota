@@ -23,7 +23,7 @@ const user = {
 
 const mockAdminStats = {
 	system: {
-		version: '0.10.0',
+		version: '0.11.0',
 		uptime_seconds: 345600,
 		db_size_bytes: 119447552,
 		python_version: '3.12.3',
