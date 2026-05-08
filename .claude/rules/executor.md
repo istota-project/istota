@@ -135,14 +135,30 @@ After `brain.execute()` returns, the executor:
 
 ## Result composition (`_compose_full_result`)
 Stays in the executor (not the brain) because it operates on the
-brain-agnostic `(result_text, execution_trace)` pair. Two modes:
-1. **CM-aware** (ISSUE-026): when `cm_boundary` entries exist in trace,
-   segments by CM boundaries and uses the last segment with substantial
-   text (>= 200 chars). Falls back to `result_text` if no substantial
-   segment (real response may only exist in CM replay events).
-2. **Terse-result recovery** (ISSUE-025): when no CM, detects substantial
-   text blocks emitted as intermediate text but missing from the final
-   ResultEvent, and prepends them.
+brain-agnostic `(result_text, execution_trace)` pair. Two mechanisms
+sharing one `_last_substantial_region()` walker; both **replace**
+`result_text` outright — never prepend / glue:
+1. **Mechanism A — CM-aware** (ISSUE-026): runs whenever any
+   `cm_boundary` entries exist in the trace. Segments by `cm_boundary`,
+   returns the last region ≥ `_CM_SEGMENT_MIN_CHARS` (200). Always runs
+   for automated tasks too — scheduled tasks truncated mid-response by
+   CM still get the fix. Falls back to `result_text` if no segment
+   qualifies.
+2. **Mechanism B — terse-recovery** (ISSUE-025): segments by both
+   `tool` and `cm_boundary`, returns the last region
+   ≥ `_TRAILING_REGION_MIN_CHARS` (500). Gated on
+   `not _is_automated_task(task)` (source_type ∉ {scheduled, briefing}
+   plus structural fallbacks `heartbeat_silent` / `scheduled_job_id`)
+   AND `_is_terse(result_text)` (< 150 chars or matches a short
+   reference regex like "see above" / "done" / "ok"). Skipped when CM
+   events exist (Mechanism A wins) and when the recovered region is
+   already a substring of `result_text`.
+
+Every override logs one INFO line
+(`compose_full_result: mechanism=… task_id=… source_type=… original_chars=… recovered_chars=…`)
+so the 500-char floor can be calibrated against real production data.
+The legacy Jaccard near-duplicate gluing path is gone; `_text_similarity`
+remains in the source as a dead helper but is no longer called.
 
 ## API retry constants (re-exported from brain.claude_code)
 - `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` + `429`
@@ -182,8 +198,9 @@ Every proxy rejection emits a structured WARNING — `proxy_rejected task_id=…
 | Function | Purpose |
 |---|---|
 | `detect_malformed_result(text, tool_count, ...)` | Validates model output for leaked tool-call XML. Strict mode (Talk): any `</parameter>`, `</invoke>`, `<thinking>` outside code fences is flagged. Lenient mode (other targets): only flags when entire output is syntax fragments (< 20 chars of real content). Malformed results are reclassified as failures and retried. |
-| `_compose_full_result(result_text, execution_trace)` | Two modes: (1) CM-aware — segments trace at `cm_boundary` markers, uses last substantial segment (>= 200 chars), falls back to `result_text` if none; (2) Terse-result recovery — recovers substantial text blocks from trace, deduplicates via Jaccard >= 0.5. |
-| `_text_similarity(a, b)` | Word-bigram Jaccard similarity (0.0–1.0). Compares first 2000 chars. Used by `_compose_full_result` for near-duplicate detection. |
+| `_compose_full_result(result_text, execution_trace, task=None)` | Two replace-only mechanisms sharing `_last_substantial_region()`: (A) CM-aware — runs whenever `cm_boundary` events exist, returns last segment ≥ 200 chars; (B) terse-recovery — runs only on non-automated tasks with terse `result_text`, segments by `tool` + `cm_boundary`, returns last region ≥ 500 chars. See "Result composition" section above. Logs every override. |
+| `_last_substantial_region(trace, delimiters, min_chars)` | Shared walker: groups text events into regions split by `delimiters`, returns the joined text of the last region whose length crosses `min_chars`. |
+| `_is_automated_task(task)`, `_is_terse(text)` | Gates for Mechanism B. Automated = source_type in `{scheduled, briefing}` or `heartbeat_silent` or `scheduled_job_id`. Terse = empty, < 150 chars, or matches short-reference regex. |
 
 ## Other Functions
 | Function | Purpose |
