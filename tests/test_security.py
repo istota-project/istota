@@ -17,12 +17,15 @@ from istota.config import (
 from istota.executor import (
     _CREDENTIAL_ENV_PATTERNS,
     _CREDENTIAL_SKILL_MAP,
+    _LOOKUP_DENIED_VARS,
     _allowed_credentials_for_skills,
+    _authorized_skills_from_credentials,
     _build_skill_credential_map,
     build_allowed_tools,
     build_clean_env,
     build_stripped_env,
 )
+from istota.skills._types import SkillMeta
 
 
 class TestBuildCleanEnv:
@@ -376,3 +379,62 @@ class TestCredentialSkillScoping:
         # Non-credential vars stay in clean env
         assert clean_env["PATH"] == "/usr/bin"
         assert clean_env["ISTOTA_TASK_ID"] == "42"
+
+
+class TestLookupDeniedVars:
+    """ISTOTA_SECRET_KEY may flow into specific skill subprocess envs but must
+    never be returned by the proxy's credential-lookup endpoint, and must not
+    auto-authorize its mapped skills via credential presence alone.
+
+    (Regression for the c1055d0 follow-up: pre-patch, money/feeds were
+    auto-authorized on every host because the master key is set instance-wide,
+    and `bash -c '.developer/credential-fetch ISTOTA_SECRET_KEY'` returned the
+    raw Fernet key.)
+    """
+
+    def test_master_key_in_lookup_denied_set(self):
+        assert "ISTOTA_SECRET_KEY" in _LOOKUP_DENIED_VARS
+
+    def _index(self):
+        return {
+            name: SkillMeta(name=name, description="", cli=True)
+            for name in (
+                "money", "feeds", "bookmarks", "email",
+                "calendar", "developer", "nextcloud",
+            )
+        }
+
+    def test_master_key_alone_does_not_auto_authorize_money_or_feeds(self):
+        """Instance-wide vars (master key) must not auto-authorize any
+        skill — the auto-authorization safety net is for per-user signals."""
+        result = _authorized_skills_from_credentials(
+            self._index(), {"ISTOTA_SECRET_KEY": "k" * 64},
+        )
+        assert "money" not in result
+        assert "feeds" not in result
+        assert result == []
+
+    def test_other_creds_still_auto_authorize_their_skills(self):
+        """Per-user creds keep auto-authorizing their skills even when the
+        master key is also present (the common production env shape)."""
+        result = _authorized_skills_from_credentials(self._index(), {
+            "ISTOTA_SECRET_KEY": "k" * 64,
+            "KARAKEEP_API_KEY": "x",
+            "GITLAB_TOKEN": "y",
+        })
+        assert sorted(result) == ["bookmarks", "developer"]
+        assert "money" not in result
+        assert "feeds" not in result
+
+    def test_money_still_gets_master_key_in_credential_map(self):
+        """Selection-driven authorization (executor unions selected CLI
+        skills into cred_skill_names) is still expected to give money/feeds
+        their master key via skill_credential_map.  This pins the underlying
+        per-skill mapping: when money is in cred_skill_names, its credential
+        set still includes the master key."""
+        assert _build_skill_credential_map(["money"]) == {
+            "money": {"ISTOTA_SECRET_KEY"},
+        }
+        assert _build_skill_credential_map(["feeds"]) == {
+            "feeds": {"ISTOTA_SECRET_KEY"},
+        }
