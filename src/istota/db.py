@@ -417,45 +417,69 @@ def create_task(
     return task_id
 
 
+# Canonical SELECT/RETURNING column list for any query that reconstructs a
+# `Task` via `_row_to_task`. Update this when adding a column to `tasks`;
+# `_row_to_task` will then trip an `IndexError` from any SELECT that forgot
+# to include the column, surfacing the omission as a test failure rather
+# than a silent `None` (see commit 027eb1a — a missed `skill, skill_args`
+# in `claim_task`'s RETURNING caused a 5-minute-loop production bug).
+_TASK_COLUMNS = (
+    "id, status, source_type, user_id, prompt, command, "
+    "conversation_token, parent_task_id, is_group_chat, attachments, "
+    "result, actions_taken, execution_trace, error, confirmation_prompt, "
+    "priority, attempt_count, max_attempts, created_at, scheduled_for, "
+    "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
+    "reply_to_content, heartbeat_silent, skip_log_channel, scheduled_job_id, "
+    "queue, confirmed_at, selected_skills, model, effort, "
+    "talk_delivery_token, skill, skill_args"
+)
+
+
 def _row_to_task(row: sqlite3.Row) -> Task:
-    """Convert a database row to a Task object."""
+    """Convert a database row to a Task object.
+
+    The row must include every column in `_TASK_COLUMNS`. Callers should
+    use `_TASK_COLUMNS` in their SELECT/RETURNING clause; missing columns
+    raise `IndexError` from `sqlite3.Row` rather than producing a silent
+    `None`.
+    """
     return Task(
         id=row["id"],
         status=row["status"],
         source_type=row["source_type"],
         user_id=row["user_id"],
         prompt=row["prompt"],
-        command=row["command"] if "command" in row.keys() else None,
+        command=row["command"],
         conversation_token=row["conversation_token"],
         parent_task_id=row["parent_task_id"],
         is_group_chat=bool(row["is_group_chat"]),
         attachments=json.loads(row["attachments"]) if row["attachments"] else None,
-        result=row["result"] if "result" in row.keys() else None,
-        actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
-        execution_trace=row["execution_trace"] if "execution_trace" in row.keys() else None,
-        error=row["error"] if "error" in row.keys() else None,
-        confirmation_prompt=row["confirmation_prompt"] if "confirmation_prompt" in row.keys() else None,
+        result=row["result"],
+        actions_taken=row["actions_taken"],
+        execution_trace=row["execution_trace"],
+        error=row["error"],
+        confirmation_prompt=row["confirmation_prompt"],
         priority=row["priority"],
         attempt_count=row["attempt_count"],
         max_attempts=row["max_attempts"],
         created_at=row["created_at"],
         scheduled_for=row["scheduled_for"],
         output_target=row["output_target"],
-        talk_message_id=row["talk_message_id"] if "talk_message_id" in row.keys() else None,
-        talk_response_id=row["talk_response_id"] if "talk_response_id" in row.keys() else None,
-        reply_to_talk_id=row["reply_to_talk_id"] if "reply_to_talk_id" in row.keys() else None,
-        reply_to_content=row["reply_to_content"] if "reply_to_content" in row.keys() else None,
-        heartbeat_silent=bool(row["heartbeat_silent"]) if "heartbeat_silent" in row.keys() else False,
-        skip_log_channel=bool(row["skip_log_channel"]) if "skip_log_channel" in row.keys() else False,
-        scheduled_job_id=row["scheduled_job_id"] if "scheduled_job_id" in row.keys() else None,
-        queue=row["queue"] if "queue" in row.keys() else "foreground",
-        confirmed_at=row["confirmed_at"] if "confirmed_at" in row.keys() else None,
-        selected_skills=row["selected_skills"] if "selected_skills" in row.keys() else None,
-        model=row["model"] if "model" in row.keys() else None,
-        effort=row["effort"] if "effort" in row.keys() else None,
-        talk_delivery_token=row["talk_delivery_token"] if "talk_delivery_token" in row.keys() else None,
-        skill=row["skill"] if "skill" in row.keys() else None,
-        skill_args=row["skill_args"] if "skill_args" in row.keys() else None,
+        talk_message_id=row["talk_message_id"],
+        talk_response_id=row["talk_response_id"],
+        reply_to_talk_id=row["reply_to_talk_id"],
+        reply_to_content=row["reply_to_content"],
+        heartbeat_silent=bool(row["heartbeat_silent"]),
+        skip_log_channel=bool(row["skip_log_channel"]),
+        scheduled_job_id=row["scheduled_job_id"],
+        queue=row["queue"],
+        confirmed_at=row["confirmed_at"],
+        selected_skills=row["selected_skills"],
+        model=row["model"],
+        effort=row["effort"],
+        talk_delivery_token=row["talk_delivery_token"],
+        skill=row["skill"],
+        skill_args=row["skill_args"],
     )
 
 
@@ -581,15 +605,7 @@ def claim_task(
             ORDER BY priority DESC, created_at ASC
             LIMIT 1
         )
-        RETURNING id, status, source_type, user_id, prompt, command,
-                  conversation_token,
-                  parent_task_id, is_group_chat, attachments, priority,
-                  attempt_count, max_attempts, created_at, scheduled_for,
-                  output_target, talk_message_id, talk_response_id,
-                  reply_to_talk_id, reply_to_content,
-                  heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
-                  confirmed_at, confirmation_prompt, model, effort,
-                  talk_delivery_token, skill, skill_args
+        RETURNING {_TASK_COLUMNS}
         """,
         params,
     )
@@ -615,18 +631,7 @@ def get_users_with_pending_tasks(conn: sqlite3.Connection) -> list[str]:
 def get_task(conn: sqlite3.Connection, task_id: int) -> Task | None:
     """Get a task by ID."""
     cursor = conn.execute(
-        """
-        SELECT id, status, source_type, user_id, prompt, command,
-               conversation_token,
-               parent_task_id, is_group_chat, attachments, result, actions_taken, execution_trace, error,
-               confirmation_prompt, priority, attempt_count, max_attempts,
-               created_at, scheduled_for, output_target,
-               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
-               confirmed_at, selected_skills, model, effort,
-               talk_delivery_token, skill, skill_args
-        FROM tasks WHERE id = ?
-        """,
+        f"SELECT {_TASK_COLUMNS} FROM tasks WHERE id = ?",
         (task_id,),
     )
     row = cursor.fetchone()
@@ -793,13 +798,8 @@ def get_pending_confirmation(
     Returns the most recent task awaiting confirmation, or None if none found.
     """
     cursor = conn.execute(
-        """
-        SELECT id, status, source_type, user_id, prompt, conversation_token,
-               parent_task_id, is_group_chat, attachments, result, error,
-               confirmation_prompt, priority, attempt_count, max_attempts,
-               created_at, scheduled_for, output_target,
-               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent
+        f"""
+        SELECT {_TASK_COLUMNS}
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'pending_confirmation'
@@ -821,13 +821,8 @@ def get_pending_confirmation_for_user(
 ) -> Task | None:
     """Get the newest pending_confirmation task for a user, any conversation."""
     cursor = conn.execute(
-        """
-        SELECT id, status, source_type, user_id, prompt, conversation_token,
-               parent_task_id, is_group_chat, attachments, result, error,
-               confirmation_prompt, priority, attempt_count, max_attempts,
-               created_at, scheduled_for, output_target,
-               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent
+        f"""
+        SELECT {_TASK_COLUMNS}
         FROM tasks
         WHERE user_id = ? AND status = 'pending_confirmation'
         ORDER BY id DESC
@@ -847,13 +842,8 @@ def get_pending_confirmation_by_response_id(
 ) -> Task | None:
     """Get a pending_confirmation task by its Talk confirmation message ID."""
     cursor = conn.execute(
-        """
-        SELECT id, status, source_type, user_id, prompt, conversation_token,
-               parent_task_id, is_group_chat, attachments, result, error,
-               confirmation_prompt, priority, attempt_count, max_attempts,
-               created_at, scheduled_for, output_target,
-               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent
+        f"""
+        SELECT {_TASK_COLUMNS}
         FROM tasks
         WHERE talk_response_id = ? AND status = 'pending_confirmation'
         LIMIT 1
@@ -1656,15 +1646,8 @@ def get_reply_parent_task(
     to find the conversation exchange being replied to.
     """
     cursor = conn.execute(
-        """
-        SELECT id, status, source_type, user_id, prompt, conversation_token,
-               parent_task_id, is_group_chat, attachments, result, error,
-               confirmation_prompt, priority, attempt_count, max_attempts,
-               created_at, scheduled_for, output_target,
-               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent, actions_taken, scheduled_job_id, queue,
-               selected_skills, model, effort,
-               talk_delivery_token
+        f"""
+        SELECT {_TASK_COLUMNS}
         FROM tasks
         WHERE conversation_token = ?
         AND (talk_message_id = ? OR talk_response_id = ?)
@@ -1773,13 +1756,8 @@ def get_stale_pending_tasks(conn: sqlite3.Connection, warn_minutes: int) -> list
     Excludes tasks that are scheduled for the future.
     """
     cursor = conn.execute(
-        """
-        SELECT id, status, source_type, user_id, prompt, conversation_token,
-               parent_task_id, is_group_chat, attachments, result, error,
-               confirmation_prompt, priority, attempt_count, max_attempts,
-               created_at, scheduled_for, output_target,
-               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent
+        f"""
+        SELECT {_TASK_COLUMNS}
         FROM tasks
         WHERE status = 'pending'
         AND created_at < datetime('now', '-' || ? || ' minutes')
@@ -2611,13 +2589,8 @@ def get_completed_channel_tasks_since(
 
     Returns list of Task objects ordered by id ascending.
     """
-    query = """
-        SELECT id, status, source_type, user_id, prompt, conversation_token,
-               parent_task_id, is_group_chat, attachments, result, error,
-               confirmation_prompt, priority, attempt_count, max_attempts,
-               created_at, scheduled_for, output_target,
-               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent
+    query = f"""
+        SELECT {_TASK_COLUMNS}
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'completed'
@@ -2675,13 +2648,8 @@ def get_completed_tasks_since(
 
     Returns list of Task objects ordered by id ascending.
     """
-    query = """
-        SELECT id, status, source_type, user_id, prompt, conversation_token,
-               parent_task_id, is_group_chat, attachments, result, error,
-               confirmation_prompt, priority, attempt_count, max_attempts,
-               created_at, scheduled_for, output_target,
-               talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
-               heartbeat_silent
+    query = f"""
+        SELECT {_TASK_COLUMNS}
         FROM tasks
         WHERE user_id = ?
         AND status = 'completed'
