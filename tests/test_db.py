@@ -209,6 +209,45 @@ class TestClaimTaskChannelGate:
             assert claimed.id == t2
 
 
+class TestClaimTaskSkillRoundTrip:
+    """Regression: skill / skill_args set on a task must survive claim_task.
+
+    A missing column in claim_task's RETURNING clause caused module-poller
+    tasks (`_module.feeds.run_scheduled`) to be claimed with skill=None,
+    falling through to the LLM execution path with an empty prompt — which
+    on a memory-rich account produced unsolicited ntfy notifications.
+    """
+
+    def test_skill_columns_survive_claim(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="", user_id="user1",
+                source_type="scheduled", conversation_token=None,
+                queue="background",
+                skill="feeds", skill_args='["run-scheduled"]',
+            )
+
+            claimed = db.claim_task(conn, "worker-1", queue="background")
+            assert claimed is not None
+            assert claimed.id == tid
+            assert claimed.skill == "feeds"
+            assert claimed.skill_args == '["run-scheduled"]'
+
+    def test_get_task_returns_skill_columns(self, db_path):
+        with db.get_db(db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="", user_id="user1",
+                source_type="scheduled", conversation_token=None,
+                queue="background",
+                skill="money", skill_args='["run-scheduled"]',
+            )
+
+            fetched = db.get_task(conn, tid)
+            assert fetched is not None
+            assert fetched.skill == "money"
+            assert fetched.skill_args == '["run-scheduled"]'
+
+
 class TestCreateTaskTalkDedup:
     def test_duplicate_talk_message_id_returns_existing(self, db_path):
         with db.get_db(db_path) as conn:

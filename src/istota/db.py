@@ -589,7 +589,7 @@ def claim_task(
                   reply_to_talk_id, reply_to_content,
                   heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
                   confirmed_at, confirmation_prompt, model, effort,
-                  talk_delivery_token
+                  talk_delivery_token, skill, skill_args
         """,
         params,
     )
@@ -624,7 +624,7 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Task | None:
                talk_message_id, talk_response_id, reply_to_talk_id, reply_to_content,
                heartbeat_silent, skip_log_channel, scheduled_job_id, queue,
                confirmed_at, selected_skills, model, effort,
-               talk_delivery_token
+               talk_delivery_token, skill, skill_args
         FROM tasks WHERE id = ?
         """,
         (task_id,),
