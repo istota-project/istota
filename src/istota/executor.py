@@ -444,6 +444,22 @@ _CREDENTIAL_SKILL_MAP: dict[str, frozenset[str]] = {
 }
 
 
+# Credentials that may be injected into a specific skill subprocess env (via
+# _CREDENTIAL_SKILL_MAP) but must never be returned by the proxy's
+# credential-lookup endpoint, and must not auto-authorize their mapped skills
+# in _authorized_skills_from_credentials.
+#
+# The other entries in _CREDENTIAL_SKILL_MAP are per-user signals — their
+# presence means "the user configured this resource," which is a legitimate
+# basis for keyword-miss safety net authorization. ISTOTA_SECRET_KEY is
+# instance-wide: it's always set on every host, so it isn't a "user has X
+# configured" signal at all. Letting it auto-authorize money/feeds means
+# they're authorized on every task; letting it flow through credential-fetch
+# means a compromised Claude can extract the master Fernet key directly via
+# `bash -c '.developer/credential-fetch ISTOTA_SECRET_KEY'`.
+_LOOKUP_DENIED_VARS = frozenset({"ISTOTA_SECRET_KEY"})
+
+
 # --- Network proxy allowlist ---
 
 _DEFAULT_NETWORK_HOSTS = frozenset({
@@ -560,12 +576,18 @@ def _authorized_skills_from_credentials(
     eliminates the failure mode where keyword matching missed a skill the
     user obviously needs (e.g. user has karakeep configured, prompt didn't
     say "bookmark", `bookmarks` not selected, no KARAKEEP_API_KEY available).
+
+    Vars in _LOOKUP_DENIED_VARS (instance-wide, not per-user) don't count as
+    auto-authorization signals: they're set on every host regardless of which
+    resources the user configured.
     """
     authorized = set()
     for skill_name, meta in skill_index.items():
         if not getattr(meta, "cli", False):
             continue
         for var, allowed_skills in _CREDENTIAL_SKILL_MAP.items():
+            if var in _LOOKUP_DENIED_VARS:
+                continue
             if skill_name in allowed_skills and var in credential_env:
                 authorized.add(skill_name)
                 break
@@ -2421,17 +2443,37 @@ def execute_task(
                 # build_bwrap_cmd() bind-mounts this file into the sandbox.
                 _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{task.id}.sock"
                 env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
-                # Credential authorization is decoupled from doc-selection:
-                # any CLI skill whose credentials are actually present in the
-                # user's env is authorized, regardless of whether Pass 1 / Pass
-                # 2 selected it for the prompt. This avoids the failure mode
-                # where a keyword miss locks out a skill the user clearly
-                # configured. Threat model is unchanged — the user's env only
-                # contains creds for resources they've configured.
-                cred_skill_names = _authorized_skills_from_credentials(
+                # Credential authorization combines two signals:
+                #   1. Auto-authorization from credential presence — any CLI
+                #      skill whose per-user credentials are in the env is
+                #      authorized regardless of selection (keyword-miss
+                #      safety net).  Instance-wide vars (_LOOKUP_DENIED_VARS)
+                #      don't count here — they're not per-user signals.
+                #   2. Selection — any CLI skill picked by Pass 1 / Pass 2
+                #      gets its mapped credentials, including the master key
+                #      for money / feeds when they're actually selected.
+                # Threat model unchanged: per-user creds only exist for
+                # resources the user configured; selection still flows
+                # through the same Pass 1 / Pass 2 gates.
+                auto_authorized = _authorized_skills_from_credentials(
                     skill_index, credential_env,
                 )
-                allowed_creds = _allowed_credentials_for_skills(cred_skill_names)
+                selected_cli_skills = [
+                    s for s in selected_skills
+                    if s in skill_index and skill_index[s].cli
+                ]
+                cred_skill_names = sorted(
+                    set(auto_authorized) | set(selected_cli_skills)
+                )
+                # Filter _LOOKUP_DENIED_VARS out of the lookup-endpoint allow
+                # list. They still flow through skill_credential_map, so the
+                # proxy can inject them into specific skill subprocess envs,
+                # but `credential-fetch ISTOTA_SECRET_KEY` from inside Claude
+                # gets rejected.
+                allowed_creds = (
+                    _allowed_credentials_for_skills(cred_skill_names)
+                    - _LOOKUP_DENIED_VARS
+                )
                 skill_cred_map = _build_skill_credential_map(cred_skill_names)
                 cli_skills = frozenset(
                     name for name, meta in skill_index.items() if meta.cli

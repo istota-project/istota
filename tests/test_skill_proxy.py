@@ -387,6 +387,33 @@ class TestProxyInformativeRejections:
         assert resp["reason"] == "not_authorized_credential"
         assert resp["name"] == "GITLAB_TOKEN"
 
+    def test_master_key_rejected_by_lookup_endpoint(self, sock_path):
+        """The master Fernet key flows into specific skill subprocess envs
+        (via skill_credential_map) but must never be returned by the
+        credential-lookup endpoint — even when the proxy holds it in
+        credential_env. The executor enforces this by excluding
+        ISTOTA_SECRET_KEY from `allowed_credentials`; this test pins the
+        proxy's behavior under that configuration so a future executor
+        regression that re-adds the var to allowed_credentials gets caught
+        by a separate test, while this one stays green for the supported
+        config."""
+        with SkillProxy(
+            sock_path,
+            credential_env={
+                "ISTOTA_SECRET_KEY": "k" * 64,
+                "GITLAB_TOKEN": "tok",
+            },
+            base_env={"PATH": "/usr/bin"},
+            allowed_credentials={"GITLAB_TOKEN"},
+            task_id=11,
+        ):
+            resp = self._send_request(sock_path, {
+                "type": "credential", "name": "ISTOTA_SECRET_KEY",
+            })
+        assert resp["reason"] == "not_authorized_credential"
+        assert resp["name"] == "ISTOTA_SECRET_KEY"
+        assert "k" * 64 not in json.dumps(resp)
+
     def test_proxy_logs_warning_on_rejection(self, sock_path, caplog):
         """Every rejection emits a structured WARNING for observability."""
         import logging
