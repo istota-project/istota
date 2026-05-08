@@ -11,15 +11,15 @@ These belong to the Istota instance, not to any user. They live in `config.toml`
 
 | Credential | Config section | Env var override | Consumed by |
 |---|---|---|---|
-| SMTP (email sending) | `[email]` | `ISTOTA_SMTP_PASSWORD` | `email` skill |
-| IMAP (email receiving) | `[email]` | `ISTOTA_IMAP_PASSWORD` | `email` skill |
-| CalDAV | derived from `[nextcloud]` | `ISTOTA_NC_APP_PASSWORD` | `calendar`, `location` skills |
-| Nextcloud | `[nextcloud]` | `ISTOTA_NC_APP_PASSWORD` | `nextcloud` skill |
-| GitLab token | `[developer]` | `ISTOTA_GITLAB_TOKEN` | `developer` skill |
-| GitHub token | `[developer]` | `ISTOTA_GITHUB_TOKEN` | `developer` skill |
-| Google OAuth client secret | `[google_workspace]` | `ISTOTA_GOOGLE_CLIENT_SECRET` | Google OAuth flow |
-| Web OAuth2 client secret | `[web]` | `ISTOTA_OAUTH2_CLIENT_SECRET` | Nextcloud login flow |
-| Web session signing key | `[web]` | `ISTOTA_WEB_SECRET_KEY` | Session cookies |
+| SMTP (email sending) | `[email]` | `ISTOTA_EMAIL_SMTP_PASSWORD` | `email` skill |
+| IMAP (email receiving) | `[email]` | `ISTOTA_EMAIL_IMAP_PASSWORD` | `email` skill |
+| CalDAV | derived from `[nextcloud]` | `ISTOTA_NEXTCLOUD_APP_PASSWORD` | `calendar`, `location` skills |
+| Nextcloud | `[nextcloud]` | `ISTOTA_NEXTCLOUD_APP_PASSWORD` | `nextcloud` skill |
+| GitLab token | `[developer]` | `ISTOTA_DEVELOPER_GITLAB_TOKEN` | `developer` skill |
+| GitHub token | `[developer]` | `ISTOTA_DEVELOPER_GITHUB_TOKEN` | `developer` skill |
+| Google OAuth client secret | `[google_workspace]` | `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET` | Google OAuth flow |
+| Web OAuth2 client secret | `[web]` | `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | Nextcloud login flow |
+| Web session signing key | `[web]` | `ISTOTA_WEB_SESSION_SECRET_KEY` | Session cookies |
 | `ISTOTA_SECRET_KEY` | env only | `ISTOTA_SECRET_KEY` | Fernet encryption for tier-2 secrets |
 
 CalDAV credentials are derived from the Nextcloud app password automatically — no separate config needed.

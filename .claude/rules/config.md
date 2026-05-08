@@ -218,7 +218,7 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 3. Parse `[users.*]` section → `_parse_user_data()` for each
 4. Parse `[security]` section → `SecurityConfig`
 5. Call `load_admin_users()` → `config.admin_users`
-6. Apply env var overrides for secrets (`ISTOTA_NC_APP_PASSWORD` → `nextcloud.app_password`, etc.)
+6. Apply env var overrides for secrets (`ISTOTA_NEXTCLOUD_APP_PASSWORD` → `nextcloud.app_password`, etc.)
 7. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, site_enabled, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
 8. **Phase 7a**: `_apply_user_resources(config)` overlays the `user_resources` DB table onto `config.users[*].resources`. Each row becomes a `ResourceConfig` entry with extras decoded from JSON. Dedup is keyed on `(type, path)` — DB wins. Distinct paths coexist.
 9. **Modules refactor (between 7a and 7b)**: `_migrate_obsolete_resources(config)` first calls `secrets_store.import_from_user_configs` (idempotent — extends `_IMPORT_MAP` to absorb karakeep `base_url`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources(db_path)` deletes `user_resources` rows whose type is in the retired set (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`), then filters those types out of `uc.resources` in memory so the rest of the load cycle sees post-cleanup state.
@@ -246,14 +246,18 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 
 **briefing_configs table (Phase 7b).** Per-user briefings live in `briefing_configs` (id PK, `UNIQUE(user_id, name)`). The `cron_expression` column stores the cron string, `components` is a JSON dict of per-component flags, and `enabled` lets the web UI mute a briefing without deleting it. Output (`talk` / `email` / `both`) is packed into `components.__output__` since the legacy schema has no dedicated column; reads hoist it back into the dataclass. The scheduler imports `[[briefings]]` blocks from TOML on startup via `user_briefings.import_from_user_configs(db_path, config.users)` (idempotent — only writes rows whose `(user_id, name)` pair doesn't already exist). At config-load time, `_apply_user_briefings` merges DB rows into `config.users[uid].briefings` so `check_briefings` and `get_briefings_for_user` (in `skills/briefing`) read DB and TOML rows uniformly. Web UI reads/writes via `GET/POST /istota/api/settings/briefings` and `DELETE /istota/api/settings/briefings/{id}`; payload accepts `{name, cron, conversation_token?, output?, components?, enabled?}`. The GET response also returns a `rooms` list (auto-provisioned `log_channel` + `alerts_channel` tokens) so the UI can offer them as conversation_token picks. Ansible deploys provision via `istota briefing ensure --user … --name … --cron … [--conversation-token …] [--output …] [--components-json '{…}'] [--component k=v] [--disabled]` (idempotent upsert with `STATE: created|updated|noop` output). See `src/istota/user_briefings.py`.
 
-**Secret env var overrides** (applied after TOML, enables `EnvironmentFile=`):
+**Secret env var overrides** (applied after TOML, enables `EnvironmentFile=`). Naming convention is `ISTOTA_<SECTION>_<FIELD>` matching the config dataclass path — same convention as docker-compose env vars, so a single env-var name works across both deploy paths. The literal `ISTOTA_SECRET_KEY` (master Fernet key, not a config field) and runtime injection vars (`ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `ISTOTA_TASK_ID`, etc.) are intentionally outside this convention — they aren't config overrides.
+
 | Env Var | Config Field |
 |---|---|
-| `ISTOTA_NC_APP_PASSWORD` | `nextcloud.app_password` |
-| `ISTOTA_IMAP_PASSWORD` | `email.imap_password` |
-| `ISTOTA_SMTP_PASSWORD` | `email.smtp_password` |
-| `ISTOTA_GITLAB_TOKEN` | `developer.gitlab_token` |
-| `ISTOTA_GITHUB_TOKEN` | `developer.github_token` |
+| `ISTOTA_NEXTCLOUD_APP_PASSWORD` | `nextcloud.app_password` |
+| `ISTOTA_EMAIL_IMAP_PASSWORD` | `email.imap_password` |
+| `ISTOTA_EMAIL_SMTP_PASSWORD` | `email.smtp_password` |
+| `ISTOTA_DEVELOPER_GITLAB_TOKEN` | `developer.gitlab_token` |
+| `ISTOTA_DEVELOPER_GITHUB_TOKEN` | `developer.github_token` |
+| `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET` | `google_workspace.client_secret` |
+| `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
+| `ISTOTA_WEB_SESSION_SECRET_KEY` | `web.session_secret_key` |
 
 ### `load_admin_users(path=None) -> set[str]`
 Loads admin user IDs from plain text file (one per line, `#` comments, blank lines ignored).

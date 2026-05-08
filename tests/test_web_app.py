@@ -893,8 +893,8 @@ oauth2_client_id = "my-client"
 """
         config_file = tmp_path / "config.toml"
         config_file.write_text(toml_content)
-        monkeypatch.setenv("ISTOTA_OAUTH2_CLIENT_SECRET", "env-secret")
-        monkeypatch.setenv("ISTOTA_WEB_SECRET_KEY", "env-key")
+        monkeypatch.setenv("ISTOTA_WEB_OAUTH2_CLIENT_SECRET", "env-secret")
+        monkeypatch.setenv("ISTOTA_WEB_SESSION_SECRET_KEY", "env-key")
         cfg = load_config(config_file)
         assert cfg.web.oauth2_client_secret == "env-secret"
         assert cfg.web.session_secret_key == "env-key"

@@ -141,10 +141,10 @@ class TestBuildStrippedEnv:
     def test_strips_app_password(self):
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",
-            "ISTOTA_NC_APP_PASSWORD": "pw-123",
+            "ISTOTA_NEXTCLOUD_APP_PASSWORD": "pw-123",
         }, clear=True):
             env = build_stripped_env()
-        assert "ISTOTA_NC_APP_PASSWORD" not in env
+        assert "ISTOTA_NEXTCLOUD_APP_PASSWORD" not in env
 
     def test_strips_private_key(self):
         with patch.dict(os.environ, {
@@ -216,25 +216,25 @@ class TestConfigEnvVarOverrides:
 
     def test_nc_app_password_override(self, tmp_path):
         config_file = self._write_minimal_config(tmp_path)
-        with patch.dict(os.environ, {"ISTOTA_NC_APP_PASSWORD": "env-password"}, clear=False):
+        with patch.dict(os.environ, {"ISTOTA_NEXTCLOUD_APP_PASSWORD": "env-password"}, clear=False):
             config = load_config(config_file)
         assert config.nextcloud.app_password == "env-password"
 
     def test_imap_password_override(self, tmp_path):
         config_file = self._write_minimal_config(tmp_path)
-        with patch.dict(os.environ, {"ISTOTA_IMAP_PASSWORD": "env-imap"}, clear=False):
+        with patch.dict(os.environ, {"ISTOTA_EMAIL_IMAP_PASSWORD": "env-imap"}, clear=False):
             config = load_config(config_file)
         assert config.email.imap_password == "env-imap"
 
     def test_smtp_password_override(self, tmp_path):
         config_file = self._write_minimal_config(tmp_path)
-        with patch.dict(os.environ, {"ISTOTA_SMTP_PASSWORD": "env-smtp"}, clear=False):
+        with patch.dict(os.environ, {"ISTOTA_EMAIL_SMTP_PASSWORD": "env-smtp"}, clear=False):
             config = load_config(config_file)
         assert config.email.smtp_password == "env-smtp"
 
     def test_gitlab_token_override(self, tmp_path):
         config_file = self._write_minimal_config(tmp_path)
-        with patch.dict(os.environ, {"ISTOTA_GITLAB_TOKEN": "env-gl-token"}, clear=False):
+        with patch.dict(os.environ, {"ISTOTA_DEVELOPER_GITLAB_TOKEN": "env-gl-token"}, clear=False):
             config = load_config(config_file)
         assert config.developer.gitlab_token == "env-gl-token"
 
@@ -244,8 +244,8 @@ class TestConfigEnvVarOverrides:
         env_clean = {
             k: v for k, v in os.environ.items()
             if k not in {
-                "ISTOTA_NC_APP_PASSWORD", "ISTOTA_IMAP_PASSWORD", "ISTOTA_SMTP_PASSWORD",
-                "ISTOTA_GITLAB_TOKEN",
+                "ISTOTA_NEXTCLOUD_APP_PASSWORD", "ISTOTA_EMAIL_IMAP_PASSWORD", "ISTOTA_EMAIL_SMTP_PASSWORD",
+                "ISTOTA_DEVELOPER_GITLAB_TOKEN",
             }
         }
         with patch.dict(os.environ, env_clean, clear=True):

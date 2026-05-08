@@ -31,7 +31,7 @@ Access Google Drive, Gmail, Calendar, Sheets, Docs, and Chat through the [Google
 [google_workspace]
 enabled = true
 client_id = "123456789-abc.apps.googleusercontent.com"
-client_secret = ""    # or ISTOTA_GOOGLE_CLIENT_SECRET env var
+client_secret = ""    # or ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET env var
 ```
 
 The default scopes request access to Drive, Gmail, Calendar, Sheets, and Docs. To restrict access, override the `scopes` list:

@@ -729,16 +729,16 @@ github_api_allowlist = ["GET /repos/*"]
         import os
         config_file = tmp_path / "config.toml"
         config_file.write_text("")
-        old = os.environ.get("ISTOTA_GITHUB_TOKEN")
+        old = os.environ.get("ISTOTA_DEVELOPER_GITHUB_TOKEN")
         try:
-            os.environ["ISTOTA_GITHUB_TOKEN"] = "ghp_env_override"
+            os.environ["ISTOTA_DEVELOPER_GITHUB_TOKEN"] = "ghp_env_override"
             cfg = load_config(config_file)
             assert cfg.developer.github_token == "ghp_env_override"
         finally:
             if old is None:
-                os.environ.pop("ISTOTA_GITHUB_TOKEN", None)
+                os.environ.pop("ISTOTA_DEVELOPER_GITHUB_TOKEN", None)
             else:
-                os.environ["ISTOTA_GITHUB_TOKEN"] = old
+                os.environ["ISTOTA_DEVELOPER_GITHUB_TOKEN"] = old
 
     def test_load_defaults_when_not_set(self, tmp_path):
         config_file = tmp_path / "config.toml"

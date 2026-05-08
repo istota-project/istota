@@ -1009,16 +1009,19 @@ def load_config(config_path: Path | None = None) -> Config:
 
     config.admin_users = load_admin_users()
 
-    # Environment variable overrides for secrets (allows EnvironmentFile= usage)
+    # Environment variable overrides for secrets (allows EnvironmentFile= usage).
+    # Naming convention: ISTOTA_<SECTION>_<FIELD>, matching the config dataclass
+    # path. Same convention as docker-compose env vars — single source of truth
+    # for "where does this credential come from" across all deploy paths.
     _env_secret_overrides = [
-        ("ISTOTA_NC_APP_PASSWORD", "nextcloud", "app_password"),
-        ("ISTOTA_IMAP_PASSWORD", "email", "imap_password"),
-        ("ISTOTA_SMTP_PASSWORD", "email", "smtp_password"),
-        ("ISTOTA_GITLAB_TOKEN", "developer", "gitlab_token"),
-        ("ISTOTA_GITHUB_TOKEN", "developer", "github_token"),
-        ("ISTOTA_GOOGLE_CLIENT_SECRET", "google_workspace", "client_secret"),
-        ("ISTOTA_OAUTH2_CLIENT_SECRET", "web", "oauth2_client_secret"),
-        ("ISTOTA_WEB_SECRET_KEY", "web", "session_secret_key"),
+        ("ISTOTA_NEXTCLOUD_APP_PASSWORD", "nextcloud", "app_password"),
+        ("ISTOTA_EMAIL_IMAP_PASSWORD", "email", "imap_password"),
+        ("ISTOTA_EMAIL_SMTP_PASSWORD", "email", "smtp_password"),
+        ("ISTOTA_DEVELOPER_GITLAB_TOKEN", "developer", "gitlab_token"),
+        ("ISTOTA_DEVELOPER_GITHUB_TOKEN", "developer", "github_token"),
+        ("ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET", "google_workspace", "client_secret"),
+        ("ISTOTA_WEB_OAUTH2_CLIENT_SECRET", "web", "oauth2_client_secret"),
+        ("ISTOTA_WEB_SESSION_SECRET_KEY", "web", "session_secret_key"),
     ]
     for env_var, section, field_name in _env_secret_overrides:
         val = os.environ.get(env_var)

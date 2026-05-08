@@ -256,7 +256,7 @@ There is no instance-level `[money]` config section. Money is a **module** (on b
 |---|---|---|
 | `enabled` | `false` | Enable Google Workspace skill |
 | `client_id` | `""` | Google OAuth client ID |
-| `client_secret` | `""` | Google OAuth client secret (or `ISTOTA_GOOGLE_CLIENT_SECRET` env var) |
+| `client_secret` | `""` | Google OAuth client secret (or `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET` env var) |
 | `scopes` | Drive, Gmail, Calendar, Sheets, Docs | OAuth scopes to request |
 
 See [Google Workspace](../features/google-workspace.md) for setup instructions.
@@ -277,11 +277,11 @@ See [Google Workspace](../features/google-workspace.md) for setup instructions.
 | `port` | `8766` | Web app port |
 | `oauth2_provider` | `""` | Public Nextcloud URL (browser-facing), no trailing slash |
 | `oauth2_client_id` | `""` | NC OAuth 2.0 client ID |
-| `oauth2_client_secret` | `""` | NC OAuth 2.0 client secret (or `ISTOTA_OAUTH2_CLIENT_SECRET` env) |
+| `oauth2_client_secret` | `""` | NC OAuth 2.0 client secret (or `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` env) |
 | `oauth2_token_endpoint` | `""` | Optional server-to-server token URL override |
 | `oauth2_userinfo_endpoint` | `""` | Optional server-to-server userinfo URL override |
 | `oauth2_redirect_uri` | `""` | Explicit redirect URI override; otherwise derived from request |
-| `session_secret_key` | `""` | Session signing key (or `ISTOTA_WEB_SECRET_KEY` env) |
+| `session_secret_key` | `""` | Session signing key (or `ISTOTA_WEB_SESSION_SECRET_KEY` env) |
 
 ## `[location]`
 

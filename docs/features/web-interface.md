@@ -37,16 +37,16 @@ enabled = true
 port = 8766
 oauth2_provider = "https://cloud.example.com"
 oauth2_client_id = "your-client-id-from-step-1"
-oauth2_client_secret = ""    # or set ISTOTA_OAUTH2_CLIENT_SECRET env var
-session_secret_key = ""      # or set ISTOTA_WEB_SECRET_KEY env var
+oauth2_client_secret = ""    # or set ISTOTA_WEB_OAUTH2_CLIENT_SECRET env var
+session_secret_key = ""      # or set ISTOTA_WEB_SESSION_SECRET_KEY env var
 ```
 
 | Setting | Description |
 |---|---|
 | `oauth2_provider` | Your Nextcloud URL (no trailing slash) — what the browser hits to authorize. |
 | `oauth2_client_id` | The client ID from the OAuth 2.0 registration. |
-| `oauth2_client_secret` | The client secret. Prefer the `ISTOTA_OAUTH2_CLIENT_SECRET` env var. |
-| `session_secret_key` | Random string for signing session cookies. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`. Use the `ISTOTA_WEB_SECRET_KEY` env var in production. |
+| `oauth2_client_secret` | The client secret. Prefer the `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` env var. |
+| `session_secret_key` | Random string for signing session cookies. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`. Use the `ISTOTA_WEB_SESSION_SECRET_KEY` env var in production. |
 
 Optional overrides (defaults derive from `oauth2_provider`):
 

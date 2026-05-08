@@ -60,9 +60,10 @@ temp_dir = "/tmp/istota"
 # Claude subprocess runs with a clean minimal environment and --allowedTools
 # whitelist. Credentials are injected per-task and optionally routed through
 # the skill proxy (enabled by default) for credential isolation.
-# Secrets can be provided via env vars (e.g. from systemd EnvironmentFile=):
-#   ISTOTA_NC_APP_PASSWORD, ISTOTA_IMAP_PASSWORD, ISTOTA_SMTP_PASSWORD,
-#   ISTOTA_GITLAB_TOKEN, ISTOTA_GITHUB_TOKEN
+# Secrets can be provided via env vars (e.g. from systemd EnvironmentFile=).
+# Naming convention: ISTOTA_<SECTION>_<FIELD>, matching the config dataclass path.
+#   ISTOTA_NEXTCLOUD_APP_PASSWORD, ISTOTA_EMAIL_IMAP_PASSWORD, ISTOTA_EMAIL_SMTP_PASSWORD,
+#   ISTOTA_DEVELOPER_GITLAB_TOKEN, ISTOTA_DEVELOPER_GITHUB_TOKEN
 
 # [security]
 # sandbox_enabled = true           # bwrap filesystem isolation per user (Linux only)
@@ -383,8 +384,8 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # port = 8766
 # oauth2_provider = "https://cloud.example.com"   # public NC URL the browser hits
 # oauth2_client_id = "istota-web"
-# oauth2_client_secret = ""                        # or ISTOTA_OAUTH2_CLIENT_SECRET env var
-# session_secret_key = ""                          # or ISTOTA_WEB_SECRET_KEY env var
+# oauth2_client_secret = ""                        # or ISTOTA_WEB_OAUTH2_CLIENT_SECRET env var
+# session_secret_key = ""                          # or ISTOTA_WEB_SESSION_SECRET_KEY env var
 #
 # Optional overrides (defaults derive from oauth2_provider):
 # oauth2_token_endpoint = ""                       # server-to-server token URL
@@ -403,7 +404,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # [google_workspace]
 # enabled = false
 # client_id = ""
-# client_secret = ""    # or ISTOTA_GOOGLE_CLIENT_SECRET env var
+# client_secret = ""    # or ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET env var
 # scopes = [
 #     "https://www.googleapis.com/auth/drive.readonly",
 #     "https://www.googleapis.com/auth/gmail.readonly",
