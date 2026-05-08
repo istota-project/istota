@@ -79,11 +79,13 @@ Cancellation is polled between events via the `cancel_check` callback, which cal
 
 ## Result composition
 
-The result goes through `_compose_full_result()`, which has two modes:
+The result goes through `_compose_full_result()`, which has two narrowly-scoped mechanisms sharing a `_last_substantial_region()` walker. Both mechanisms **replace** `result_text` outright — they never prepend or glue recovered text in front of the model's final output.
 
-**CM-aware mode**: When context management boundaries exist in the trace, segments by boundary and uses the last segment with substantial text (>= 200 chars). Falls back to `result_text` if no substantial segment.
+**Mechanism A — CM-aware (ISSUE-026):** When any `cm_boundary` events exist in the trace, segments the trace at those boundaries and returns the last region whose text is at least 200 chars (`_CM_SEGMENT_MIN_CHARS`). Always runs when CM events are present, including for automated tasks (scheduled / briefing / heartbeat). Falls back to `result_text` if no segment qualifies.
 
-**Terse-result recovery**: When no context management, detects substantial text blocks emitted as intermediate text but missing from the `ResultEvent`, and prepends them.
+**Mechanism B — terse-recovery (ISSUE-025):** Segments the trace by both `tool` and `cm_boundary` events and returns the last region of at least 500 chars (`_TRAILING_REGION_MIN_CHARS`). Gated by **both** `_is_automated_task(task)` returning False **and** `_is_terse(result_text)` returning True (text shorter than 150 chars or matching a short reference regex like "see above" / "done" / "ok"). Structured-output tasks and substantial results bypass this mechanism. Skipped when CM events exist (Mechanism A wins).
+
+Every override emits a single `compose_full_result: mechanism=… task_id=… original_chars=… recovered_chars=…` INFO log so the 500-char floor can be calibrated against production data.
 
 Result priority: ResultEvent > result file > stderr > fallback error.
 
