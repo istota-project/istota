@@ -850,6 +850,45 @@ class WorkerPool:
             return len(self._workers)
 
 
+def _load_deferred_json(
+    user_temp_dir: Path,
+    task_id: int,
+    suffix: str,
+    *,
+    expected_type: type = list,
+) -> tuple[Path, list | dict] | None:
+    """Open ``task_<id>_<suffix>.json`` in ``user_temp_dir`` for a deferred-op handler.
+
+    Returns ``(path, data)`` on success. Returns ``None`` for absent or
+    malformed files; malformed files are unlinked and a WARN is logged. The
+    path is returned so the caller can ``unlink`` after processing — keeping
+    the lifecycle (and any task-specific invariants) explicit at the call-site.
+
+    ``expected_type`` is checked with ``isinstance``; mismatches are treated
+    as malformed (warned and unlinked).
+    """
+    path = user_temp_dir / f"task_{task_id}_{suffix}.json"
+    if not path.exists():
+        return None
+
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Bad deferred %s file for task %d: %s", suffix, task_id, e)
+        path.unlink(missing_ok=True)
+        return None
+
+    if not isinstance(data, expected_type):
+        logger.warning(
+            "Deferred %s for task %d is not a %s",
+            suffix, task_id, expected_type.__name__,
+        )
+        path.unlink(missing_ok=True)
+        return None
+
+    return path, data
+
+
 def _process_deferred_subtasks(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> int:
@@ -857,16 +896,10 @@ def _process_deferred_subtasks(
 
     Returns count of subtasks created.
     """
-    path = user_temp_dir / f"task_{task.id}_subtasks.json"
-    if not path.exists():
+    loaded = _load_deferred_json(user_temp_dir, task.id, "subtasks")
+    if loaded is None:
         return 0
-
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Bad deferred subtasks file for task %d: %s", task.id, e)
-        path.unlink(missing_ok=True)
-        return 0
+    path, data = loaded
 
     # Admin-only: non-admin users cannot create subtasks
     if not config.is_admin(task.user_id):
@@ -948,16 +981,12 @@ def _process_deferred_tracking(
 
     Returns count of items processed.
     """
-    path = user_temp_dir / f"task_{task.id}_tracked_transactions.json"
-    if not path.exists():
+    loaded = _load_deferred_json(
+        user_temp_dir, task.id, "tracked_transactions", expected_type=dict,
+    )
+    if loaded is None:
         return 0
-
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Bad deferred tracking file for task %d: %s", task.id, e)
-        path.unlink(missing_ok=True)
-        return 0
+    path, data = loaded
 
     count = 0
     with db.get_db(config.db_path) as conn:
@@ -1000,21 +1029,10 @@ def _process_deferred_sent_emails(
 
     Returns count of sent emails recorded.
     """
-    path = user_temp_dir / f"task_{task.id}_sent_emails.json"
-    if not path.exists():
+    loaded = _load_deferred_json(user_temp_dir, task.id, "sent_emails")
+    if loaded is None:
         return 0
-
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Bad deferred sent_emails file for task %d: %s", task.id, e)
-        path.unlink(missing_ok=True)
-        return 0
-
-    if not isinstance(data, list):
-        logger.warning("Deferred sent_emails for task %d is not a list", task.id)
-        path.unlink(missing_ok=True)
-        return 0
+    path, data = loaded
 
     count = 0
     with db.get_db(config.db_path) as conn:
@@ -1056,21 +1074,10 @@ def _process_deferred_kv_ops(
 
     Returns count of operations processed.
     """
-    path = user_temp_dir / f"task_{task.id}_kv_ops.json"
-    if not path.exists():
+    loaded = _load_deferred_json(user_temp_dir, task.id, "kv_ops")
+    if loaded is None:
         return 0
-
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Bad deferred kv_ops file for task %d: %s", task.id, e)
-        path.unlink(missing_ok=True)
-        return 0
-
-    if not isinstance(data, list):
-        logger.warning("Deferred kv_ops for task %d is not a list", task.id)
-        path.unlink(missing_ok=True)
-        return 0
+    path, data = loaded
 
     count = 0
     with db.get_db(config.db_path) as conn:
@@ -1115,21 +1122,10 @@ def _process_deferred_user_alerts(
 
     Returns count of alerts posted.
     """
-    path = user_temp_dir / f"task_{task.id}_user_alerts.json"
-    if not path.exists():
+    loaded = _load_deferred_json(user_temp_dir, task.id, "user_alerts")
+    if loaded is None:
         return 0
-
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Bad deferred user_alerts file for task %d: %s", task.id, e)
-        path.unlink(missing_ok=True)
-        return 0
-
-    if not isinstance(data, list):
-        logger.warning("Deferred user_alerts for task %d is not a list", task.id)
-        path.unlink(missing_ok=True)
-        return 0
+    path, data = loaded
 
     count = 0
     for entry in data:
@@ -1252,21 +1248,10 @@ def _process_deferred_kg_ops(
 
     Returns count of operations processed.
     """
-    path = user_temp_dir / f"task_{task.id}_kg_ops.json"
-    if not path.exists():
+    loaded = _load_deferred_json(user_temp_dir, task.id, "kg_ops")
+    if loaded is None:
         return 0
-
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Bad deferred kg_ops file for task %d: %s", task.id, e)
-        path.unlink(missing_ok=True)
-        return 0
-
-    if not isinstance(data, list):
-        logger.warning("Deferred kg_ops for task %d is not a list", task.id)
-        path.unlink(missing_ok=True)
-        return 0
+    path, data = loaded
 
     from .memory.knowledge_graph import (
         add_fact as kg_add_fact,
