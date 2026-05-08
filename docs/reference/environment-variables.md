@@ -58,16 +58,20 @@ Derived from Nextcloud credentials:
 
 ## Service integrations
 
-| Variable | Source |
-|---|---|
-| `KARAKEEP_BASE_URL` | From resource config `extra` |
-| `KARAKEEP_API_KEY` | From resource config `extra` |
-| `MONARCH_SESSION_TOKEN` | From resource config `extra` |
-| `FEEDS_USER` | Istota user ID (set by executor for native feeds skill) |
-| `TUMBLR_API_KEY` | Optional fallback for Tumblr feeds (from resource `extra.tumblr_api_key`) |
-| `MONEY_CONFIG` | From the user's `money` resource (`config_path` extra) |
-| `MONEY_USER` | The istota user_id (override via `user_key` on the resource) |
-| `MONEY_SECRETS_FILE` | Optional escape hatch for direct `money` CLI use; not used by seeded scheduler jobs (the skill reads creds in-process from the resource entry) |
+Every service-integration env var is declared in the consuming skill's `skill.md` `env:` block and resolved by `build_skill_env()` against the per-task `EnvContext`. Per-user credentials come from the encrypted `secrets` table (`from: "secret"`); module-skill subprocesses receive `ISTOTA_SECRET_KEY` via the proxy so they can decrypt in-process.
+
+| Variable | Source | Notes |
+|---|---|---|
+| `KARAKEEP_BASE_URL` | `secrets` (`karakeep.base_url`) | per-user |
+| `KARAKEEP_API_KEY` | `secrets` (`karakeep.api_key`) | per-user, sensitive |
+| `MONARCH_SESSION_TOKEN` | `secrets` (`monarch.session_token`) | per-user, sensitive |
+| `FEEDS_USER` | task `user_id` | set by `_execute_skill_task` for the native feeds skill |
+| `TUMBLR_API_KEY` | `secrets` (`feeds.tumblr_api_key`) | per-user, sensitive |
+| `NTFY_TOPIC` / `NTFY_SERVER_URL` / `NTFY_USERNAME` | `secrets` (`ntfy.*`) | per-user (non-credential) |
+| `NTFY_TOKEN` / `NTFY_PASSWORD` | `secrets` (`ntfy.token` / `ntfy.password`) | per-user, sensitive |
+| `MONEY_CONFIG` | legacy resource `extras.config_path` | per-user; current deployments resolve money in-process |
+| `MONEY_USER` | task `user_id` | override via `user_key` on the resource |
+| `MONEY_SECRETS_FILE` | escape hatch | optional, for direct `money` CLI use; the skill reads creds in-process |
 
 ## Google Workspace
 
@@ -98,7 +102,7 @@ Derived from Nextcloud credentials:
 
 ## Credential proxy
 
-When `skill_proxy_enabled = true`, these variables are stripped from the subprocess environment and injected server-side by the proxy:
+When `skill_proxy_enabled = true`, every env var declared with `sensitive: true` in any skill manifest is stripped from the subprocess environment and injected server-side by the proxy. The set is computed at task time by `derive_credential_set(skill_index)`. Today's set:
 
 - `CALDAV_PASSWORD`
 - `NC_PASS`
@@ -109,9 +113,11 @@ When `skill_proxy_enabled = true`, these variables are stripped from the subproc
 - `GITLAB_TOKEN`
 - `GITHUB_TOKEN`
 - `MONARCH_SESSION_TOKEN`
-- `ISTOTA_SECRET_KEY`
+- `NTFY_TOKEN`, `NTFY_PASSWORD`
+- `TUMBLR_API_KEY`
+- `ISTOTA_SECRET_KEY` — routed to module-skill subprocesses, hard-blocked at the lookup endpoint via `_PROXY_LOOKUP_BLOCKED`
 
-The proxy injects each credential only into the skill CLIs that are mapped to it (`_CREDENTIAL_SKILL_MAP` in `executor.py`). Authorization is based on credential presence in the task env — not skill selection — so any CLI skill whose credentials the user has configured can request them at runtime. See [security: credential proxy](../deployment/security.md#credential-proxy) for the authorization model and rejection logging. See [credentials](../configuration/credentials.md) for the full two-tier credential inventory and provisioning guide.
+The proxy injects each credential only into the skill CLIs whose manifest declared it (`derive_skill_credential_map`). Authorization is based on credential presence in the task env — not skill selection — so any skill whose credentials the user has configured can request them at runtime. See [security: credential proxy](../deployment/security.md#credential-proxy) for the authorization model and rejection logging. See [credentials](../configuration/credentials.md) for the full two-tier credential inventory and provisioning guide.
 
 ## Secret overrides
 
