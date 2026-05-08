@@ -57,15 +57,8 @@ istota_repo_dir: "{{ istota_home }}/istota"
 # GitLab access token used to clone the istota repo itself (for private repos).
 # Generate at: GitLab > Settings > Access Tokens (read_repository scope).
 # NOT the same as istota_developer_gitlab_token — that one feeds the
-# developer skill's API access. Operators upgrading from before the rename
-# can keep setting istota_gitlab_token; the pre_tasks shim below will
-# forward it to the new name with a deprecation warning.
+# developer skill's API access.
 istota_repo_clone_token: ""
-
-# Deprecated alias for istota_repo_clone_token. Kept so old vault entries
-# keep working through one release cycle. Remove once all environments
-# have migrated.
-istota_gitlab_token: ""
 
 # Scheduler settings
 istota_scheduler_poll_interval: 5
@@ -462,8 +455,7 @@ istota_developer_github_api_allowlist:            # API endpoint allowlist (enfo
 istota_site_enabled: false
 istota_site_base_path: "{{ istota_home }}/html"
 # Public hostname for nginx (site hosting, webhooks, etc.)
-# istota_site_hostname is accepted as a backward-compatible alias
-istota_hostname: "{{ istota_site_hostname | default(istota_namespace + '.example.com') }}"
+istota_hostname: "{{ istota_namespace }}.example.com"
 
 # Backup settings
 istota_backup_enabled: true
