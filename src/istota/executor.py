@@ -2441,7 +2441,11 @@ def execute_task(
             if credential_env:
                 # Use /tmp for socket path to stay within AF_UNIX length limit (~104 chars).
                 # build_bwrap_cmd() bind-mounts this file into the sandbox.
-                _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{task.id}.sock"
+                # PID is included so concurrent processes (xdist test workers,
+                # parallel scheduler instances on the same host) don't race on
+                # the same path — task.id alone collides when each process has
+                # its own DB.
+                _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{os.getpid()}-{task.id}.sock"
                 env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
                 # Credential authorization combines two signals:
                 #   1. Auto-authorization from credential presence — any CLI
@@ -2509,7 +2513,7 @@ def execute_task(
             dev_dir.mkdir(parents=True, exist_ok=True)
             write_bridge_script(dev_dir / "net-bridge")
 
-            _net_proxy_sock = Path(tempfile.gettempdir()) / f"istota-net-{task.id}.sock"
+            _net_proxy_sock = Path(tempfile.gettempdir()) / f"istota-net-{os.getpid()}-{task.id}.sock"
             _net_proxy_ctx = NetworkProxy(
                 _net_proxy_sock, allowed_hosts,
             )
