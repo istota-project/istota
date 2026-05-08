@@ -12,7 +12,10 @@ brain/
 ├── __init__.py     # Brain protocol re-exports + make_brain factory
 ├── _types.py       # BrainRequest, BrainResult, BrainConfig, Brain Protocol
 ├── _events.py      # StreamEvent types + Claude Code stream-json parser
-└── claude_code.py  # ClaudeCodeBrain — wraps `claude` CLI subprocess
+├── _roles.py       # Global operator role-override state (provider-agnostic)
+└── claude_code.py  # ClaudeCodeBrain — wraps `claude` CLI subprocess +
+                    # owns the Anthropic model namespace (canonical IDs,
+                    # MODEL_ALIASES, DEFAULT_ROLE_TARGETS, resolver methods)
 ```
 
 `stream_parser.py` at the package root is a backward-compat shim that
@@ -22,7 +25,51 @@ re-exports from `brain._events` for tests and a few internal callers.
 ```python
 class Brain(Protocol):
     def execute(self, req: BrainRequest) -> BrainResult: ...
+
+    # Each brain owns its own model namespace. Consumers never reach into
+    # a brain module's tables — they go through make_brain(config.brain)
+    # and call these methods.
+    def resolve_alias(self, alias: str) -> tuple[str | None, str | None] | None: ...
+    def resolve_model_name(self, name: str | None) -> str: ...
+    def list_aliases(self) -> list[tuple[str, str | None, str | None]]: ...
 ```
+
+## Model identity (single source of truth)
+
+Every model ID in the codebase resolves through the active brain. There
+are three layers, top to bottom:
+
+1. **Operator role overrides** (`brain/_roles.py`, global) — provider-
+   agnostic. Operators write `[models.roles] smart = "opus-46-high"` in
+   TOML; `set_role_overrides(...)` is called once at config-load time.
+2. **Default role targets** (per-brain, e.g. `claude_code.DEFAULT_ROLE_TARGETS`) —
+   each brain decides what `fast` / `general` / `smart` mean for *that*
+   brain's namespace if the operator hasn't overridden.
+3. **Provider aliases** (per-brain, e.g. `claude_code.MODEL_ALIASES`) —
+   short names like `opus-high` for `(model_id, effort)` pairs. Brain-
+   specific (Anthropic short names won't make sense under OpenRouter).
+
+`Brain.resolve_alias` consults all three (override > default role > provider
+alias) and returns `(model_id, effort) | None`. `Brain.resolve_model_name`
+collapses any name to a canonical ID; `Brain.list_aliases` exposes the
+merged table for the `!models` Talk command and the `!help` listing.
+
+ClaudeCodeBrain pins to versioned IDs:
+- `OPUS = "claude-opus-4-7"` (current default Opus)
+- `OPUS_46 = "claude-opus-4-6"` (prior Opus, kept for prod pinning)
+- `SONNET = "claude-sonnet-4-6"`
+- `HAIKU = "claude-haiku-4-5"`
+
+Convention: bare alias names (`opus`, `sonnet`, `haiku`) always resolve
+to the *current latest* version constant. Older-version constants are
+added only when there's a concrete reason to pin (production stability,
+reproducibility) — not exhaustive. Bumping `OPUS = "claude-opus-5-0"`
+ripples through every consumer automatically.
+
+Adding a new brain: implement the four Brain methods (`execute`,
+`resolve_alias`, `resolve_model_name`, `list_aliases`) plus your own
+canonical-ID constants and alias tables in your brain module. Operator
+overrides plug in for free via `_roles.py`.
 
 ## BrainRequest fields
 | Field | Notes |

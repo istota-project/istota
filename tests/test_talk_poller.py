@@ -7,6 +7,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from istota import db
+from istota.brain.claude_code import OPUS
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
 from istota import talk_poller as _talk_poller_mod
 from istota.talk_poller import (
@@ -743,6 +744,106 @@ class TestPollTalkConversations:
             assert task.prompt == "Check my calendar"
             assert task.conversation_token == "room1"
             assert task.talk_message_id == 101
+
+    @pytest.mark.asyncio
+    async def test_model_prefix_overrides_task_model_and_effort(self, make_config):
+        config = make_config()
+
+        msg = _msg(id=102, actor_id="alice", message="!model opus-high draft a spec for X")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+            mock_instance.send_message = AsyncMock()
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result[0])
+            assert task.prompt == "draft a spec for X"
+            assert task.model == OPUS
+            assert task.effort == "high"
+
+    @pytest.mark.asyncio
+    async def test_model_prefix_default_alias_clears_overrides(self, make_config):
+        config = make_config()
+
+        msg = _msg(id=103, actor_id="alice", message="!model default just do it")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+            mock_instance.send_message = AsyncMock()
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result[0])
+            assert task.prompt == "just do it"
+            assert task.model is None
+            assert task.effort is None
+
+    @pytest.mark.asyncio
+    async def test_model_prefix_unknown_alias_posts_usage_and_skips_task(self, make_config):
+        config = make_config()
+
+        msg = _msg(id=104, actor_id="alice", message="!model gpt-4 draft a spec")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+            mock_instance.send_message = AsyncMock()
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert result == []
+        # Usage message posted to the conversation
+        assert mock_instance.send_message.await_count == 1
+        args, _ = mock_instance.send_message.await_args
+        assert args[0] == "room1"
+        assert "Aliases:" in args[1]
+
+    @pytest.mark.asyncio
+    async def test_model_prefix_alias_only_posts_usage_and_skips_task(self, make_config):
+        config = make_config()
+
+        msg = _msg(id=105, actor_id="alice", message="!model opus")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+            mock_instance.send_message = AsyncMock()
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert result == []
+        assert mock_instance.send_message.await_count == 1
 
     @pytest.mark.asyncio
     async def test_dm_first_poll_fetches_history(self, make_config):

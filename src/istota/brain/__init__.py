@@ -2,11 +2,20 @@
 
 The executor builds the prompt, env, and sandbox configuration, then hands
 a BrainRequest to a Brain implementation. Brains own everything from
-"compose the model call" through "produce a result + trace".
+"compose the model call" through "produce a result + trace", *and* own
+their own model namespace — canonical IDs, provider aliases, and how role
+aliases like ``smart`` map to a real model. Consumers never reach into a
+brain module's tables; they go through ``make_brain(config.brain)`` and
+call ``.resolve_alias`` / ``.resolve_model_name`` / ``.list_aliases``.
 
-Phase 1 ships a single brain (ClaudeCodeBrain) that wraps the `claude` CLI.
-Future phases add direct-HTTP brains (OpenRouter, Anthropic) without any
-change to the executor's per-task orchestration.
+Operator role overrides (``[models.roles]`` TOML) are provider-agnostic
+and live globally in ``_roles.py`` — each brain consults the override
+table at resolution time and routes the override target through its own
+provider alias map.
+
+Phase 1 ships a single brain (ClaudeCodeBrain) that wraps the `claude`
+CLI. Future phases add direct-HTTP brains (OpenRouter, Anthropic) without
+any change to the executor's per-task orchestration.
 """
 
 from ._events import (
@@ -18,6 +27,7 @@ from ._events import (
     make_stream_parser,
     parse_stream_line,
 )
+from ._roles import get_role_override, get_role_overrides, set_role_overrides
 from ._types import Brain, BrainConfig, BrainRequest, BrainResult
 from .claude_code import ClaudeCodeBrain
 
@@ -45,7 +55,10 @@ __all__ = [
     "StreamEvent",
     "TextEvent",
     "ToolUseEvent",
+    "get_role_override",
+    "get_role_overrides",
     "make_brain",
     "make_stream_parser",
     "parse_stream_line",
+    "set_role_overrides",
 ]

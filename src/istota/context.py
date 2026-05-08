@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .brain import make_brain
 from .config import Config
 from .db import ConversationMessage, TalkMessage
 from .talk import clean_message_content
@@ -153,7 +154,7 @@ Rules:
             [
                 "claude",
                 "-p", "-",
-                "--model", config.conversation.selection_model,
+                "--model", make_brain(config.brain).resolve_model_name(config.conversation.selection_model),
             ],
             input=selection_prompt,
             capture_output=True,
@@ -454,7 +455,7 @@ Rules:
 
     try:
         result = subprocess.run(
-            ["claude", "-p", "-", "--model", config.conversation.selection_model],
+            ["claude", "-p", "-", "--model", make_brain(config.brain).resolve_model_name(config.conversation.selection_model)],
             input=selection_prompt,
             capture_output=True,
             text=True,

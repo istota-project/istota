@@ -2,6 +2,60 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-08: `/spec` skill, `!model` Talk prefix, brain-scoped model namespace
+
+Three loosely-related additions to the personal-assistant surface, landed in one session.
+
+The `/spec` skill (`src/istota/skills/spec/skill.md`) codifies a spec-driven development workflow that mirrors the local Claude Code `/spec` skill. Specs default to `{notes_folder}/Specs/{Drafts,Active,Done}/` and only branch into a project subfolder when the user names one explicitly in the request. Doc-only — filesystem ops piggyback on the always-include `files` skill. The skill frames specs as detailed implementation documents fit for blind handoff to a coding agent (named files/interfaces, edge cases, schema/config changes, test strategy, ordered stages, recorded decisions, explicit open questions); thin drafts shouldn't leave `Drafts/`. Triggers narrow enough to avoid false positives (`spec`, `draft spec`, `design doc`, etc.).
+
+The `!model <alias> <prompt>` Talk prefix lets users override the model for a single task. The infrastructure was already mostly there (`tasks.model` / `tasks.effort` columns, `db.create_task(model=, effort=)` kwargs, executor reads `task.model or config.model`) — what was missing was a parser and a curated alias surface. Implementation: (a) `commands.parse_model_prefix(content, brain)` parses `!model X <prompt>` and returns `(model, effort, remainder)` via `brain.resolve_alias`; (b) `talk_poller.py` intercepts the prefix before `commands.dispatch` (so `!model` doesn't get routed as an unknown command), strips it, and passes model/effort through to `db.create_task`; (c) new `!models` command lists the resolved alias table; (d) `!help` mentions the prefix. Empty-remainder + attachments path falls through to "Process the attached file(s)" — valid intent ("read this image with opus"). Empty-remainder + no attachments posts usage. Unknown alias posts usage and skips task creation rather than running with default.
+
+The brain-scoped model namespace refactor is the much larger piece — the user explicitly asked us to "avoid hardcoding model names throughout the codebase," then questioned whether the alias table should be brain-agnostic if Phase 2 brings a non-Anthropic brain. Final architecture: each `Brain` implementation owns its own canonical-ID constants, provider alias table, and default role targets; consumers reach them only via `make_brain(config.brain).resolve_alias` / `.resolve_model_name` / `.list_aliases` / `.validate_role_override`. Operator role overrides (`[models.roles]` TOML, e.g. `smart = "opus-46-high"` to pin prod to Opus 4.6) are global and provider-agnostic — they live in `brain/_roles.py` as a `dict[str, str]` of raw target strings; each brain resolves the target through its own alias table at lookup time.
+
+Three layers, top to bottom: (1) `brain/_roles._role_overrides` global operator state — atomic dict rebind via `set_role_overrides(...)` so concurrent readers always see a coherent snapshot; future SIGHUP/reload safety for free. (2) Brain-local default role targets (`brain.claude_code.DEFAULT_ROLE_TARGETS`: `fast`→Haiku, `general`→Sonnet, `smart`→Opus). (3) Brain-local provider aliases (`brain.claude_code.MODEL_ALIASES`: `opus`, `opus-high`, `opus-xhigh`, `opus-max`, `opus-46`, `opus-46-high`, `sonnet`, `sonnet-high`, `haiku`). Resolution order in `resolve_alias`: override → default role → provider alias → None. Bare aliases like `opus` always resolve to a versioned canonical ID (`OPUS = "claude-opus-4-7"`) so a model release can't silently re-route us; older versions get first-class constants only when there's a concrete reason to pin (`OPUS_46` exists because prod runs on it).
+
+Mulder + Scully review pass caught two genuine must-fix bugs that survived the initial implementation: (a) `executor.py:2434` built the `BrainRequest` with `model=(task.model or "").strip() or config.model` — never resolving aliases, so any cron job, briefing, email task, or operator `istota_model = "smart"` would have hit `claude --model smart` and failed; the talk-poller path was the only one that worked because `parse_model_prefix` pre-resolved. Fix: `model=brain.resolve_model_name(...)`. (b) `scheduler.py:2882` shipped `job.model` raw into `db.create_task` and `cron_loader._validate_model` actively warned on anything not starting with `claude-`, which would have produced log spam for every role-aliased CRON.md row. Fix: resolve at create time so DB stays canonical, teach the validator to consult `brain.resolve_alias` and `get_role_overrides`. Also caught: subtasks didn't inherit parent `model`/`effort`; role overrides could silently shadow provider aliases (`[models.roles] opus = "haiku"` would break `!model opus`); invalid override targets passed through silently. Added `Brain.validate_role_override(role, target)` returning warnings; config.py invokes it on every entry at load time.
+
+Documentation surface: rewrote the model-related blocks in `deploy/ansible/defaults/main.yml` and `config/config.example.toml` with explicit "three knobs that interact" headers, explaining the resolution chain (`!model` per-task → `istota_model`+`istota_effort` → brain default) and the alias-effort footgun (`istota_model = "opus-46-high"` resolves model only; `istota_effort` is read independently and must be set separately for global config — only the Talk `!model` path encodes both at once). The `[models.roles]` example calls out which roles internal code uses (`fast` for triage and skill classification, `general` for sleep cycle and USER.md curation, `smart` purely user-facing — so rebinding `smart` is risk-free for internal flows). `.claude/rules/brain.md` and `.claude/rules/config.md` updated for the new layout. AGENTS.md gets the `!model` prefix overview and a one-line note that brains own their model namespace.
+
+**Key changes:**
+- New `/spec` skill at `src/istota/skills/spec/skill.md` (doc-only). Uses `notes_folder` resource, companions `files` + `notes`.
+- New `!model <alias> <prompt>` Talk prefix and `!models` listing command. Aliases parsed by the active brain.
+- New `Brain` Protocol methods: `resolve_alias`, `resolve_model_name`, `list_aliases`, `validate_role_override`. ClaudeCodeBrain implements them.
+- New `brain/_roles.py` for global operator role overrides. Atomic dict rebind for concurrent-read safety.
+- New `[models.roles]` TOML section + `ModelsConfig` dataclass. Operator overrides applied at end of `load_config()` after per-entry validation by the active brain.
+- Anthropic canonical IDs (`OPUS`, `OPUS_46`, `SONNET`, `HAIKU`) and the alias tables moved into `brain/claude_code.py`. Old `brain/_models.py` deleted.
+- All in-codebase model references go through brain resolvers: per-task `BrainRequest` (executor), semantic routing, context selection, sleep cycle, cron task creation pre-resolves to canonical, cron validator consults brain.
+- Config defaults switched from bare `"haiku"` / `"sonnet"` to role names `"fast"` / `"general"`.
+- Subtasks inherit parent `model` / `effort`; deferred JSON entries can override per child.
+- Ansible: new `istota_models_roles: {}` default; `istota_conversation_selection_model` default switched from `"haiku"` to `"fast"`; template renders `[models.roles]` only when set. Defaults file gets a "three knobs" header explaining model/effort/roles interaction and the alias-effort footgun.
+- `config.example.toml` gets matching three-knobs explainer and an annotated `[models.roles]` example.
+- New tests: `tests/test_brain_models.py` (35 cases), additions to `tests/test_commands.py`, `tests/test_talk_poller.py`, `tests/test_cron_loader.py`. 4445 unit tests pass.
+
+**Files added/modified:**
+- `src/istota/skills/spec/skill.md` — new spec lifecycle skill
+- `src/istota/brain/_models.py` — deleted (contents redistributed)
+- `src/istota/brain/_roles.py` — new global operator-override module
+- `src/istota/brain/_types.py` — Brain Protocol grows four resolver methods
+- `src/istota/brain/claude_code.py` — Anthropic model namespace lives here (constants, MODEL_ALIASES, DEFAULT_ROLE_TARGETS, resolve_*/list_aliases/validate_role_override methods)
+- `src/istota/brain/__init__.py` — re-exports updated
+- `src/istota/commands.py` — new `parse_model_prefix(content, brain)`, `model_prefix_usage(brain)`, `cmd_models`; `cmd_help` lists aliases
+- `src/istota/config.py` — `ModelsConfig` dataclass, `[models]` section parser, validate-and-apply at load_config end
+- `src/istota/talk_poller.py` — intercept `!model` prefix before command dispatch, pass model/effort to `db.create_task`
+- `src/istota/context.py` — `selection_model` resolved via brain
+- `src/istota/executor.py` — per-task `BrainRequest` resolves model via brain (must-fix); `semantic_routing_model` likewise
+- `src/istota/memory/sleep_cycle.py` — `_run_sleep_cycle_brain` resolves via brain
+- `src/istota/scheduler.py` — cron task creation pre-resolves model
+- `src/istota/scheduler_deferred.py` — subtasks inherit parent model/effort
+- `src/istota/cron_loader.py` — `_validate_model` accepts aliases and role overrides
+- `deploy/ansible/defaults/main.yml` — new `istota_models_roles` var, three-knobs explainer
+- `deploy/ansible/templates/config.toml.j2` — `[models.roles]` block (rendered only when non-empty)
+- `config/config.example.toml` — three-knobs explainer at top, `[models.roles]` example
+- `.claude/rules/brain.md`, `.claude/rules/config.md` — updated for new layout
+- `AGENTS.md` — brain-namespace note + `!model` prefix overview
+- `tests/test_brain_models.py` — new (35 cases)
+- `tests/test_commands.py`, `tests/test_talk_poller.py`, `tests/test_cron_loader.py`, `tests/test_semantic_routing.py` — new tests + constant references
+
 ## 2026-05-08: `_compose_full_result` redesign
 
 The 2026-05-08 daily devlog-sync cron produced a multi-page result whose first ~5KB was a paraphrased enumeration of the bot's CLI skills, glued in front of a real ~900-char summary. The result got Talk-split into four chunks before delivery. No skill markdown content actually leaked — distinctive phrases like "Karakeep bookmark manager" don't exist anywhere in the repo. The model wrote the preamble itself, plausibly as a self-introduction, then gave a terse final summary; `_compose_full_result`'s "terse-result recovery" branch then prepended the preamble blocks to the result.

@@ -29,7 +29,10 @@ class TestSkillsConfig:
     def test_defaults(self):
         cfg = SkillsConfig()
         assert cfg.semantic_routing is True
-        assert cfg.semantic_routing_model == "haiku"
+        # Default uses the "fast" role alias, which resolves to Haiku via
+        # brain.claude_code.DEFAULT_ROLE_TARGETS. Operators rebind via
+        # [models.roles].
+        assert cfg.semantic_routing_model == "fast"
         assert cfg.semantic_routing_timeout == 3.0
 
     def test_config_has_skills_field(self):

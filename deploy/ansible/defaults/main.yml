@@ -28,11 +28,73 @@ istota_group: "{{ istota_namespace }}"
 istota_bot_name: ""
 # Include emissaries.md (constitutional principles) in system prompts
 istota_emissaries_enabled: true
-# Claude model. Pin to a version like "claude-opus-4-7" rather than the alias "opus" so
-# Claude Code updates don't silently switch us to a newer model. Empty = CLI default.
+# =============================================================================
+# Model selection — three knobs that interact
+# =============================================================================
+# istota_model + istota_effort   set the *default* model/effort for every task
+#                                 (cron jobs, briefings, talk, email, ...). Both
+#                                 are read independently — see the footgun below.
+# istota_models_roles            operator-rebound role aliases (smart/general/
+#                                 fast and custom roles). Affects anything
+#                                 that resolves a name through the active brain.
+#
+# Resolution chain inside the codebase:
+#   1. Per-task overrides (`!model <alias> <prompt>` from Talk) win over
+#      everything else — both model and effort are stored on the task row.
+#   2. Otherwise: istota_model + istota_effort.
+#   3. Otherwise: brain default (the CLI picks).
+#
+# FOOTGUN — provider-alias effort is NOT auto-applied via istota_model:
+#   istota_model: "opus-46-high"  resolves model → claude-opus-4-6, but
+#                                 istota_effort stays "" (= medium default).
+#   To get Opus 4.6 + high effort as the global default you MUST set both:
+#     istota_model: "opus-46-high"
+#     istota_effort: "high"
+#   (or equivalently, `claude-opus-4-6` + `high`).
+#   The Talk-side `!model opus-46-high <prompt>` path encodes both — only
+#   Ansible/TOML config has this split, because the two fields predate
+#   provider aliases.
+# =============================================================================
+
+# Default Claude model for every task. Accepts:
+#   - canonical IDs            "claude-opus-4-7", "claude-opus-4-6"
+#   - provider aliases         "opus", "opus-high", "opus-46-high", "sonnet", "haiku"
+#   - role aliases             "smart" (→ Opus 4.7), "general" (→ Sonnet),
+#                              "fast" (→ Haiku), or any custom role you define
+#                              in istota_models_roles
+# Empty = brain default.
 istota_model: ""
-# Effort level (Opus 4.7, Opus 4.6, Sonnet 4.6): low, medium, high, xhigh, max. Empty = model default.
+# Default effort level (Opus 4.7, Opus 4.6, Sonnet 4.6 only): low, medium, high,
+# xhigh (Opus 4.7 only), max (Opus 4.7 only). Empty = model default.
+# Read independently of istota_model — see footgun above.
 istota_effort: ""
+
+# Role aliases — provider-agnostic names that resolve to specific model IDs.
+# Defaults (in code, brain.claude_code.DEFAULT_ROLE_TARGETS):
+#   fast    → claude-haiku-4-5
+#   general → claude-sonnet-4-6
+#   smart   → claude-opus-4-7
+# These are the names internal call sites use when they need to pick a model
+# for a sub-job (e.g. context triage uses "fast", sleep cycle uses "general").
+# `smart` is currently UNUSED by internal code — it exists for `!model smart`
+# from Talk and as a sensible default for any future code path that wants
+# "the best model".
+#
+# Override here to rebind a role for this deployment, e.g.:
+#   istota_models_roles:
+#     smart: opus-46-high   # rebind the user-facing "smart" alias to Opus 4.6
+#     deep:  opus-max       # define a custom role available via !model deep
+#     fast:  haiku          # explicit (matches default; cosmetic only)
+# Values may be canonical IDs or any provider alias from MODEL_ALIASES in the
+# active brain module (resolved at config-load time; the active brain
+# validates overrides on startup and warns on typos / collisions). Empty
+# dict = use code defaults. Operator-defined custom roles are also accepted
+# and surface via `!models` Talk command.
+#
+# NOTE: role aliases never carry effort — `[models.roles] smart = "opus-46-high"`
+# resolves "smart" to model claude-opus-4-6 only; effort stays at istota_effort
+# unless the user types `!model opus-46-high <prompt>` directly.
+istota_models_roles: {}
 # Use config/system-prompt.md instead of Claude Code's default system prompt
 istota_custom_system_prompt: true
 
@@ -134,7 +196,7 @@ istota_email_bot_address: ""
 # Conversation context settings
 istota_conversation_enabled: true               # false = no conversation context at all
 istota_conversation_lookback_count: 25           # max messages to fetch from DB/cache
-istota_conversation_selection_model: "haiku"     # model for triage (only when use_selection=true)
+istota_conversation_selection_model: "fast"      # role alias (resolves to Haiku by default); operator-overridable via istota_models_roles
 istota_conversation_selection_timeout: 30.0      # timeout for triage model call
 istota_conversation_skip_selection_threshold: 3  # skip triage if history <= this count
 istota_conversation_use_selection: true           # false = include all fetched messages, no LLM triage

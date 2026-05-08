@@ -94,20 +94,37 @@ def fj_is_disallowed_command(job: "CronJob", is_admin: bool) -> bool:
 def _validate_model(name: str, user_id: str, model: str) -> None:
     """Warn on suspicious model names; never reject.
 
-    Catches obvious typos (no claude- prefix, embedded whitespace) without
-    hardcoding a model allowlist that goes stale every release.
+    Catches obvious typos (no canonical prefix, embedded whitespace) without
+    hardcoding a model allowlist that goes stale every release. Provider
+    aliases (``opus-high``), role aliases (``smart``), and operator-defined
+    custom roles are all accepted: anything that the active brain or the
+    operator role-override table knows about passes silently.
     """
-    if not model.startswith("claude-"):
-        logger.warning(
-            "Job '%s' (user %s): model %r doesn't start with 'claude-' — likely a typo",
-            name, user_id, model,
-        )
-        return
+    from .brain import BrainConfig, get_role_overrides, make_brain
+
     if any(c.isspace() for c in model):
         logger.warning(
             "Job '%s' (user %s): model %r contains whitespace — likely a typo",
             name, user_id, model,
         )
+        return
+
+    if model.startswith("claude-"):
+        return
+
+    # Known to the active brain? Defaults to claude_code at module import time;
+    # the actual brain config isn't available to cron_loader, but every brain
+    # exposes the same alias surface so this is good enough for warn-only.
+    brain = make_brain(BrainConfig())
+    if brain.resolve_alias(model) is not None:
+        return
+    if model.lower() in get_role_overrides():
+        return
+
+    logger.warning(
+        "Job '%s' (user %s): model %r is neither a canonical id, alias, nor role — likely a typo",
+        name, user_id, model,
+    )
 
 
 def _validate_effort(name: str, user_id: str, effort: str) -> None:

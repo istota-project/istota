@@ -7,14 +7,41 @@ bot_name = "Istota"
 # Include emissaries.md (constitutional principles) in system prompts (default: true)
 # emissaries_enabled = true
 
-# Claude model to use. Pin to a specific version so a Claude Code update doesn't
-# silently move you to a new model. Use "claude-opus-4-7" not "opus", "claude-sonnet-4-6"
-# not "sonnet". Aliases ("opus", "sonnet", "haiku") still work but float to the latest.
-# Empty or omitted = CLI default.
+# =============================================================================
+# Model selection — three knobs that interact
+# =============================================================================
+# `model` + `effort` set the *default* for every task (cron, briefings, talk,
+# email, ...). Both fields are read independently — see footgun below.
+# `[models.roles]` (further down) rebinds role aliases like smart/general/fast.
+#
+# Resolution chain:
+#   1. Per-task overrides — `!model <alias> <prompt>` from Talk wins, both
+#      model and effort stored on the task row.
+#   2. Otherwise — top-level `model` + `effort` here.
+#   3. Otherwise — brain default.
+#
+# FOOTGUN — provider aliases like "opus-46-high" encode model AND effort
+# only when used via the Talk `!model` prefix. In this top-level config,
+# `model = "opus-46-high"` resolves the model to claude-opus-4-6 but leaves
+# `effort` empty (= medium default). To pin Opus 4.6 + high effort as the
+# *global* default you must set BOTH:
+#   model = "opus-46-high"   (or equivalently "claude-opus-4-6")
+#   effort = "high"
+# =============================================================================
+
+# Claude model. Accepts:
+#   - canonical IDs    "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"
+#   - provider aliases "opus", "opus-high", "opus-46-high", "sonnet", "haiku"
+#   - role aliases     "smart", "general", "fast", or any custom role from
+#                      [models.roles] below
+# Bare aliases ("opus", "sonnet") float to the current latest version each
+# release; canonical IDs are immutable.
+# Empty or omitted = brain default.
 # model = "claude-opus-4-7"
 
 # Effort level (Opus 4.7, Opus 4.6, Sonnet 4.6 only): low, medium, high, xhigh, max.
 # Opus 4.7 supports all five and defaults to xhigh. Other models top out at high (or max).
+# Read independently of `model` — see footgun above.
 # Empty or omitted = model default.
 # effort = "high"
 
@@ -118,8 +145,11 @@ enabled = true
 lookback_count = 25
 # Include all messages without selection if history <= this threshold (faster for short threads)
 skip_selection_threshold = 3
-# Model for selecting relevant context (Haiku sufficient for relevance matching)
-selection_model = "haiku"
+# Model for selecting relevant context. Accepts canonical IDs ("claude-haiku-4-5"),
+# provider aliases ("haiku"), or role aliases ("fast" — default; resolves to
+# Haiku via brain.claude_code.DEFAULT_ROLE_TARGETS, operator-overridable via
+# [models.roles] below).
+selection_model = "fast"
 # Timeout for context selection
 selection_timeout = 30.0
 # Set to false to include all lookback messages without LLM selection (useful for testing)
@@ -256,8 +286,33 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 
 # [skills]
 # semantic_routing = true              # enable LLM-based Pass 2 skill classification
-# semantic_routing_model = "haiku"     # model for classification (fast, cheap)
+# semantic_routing_model = "fast"      # role alias (resolves to Haiku); accepts canonical / provider / role aliases
 # semantic_routing_timeout = 3.0       # seconds, falls back to Pass 1 on timeout
+
+# ============================================================================
+# Model role aliases (operator override) — optional
+# ============================================================================
+# Roles are provider-agnostic names that internal call sites resolve through
+# the active brain at runtime. Defaults (in code, brain.claude_code.DEFAULT_ROLE_TARGETS):
+#   fast    → claude-haiku-4-5    (used by: context triage, skill classification)
+#   general → claude-sonnet-4-6   (used by: sleep cycle extraction + USER.md curation)
+#   smart   → claude-opus-4-7     (NOT used by internal code — exists for `!model smart`
+#                                  from Talk and for any future code path that wants
+#                                  "the best model")
+#
+# Rebind any role to a canonical ID, a provider alias from MODEL_ALIASES, or
+# add a custom role name accessible via `!model <name>` from Talk.
+#
+# NOTE: role aliases never carry effort — `smart = "opus-46-high"` resolves
+# `smart` to claude-opus-4-6 only; effort still tracks the top-level `effort`
+# field (or the per-task override) unless the user types the provider alias
+# directly via `!model opus-46-high <prompt>`.
+#
+# Example (uncomment to use):
+# [models.roles]
+# smart = "opus-46-high"   # rebind user-facing "smart" alias to Opus 4.6
+# deep  = "opus-max"       # define a custom role for "deep thinking" tasks
+# fast  = "haiku"          # explicit (matches default; cosmetic)
 
 # ============================================================================
 # Sleep Cycle (nightly memory extraction)
