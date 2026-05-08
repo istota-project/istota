@@ -110,8 +110,8 @@ def parse_briefing_json(text: str) -> dict | None:
                 return result
 
     # Try finding first valid JSON object using raw_decode (handles
-    # cases where multiple JSON objects appear in the text, e.g. from
-    # _compose_full_result prepending near-duplicate blocks).
+    # cases where multiple JSON objects appear in the text — e.g. when
+    # the model emits a draft + final, or restates after a CM boundary).
     first_brace = text.find("{")
     if first_brace != -1:
         try:

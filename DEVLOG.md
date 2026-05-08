@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-08: `_compose_full_result` redesign
+
+The 2026-05-08 daily devlog-sync cron produced a multi-page result whose first ~5KB was a paraphrased enumeration of the bot's CLI skills, glued in front of a real ~900-char summary. The result got Talk-split into four chunks before delivery. No skill markdown content actually leaked — distinctive phrases like "Karakeep bookmark manager" don't exist anywhere in the repo. The model wrote the preamble itself, plausibly as a self-introduction, then gave a terse final summary; `_compose_full_result`'s "terse-result recovery" branch then prepended the preamble blocks to the result.
+
+The trigger: `max_block_len > result_len * 2` (the old `executor.py:197`). Any intermediate text block more than 2× the size of the ResultEvent satisfied "the real answer must be earlier in the trace." With a 5KB preamble against a 900-char summary, the gate read "real answer was in text, ResultEvent is terse" — wrong reading.
+
+Mulder + scully passes on the redesign caught three things v1 of the spec got wrong: (a) the original ISSUE-025 shape is `text(answer) → tool → terse ResultEvent` — answer is *not* trailing because a tool follows it, so v1's "walk back, stop at first tool" Mechanism B regressed the bug it claimed to preserve; (b) the source-type gate at the top of the function would have killed CM-aware recovery for scheduled tasks, regressing ISSUE-026; (c) `heartbeat` isn't an actual `source_type` value (heartbeat tasks are stamped `scheduled` per `scheduler.py:2871`) — including it in the gate set would have been dead code, but `heartbeat_silent` and `scheduled_job_id` are real structural signals worth checking as defense in depth.
+
+Final shape: one `_last_substantial_region(trace, delimiters, min_chars)` helper that both mechanisms share — same walking logic, different delimiter sets. CM-aware uses `{cm_boundary}` as delimiter and a 200-char floor; terse-recovery uses `{tool, cm_boundary}` and a 500-char floor. The CM-aware branch always runs when CM events exist (no source-type gate). Terse-recovery is gated on both `_is_automated_task(task)` (source_type ∈ {scheduled, briefing} OR heartbeat_silent OR scheduled_job_id is not None) AND `_is_terse(result_text)` (≤150 chars OR matches a short reference regex). When recovery fires, replace — never prepend, never glue. Every override emits one INFO log line so the thresholds can be calibrated against real production data over the next sprint.
+
+Test migration: 14 existing tests in `TestComposeFullResult` / `TestComposeFullResultCM` were rewritten — most asserted the old prepend / multi-block-concat behavior that the redesign removes. The new suite has 36 cases across three classes: ten new Mechanism B tests covering all the gates, including a regression test pinned to the 2026-05-08 incident shape (5KB preamble + 900-char summary + scheduled source_type — both gates independently block override); nine CM-aware tests preserved with adjustments for the unified region helper; and a new `TestComposeHelpers` class exercising `_is_terse`, `_is_automated_task`, and `_last_substantial_region` directly. All 4379 unit tests pass.
+
+The 500-char `_TRAILING_REGION_MIN_CHARS` floor is a guess — there's no captured trace shape for the original ISSUE-025 in the DEVLOG or commits to anchor against. Plan: run the new INFO logging for two weeks, then either lower the floor based on observed legitimate recoveries, raise it if recoveries always look like garbage, or delete the terse-recovery branch entirely if it never fires usefully (CM-aware is the well-understood case and may be all that's actually needed). The redesign keeps that delete-branch option open by making B genuinely independent — its absence wouldn't affect A.
+
+Drive-by: `briefing/__init__.py:112-114` had a comment referencing `_compose_full_result prepending near-duplicate blocks` as the motivating example for `raw_decode` JSON parsing. The prepend behavior is gone; updated the comment to point at the more general "model emits a draft + final, or restates after a CM boundary" pattern that still motivates the same parser shape.
+
+See `Notes/Projects/Istota/Compose full result redesign spec.md` for the full design rationale, including the mulder/scully findings that drove the v1 → v2 spec revision.
+
 ## 2026-05-08: Unified credential resolution refactor (all four phases)
 
 End-to-end implementation of `Notes/Projects/Istota/Unified credential resolution refactor spec.md`. Ships in one commit because the four phases interlock — splitting them would have either broken `main` mid-stack or required a long-lived shim layer the spec exists to avoid.

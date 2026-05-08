@@ -7,7 +7,14 @@ import pytest
 
 from istota.executor import (
     _compose_full_result,
+    _is_automated_task,
+    _is_terse,
+    _last_substantial_region,
     _text_similarity,
+    _AUTOMATED_SOURCE_TYPES,
+    _CM_SEGMENT_MIN_CHARS,
+    _TERSE_RESULT_MAX_CHARS,
+    _TRAILING_REGION_MIN_CHARS,
     detect_malformed_result,
     parse_api_error,
     is_transient_api_error,
@@ -23,6 +30,7 @@ from istota.executor import (
     API_RETRY_DELAY_SECONDS,
     TRANSIENT_STATUS_CODES,
 )
+from istota import db as _db
 from istota.brain import BrainRequest, ClaudeCodeBrain
 from istota.brain._types import BrainResult
 from pathlib import Path
@@ -2943,11 +2951,41 @@ class TestDetectMalformedResult:
 # ---------------------------------------------------------------------------
 
 
-class TestComposeFullResult:
-    """Test recovery of substantial text blocks from execution trace."""
+def _make_task(
+    *,
+    source_type: str = "talk",
+    heartbeat_silent: bool = False,
+    scheduled_job_id=None,
+    task_id: int = 1,
+):
+    """Build a Task for compose tests. Only the fields _is_automated_task
+    actually reads need to be set."""
+    return _db.Task(
+        id=task_id,
+        status="running",
+        source_type=source_type,
+        user_id="test_user",
+        prompt="",
+        conversation_token="",
+        heartbeat_silent=heartbeat_silent,
+        scheduled_job_id=scheduled_job_id,
+    )
 
-    def _substantial_text(self):
-        return ("Here are the top findings from the search. " * 10).strip()  # ~450 chars
+
+def _block(prefix: str, target_chars: int) -> str:
+    """Build a substantive text block of approximately target_chars."""
+    sentence = (
+        f"{prefix} The data shows a clear pattern, with consistent measurements "
+        f"across the observed window and reasonable confidence in the result. "
+    )
+    n = target_chars // len(sentence) + 1
+    return (sentence * n).strip()
+
+
+class TestComposeFullResult:
+    """Mechanism B (terse-recovery) — tests against the redesigned function."""
+
+    # --- pass-through cases ---
 
     def test_no_trace_returns_result_as_is(self):
         assert _compose_full_result("Done.", []) == "Done."
@@ -2960,83 +2998,19 @@ class TestComposeFullResult:
         ]
         assert _compose_full_result("Done.", trace) == "Done."
 
-    def test_substantial_block_prepended_to_result(self):
-        findings = self._substantial_text()
+    def test_substantial_result_not_overridden(self):
+        """A non-terse result must never be replaced — the regression test
+        for the 2026-05-08 incident: 5KB skill-doc preamble + 900-char real
+        summary previously got concatenated."""
+        preamble = _block("Preamble.", 5000)
+        real_summary = _block("Summary.", 900)
         trace = [
-            {"type": "text", "text": "Let me search."},
-            {"type": "tool", "text": "Browse OLX"},
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write tracking file"},
-        ]
-        result = _compose_full_result("All results posted above.", trace)
-        assert findings in result
-        assert result.startswith(findings)
-
-    def test_result_already_contains_substantial_content(self):
-        findings = self._substantial_text()
-        trace = [
+            {"type": "text", "text": preamble},
+            {"type": "tool", "text": "git log"},
             {"type": "tool", "text": "Read file"},
-            {"type": "text", "text": findings},
         ]
-        # ResultEvent.text IS the substantial content
-        result = _compose_full_result(findings, trace)
-        assert result == findings  # no duplication
-
-    def test_multiple_substantial_blocks_all_included(self):
-        block1 = (
-            "The calendar shows three meetings today: a standup at 9am, "
-            "a design review at 11am, and a planning session at 2pm. "
-            "All meetings are in the main conference room on the second floor. "
-            "The standup has seven attendees and typically runs 15 minutes."
-        )
-        block2 = (
-            "Market summary: the S&P 500 gained 1.2% on strong earnings reports "
-            "from tech companies. European markets closed mixed, with the DAX up "
-            "0.3% while the FTSE declined 0.1% on weaker consumer data. "
-            "Asian markets were mostly higher overnight with the Nikkei up 0.8%."
-        )
-        trace = [
-            {"type": "text", "text": block1},
-            {"type": "tool", "text": "More browsing"},
-            {"type": "text", "text": block2},
-        ]
-        result = _compose_full_result("See above.", trace)
-        assert block1 in result
-        assert block2 in result
-
-    def test_terse_result_dropped_when_dwarfed_by_substantial(self):
-        findings = self._substantial_text()
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result("See above.", trace)
-        # The terse closing should be dropped since it's just a reference
-        assert result == findings
-
-    def test_substantial_result_not_augmented_with_comparable_blocks(self):
-        """When the result is comparable length to trace blocks, no recovery."""
-        block = self._substantial_text()  # ~450 chars
-        long_result = ("Here is a detailed conclusion. " * 10).strip()  # ~300 chars
-        trace = [
-            {"type": "text", "text": block},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result(long_result, trace)
-        # Block is only ~1.5x the result — not recovered
-        assert result == long_result
-
-    def test_short_result_with_slightly_longer_block_no_recovery(self):
-        """When trace block is only slightly longer than result, no recovery."""
-        block = "A" * 250
-        short_result = "B" * 200
-        trace = [
-            {"type": "text", "text": block},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result(short_result, trace)
-        # 250 <= 200 * 2 = 400, so no recovery
-        assert result == short_result
+        result = _compose_full_result(real_summary, trace)
+        assert result == real_summary
 
     def test_empty_trace_entries_ignored(self):
         trace = [
@@ -3045,99 +3019,193 @@ class TestComposeFullResult:
         ]
         assert _compose_full_result("Done.", trace) == "Done."
 
-    def test_near_duplicate_blocks_deduplicated(self):
-        """When the model restates itself with minor edits, only keep one copy."""
-        block_v1 = (
-            "That's the only feedback memory I have saved. One file: "
-            "feedback_no_parallel_mutations.md — Never run mutation commands "
-            "in parallel subagents. Learned the hard way during yesterday's "
-            "moneyman pipeline test when I fired two subagents for every step, "
-            "doubled all the writes, and then blamed moneyman for the chaos."
-        )
-        block_v2 = (
-            "That's the only feedback memory I have. One file: "
-            "feedback_no_parallel_mutations.md — Never run mutation commands "
-            "in parallel subagents. Learned the hard way during the moneyman "
-            "pipeline test when I fired two subagents at every step, "
-            "duplicated entries, and then blamed moneyman for bugs that were "
-            "entirely self-inflicted."
-        )
-        trace = [
-            {"type": "text", "text": block_v1},
-            {"type": "tool", "text": "Read memory file"},
-            {"type": "text", "text": block_v2},
-        ]
-        result = _compose_full_result("See above.", trace)
-        # Should contain only one version, not both
-        assert block_v1 in result
-        assert block_v2 not in result
+    def test_substantial_no_tools_no_recovery(self):
+        """A substantial result with no tool boundary in trace: still no
+        override — gate is on terseness, not trace shape."""
+        block = _block("Findings.", 800)
+        trace = [{"type": "text", "text": block}]
+        long_result = _block("Result.", 400)
+        result = _compose_full_result(long_result, trace)
+        assert result == long_result
 
-    def test_near_duplicate_of_result_text_dropped(self):
-        """A trace block that's a near-duplicate of result_text is skipped."""
-        result_text = (
-            "Here are the findings from the analysis. The data shows a clear "
-            "trend toward increased usage over the past quarter. " * 5
-        ).strip()
-        # Slightly different version in trace
-        trace_block = (
-            "Here are the findings from my analysis. The data shows a clear "
-            "trend towards increased usage over the last quarter. " * 5
-        ).strip()
+    # --- terse-pattern recovery ---
+
+    def test_see_above_with_substantial_pre_tool_region(self):
+        """Canonical ISSUE-025 shape: substantial text → tool → terse result."""
+        findings = _block("Findings.", 800)
         trace = [
-            {"type": "text", "text": trace_block},
+            {"type": "text", "text": findings},
             {"type": "tool", "text": "Write file"},
         ]
-        result = _compose_full_result(result_text, trace)
-        assert result == result_text
+        result = _compose_full_result("See above.", trace, task=_make_task())
+        assert result == findings
 
-    def test_distinct_blocks_not_deduplicated(self):
-        """Blocks with genuinely different content are both kept."""
-        block1 = (
-            "The calendar shows three meetings today: a standup at 9am, "
-            "a design review at 11am, and a planning session at 2pm. "
-            "All meetings are in the main conference room on the second floor. "
-            "The standup has seven attendees and typically runs 15 minutes."
-        )
-        block2 = (
-            "Market summary: the S&P 500 gained 1.2% on strong earnings reports "
-            "from tech companies. European markets closed mixed, with the DAX up "
-            "0.3% while the FTSE declined 0.1% on weaker consumer data. "
-            "Asian markets were mostly higher overnight with the Nikkei up 0.8%."
-        )
+    def test_terse_short_result_with_substantial_trailing_region(self):
+        """Result < 150 chars but not a known reference — still triggers."""
+        findings = _block("Findings.", 800)
         trace = [
-            {"type": "text", "text": block1},
-            {"type": "tool", "text": "Check markets"},
-            {"type": "text", "text": block2},
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
         ]
-        result = _compose_full_result("Done.", trace)
-        assert block1 in result
-        assert block2 in result
+        result = _compose_full_result(
+            "Operation completed.", trace, task=_make_task(),
+        )
+        assert result == findings
+
+    def test_done_with_substantial_pre_tool_region(self):
+        findings = _block("Findings.", 800)
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        assert _compose_full_result("Done.", trace, task=_make_task()) == findings
+
+    def test_empty_result_with_substantial_trailing_region(self):
+        findings = _block("Findings.", 800)
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        assert _compose_full_result("", trace, task=_make_task()) == findings
+
+    # --- terse but no qualifying region ---
+
+    def test_terse_result_short_trailing_region_no_override(self):
+        """Trailing region must be ≥ TRAILING_REGION_MIN_CHARS to override."""
+        short_block = "Brief note about the result. " * 5  # ~145 chars
+        trace = [
+            {"type": "text", "text": short_block},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result("See above.", trace, task=_make_task())
+        # Region < 500 chars → no override
+        assert result == "See above."
+
+    def test_terse_result_region_already_in_result(self):
+        """If the trailing region appears verbatim in result_text, no override."""
+        block = _block("Findings.", 800)
+        trace = [{"type": "text", "text": block}]
+        # Result already contains the region (followed by a tag) — no override
+        embedded = block + "\n\n[done]"
+        result = _compose_full_result(embedded, trace, task=_make_task())
+        assert result == embedded
+
+    # --- streaming fragment aggregation ---
+
+    def test_streaming_fragments_aggregate_into_one_region(self):
+        """Many small text events between trace boundaries should aggregate."""
+        # 12 fragments × ~50 chars = ~600 chars total, joined with \n\n
+        fragments = [
+            f"Fragment {i}: more detail about the analysis goes here. "
+            for i in range(12)
+        ]
+        trace = [
+            *({"type": "text", "text": f} for f in fragments),
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result("See above.", trace, task=_make_task())
+        # Should be the joined fragments, not the terse result
+        assert "Fragment 0" in result
+        assert "Fragment 11" in result
+        assert result != "See above."
+
+    # --- automated-task gate ---
+
+    def test_scheduled_task_no_terse_recovery(self):
+        """Mechanism B is gated for scheduled tasks regardless of trace."""
+        findings = _block("Findings.", 800)
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result(
+            "See above.", trace, task=_make_task(source_type="scheduled"),
+        )
+        assert result == "See above."
+
+    def test_briefing_task_no_terse_recovery(self):
+        findings = _block("Findings.", 800)
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result(
+            "See above.", trace, task=_make_task(source_type="briefing"),
+        )
+        assert result == "See above."
+
+    def test_heartbeat_silent_blocks_terse_recovery(self):
+        """heartbeat_silent flag gates Mechanism B even when source_type
+        isn't in the explicit set."""
+        findings = _block("Findings.", 800)
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result(
+            "See above.", trace,
+            task=_make_task(source_type="cli", heartbeat_silent=True),
+        )
+        assert result == "See above."
+
+    def test_scheduled_job_id_blocks_terse_recovery(self):
+        findings = _block("Findings.", 800)
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result(
+            "See above.", trace,
+            task=_make_task(source_type="cli", scheduled_job_id=42),
+        )
+        assert result == "See above."
+
+    def test_no_task_means_no_automated_gate(self):
+        """Backwards-compat: callers passing no task get the original gating
+        behavior (no automated-task gate fires)."""
+        findings = _block("Findings.", 800)
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result("See above.", trace)
+        assert result == findings
+
+    # --- regression — 2026-05-08 incident ---
+
+    def test_regression_5KB_preamble_900_char_summary_scheduled(self):
+        """The 2026-05-08 cron incident: 5KB skill-doc preamble + 900-char
+        real summary on a scheduled task. Both gates (substantial result AND
+        scheduled source_type) must independently block override."""
+        preamble = _block("Skill enumeration.", 5000)
+        real_summary = _block("Daily devlog summary.", 900)
+        trace = [
+            {"type": "text", "text": preamble},
+            {"type": "tool", "text": "git log"},
+            {"type": "tool", "text": "Read DEVLOG.md"},
+        ]
+        result = _compose_full_result(
+            real_summary, trace, task=_make_task(source_type="scheduled"),
+        )
+        assert result == real_summary
+        assert "Skill enumeration." not in result
 
 
 class TestComposeFullResultCM:
-    """Test CM-aware result composition (ISSUE-026)."""
-
-    def _substantial_text(self, variant="a"):
-        if variant == "a":
-            return ("Here are the top findings from the search. " * 10).strip()
-        return ("The market data shows a clear upward trend. " * 10).strip()
+    """Mechanism A (CM-aware) — segmentation by cm_boundary."""
 
     def test_cm_boundary_uses_last_substantial_segment(self):
-        """When CM fires between two substantial text blocks, use the last one."""
-        pre_cm = self._substantial_text("a")
-        post_cm = self._substantial_text("b")
+        pre_cm = _block("PreCM.", 450)
+        post_cm = _block("PostCM.", 450)
         trace = [
             {"type": "text", "text": pre_cm},
             {"type": "cm_boundary"},
             {"type": "text", "text": post_cm},
         ]
-        # result_text would contain both (as Claude Code concatenates them)
         doubled_result = f"{pre_cm}\n\n{post_cm}"
-        result = _compose_full_result(doubled_result, trace)
-        assert result == post_cm
+        assert _compose_full_result(doubled_result, trace) == post_cm
 
     def test_cm_boundary_with_thin_last_segment_trusts_result(self):
-        """When last segment is thin progress text, trust result_text."""
         trace = [
             {"type": "text", "text": "Let me check."},
             {"type": "cm_boundary"},
@@ -3145,46 +3213,32 @@ class TestComposeFullResultCM:
             {"type": "cm_boundary"},
             {"type": "text", "text": "Now let me write the patch."},
         ]
-        good_result = self._substantial_text("a")
-        result = _compose_full_result(good_result, trace)
-        assert result == good_result
+        good_result = _block("Result.", 450)
+        assert _compose_full_result(good_result, trace) == good_result
 
     def test_cm_boundary_with_tools_after_last_cm(self):
-        """When last segment has only tools (no text), trust result_text."""
-        real_response = self._substantial_text("a")
+        real_response = _block("Response.", 450)
         trace = [
             {"type": "text", "text": real_response},
             {"type": "cm_boundary"},
             {"type": "tool", "text": "Write file"},
             {"type": "tool", "text": "Edit config"},
         ]
-        result = _compose_full_result(real_response, trace)
-        assert result == real_response
+        # Last segment has no text (only tools) → walk back to pre-CM real_response.
+        # Equal to result_text (after strip), so we return result_text unchanged.
+        assert _compose_full_result(real_response, trace) == real_response
 
     def test_cm_boundary_empty_last_segment_trusts_result(self):
-        """When CM is the very last entry, last segment is empty."""
-        real_response = self._substantial_text("a")
+        real_response = _block("Response.", 450)
         trace = [
             {"type": "text", "text": real_response},
             {"type": "cm_boundary"},
         ]
-        result = _compose_full_result(real_response, trace)
-        assert result == real_response
-
-    def test_no_cm_boundary_falls_through_to_existing_logic(self):
-        """Without CM boundaries, existing terse-result recovery applies."""
-        findings = self._substantial_text("a")
-        trace = [
-            {"type": "text", "text": findings},
-            {"type": "tool", "text": "Write file"},
-        ]
-        result = _compose_full_result("See above.", trace)
-        assert findings in result
+        assert _compose_full_result(real_response, trace) == real_response
 
     def test_multiple_cm_boundaries_uses_last_substantial(self):
-        """Multiple CM firings: use last segment with substantial text."""
-        block1 = self._substantial_text("a")
-        block2 = self._substantial_text("b")
+        block1 = _block("Block1.", 450)
+        block2 = _block("Block2.", 450)
         trace = [
             {"type": "text", "text": block1},
             {"type": "cm_boundary"},
@@ -3194,14 +3248,11 @@ class TestComposeFullResultCM:
             {"type": "cm_boundary"},
         ]
         doubled = f"{block1}\n\n{block2}"
-        result = _compose_full_result(doubled, trace)
-        # Last substantial segment is before the final CM boundary
-        assert result == block2
+        assert _compose_full_result(doubled, trace) == block2
 
     def test_cm_with_multiple_texts_in_last_segment(self):
-        """Last segment has multiple text blocks — join them all."""
-        block1 = self._substantial_text("a")
-        block2 = self._substantial_text("b")
+        block1 = _block("BlockA.", 450)
+        block2 = _block("BlockB.", 450)
         trace = [
             {"type": "text", "text": "Old analysis."},
             {"type": "cm_boundary"},
@@ -3209,13 +3260,12 @@ class TestComposeFullResultCM:
             {"type": "tool", "text": "Read file"},
             {"type": "text", "text": block2},
         ]
+        # Tool is NOT a CM-mode delimiter — both text blocks belong to the
+        # post-CM segment and are joined.
         result = _compose_full_result("Doubled.", trace)
-        assert block1 in result
-        assert block2 in result
         assert result == f"{block1}\n\n{block2}"
 
     def test_cm_real_pattern_pre_and_post_cm_responses(self):
-        """Real pattern: model gives answer, CM fires, model restates."""
         pre_cm = (
             "Found it. The issue is clear from the trace data. "
             "The current fix handles two things correctly: "
@@ -3240,9 +3290,133 @@ class TestComposeFullResultCM:
             {"type": "cm_boundary"},
         ]
         doubled_result = f"{post_cm}\n\n{pre_cm}"
-        result = _compose_full_result(doubled_result, trace)
+        assert _compose_full_result(doubled_result, trace) == post_cm
+
+    def test_cm_aware_runs_for_scheduled_tasks(self):
+        """The source-type gate is Mechanism-B-only; CM-aware always runs."""
+        pre_cm = _block("PreCM.", 450)
+        post_cm = _block("PostCM.", 450)
+        trace = [
+            {"type": "text", "text": pre_cm},
+            {"type": "cm_boundary"},
+            {"type": "text", "text": post_cm},
+        ]
+        doubled_result = f"{pre_cm}\n\n{post_cm}"
+        result = _compose_full_result(
+            doubled_result, trace, task=_make_task(source_type="scheduled"),
+        )
         assert result == post_cm
-        assert pre_cm not in result
+
+    def test_cm_recovered_equals_result_no_override(self):
+        """When the last substantial segment IS result_text after strip,
+        no override (avoids no-op log entries)."""
+        block = _block("Block.", 450)
+        trace = [
+            {"type": "text", "text": block},
+            {"type": "cm_boundary"},
+        ]
+        # No segment after final CM has text; walking back finds `block`.
+        # If result_text is exactly block, no override.
+        assert _compose_full_result(block, trace) == block
+
+
+class TestComposeHelpers:
+    """Direct tests for the helper predicates."""
+
+    def test_is_terse_short(self):
+        assert _is_terse("Done.")
+
+    def test_is_terse_empty(self):
+        assert _is_terse("")
+        assert _is_terse("   ")
+
+    def test_is_terse_pattern_see_above(self):
+        assert _is_terse("See above.")
+        assert _is_terse("see above")
+        assert _is_terse("SEE ABOVE")
+
+    def test_is_terse_pattern_done(self):
+        assert _is_terse("Done.")
+        assert _is_terse("Done")
+        assert _is_terse("OK")
+        assert _is_terse("✓")
+
+    def test_is_terse_substantial_text_not_terse(self):
+        long_text = "A" * (_TERSE_RESULT_MAX_CHARS + 1)
+        assert not _is_terse(long_text)
+
+    def test_is_automated_task_none(self):
+        assert not _is_automated_task(None)
+
+    def test_is_automated_task_scheduled(self):
+        assert _is_automated_task(_make_task(source_type="scheduled"))
+
+    def test_is_automated_task_briefing(self):
+        assert _is_automated_task(_make_task(source_type="briefing"))
+
+    def test_is_automated_task_talk_not_automated(self):
+        assert not _is_automated_task(_make_task(source_type="talk"))
+
+    def test_is_automated_task_email_not_automated(self):
+        assert not _is_automated_task(_make_task(source_type="email"))
+
+    def test_is_automated_task_subtask_not_automated(self):
+        assert not _is_automated_task(_make_task(source_type="subtask"))
+
+    def test_is_automated_task_heartbeat_silent_flag(self):
+        assert _is_automated_task(
+            _make_task(source_type="cli", heartbeat_silent=True),
+        )
+
+    def test_is_automated_task_scheduled_job_id_flag(self):
+        assert _is_automated_task(
+            _make_task(source_type="cli", scheduled_job_id=42),
+        )
+
+    def test_last_substantial_region_empty_trace(self):
+        assert _last_substantial_region([], {"tool"}, 100) is None
+
+    def test_last_substantial_region_no_qualifying_region(self):
+        trace = [
+            {"type": "text", "text": "tiny"},
+            {"type": "tool", "text": "Read"},
+            {"type": "text", "text": "also tiny"},
+        ]
+        assert _last_substantial_region(trace, {"tool"}, 500) is None
+
+    def test_last_substantial_region_returns_last_substantial(self):
+        block1 = _block("Block1.", 600)
+        block2 = _block("Block2.", 600)
+        trace = [
+            {"type": "text", "text": block1},
+            {"type": "tool", "text": "Read"},
+            {"type": "text", "text": block2},
+        ]
+        # With tool as delimiter, regions = [[block1], [block2]]
+        # Reverse walk: block2 first → returned.
+        assert _last_substantial_region(trace, {"tool"}, 500) == block2
+
+    def test_last_substantial_region_walks_back_past_thin(self):
+        block = _block("Block.", 600)
+        trace = [
+            {"type": "text", "text": block},
+            {"type": "tool", "text": "Read"},
+            {"type": "text", "text": "thin"},
+        ]
+        # Last region is "thin" (4 chars), walks back to the substantial one.
+        assert _last_substantial_region(trace, {"tool"}, 500) == block
+
+    def test_last_substantial_region_aggregates_within_region(self):
+        trace = [
+            {"type": "text", "text": "Part one. "},
+            {"type": "text", "text": "Part two. "},
+            {"type": "text", "text": "Part three. "},
+            {"type": "tool", "text": "Read"},
+        ]
+        # Three text events form one region (no delimiter between them).
+        # Joined with \n\n.
+        result = _last_substantial_region(trace, {"tool"}, 20)
+        assert result == "Part one.\n\nPart two.\n\nPart three."
 
 
 # =============================================================================

@@ -108,9 +108,28 @@ def detect_malformed_result(
     return None
 
 
-# Minimum length for a text block to be considered "substantial" content
-# rather than a short progress note ("Let me check...", "Running the search...")
-_SUBSTANTIAL_TEXT_MIN_CHARS = 200
+# Minimum joined-region length for a CM segment to override result_text.
+_CM_SEGMENT_MIN_CHARS = 200
+
+# Below this absolute char count, result_text counts as "terse" and is eligible
+# for replacement by a substantial trailing trace region.
+_TERSE_RESULT_MAX_CHARS = 150
+
+# Minimum joined-region length for terse-recovery to override result_text.
+# Calibration is empirical; log overrides and tune over a sprint of data.
+_TRAILING_REGION_MIN_CHARS = 500
+
+# Source types whose tasks emit structured / programmatic output and never
+# benefit from terse-recovery (Mechanism B). Mechanism A still runs for these.
+_AUTOMATED_SOURCE_TYPES = frozenset({"scheduled", "briefing"})
+
+# Result texts that are clearly references rather than the answer itself,
+# regardless of length.
+_TERSE_REFERENCE_RE = re.compile(
+    r"^(see above|as (shown|stated)( above)?|done|ok|✓|"
+    r"that's everything|that('s| is) it|all done)\.?$",
+    re.IGNORECASE,
+)
 
 
 def _text_similarity(a: str, b: str) -> float:
@@ -131,101 +150,139 @@ def _text_similarity(a: str, b: str) -> float:
     return intersection / union if union else 0.0
 
 
-_SIMILARITY_THRESHOLD = 0.5
+def _last_substantial_region(
+    trace: list[dict],
+    delimiters: set[str],
+    min_chars: int,
+) -> str | None:
+    """Walk the trace, group text events into regions delimited by event types
+    in ``delimiters``, then return the joined text of the last region whose
+    length is ≥ ``min_chars``. Returns ``None`` if no region qualifies.
+
+    Adjacent ``text`` events within a region are joined with ``\\n\\n``, so
+    a paragraph split into multiple events by streaming aggregates back into
+    one region — no per-block size filter is needed.
+    """
+    regions: list[list[str]] = [[]]
+    for entry in trace:
+        et = entry.get("type")
+        if et in delimiters:
+            regions.append([])
+        elif et == "text":
+            t = entry.get("text", "").strip()
+            if t:
+                regions[-1].append(t)
+    for seg in reversed(regions):
+        joined = "\n\n".join(seg)
+        if len(joined) >= min_chars:
+            return joined
+    return None
 
 
-def _compose_full_result(result_text: str, execution_trace: list[dict]) -> str:
-    """Compose full result by recovering substantial text blocks from the trace.
+def _is_automated_task(task) -> bool:
+    """True when the task is automated / structured-output and shouldn't
+    trigger terse-recovery.
 
-    Handles two distinct scenarios:
+    Checks ``source_type`` plus structural fallbacks (``heartbeat_silent``,
+    ``scheduled_job_id``) in case a future code path stamps a non-scheduled
+    source_type on a heartbeat-style task. Defense in depth — robust to
+    source_type churn without locking the gate to one string set.
+    """
+    if task is None:
+        return False
+    if getattr(task, "source_type", None) in _AUTOMATED_SOURCE_TYPES:
+        return True
+    if getattr(task, "heartbeat_silent", False):
+        return True
+    if getattr(task, "scheduled_job_id", None) is not None:
+        return True
+    return False
 
-    1. **CM-aware composition (ISSUE-026):** When context management fired
-       mid-response, the result_text may contain both pre-CM and post-CM
-       text concatenated.  We segment the execution trace at CM boundaries
-       and use the last segment with substantial text as the authoritative
-       response.  If no segment is substantial, fall back to result_text
-       (the real response may only exist in CM replay events).
 
-    2. **Terse-result recovery (ISSUE-025):** When the model emits a long
-       response as intermediate text then does more tool calls, the
-       ResultEvent only captures the final terse text.  We detect that
-       pattern and prepend the substantial earlier text blocks.
+def _is_terse(text: str) -> bool:
+    """True when ``text`` is short enough or matches a known reference
+    pattern such that it's likely a stand-in rather than the real answer.
+    Empty text is treated as terse (recovery is wanted)."""
+    s = text.strip()
+    if not s:
+        return True
+    if len(s) < _TERSE_RESULT_MAX_CHARS:
+        return True
+    return bool(_TERSE_REFERENCE_RE.match(s))
+
+
+def _log_compose_override(
+    task,
+    mechanism: str,
+    original: str,
+    recovered: str,
+) -> None:
+    logger.info(
+        "compose_full_result: mechanism=%s task_id=%s source_type=%s "
+        "original_chars=%d recovered_chars=%d",
+        mechanism,
+        getattr(task, "id", None),
+        getattr(task, "source_type", None),
+        len(original.strip()),
+        len(recovered),
+    )
+
+
+def _compose_full_result(
+    result_text: str,
+    execution_trace: list[dict],
+    task=None,
+) -> str:
+    """Reconcile the model's ResultEvent with text events from the trace.
+
+    Recovers from two failure modes:
+
+    - **CM mid-response truncation (ISSUE-026):** context management fires
+      mid-response, so ResultEvent only sees the post-CM tail. Mechanism A
+      walks segments delimited by ``cm_boundary`` and returns the last one
+      whose text crosses ``_CM_SEGMENT_MIN_CHARS``. Always runs when CM
+      events are present, including for automated tasks.
+
+    - **Terse-reference ResultEvent (ISSUE-025):** the model writes the real
+      answer as a text event, does one more tool call, then ResultEvent
+      comes back as ``"see above"`` / ``"done"`` / a one-line reference.
+      Mechanism B walks segments delimited by both ``cm_boundary`` and
+      ``tool``, returning the last region ≥ ``_TRAILING_REGION_MIN_CHARS``.
+      Gated by ``_is_automated_task`` and ``_is_terse(result_text)`` —
+      structured-output tasks and substantial results bypass.
+
+    Returns ``result_text`` unchanged when no override is justified. Override
+    or trust — never glue. Logs every override for calibration.
     """
     if not execution_trace:
         return result_text
 
-    # --- CM-aware composition ---
-    has_cm = any(e.get("type") == "cm_boundary" for e in execution_trace)
-    if has_cm:
-        # Split trace into segments at CM boundaries, then walk backwards
-        # to find the last segment with substantial text.
-        segments: list[list[str]] = [[]]
-        for entry in execution_trace:
-            if entry.get("type") == "cm_boundary":
-                segments.append([])
-            elif entry.get("type") == "text":
-                text = entry["text"].strip()
-                if text:
-                    segments[-1].append(text)
-
-        # Walk segments in reverse to find the last substantial one
-        for seg in reversed(segments):
-            joined = "\n\n".join(seg)
-            if len(joined) >= _SUBSTANTIAL_TEXT_MIN_CHARS:
-                return joined
-
-        # No substantial segment found: the real response is only in
-        # result_text (from CM replay events).  Trust it as-is.
+    # Mechanism A — CM-aware. Always runs when CM events exist.
+    if any(e.get("type") == "cm_boundary" for e in execution_trace):
+        recovered = _last_substantial_region(
+            execution_trace, {"cm_boundary"}, _CM_SEGMENT_MIN_CHARS,
+        )
+        if recovered is not None and recovered.strip() != result_text.strip():
+            _log_compose_override(task, "cm_aware", result_text, recovered)
+            return recovered
         return result_text
 
-    # --- Terse-result recovery (no CM) ---
-    substantial_blocks = []
-    for entry in execution_trace:
-        if entry.get("type") == "text":
-            text = entry["text"].strip()
-            if len(text) >= _SUBSTANTIAL_TEXT_MIN_CHARS:
-                substantial_blocks.append(text)
-
-    if not substantial_blocks:
+    # Mechanism B — terse-recovery. Source-type and terseness gates.
+    if _is_automated_task(task):
+        return result_text
+    if not _is_terse(result_text):
         return result_text
 
-    # Only recover blocks if the longest one is meaningfully longer than
-    # the result — this indicates the real answer was in intermediate text
-    # and the final result is just a terse summary/reference.
-    max_block_len = max(len(b) for b in substantial_blocks)
-    result_len = len(result_text.strip())
-    if max_block_len <= result_len * 2:
+    recovered = _last_substantial_region(
+        execution_trace, {"tool", "cm_boundary"}, _TRAILING_REGION_MIN_CHARS,
+    )
+    if recovered is None:
+        return result_text
+    if recovered in result_text:
         return result_text
 
-    # Deduplicate: keep only blocks that aren't near-duplicates of an
-    # earlier block or of the result text (exact substring OR fuzzy match)
-    unique_blocks: list[str] = []
-    for block in substantial_blocks:
-        if block in result_text:
-            continue
-        if _text_similarity(block, result_text) >= _SIMILARITY_THRESHOLD:
-            continue
-        if any(
-            block in prev
-            or prev in block
-            or _text_similarity(block, prev) >= _SIMILARITY_THRESHOLD
-            for prev in unique_blocks
-        ):
-            continue
-        unique_blocks.append(block)
-
-    if not unique_blocks:
-        return result_text
-
-    # Compose: unique blocks first, then the result text
-    # Skip the result text if it's just a terse reference like "see above"
-    parts = unique_blocks
-    if len(result_text) >= _SUBSTANTIAL_TEXT_MIN_CHARS or not any(
-        len(b) > len(result_text) * 3 for b in unique_blocks
-    ):
-        parts.append(result_text)
-
-    return "\n\n".join(parts)
+    _log_compose_override(task, "terse_recovery", result_text, recovered)
+    return recovered
 
 
 def _pre_transcribe_attachments(
@@ -2403,7 +2460,7 @@ def execute_task(
         if success and trace:
             try:
                 trace_list = json.loads(trace)
-                result = _compose_full_result(result, trace_list)
+                result = _compose_full_result(result, trace_list, task=task)
             except (json.JSONDecodeError, TypeError):
                 pass
 
