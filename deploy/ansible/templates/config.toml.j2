@@ -39,7 +39,7 @@ temp_dir = "{{ istota_home }}/tmp"
 
 [brain]
 # Which model-invocation backend the executor uses.
-# "claude_code" wraps the `claude` CLI subprocess (Phase 1 default + only option).
+# "claude_code" wraps the `claude` CLI subprocess (current default + only option).
 # Future: "openrouter", "anthropic" for direct-HTTP brains.
 kind = "{{ istota_brain_kind | default('claude_code', true) }}"
 

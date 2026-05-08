@@ -754,13 +754,13 @@
   changed_when: false  # Schema uses CREATE TABLE IF NOT EXISTS, always safe to run
   when: not istota_web_only
 
-# Phase 6: write user profile rows into the user_profiles DB table.
+# Write user profile rows into the user_profiles DB table.
 # Profile-shaped fields (display_name, timezone, email_addresses, log/alerts
 # channels, worker overrides, disabled_skills, trusted_email_senders,
 # disabled_modules) are authoritatively stored in the DB. The `user ensure`
 # CLI is idempotent, prints STATE: created|updated|noop per call, and is the
 # only path Ansible uses to provision user profiles.
-- name: Ensure user_profiles rows (Phase 6)
+- name: Ensure user_profiles rows
   command: >
     {{ istota_home }}/.venv/bin/{{ istota_package }}
     -c {{ istota_repo_dir }}/config/config.toml
@@ -789,7 +789,7 @@
   notify:
     - "restart istota-scheduler"
 
-# Phase 7a: write user_resources rows into the DB via `istota resource ensure`.
+# Write user_resources rows into the DB via `istota resource ensure`.
 # The DB is the source of truth — each (user, type, path) is upserted
 # independently. type/path/name/permissions are extracted as flags and
 # any remaining keys are passed as --extras-json so nested values
@@ -810,7 +810,7 @@
       {{ ns.out | to_json }}
   when: not istota_web_only
 
-- name: Ensure user_resources rows (Phase 7a)
+- name: Ensure user_resources rows
   command: >
     {{ istota_home }}/.venv/bin/{{ istota_package }}
     -c {{ istota_repo_dir }}/config/config.toml
@@ -831,12 +831,12 @@
   notify:
     - "restart istota-scheduler"
 
-# Phase 7b: write briefing rows into the briefing_configs DB table via
+# Write briefing rows into the briefing_configs DB table via
 # `istota briefing ensure`. The DB is the source of truth — each
 # (user, briefing.name) is upserted independently. Components is a
 # freeform dict so we pass it through as JSON; output (talk|email|both)
 # and conversation_token are extracted as flags.
-- name: Plan briefing ensure invocations (Phase 7b)
+- name: Plan briefing ensure invocations
   set_fact:
     _istota_briefing_targets: "{{ _briefing_targets_json | from_json }}"
   vars:
@@ -858,7 +858,7 @@
       {{ ns.out | to_json }}
   when: not istota_web_only
 
-- name: Ensure briefing_configs rows (Phase 7b)
+- name: Ensure briefing_configs rows
   command: >
     {{ istota_home }}/.venv/bin/{{ istota_package }}
     -c {{ istota_repo_dir }}/config/config.toml
@@ -880,11 +880,11 @@
   notify:
     - "restart istota-scheduler"
 
-# Connected services + module-owned credentials (Phase 1+2 of the modules
-# refactor). Tier-2 secrets (Karakeep base_url+api_key, Monarch creds,
-# Overland ingest_token, Tumblr API key) live in the encrypted `secrets`
-# table — not in per-user TOML, not in `[[resources]]`. `istota secret
-# ensure` validates against the central schema and is idempotent.
+# Connected services + module-owned credentials. Tier-2 secrets (Karakeep
+# base_url+api_key, Monarch creds, Overland ingest_token, Tumblr API key)
+# live in the encrypted `secrets` table — not in per-user TOML, not in
+# `[[resources]]`. `istota secret ensure` validates against the central
+# schema and is idempotent.
 #
 # Inventory shape:
 #   istota_user_secrets:
