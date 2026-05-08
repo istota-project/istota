@@ -3035,42 +3035,51 @@ def _sync_cron_files(conn, app_config: Config) -> None:
         logger.error("Error syncing feeds module jobs: %s", e)
 
 
-def _sync_money_module_jobs(conn, app_config: Config) -> None:
-    """Seed/refresh ``_module.money.*`` scheduled jobs from each user's money config.
+def _sync_module_jobs(
+    conn,
+    app_config: Config,
+    *,
+    module_name: str,
+    module_prefix: str,
+    resolve_for_user,
+    jobs_for_user,
+    user_not_found_exc: type[Exception],
+    on_first_seed=None,
+) -> None:
+    """Seed/refresh ``{module_prefix}*`` scheduled jobs from each user's module config.
 
-    Idempotent: existing rows are updated when cron or command differs;
-    obsolete rows (e.g. user removed monarch config) are deleted.
-    Users without a money resource have all their ``_module.money.*`` rows
-    cleaned up.
+    Shared engine for ``_sync_money_module_jobs`` and
+    ``_sync_feeds_module_jobs``. Idempotent: existing rows are updated when
+    cron or command differs; obsolete rows are deleted; users with the
+    module disabled have all their ``{module_prefix}*`` rows cleaned up.
+
+    ``on_first_seed(conn, user_id, job_dict)`` — optional callback invoked
+    once after each freshly-inserted row, before commit. Feeds uses this to
+    queue an immediate one-shot poll for the ``run_scheduled`` row so newly
+    provisioned users don't wait up to 5 minutes for the first tick.
     """
-    try:
-        from istota.money import UserNotFoundError, resolve_for_user
-        from istota.money.jobs import MODULE_PREFIX, jobs_for_user
-    except ImportError:
-        # money extra not installed
-        return
-
     for user_id in app_config.users:
         uc = app_config.users.get(user_id)
         if uc is None:
             continue
 
-        has_money = app_config.is_module_enabled(user_id, "money")
-        if not has_money:
+        if not app_config.is_module_enabled(user_id, module_name):
             # Drop any stale module rows
             conn.execute(
                 "DELETE FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-                (user_id, f"{MODULE_PREFIX}%"),
+                (user_id, f"{module_prefix}%"),
             )
             continue
 
         try:
-            money_ctx = resolve_for_user(user_id, app_config)
-        except UserNotFoundError as e:
-            logger.warning("Could not resolve money config for %s: %s", user_id, e)
+            module_ctx = resolve_for_user(user_id, app_config)
+        except user_not_found_exc as e:
+            logger.warning(
+                "Could not resolve %s config for %s: %s", module_name, user_id, e,
+            )
             continue
 
-        wanted = jobs_for_user(money_ctx, user_id)
+        wanted = jobs_for_user(module_ctx, user_id)
         wanted_by_name = {j["name"]: j for j in wanted}
 
         # Rescue auto-disabled module rows. Two failure waves stuck rows
@@ -3097,7 +3106,7 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
             "AND consecutive_failures > 0 "
             "AND (last_run_at IS NULL "
             "     OR last_run_at < datetime('now', '-1 hour'))",
-            (user_id, f"{MODULE_PREFIX}%"),
+            (user_id, f"{module_prefix}%"),
         ).rowcount
         if rescued:
             logger.info(
@@ -3109,7 +3118,7 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
             "SELECT id, name, cron_expression, command, skill, skill_args, "
             "skip_log_channel "
             "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-            (user_id, f"{MODULE_PREFIX}%"),
+            (user_id, f"{module_prefix}%"),
         ))
         existing_by_name = {row[1]: row for row in existing_rows}
 
@@ -3126,6 +3135,8 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
                 logger.info(
                     "Seeded module job '%s' for user %s", name, user_id,
                 )
+                if on_first_seed is not None:
+                    on_first_seed(conn, user_id, j)
             else:
                 legacy_command = row[3] is not None
                 drift = (
@@ -3175,12 +3186,27 @@ def _sync_money_module_jobs(conn, app_config: Config) -> None:
     conn.commit()
 
 
-def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
-    """Seed/refresh ``_module.feeds.*`` scheduled jobs for users with a feeds resource.
+def _sync_money_module_jobs(conn, app_config: Config) -> None:
+    """Seed/refresh ``_module.money.*`` scheduled jobs from each user's money config."""
+    try:
+        from istota.money import UserNotFoundError, resolve_for_user
+        from istota.money.jobs import MODULE_PREFIX, jobs_for_user
+    except ImportError:
+        # money extra not installed
+        return
 
-    Idempotent: existing rows are updated when cron or command differs;
-    obsolete rows (e.g. user removed their feeds resource) are deleted.
-    """
+    _sync_module_jobs(
+        conn, app_config,
+        module_name="money",
+        module_prefix=MODULE_PREFIX,
+        resolve_for_user=resolve_for_user,
+        jobs_for_user=jobs_for_user,
+        user_not_found_exc=UserNotFoundError,
+    )
+
+
+def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
+    """Seed/refresh ``_module.feeds.*`` scheduled jobs for users with feeds enabled."""
     try:
         from istota.feeds import UserNotFoundError, resolve_for_user
         from istota.feeds.jobs import MODULE_PREFIX, jobs_for_user
@@ -3188,132 +3214,39 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
         # feeds extra not installed
         return
 
-    for user_id in app_config.users:
-        uc = app_config.users.get(user_id)
-        if uc is None:
-            continue
+    run_scheduled_name = f"{MODULE_PREFIX}run_scheduled"
 
-        has_feeds = app_config.is_module_enabled(user_id, "feeds")
-        if not has_feeds:
-            conn.execute(
-                "DELETE FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-                (user_id, f"{MODULE_PREFIX}%"),
-            )
-            continue
+    def _queue_initial_poll(conn, user_id: str, j: dict) -> None:
+        # First-time seed: queue an immediate one-shot poll so newly
+        # provisioned users see their seeded subscriptions populate
+        # without waiting up to 5 minutes for the first cron tick.
+        if j["name"] != run_scheduled_name:
+            return
+        task_id = db.create_task(
+            conn,
+            prompt="",
+            user_id=user_id,
+            source_type="scheduled",
+            priority=5,
+            skip_log_channel=True,
+            skill=j["skill"],
+            skill_args=j["skill_args"],
+            queue="background",
+        )
+        logger.info(
+            "Queued initial feeds poll for user %s as task %d",
+            user_id, task_id,
+        )
 
-        try:
-            feeds_ctx = resolve_for_user(user_id, app_config)
-        except UserNotFoundError as e:
-            logger.warning("Could not resolve feeds config for %s: %s", user_id, e)
-            continue
-
-        wanted = jobs_for_user(feeds_ctx, user_id)
-        wanted_by_name = {j["name"]: j for j in wanted}
-
-        # Rescue auto-disabled module rows. See _sync_money_module_jobs
-        # for the full rationale — same predicate, same failure waves.
-        rescued = conn.execute(
-            "UPDATE scheduled_jobs "
-            "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
-            "WHERE user_id = ? AND name LIKE ? AND enabled = 0 "
-            "AND consecutive_failures > 0 "
-            "AND (last_run_at IS NULL "
-            "     OR last_run_at < datetime('now', '-1 hour'))",
-            (user_id, f"{MODULE_PREFIX}%"),
-        ).rowcount
-        if rescued:
-            logger.info(
-                "Re-enabled %d auto-disabled module job(s) for user %s",
-                rescued, user_id,
-            )
-
-        existing_rows = list(conn.execute(
-            "SELECT id, name, cron_expression, command, skill, skill_args, "
-            "skip_log_channel "
-            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-            (user_id, f"{MODULE_PREFIX}%"),
-        ))
-        existing_by_name = {row[1]: row for row in existing_rows}
-
-        for name, j in wanted_by_name.items():
-            row = existing_by_name.get(name)
-            if row is None:
-                conn.execute(
-                    "INSERT INTO scheduled_jobs "
-                    "(user_id, name, cron_expression, prompt, command, "
-                    "skill, skill_args, enabled, skip_log_channel) "
-                    "VALUES (?, ?, ?, '', NULL, ?, ?, 1, 1)",
-                    (user_id, name, j["cron"], j["skill"], j["skill_args"]),
-                )
-                logger.info(
-                    "Seeded module job '%s' for user %s", name, user_id,
-                )
-                # First-time seed: queue an immediate one-shot poll so newly
-                # provisioned users see their seeded subscriptions populate
-                # without waiting up to 5 minutes for the first cron tick.
-                if name == f"{MODULE_PREFIX}run_scheduled":
-                    task_id = db.create_task(
-                        conn,
-                        prompt="",
-                        user_id=user_id,
-                        source_type="scheduled",
-                        priority=5,
-                        skip_log_channel=True,
-                        skill=j["skill"],
-                        skill_args=j["skill_args"],
-                        queue="background",
-                    )
-                    logger.info(
-                        "Queued initial feeds poll for user %s as task %d",
-                        user_id, task_id,
-                    )
-            else:
-                legacy_command = row[3] is not None
-                drift = (
-                    row[2] != j["cron"]
-                    or legacy_command  # legacy command shape — migrate
-                    or row[4] != j["skill"]
-                    or row[5] != j["skill_args"]
-                    or not bool(row[6])
-                )
-                if drift:
-                    # Don't bump last_run_at here — backfilling skip_log_channel
-                    # on existing rows would otherwise defer the next scheduled
-                    # run by one full cron interval (up to 24h for daily jobs).
-                    extra_sql = ""
-                    if legacy_command:
-                        # Non-admin users hit the admin gate on the old
-                        # command-task path and got auto-disabled. The migration
-                        # to skill-task shape removes that failure mode, so
-                        # rescue the row's enabled/failure state in the same
-                        # update.
-                        extra_sql = (
-                            ", enabled = 1, consecutive_failures = 0, "
-                            "last_error = NULL"
-                        )
-                    conn.execute(
-                        "UPDATE scheduled_jobs "
-                        "SET cron_expression = ?, command = NULL, "
-                        "skill = ?, skill_args = ?, skip_log_channel = 1"
-                        f"{extra_sql} "
-                        "WHERE id = ?",
-                        (j["cron"], j["skill"], j["skill_args"], row[0]),
-                    )
-                    logger.info(
-                        "Updated module job '%s' for user %s%s",
-                        name, user_id,
-                        " (rescued from auto-disable)" if legacy_command else "",
-                    )
-
-        for name, row in existing_by_name.items():
-            if name not in wanted_by_name:
-                conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (row[0],))
-                logger.info(
-                    "Removed obsolete module job '%s' for user %s",
-                    name, user_id,
-                )
-
-    conn.commit()
+    _sync_module_jobs(
+        conn, app_config,
+        module_name="feeds",
+        module_prefix=MODULE_PREFIX,
+        resolve_for_user=resolve_for_user,
+        jobs_for_user=jobs_for_user,
+        user_not_found_exc=UserNotFoundError,
+        on_first_seed=_queue_initial_poll,
+    )
 
 
 def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
