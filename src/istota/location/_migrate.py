@@ -289,8 +289,49 @@ def migrate_legacy_data(
         conn.close()
 
 
+def _find_orphans(framework_db: Path, enabled: set[str]) -> list[tuple[str, int, str]]:
+    """Return ``(user_id, ping_count, latest_timestamp)`` for users with rows
+    in framework ``location_pings`` who are not in ``enabled``.
+
+    Returns ``[]`` if the framework table is gone (Stage 4 already ran).
+    """
+    conn = sqlite3.connect(framework_db)
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='location_pings'",
+        ).fetchone()
+        if not row:
+            return []
+        rows = conn.execute(
+            """
+            SELECT user_id, COUNT(*) AS pings, MAX(timestamp) AS latest
+            FROM location_pings
+            GROUP BY user_id
+            ORDER BY user_id
+            """,
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(uid, pings, latest) for (uid, pings, latest) in rows if uid not in enabled]
+
+
 def main() -> int:
+    import argparse
+
     from istota.config import load_config
+
+    parser = argparse.ArgumentParser(prog="istota.location._migrate")
+    parser.add_argument(
+        "--check-orphans",
+        action="store_true",
+        help=(
+            "Report rows in framework location_pings whose user_id isn't "
+            "enabled for the location module. Exits 2 if any are found "
+            "(stdout = pipe-separated 'user_id|count|latest_ts' lines), "
+            "0 otherwise. Does not migrate."
+        ),
+    )
+    args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     config = load_config()
@@ -298,6 +339,13 @@ def main() -> int:
     if not framework_db.exists():
         print("framework DB missing; nothing to migrate", file=sys.stderr)
         return 0
+
+    if args.check_orphans:
+        enabled = set(list_users(config))
+        orphans = _find_orphans(framework_db, enabled)
+        for uid, pings, latest in orphans:
+            print(f"{uid}|{pings}|{latest}")
+        return 2 if orphans else 0
 
     failures: list[tuple[str, Exception]] = []
     for user_id in list_users(config):

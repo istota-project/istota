@@ -1045,26 +1045,21 @@
   failed_when: false
   when: not istota_web_only
 
+# The migrator's --check-orphans mode uses the same Config.is_module_enabled
+# path that the runtime uses, so what the webhook receiver actually wrote and
+# what we treat as "enabled" here can never disagree. Exit 2 == orphans found,
+# stdout = "user_id|count|latest_ts" lines.
 - name: Pre-check — orphan location data (users not enabled for location module)
-  shell: |
-    set -e
-    sqlite3 -separator "|" {{ istota_home }}/data/istota.db "
-    SELECT user_id, COUNT(*) AS pings, MAX(timestamp) AS latest
-    FROM location_pings
-    WHERE user_id NOT IN ({{ _location_enabled_users_sql }})
-    GROUP BY user_id;"
+  command: >-
+    {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.location._migrate
+    --check-orphans
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  environment:
+    ISTOTA_ADMINS_FILE: "/etc/{{ istota_namespace }}/admins"
   register: _location_orphan_check
   changed_when: false
-  vars:
-    _location_enabled_users_sql: >-
-      {%- set _enabled = [] -%}
-      {%- for k, v in (istota_users | default({})).items() -%}
-      {%-   if 'location' not in (v.disabled_modules | default([])) -%}
-      {%-     set _ = _enabled.append(k) -%}
-      {%-   endif -%}
-      {%- endfor -%}
-      {%- set _enabled = _enabled + ['__no_such_user__'] -%}
-      {{ _enabled | map('regex_replace', '^(.*)$', "'\\1'") | join(',') }}
+  failed_when: false  # exit 2 (orphans) is handled by the next task, not a hard fail
   when:
     - not istota_web_only
     - (_location_legacy_tables_check.stdout | default('') | trim) == 'location_pings'
@@ -1073,20 +1068,22 @@
   fail:
     msg: |
       Framework istota.db has location_pings rows for users not enabled for the
-      location module under the current config:
+      location module under the current config (per Config.is_module_enabled,
+      which considers both the inventory and the user_profiles DB row):
 
       {{ _location_orphan_check.stdout }}
 
       Recovery options:
         1) Re-enable the location module for these users (remove "location" from
-           their disabled_modules list) and rerun the deploy — their data will
-           be migrated into per-user location.db files.
+           the user_profiles.disabled_modules JSON column AND from the inventory
+           istota_users[*].disabled_modules), then rerun the deploy — their data
+           will be migrated into per-user location.db files.
         2) Pass -e include_orphans=true to drop these rows along with the
            framework tables in this stage (data loss, irreversible).
   when:
     - not istota_web_only
     - (_location_legacy_tables_check.stdout | default('') | trim) == 'location_pings'
-    - (_location_orphan_check.stdout | default('') | trim) != ''
+    - (_location_orphan_check.rc | default(0)) == 2
     - not (include_orphans | default(false) | bool)
 
 - name: Pre-check — duplicate (user_id, name) in framework places
