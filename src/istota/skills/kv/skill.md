@@ -16,7 +16,20 @@ istota-skill kv set <namespace> <key> '<json_value>'   # Set a value (JSON)
 istota-skill kv list <namespace>                       # List all keys in namespace
 istota-skill kv delete <namespace> <key>               # Delete a key
 istota-skill kv namespaces                             # List all namespaces
+
+# Set ops — operate on a JSON-array value at <ns>/<key>, members are plain strings:
+istota-skill kv set-contains <ns> <key> <member>            # {"contains": bool}
+istota-skill kv set-size     <ns> <key>                     # {"size": N}
+istota-skill kv set-members  <ns> <key> [--limit N] [--offset N]  # paginated slice
+istota-skill kv set-add      <ns> <key> <member> [<member>...]    # bootstraps [] if missing
+istota-skill kv set-remove   <ns> <key> <member> [<member>...]
 ```
+
+Use the set ops for membership-tracking patterns (seen IDs, processed hashes,
+etc.) instead of round-tripping the full array through `get` — a 40 KB blob
+choked one task in production. `set-add` / `set-remove` accept multiple
+members in a single call. The deferred apply re-reads the current value, so
+concurrent set-adds across tasks compose correctly.
 
 ## Environment variables
 
@@ -29,10 +42,10 @@ istota-skill kv namespaces                             # List all namespaces
 
 ## Sandbox constraints
 
-- **Reads** (`get`, `list`, `namespaces`) work directly — the DB is read-only accessible.
-- **Writes** (`set`, `delete`) are deferred when running in the sandbox: the CLI writes a JSON file to `$ISTOTA_DEFERRED_DIR` and the scheduler processes it after task completion.
+- **Reads** (`get`, `list`, `namespaces`, `set-contains`, `set-size`, `set-members`) work directly — the DB is read-only accessible.
+- **Writes** (`set`, `delete`, `set-add`, `set-remove`) are deferred when running in the sandbox: the CLI writes a JSON file to `$ISTOTA_DEFERRED_DIR` and the scheduler processes it after task completion.
 
-The CLI handles this automatically — use `set` and `delete` normally and they will be deferred transparently when `ISTOTA_DEFERRED_DIR` is set.
+The CLI handles this automatically — use the write commands normally and they will be deferred transparently when `ISTOTA_DEFERRED_DIR` is set.
 
 ## Output format
 
@@ -44,6 +57,11 @@ All commands return JSON with a `status` field (`ok`, `not_found`, or `error`).
 {"status": "ok", "count": 3, "entries": [...]}
 {"status": "ok", "namespaces": ["briefing", "location"]}
 {"status": "ok", "deferred": true}
+{"status": "ok", "contains": true}
+{"status": "ok", "size": 1417}
+{"status": "ok", "total": 1417, "offset": 0, "members": ["id-1", "id-2", ...]}
+{"status": "ok", "added": 2, "deferred": true}
+{"status": "ok", "removed": 1, "deferred": true}
 ```
 
 ## Notes

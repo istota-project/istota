@@ -142,9 +142,9 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 ## Skill CLI Modules (`src/istota/skills/`)
 
 ### `kv/` - Key-Value Store
-**Subcommands**: `get NAMESPACE KEY`, `set NAMESPACE KEY '<json>'`, `list NAMESPACE`, `delete NAMESPACE KEY`, `namespaces`
+**Subcommands**: `get NAMESPACE KEY`, `set NAMESPACE KEY '<json>'`, `list NAMESPACE`, `delete NAMESPACE KEY`, `namespaces`, `set-contains NS KEY MEMBER`, `set-size NS KEY`, `set-members NS KEY [--limit N] [--offset N]`, `set-add NS KEY MEMBER [MEMBER...]`, `set-remove NS KEY MEMBER [MEMBER...]`
 **Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_TASK_ID`
-**Note**: `always_include` core skill. Persistent per-user, namespaced JSON store. Writes go through deferred-DB pattern under sandbox.
+**Note**: `always_include` core skill. Persistent per-user, namespaced JSON store. Writes go through deferred-DB pattern under sandbox. Set ops (`set-add`/`set-remove`/`set-contains`/`set-size`/`set-members`) operate on a JSON-array value at `<ns>/<key>` with plain-string members — added so membership-tracking patterns (seen IDs, processed hashes) don't have to round-trip the full array through `get`. Deferred `set-add`/`set-remove` carry only the member list; the scheduler re-reads the current value at apply time so concurrent ops compose correctly.
 
 ### `email/` - IMAP/SMTP
 **Subcommands**: `send`, `output`

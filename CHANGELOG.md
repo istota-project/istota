@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **KV set ops** — `kv set-contains`, `set-size`, `set-members` (read), `set-add`, `set-remove` (deferred-write) for membership-tracking patterns. Operate on a JSON-array value at `<ns>/<key>` with plain-string members. Bootstraps `[]` if missing. `set-add` / `set-remove` accept multiple members per call. Deferred ops carry only the member list; the scheduler re-reads the current value at apply time so concurrent set-adds across tasks compose correctly. Existing `get` / `set` / `list` / `delete` / `namespaces` semantics unchanged. Avoids round-tripping large blobs (e.g. ~44 KB seen-IDs arrays) through the skill proxy when the caller just needs a membership check.
+
 ### Changed
 - **Per-user `location.db`** — GPS data (`location_pings`, `places`, `visits`, `location_state`, `dismissed_clusters`) moved out of framework `istota.db` into per-user `{workspace}/location/data/location.db` files. New module package at `src/istota/location/` with `resolve_for_user(user_id, config)` mirroring the `feeds` / `money` pattern. The two global Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) intentionally stay in framework `istota.db` to preserve cross-user dedup; skill subcommands and web routes that need them open a second connection via `location.db.with_geocode_conn(...)`. Skill CLI reads `LOCATION_DB_PATH` (set by a `setup_env` hook) instead of `ISTOTA_DB_PATH` for per-user data.
 - **One-shot Ansible migration** — new idempotent block stops services, runs `python -m istota.location._migrate` to copy each enabled user's rows into their per-user file (FK-orphan NULL pass + `pragma foreign_key_check`/`integrity_check` validation + sentinel-gated re-run safety), drops the framework tables, restarts services. Pre-checks halt the deploy on orphan rows for users not enabled for the location module unless `-e include_orphans=true` is set.

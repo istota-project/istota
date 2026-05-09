@@ -2,6 +2,35 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-09: KV set ops for membership-tracking patterns
+
+A scheduled task choked on `istota-skill kv get <ns> <key>` returning a ~44 KB JSON array of seen-item IDs — the array had grown past the size where the skill-proxy path could comfortably round-trip the value through subprocess pipes and into the LLM's tool-result. The CLI hung, the bash sandbox routed it to background execution, and the task burned its action budget across nine recovery attempts before producing a partial result. The KV store itself was healthy; the failure mode was "membership check forces a full-array round-trip when the user really just needed `id in seen?`".
+
+Fix is additive — five new subcommands on the `kv` skill that operate on a JSON-array value at `<ns>/<key>` with plain-string members:
+
+- `set-contains <ns> <key> <member>` — read-only, returns `{"contains": bool}`. Missing key returns `false` (not an error to ask).
+- `set-size <ns> <key>` — `{"size": N}`. Cheap counter.
+- `set-members <ns> <key> [--limit N] [--offset N]` — paginated slice (default limit 100). For when a sample is genuinely needed.
+- `set-add <ns> <key> <member> [<member>...]` — bootstraps `[]` if missing. Multi-member.
+- `set-remove <ns> <key> <member> [<member>...]` — multi-member.
+
+Existing `get`/`set`/`list`/`delete`/`namespaces` semantics unchanged. Set ops reject non-array values with a clear error (`value at <ns>/<key> is not a JSON array`). Knowledge-graph facts live in their own table (`knowledge_facts`), so they're unaffected.
+
+Concurrency choice that mattered: deferred `set-add` / `set-remove` ops carry only the member list, not a recomputed full array. The scheduler's `_process_deferred_kv_ops` re-reads the current value from the DB at apply time, applies the member-set diff, and writes back. This is the right model for the seen-items pattern where two concurrent tasks might add different members — strategy-A "read at CLI time, defer the full new value" would lose one of the additions. The CLI does still read at submission time so it can return an `added` / `removed` count to the LLM, but that's a hint based on the read-time view; the actual mutation is server-side and atomic.
+
+Plain-string members instead of full JSON members — the apartment-IDs / URL-hashes / processed-message-IDs use case is overwhelmingly strings, and the alternative (`'"id-123"'` shell quoting) is a usability footgun. If someone needs object members later, they can switch to a different pattern. `set-add` dedups members internally and against the existing set.
+
+TDD pass per project conventions: 24 new tests in `tests/test_kv_skill.py` covering all five commands across read / direct-write / deferred-write paths plus three scheduler composition cases (bootstrap missing key, dedup against existing, set-add then set-remove compose). Started with failing tests, implemented, all 354 tests in the kv + scheduler suites pass with `-p no:testmon`. Lint clean.
+
+Docs: `skills/kv/skill.md` lists the new commands prominently and points to the membership-tracking use case; `.claude/rules/skills.md` updated subcommand list; `scheduler_deferred.py` docstring reflects the broader op set.
+
+**Files added/modified:**
+- `src/istota/skills/kv/__init__.py` — five new `cmd_set_*` functions, shared `_load_set` validator, parser entries, `_defer_op` helper extracted from `_defer_write`.
+- `src/istota/scheduler_deferred.py` — `set-add` / `set-remove` ops in `_process_deferred_kv_ops`, re-reading current value before applying the diff.
+- `src/istota/skills/kv/skill.md` — set-ops section with use-case framing.
+- `.claude/rules/skills.md` — subcommand list updated.
+- `tests/test_kv_skill.py` — 24 new tests covering CLI + scheduler paths.
+
 ## 2026-05-09: Per-user `location.db` split (Stages 3 & 4)
 
 Wrapped up the location-db-per-user-split spec. Stages 1 & 2 had already shipped: a new `src/istota/location/` package with `resolve_for_user(user_id, config) -> LocationContext`, per-user `{workspace}/location/data/location.db`, every runtime caller (webhook receiver, scheduler reconcile/cleanup, web routes, skill CLI, location_logic helpers) switched to per-user connections. This session landed the migration deploy (Stage 3) and the framework cleanup (Stage 4).
