@@ -30,10 +30,13 @@ def db_path(tmp_path, monkeypatch):
 
 
 def _make_config(db_path: Path, users: dict[str, UserConfig]) -> Config:
+    # Per-user split: receiver resolves a LocationContext for each
+    # ingest user, which requires nextcloud_mount_path.
     return Config(
         db_path=db_path,
         users=users,
         location=LocationReceiverConfig(enabled=True),
+        nextcloud_mount_path=db_path.parent,
     )
 
 

@@ -397,54 +397,10 @@ CREATE TABLE IF NOT EXISTS sent_emails (
 CREATE INDEX IF NOT EXISTS idx_sent_emails_message_id ON sent_emails(message_id);
 CREATE INDEX IF NOT EXISTS idx_sent_emails_user ON sent_emails(user_id);
 
--- Location pings (GPS data from Overland iOS app)
-CREATE TABLE IF NOT EXISTS location_pings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    timestamp TEXT NOT NULL,           -- device timestamp (ISO 8601)
-    received_at TEXT NOT NULL DEFAULT (datetime('now')),
-    lat REAL NOT NULL,
-    lon REAL NOT NULL,
-    altitude REAL,
-    accuracy REAL,                     -- horizontal accuracy (meters)
-    speed REAL,                        -- m/s, -1 if unavailable
-    course REAL,                       -- degrees, -1 if unavailable
-    battery REAL,                      -- 0.0–1.0
-    activity_type TEXT,                -- stationary, walking, running, automotive, cycling
-    wifi TEXT,                         -- SSID if available
-    place_id INTEGER REFERENCES places(id),
-    visit_id INTEGER REFERENCES visits(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_location_pings_user_time ON location_pings(user_id, timestamp);
-
--- Named places (geofences)
-CREATE TABLE IF NOT EXISTS places (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    lat REAL NOT NULL,
-    lon REAL NOT NULL,
-    radius_meters INTEGER NOT NULL DEFAULT 100,
-    category TEXT,                     -- home, gym, work, food, other
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    notes TEXT,
-    UNIQUE(user_id, name)
-);
-
--- Visits (contiguous time at a place)
-CREATE TABLE IF NOT EXISTS visits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    place_id INTEGER REFERENCES places(id),
-    place_name TEXT NOT NULL,          -- snapshot (place name can change)
-    entered_at TEXT NOT NULL,
-    exited_at TEXT,                    -- NULL = still here
-    duration_sec INTEGER,              -- computed on exit
-    ping_count INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_visits_user_time ON visits(user_id, entered_at);
+-- Note: Per-user location data (location_pings, places, visits,
+-- dismissed_clusters, location_state) lives in per-user
+-- {workspace}/location/data/location.db files; see src/istota/location/.
+-- Framework istota.db keeps only the global geocode caches below.
 
 -- Geocode cache (forward geocoding results for calendar event locations)
 CREATE TABLE IF NOT EXISTS geocode_cache (
@@ -526,28 +482,6 @@ CREATE TABLE IF NOT EXISTS knowledge_facts_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_kfa_user_ts ON knowledge_facts_audit(user_id, ts);
 CREATE INDEX IF NOT EXISTS idx_kfa_fact_id ON knowledge_facts_audit(fact_id);
-
--- Dismissed cluster zones (suppress detected unknown places without saving them)
-CREATE TABLE IF NOT EXISTS dismissed_clusters (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    lat REAL NOT NULL,
-    lon REAL NOT NULL,
-    radius_meters INTEGER NOT NULL,
-    dismissed_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_dismissed_clusters_user ON dismissed_clusters(user_id);
-
--- Location state machine (per-user hysteresis tracking)
-CREATE TABLE IF NOT EXISTS location_state (
-    user_id TEXT PRIMARY KEY,
-    current_place_id INTEGER REFERENCES places(id),
-    current_visit_id INTEGER REFERENCES visits(id),
-    consecutive_count INTEGER DEFAULT 0,
-    last_ping_place_id INTEGER,
-    exit_started_at TEXT               -- first away-from-current-place ping, NULL when at place
-);
 
 -- Tier-2 credentials (web-UI-managed, encrypted at rest with a Fernet key
 -- derived from $ISTOTA_SECRET_KEY). One row per (user, service, key) — e.g.

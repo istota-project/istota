@@ -14,40 +14,78 @@ CLI:
     python -m istota.skills.location list-dismissed
     python -m istota.skills.location restore-dismissed CLUSTER_ID
     python -m istota.skills.location place-stats (--name NAME | --id ID)
+
+Per-user split: per-user GPS data lives in ``location.db`` resolved
+via ``LOCATION_DB_PATH`` (set by the ``setup_env`` hook below). Two
+subcommands also need the framework-side geocode caches and read
+``ISTOTA_DB_PATH`` for those.
 """
 
 import argparse
 import json
 import os
-
-import sys
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 
-def _get_conn() -> sqlite3.Connection:
+def setup_env(ctx) -> dict[str, str]:
+    """Inject LOCATION_DB_PATH for the per-user location.db.
+
+    Self-gates on ``Config.is_module_enabled(user_id, "location")``.
+    Returns ``{}`` (no env contribution) when the module is disabled
+    for the user, when nextcloud_mount_path is unset, or when any
+    other resolution gate fails.
+    """
+    from istota import location as _location  # noqa: PLC0415
+
+    config = ctx.config
+    user_id = ctx.task.user_id
+    try:
+        loc_ctx = _location.resolve_for_user(user_id, config)
+    except _location.UserNotFoundError:
+        return {}
+    return {"LOCATION_DB_PATH": str(loc_ctx.db_path)}
+
+
+def _get_location_db_path() -> str:
+    db_path = os.environ.get("LOCATION_DB_PATH", "")
+    if not db_path:
+        print(json.dumps({
+            "status": "error", "error": "LOCATION_DB_PATH not set",
+        }))
+        sys.exit(1)
+    return db_path
+
+
+def _get_framework_db_path() -> str:
+    """Path to framework istota.db — only needed for geocode caches."""
     db_path = os.environ.get("ISTOTA_DB_PATH", "")
     if not db_path:
-        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
+        print(json.dumps({
+            "status": "error", "error": "ISTOTA_DB_PATH not set",
+        }))
         sys.exit(1)
-    conn = sqlite3.connect(db_path)
+    return db_path
+
+
+def _connect_location() -> sqlite3.Connection:
+    """Open a raw connection to per-user location.db.
+
+    Subcommands use raw connections (rather than the package's
+    contextmanager) because they read+commit+close inline; the manager
+    pattern is awkward when the conn outlives a single ``with`` block.
+    """
+    conn = sqlite3.connect(_get_location_db_path())
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
-def _get_user_id() -> str:
-    user_id = os.environ.get("ISTOTA_USER_ID", "")
-    if not user_id:
-        print(json.dumps({"error": "ISTOTA_USER_ID not set"}))
-        sys.exit(1)
-    return user_id
-
-
 def cmd_current(args):
-    conn = _get_conn()
-    user_id = _get_user_id()
+    conn = _connect_location()
 
-    # Latest ping
     cursor = conn.execute(
         """
         SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
@@ -55,10 +93,8 @@ def cmd_current(args):
                p.name as place_name
         FROM location_pings lp
         LEFT JOIN places p ON lp.place_id = p.id
-        WHERE lp.user_id = ?
         ORDER BY lp.timestamp DESC LIMIT 1
-        """,
-        (user_id,),
+        """
     )
     row = cursor.fetchone()
     if not row:
@@ -77,15 +113,13 @@ def cmd_current(args):
         "place": row["place_name"],
     }
 
-    # Current visit (open)
     cursor = conn.execute(
         """
         SELECT place_name, entered_at, ping_count
         FROM visits
-        WHERE user_id = ? AND exited_at IS NULL
+        WHERE exited_at IS NULL
         ORDER BY entered_at DESC LIMIT 1
-        """,
-        (user_id,),
+        """
     )
     visit_row = cursor.fetchone()
     current_visit = None
@@ -112,8 +146,7 @@ def cmd_current(args):
 
 
 def cmd_history(args):
-    conn = _get_conn()
-    user_id = _get_user_id()
+    conn = _connect_location()
 
     if args.date:
         tz_name = getattr(args, "tz", None) or os.environ.get("TZ", "America/Los_Angeles")
@@ -136,10 +169,10 @@ def cmd_history(args):
                    p.name as place_name
             FROM location_pings lp
             LEFT JOIN places p ON lp.place_id = p.id
-            WHERE lp.user_id = ? AND lp.timestamp >= ? AND lp.timestamp < ?
+            WHERE lp.timestamp >= ? AND lp.timestamp < ?
             ORDER BY lp.timestamp DESC
         """
-        params = [user_id, since, until]
+        params: list = [since, until]
         if limit:
             query += " LIMIT ?"
             params.append(limit)
@@ -153,10 +186,9 @@ def cmd_history(args):
                    p.name as place_name
             FROM location_pings lp
             LEFT JOIN places p ON lp.place_id = p.id
-            WHERE lp.user_id = ?
             ORDER BY lp.timestamp DESC LIMIT ?
             """,
-            (user_id, limit),
+            (limit,),
         )
 
     rows = cursor.fetchall()
@@ -178,15 +210,12 @@ def cmd_history(args):
 
 
 def cmd_places(args):
-    conn = _get_conn()
-    user_id = _get_user_id()
-
+    conn = _connect_location()
     cursor = conn.execute(
         """
         SELECT id, name, lat, lon, radius_meters, category, notes
-        FROM places WHERE user_id = ? ORDER BY name
-        """,
-        (user_id,),
+        FROM places ORDER BY name
+        """
     )
     rows = cursor.fetchall()
     results = [
@@ -206,35 +235,30 @@ def cmd_places(args):
 
 
 def cmd_learn(args):
-    conn = _get_conn()
-    user_id = _get_user_id()
+    from istota.location import db as location_db
+
+    conn = _connect_location()
 
     name = args.name
     radius = args.radius or 100
     category = args.category or "other"
     notes = (getattr(args, "notes", None) or "").strip() or None
 
-    # Get latest ping
     cursor = conn.execute(
-        """
-        SELECT lat, lon, accuracy, timestamp
-        FROM location_pings WHERE user_id = ?
-        ORDER BY timestamp DESC LIMIT 1
-        """,
-        (user_id,),
+        "SELECT lat, lon, accuracy, timestamp FROM location_pings "
+        "ORDER BY timestamp DESC LIMIT 1"
     )
     row = cursor.fetchone()
     if not row:
-        print(json.dumps({"error": "No location pings found"}))
+        print(json.dumps({"status": "error", "error": "No location pings found"}))
         conn.close()
         sys.exit(1)
 
     lat, lon = row["lat"], row["lon"]
-
-    # Insert directly into DB
-    from istota.db import upsert_place
-    upsert_place(conn, user_id, name, lat, lon,
-                 radius_meters=radius, category=category, notes=notes)
+    location_db.upsert_place(
+        conn, name, lat, lon,
+        radius_meters=radius, category=category, notes=notes,
+    )
     conn.commit()
     conn.close()
 
@@ -249,17 +273,17 @@ def cmd_learn(args):
     }))
 
 
-def _resolve_place(conn, user_id, name=None, place_id=None):
+def _resolve_place(conn, name=None, place_id=None):
     """Find a place by name or ID. Returns (place, error_msg)."""
-    from istota.db import get_place_by_name, get_place_by_id
+    from istota.location import db as location_db
 
     if place_id is not None:
-        place = get_place_by_id(conn, place_id)
-        if not place or place.user_id != user_id:
+        place = location_db.get_place_by_id(conn, place_id)
+        if not place:
             return None, f"No place found with ID {place_id}"
         return place, None
     if name:
-        place = get_place_by_name(conn, user_id, name)
+        place = location_db.get_place_by_name(conn, name)
         if not place:
             return None, f"No place found with name '{name}'"
         return place, None
@@ -267,18 +291,16 @@ def _resolve_place(conn, user_id, name=None, place_id=None):
 
 
 def cmd_update(args):
-    conn = _get_conn()
-    user_id = _get_user_id()
+    from istota.location import db as location_db
 
-    place, err = _resolve_place(conn, user_id, name=args.name, place_id=args.id)
+    conn = _connect_location()
+    place, err = _resolve_place(conn, name=args.name, place_id=args.id)
     if err:
-        print(json.dumps({"error": err}))
+        print(json.dumps({"status": "error", "error": err}))
         conn.close()
         sys.exit(1)
 
-    from istota.db import update_place, get_place_by_id
-
-    updates = {}
+    updates: dict = {}
     clear_notes = False
     if args.rename is not None:
         updates["name"] = args.rename
@@ -298,18 +320,17 @@ def cmd_update(args):
         updates["lon"] = args.lon
 
     if not updates and not clear_notes:
-        print(json.dumps({"error": "No changes specified"}))
+        print(json.dumps({"status": "error", "error": "No changes specified"}))
         conn.close()
         sys.exit(1)
 
     if updates:
-        update_place(conn, place.id, **updates)
+        location_db.update_place(conn, place.id, **updates)
     if clear_notes:
-        # update_place skips None, so write NULL directly to clear notes.
         conn.execute("UPDATE places SET notes = NULL WHERE id = ?", (place.id,))
     conn.commit()
 
-    updated = get_place_by_id(conn, place.id)
+    updated = location_db.get_place_by_id(conn, place.id)
     conn.close()
 
     print(json.dumps({
@@ -327,27 +348,22 @@ def cmd_update(args):
 
 
 def cmd_delete(args):
-    conn = _get_conn()
-    user_id = _get_user_id()
+    from istota.location import db as location_db
 
-    place, err = _resolve_place(conn, user_id, name=args.name, place_id=args.id)
+    conn = _connect_location()
+    place, err = _resolve_place(conn, name=args.name, place_id=args.id)
     if err:
-        print(json.dumps({"error": err}))
+        print(json.dumps({"status": "error", "error": err}))
         conn.close()
         sys.exit(1)
 
-    from istota.db import delete_place_by_id, nullify_place_on_pings
-
     place_name = place.name
-    nullify_place_on_pings(conn, place.id)
-    delete_place_by_id(conn, place.id)
+    location_db.nullify_place_on_pings(conn, place.id)
+    location_db.delete_place_by_id(conn, place.id)
     conn.commit()
     conn.close()
 
-    print(json.dumps({
-        "status": "ok",
-        "deleted": place_name,
-    }))
+    print(json.dumps({"status": "ok", "deleted": place_name}))
 
 
 _VIRTUAL_LOCATION_PATTERNS = [
@@ -358,16 +374,11 @@ _VIRTUAL_LOCATION_PATTERNS = [
 
 
 def _is_virtual_location(location: str) -> bool:
-    """Check if a location string indicates a virtual meeting."""
     loc_lower = location.lower()
     return any(p in loc_lower for p in _VIRTUAL_LOCATION_PATTERNS)
 
 
 def _match_place(location_text: str, places):
-    """Fuzzy-match a location string against known places (case-insensitive substring).
-
-    Returns (place_name, lat, lon, radius_meters) or None.
-    """
     loc_lower = location_text.lower()
     for place in places:
         if place["name"].lower() in loc_lower or loc_lower in place["name"].lower():
@@ -380,14 +391,14 @@ def _match_place(location_text: str, places):
     return None
 
 
-def _geocode_location(location_text: str, conn):
+def _geocode_location(location_text: str, framework_conn):
     """Resolve location text to lat/lon via cache or Nominatim.
 
-    Returns (lat, lon) or None.
+    Cache reads/writes go to framework istota.db (cross-user dedup).
     """
     from istota.db import get_cached_geocode, cache_geocode
 
-    cached = get_cached_geocode(conn, location_text)
+    cached = get_cached_geocode(framework_conn, location_text)
     if cached:
         return cached
 
@@ -396,8 +407,11 @@ def _geocode_location(location_text: str, conn):
         geolocator = Nominatim(user_agent="istota")
         result = geolocator.geocode(location_text, timeout=10)
         if result:
-            cache_geocode(conn, location_text, result.latitude, result.longitude)
-            conn.commit()
+            cache_geocode(
+                framework_conn, location_text,
+                result.latitude, result.longitude,
+            )
+            framework_conn.commit()
             return (result.latitude, result.longitude)
     except Exception:
         pass
@@ -406,6 +420,11 @@ def _geocode_location(location_text: str, conn):
 
 
 def cmd_attendance(args):
+    """Cross-reference calendar events with GPS pings.
+
+    Triple-DB: per-user location.db for pings/places, framework
+    istota.db for the geocode cache, CalDAV for events.
+    """
     from istota.geo import haversine
     from istota.skills.calendar import (
         CalendarEvent,
@@ -413,48 +432,46 @@ def cmd_attendance(args):
         list_calendars,
         get_events,
     )
-    from istota import db
+    from istota.location import db as location_db
     from datetime import timedelta
     from zoneinfo import ZoneInfo
 
-    conn = _get_conn()
-    user_id = _get_user_id()
+    conn = _connect_location()
+    framework_conn = sqlite3.connect(_get_framework_db_path())
+    framework_conn.row_factory = sqlite3.Row
 
-    # Determine timezone
     tz_name = os.environ.get("TZ", "America/Los_Angeles")
     try:
         tz = ZoneInfo(tz_name)
     except Exception:
         tz = ZoneInfo("America/Los_Angeles")
 
-    # Determine date
     if args.date:
         target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     else:
         target_date = datetime.now(tz).date()
 
-    # Build day boundaries in local timezone
     day_start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=tz)
     day_end = day_start + timedelta(days=1)
 
-    # Connect to CalDAV
     caldav_url = os.environ.get("CALDAV_URL", "")
     caldav_user = os.environ.get("CALDAV_USERNAME", "")
     caldav_pass = os.environ.get("CALDAV_PASSWORD", "")
 
     if not all([caldav_url, caldav_user, caldav_pass]):
-        print(json.dumps({"error": "CalDAV credentials not set (CALDAV_URL, CALDAV_USERNAME, CALDAV_PASSWORD)"}))
+        print(json.dumps({"status": "error", "error": "CalDAV credentials not set (CALDAV_URL, CALDAV_USERNAME, CALDAV_PASSWORD)"}))
         conn.close()
+        framework_conn.close()
         sys.exit(1)
 
     client = get_caldav_client(caldav_url, caldav_user, caldav_pass)
 
-    # Fetch events from all calendars visible to this client (including shared calendars)
     try:
         calendars = list_calendars(client)
     except Exception as e:
-        print(json.dumps({"error": f"Failed to list calendars: {e}"}))
+        print(json.dumps({"status": "error", "error": f"Failed to list calendars: {e}"}))
         conn.close()
+        framework_conn.close()
         sys.exit(1)
 
     all_events: list[CalendarEvent] = []
@@ -465,7 +482,6 @@ def cmd_attendance(args):
         except Exception:
             continue
 
-    # Filter events
     filtered = []
     for ev in all_events:
         if ev.all_day:
@@ -474,7 +490,6 @@ def cmd_attendance(args):
             continue
         if _is_virtual_location(ev.location):
             continue
-        # Optional --event filter
         if args.event:
             query = args.event.lower()
             if query != ev.uid.lower() and query not in ev.summary.lower():
@@ -484,12 +499,11 @@ def cmd_attendance(args):
     if not filtered:
         print(json.dumps({"date": str(target_date), "events": []}))
         conn.close()
+        framework_conn.close()
         return
 
-    # Load known places from DB
     places_rows = conn.execute(
-        "SELECT name, lat, lon, radius_meters FROM places WHERE user_id = ?",
-        (user_id,),
+        "SELECT name, lat, lon, radius_meters FROM places"
     ).fetchall()
     places = [dict(r) for r in places_rows]
 
@@ -497,11 +511,9 @@ def cmd_attendance(args):
 
     results = []
     for ev in filtered:
-        # Resolve location to coordinates
         event_lat, event_lon, radius = None, None, default_radius
         source = None
 
-        # Try place match first
         place_match = _match_place(ev.location, places)
         if place_match:
             event_lat = place_match["lat"]
@@ -509,8 +521,7 @@ def cmd_attendance(args):
             radius = place_match["radius_meters"]
             source = "place"
         else:
-            # Try geocode
-            coords = _geocode_location(ev.location, conn)
+            coords = _geocode_location(ev.location, framework_conn)
             if coords:
                 event_lat, event_lon = coords
                 source = "geocode"
@@ -534,24 +545,22 @@ def cmd_attendance(args):
         entry["event_lon"] = round(event_lon, 6)
         entry["radius_meters"] = radius
 
-        # Query pings for event time window (with 30min buffer)
         ev_start = ev.start
         ev_end = ev.end
-        # Ensure timezone-aware for comparison
         if ev_start.tzinfo is None:
             ev_start = ev_start.replace(tzinfo=tz)
         if ev_end.tzinfo is None:
             ev_end = ev_end.replace(tzinfo=tz)
 
-        # Convert to UTC for DB query (pings stored as UTC ISO strings)
         window_start = (ev_start - timedelta(minutes=30)).astimezone(timezone.utc)
         window_end = (ev_end + timedelta(minutes=30)).astimezone(timezone.utc)
         ping_since = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
         ping_until = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        pings = db.get_pings(conn, user_id, since=ping_since, until=ping_until, limit=1000)
+        pings = location_db.get_pings(
+            conn, since=ping_since, until=ping_until, limit=1000,
+        )
 
-        # Check proximity
         nearby_pings = []
         for ping in pings:
             dist = haversine(event_lat, event_lon, ping.lat, ping.lon)
@@ -560,7 +569,7 @@ def cmd_attendance(args):
 
         if nearby_pings:
             entry["attended"] = True
-            entry["first_nearby_ping"] = nearby_pings[-1].timestamp  # pings are newest-first
+            entry["first_nearby_ping"] = nearby_pings[-1].timestamp
             entry["last_nearby_ping"] = nearby_pings[0].timestamp
             entry["nearby_ping_count"] = len(nearby_pings)
         else:
@@ -570,25 +579,40 @@ def cmd_attendance(args):
 
     print(json.dumps({"date": str(target_date), "events": results}))
     conn.close()
+    framework_conn.close()
 
 
 def cmd_reverse_geocode(args):
+    """Reverse-geocode a lat/lon.
+
+    Cache lookup goes to framework istota.db; this subcommand doesn't
+    touch the per-user location.db at all.
+    """
     from istota.geo import reverse_geocode
 
-    conn = _get_conn()
-    result = reverse_geocode(args.lat, args.lon, conn)
-    print(json.dumps(result, indent=2))
-    conn.close()
+    framework_conn = sqlite3.connect(_get_framework_db_path())
+    framework_conn.row_factory = sqlite3.Row
+    try:
+        result = reverse_geocode(args.lat, args.lon, framework_conn)
+        print(json.dumps(result, indent=2))
+    finally:
+        framework_conn.close()
 
 
 def cmd_day_summary(args):
+    """Day summary with reverse-geocoded place names.
+
+    Reads pings from per-user location.db; resolves ``unknown`` stops
+    via reverse_geocode against the framework istota.db cache.
+    """
     from istota.geo import (
         reverse_geocode, cluster_pings, dedupe_near_duplicate_pings, haversine,
         filter_transit_clusters, merge_consecutive_stops,
     )
 
-    conn = _get_conn()
-    user_id = _get_user_id()
+    conn = _connect_location()
+    framework_conn = sqlite3.connect(_get_framework_db_path())
+    framework_conn.row_factory = sqlite3.Row
 
     tz_name = getattr(args, "tz", None) or os.environ.get("TZ", "America/Los_Angeles")
     try:
@@ -600,7 +624,6 @@ def cmd_day_summary(args):
 
     target_date = args.date or datetime.now(tz).strftime("%Y-%m-%d")
 
-    # Day boundaries in UTC
     day_start_local = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=tz)
     day_end_local = day_start_local + timedelta(days=1)
     since_utc = day_start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -612,31 +635,29 @@ def cmd_day_summary(args):
                lp.place_id, p.name as place_name
         FROM location_pings lp
         LEFT JOIN places p ON lp.place_id = p.id
-        WHERE lp.user_id = ? AND lp.timestamp >= ? AND lp.timestamp < ?
+        WHERE lp.timestamp >= ? AND lp.timestamp < ?
         ORDER BY lp.timestamp ASC
         """,
-        (user_id, since_utc, until_utc),
+        (since_utc, until_utc),
     ).fetchall()
 
     if not rows:
         print(json.dumps({"date": target_date, "stops": [], "ping_count": 0}))
         conn.close()
+        framework_conn.close()
         return
 
     pings = [dict(r) for r in rows]
     pings = dedupe_near_duplicate_pings(pings)
     clusters = cluster_pings(pings, radius_m=250)
 
-    # Load saved places for proximity matching
     saved_places = conn.execute(
-        "SELECT id, name, lat, lon, radius_meters FROM places WHERE user_id = ?",
-        (user_id,),
+        "SELECT id, name, lat, lon, radius_meters FROM places"
     ).fetchall()
     saved_places = [dict(r) for r in saved_places]
 
     stops, transit_pings = filter_transit_clusters(clusters)
 
-    # Resolve location names
     for stop in stops:
         if stop["place_name"]:
             stop["location"] = stop["place_name"]
@@ -652,7 +673,7 @@ def cmd_day_summary(args):
                     break
 
             if not matched:
-                geo = reverse_geocode(stop["lat"], stop["lon"], conn)
+                geo = reverse_geocode(stop["lat"], stop["lon"], framework_conn)
                 name = (
                     geo.get("suburb")
                     or geo.get("neighborhood")
@@ -666,7 +687,6 @@ def cmd_day_summary(args):
                 stop["neighborhood"] = geo.get("neighborhood")
                 stop["suburb"] = geo.get("suburb")
 
-        # Convert timestamps to local time
         for key in ("first_ts", "last_ts"):
             try:
                 utc_dt = datetime.fromisoformat(stop[key]).replace(tzinfo=timezone.utc)
@@ -676,7 +696,6 @@ def cmd_day_summary(args):
 
     merged = merge_consecutive_stops(stops)
 
-    # Pre-compute duration for each stop so consumers don't need timestamp math
     for s in merged:
         try:
             first = datetime.fromisoformat(s["first_ts"]).replace(tzinfo=timezone.utc)
@@ -710,19 +729,16 @@ def cmd_day_summary(args):
 
     print(json.dumps(result, indent=2))
     conn.close()
+    framework_conn.close()
 
 
 def cmd_discover(args):
     """Find clusters of stationary pings not assigned to any place."""
     from istota.location_logic import _location_discover_places
 
-    db_path = os.environ.get("ISTOTA_DB_PATH", "")
-    if not db_path:
-        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
-        sys.exit(1)
-    user_id = _get_user_id()
+    db_path = _get_location_db_path()
     min_pings = getattr(args, "min_pings", None) or 10
-    result = _location_discover_places(db_path, user_id, min_pings=min_pings)
+    result = _location_discover_places(db_path, min_pings=min_pings)
     print(json.dumps(result, indent=2))
 
 
@@ -730,14 +746,10 @@ def cmd_dismiss_cluster(args):
     """Mark a cluster zone as dismissed so it stops surfacing in discover."""
     from istota.location_logic import _location_dismiss_cluster
 
-    db_path = os.environ.get("ISTOTA_DB_PATH", "")
-    if not db_path:
-        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
-        sys.exit(1)
-    user_id = _get_user_id()
+    db_path = _get_location_db_path()
     radius = getattr(args, "radius", None) or 100
     result = _location_dismiss_cluster(
-        db_path, user_id,
+        db_path,
         {"lat": args.lat, "lon": args.lon, "radius_meters": radius},
     )
     print(json.dumps({"status": "ok", **result}, indent=2))
@@ -747,25 +759,17 @@ def cmd_list_dismissed(args):
     """List all dismissed cluster zones."""
     from istota.location_logic import _location_list_dismissed
 
-    db_path = os.environ.get("ISTOTA_DB_PATH", "")
-    if not db_path:
-        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
-        sys.exit(1)
-    user_id = _get_user_id()
-    result = _location_list_dismissed(db_path, user_id)
+    db_path = _get_location_db_path()
+    result = _location_list_dismissed(db_path)
     print(json.dumps(result, indent=2))
 
 
 def cmd_restore_dismissed(args):
-    """Un-dismiss a cluster zone by id (so it can be discovered again)."""
+    """Un-dismiss a cluster zone by id."""
     from istota.location_logic import _location_restore_dismissed
 
-    db_path = os.environ.get("ISTOTA_DB_PATH", "")
-    if not db_path:
-        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
-        sys.exit(1)
-    user_id = _get_user_id()
-    deleted = _location_restore_dismissed(db_path, user_id, args.cluster_id)
+    db_path = _get_location_db_path()
+    deleted = _location_restore_dismissed(db_path, args.cluster_id)
     if not deleted:
         print(json.dumps({"status": "error", "error": "dismissed cluster not found"}))
         return
@@ -773,31 +777,31 @@ def cmd_restore_dismissed(args):
 
 
 def cmd_place_stats(args):
-    """Visit statistics for a place, derived from ping data."""
+    """Visit statistics for a place."""
     from istota.location_logic import _location_place_stats
+    from istota.location import db as location_db
 
-    db_path = os.environ.get("ISTOTA_DB_PATH", "")
-    if not db_path:
-        print(json.dumps({"error": "ISTOTA_DB_PATH not set"}))
-        sys.exit(1)
-    user_id = _get_user_id()
+    db_path = _get_location_db_path()
 
     place_id = getattr(args, "id", None)
     if place_id is None:
-        from istota import db as _db
-        conn = _get_conn()
+        conn = _connect_location()
         try:
-            place = _db.get_place_by_name(conn, user_id, args.name)
+            place = location_db.get_place_by_name(conn, args.name)
         finally:
             conn.close()
         if not place:
-            print(json.dumps({"status": "error", "error": f"place '{args.name}' not found"}))
+            print(json.dumps({
+                "status": "error", "error": f"place '{args.name}' not found",
+            }))
             return
         place_id = place.id
 
-    result = _location_place_stats(db_path, user_id, place_id)
+    result = _location_place_stats(db_path, place_id)
     if result is None:
-        print(json.dumps({"status": "error", "error": "place not found or not owned by user"}))
+        print(json.dumps({
+            "status": "error", "error": "place not found",
+        }))
         return
     print(json.dumps(result, indent=2))
 

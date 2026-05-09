@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-09: Per-user `location.db` split (Stages 3 & 4)
+
+Wrapped up the location-db-per-user-split spec. Stages 1 & 2 had already shipped: a new `src/istota/location/` package with `resolve_for_user(user_id, config) -> LocationContext`, per-user `{workspace}/location/data/location.db`, every runtime caller (webhook receiver, scheduler reconcile/cleanup, web routes, skill CLI, location_logic helpers) switched to per-user connections. This session landed the migration deploy (Stage 3) and the framework cleanup (Stage 4).
+
+**Stage 3 — migration deploy.** Added an idempotent Ansible block in `deploy/ansible/tasks/main.yml`, structured as a near-literal copy of the istota.db rename block from commit 310950e. Sequence: detect framework `location_pings` table (entire block no-ops once it's gone) → orphan pre-check (users with rows in framework but `location` in `disabled_modules` or no longer in config — halts unless `-e include_orphans=true`) → duplicate `(user_id, name)` pre-check against the new per-user `UNIQUE(name)` constraint → stop services with `failed_when: false` → run `python -m istota.location._migrate` → `DROP TABLE` + `VACUUM` on framework tables → restart services explicitly.
+
+The orphan-list Jinja was the fiddly part — Ansible doesn't have a clean "filter dict by attribute predicate" idiom. Used a `{%- for k, v in istota_users.items() -%}` accumulator with `_enabled.append(k)` pattern, plus a `'__no_such_user__'` sentinel so the SQL `WHERE user_id NOT IN (...)` clause stays well-formed when the enabled list is empty.
+
+**Stage 4 — framework cleanup.** Deleted from `src/istota/db.py`: the entire 755-line "Location tracking functions" block (Place / Visit / LocationState / LocationPing dataclasses + every helper that touches `location_pings`/`places`/`visits`/`dismissed_clusters`/`location_state`), the trailing `cleanup_old_location_pings`, and the `ALTER TABLE location_state ADD COLUMN exit_started_at` migration. Dropped the five `CREATE TABLE` blocks from `schema.sql` and replaced them with a one-line pointer comment. Verified `init_db` on a fresh DB now produces 34 tables, none of them location-shaped, and `geocode_cache` / `reverse_geocode_cache` (the cross-user Nominatim caches that intentionally stay in framework `istota.db`) still present.
+
+Test fallout: three classes in `tests/test_location.py` had not been xfailed in the Stage 2 follow-up (`TestVisitDB`, `TestLocationCLI`, `TestReconcileVisits`) — they kept passing because the framework helpers they called still existed. With those gone, they fail with AttributeError. Followed the existing Stage 2 pattern: `@pytest.mark.xfail(reason=..., strict=False)` on each class with a Stage 4 explanatory note. Equivalents for the production paths exist in `tests/test_location_module.py`. Also dropped four obsolete unit-test classes that exercised the framework helpers directly (`TestLocationPingDB`, `TestPlaceDB`, `TestDismissedClusterDB`, `TestLocationStateDB`) and updated `TestResolvePlace` to use `istota.location.models.Place` (no `user_id`). Final state: `4397 passed, 7 skipped, 69 xfailed, 0 failures`.
+
+Doc updates: `AGENTS.md` "GPS Location" section now describes the per-user file, the dual-DB pattern for geocode caches, and the migrator entry point. `.claude/rules/scheduler.md` table list trimmed (five rows out, one cross-reference row in). `.claude/rules/executor.md` env table gained a `LOCATION_DB_PATH` row alongside `MONEY_USER` / `FEEDS_USER`.
+
+Spec moved from `Specs/Active/` to `Specs/Done/`.
+
+**Files added/modified:**
+- `deploy/ansible/tasks/main.yml` — Stage 3 migration block (orphan/duplicate pre-checks, services stop, migrator invoke, `DROP TABLE`, services restart).
+- `src/istota/db.py` — removed location helpers, dataclasses, and the obsolete `ALTER TABLE` migration.
+- `schema.sql` — removed the five location `CREATE TABLE` blocks and indexes; left a pointer comment.
+- `tests/test_location.py` — deleted four obsolete framework-only test classes; xfailed three more; rewrote `TestResolvePlace` to use `models.Place`.
+- `AGENTS.md`, `.claude/rules/scheduler.md`, `.claude/rules/executor.md` — doc updates.
+
 ## 2026-05-08: `/spec` skill, `!model` Talk prefix, brain-scoped model namespace
 
 Three loosely-related additions to the personal-assistant surface, landed in one session.

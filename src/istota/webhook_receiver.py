@@ -16,15 +16,19 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
-from . import db
+from . import location
 from .config import load_config
+from .location.models import LocationContext
 
 logger = logging.getLogger("istota.webhook_receiver")
 
-# Module-level state, populated on startup
+# Module-level state, populated on startup. The three dicts are rebound
+# atomically under ``_lock`` by ``reload_config`` so any reader holding
+# the lock sees a consistent snapshot.
 _config = None
-_token_map: dict[str, str] = {}      # token -> user_id
-_places_cache: dict[str, list] = {}   # user_id -> list[Place] (DB objects)
+_token_map: dict[str, str] = {}                        # token -> user_id
+_user_contexts: dict[str, LocationContext] = {}        # user_id -> ctx
+_places_cache: dict[str, list] = {}                     # user_id -> places
 _lock = threading.Lock()
 
 # Hysteresis threshold: consecutive pings at new place before opening a visit
@@ -42,44 +46,65 @@ def _parse_ts(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
 
 
-def _get_conn() -> sqlite3.Connection:
-    """Get a DB connection using loaded config."""
-    conn = sqlite3.connect(_config.db_path, timeout=30.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.row_factory = sqlite3.Row
-    return conn
+def _get_user_db_path(user_id: str):
+    """Resolve the per-user ``location.db`` path for an ingesting user.
+
+    Caller must hold (or acquire+release) ``_lock`` around the dict read
+    if it cares about a reload happening between the lookup and the open.
+    Once the path is in hand, the DB file itself is stable across reloads
+    — only the in-memory dict gets rebound.
+    """
+    return _user_contexts[user_id].db_path
 
 
 def reload_config() -> None:
-    """Reload config, token map, and places cache.
+    """Reload config, token map, user contexts, and places cache.
 
-    Tokens come from the encrypted ``secrets`` table per user; the location
-    module gate decides which users get scanned. Users without an ingest
-    token (or with the location module disabled) simply don't appear in the
-    token map and their requests fall through to the 403 path.
+    Tokens come from the encrypted ``secrets`` table per user; the
+    location module gate decides which users get scanned. Users without
+    an ingest token (or with the location module disabled, or with no
+    nextcloud mount configured) don't appear in any of the three dicts
+    and their requests fall through to the 403 path.
+
+    The three dicts are rebound under ``_lock`` as a single block so any
+    reader holding the lock sees a consistent snapshot.
     """
     from . import secrets_store  # noqa: PLC0415
 
-    global _config, _token_map, _places_cache
+    global _config, _token_map, _user_contexts, _places_cache
     _config = load_config()
-    with _lock:
-        token_map = {}
-        places_cache = {}
-        conn = _get_conn()
+
+    token_map: dict[str, str] = {}
+    user_contexts: dict[str, LocationContext] = {}
+    places_cache: dict[str, list] = {}
+
+    for user_id in location.list_users(_config):
         try:
-            for user_id in _config.users:
-                if not _config.is_module_enabled(user_id, "location"):
-                    continue
-                tok = secrets_store.get_secret(
-                    _config.db_path, user_id, "overland", "ingest_token",
-                )
-                if tok:
-                    token_map[tok] = user_id
-                    places_cache[user_id] = db.get_places(conn, user_id)
-        finally:
-            conn.close()
+            ctx = location.resolve_for_user(user_id, _config)
+        except location.UserNotFoundError as e:
+            logger.warning(
+                "skipping user '%s' for location ingest: %s", user_id, e,
+            )
+            continue
+        # Lazily ensure the per-user file exists so the first ping after
+        # provisioning lands in a real DB (Stage 2's lazy init pairs
+        # with Stage 3's data copy).
+        location.init_db(ctx.db_path)
+        tok = secrets_store.get_secret(
+            _config.db_path, user_id, "overland", "ingest_token",
+        )
+        if not tok:
+            continue
+        token_map[tok] = user_id
+        user_contexts[user_id] = ctx
+        with location.connect(ctx.db_path) as conn:
+            places_cache[user_id] = location.db.get_places(conn)
+
+    with _lock:
         _token_map = token_map
+        _user_contexts = user_contexts
         _places_cache = places_cache
+
     logger.info(
         "Loaded location config: %d user(s) with tokens", len(_token_map),
     )
@@ -115,8 +140,12 @@ async def receive_location(
 
     with _lock:
         user_id = _token_map.get(auth_token)
+        db_path = (
+            _user_contexts[user_id].db_path
+            if user_id and user_id in _user_contexts else None
+        )
 
-    if not user_id:
+    if not user_id or db_path is None:
         return JSONResponse({"error": "invalid token"}, status_code=403)
 
     try:
@@ -128,22 +157,19 @@ async def receive_location(
     if not locations:
         return JSONResponse({"result": "ok"})
 
-    conn = _get_conn()
     try:
-        # Refresh places from DB (picks up web UI changes without restart)
-        places = db.get_places(conn, user_id)
-        with _lock:
-            _places_cache[user_id] = places
+        with location.connect(db_path) as conn:
+            # Refresh places from DB (picks up web UI changes without restart)
+            places = location.db.get_places(conn)
+            with _lock:
+                _places_cache[user_id] = places
 
-        for feature in locations:
-            _process_feature(conn, user_id, feature, places)
-        conn.commit()
+            for feature in locations:
+                _process_feature(conn, feature, places)
+            conn.commit()
     except Exception:
         logger.exception("Error processing location batch for %s", user_id)
-        conn.rollback()
         return JSONResponse({"error": "processing error"}, status_code=500)
-    finally:
-        conn.close()
 
     return JSONResponse({"result": "ok"})
 
@@ -153,11 +179,14 @@ app.include_router(location_router)
 
 def _process_feature(
     conn: sqlite3.Connection,
-    user_id: str,
     feature: dict,
     places: list,
 ) -> None:
-    """Process a single GeoJSON Feature from Overland."""
+    """Process a single GeoJSON Feature from Overland.
+
+    ``conn`` is the per-user ``location.db`` connection, so no
+    ``user_id`` parameter is needed — the file is the user scope.
+    """
     geom = feature.get("geometry", {})
     coords = geom.get("coordinates", [])
     if len(coords) < 2:
@@ -203,8 +232,8 @@ def _process_feature(
         place = resolve_place(lat, lon, places)
         place_id = place.id if place else None
 
-    ping_id = db.insert_location_ping(
-        conn, user_id, timestamp, lat, lon,
+    ping_id = location.db.insert_ping(
+        conn, timestamp, lat, lon,
         altitude=props.get("altitude"),
         accuracy=accuracy,
         speed=speed,
@@ -220,12 +249,11 @@ def _process_feature(
         # place_id=NULL for history and stats.
         return
 
-    _update_state_machine(conn, user_id, ping_id, place_id, place, timestamp)
+    _update_state_machine(conn, ping_id, place_id, place, timestamp)
 
 
 def _update_state_machine(
     conn: sqlite3.Connection,
-    user_id: str,
     ping_id: int,
     new_place_id: int | None,
     new_place,
@@ -240,7 +268,7 @@ def _update_state_machine(
       ``visit_exit_minutes`` (filters GPS drift while stationary). A single
       ping back at the place resets the away clock.
     """
-    state = db.get_location_state(conn, user_id)
+    state = location.db.get_location_state(conn)
     exit_minutes = (
         _config.location.visit_exit_minutes
         if _config is not None else DEFAULT_VISIT_EXIT_MINUTES
@@ -249,19 +277,19 @@ def _update_state_machine(
     if state is None:
         visit_id = None
         if new_place_id is not None:
-            visit_id = db.insert_visit(
-                conn, user_id, new_place_id, new_place.name, timestamp,
+            visit_id = location.db.open_visit(
+                conn, new_place_id, new_place.name, timestamp,
             )
 
-        db.set_location_state(
-            conn, user_id,
+        location.db.set_location_state(
+            conn,
             current_place_id=new_place_id,
             current_visit_id=visit_id,
             consecutive_count=1,
             last_ping_place_id=new_place_id,
             exit_started_at=None,
         )
-        db.update_ping_place(conn, ping_id, new_place_id, visit_id)
+        location.db.update_ping_place(conn, ping_id, new_place_id, visit_id)
         return
 
     current_place_id = state.current_place_id
@@ -270,16 +298,18 @@ def _update_state_machine(
     if current_place_id is not None and new_place_id == current_place_id:
         # Back at (or still at) the current place — clear exit timer.
         if current_visit_id is not None:
-            db.increment_visit_ping_count(conn, current_visit_id)
-        db.set_location_state(
-            conn, user_id,
+            location.db.increment_visit_ping_count(conn, current_visit_id)
+        location.db.set_location_state(
+            conn,
             current_place_id=current_place_id,
             current_visit_id=current_visit_id,
             consecutive_count=0,
             last_ping_place_id=new_place_id,
             exit_started_at=None,
         )
-        db.update_ping_place(conn, ping_id, new_place_id, current_visit_id)
+        location.db.update_ping_place(
+            conn, ping_id, new_place_id, current_visit_id,
+        )
         return
 
     # This ping is away from (or different from) the current place.
@@ -318,28 +348,28 @@ def _update_state_machine(
         close_exit_ts = exit_started_at or timestamp
 
     if should_close:
-        db.close_visit(conn, current_visit_id, close_exit_ts)
+        location.db.close_visit(conn, current_visit_id, close_exit_ts)
         current_place_id = None
         current_visit_id = None
         exit_started_at = None
 
     if open_new:
-        new_visit_id = db.insert_visit(
-            conn, user_id, new_place_id, new_place.name, timestamp,
+        new_visit_id = location.db.open_visit(
+            conn, new_place_id, new_place.name, timestamp,
         )
-        db.set_location_state(
-            conn, user_id,
+        location.db.set_location_state(
+            conn,
             current_place_id=new_place_id,
             current_visit_id=new_visit_id,
             consecutive_count=0,
             last_ping_place_id=new_place_id,
             exit_started_at=None,
         )
-        db.update_ping_place(conn, ping_id, new_place_id, new_visit_id)
+        location.db.update_ping_place(conn, ping_id, new_place_id, new_visit_id)
         return
 
-    db.set_location_state(
-        conn, user_id,
+    location.db.set_location_state(
+        conn,
         current_place_id=current_place_id,
         current_visit_id=current_visit_id,
         consecutive_count=consecutive,
@@ -347,7 +377,7 @@ def _update_state_machine(
         exit_started_at=exit_started_at,
     )
     # Ping keeps its observed place_id; visit_id follows the open visit if any.
-    db.update_ping_place(conn, ping_id, new_place_id, current_visit_id)
+    location.db.update_ping_place(conn, ping_id, new_place_id, current_visit_id)
 
 
 # =============================================================================
