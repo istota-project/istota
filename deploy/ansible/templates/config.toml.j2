@@ -16,8 +16,9 @@ effort = "{{ istota_effort }}"
 custom_system_prompt = true
 {% endif %}
 
-# Database path
-db_path = "{{ istota_home }}/data/{{ istota_namespace }}.db"
+# Database path. Filename is fixed (technical IDs are always istota); only
+# the parent dir is per-deploy via {{ istota_home }}.
+db_path = "{{ istota_home }}/data/istota.db"
 
 # File access configuration
 {% if istota_use_nextcloud_mount %}

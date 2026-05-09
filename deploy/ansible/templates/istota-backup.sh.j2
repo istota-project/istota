@@ -2,7 +2,7 @@
 # {{ istota_namespace | capitalize }} backup script - managed by Ansible
 set -euo pipefail
 
-DB="{{ istota_home }}/data/{{ istota_namespace }}.db"
+DB="{{ istota_home }}/data/istota.db"
 LOCAL_DIR="{{ istota_backup_local_dir }}"
 REMOTE_DIR="{{ istota_backup_remote_dir }}"
 MOUNT_PATH="{{ istota_nextcloud_mount_path }}"

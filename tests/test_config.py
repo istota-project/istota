@@ -1142,11 +1142,11 @@ class TestAnsibleValidateConfigScript:
     def test_passes_on_well_formed_config(self, tmp_path):
         cfg = (
             'bot_name = "Test"\n'
-            'db_path = "/srv/zorg/data/zorg.db"\n'
-            'temp_dir = "/srv/zorg/tmp"\n'
+            'db_path = "/srv/app/zorg/data/istota.db"\n'
+            'temp_dir = "/srv/app/zorg/tmp"\n'
             "\n[brain]\nkind = \"claude_code\"\n"
         )
-        proc = self._run(tmp_path, cfg, "/srv/zorg/data/zorg.db", "/srv/zorg/tmp")
+        proc = self._run(tmp_path, cfg, "/srv/app/zorg/data/istota.db", "/srv/app/zorg/tmp")
         assert proc.returncode == 0, proc.stderr
         assert "ok" in proc.stdout
 
@@ -1155,10 +1155,10 @@ class TestAnsibleValidateConfigScript:
             'bot_name = "Test"\n'
             "\n[brain]\n"
             'kind = "claude_code"\n'
-            'db_path = "/srv/zorg/data/zorg.db"\n'
-            'temp_dir = "/srv/zorg/tmp"\n'
+            'db_path = "/srv/app/zorg/data/istota.db"\n'
+            'temp_dir = "/srv/app/zorg/tmp"\n'
         )
-        proc = self._run(tmp_path, cfg, "/srv/zorg/data/zorg.db", "/srv/zorg/tmp")
+        proc = self._run(tmp_path, cfg, "/srv/app/zorg/data/istota.db", "/srv/app/zorg/tmp")
         assert proc.returncode == 1
         assert "leaked under [brain]" in proc.stderr
         assert "db_path" in proc.stderr and "temp_dir" in proc.stderr
@@ -1167,10 +1167,10 @@ class TestAnsibleValidateConfigScript:
         cfg = (
             'bot_name = "Test"\n'
             'db_path = "/wrong/path.db"\n'
-            'temp_dir = "/srv/zorg/tmp"\n'
+            'temp_dir = "/srv/app/zorg/tmp"\n'
             "\n[brain]\nkind = \"claude_code\"\n"
         )
-        proc = self._run(tmp_path, cfg, "/srv/zorg/data/zorg.db", "/srv/zorg/tmp")
+        proc = self._run(tmp_path, cfg, "/srv/app/zorg/data/istota.db", "/srv/app/zorg/tmp")
         assert proc.returncode == 1
         assert "db_path" in proc.stderr and "/wrong/path.db" in proc.stderr
 
@@ -1182,12 +1182,12 @@ class TestAnsibleValidateConfigScript:
     def test_brain_kind_alone_does_not_trip_leak_check(self, tmp_path):
         cfg = (
             'bot_name = "Test"\n'
-            'db_path = "/srv/zorg/data/zorg.db"\n'
-            'temp_dir = "/srv/zorg/tmp"\n'
+            'db_path = "/srv/app/zorg/data/istota.db"\n'
+            'temp_dir = "/srv/app/zorg/tmp"\n'
             "\n[brain]\n"
             'kind = "claude_code"\n'
         )
-        proc = self._run(tmp_path, cfg, "/srv/zorg/data/zorg.db", "/srv/zorg/tmp")
+        proc = self._run(tmp_path, cfg, "/srv/app/zorg/data/istota.db", "/srv/app/zorg/tmp")
         assert proc.returncode == 0, proc.stderr
 
 
