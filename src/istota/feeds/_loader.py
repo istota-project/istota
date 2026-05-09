@@ -16,6 +16,7 @@ loader still consults the secrets table as the only source of
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 
 from istota.feeds.models import FeedsContext
@@ -60,16 +61,24 @@ def _read_credential(
         return ""
 
 
-def resolve_for_user(user_id: str, istota_config) -> FeedsContext:
+def resolve_for_user(
+    user_id: str,
+    istota_config,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> FeedsContext:
     """Build a feeds context for ``user_id``.
 
     Gated on ``Config.is_module_enabled(user_id, "feeds")``. The workspace
     root is always ``{nextcloud_mount}/{get_user_bot_path(...)}``.
+
+    Pass ``conn`` to reuse an existing framework-DB connection for the
+    module-enabled check (hot scheduler loops).
     """
     if istota_config is None:
         raise UserNotFoundError("istota config not loaded")
 
-    if not istota_config.is_module_enabled(user_id, "feeds"):
+    if not istota_config.is_module_enabled(user_id, "feeds", conn=conn):
         raise UserNotFoundError(f"feeds module disabled for '{user_id}'")
 
     uc = istota_config.get_user(user_id)
@@ -99,11 +108,18 @@ def resolve_for_user(user_id: str, istota_config) -> FeedsContext:
     )
 
 
-def list_users(istota_config) -> list[str]:
-    """Istota usernames with the feeds module enabled."""
+def list_users(
+    istota_config,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> list[str]:
+    """Istota usernames with the feeds module enabled.
+
+    Pass ``conn`` to reuse an existing framework-DB connection.
+    """
     if istota_config is None:
         return []
     return [
         uid for uid in (istota_config.users or {})
-        if istota_config.is_module_enabled(uid, "feeds")
+        if istota_config.is_module_enabled(uid, "feeds", conn=conn)
     ]

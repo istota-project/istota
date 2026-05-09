@@ -64,10 +64,16 @@ _PROFILE_COLUMNS = (
 
 @contextmanager
 def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """Open a connection with WAL + 30s timeout, matching db.get_db semantics."""
+    """Open a connection with 30s timeout, matching db.get_db semantics.
+
+    WAL is persistent in the SQLite file header; re-issuing
+    ``PRAGMA journal_mode=WAL`` per connection costs a write-lock
+    acquisition and races with sibling readers. The framework
+    ``istota.db`` is initialised in WAL mode at ``init_db`` time, so
+    this helper just opens a conn.
+    """
     conn = sqlite3.connect(db_path, timeout=30.0)
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
         yield conn
         conn.commit()
@@ -112,10 +118,26 @@ def _parse_json_list(value: str | None) -> list[str]:
     return [str(x) for x in parsed]
 
 
-def get_profile(db_path: Path, user_id: str) -> UserProfile | None:
-    """Return the stored profile for ``user_id`` or None if no row exists."""
-    with _connect(db_path) as conn:
+def get_profile(
+    db_path: Path,
+    user_id: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> UserProfile | None:
+    """Return the stored profile for ``user_id`` or None if no row exists.
+
+    Pass ``conn`` to reuse an existing framework-DB connection (hot loops
+    in the scheduler already hold one). Without it, opens a short-lived
+    conn — keeps the API ergonomic for one-off callers.
+    """
+    if conn is not None:
         row = conn.execute(
+            "SELECT * FROM user_profiles WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return _row_to_profile(row) if row else None
+    with _connect(db_path) as cm_conn:
+        row = cm_conn.execute(
             "SELECT * FROM user_profiles WHERE user_id = ?",
             (user_id,),
         ).fetchone()

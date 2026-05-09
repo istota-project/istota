@@ -11,6 +11,10 @@ ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.web_app:app -
 Restart=always
 RestartSec=5
 
+# FD ceiling — see scheduler unit. Web reads framework istota.db plus
+# per-user feeds.db / location.db on every request.
+LimitNOFILE=65536
+
 # Environment
 Environment=PATH={{ istota_home }}/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME={{ istota_home }}

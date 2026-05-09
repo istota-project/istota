@@ -3656,6 +3656,35 @@ class TestReconcileVisits:
             assert visits[0].entered_at == "2026-04-21T08:00:00Z"
             assert visits[1].entered_at == "2026-04-21T10:00:00Z"
 
+    def test_reconcile_with_pings_linked_to_old_visit(self, tmp_path):
+        """Pings with visit_id pointing at the about-to-be-deleted visit must
+        not trigger FOREIGN KEY constraint failed. Regression for the per-user
+        location.db split: `connect()` enables `PRAGMA foreign_keys = ON`,
+        which the framework istota.db never did.
+        """
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 35.629, 139.741)
+            old_visit_id = location_db.open_visit(conn, pid, "home", "2026-04-21T10:00:00Z")
+            location_db.close_visit(conn, old_visit_id, "2026-04-21T10:28:00Z")
+            # Pings with visit_id set — the realistic state after live ingest
+            for m in range(0, 30, 2):
+                location_db.insert_ping(
+                    conn, f"2026-04-21T10:{m:02d}:00Z", 0.0, 0.0,
+                    accuracy=10.0, place_id=pid, visit_id=old_visit_id,
+                )
+            conn.commit()
+
+            n = location_db.reconcile_visits(
+                conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+                grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
+            )
+            conn.commit()
+
+            assert n == 1
+            visits = location_db.get_visits(conn)
+            assert len(visits) == 1
+
     def test_cleans_up_phantoms_from_prior_buggy_runs(self, tmp_path):
         """Pre-existing duplicate visits (from the bug) must be replaced by one."""
         db_path = _init_loc_db(tmp_path)

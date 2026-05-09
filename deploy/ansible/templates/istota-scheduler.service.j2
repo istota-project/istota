@@ -15,6 +15,14 @@ ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.scheduler -
 Restart=always
 RestartSec=5
 
+# FD ceiling. The scheduler holds many concurrent SQLite connections
+# (framework istota.db + per-user feeds.db + per-user location.db, each
+# WAL-mode → main + -wal + -shm), spawns claude CLI subprocesses with
+# stream-json pipes, and runs Talk/email/heartbeat pollers. The systemd
+# default of 1024 has produced "unable to open database file" + httpx
+# "All connection attempts failed" bursts (EMFILE).
+LimitNOFILE=65536
+
 # Environment
 Environment=PATH={{ istota_home }}/.venv/bin:{{ istota_home }}/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME={{ istota_home }}

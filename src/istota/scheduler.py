@@ -2428,21 +2428,27 @@ async def run_cleanup_checks(config: Config) -> None:
         from . import location as _location  # noqa: PLC0415
 
         total_pings = 0
-        for uid in _location.list_users(config):
-            try:
-                ctx = _location.resolve_for_user(uid, config)
-                with _location.connect(ctx.db_path) as conn:
-                    deleted = _location.db.cleanup_old_pings(
-                        conn, sched.location_ping_retention_days,
+        # Reuse one framework-DB conn for the per-user is_module_enabled
+        # checks to avoid opening N+ short-lived sqlite connections per
+        # cleanup tick (one of the FD-churn paths that produced EMFILE).
+        with db.get_db(config.db_path) as fw_conn:
+            enabled_users = _location.list_users(config, conn=fw_conn)
+            for uid in enabled_users:
+                try:
+                    ctx = _location.resolve_for_user(uid, config, conn=fw_conn)
+                except _location.UserNotFoundError:
+                    continue
+                try:
+                    with _location.connect(ctx.db_path) as conn:
+                        deleted = _location.db.cleanup_old_pings(
+                            conn, sched.location_ping_retention_days,
+                        )
+                        conn.commit()
+                    total_pings += deleted
+                except Exception:
+                    logger.exception(
+                        "Failed to clean up location pings for user=%s", uid,
                     )
-                    conn.commit()
-                total_pings += deleted
-            except _location.UserNotFoundError:
-                continue
-            except Exception:
-                logger.exception(
-                    "Failed to clean up location pings for user=%s", uid,
-                )
         if total_pings > 0:
             logger.info(f"Cleaned up {total_pings} old location ping(s)")
 
@@ -2485,29 +2491,34 @@ def _reconcile_visits_for_all_users(config: Config) -> None:
     since_s = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     until_s = until.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    for uid in _location.list_users(config):
-        try:
-            ctx = _location.resolve_for_user(uid, config)
-            with _location.connect(ctx.db_path) as conn:
-                n = _location.db.reconcile_visits(
-                    conn, since_s, until_s,
-                    grace_minutes=loc.reconcile_grace_minutes,
-                    min_pings=loc.reconcile_min_pings,
-                    min_dwell_sec=loc.reconcile_min_dwell_sec,
-                    accuracy_threshold_m=loc.accuracy_threshold_m,
+    # One framework-DB conn for the module-enabled lookups across users —
+    # avoids the FD churn that triggered EMFILE on prod.
+    with db.get_db(config.db_path) as fw_conn:
+        enabled_users = _location.list_users(config, conn=fw_conn)
+        for uid in enabled_users:
+            try:
+                ctx = _location.resolve_for_user(uid, config, conn=fw_conn)
+            except _location.UserNotFoundError:
+                continue
+            try:
+                with _location.connect(ctx.db_path) as conn:
+                    n = _location.db.reconcile_visits(
+                        conn, since_s, until_s,
+                        grace_minutes=loc.reconcile_grace_minutes,
+                        min_pings=loc.reconcile_min_pings,
+                        min_dwell_sec=loc.reconcile_min_dwell_sec,
+                        accuracy_threshold_m=loc.accuracy_threshold_m,
+                    )
+                    conn.commit()
+                if n:
+                    logger.info(
+                        "Reconciled %d visit(s) for user=%s window=[%s,%s)",
+                        n, uid, since_s, until_s,
+                    )
+            except Exception:
+                logger.exception(
+                    "Visit reconciliation failed for user=%s", uid,
                 )
-                conn.commit()
-            if n:
-                logger.info(
-                    "Reconciled %d visit(s) for user=%s window=[%s,%s)",
-                    n, uid, since_s, until_s,
-                )
-        except _location.UserNotFoundError:
-            continue
-        except Exception:
-            logger.exception(
-                "Visit reconciliation failed for user=%s", uid,
-            )
 
 
 def cleanup_old_claude_logs(retention_days: int) -> int:
@@ -2628,7 +2639,7 @@ def _sync_module_jobs(
         if uc is None:
             continue
 
-        if not app_config.is_module_enabled(user_id, module_name):
+        if not app_config.is_module_enabled(user_id, module_name, conn=conn):
             # Drop any stale module rows
             conn.execute(
                 "DELETE FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
@@ -2637,7 +2648,7 @@ def _sync_module_jobs(
             continue
 
         try:
-            module_ctx = resolve_for_user(user_id, app_config)
+            module_ctx = resolve_for_user(user_id, app_config, conn=conn)
         except user_not_found_exc as e:
             logger.warning(
                 "Could not resolve %s config for %s: %s", module_name, user_id, e,
