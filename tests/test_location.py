@@ -48,53 +48,6 @@ def _init_loc_db(tmp_path, name: str = "location.db"):
     return db_path
 
 
-# Shim helpers — let tests written against the old per-row-user_id schema
-# carry over to the per-user location.db without rewriting their seed code
-# line by line. Each shim drops the legacy ``user_id`` argument and calls
-# the per-user helper.
-
-def _loc_insert_ping(conn, _user_id, ts, lat, lon, **kw):
-    return location_db.insert_ping(conn, ts, lat, lon, **kw)
-
-
-def _loc_insert_place(conn, _user_id, name, lat, lon, *args, **kw):
-    radius = kw.pop("radius_meters", None)
-    category = kw.pop("category", None)
-    notes = kw.pop("notes", None)
-    if args:
-        radius = radius if radius is not None else args[0]
-    if len(args) > 1:
-        category = category if category is not None else args[1]
-    if len(args) > 2:
-        notes = notes if notes is not None else args[2]
-    return location_db.add_place(
-        conn, name, lat, lon,
-        radius_meters=radius if radius is not None else 25,
-        category=category, notes=notes,
-    )
-
-
-def _loc_insert_dismissed(conn, _user_id, lat, lon, radius_meters):
-    return location_db.dismiss_cluster(conn, lat, lon, radius_meters)
-
-
-def _loc_insert_visit(conn, _user_id, place_id, place_name, entered_at):
-    return location_db.open_visit(conn, place_id, place_name, entered_at)
-
-
-def _loc_set_state(conn, _user_id, current_place_id, current_visit_id,
-                   consecutive_count, last_ping_place_id=None,
-                   exit_started_at=None):
-    location_db.set_location_state(
-        conn,
-        current_place_id=current_place_id,
-        current_visit_id=current_visit_id,
-        consecutive_count=consecutive_count,
-        last_ping_place_id=last_ping_place_id,
-        exit_started_at=exit_started_at,
-    )
-
-
 # ===========================================================================
 # DB function tests
 # ===========================================================================
@@ -227,47 +180,38 @@ class TestDiscoverPlacesFiltersDismissed:
         assert len(result["clusters"]) == 1
 
 
-@pytest.mark.xfail(
-    reason="Stage 4 (location-db-per-user-split): framework db.insert_visit / "
-           "db.close_visit / db.get_open_visit / db.get_visits / "
-           "db.increment_visit_ping_count are gone. Per-user equivalents in "
-           "istota.location.db are exercised end-to-end via webhook_receiver "
-           "tests and the state machine tests; rewrite tracked as Stage 2 "
-           "follow-up.",
-    strict=False,
-)
 class TestVisitDB:
     def test_insert_and_close(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 34.0, -118.0)
-            vid = db.insert_visit(conn, "alice", pid, "home", "2026-02-20T08:00:00")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 34.0, -118.0)
+            vid = location_db.open_visit(conn, pid, "home", "2026-02-20T08:00:00")
             conn.commit()
 
-            visit = db.get_open_visit(conn, "alice")
+            visit = location_db.get_open_visit(conn)
             assert visit is not None
             assert visit.place_name == "home"
             assert visit.exited_at is None
 
-            db.close_visit(conn, vid, "2026-02-20T10:00:00")
+            location_db.close_visit(conn, vid, "2026-02-20T10:00:00")
             conn.commit()
 
-            assert db.get_open_visit(conn, "alice") is None
+            assert location_db.get_open_visit(conn) is None
 
-            visits = db.get_visits(conn, "alice")
+            visits = location_db.get_visits(conn)
             assert len(visits) == 1
             assert visits[0].exited_at == "2026-02-20T10:00:00"
             assert visits[0].duration_sec > 0
 
     def test_increment_ping_count(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            vid = db.insert_visit(conn, "alice", None, "unknown", "2026-02-20T08:00:00")
-            db.increment_visit_ping_count(conn, vid)
-            db.increment_visit_ping_count(conn, vid)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            vid = location_db.open_visit(conn, None, "unknown", "2026-02-20T08:00:00")
+            location_db.increment_visit_ping_count(conn, vid)
+            location_db.increment_visit_ping_count(conn, vid)
             conn.commit()
 
-            visit = db.get_open_visit(conn, "alice")
+            visit = location_db.get_open_visit(conn)
             assert visit.ping_count == 3  # 1 initial + 2 increments
 
 
@@ -780,17 +724,9 @@ class TestOverlandPayloadParsing:
 # ===========================================================================
 
 
-@pytest.mark.xfail(
-    reason="Stage 4 (location-db-per-user-split): seed code uses framework "
-           "db.insert_place / db.get_db with user_id, but the framework helpers "
-           "are gone. CLI commands themselves work against per-user "
-           "location.db; rewrite via the _loc_* shims tracked as Stage 2 "
-           "follow-up.",
-    strict=False,
-)
 class TestLocationCLI:
     def test_current_no_data(self, tmp_path):
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
         with patch.dict("os.environ", env):
             from istota.skills.location import cmd_current
@@ -812,9 +748,9 @@ class TestLocationCLI:
             assert output["current_visit"] is None
 
     def test_places_lists_db(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            db.insert_place(conn, "alice", "home", 34.0, -118.0, 150, "home")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.add_place(conn, "home", 34.0, -118.0, radius_meters=150, category="home")
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -838,9 +774,9 @@ class TestLocationCLI:
             assert output[0]["radius_meters"] == 150
 
     def test_places_includes_id(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 34.0, -118.0, 150, "home")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 34.0, -118.0, radius_meters=150, category="home")
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -860,9 +796,9 @@ class TestLocationCLI:
             assert output[0]["id"] == pid
 
     def test_update_by_name(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "restaurant")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="restaurant")
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -892,14 +828,14 @@ class TestLocationCLI:
             assert output["place"]["name"] == "cafe"
 
         # Verify DB
-        with db.get_db(db_path) as conn:
-            place = db.get_place_by_name(conn, "alice", "cafe")
+        with location_db.connect(db_path) as conn:
+            place = location_db.get_place_by_name(conn, "cafe")
             assert place.category == "food"
 
     def test_update_by_id(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "restaurant")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="restaurant")
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -928,9 +864,9 @@ class TestLocationCLI:
             assert output["place"]["category"] == "food"
 
     def test_update_rename(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            db.insert_place(conn, "alice", "old name", 34.0, -118.0, 100, "other")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.add_place(conn, "old name", 34.0, -118.0, radius_meters=100, category="other")
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -957,12 +893,12 @@ class TestLocationCLI:
             output = json.loads(captured.getvalue())
             assert output["place"]["name"] == "new name"
 
-        with db.get_db(db_path) as conn:
-            assert db.get_place_by_name(conn, "alice", "new name") is not None
-            assert db.get_place_by_name(conn, "alice", "old name") is None
+        with location_db.connect(db_path) as conn:
+            assert location_db.get_place_by_name(conn, "new name") is not None
+            assert location_db.get_place_by_name(conn, "old name") is None
 
     def test_update_not_found(self, tmp_path):
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
         with patch.dict("os.environ", env):
@@ -990,9 +926,9 @@ class TestLocationCLI:
             assert "error" in output
 
     def test_update_no_changes(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="food")
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -1021,9 +957,9 @@ class TestLocationCLI:
             assert "error" in output
 
     def test_delete_by_name(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="food")
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -1045,13 +981,13 @@ class TestLocationCLI:
             assert output["status"] == "ok"
             assert output["deleted"] == "cafe"
 
-        with db.get_db(db_path) as conn:
-            assert db.get_place_by_name(conn, "alice", "cafe") is None
+        with location_db.connect(db_path) as conn:
+            assert location_db.get_place_by_name(conn, "cafe") is None
 
     def test_delete_by_id(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="food")
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -1072,11 +1008,11 @@ class TestLocationCLI:
             output = json.loads(captured.getvalue())
             assert output["status"] == "ok"
 
-        with db.get_db(db_path) as conn:
-            assert db.get_places(conn, "alice") == []
+        with location_db.connect(db_path) as conn:
+            assert location_db.get_places(conn) == []
 
     def test_delete_not_found(self, tmp_path):
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
         with patch.dict("os.environ", env):
@@ -1098,10 +1034,9 @@ class TestLocationCLI:
             assert "error" in output
 
     def test_history_lists_pings(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            db.insert_location_ping(
-                conn, "alice", "2026-02-20T10:00:00Z", 34.0, -118.0,
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.insert_ping(conn, "2026-02-20T10:00:00Z", 34.0, -118.0,
                 accuracy=5.0, activity_type="walking",
             )
             conn.commit()
@@ -1129,27 +1064,23 @@ class TestLocationCLI:
 
     def test_history_date_uses_timezone_aware_boundaries(self, tmp_path):
         """history --date should convert local day boundaries to UTC."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
             # 2026-03-16 in Pacific = 2026-03-16T07:00:00Z to 2026-03-17T07:00:00Z (PDT)
             # Ping at 2026-03-16T02:00:00Z = Mar 15 7pm Pacific — outside Mar 16 local
-            db.insert_location_ping(
-                conn, "alice", "2026-03-16T02:00:00Z", 34.0, -118.0,
+            location_db.insert_ping(conn, "2026-03-16T02:00:00Z", 34.0, -118.0,
                 accuracy=5.0, activity_type="stationary",
             )
             # Ping at 2026-03-16T20:00:00Z = Mar 16 1pm Pacific — inside Mar 16 local
-            db.insert_location_ping(
-                conn, "alice", "2026-03-16T20:00:00Z", 34.1, -118.1,
+            location_db.insert_ping(conn, "2026-03-16T20:00:00Z", 34.1, -118.1,
                 accuracy=5.0, activity_type="walking",
             )
             # Ping at 2026-03-17T03:00:00Z = Mar 16 8pm Pacific — inside Mar 16 local
-            db.insert_location_ping(
-                conn, "alice", "2026-03-17T03:00:00Z", 34.2, -118.2,
+            location_db.insert_ping(conn, "2026-03-17T03:00:00Z", 34.2, -118.2,
                 accuracy=5.0, activity_type="walking",
             )
             # Ping at 2026-03-17T10:00:00Z = Mar 17 3am Pacific — outside Mar 16 local
-            db.insert_location_ping(
-                conn, "alice", "2026-03-17T10:00:00Z", 34.3, -118.3,
+            location_db.insert_ping(conn, "2026-03-17T10:00:00Z", 34.3, -118.3,
                 accuracy=5.0, activity_type="stationary",
             )
             conn.commit()
@@ -1178,13 +1109,12 @@ class TestLocationCLI:
 
     def test_history_date_returns_all_pings_by_default(self, tmp_path):
         """history --date with no --limit should return all pings, not just 20."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
             # Insert 30 pings spread across Mar 16 Pacific
             for i in range(30):
                 ts = f"2026-03-16T{15 + (i // 6):02d}:{(i % 6) * 10:02d}:00Z"
-                db.insert_location_ping(
-                    conn, "alice", ts, 34.0 + i * 0.001, -118.0,
+                location_db.insert_ping(conn, ts, 34.0 + i * 0.001, -118.0,
                     accuracy=5.0, activity_type="stationary",
                 )
             conn.commit()
@@ -1210,12 +1140,11 @@ class TestLocationCLI:
 
     def test_history_date_respects_explicit_limit(self, tmp_path):
         """history --date --limit N should cap results."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
             for i in range(10):
                 ts = f"2026-03-16T{15 + i}:00:00Z"
-                db.insert_location_ping(
-                    conn, "alice", ts, 34.0, -118.0,
+                location_db.insert_ping(conn, ts, 34.0, -118.0,
                     accuracy=5.0, activity_type="stationary",
                 )
             conn.commit()
@@ -1240,21 +1169,13 @@ class TestLocationCLI:
             assert len(output) == 5
 
 
-@pytest.mark.xfail(
-    reason="Stage 2 (location-db-per-user-split): seed code uses framework "
-           "db.* helpers + WHERE user_id, but cmd_* now reads LOCATION_DB_PATH "
-           "and inserts without user_id. Class needs rewriting against "
-           "location_db schema; tracked as Stage 2 follow-up.",
-    strict=False,
-)
 class TestLocationDiscoverDismissCLI:
     """CLI wrappers for discover, dismiss-cluster, list-dismissed, restore-dismissed, place-stats."""
 
-    def _seed_cluster(self, conn, user_id, lat, lon, count=15):
+    def _seed_cluster(self, conn, lat, lon, count=15):
         for i in range(count):
             ts = f"2026-01-10T09:{i:02d}:00Z"
-            db.insert_location_ping(
-                conn, user_id, ts, lat + (i % 3) * 0.00002, lon,
+            location_db.insert_ping(conn, ts, lat + (i % 3) * 0.00002, lon,
                 accuracy=5.0, activity_type="stationary",
             )
 
@@ -1269,9 +1190,9 @@ class TestLocationDiscoverDismissCLI:
         return json.loads(captured.getvalue())
 
     def test_discover_finds_unassigned_cluster(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            self._seed_cluster(conn, "alice", 34.0, -118.0)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            self._seed_cluster(conn, 34.0, -118.0)
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -1287,9 +1208,9 @@ class TestLocationDiscoverDismissCLI:
         assert "radius_meters" in output["clusters"][0]
 
     def test_discover_respects_min_pings(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            self._seed_cluster(conn, "alice", 34.0, -118.0, count=8)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            self._seed_cluster(conn, 34.0, -118.0, count=8)
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -1303,7 +1224,7 @@ class TestLocationDiscoverDismissCLI:
         assert output["clusters"] == []
 
     def test_dismiss_cluster_inserts_row(self, tmp_path):
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
         with patch.dict("os.environ", env):
@@ -1321,15 +1242,15 @@ class TestLocationDiscoverDismissCLI:
         assert output["radius_meters"] == 200
         assert isinstance(output["id"], int)
 
-        with db.get_db(db_path) as conn:
-            rows = db.list_dismissed_clusters(conn, "alice")
+        with location_db.connect(db_path) as conn:
+            rows = location_db.list_dismissed_clusters(conn)
             assert len(rows) == 1
 
     def test_list_dismissed_returns_inserted_rows(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            db.insert_dismissed_cluster(conn, "alice", 34.0, -118.0, 100)
-            db.insert_dismissed_cluster(conn, "alice", 40.0, -73.0, 150)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.dismiss_cluster(conn, 34.0, -118.0, 100)
+            location_db.dismiss_cluster(conn, 40.0, -73.0, 150)
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -1344,9 +1265,9 @@ class TestLocationDiscoverDismissCLI:
         assert radii == [100, 150]
 
     def test_restore_dismissed_deletes_row(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            cid = db.insert_dismissed_cluster(conn, "alice", 34.0, -118.0, 100)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            cid = location_db.dismiss_cluster(conn, 34.0, -118.0, 100)
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -1358,11 +1279,11 @@ class TestLocationDiscoverDismissCLI:
             output = self._run(cmd_restore_dismissed, args)
 
         assert output["status"] == "ok"
-        with db.get_db(db_path) as conn:
-            assert db.list_dismissed_clusters(conn, "alice") == []
+        with location_db.connect(db_path) as conn:
+            assert location_db.list_dismissed_clusters(conn) == []
 
     def test_restore_dismissed_unknown_id(self, tmp_path):
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
         with patch.dict("os.environ", env):
@@ -1375,17 +1296,16 @@ class TestLocationDiscoverDismissCLI:
         assert output["status"] == "error"
 
     def test_place_stats_by_id(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "cafe", 34.0, -118.0, 100, "food")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "cafe", 34.0, -118.0, radius_meters=100, category="food")
             for i, ts in enumerate([
                 "2026-01-10T09:00:00Z",
                 "2026-01-10T09:05:00Z",
                 "2026-01-10T09:30:00Z",
                 "2026-01-10T10:00:00Z",
             ]):
-                db.insert_location_ping(
-                    conn, "alice", ts, 34.0, -118.0,
+                location_db.insert_ping(conn, ts, 34.0, -118.0,
                     accuracy=5.0, activity_type="stationary",
                 )
                 last_id = conn.execute("SELECT max(id) FROM location_pings").fetchone()[0]
@@ -1406,9 +1326,9 @@ class TestLocationDiscoverDismissCLI:
         assert output["total_duration_min"] == 60
 
     def test_place_stats_by_name(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 34.0, -118.0, 150, "home")
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 34.0, -118.0, radius_meters=150, category="home")
             conn.commit()
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
@@ -1424,7 +1344,7 @@ class TestLocationDiscoverDismissCLI:
         assert output["total_visits"] == 0
 
     def test_place_stats_unknown_name(self, tmp_path):
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
 
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
         with patch.dict("os.environ", env):
@@ -1438,12 +1358,17 @@ class TestLocationDiscoverDismissCLI:
         assert output["status"] == "error"
 
     def test_place_stats_other_user_cannot_read(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 34.0, -118.0, 150, "home")
+        # Per-user isolation is now per-file: alice's place lives in alice's
+        # location.db; bob's process points at bob's empty location.db and
+        # the place_id miss returns an error.
+        alice_db = _init_loc_db(tmp_path / "alice", "location.db")
+        with location_db.connect(alice_db) as conn:
+            pid = location_db.add_place(conn, "home", 34.0, -118.0, radius_meters=150, category="home")
             conn.commit()
 
-        env = {"ISTOTA_DB_PATH": str(db_path), "ISTOTA_USER_ID": "bob"}
+        bob_db = _init_loc_db(tmp_path / "bob", "location.db")
+
+        env = {"LOCATION_DB_PATH": str(bob_db), "ISTOTA_DB_PATH": str(bob_db)}
         with patch.dict("os.environ", env):
             from istota.skills.location import cmd_place_stats
 
@@ -1642,34 +1567,34 @@ def _make_calendar_event(
     )
 
 
-@pytest.mark.xfail(
-    reason="Stage 2 (location-db-per-user-split): cmd_attendance now uses "
-           "two connections (per-user location.db + framework istota.db for "
-           "geocode cache). Test seed uses framework db.* helpers; rewrite "
-           "tracked as Stage 2 follow-up.",
-    strict=False,
-)
 class TestCmdAttendance:
     def _run_attendance(self, tmp_path, events, pings=None, places=None, args_overrides=None):
-        """Helper to run cmd_attendance with mocked CalDAV and DB."""
+        """Helper to run cmd_attendance with mocked CalDAV and DB.
+
+        Uses two DBs to mirror production: per-user location.db for
+        pings/places, framework istota.db for the global geocode cache.
+        """
         from istota.skills.location import cmd_attendance
 
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            # Insert places
+        loc_db = _init_loc_db(tmp_path, "location.db")
+        framework_db = _init_db(tmp_path)  # for geocode_cache
+        with location_db.connect(loc_db) as conn:
             for p in (places or []):
-                db.insert_place(conn, "alice", p["name"], p["lat"], p["lon"],
-                                p.get("radius_meters", 100), p.get("category", "other"))
-            # Insert pings
+                location_db.add_place(
+                    conn, p["name"], p["lat"], p["lon"],
+                    radius_meters=p.get("radius_meters", 100),
+                    category=p.get("category", "other"),
+                )
             for ping in (pings or []):
-                db.insert_location_ping(
-                    conn, "alice", ping["timestamp"], ping["lat"], ping["lon"],
+                location_db.insert_ping(
+                    conn, ping["timestamp"], ping["lat"], ping["lon"],
                     accuracy=ping.get("accuracy", 5.0),
                 )
             conn.commit()
 
         env = {
-            "ISTOTA_DB_PATH": str(db_path),
+            "LOCATION_DB_PATH": str(loc_db),
+            "ISTOTA_DB_PATH": str(framework_db),
             "ISTOTA_USER_ID": "alice",
             "CALDAV_URL": "https://cloud.example.com/remote.php/dav",
             "CALDAV_USERNAME": "alice",
@@ -2763,13 +2688,6 @@ class TestCmdReverseGeocode:
 # ===========================================================================
 
 
-@pytest.mark.xfail(
-    reason="Stage 2 (location-db-per-user-split): _insert_pings helper uses "
-           "location_db.insert_ping but _init_db creates a framework-shaped "
-           "DB whose location_pings table has user_id NOT NULL. Class needs "
-           "to switch to _init_loc_db; tracked as Stage 2 follow-up.",
-    strict=False,
-)
 class TestLocationQueryTripsGapSegmentation:
     """C: time-gap-based trip segmentation in _location_query_trips().
 
@@ -2793,7 +2711,7 @@ class TestLocationQueryTripsGapSegmentation:
     def test_long_gap_splits_trip(self, tmp_path):
         from istota.web_app import _location_query_trips
 
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
         # Two walks ~2.5h apart on 2026-04-27 PT (= 04-28 UTC)
         pings = [
             # First walk near 5:55 PM PT
@@ -2818,7 +2736,7 @@ class TestLocationQueryTripsGapSegmentation:
     def test_short_gap_keeps_single_trip(self, tmp_path):
         from istota.web_app import _location_query_trips
 
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
         # Two walking pings 10 minutes apart — same trip (red light, brief stop)
         pings = [
             {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
@@ -2837,7 +2755,7 @@ class TestLocationQueryTripsGapSegmentation:
         """A gap of exactly 60 minutes should not split (threshold is exclusive)."""
         from istota.web_app import _location_query_trips
 
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
         pings = [
             {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
              "activity_type": "walking", "speed": 1.0},
@@ -2853,7 +2771,7 @@ class TestLocationQueryTripsGapSegmentation:
     def test_just_over_threshold_splits(self, tmp_path):
         from istota.web_app import _location_query_trips
 
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
         pings = [
             {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
              "activity_type": "walking", "speed": 1.0},
@@ -2870,7 +2788,7 @@ class TestLocationQueryTripsGapSegmentation:
         """30 min gap (subway tunnel, traffic, suspended app) should not split."""
         from istota.web_app import _location_query_trips
 
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
         pings = [
             {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
              "activity_type": "walking", "speed": 1.0},
@@ -2887,7 +2805,7 @@ class TestLocationQueryTripsGapSegmentation:
         """Original stationary-based closure path remains functional."""
         from istota.web_app import _location_query_trips
 
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
         pings = [
             {"timestamp": "2026-04-28T01:00:00Z", "lat": 34.10, "lon": -118.30,
              "activity_type": "walking", "speed": 1.0},
@@ -2911,7 +2829,7 @@ class TestLocationQueryTripsGapSegmentation:
     def test_no_pings_no_trips(self, tmp_path):
         from istota.web_app import _location_query_trips
 
-        db_path = _init_db(tmp_path)
+        db_path = _init_loc_db(tmp_path)
         result = _location_query_trips(
             str(db_path), "America/Los_Angeles", "2026-04-27",
         )
@@ -2919,36 +2837,38 @@ class TestLocationQueryTripsGapSegmentation:
 
 
 @_needs_geopy
-@pytest.mark.xfail(
-    reason="Stage 2 (location-db-per-user-split): cmd_day_summary now uses "
-           "two connections (per-user location.db + framework istota.db for "
-           "reverse_geocode cache). Test seed uses framework db.* helpers + "
-           "single-DB env; rewrite tracked as Stage 2 follow-up.",
-    strict=False,
-)
 class TestCmdDaySummary:
     def _run_day_summary(self, tmp_path, pings=None, places=None,
                          date="2026-03-08", tz="America/Los_Angeles",
                          nominatim_results=None):
-        """Helper to run cmd_day_summary with test DB and optional mocks."""
+        """Helper to run cmd_day_summary with test DB and optional mocks.
+
+        Uses two DBs to mirror production: per-user location.db for
+        pings/places, framework istota.db for reverse_geocode_cache.
+        """
         from istota.skills.location import cmd_day_summary
 
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
+        loc_db = _init_loc_db(tmp_path, "location.db")
+        framework_db = _init_db(tmp_path)  # for reverse_geocode_cache
+        with location_db.connect(loc_db) as conn:
             for p in (places or []):
-                db.insert_place(conn, "alice", p["name"], p["lat"], p["lon"],
-                                p.get("radius_meters", 100), p.get("category", "other"))
+                location_db.add_place(
+                    conn, p["name"], p["lat"], p["lon"],
+                    radius_meters=p.get("radius_meters", 100),
+                    category=p.get("category", "other"),
+                )
             for ping in (pings or []):
                 place_id = ping.get("place_id")
-                db.insert_location_ping(
-                    conn, "alice", ping["timestamp"], ping["lat"], ping["lon"],
+                location_db.insert_ping(
+                    conn, ping["timestamp"], ping["lat"], ping["lon"],
                     accuracy=ping.get("accuracy", 5.0),
                     place_id=place_id,
                 )
             conn.commit()
 
         env = {
-            "ISTOTA_DB_PATH": str(db_path),
+            "LOCATION_DB_PATH": str(loc_db),
+            "ISTOTA_DB_PATH": str(framework_db),
             "ISTOTA_USER_ID": "alice",
             "TZ": tz,
         }
@@ -3472,130 +3392,112 @@ class TestDwellBasedExit:
             assert gym_visit.exited_at is None
 
 
-@pytest.mark.xfail(
-    reason="Stage 4 (location-db-per-user-split): seed code calls framework "
-           "db.insert_location_ping / db.reconcile_visits with user_id. "
-           "location.db.reconcile_visits is exercised by the scheduler "
-           "integration path and a dedicated rewrite is tracked as Stage 2 "
-           "follow-up.",
-    strict=False,
-)
 class TestReconcileVisits:
-    def _ping(self, conn, user_id, ts, place_id):
-        db.insert_location_ping(
-            conn, user_id, ts, 0.0, 0.0, accuracy=10.0, place_id=place_id,
+    def _ping(self, conn, ts, place_id):
+        location_db.insert_ping(
+            conn, ts, 0.0, 0.0, accuracy=10.0, place_id=place_id,
         )
 
     def test_reconciles_fragmented_visit_into_one(self, tmp_path):
         """The Shinagawa case: flicker split a single stay into many short segments."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 35.629, 139.741)
             # 15 pings mostly at place, a handful briefly outside
             at_place = [f"2026-04-21T10:{m:02d}:00Z" for m in range(0, 30, 2)]
             for ts in at_place:
-                self._ping(conn, "alice", ts, pid)
+                self._ping(conn, ts, pid)
             # sprinkle a few unassigned pings in between — gaps < grace
             for ts in ("2026-04-21T10:05:30Z", "2026-04-21T10:13:30Z", "2026-04-21T10:19:30Z"):
-                self._ping(conn, "alice", ts, None)
+                self._ping(conn, ts, None)
             conn.commit()
 
-            n = db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+            n = location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
             )
             conn.commit()
 
             assert n == 1
-            visits = db.get_visits(conn, "alice")
+            visits = location_db.get_visits(conn)
             assert len(visits) == 1
             assert visits[0].entered_at == "2026-04-21T10:00:00Z"
             assert visits[0].exited_at == "2026-04-21T10:28:00Z"
             assert visits[0].ping_count == 15
 
     def test_splits_when_gap_exceeds_grace(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 35.629, 139.741)
             # Morning visit
             for m in range(0, 10, 2):
-                self._ping(conn, "alice", f"2026-04-21T08:{m:02d}:00Z", pid)
+                self._ping(conn, f"2026-04-21T08:{m:02d}:00Z", pid)
             # 45-min gap (away), no pings at place
             # Evening visit
             for m in range(0, 10, 2):
-                self._ping(conn, "alice", f"2026-04-21T09:{m:02d}:00Z", pid)
+                self._ping(conn, f"2026-04-21T09:{m:02d}:00Z", pid)
             conn.commit()
 
-            n = db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+            n = location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
             )
             conn.commit()
 
             assert n == 2
-            visits = sorted(db.get_visits(conn, "alice"), key=lambda v: v.entered_at)
+            visits = sorted(location_db.get_visits(conn), key=lambda v: v.entered_at)
             assert visits[0].entered_at == "2026-04-21T08:00:00Z"
             assert visits[1].entered_at == "2026-04-21T09:00:00Z"
 
     def test_filters_walkby(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 35.629, 139.741)
             # Only 2 pings at place — below min_pings=3
-            self._ping(conn, "alice", "2026-04-21T10:00:00Z", pid)
-            self._ping(conn, "alice", "2026-04-21T10:01:00Z", pid)
+            self._ping(conn, "2026-04-21T10:00:00Z", pid)
+            self._ping(conn, "2026-04-21T10:01:00Z", pid)
             conn.commit()
 
-            n = db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+            n = location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
             )
             assert n == 0
-            assert db.get_visits(conn, "alice") == []
+            assert location_db.get_visits(conn) == []
 
     def test_splits_on_different_place(self, tmp_path):
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid_a = db.insert_place(conn, "alice", "home", 34.0, -118.0)
-            pid_b = db.insert_place(conn, "alice", "gym", 34.1, -118.1)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid_a = location_db.add_place(conn, "home", 34.0, -118.0)
+            pid_b = location_db.add_place(conn, "gym", 34.1, -118.1)
             for m in range(0, 10, 2):
-                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid_a)
+                self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid_a)
             for m in range(12, 22, 2):
-                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid_b)
+                self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid_b)
             conn.commit()
 
-            n = db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+            n = location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
             )
             assert n == 2
-            visits = sorted(db.get_visits(conn, "alice"), key=lambda v: v.entered_at)
+            visits = sorted(location_db.get_visits(conn), key=lambda v: v.entered_at)
             assert visits[0].place_name == "home"
             assert visits[1].place_name == "gym"
 
     def test_preserves_open_visit_outside_window(self, tmp_path):
         """An open visit started before `since` must be left alone."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 35.629, 139.741)
             # Open visit entered before reconcile window
-            vid = db.insert_visit(conn, "alice", pid, "home", "2026-04-20T23:00:00Z")
+            vid = location_db.open_visit(conn, pid, "home", "2026-04-20T23:00:00Z")
             for m in range(0, 10, 2):
-                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid)
+                self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid)
             conn.commit()
 
-            db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+            location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
             )
             conn.commit()
 
-            visits = db.get_visits(conn, "alice")
+            visits = location_db.get_visits(conn)
             # The open visit must still exist and be open
             open_ones = [v for v in visits if v.exited_at is None]
             assert len(open_ones) == 1
@@ -3603,32 +3505,28 @@ class TestReconcileVisits:
 
     def test_accuracy_filter_drops_bad_pings(self, tmp_path):
         """Historical pings with accuracy > threshold are treated as unassigned."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 35.629, 139.741)
             # One early bad-accuracy ping pinned to the place (like the 1336m Shinagawa case)
-            db.insert_location_ping(
-                conn, "alice", "2026-04-21T08:00:00Z", 35.629, 139.741,
+            location_db.insert_ping(conn, "2026-04-21T08:00:00Z", 35.629, 139.741,
                 accuracy=1200.0, place_id=pid,
             )
             # Real visit starts later with good pings
             for m in range(30, 50, 2):
-                db.insert_location_ping(
-                    conn, "alice", f"2026-04-21T08:{m:02d}:00Z", 35.629, 139.741,
+                location_db.insert_ping(conn, f"2026-04-21T08:{m:02d}:00Z", 35.629, 139.741,
                     accuracy=10.0, place_id=pid,
                 )
             conn.commit()
 
             # Without filter: the bad ping would anchor a visit starting at 08:00
-            db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+            location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
                 accuracy_threshold_m=100.0,
             )
             conn.commit()
 
-            visits = db.get_visits(conn, "alice")
+            visits = location_db.get_visits(conn)
             assert len(visits) == 1
             assert visits[0].entered_at == "2026-04-21T08:30:00Z", (
                 "Bad-accuracy ping should not have anchored the visit's entered_at"
@@ -3637,25 +3535,23 @@ class TestReconcileVisits:
 
     def test_replaces_stale_closed_visits_in_window(self, tmp_path):
         """Existing closed visits in the window are dropped before re-derivation."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 35.629, 139.741)
             # Seed with an incorrect, short closed visit
-            stale_id = db.insert_visit(conn, "alice", pid, "home", "2026-04-21T10:05:00Z")
-            db.close_visit(conn, stale_id, "2026-04-21T10:07:00Z")
+            stale_id = location_db.open_visit(conn, pid, "home", "2026-04-21T10:05:00Z")
+            location_db.close_visit(conn, stale_id, "2026-04-21T10:07:00Z")
             # Pings showing the true longer stay
             for m in range(0, 30, 2):
-                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid)
+                self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid)
             conn.commit()
 
-            db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+            location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
             )
             conn.commit()
 
-            visits = db.get_visits(conn, "alice")
+            visits = location_db.get_visits(conn)
             assert len(visits) == 1
             assert visits[0].id != stale_id  # stale row deleted
             assert visits[0].entered_at == "2026-04-21T10:00:00Z"
@@ -3668,9 +3564,9 @@ class TestReconcileVisits:
         When `since` advances past a visit's first ping but the last ping is
         still in window, prior runs must be cleaned up — not duplicated.
         """
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "lazy_acres", 32.78, -117.18)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "lazy_acres", 32.78, -117.18)
             # 20 sparse pings over 11 minutes (Lazy Acres pattern)
             ping_times = [
                 "2026-04-29T03:38:00Z", "2026-04-29T03:38:30Z",
@@ -3685,7 +3581,7 @@ class TestReconcileVisits:
                 "2026-04-29T03:49:00Z", "2026-04-29T03:49:30Z",
             ]
             for ts in ping_times:
-                self._ping(conn, "alice", ts, pid)
+                self._ping(conn, ts, pid)
             conn.commit()
 
             # Three reconciler runs with `since` sliding past the visit's
@@ -3695,14 +3591,13 @@ class TestReconcileVisits:
                 ("2026-04-29T03:40:00Z", "2026-04-29T03:56:00Z"),
                 ("2026-04-29T03:43:00Z", "2026-04-29T04:03:00Z"),
             ]:
-                db.reconcile_visits(
-                    conn, "alice", since=since, until=until,
+                location_db.reconcile_visits(conn, since=since, until=until,
                     grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
                     accuracy_threshold_m=100.0,
                 )
                 conn.commit()
 
-            visits = db.get_visits(conn, "alice")
+            visits = location_db.get_visits(conn)
             assert len(visits) == 1, (
                 f"Expected 1 visit after sliding-window runs, got {len(visits)}: "
                 f"{[(v.id, v.entered_at, v.exited_at) for v in visits]}"
@@ -3713,25 +3608,23 @@ class TestReconcileVisits:
 
     def test_visit_straddling_since_not_truncated(self, tmp_path):
         """A visit whose first ping is before `since` must be reconstructed in full."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 35.629, 139.741)
             # Visit pings span 09:50 - 10:10; reconcile window starts at 10:00.
             for m in range(50, 60, 2):
-                self._ping(conn, "alice", f"2026-04-21T09:{m:02d}:00Z", pid)
+                self._ping(conn, f"2026-04-21T09:{m:02d}:00Z", pid)
             for m in range(0, 12, 2):
-                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid)
+                self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid)
             conn.commit()
 
-            db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-21T10:00:00Z", until="2026-04-21T11:00:00Z",
+            location_db.reconcile_visits(conn, since="2026-04-21T10:00:00Z", until="2026-04-21T11:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
                 accuracy_threshold_m=100.0,
             )
             conn.commit()
 
-            visits = db.get_visits(conn, "alice")
+            visits = location_db.get_visits(conn)
             assert len(visits) == 1
             assert visits[0].entered_at == "2026-04-21T09:50:00Z", (
                 "Read-back must find the visit's true first ping outside the window"
@@ -3740,26 +3633,24 @@ class TestReconcileVisits:
 
     def test_visit_entirely_before_window_untouched(self, tmp_path):
         """A closed visit that ended before `since` must be left alone."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "home", 35.629, 139.741)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "home", 35.629, 139.741)
             # Pre-existing closed visit from earlier in the day
-            old_id = db.insert_visit(conn, "alice", pid, "home", "2026-04-21T08:00:00Z")
-            db.close_visit(conn, old_id, "2026-04-21T08:30:00Z")
+            old_id = location_db.open_visit(conn, pid, "home", "2026-04-21T08:00:00Z")
+            location_db.close_visit(conn, old_id, "2026-04-21T08:30:00Z")
             # Pings for a different, later visit that we will reconcile
             for m in range(0, 12, 2):
-                self._ping(conn, "alice", f"2026-04-21T10:{m:02d}:00Z", pid)
+                self._ping(conn, f"2026-04-21T10:{m:02d}:00Z", pid)
             conn.commit()
 
-            db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-21T09:00:00Z", until="2026-04-21T11:00:00Z",
+            location_db.reconcile_visits(conn, since="2026-04-21T09:00:00Z", until="2026-04-21T11:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
                 accuracy_threshold_m=100.0,
             )
             conn.commit()
 
-            visits = sorted(db.get_visits(conn, "alice"), key=lambda v: v.entered_at)
+            visits = sorted(location_db.get_visits(conn), key=lambda v: v.entered_at)
             assert len(visits) == 2
             assert visits[0].id == old_id
             assert visits[0].entered_at == "2026-04-21T08:00:00Z"
@@ -3767,33 +3658,31 @@ class TestReconcileVisits:
 
     def test_cleans_up_phantoms_from_prior_buggy_runs(self, tmp_path):
         """Pre-existing duplicate visits (from the bug) must be replaced by one."""
-        db_path = _init_db(tmp_path)
-        with db.get_db(db_path) as conn:
-            pid = db.insert_place(conn, "alice", "lazy_acres", 32.78, -117.18)
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "lazy_acres", 32.78, -117.18)
             # Three phantom visits with staggered entries, identical exits, no pings linked
             for entry in ("2026-04-29T03:38:00Z",
                           "2026-04-29T03:40:15Z",
                           "2026-04-29T03:43:30Z"):
-                vid = db.insert_visit(conn, "alice", pid, "lazy_acres", entry)
-                db.close_visit(conn, vid, "2026-04-29T03:49:30Z")
+                vid = location_db.open_visit(conn, pid, "lazy_acres", entry)
+                location_db.close_visit(conn, vid, "2026-04-29T03:49:30Z")
             # Real pings (would be linked to a different visit_id in production)
             for ts in (
                 "2026-04-29T03:38:00Z", "2026-04-29T03:39:00Z",
                 "2026-04-29T03:42:00Z", "2026-04-29T03:45:00Z",
                 "2026-04-29T03:47:00Z", "2026-04-29T03:49:30Z",
             ):
-                self._ping(conn, "alice", ts, pid)
+                self._ping(conn, ts, pid)
             conn.commit()
 
-            db.reconcile_visits(
-                conn, "alice",
-                since="2026-04-29T03:00:00Z", until="2026-04-29T04:30:00Z",
+            location_db.reconcile_visits(conn, since="2026-04-29T03:00:00Z", until="2026-04-29T04:30:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
                 accuracy_threshold_m=100.0,
             )
             conn.commit()
 
-            visits = db.get_visits(conn, "alice")
+            visits = location_db.get_visits(conn)
             assert len(visits) == 1
             assert visits[0].entered_at == "2026-04-29T03:38:00Z"
             assert visits[0].exited_at == "2026-04-29T03:49:30Z"
