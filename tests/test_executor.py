@@ -1428,6 +1428,22 @@ class TestAdminPromptIsolation:
         assert "You can ONLY access files under" in prompt
         assert "do NOT have access to the task database" in prompt
 
+    def test_prompt_includes_utc_anchor_and_elapsed_time_rule(self, tmp_path):
+        """ISSUE-091 — UTC anchor + elapsed-time rule must be present."""
+        import re
+        config = self._make_config(tmp_path)
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+        for is_admin in (True, False):
+            prompt = build_prompt(task, [], config, is_admin=is_admin)
+            assert re.search(r"Current UTC: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", prompt), (
+                "Current UTC ISO 8601 line missing from prompt header"
+            )
+            assert "normalize both to ISO 8601 UTC" in prompt, (
+                "Elapsed-time arithmetic rule missing from rules section"
+            )
+
 
 class TestAdminEnvVarIsolation:
     def _make_config(self, tmp_path, admin_users=None):
