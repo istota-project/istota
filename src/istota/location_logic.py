@@ -1,44 +1,44 @@
 """Location query helpers shared between the web API and the location skill.
 
-These functions are pure SQL + lightweight math — no FastAPI/HTTP/auth dependencies —
-so they can be called from both `web_app.py` and skill subprocesses.
+These functions are pure SQL + lightweight math — no FastAPI/HTTP/auth
+dependencies — so they can be called from both `web_app.py` and skill
+subprocesses.
+
+Per-user split: every helper takes a path to the per-user
+``location.db`` (no ``user_id``). The file is the user scope.
 """
+
+from __future__ import annotations
 
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
-from .db import (
-    delete_dismissed_cluster,
-    get_place_by_id,
-    insert_dismissed_cluster,
-    list_dismissed_clusters,
-)
 from .geo import haversine
+from .location import db as location_db
 
 
-def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | None:
+def _location_place_stats(db_path: str | Path, place_id: int) -> dict | None:
     """Visit statistics for a place, derived from ping data.
 
-    Groups pings into visits by checking whether the user was seen elsewhere
-    during gaps. A gap only splits a visit if there are pings at a different
-    place (or unassigned pings far away) in between — GPS dropout while
-    stationary indoors doesn't break a visit. Walk-bys (< 3 pings) are
-    filtered out.
+    Groups pings into visits by checking whether the user was seen
+    elsewhere during gaps. A gap only splits a visit if there are pings
+    at a different place (or unassigned pings far away) in between —
+    GPS dropout while stationary indoors doesn't break a visit. Walk-bys
+    (< 3 pings) are filtered out.
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        place = get_place_by_id(conn, place_id)
-        if not place or place.user_id != user_id:
+    with location_db.connect(Path(db_path)) as conn:
+        place = location_db.get_place_by_id(conn, place_id)
+        if not place:
             return None
 
         rows = conn.execute(
             """
             SELECT timestamp FROM location_pings
-            WHERE user_id = ? AND place_id = ?
+            WHERE place_id = ?
             ORDER BY timestamp ASC
             """,
-            (user_id, place_id),
+            (place_id,),
         ).fetchall()
 
         if not rows:
@@ -53,7 +53,7 @@ def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | N
             }
 
         min_pings = 3  # filter out walk-bys
-        segments: list[tuple[str, str, int]] = []  # (first_ts, last_ts, ping_count)
+        segments: list[tuple[str, str, int]] = []
         visit_start = rows[0]["timestamp"]
         prev_ts = visit_start
         ping_count = 1
@@ -63,11 +63,11 @@ def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | N
             elsewhere = conn.execute(
                 """
                 SELECT 1 FROM location_pings
-                WHERE user_id = ? AND place_id IS NOT ? AND place_id IS NOT NULL
+                WHERE place_id IS NOT ? AND place_id IS NOT NULL
                   AND timestamp > ? AND timestamp < ?
                 LIMIT 1
                 """,
-                (user_id, place_id, prev_ts, ts),
+                (place_id, prev_ts, ts),
             ).fetchone()
             if elsewhere:
                 segments.append((visit_start, prev_ts, ping_count))
@@ -114,37 +114,30 @@ def _location_place_stats(db_path: str, user_id: str, place_id: int) -> dict | N
             "total_duration_min": round(total_sec / 60),
             "longest_visit_min": round(longest_sec / 60),
         }
-    finally:
-        conn.close()
 
 
-def _location_list_dismissed(db_path: str, user_id: str) -> dict:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = list_dismissed_clusters(conn, user_id)
+def _location_list_dismissed(db_path: str | Path) -> dict:
+    with location_db.connect(Path(db_path)) as conn:
+        rows = location_db.list_dismissed_clusters(conn)
         return {
             "dismissed": [
                 {
-                    "id": r["id"],
-                    "lat": r["lat"],
-                    "lon": r["lon"],
-                    "radius_meters": r["radius_meters"],
-                    "dismissed_at": r["dismissed_at"],
+                    "id": r.id,
+                    "lat": r.lat,
+                    "lon": r.lon,
+                    "radius_meters": r.radius_meters,
+                    "dismissed_at": r.dismissed_at,
                 }
                 for r in rows
             ]
         }
-    finally:
-        conn.close()
 
 
-def _location_dismiss_cluster(db_path: str, user_id: str, data: dict) -> dict:
+def _location_dismiss_cluster(db_path: str | Path, data: dict) -> dict:
     radius = int(data.get("radius_meters", 100))
-    conn = sqlite3.connect(db_path)
-    try:
-        cluster_id = insert_dismissed_cluster(
-            conn, user_id, float(data["lat"]), float(data["lon"]), radius,
+    with location_db.connect(Path(db_path)) as conn:
+        cluster_id = location_db.dismiss_cluster(
+            conn, float(data["lat"]), float(data["lon"]), radius,
         )
         conn.commit()
         return {
@@ -153,25 +146,20 @@ def _location_dismiss_cluster(db_path: str, user_id: str, data: dict) -> dict:
             "lon": float(data["lon"]),
             "radius_meters": radius,
         }
-    finally:
-        conn.close()
 
 
-def _location_restore_dismissed(db_path: str, user_id: str, cluster_id: int) -> bool:
-    conn = sqlite3.connect(db_path)
-    try:
-        deleted = delete_dismissed_cluster(conn, user_id, cluster_id)
+def _location_restore_dismissed(db_path: str | Path, cluster_id: int) -> bool:
+    with location_db.connect(Path(db_path)) as conn:
+        deleted = location_db.restore_dismissed_cluster(conn, cluster_id)
         conn.commit()
         return deleted
-    finally:
-        conn.close()
 
 
-def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -> dict:
+def _location_discover_places(
+    db_path: str | Path, min_pings: int = 10,
+) -> dict:
     """Find clusters of stationary pings not assigned to any place."""
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
+    with location_db.connect(Path(db_path)) as conn:
         rows = conn.execute(
             """
             SELECT ROUND(lat, 4) as rlat, ROUND(lon, 4) as rlon,
@@ -179,13 +167,13 @@ def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -
                    COUNT(*) as cnt,
                    MIN(timestamp) as first_seen, MAX(timestamp) as last_seen
             FROM location_pings
-            WHERE user_id = ? AND place_id IS NULL
+            WHERE place_id IS NULL
               AND (activity_type IS NULL OR activity_type = 'stationary')
             GROUP BY rlat, rlon
             HAVING cnt >= ?
             ORDER BY cnt DESC
             """,
-            (user_id, max(3, min_pings // 3)),
+            (max(3, min_pings // 3),),
         ).fetchall()
 
         points = [
@@ -225,7 +213,8 @@ def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -
                 center_lat = cluster_lat / cluster_count
                 center_lon = cluster_lon / cluster_count
                 spread = max(
-                    (haversine(center_lat, center_lon, mlat, mlon) for mlat, mlon in members),
+                    (haversine(center_lat, center_lon, mlat, mlon)
+                     for mlat, mlon in members),
                     default=0.0,
                 )
                 radius_meters = int(min(300, max(50, round(spread + 25))))
@@ -239,12 +228,10 @@ def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -
                 })
 
         existing = conn.execute(
-            "SELECT lat, lon, radius_meters FROM places WHERE user_id = ?",
-            (user_id,),
+            "SELECT lat, lon, radius_meters FROM places"
         ).fetchall()
         dismissed = conn.execute(
-            "SELECT lat, lon, radius_meters FROM dismissed_clusters WHERE user_id = ?",
-            (user_id,),
+            "SELECT lat, lon, radius_meters FROM dismissed_clusters"
         ).fetchall()
         filtered = []
         for c in clusters:
@@ -264,5 +251,3 @@ def _location_discover_places(db_path: str, user_id: str, min_pings: int = 10) -
                 filtered.append(c)
 
         return {"clusters": filtered}
-    finally:
-        conn.close()

@@ -92,6 +92,7 @@ def build_prompt(
 | Monarch | `MONARCH_SESSION_TOKEN` | From resource config `extra` |
 | Money | `MONEY_CONFIG`, `MONEY_USER` | From the user's `money` resource (in-process; `MONEY_USER` defaults to istota user_id) |
 | Feeds | `FEEDS_USER` | From the user's `feeds` resource (in-process; defaults to istota user_id) |
+| Location | `LOCATION_DB_PATH` | `istota.location.resolve_for_user(user_id, config).db_path` via the location skill's `setup_env` hook. Per-user `{workspace}/location/data/location.db`. Skill subcommands needing the framework geocode caches (`reverse_geocode`, `day_summary`) open a second conn to `ISTOTA_DB_PATH`. |
 | Website | `WEBSITE_PATH`, `WEBSITE_URL` | `config.site.*` (if enabled + user site_enabled) |
 | Developer | `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` (if enabled) |
 | Developer | `GITLAB_URL` | `config.developer.gitlab_url` (if enabled) |

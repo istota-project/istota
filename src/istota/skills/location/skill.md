@@ -3,7 +3,7 @@ name: location
 triggers: [location, gps, where, place, places, visit, visits, track, position, coordinates, attendance, reverse geocode, day summary, neighborhood, summary]
 description: Location tracking, place recognition, visit history, and calendar attendance
 cli: true
-env: [{"var":"CALDAV_URL","from":"config","config_path":"caldav_url","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_USERNAME","from":"config","config_path":"caldav_username","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_PASSWORD","from":"config","config_path":"caldav_password","when":"caldav_url","gate_has_discovered_calendars":true,"sensitive":true}]
+env: [{"var":"LOCATION_DB_PATH","from":"setup_env"},{"var":"CALDAV_URL","from":"config","config_path":"caldav_url","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_USERNAME","from":"config","config_path":"caldav_username","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_PASSWORD","from":"config","config_path":"caldav_password","when":"caldav_url","gate_has_discovered_calendars":true,"sensitive":true}]
 ---
 # Location Skill
 
@@ -33,7 +33,7 @@ The web UI surfaces "discovered clusters" — recurring locations that aren't ye
 
 Run `istota-skill location --help` (or `istota-skill location <subcommand> --help`) to see the live argument list.
 
-All commands output JSON. The `ISTOTA_DB_PATH` and `ISTOTA_USER_ID` environment variables are set automatically.
+All commands output JSON. `LOCATION_DB_PATH` (the user's per-user `location.db`) is set automatically by the skill's `setup_env` hook. The `reverse-geocode` and `day-summary` subcommands also read `ISTOTA_DB_PATH` (the framework DB) for the cross-user reverse-geocode cache.
 
 ```bash
 # Current location + place/visit info

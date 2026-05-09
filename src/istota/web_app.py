@@ -460,13 +460,26 @@ def _has_google_token(username: str) -> bool:
 
 
 def _get_location_config(username: str) -> tuple[str, str, str] | None:
-    """Get (db_path, user_id, timezone) for location queries, or None."""
+    """Resolve (per-user location.db path, user_id, timezone), or None.
+
+    Per-user split: ``db_path`` now points at
+    ``{workspace}/location/data/location.db`` rather than the framework
+    ``istota.db``. Callers that also need the framework-side geocode
+    cache open a second connection to ``_config.db_path``.
+    """
     if not _config or not _config.location.enabled:
         return None
     uc = _config.get_user(username)
     if not uc:
         return None
-    return str(_config.db_path), username, uc.timezone
+    from . import location as _location  # noqa: PLC0415
+    try:
+        loc_ctx = _location.resolve_for_user(username, _config)
+    except _location.UserNotFoundError:
+        return None
+    # Lazy init so /location/* endpoints work even before a ping arrives.
+    _location.init_db(loc_ctx.db_path)
+    return str(loc_ctx.db_path), username, uc.timezone
 
 
 def _resolve_tz(client_tz: str, fallback: str) -> str:
@@ -1004,14 +1017,41 @@ def _admin_module_money() -> dict | None:
 
 
 def _admin_module_location() -> dict:
+    """Aggregate location stats across every user's ``location.db``.
+
+    Per-user files: sum visits + places, take max(last ping timestamp).
+    Per-user try/except so one broken DB doesn't blank the whole row.
+    """
     out = {"visits_total": 0, "places_total": 0, "last_update": None}
+    if not _config:
+        return out
     try:
-        from . import db
-        with db.get_db(_config.db_path) as conn:
-            out["visits_total"] = conn.execute("SELECT COUNT(*) AS n FROM visits").fetchone()["n"]
-            out["places_total"] = conn.execute("SELECT COUNT(*) AS n FROM places").fetchone()["n"]
-            row = conn.execute("SELECT MAX(timestamp) AS ts FROM location_pings").fetchone()
-            out["last_update"] = _iso_utc(row["ts"]) if row else None
+        from . import location as _location  # noqa: PLC0415
+
+        latest: str | None = None
+        for uid in _location.list_users(_config):
+            try:
+                ctx = _location.resolve_for_user(uid, _config)
+                if not ctx.db_path.exists():
+                    continue
+                with _location.connect(ctx.db_path) as conn:
+                    out["visits_total"] += conn.execute(
+                        "SELECT COUNT(*) AS n FROM visits"
+                    ).fetchone()["n"]
+                    out["places_total"] += conn.execute(
+                        "SELECT COUNT(*) AS n FROM places"
+                    ).fetchone()["n"]
+                    row = conn.execute(
+                        "SELECT MAX(timestamp) AS ts FROM location_pings"
+                    ).fetchone()
+                    ts = row["ts"] if row else None
+                    if ts and (latest is None or ts > latest):
+                        latest = ts
+            except Exception:
+                logger.exception(
+                    "location module stats failed for user=%s", uid,
+                )
+        out["last_update"] = _iso_utc(latest)
     except Exception:
         logger.exception("location module stats failed")
     return out
@@ -1876,7 +1916,7 @@ def _sanitize_html(content: str, max_len: int = 600) -> str:
 # ============================================================================
 
 
-def _location_query_current(db_path: str, user_id: str) -> dict:
+def _location_query_current(db_path: str) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -1887,10 +1927,8 @@ def _location_query_current(db_path: str, user_id: str) -> dict:
                    p.name as place_name
             FROM location_pings lp
             LEFT JOIN places p ON lp.place_id = p.id
-            WHERE lp.user_id = ?
             ORDER BY lp.timestamp DESC LIMIT 1
-            """,
-            (user_id,),
+            """
         ).fetchone()
         if not row:
             return {"last_ping": None, "current_visit": None}
@@ -1909,10 +1947,9 @@ def _location_query_current(db_path: str, user_id: str) -> dict:
             """
             SELECT place_name, entered_at, ping_count
             FROM visits
-            WHERE user_id = ? AND exited_at IS NULL
+            WHERE exited_at IS NULL
             ORDER BY entered_at DESC LIMIT 1
-            """,
-            (user_id,),
+            """
         ).fetchone()
         current_visit = None
         if visit_row:
@@ -1938,7 +1975,7 @@ def _location_query_current(db_path: str, user_id: str) -> dict:
 
 
 def _location_query_pings(
-    db_path: str, user_id: str, tz_name: str,
+    db_path: str, tz_name: str,
     date: str | None, start: str | None, end: str | None, limit: int,
 ) -> dict:
     from zoneinfo import ZoneInfo
@@ -1972,10 +2009,10 @@ def _location_query_pings(
                        p.name as place_name
                 FROM location_pings lp
                 LEFT JOIN places p ON lp.place_id = p.id
-                WHERE lp.user_id = ? AND lp.timestamp >= ? AND lp.timestamp < ?
+                WHERE lp.timestamp >= ? AND lp.timestamp < ?
                 ORDER BY lp.timestamp ASC
             """
-            params: list = [user_id, since, until]
+            params: list = [since, until]
             if limit:
                 query += " LIMIT ?"
                 params.append(limit)
@@ -1988,10 +2025,9 @@ def _location_query_pings(
                        p.name as place_name
                 FROM location_pings lp
                 LEFT JOIN places p ON lp.place_id = p.id
-                WHERE lp.user_id = ?
                 ORDER BY lp.timestamp DESC LIMIT ?
                 """,
-                (user_id, limit or 100),
+                (limit or 100,),
             ).fetchall()
 
         pings = [
@@ -2012,7 +2048,7 @@ def _location_query_pings(
         conn.close()
 
 
-def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: str | None) -> dict:
+def _location_query_day_summary(db_path: str, tz_name: str, date: str | None) -> dict:
     from zoneinfo import ZoneInfo
     from .geo import (
         cluster_pings, dedupe_near_duplicate_pings, reverse_geocode, haversine,
@@ -2031,8 +2067,14 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
     since_utc = day_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     until_utc = day_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Per-user pings/places live in location.db; reverse-geocode cache
+    # remains in framework istota.db. Two connections.
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    framework_db = str(_config.db_path) if _config else ""
+    framework_conn = sqlite3.connect(framework_db) if framework_db else None
+    if framework_conn is not None:
+        framework_conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
             """
@@ -2040,10 +2082,10 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
                    lp.place_id, p.name as place_name
             FROM location_pings lp
             LEFT JOIN places p ON lp.place_id = p.id
-            WHERE lp.user_id = ? AND lp.timestamp >= ? AND lp.timestamp < ?
+            WHERE lp.timestamp >= ? AND lp.timestamp < ?
             ORDER BY lp.timestamp ASC
             """,
-            (user_id, since_utc, until_utc),
+            (since_utc, until_utc),
         ).fetchall()
 
         if not rows:
@@ -2054,8 +2096,7 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
         clusters = cluster_pings(pings, radius_m=250)
 
         saved_places_rows = conn.execute(
-            "SELECT id, name, lat, lon, radius_meters FROM places WHERE user_id = ?",
-            (user_id,),
+            "SELECT id, name, lat, lon, radius_meters FROM places"
         ).fetchall()
         saved_places = [dict(r) for r in saved_places_rows]
 
@@ -2083,7 +2124,9 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
                         matched = True
                         break
                 if not matched:
-                    geo = reverse_geocode(stop["lat"], stop["lon"], conn)
+                    geo = reverse_geocode(
+                        stop["lat"], stop["lon"], framework_conn,
+                    )
                     name = (
                         geo.get("suburb")
                         or geo.get("neighborhood")
@@ -2123,15 +2166,17 @@ def _location_query_day_summary(db_path: str, user_id: str, tz_name: str, date: 
         }
     finally:
         conn.close()
+        if framework_conn is not None:
+            framework_conn.close()
 
 
-def _location_query_places(db_path: str, user_id: str) -> dict:
+def _location_query_places(db_path: str) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT id, name, lat, lon, radius_meters, category, notes FROM places WHERE user_id = ? ORDER BY name",
-            (user_id,),
+            "SELECT id, name, lat, lon, radius_meters, category, notes "
+            "FROM places ORDER BY name"
         ).fetchall()
         return {
             "places": [
@@ -2145,16 +2190,17 @@ def _location_query_places(db_path: str, user_id: str) -> dict:
         conn.close()
 
 
-def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
-    from .db import insert_place
+def _location_create_place(db_path: str, data: dict) -> dict:
+    from .location import db as location_db
     from .geo import haversine
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         notes = (data.get("notes") or "").strip() or None
-        place_id = insert_place(
-            conn, user_id,
+        place_id = location_db.add_place(
+            conn,
             name=data["name"],
             lat=data["lat"],
             lon=data["lon"],
@@ -2171,10 +2217,10 @@ def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
         candidates = conn.execute(
             """
             SELECT id, lat, lon FROM location_pings
-            WHERE user_id = ? AND place_id IS NULL
+            WHERE place_id IS NULL
               AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
             """,
-            (user_id, lat - dlat, lat + dlat, lon - dlon, lon + dlon),
+            (lat - dlat, lat + dlat, lon - dlon, lon + dlon),
         ).fetchall()
         backfilled = 0
         for row in candidates:
@@ -2192,16 +2238,17 @@ def _location_create_place(db_path: str, user_id: str, data: dict) -> dict:
         conn.close()
 
 
-def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict) -> dict | None:
-    from .db import get_place_by_id, update_place
+def _location_update_place(db_path: str, place_id: int, data: dict) -> dict | None:
+    from .location import db as location_db
     from .geo import haversine
     import math
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
-        place = get_place_by_id(conn, place_id)
-        if not place or place.user_id != user_id:
+        place = location_db.get_place_by_id(conn, place_id)
+        if not place:
             return None
 
         geo_changed = any(k in data for k in ("lat", "lon", "radius_meters"))
@@ -2216,9 +2263,9 @@ def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict
                 normalized["notes"] = n
             else:
                 conn.execute("UPDATE places SET notes = NULL WHERE id = ?", (place_id,))
-        update_place(conn, place_id, **normalized)
+        location_db.update_place(conn, place_id, **normalized)
 
-        updated = get_place_by_id(conn, place_id)
+        updated = location_db.get_place_by_id(conn, place_id)
         if not updated:
             return None
 
@@ -2229,8 +2276,8 @@ def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict
 
             # Unassign pings that no longer fall within the new geofence
             assigned = conn.execute(
-                "SELECT id, lat, lon FROM location_pings WHERE user_id = ? AND place_id = ?",
-                (user_id, place_id),
+                "SELECT id, lat, lon FROM location_pings WHERE place_id = ?",
+                (place_id,),
             ).fetchall()
             for row in assigned:
                 if haversine(lat, lon, row["lat"], row["lon"]) > radius_m:
@@ -2242,10 +2289,10 @@ def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict
             candidates = conn.execute(
                 """
                 SELECT id, lat, lon FROM location_pings
-                WHERE user_id = ? AND place_id IS NULL
+                WHERE place_id IS NULL
                   AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
                 """,
-                (user_id, lat - dlat, lat + dlat, lon - dlon, lon + dlon),
+                (lat - dlat, lat + dlat, lon - dlon, lon + dlon),
             ).fetchall()
             for row in candidates:
                 if haversine(lat, lon, row["lat"], row["lon"]) <= radius_m:
@@ -2261,24 +2308,25 @@ def _location_update_place(db_path: str, user_id: str, place_id: int, data: dict
         conn.close()
 
 
-def _location_delete_place(db_path: str, user_id: str, place_id: int) -> bool:
-    from .db import get_place_by_id, delete_place_by_id, nullify_place_on_pings
+def _location_delete_place(db_path: str, place_id: int) -> bool:
+    from .location import db as location_db
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
-        place = get_place_by_id(conn, place_id)
-        if not place or place.user_id != user_id:
+        place = location_db.get_place_by_id(conn, place_id)
+        if not place:
             return False
-        nullify_place_on_pings(conn, place_id)
-        delete_place_by_id(conn, place_id)
+        location_db.nullify_place_on_pings(conn, place_id)
+        location_db.delete_place_by_id(conn, place_id)
         conn.commit()
         return True
     finally:
         conn.close()
 
 
-def _location_query_trips(db_path: str, user_id: str, tz_name: str, date: str | None) -> dict:
+def _location_query_trips(db_path: str, tz_name: str, date: str | None) -> dict:
     """Detect trips: sequences of non-stationary pings between stationary periods."""
     from zoneinfo import ZoneInfo
     from .geo import _timestamp_gap_seconds, dedupe_near_duplicate_pings, haversine
@@ -2296,10 +2344,10 @@ def _location_query_trips(db_path: str, user_id: str, tz_name: str, date: str | 
             """
             SELECT timestamp, lat, lon, activity_type, speed
             FROM location_pings
-            WHERE user_id = ? AND timestamp >= ? AND timestamp < ?
+            WHERE timestamp >= ? AND timestamp < ?
             ORDER BY timestamp ASC
             """,
-            (user_id, since, until),
+            (since, until),
         ).fetchall()
 
         deduped_rows = dedupe_near_duplicate_pings([dict(r) for r in rows])
@@ -2416,8 +2464,8 @@ async def api_location_current(user: dict = Depends(_require_api_auth)):
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
-    return await asyncio.to_thread(_location_query_current, db_path, user_id)
+    db_path, _user_id, _ = loc
+    return await asyncio.to_thread(_location_query_current, db_path)
 
 
 @api_router.get("/location/pings")
@@ -2432,10 +2480,10 @@ async def api_location_pings(
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, tz_name = loc
+    db_path, _user_id, tz_name = loc
     effective_tz = _resolve_tz(tz, tz_name)
     return await asyncio.to_thread(
-        _location_query_pings, db_path, user_id, effective_tz,
+        _location_query_pings, db_path, effective_tz,
         date or None, start or None, end or None, limit,
     )
 
@@ -2449,10 +2497,10 @@ async def api_location_day_summary(
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, tz_name = loc
+    db_path, _user_id, tz_name = loc
     effective_tz = _resolve_tz(tz, tz_name)
     return await asyncio.to_thread(
-        _location_query_day_summary, db_path, user_id, effective_tz, date or None,
+        _location_query_day_summary, db_path, effective_tz, date or None,
     )
 
 
@@ -2461,8 +2509,8 @@ async def api_location_places(user: dict = Depends(_require_api_auth)):
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
-    return await asyncio.to_thread(_location_query_places, db_path, user_id)
+    db_path, _user_id, _ = loc
+    return await asyncio.to_thread(_location_query_places, db_path)
 
 
 @api_router.post("/location/places")
@@ -2470,12 +2518,12 @@ async def api_location_create_place(request: Request, user: dict = Depends(_requ
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
+    db_path, _user_id, _ = loc
     data = await request.json()
     if not data.get("name") or "lat" not in data or "lon" not in data:
         return JSONResponse({"error": "name, lat, lon required"}, status_code=400)
     try:
-        result = await asyncio.to_thread(_location_create_place, db_path, user_id, data)
+        result = await asyncio.to_thread(_location_create_place, db_path, data)
         return result
     except Exception as e:
         logger.error("Failed to create place: %s", e)
@@ -2487,9 +2535,9 @@ async def api_location_update_place(place_id: int, request: Request, user: dict 
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
+    db_path, _user_id, _ = loc
     data = await request.json()
-    result = await asyncio.to_thread(_location_update_place, db_path, user_id, place_id, data)
+    result = await asyncio.to_thread(_location_update_place, db_path, place_id, data)
     if not result:
         return JSONResponse({"error": "place not found or not editable"}, status_code=404)
     return result
@@ -2500,8 +2548,8 @@ async def api_location_delete_place(place_id: int, request: Request, user: dict 
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
-    deleted = await asyncio.to_thread(_location_delete_place, db_path, user_id, place_id)
+    db_path, _user_id, _ = loc
+    deleted = await asyncio.to_thread(_location_delete_place, db_path, place_id)
     if not deleted:
         return JSONResponse({"error": "place not found or not deletable"}, status_code=404)
     return {"status": "ok"}
@@ -2512,8 +2560,8 @@ async def api_location_place_stats(place_id: int, user: dict = Depends(_require_
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
-    result = await asyncio.to_thread(_location_place_stats, db_path, user_id, place_id)
+    db_path, _user_id, _ = loc
+    result = await asyncio.to_thread(_location_place_stats, db_path, place_id)
     if result is None:
         return JSONResponse({"error": "place not found"}, status_code=404)
     return result
@@ -2527,8 +2575,8 @@ async def api_location_discover_places(
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
-    return await asyncio.to_thread(_location_discover_places, db_path, user_id, min_pings)
+    db_path, _user_id, _ = loc
+    return await asyncio.to_thread(_location_discover_places, db_path, min_pings)
 
 
 @api_router.get("/location/dismissed-clusters")
@@ -2536,8 +2584,8 @@ async def api_location_list_dismissed(user: dict = Depends(_require_api_auth)):
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
-    return await asyncio.to_thread(_location_list_dismissed, db_path, user_id)
+    db_path, _user_id, _ = loc
+    return await asyncio.to_thread(_location_list_dismissed, db_path)
 
 
 @api_router.post("/location/dismissed-clusters")
@@ -2549,13 +2597,13 @@ async def api_location_dismiss_cluster(
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
+    db_path, _user_id, _ = loc
     data = await request.json()
     if "lat" not in data or "lon" not in data or "radius_meters" not in data:
         return JSONResponse({"error": "lat, lon, radius_meters required"}, status_code=400)
     try:
         result = await asyncio.to_thread(
-            _location_dismiss_cluster, db_path, user_id, data,
+            _location_dismiss_cluster, db_path, data,
         )
         return result
     except Exception as e:
@@ -2572,8 +2620,8 @@ async def api_location_restore_dismissed(
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, _ = loc
-    deleted = await asyncio.to_thread(_location_restore_dismissed, db_path, user_id, cluster_id)
+    db_path, _user_id, _ = loc
+    deleted = await asyncio.to_thread(_location_restore_dismissed, db_path, cluster_id)
     if not deleted:
         return JSONResponse({"error": "dismissed cluster not found"}, status_code=404)
     return {"status": "ok"}
@@ -2588,9 +2636,9 @@ async def api_location_trips(
     loc = _get_location_config(user["username"])
     if not loc:
         return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, user_id, tz_name = loc
+    db_path, _user_id, tz_name = loc
     effective_tz = _resolve_tz(tz, tz_name)
-    return await asyncio.to_thread(_location_query_trips, db_path, user_id, effective_tz, date or None)
+    return await asyncio.to_thread(_location_query_trips, db_path, effective_tz, date or None)
 
 
 # ============================================================================

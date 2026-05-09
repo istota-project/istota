@@ -2423,12 +2423,28 @@ async def run_cleanup_checks(config: Config) -> None:
         except Exception as e:
             logger.error(f"Error cleaning up temp files: {e}")
 
-    # 8. Clean up old location pings
+    # 8. Clean up old location pings (per-user location.db)
     if sched.location_ping_retention_days > 0:
-        with db.get_db(config.db_path) as conn:
-            deleted_pings = db.cleanup_old_location_pings(conn, sched.location_ping_retention_days)
-            if deleted_pings > 0:
-                logger.info(f"Cleaned up {deleted_pings} old location ping(s)")
+        from . import location as _location  # noqa: PLC0415
+
+        total_pings = 0
+        for uid in _location.list_users(config):
+            try:
+                ctx = _location.resolve_for_user(uid, config)
+                with _location.connect(ctx.db_path) as conn:
+                    deleted = _location.db.cleanup_old_pings(
+                        conn, sched.location_ping_retention_days,
+                    )
+                    conn.commit()
+                total_pings += deleted
+            except _location.UserNotFoundError:
+                continue
+            except Exception:
+                logger.exception(
+                    "Failed to clean up location pings for user=%s", uid,
+                )
+        if total_pings > 0:
+            logger.info(f"Cleaned up {total_pings} old location ping(s)")
 
     # 8b. Reconcile visits from pings (batch cleanup of state-machine drift)
     if config.location.reconcile_enabled:
@@ -2448,12 +2464,20 @@ async def run_cleanup_checks(config: Config) -> None:
 
 
 def _reconcile_visits_for_all_users(config: Config) -> None:
-    """Re-derive the visits table for each user with an overland resource.
+    """Re-derive the visits table for each user with the location module
+    enabled.
 
-    Operates on a window ending ``reconcile_buffer_minutes`` before now so
-    the currently-open visit is never rewritten. Only closed visits in the
-    window are replaced.
+    Operates on a window ending ``reconcile_buffer_minutes`` before now
+    so the currently-open visit is never rewritten. Only closed visits
+    in the window are replaced.
+
+    Per-user file scope: every user with an enabled location module is
+    a candidate. The legacy ``[[resources]]`` overland filter was dead
+    code post-modules-refactor (the overland token moved into the
+    secrets table) and is gone.
     """
+    from . import location as _location  # noqa: PLC0415
+
     loc = config.location
     now = datetime.now(timezone.utc)
     until = now - timedelta(minutes=loc.reconcile_buffer_minutes)
@@ -2461,27 +2485,29 @@ def _reconcile_visits_for_all_users(config: Config) -> None:
     since_s = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     until_s = until.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    with db.get_db(config.db_path) as conn:
-        user_ids = [
-            uid for uid, uc in config.users.items()
-            if any(rc.type == "overland" for rc in uc.resources)
-        ]
-        for uid in user_ids:
-            try:
-                n = db.reconcile_visits(
-                    conn, uid, since_s, until_s,
+    for uid in _location.list_users(config):
+        try:
+            ctx = _location.resolve_for_user(uid, config)
+            with _location.connect(ctx.db_path) as conn:
+                n = _location.db.reconcile_visits(
+                    conn, since_s, until_s,
                     grace_minutes=loc.reconcile_grace_minutes,
                     min_pings=loc.reconcile_min_pings,
                     min_dwell_sec=loc.reconcile_min_dwell_sec,
                     accuracy_threshold_m=loc.accuracy_threshold_m,
                 )
-                if n:
-                    logger.info(
-                        "Reconciled %d visit(s) for user=%s window=[%s,%s)",
-                        n, uid, since_s, until_s,
-                    )
-            except Exception as e:
-                logger.error(f"Visit reconciliation failed for {uid}: {e}")
+                conn.commit()
+            if n:
+                logger.info(
+                    "Reconciled %d visit(s) for user=%s window=[%s,%s)",
+                    n, uid, since_s, until_s,
+                )
+        except _location.UserNotFoundError:
+            continue
+        except Exception:
+            logger.exception(
+                "Visit reconciliation failed for user=%s", uid,
+            )
 
 
 def cleanup_old_claude_logs(retention_days: int) -> int:

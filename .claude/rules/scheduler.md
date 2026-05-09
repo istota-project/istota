@@ -222,9 +222,8 @@ After task completion, if enabled + `auto_index_conversations`:
 | `knowledge_facts` | — | id, user_id, subject, predicate, object, source, source_task_id, valid_from, valid_to, created_at |
 | `knowledge_facts_audit` | — | id, fact_id, user_id, op, payload (JSON), source_task_id, created_at |
 | `google_oauth_tokens` | — | user_id, access_token, refresh_token, expires_at, scopes |
-| `dismissed_clusters` | — | user_id, cluster_hash, dismissed_at |
-| `location_state` | — | user_id, last_place_id, last_seen_at, away_streak_started_at |
-| `location_pings` / `places` / `visits` / `geocode_cache` / `reverse_geocode_cache` | — | location subsystem (see `webhook_receiver.py`, `location_logic.py`) |
+| `geocode_cache` / `reverse_geocode_cache` | — | global Nominatim caches (forward + reverse geocoding); shared across users so per-user splitting would lose dedup |
+| (`location_pings` / `places` / `visits` / `location_state` / `dismissed_clusters`) | — | per-user `location.db` only; not in framework `istota.db`. See `src/istota/location/db.py` and AGENTS.md "GPS Location" |
 | `talk_messages` / `talk_poll_state` | — | Talk poller state + message cache |
 | `istota_kv` | — | user_id, namespace, key, value (JSON) — backs the `kv` skill |
 | `trusted_email_senders` | — | user_id, pattern (fnmatch) — email-gate allowlist |

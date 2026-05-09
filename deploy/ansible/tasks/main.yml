@@ -1030,6 +1030,141 @@
     group: "{{ istota_group }}"
   when: not ansible_check_mode and not istota_web_only
 
+# One-time migration: framework istota.db → per-user location.db.
+# Copies each user's location_pings/places/visits/dismissed_clusters/location_state
+# rows into {workspace}/location/data/location.db, then drops the framework tables.
+# Idempotent: skipped once framework location_pings is gone (post-migration). The
+# per-user migrator is itself idempotent via a sentinel in schema_meta, so partial
+# state is recoverable by rerunning.
+- name: Detect framework location_pings table
+  command: >-
+    sqlite3 {{ istota_home }}/data/istota.db
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='location_pings';"
+  register: _location_legacy_tables_check
+  changed_when: false
+  failed_when: false
+  when: not istota_web_only
+
+- name: Pre-check — orphan location data (users not enabled for location module)
+  shell: |
+    set -e
+    sqlite3 -separator "|" {{ istota_home }}/data/istota.db "
+    SELECT user_id, COUNT(*) AS pings, MAX(timestamp) AS latest
+    FROM location_pings
+    WHERE user_id NOT IN ({{ _location_enabled_users_sql }})
+    GROUP BY user_id;"
+  register: _location_orphan_check
+  changed_when: false
+  vars:
+    _location_enabled_users_sql: >-
+      {%- set _enabled = [] -%}
+      {%- for k, v in (istota_users | default({})).items() -%}
+      {%-   if 'location' not in (v.disabled_modules | default([])) -%}
+      {%-     set _ = _enabled.append(k) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set _enabled = _enabled + ['__no_such_user__'] -%}
+      {{ _enabled | map('regex_replace', '^(.*)$', "'\\1'") | join(',') }}
+  when:
+    - not istota_web_only
+    - (_location_legacy_tables_check.stdout | default('') | trim) == 'location_pings'
+
+- name: Halt deploy on orphan framework location data
+  fail:
+    msg: |
+      Framework istota.db has location_pings rows for users not enabled for the
+      location module under the current config:
+
+      {{ _location_orphan_check.stdout }}
+
+      Recovery options:
+        1) Re-enable the location module for these users (remove "location" from
+           their disabled_modules list) and rerun the deploy — their data will
+           be migrated into per-user location.db files.
+        2) Pass -e include_orphans=true to drop these rows along with the
+           framework tables in this stage (data loss, irreversible).
+  when:
+    - not istota_web_only
+    - (_location_legacy_tables_check.stdout | default('') | trim) == 'location_pings'
+    - (_location_orphan_check.stdout | default('') | trim) != ''
+    - not (include_orphans | default(false) | bool)
+
+- name: Pre-check — duplicate (user_id, name) in framework places
+  command: >-
+    sqlite3 -separator "|" {{ istota_home }}/data/istota.db
+    "SELECT user_id, name, COUNT(*) AS dup_count FROM places
+     GROUP BY user_id, name HAVING COUNT(*) > 1;"
+  register: _location_duplicate_places
+  changed_when: false
+  when:
+    - not istota_web_only
+    - (_location_legacy_tables_check.stdout | default('') | trim) == 'location_pings'
+
+- name: Halt deploy on duplicate place names
+  fail:
+    msg: |
+      Framework places table has duplicate (user_id, name) rows that would
+      violate the per-user UNIQUE(name) constraint after migration:
+
+      {{ _location_duplicate_places.stdout }}
+
+      Resolve manually (rename or delete duplicates) before rerunning.
+  when:
+    - not istota_web_only
+    - (_location_legacy_tables_check.stdout | default('') | trim) == 'location_pings'
+    - (_location_duplicate_places.stdout | default('') | trim) != ''
+
+- name: Migrate framework location data into per-user location.db files
+  block:
+    - name: Stop services for location migration
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - "{{ istota_namespace }}-scheduler"
+        - "{{ istota_namespace }}-web"
+        - "{{ istota_namespace }}-webhooks"
+      failed_when: false  # missing units (e.g. webhooks disabled) are fine
+
+    - name: Run per-user location migrator
+      command: >-
+        {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.location._migrate
+      args:
+        chdir: "{{ istota_repo_dir }}"
+      environment:
+        ISTOTA_ADMINS_FILE: "/etc/{{ istota_namespace }}/admins"
+      register: _location_migrator_result
+
+    - name: Show migrator output
+      debug:
+        msg: "{{ _location_migrator_result.stdout_lines }}"
+
+    - name: Drop legacy location tables from framework istota.db
+      command: >-
+        sqlite3 {{ istota_home }}/data/istota.db
+        "DROP TABLE IF EXISTS location_pings;
+         DROP TABLE IF EXISTS visits;
+         DROP TABLE IF EXISTS dismissed_clusters;
+         DROP TABLE IF EXISTS location_state;
+         DROP TABLE IF EXISTS places;
+         VACUUM;"
+
+    # Bring services back up explicitly. Notify handlers fire at end-of-play,
+    # but on a re-run where templates didn't change those wouldn't fire and
+    # we'd leave services down — same pattern as the istota.db rename block.
+    - name: Restart services after location migration
+      systemd:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - "{{ istota_namespace }}-scheduler"
+        - "{{ istota_namespace }}-web"
+        - "{{ istota_namespace }}-webhooks"
+      failed_when: false
+  when:
+    - not istota_web_only
+    - (_location_legacy_tables_check.stdout | default('') | trim) == 'location_pings'
+
 - name: Deploy istota-scheduler systemd service
   template:
     src: istota-scheduler.service.j2
