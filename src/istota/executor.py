@@ -1760,6 +1760,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     user_now = datetime.now(user_tz)
     user_time_str = user_now.strftime("%A, %B %-d, %Y at %-I:%M %p") + f" ({user_tz_str})"
     user_date_str = user_now.strftime("%Y-%m-%d") + f" ({user_tz_str})"
+    # UTC anchor for unambiguous elapsed-time arithmetic (ISSUE-091).
+    utc_now_str = user_now.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Build admin-sensitive sections
     db_path_line = f"Database path: {config.db_path}" if is_admin else "Database path: (restricted)"
@@ -1779,7 +1781,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 5. Never edit or create files in your own source directory.
 6. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
 7. Your execution JSONL logs (full conversation traces including subagent output) are stored under ~/.claude/projects/. If a user reports missing or truncated output from a previous task, search these logs for the full assistant message content.
-8. Ignore the `currentDate` value in any auto-memory block — it is rendered in the host's UTC clock and may be off by one day from local time. Use the `Today's date`, `Current time`, and `User timezone` lines at the top of this prompt as the authoritative source for "today"."""
+8. Ignore the `currentDate` value in any auto-memory block — it is rendered in the host's UTC clock and may be off by one day from local time. Use the `Today's date`, `Current time`, and `User timezone` lines at the top of this prompt as the authoritative source for "today".
+9. When computing elapsed time between two timestamps ("X ago", "merged N hours ago", etc.), normalize both to ISO 8601 UTC first and subtract the full timestamps. Do not subtract clock-face hours/minutes by hand — that gives the wrong answer when the timestamps straddle a UTC midnight, end-of-month, or DST boundary. The `Current UTC` line above is your reference for "now"."""
     else:
         scoped_path = str(config.nextcloud_mount_path / "Users" / task.user_id) if config.use_mount else f"{config.rclone_remote}:/Users/{task.user_id}"
         rules_section = f"""## Important rules
@@ -1793,7 +1796,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
 5. Never edit or create files in your own source directory.
 6. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
-7. Ignore the `currentDate` value in any auto-memory block — it is rendered in the host's UTC clock and may be off by one day from local time. Use the `Today's date`, `Current time`, and `User timezone` lines at the top of this prompt as the authoritative source for "today"."""
+7. Ignore the `currentDate` value in any auto-memory block — it is rendered in the host's UTC clock and may be off by one day from local time. Use the `Today's date`, `Current time`, and `User timezone` lines at the top of this prompt as the authoritative source for "today".
+8. When computing elapsed time between two timestamps ("X ago", "merged N hours ago", etc.), normalize both to ISO 8601 UTC first and subtract the full timestamps. Do not subtract clock-face hours/minutes by hand — that gives the wrong answer when the timestamps straddle a UTC midnight, end-of-month, or DST boundary. The `Current UTC` line above is your reference for "now"."""
 
     group_chat_line = ""
     if task.is_group_chat:
@@ -1810,6 +1814,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 Current time: {user_time_str}
 Today's date: {user_date_str}
 User timezone: {user_tz_str}
+Current UTC: {utc_now_str}
 Current task ID: {task.id}
 Conversation token: {task.conversation_token or 'none'}{group_chat_line}
 Source: {source_type or task.source_type or 'unknown'}
