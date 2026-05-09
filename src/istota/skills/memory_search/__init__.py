@@ -25,7 +25,6 @@ def _get_conn() -> sqlite3.Connection:
         print(json.dumps({"status": "error", "error": "ISTOTA_DB_PATH not set"}))
         sys.exit(1)
     conn = sqlite3.connect(db_path, timeout=30.0)
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     return conn
 

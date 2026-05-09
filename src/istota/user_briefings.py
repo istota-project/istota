@@ -52,10 +52,15 @@ class UserBriefing:
 
 @contextmanager
 def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """Open a connection with WAL + 30s timeout, matching db.get_db semantics."""
+    """Open a connection with 30s timeout, matching db.get_db semantics.
+
+    WAL is persistent in the SQLite file header; re-issuing
+    ``PRAGMA journal_mode=WAL`` per connection costs a write-lock
+    acquisition and races with sibling readers. The framework
+    ``istota.db`` is initialised in WAL mode at ``init_db`` time.
+    """
     conn = sqlite3.connect(db_path, timeout=30.0)
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
         yield conn
         conn.commit()
