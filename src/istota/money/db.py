@@ -60,10 +60,14 @@ CREATE TABLE IF NOT EXISTS kv_store (
 
 @contextmanager
 def get_db(db_path: Path | str):
-    """Context manager for database connections with WAL mode and row factory."""
+    """Context manager for database connections with row factory.
+
+    WAL is set once by ``init_db`` and persists in the SQLite file
+    header — re-issuing the pragma per connection costs a write-lock
+    acquisition and races with sibling readers.
+    """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     try:
         yield conn
         conn.commit()
@@ -77,6 +81,7 @@ def get_db(db_path: Path | str):
 def init_db(db_path: Path | str) -> None:
     """Create tables if they don't exist."""
     with get_db(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         _migrate_monarch_synced_columns(conn)
 

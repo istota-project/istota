@@ -125,18 +125,17 @@ class SecretRef:
 
 @contextmanager
 def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """Open a sqlite3 connection with the same WAL+timeout settings as ``db.get_db``.
+    """Open a sqlite3 connection with the same timeout settings as ``db.get_db``.
 
-    Without WAL, ``get_secret``'s SELECT-then-UPDATE pattern hits a writer
-    lock contention every time the scheduler and the web process touch the
-    same row. ``timeout=30.0`` plus WAL gives us coexistence with the main
-    DB connection pool — the secrets table lives in the same file.
+    WAL is persistent in the SQLite file header; re-issuing
+    ``PRAGMA journal_mode=WAL`` per connection costs a write-lock
+    acquisition and races with sibling readers. The framework
+    ``istota.db`` is initialised in WAL mode at ``init_db`` time.
+    ``timeout=30.0`` keeps ``get_secret``'s SELECT-then-UPDATE pattern
+    coexistent with the main DB connection pool.
     """
     conn = sqlite3.connect(db_path, timeout=30.0)
     try:
-        # WAL is sticky on a DB file; setting it from any connection is fine
-        # and idempotent. Cheap enough to do on every open.
-        conn.execute("PRAGMA journal_mode=WAL")
         yield conn
         conn.commit()
     finally:
