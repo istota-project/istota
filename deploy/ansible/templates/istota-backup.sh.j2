@@ -13,6 +13,10 @@ RCLONE_CONFIG="{{ istota_backup_rclone_config }}"
 RCLONE_REMOTE="{{ istota_backup_rclone_remote }}"
 RCLONE_BACKUP_PATH="{{ istota_backup_rclone_remote_path }}"
 
+# Module DBs live per-user at {mount}/Users/<user>/<bot_dir>/<module>/data/<module>.db
+# and need WAL-aware backups too — rclone file-copy is not WAL-safe.
+MODULE_NAMES=(feeds money location)
+
 TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
 DAY_OF_WEEK=$(date +%u)
 
@@ -24,59 +28,102 @@ mount_available() {
     mountpoint -q "$MOUNT_PATH" 2>/dev/null
 }
 
-backup_db() {
-    log "Starting database backup"
+# Backup a single SQLite DB with WAL-aware .backup, integrity check, gzip,
+# remote copy, and per-prefix retention rotation.
+#   $1 — source DB path
+#   $2 — backup name prefix (used in filename + rotation glob)
+_backup_one_db() {
+    local src_db="$1"
+    local prefix="$2"
+
+    if [ ! -f "$src_db" ]; then
+        log "Skipping ${prefix}: source DB not found at ${src_db}"
+        return 0
+    fi
+
+    log "Backing up ${prefix} (${src_db})"
 
     local tmp_file
-    tmp_file=$(mktemp "${LOCAL_DIR}/{{ istota_namespace }}-backup-XXXXXX.db")
+    tmp_file=$(mktemp "${LOCAL_DIR}/${prefix}-backup-XXXXXX.db")
     trap 'rm -f "$tmp_file"' RETURN
 
-    # Safe WAL-aware backup
-    sqlite3 "$DB" ".backup '$tmp_file'"
+    sqlite3 "$src_db" ".backup '$tmp_file'"
 
-    # Integrity check on backup copy
     local check
     check=$(sqlite3 "$tmp_file" "PRAGMA integrity_check;")
     if [ "$check" != "ok" ]; then
-        log "ERROR: Backup integrity check failed: $check"
+        log "ERROR: Backup integrity check failed for ${prefix}: $check"
         return 1
     fi
 
-    local backup_name="{{ istota_namespace }}-${TIMESTAMP}.db.gz"
+    local backup_name="${prefix}-${TIMESTAMP}.db.gz"
 
-    # Daily backup (local)
     gzip -c "$tmp_file" > "${LOCAL_DIR}/daily/${backup_name}"
     log "Local daily backup saved: ${LOCAL_DIR}/daily/${backup_name}"
 
-    # Weekly backup on Sundays (local)
     if [ "$DAY_OF_WEEK" -eq 7 ]; then
         cp "${LOCAL_DIR}/daily/${backup_name}" "${LOCAL_DIR}/weekly/${backup_name}"
         log "Local weekly backup saved: ${LOCAL_DIR}/weekly/${backup_name}"
     fi
 
-    # Remote copies via mount
     if mount_available; then
         cp "${LOCAL_DIR}/daily/${backup_name}" "${REMOTE_DIR}/db/daily/${backup_name}"
-        log "Remote daily backup copied"
+        log "Remote daily backup copied: ${backup_name}"
 
         if [ "$DAY_OF_WEEK" -eq 7 ]; then
             cp "${LOCAL_DIR}/weekly/${backup_name}" "${REMOTE_DIR}/db/weekly/${backup_name}"
-            log "Remote weekly backup copied"
+            log "Remote weekly backup copied: ${backup_name}"
         fi
     else
-        log "WARNING: Nextcloud mount not available, skipping remote copy"
+        log "WARNING: Nextcloud mount not available, skipping remote copy for ${prefix}"
     fi
 
-    # Rotate local daily
-    find "${LOCAL_DIR}/daily" -name "{{ istota_namespace }}-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
-    # Rotate local weekly
-    find "${LOCAL_DIR}/weekly" -name "{{ istota_namespace }}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
+    # Rotate per-prefix so each (user, module) has its own retention window
+    find "${LOCAL_DIR}/daily" -name "${prefix}-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
+    find "${LOCAL_DIR}/weekly" -name "${prefix}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
 
-    # Rotate remote
     if mount_available; then
-        find "${REMOTE_DIR}/db/daily" -name "{{ istota_namespace }}-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
-        find "${REMOTE_DIR}/db/weekly" -name "{{ istota_namespace }}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
+        find "${REMOTE_DIR}/db/daily" -name "${prefix}-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
+        find "${REMOTE_DIR}/db/weekly" -name "${prefix}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
     fi
+}
+
+# Discover per-user module DBs by scanning {mount}/Users/<user>/*/<module>/data/<module>.db.
+# The bot_dir name is wildcarded so the discovery doesn't depend on namespace
+# config matching the deployed mount layout.
+_discover_module_dbs() {
+    if ! mount_available; then
+        return 0
+    fi
+    local users_root="${MOUNT_PATH}/Users"
+    [ -d "$users_root" ] || return 0
+
+    local module
+    local find_args=()
+    for module in "${MODULE_NAMES[@]}"; do
+        find_args+=(-o -path "*/${module}/data/${module}.db")
+    done
+    # Drop the leading -o
+    find_args=("${find_args[@]:1}")
+
+    find "$users_root" -mindepth 5 -maxdepth 5 -type f \( "${find_args[@]}" \) 2>/dev/null
+}
+
+backup_db() {
+    log "Starting database backup"
+
+    _backup_one_db "$DB" "{{ istota_namespace }}"
+
+    # Per-user module DBs (feeds, money, location, ...)
+    local module_db user_id module
+    while IFS= read -r module_db; do
+        [ -z "$module_db" ] && continue
+        # Path shape: {mount}/Users/<user>/<bot_dir>/<module>/data/<module>.db
+        # Walk up from the file: dirname=data, parent=module, grandparent=bot_dir, then user.
+        module=$(basename "$(dirname "$(dirname "$module_db")")")
+        user_id=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$module_db")")")")")
+        _backup_one_db "$module_db" "${user_id}-${module}"
+    done < <(_discover_module_dbs)
 
     log "Database backup complete"
 }
