@@ -270,8 +270,11 @@ def _process_deferred_kv_ops(
 ) -> int:
     """Process deferred KV store operations from JSON file.
 
-    When Claude runs `istota-skill kv set/delete` inside the sandbox, the skill
-    CLI writes operations to a deferred file. The scheduler processes them here.
+    When Claude runs `istota-skill kv set|delete|set-add|set-remove` inside
+    the sandbox, the skill CLI writes operations to a deferred file. The
+    scheduler processes them here. `set-add` / `set-remove` re-read the
+    current value from the DB before applying the diff so concurrent ops
+    across tasks compose correctly.
 
     Returns count of operations processed.
     """
@@ -295,6 +298,45 @@ def _process_deferred_kv_ops(
                     count += 1
                 elif op == "delete":
                     db.kv_delete(conn, task.user_id, namespace, key)
+                    count += 1
+                elif op in ("set-add", "set-remove"):
+                    members = entry.get("members") or []
+                    if not isinstance(members, list):
+                        logger.warning(
+                            "Bad %s op for task %d: members not a list", op, task.id,
+                        )
+                        continue
+                    row = db.kv_get(conn, task.user_id, namespace, key)
+                    current: list = []
+                    if row is not None:
+                        try:
+                            parsed = json.loads(row["value"])
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Skipping %s for task %d: %s/%s is not valid JSON",
+                                op, task.id, namespace, key,
+                            )
+                            continue
+                        if not isinstance(parsed, list):
+                            logger.warning(
+                                "Skipping %s for task %d: %s/%s is not a JSON array",
+                                op, task.id, namespace, key,
+                            )
+                            continue
+                        current = parsed
+                    if op == "set-add":
+                        seen = set(current)
+                        new_members = list(current)
+                        for m in members:
+                            if m not in seen:
+                                new_members.append(m)
+                                seen.add(m)
+                    else:
+                        to_remove = set(members)
+                        new_members = [m for m in current if m not in to_remove]
+                    db.kv_set(
+                        conn, task.user_id, namespace, key, json.dumps(new_members),
+                    )
                     count += 1
                 else:
                     logger.warning(
