@@ -50,7 +50,8 @@ SUGGESTED_PREDICATES = {
     "staying_in": "temporary location like a trip or hotel (temporary, use valid_from/valid_until for dates)",
     "visiting": "short visit to a place (temporary, use valid_from/valid_until for dates)",
     "traveled_to": "completed trip or visit to a location (use valid_from/valid_until for dates)",
-    "has_appointment": "scheduled medical or professional appointment (use valid_from for the date)",
+    "has_scheduled_procedure": "ongoing medical workup or scheduled procedure — context only, NOT the date (calendar owns the date)",
+    "has_medical_workup": "ongoing diagnostic process — context only, NOT the date (calendar owns the date)",
     # Multi-valued (concurrent facts allowed)
     "works_on": "project, product, or initiative",
     "uses_tech": "software, programming language, or digital tool (not physical objects)",
@@ -429,6 +430,16 @@ Temporal facts: for trips, visits, and time-bounded states, put dates in valid_f
 fields — NOT in the object string. Example:
   {{"subject": "felix", "predicate": "visiting", "object": "japan", "valid_from": "2026-04-14", "valid_until": "2026-04-24"}}
 NOT: {{"subject": "felix", "predicate": "visiting", "object": "japan, april 14-24 2026"}}
+
+Calendar-managed events: do NOT create facts that carry the date of a scheduled event whose
+date already lives on the calendar (medical appointments, meetings, deadlines, etc.). The
+calendar is the sole authority for when scheduled events happen — duplicating the date in a
+KG fact creates two independent stores that can disagree, with no tiebreaker. KG facts may
+capture date-less metadata about the event (procedure type, fasting requirements, location
+details, what the workup is for) using predicates like has_scheduled_procedure or
+has_medical_workup. On any such fact, valid_from = when we learned about it, NEVER the event
+date. If the event date is the only thing worth recording, write nothing — the calendar
+already has it.
 
 Normalize entity names to lowercase. Object values MUST be under 10 words (max 100 characters)
 — put context, reasoning, and detail in MEMORIES, not in fact objects. Long objects break

@@ -26,6 +26,8 @@ Before storing anything in memory, decide which of these three branches it falls
 
 **Don't store** — anything already on the calendar / in files; transient state ("meeting tomorrow"); information about other users; sensitive data (passwords, tokens, financial account numbers).
 
+**Calendar owns dates for scheduled events.** Never write a KG fact that carries the date of an appointment, meeting, or other calendar-managed event. The calendar is the single source of truth for when things happen — duplicating the date in a KG fact creates two independent stores that can (and do) disagree, with nothing to break the tie. Date-less metadata about a scheduled event is fine: `has_scheduled_procedure mri`, `has_medical_workup "kaiser sunset, 4hr fast"`. On these facts, `--from` = when we learned the fact, never the event date. If the event date is the only thing worth recording, write nothing — the calendar already has it.
+
 ### Writing facts
 
 ```bash

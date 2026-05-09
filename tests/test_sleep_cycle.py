@@ -416,8 +416,21 @@ class TestBuildMemoryExtractionPrompt:
     def test_prompt_includes_new_predicates(self):
         """Expanded predicate vocabulary (item 5)."""
         prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
-        for pred in ("has_family_member", "traveled_to", "completed", "has_appointment", "interested_in"):
+        for pred in ("has_family_member", "traveled_to", "completed", "has_scheduled_procedure", "interested_in"):
             assert pred in prompt, f"Predicate '{pred}' missing from prompt"
+
+    def test_appointment_predicate_dropped(self):
+        """has_appointment was retired (ISSUE-089) — calendar owns scheduled-event dates."""
+        assert "has_appointment" not in SUGGESTED_PREDICATES
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "has_appointment" not in prompt
+
+    def test_prompt_forbids_calendar_event_dates_in_kg(self):
+        """Prompt must steer the model away from duplicating calendar dates in KG facts."""
+        prompt = build_memory_extraction_prompt("alice", "data", None, "2026-01-28")
+        assert "Calendar-managed events" in prompt
+        assert "calendar is the sole authority" in prompt
+        assert "has_scheduled_procedure" in prompt
 
 
 class TestProcessUserSleepCycle:
