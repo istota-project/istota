@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-05-09
+
 ### Added
 - **KV set ops** — `kv set-contains`, `set-size`, `set-members` (read), `set-add`, `set-remove` (deferred-write) for membership-tracking patterns. Operate on a JSON-array value at `<ns>/<key>` with plain-string members. Bootstraps `[]` if missing. `set-add` / `set-remove` accept multiple members per call. Deferred ops carry only the member list; the scheduler re-reads the current value at apply time so concurrent set-adds across tasks compose correctly. Existing `get` / `set` / `list` / `delete` / `namespaces` semantics unchanged. Avoids round-tripping large blobs (e.g. ~44 KB seen-IDs arrays) through the skill proxy when the caller just needs a membership check.
 
@@ -507,7 +509,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.11.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.11.1...main
+[0.11.1]: https://gitlab.com/cynium/istota/-/releases/v0.11.1
 [0.11.0]: https://gitlab.com/cynium/istota/-/releases/v0.11.0
 [0.10.0]: https://gitlab.com/cynium/istota/-/releases/v0.10.0
 [0.9.0]: https://gitlab.com/cynium/istota/-/releases/v0.9.0
