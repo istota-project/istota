@@ -729,6 +729,80 @@
     - "restart istota-scheduler"
     - "restart istota-web"
 
+# One-time migration for deploys that pre-date the istota.db rename.
+# The codebase standardized on `istota.db` and `istota_*` table names; the
+# per-deploy namespace only lives in dirs/services. Long-lived deploys (zorg)
+# still have <namespace>.db on disk plus dead per-namespace cruft tables.
+# Idempotent: skipped once istota.db exists or namespace is already 'istota'.
+- name: Detect legacy <namespace>.db
+  stat:
+    path: "{{ istota_home }}/data/{{ istota_namespace }}.db"
+  register: _istota_legacy_db
+  when: not istota_web_only and istota_namespace != 'istota'
+
+- name: Detect canonical istota.db
+  stat:
+    path: "{{ istota_home }}/data/istota.db"
+  register: _istota_canonical_db
+  when: not istota_web_only and istota_namespace != 'istota'
+
+- name: Migrate legacy <namespace>.db to istota.db
+  block:
+    - name: Stop services for legacy DB rename
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - "{{ istota_namespace }}-scheduler"
+        - "{{ istota_namespace }}-web"
+        - "{{ istota_namespace }}-webhooks"
+      failed_when: false  # missing units (e.g. webhooks disabled) are fine
+
+    # Drops:
+    #   feed_items, feed_state         dead since the per-user feeds.db split
+    #   <namespace>_kv                 created but never written; istota_kv is live
+    #   <namespace>_file_tasks         small live data; user opted to drop
+    - name: Drop dead module/legacy tables in legacy DB
+      command: >-
+        sqlite3 {{ istota_home }}/data/{{ istota_namespace }}.db
+        "DROP TABLE IF EXISTS feed_items;
+         DROP TABLE IF EXISTS feed_state;
+         DROP TABLE IF EXISTS {{ istota_namespace }}_kv;
+         DROP TABLE IF EXISTS {{ istota_namespace }}_file_tasks;
+         VACUUM;"
+
+    - name: Rename legacy DB and WAL/SHM sidecars to istota.db
+      shell: |
+        set -e
+        cd "{{ istota_home }}/data"
+        mv "{{ istota_namespace }}.db" istota.db
+        for ext in -wal -shm; do
+          src="{{ istota_namespace }}.db${ext}"
+          [ -f "$src" ] && mv "$src" "istota.db${ext}"
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+
+    # Bring services back up explicitly. The config template change queues
+    # restart handlers for end-of-play, but on a re-run where the template
+    # didn't change those wouldn't fire and we'd leave services down.
+    - name: Restart services after legacy DB rename
+      systemd:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - "{{ istota_namespace }}-scheduler"
+        - "{{ istota_namespace }}-web"
+        - "{{ istota_namespace }}-webhooks"
+      failed_when: false
+  when:
+    - not istota_web_only
+    - istota_namespace != 'istota'
+    - _istota_legacy_db.stat is defined
+    - _istota_legacy_db.stat.exists
+    - not (_istota_canonical_db.stat.exists | default(false))
+
 # ISSUE-058: Validate the rendered config before any handler restarts the
 # scheduler. Catches structural bugs (keys nested under the wrong [table],
 # unparseable TOML, fields silently falling back to dataclass defaults)
@@ -740,7 +814,7 @@
     files/validate_config.py
     "{{ istota_repo_dir }}/config/config.toml"
     "{{ istota_package }}"
-    "{{ istota_home }}/data/{{ istota_namespace }}.db"
+    "{{ istota_home }}/data/istota.db"
     "{{ istota_home }}/tmp"
   args:
     executable: "{{ istota_home }}/.venv/bin/python"
@@ -748,7 +822,7 @@
   when: not istota_web_only
 
 - name: Initialize/migrate database schema
-  command: "{{ istota_home }}/.venv/bin/python -c \"from pathlib import Path; import sys; sys.path.insert(0, 'src'); from {{ istota_package }}.db import init_db; init_db(Path('{{ istota_home }}/data/{{ istota_namespace }}.db'))\""
+  command: "{{ istota_home }}/.venv/bin/python -c \"from pathlib import Path; import sys; sys.path.insert(0, 'src'); from {{ istota_package }}.db import init_db; init_db(Path('{{ istota_home }}/data/istota.db'))\""
   args:
     chdir: "{{ istota_repo_dir }}"
   changed_when: false  # Schema uses CREATE TABLE IF NOT EXISTS, always safe to run
@@ -943,15 +1017,15 @@
 
 - name: Apply database migrations
   shell: |
-    sqlite3 "{{ istota_home }}/data/{{ istota_namespace }}.db" "ALTER TABLE processed_emails ADD COLUMN \"references\" TEXT;" 2>/dev/null || true
-    sqlite3 "{{ istota_home }}/data/{{ istota_namespace }}.db" "ALTER TABLE tasks ADD COLUMN output_target TEXT;" 2>/dev/null || true
-    sqlite3 "{{ istota_home }}/data/{{ istota_namespace }}.db" "ALTER TABLE scheduled_jobs ADD COLUMN output_target TEXT;" 2>/dev/null || true
+    sqlite3 "{{ istota_home }}/data/istota.db" "ALTER TABLE processed_emails ADD COLUMN \"references\" TEXT;" 2>/dev/null || true
+    sqlite3 "{{ istota_home }}/data/istota.db" "ALTER TABLE tasks ADD COLUMN output_target TEXT;" 2>/dev/null || true
+    sqlite3 "{{ istota_home }}/data/istota.db" "ALTER TABLE scheduled_jobs ADD COLUMN output_target TEXT;" 2>/dev/null || true
   changed_when: false  # Idempotent - silently fails if column already exists
   when: not istota_web_only
 
 - name: Set ownership of database
   file:
-    path: "{{ istota_home }}/data/{{ istota_namespace }}.db"
+    path: "{{ istota_home }}/data/istota.db"
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
   when: not ansible_check_mode and not istota_web_only
