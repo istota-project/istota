@@ -664,6 +664,36 @@ def reconcile_visits(
         for r in conn.execute("SELECT id, name FROM places").fetchall()
     }
 
+    # `location_pings.visit_id` and `location_state.current_visit_id`
+    # both REFERENCE visits(id). With `PRAGMA foreign_keys = ON` (set by
+    # `connect()`), deleting visits while pings still point at them
+    # raises FOREIGN KEY constraint failed. Null the back-references
+    # first; pings keep their `place_id`, which is what reconcile reads.
+    conn.execute(
+        """
+        UPDATE location_pings SET visit_id = NULL
+        WHERE visit_id IN (
+            SELECT id FROM visits
+            WHERE exited_at IS NOT NULL
+              AND exited_at >= ?
+              AND entered_at < ?
+        )
+        """,
+        (since, until),
+    )
+    conn.execute(
+        """
+        UPDATE location_state SET current_visit_id = NULL
+        WHERE current_visit_id IN (
+            SELECT id FROM visits
+            WHERE exited_at IS NOT NULL
+              AND exited_at >= ?
+              AND entered_at < ?
+        )
+        """,
+        (since, until),
+    )
+
     conn.execute(
         """
         DELETE FROM visits

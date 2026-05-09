@@ -11,6 +11,10 @@ ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.webhook_recei
 Restart=always
 RestartSec=5
 
+# FD ceiling — see scheduler unit. Webhook receiver writes per-user
+# location.db on every Overland ingest.
+LimitNOFILE=65536
+
 # Environment
 Environment=PATH={{ istota_home }}/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME={{ istota_home }}

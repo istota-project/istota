@@ -14,6 +14,7 @@ when modules took over module gating.
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 
 import tomli
@@ -85,16 +86,24 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
     return {"monarch": monarch} if monarch else {}
 
 
-def resolve_for_user(user_id: str, istota_config) -> UserContext:
+def resolve_for_user(
+    user_id: str,
+    istota_config,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> UserContext:
     """Build a money :class:`UserContext` for ``user_id``.
 
     Gated on ``Config.is_module_enabled(user_id, "money")``. The workspace
     root is always ``{nextcloud_mount}/{get_user_bot_path(...)}``.
+
+    Pass ``conn`` to reuse an existing framework-DB connection for the
+    module-enabled check (hot scheduler loops).
     """
     if istota_config is None:
         raise UserNotFoundError("istota config not loaded")
 
-    if not istota_config.is_module_enabled(user_id, "money"):
+    if not istota_config.is_module_enabled(user_id, "money", conn=conn):
         raise UserNotFoundError(f"money module disabled for '{user_id}'")
 
     uc = istota_config.get_user(user_id)
@@ -121,11 +130,18 @@ def resolve_for_user(user_id: str, istota_config) -> UserContext:
     return ctx
 
 
-def list_users(istota_config) -> list[str]:
-    """List istota usernames with the money module enabled."""
+def list_users(
+    istota_config,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> list[str]:
+    """List istota usernames with the money module enabled.
+
+    Pass ``conn`` to reuse an existing framework-DB connection.
+    """
     if istota_config is None:
         return []
     return [
         uid for uid in (istota_config.users or {})
-        if istota_config.is_module_enabled(uid, "money")
+        if istota_config.is_module_enabled(uid, "money", conn=conn)
     ]

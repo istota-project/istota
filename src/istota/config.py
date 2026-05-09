@@ -547,7 +547,13 @@ class Config:
             return uc.max_background_workers
         return self.scheduler.user_max_background_workers
 
-    def is_module_enabled(self, user_id: str, module: str) -> bool:
+    def is_module_enabled(
+        self,
+        user_id: str,
+        module: str,
+        *,
+        conn: "sqlite3.Connection | None" = None,
+    ) -> bool:
         """Check whether a module is enabled for a user.
 
         Modules are on by default. Returns False only when the user has an
@@ -560,6 +566,11 @@ class Config:
         without waiting for a config reload. Falls back to the in-memory
         ``UserConfig`` for the init / test paths where the DB may not exist
         yet, or when the row hasn't been seeded.
+
+        Pass ``conn`` to reuse an existing framework-DB connection — hot
+        per-tick loops in the scheduler already hold one and would
+        otherwise open a fresh sqlite connection per call (the FD churn
+        that produced "unable to open database file" / EMFILE).
         """
         from .modules import MODULE_NAMES
         if module not in MODULE_NAMES:
@@ -568,7 +579,7 @@ class Config:
         if self.db_path is not None and Path(self.db_path).exists():
             try:
                 from . import user_profiles as _up
-                profile = _up.get_profile(Path(self.db_path), user_id)
+                profile = _up.get_profile(Path(self.db_path), user_id, conn=conn)
             except Exception as e:  # pragma: no cover - defensive
                 logger.debug("is_module_enabled DB read failed: %s", e)
                 profile = None

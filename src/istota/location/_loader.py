@@ -12,6 +12,7 @@ path is derived from ``nextcloud_mount_path`` + ``get_user_bot_path``.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from istota.location.models import LocationContext
@@ -22,17 +23,25 @@ class UserNotFoundError(Exception):
     """The user has no usable location configuration."""
 
 
-def resolve_for_user(user_id: str, istota_config) -> LocationContext:
+def resolve_for_user(
+    user_id: str,
+    istota_config,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> LocationContext:
     """Build a location context for ``user_id``.
 
     Raises :class:`UserNotFoundError` if the config is missing, the user
     is unknown, the location module is opted out, or the Nextcloud mount
     path is unset.
+
+    Pass ``conn`` to reuse an existing framework-DB connection for the
+    module-enabled check (hot scheduler loops).
     """
     if istota_config is None:
         raise UserNotFoundError("istota config not loaded")
 
-    if not istota_config.is_module_enabled(user_id, "location"):
+    if not istota_config.is_module_enabled(user_id, "location", conn=conn):
         raise UserNotFoundError(f"location module disabled for '{user_id}'")
 
     if user_id not in (istota_config.users or {}):
@@ -53,11 +62,19 @@ def resolve_for_user(user_id: str, istota_config) -> LocationContext:
     return synthesize_location_context(user_id, workspace)
 
 
-def list_users(istota_config) -> list[str]:
-    """Istota usernames with the location module enabled."""
+def list_users(
+    istota_config,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> list[str]:
+    """Istota usernames with the location module enabled.
+
+    Pass ``conn`` to reuse an existing framework-DB connection — without
+    it, every per-user check opens a fresh sqlite connection.
+    """
     if istota_config is None:
         return []
     return [
         uid for uid in (istota_config.users or {})
-        if istota_config.is_module_enabled(uid, "location")
+        if istota_config.is_module_enabled(uid, "location", conn=conn)
     ]
