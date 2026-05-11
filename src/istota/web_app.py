@@ -1190,11 +1190,25 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
     Modules are on by default. The web UI uses this to render the
     "Disabled modules" multiselect in /settings → Preferences and to gate
     each module's settings page with a banner.
+
+    Experimental modules (entries in ``EXPERIMENTAL_MODULES``) are hidden
+    unless the operator has enabled the matching ``module_<name>`` flag
+    via ``[experimental] features`` — they shouldn't appear in the
+    settings UI on standard installs.
     """
-    from .modules import MODULE_NAMES
+    from .modules import EXPERIMENTAL_MODULES, MODULE_NAMES
+
+    def _visible(cfg) -> list[str]:
+        out = []
+        for name in sorted(MODULE_NAMES):
+            flag = EXPERIMENTAL_MODULES.get(name)
+            if flag and (cfg is None or not cfg.experimental.is_enabled(flag)):
+                continue
+            out.append(name)
+        return out
 
     if not _config:
-        modules = sorted(MODULE_NAMES)
+        modules = _visible(None)
         return {
             "modules": modules,
             "disabled": [],
@@ -1202,12 +1216,12 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
         }
 
     username = user["username"]
-    modules = sorted(MODULE_NAMES)
+    modules = _visible(_config)
     uc = _config.get_user(username)
     disabled = list(uc.disabled_modules) if uc else []
     return {
         "modules": modules,
-        "disabled": [m for m in disabled if m in MODULE_NAMES],
+        "disabled": [m for m in disabled if m in modules],
         "enabled_for_user": {
             m: _config.is_module_enabled(username, m) for m in modules
         },
@@ -1374,9 +1388,17 @@ def _coerce_profile_value(field: str, value: object) -> object:
             if v:
                 out.append(v)
         if field == "disabled_modules":
-            from .modules import MODULE_NAMES
+            from .modules import EXPERIMENTAL_MODULES, MODULE_NAMES
             for v in out:
                 if v not in MODULE_NAMES:
+                    raise ValueError(f"unknown module: {v}")
+                # Experimental modules aren't user-visible until the
+                # operator enables their flag. Accepting writes for
+                # hidden modules would leak the module's existence and
+                # persist state that's invisible everywhere else in the
+                # UI (the modules endpoint filters them out).
+                flag = EXPERIMENTAL_MODULES.get(v)
+                if flag and not (_config and _config.experimental.is_enabled(flag)):
                     raise ValueError(f"unknown module: {v}")
         return out
     if t == "int":

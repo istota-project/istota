@@ -81,6 +81,7 @@ def build_prompt(
 | Core | `ISTOTA_DB_PATH` | `str(config.db_path)` |
 | Core | `ISTOTA_CONVERSATION_TOKEN` | `task.conversation_token` |
 | Core | `ISTOTA_DEFERRED_DIR` | `str(user_temp_dir)` — always set, for deferred DB writes |
+| Core | `ISTOTA_EXPERIMENTAL_FEATURES` | CSV of `config.experimental.features`. Read by `experimental.enabled_features_from_env()` and `@requires_feature`. Propagated by every subprocess builder: `executor.execute_task` (LLM path), `scheduler._execute_skill_task`, `scheduler._execute_command_task`, `heartbeat._check_shell_command`. Not credential-flavored — passes through the skill proxy and `build_stripped_env` untouched. |
 | Core | `ISTOTA_SKILL_PROXY_SOCK` | Skill proxy socket path (if proxy enabled) |
 | Nextcloud | `NC_URL`, `NC_USER`, `NC_PASS` | `config.nextcloud.*` |
 | Nextcloud | `NEXTCLOUD_MOUNT_PATH` | `str(config.nextcloud_mount_path)` |

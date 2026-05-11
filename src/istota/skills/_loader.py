@@ -188,6 +188,7 @@ def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
         exclude_persona=_get_bool("exclude_persona"),
         exclude_resources=_get_list("exclude_resources"),
         cli=_get_bool("cli"),
+        experimental=_get_bool("experimental"),
         skill_dir=str(skill_dir),
     )
 
@@ -238,6 +239,7 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
             exclude_persona=meta.get("exclude_persona", False),
             exclude_resources=meta.get("exclude_resources", []),
             cli=meta.get("cli", False),
+            experimental=meta.get("experimental", False),
         )
         for name, meta in data.items()
         if isinstance(meta, dict)
@@ -331,6 +333,7 @@ def select_skills(
     attachments: list[str] | None = None,
     disabled_skills: set[str] | None = None,
     sticky_skills: set[str] | None = None,
+    enabled_experimental_features: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Select relevant skills based on prompt and context.
 
@@ -344,12 +347,19 @@ def select_skills(
     Skills with admin_only=true are skipped for non-admin users.
     Skills with unmet dependencies are skipped with a debug log.
     Skills in disabled_skills are skipped entirely (instance-wide + per-user).
+    Skills marked ``experimental=true`` are skipped unless their
+    ``skill_<name>`` flag appears in ``enabled_experimental_features``.
     """
     selected = set()
     reasons: dict[str, str] = {}
     prompt_lower = prompt.lower()
     attachment_extensions = _get_attachment_extensions(attachments)
     disabled = disabled_skills or set()
+
+    def _experimental_blocked(meta: SkillMeta) -> bool:
+        if not meta.experimental:
+            return False
+        return f"skill_{meta.name}" not in enabled_experimental_features
 
     def _add(name: str, reason: str) -> None:
         selected.add(name)
@@ -360,6 +370,10 @@ def select_skills(
             continue
 
         if meta.admin_only and not is_admin:
+            continue
+
+        if _experimental_blocked(meta):
+            logger.debug("Skill %s skipped: experimental flag skill_%s not enabled", name, name)
             continue
 
         if meta.always_include:
@@ -397,6 +411,8 @@ def select_skills(
             meta = skill_index[name]
             if meta.admin_only and not is_admin:
                 continue
+            if _experimental_blocked(meta):
+                continue
             if meta.always_include:
                 continue  # already selected
             if _check_dependencies(meta):
@@ -410,6 +426,8 @@ def select_skills(
             if companion in skill_index and companion not in selected and companion not in disabled:
                 cmeta = skill_index[companion]
                 if cmeta.admin_only and not is_admin:
+                    continue
+                if _experimental_blocked(cmeta):
                     continue
                 if _check_dependencies(cmeta):
                     companions[companion] = f"companion_of={name}"
@@ -606,12 +624,14 @@ def build_skill_manifest(
     disabled_skills: set[str] | None = None,
     is_admin: bool = True,
     user_resource_types: set[str] | None = None,
+    enabled_experimental_features: frozenset[str] = frozenset(),
 ) -> str:
     """Build a compact manifest of available skills for LLM classification.
 
     Excludes already-selected skills, always_include skills (already loaded),
     disabled skills, admin_only skills for non-admins, and skills with
-    unmet dependencies.
+    unmet dependencies. Also excludes experimental skills whose
+    ``skill_<name>`` flag isn't enabled.
 
     When user_resource_types is provided, prepends a "User resources" line so
     the classifier can disambiguate (e.g. user has karakeep → bookmarks is
@@ -628,6 +648,8 @@ def build_skill_manifest(
         if name in disabled:
             continue
         if meta.admin_only and not is_admin:
+            continue
+        if meta.experimental and f"skill_{name}" not in enabled_experimental_features:
             continue
         if not _check_dependencies(meta):
             continue
@@ -653,17 +675,20 @@ def classify_skills(
     model: str = "haiku",
     timeout: float = 3.0,
     user_resource_types: set[str] | None = None,
+    enabled_experimental_features: frozenset[str] = frozenset(),
 ) -> list[str]:
     """LLM-based skill classification (Pass 2).
 
     Returns additional skill names to load beyond keyword matches.
     Returns [] on timeout, error, or if no additional skills are needed.
-    Respects disabled_skills, admin_only, and dependency checks.
+    Respects disabled_skills, admin_only, dependency checks, and
+    experimental gating.
     """
     manifest = build_skill_manifest(
         skill_index, exclude=already_selected,
         disabled_skills=disabled_skills, is_admin=is_admin,
         user_resource_types=user_resource_types,
+        enabled_experimental_features=enabled_experimental_features,
     )
 
     # Check if there are any skills to classify
@@ -720,6 +745,8 @@ def classify_skills(
                 continue
             meta = skill_index[name]
             if meta.admin_only and not is_admin:
+                continue
+            if meta.experimental and f"skill_{name}" not in enabled_experimental_features:
                 continue
             if not _check_dependencies(meta):
                 continue

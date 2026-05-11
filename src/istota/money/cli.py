@@ -11,6 +11,8 @@ from pathlib import Path
 
 import click
 
+from istota.experimental import requires_feature
+
 
 def _output(result: dict) -> None:
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
@@ -579,8 +581,9 @@ def report(ctx, report_type, year, ledger):
 @click.argument("symbol")
 @click.option("--ledger", "-l", help="Ledger name")
 @pass_ctx
+@requires_feature("money_tax")
 def lots(ctx, symbol, ledger):
-    """Show open lots for a security."""
+    """Show open lots for a security. Experimental — gated by ``money_tax``."""
     from istota.money.core.ledger import lots as ledger_lots
     _output(ledger_lots(resolve_ledger(ledger, ctx.ledgers), symbol))
 
@@ -589,8 +592,9 @@ def lots(ctx, symbol, ledger):
 @click.option("--year", "-y", type=int, help="Year to analyze")
 @click.option("--ledger", "-l", help="Ledger name")
 @pass_ctx
+@requires_feature("money_wash_sales")
 def wash_sales(ctx, year, ledger):
-    """Detect wash sale violations."""
+    """Detect wash sale violations. Experimental — gated by ``money_wash_sales``."""
     from istota.money.core.ledger import wash_sales as ledger_wash_sales
     _output(ledger_wash_sales(resolve_ledger(ledger, ctx.ledgers), year))
 

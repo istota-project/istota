@@ -224,6 +224,13 @@ istota_admin_users: []
 # Example: ["browse", "whisper"]
 istota_disabled_skills: []
 
+# Experimental feature flags — operator opt-in for rough features that
+# ship in the tree but are off by default. Not exposed in the web UI,
+# not toggleable per user. Run `uv run istota experimental list` on the
+# host to see the current registry. See docs/EXPERIMENTAL.md.
+# Example: ["module_health", "money_tax"]
+istota_experimental_features: []
+
 # Users configuration (dict of user_id -> user config).
 #
 # After the modules / connected services refactor, the data model is split

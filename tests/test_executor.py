@@ -1623,6 +1623,42 @@ class TestDeferredDirEnvVar:
         env = mock_run.call_args[1]["env"]
         assert env["ISTOTA_DEFERRED_DIR"] == str(tmp_path / "temp" / "alice")
 
+    @patch("istota.executor.subprocess.run")
+    def test_experimental_features_propagated(self, mock_run, tmp_path):
+        """LLM-path subprocess must carry ISTOTA_EXPERIMENTAL_FEATURES so
+        skills invoked via the skill proxy (which forwards env to skill CLIs)
+        see consistent gating with the scheduler subprocess paths."""
+        from istota.config import ExperimentalConfig
+        config = self._make_config(tmp_path)
+        config.experimental = ExperimentalConfig(features=["module_health", "money_tax"])
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        assert env["ISTOTA_EXPERIMENTAL_FEATURES"] == "module_health,money_tax"
+
+    @patch("istota.executor.subprocess.run")
+    def test_experimental_features_empty_when_unset(self, mock_run, tmp_path):
+        """Always-set contract: even with no features enabled, the var
+        exists (empty string) so consumers don't have to dance around
+        os.environ.get(...) returning None."""
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+            from istota.executor import execute_task
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        assert env["ISTOTA_EXPERIMENTAL_FEATURES"] == ""
+
 
 # ---------------------------------------------------------------------------
 # TestCalDAVCredentialScoping

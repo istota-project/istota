@@ -413,6 +413,16 @@ class ModelsConfig:
 
 
 @dataclass
+class ExperimentalConfig:
+    """Operator-scoped feature flags. See ``src/istota/experimental.py``."""
+
+    features: list[str] = field(default_factory=list)
+
+    def is_enabled(self, feature: str) -> bool:
+        return feature in self.features
+
+
+@dataclass
 class Config:
     namespace: str = "istota"  # Install namespace (drives /etc/{namespace}/, /srv/app/{namespace}/, etc.)
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
@@ -443,6 +453,7 @@ class Config:
     google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
     web: WebConfig = field(default_factory=WebConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
+    experimental: ExperimentalConfig = field(default_factory=ExperimentalConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     rclone_remote: str = "nextcloud"  # rclone remote name
@@ -572,8 +583,17 @@ class Config:
         otherwise open a fresh sqlite connection per call (the FD churn
         that produced "unable to open database file" / EMFILE).
         """
-        from .modules import MODULE_NAMES
+        from .modules import EXPERIMENTAL_MODULES, MODULE_NAMES
         if module not in MODULE_NAMES:
+            logger.debug("is_module_enabled: unknown module %r", module)
+            return False
+
+        # Experimental modules stay dark until the operator opts in via
+        # `[experimental] features = ["module_<name>"]`. This runs before
+        # the per-user opt-out check so a disabled experimental module
+        # short-circuits without a DB lookup.
+        flag = EXPERIMENTAL_MODULES.get(module)
+        if flag and not self.experimental.is_enabled(flag):
             return False
 
         if self.db_path is not None and Path(self.db_path).exists():
@@ -918,6 +938,19 @@ def load_config(config_path: Path | None = None) -> Config:
         if not isinstance(roles, dict):
             roles = {}
         config.models = ModelsConfig(roles={str(k): str(v) for k, v in roles.items()})
+
+    if "experimental" in data:
+        exp = data["experimental"]
+        feats = exp.get("features", []) if isinstance(exp, dict) else []
+        if not isinstance(feats, list):
+            feats = []
+        config.experimental = ExperimentalConfig(features=[str(f) for f in feats])
+        from .experimental import KNOWN_FEATURES
+        for f in config.experimental.features:
+            if f not in KNOWN_FEATURES:
+                logger.warning(
+                    "[experimental] unknown feature %r — typo or stale flag", f,
+                )
 
     if "briefing_defaults" in data:
         bd = data["briefing_defaults"]

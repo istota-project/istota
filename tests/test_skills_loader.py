@@ -1433,3 +1433,90 @@ class TestUntrustedInputCompanion:
             "what's 2 + 2", "talk", set(), index,
         )
         assert "untrusted_input" not in result
+
+
+class TestExperimentalSkillGating:
+    """Skills marked ``experimental=true`` are filtered out of select_skills
+    unless the matching ``skill_<name>`` flag is enabled."""
+
+    def _index(self) -> dict[str, SkillMeta]:
+        return {
+            "core": SkillMeta(
+                name="core",
+                description="Always loaded",
+                always_include=True,
+            ),
+            "wild": SkillMeta(
+                name="wild",
+                description="Experimental",
+                keywords=["wild", "thing"],
+                experimental=True,
+            ),
+            "normal": SkillMeta(
+                name="normal",
+                description="Normal keyword skill",
+                keywords=["wild", "thing"],
+            ),
+        }
+
+    def test_experimental_hidden_when_flag_off(self):
+        result = select_skills(
+            "do a wild thing", "talk", set(), self._index(),
+        )
+        assert "wild" not in result
+        assert "normal" in result
+        assert "core" in result
+
+    def test_experimental_visible_when_flag_on(self):
+        result = select_skills(
+            "do a wild thing", "talk", set(), self._index(),
+            enabled_experimental_features=frozenset({"skill_wild"}),
+        )
+        assert "wild" in result
+        assert "normal" in result
+
+    def test_sticky_experimental_blocked(self):
+        result = select_skills(
+            "neutral prompt", "talk", set(), self._index(),
+            sticky_skills={"wild"},
+        )
+        assert "wild" not in result
+
+    def test_sticky_experimental_allowed_with_flag(self):
+        result = select_skills(
+            "neutral prompt", "talk", set(), self._index(),
+            sticky_skills={"wild"},
+            enabled_experimental_features=frozenset({"skill_wild"}),
+        )
+        assert "wild" in result
+
+    def test_companion_experimental_blocked(self):
+        index = self._index()
+        # Make 'normal' a companion-puller for 'wild'
+        index["normal"] = SkillMeta(
+            name="normal",
+            description="Pulls wild in",
+            keywords=["thing"],
+            companion_skills=["wild"],
+        )
+        result = select_skills(
+            "thing", "talk", set(), index,
+        )
+        assert "normal" in result
+        # Wild stays hidden — gating fires even on companion path
+        assert "wild" not in result
+
+    def test_load_skill_index_parses_experimental_frontmatter(self, tmp_path):
+        skill = _write_skill_md(
+            tmp_path / "skills", "exp", {
+                "name": "exp",
+                "description": "Experimental skill",
+                "experimental": True,
+            },
+        )
+        del skill  # quiet linter
+        index = load_skill_index(
+            tmp_path / "skills", bundled_dir=_empty_bundled(tmp_path),
+        )
+        assert "exp" in index
+        assert index["exp"].experimental is True

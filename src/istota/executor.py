@@ -1946,6 +1946,7 @@ def execute_task(
         attachments=task.attachments,
         disabled_skills=_disabled if _disabled else None,
         sticky_skills=sticky_skills or None,
+        enabled_experimental_features=frozenset(config.experimental.features),
     )
 
     # Pass 2: LLM-based semantic routing
@@ -1959,6 +1960,7 @@ def execute_task(
             model=make_brain(config.brain).resolve_model_name(config.skills.semantic_routing_model),
             timeout=config.skills.semantic_routing_timeout,
             user_resource_types=user_resource_types,
+            enabled_experimental_features=frozenset(config.experimental.features),
         )
         if extra_skills:
             all_selected = set(selected_skills) | set(extra_skills)
@@ -2250,6 +2252,7 @@ def execute_task(
             "ISTOTA_BOT_DIR_NAME": config.bot_dir_name,
             "ISTOTA_CONVERSATION_TOKEN": task.conversation_token or "",
             "ISTOTA_DEFERRED_DIR": str(user_temp_dir),
+            "ISTOTA_EXPERIMENTAL_FEATURES": ",".join(config.experimental.features),
         })
 
         # Admin users get full DB and mount access; non-admin users get scoped paths

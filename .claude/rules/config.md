@@ -129,6 +129,22 @@ role names beyond the three defaults are accepted (e.g. `deep`,
 top-level `model`, per-task `model`, `[[jobs]] model`) accepts canonical
 IDs, provider aliases, or role aliases.
 
+### `ExperimentalConfig`
+```
+features: list[str] = []     # operator opt-in for rough features ([experimental] features in TOML)
+```
+Operator-scoped feature flags. Flat list of feature names; off by default.
+`is_enabled(feature) -> bool` is the check used by `Config.is_module_enabled`
+(via `EXPERIMENTAL_MODULES` in `modules.py`), by the `@requires_feature`
+Click decorator (`src/istota/experimental.py`), and by `select_skills` /
+`build_skill_manifest` / `classify_skills` (gated on `skill_<name>` flags).
+`load_config()` logs a warning when a configured name isn't in the
+`KNOWN_FEATURES` registry but keeps the entry — operators can graduate
+features in code without breaking deployments that still list them.
+Naming convention: `module_<x>` for module gates, `skill_<x>` for skill
+gates, free-form for CLI subcommand gates (`money_tax`, `money_wash_sales`).
+See `docs/EXPERIMENTAL.md` for the registry and graduation policy.
+
 ### `BriefingConfig`
 ```
 name: str                    cron: str                   conversation_token: str = ""
@@ -201,6 +217,7 @@ memory_search: MemorySearchConfig   sleep_cycle: SleepCycleConfig
 channel_sleep_cycle: ChannelSleepCycleConfig
 developer: DeveloperConfig          site: SiteConfig
 location: LocationReceiverConfig
+models: ModelsConfig                experimental: ExperimentalConfig
 users: dict[str, UserConfig] = {}
 admin_users: set[str] = set()      # from /etc/istota/admins (empty = all admin)
 rclone_remote: str = "nextcloud"
@@ -221,7 +238,7 @@ Properties:
 Methods:
 - `get_user(nc_username) -> UserConfig | None`
 - `is_admin(user_id) -> bool` — True if `admin_users` empty or user in set
-- `is_module_enabled(user_id, module) -> bool` — True unless ``module`` appears in the user's `disabled_modules`. Unknown users default to True (docker auto-seed path). Module names are validated against `istota.modules.MODULE_NAMES` (`feeds`, `money`, `location`); unknown names always return False. Reads from the `user_profiles` DB row when `db_path` is set (so web edits to `disabled_modules` take effect across web/scheduler/webhook processes without SIGHUP), falls back to the in-memory `UserConfig.disabled_modules` for init/test paths or unseeded rows.
+- `is_module_enabled(user_id, module) -> bool` — True unless ``module`` appears in the user's `disabled_modules`. Unknown users default to True (docker auto-seed path). Module names are validated against `istota.modules.MODULE_NAMES` (`feeds`, `money`, `location`, `health`); unknown names always return False. Reads from the `user_profiles` DB row when `db_path` is set (so web edits to `disabled_modules` take effect across web/scheduler/webhook processes without SIGHUP), falls back to the in-memory `UserConfig.disabled_modules` for init/test paths or unseeded rows. **Experimental gate**: if `module` appears in `modules.EXPERIMENTAL_MODULES`, the method also requires the matching flag to be enabled in `config.experimental.features`; this check runs before the user-profile DB read so a disabled experimental module short-circuits without a DB hit. Surfaces that need to enumerate visible modules (the `/settings/modules` web endpoint, `disabled_modules` profile-write validation in `_coerce_profile_value`) filter against the same gate.
 - `find_user_by_email(email_address) -> str | None`
 - `is_trusted_email_sender(user_id, sender_email) -> bool` — checks user's own emails + `trusted_email_senders` patterns via fnmatch
 

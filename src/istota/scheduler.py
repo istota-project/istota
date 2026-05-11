@@ -1087,6 +1087,7 @@ def _execute_skill_task(
     env["ISTOTA_TASK_ID"] = str(task.id)
     env["ISTOTA_USER_ID"] = task.user_id
     env["ISTOTA_DEFERRED_DIR"] = str(user_temp_dir)
+    env["ISTOTA_EXPERIMENTAL_FEATURES"] = ",".join(config.experimental.features)
     if config.config_path:
         env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
     if config.db_path:
@@ -1163,6 +1164,7 @@ def _execute_command_task(
     env = build_stripped_env()
     env["ISTOTA_TASK_ID"] = str(task.id)
     env["ISTOTA_USER_ID"] = task.user_id
+    env["ISTOTA_EXPERIMENTAL_FEATURES"] = ",".join(config.experimental.features)
     # Propagate the config path so module skills (feeds, money) loading
     # istota config from a fresh subprocess find the same file the daemon
     # did — the subprocess cwd is `config.temp_dir`, which doesn't contain

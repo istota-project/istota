@@ -2247,6 +2247,26 @@ class TestExecuteCommandTask:
         assert success is True
         assert "path=[]" in result
 
+    def test_experimental_features_propagated(self, db_path, tmp_path):
+        """`@requires_feature`-gated subcommands run from a command-task need
+        the CSV propagated. Regression check for the heartbeat-shaped gap."""
+        from istota.config import ExperimentalConfig
+        config = self._make_config(db_path, tmp_path)
+        config.experimental = ExperimentalConfig(features=["module_health", "money_tax"])
+        task = self._make_task(command="echo flags=[$ISTOTA_EXPERIMENTAL_FEATURES]")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "flags=[module_health,money_tax]" in result
+
+    def test_experimental_features_empty_when_unset(self, db_path, tmp_path):
+        """Always-set contract: the var exists even when no flags are on,
+        so `enabled_features_from_env()` returns an empty frozenset cleanly."""
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(command="echo flags=[$ISTOTA_EXPERIMENTAL_FEATURES]")
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "flags=[]" in result
+
     def test_no_output_shows_placeholder(self, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
         task = self._make_task(command="true")
@@ -2569,6 +2589,29 @@ class TestExecuteSkillTask:
         assert env.get("NC_URL") == "https://nc.example.com"
         assert env.get("NC_USER") == "ncuser"
         assert env.get("FEEDS_USER") == "alice"
+
+    def test_experimental_features_propagated(self, db_path, tmp_path):
+        """Skill-tasks must carry `ISTOTA_EXPERIMENTAL_FEATURES` so that
+        gated subcommands (e.g. money_tax) behave consistently across the
+        LLM, skill-task, and command-task subprocess paths."""
+        from istota.config import ExperimentalConfig
+        config = self._make_config(db_path, tmp_path)
+        config.experimental = ExperimentalConfig(features=["module_health", "money_tax"])
+        task = self._task(skill="feeds", skill_args='["--help"]')
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with patch("istota.scheduler.subprocess.run", side_effect=_fake_run):
+            with patch(
+                "istota.scheduler.discover_calendars_for_task",
+                return_value=[],
+            ):
+                success, _ = _execute_skill_task(task, config)
+        assert success is True
+        assert captured["env"]["ISTOTA_EXPERIMENTAL_FEATURES"] == "module_health,money_tax"
 
     def test_caldav_env_resolved_when_calendars_discovered(
         self, db_path, tmp_path,

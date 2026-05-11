@@ -1077,6 +1077,29 @@ def cmd_tasks_file_status(args):
         print(f"  [{t.id}] {t.status:12} {t.user_id:15} {content_preview}")
 
 
+def cmd_experimental_list(args):
+    """List known experimental feature flags with current on/off status."""
+    from istota.experimental import KNOWN_FEATURES
+    config = load_config(Path(args.config) if args.config else None)
+    enabled = set(config.experimental.features)
+    rows = []
+    width = max((len(name) for name in KNOWN_FEATURES), default=0)
+    for name, desc in sorted(KNOWN_FEATURES.items()):
+        status = "on " if name in enabled else "off"
+        rows.append(f"  [{status}] {name.ljust(width)}  {desc}")
+    if not rows:
+        print("(no experimental features registered)")
+        return
+    print("Experimental features:")
+    print("\n".join(rows))
+    unknown = sorted(enabled - set(KNOWN_FEATURES))
+    if unknown:
+        print()
+        print("Configured but unknown (typo or stale flag):")
+        for name in unknown:
+            print(f"  {name}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Istota CLI")
     parser.add_argument("-c", "--config", help="Path to config file")
@@ -1321,6 +1344,11 @@ def main():
     from istota import cli_money
     cli_money.add_subparser(subparsers)
 
+    # experimental
+    exp_parser = subparsers.add_parser("experimental", help="Experimental feature flags")
+    exp_subparsers = exp_parser.add_subparsers(dest="experimental_action", required=True)
+    exp_subparsers.add_parser("list", help="List known feature flags with on/off status")
+
     args = parser.parse_args()
 
     # Load config and setup logging (except for init which doesn't need full config)
@@ -1376,6 +1404,11 @@ def main():
         rc = cli_money.dispatch(args, config)
         if rc:
             sys.exit(rc)
+    elif args.command == "experimental":
+        experimental_commands = {
+            "list": cmd_experimental_list,
+        }
+        experimental_commands[args.experimental_action](args)
     else:
         commands[args.command](args)
 

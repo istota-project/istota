@@ -315,6 +315,27 @@ class TestCheckShellCommand:
         result = _check_shell_command(check, config)
         assert result.healthy is True
 
+    def test_experimental_features_propagated(self, tmp_path):
+        """Heartbeat shell-command checks must propagate
+        ISTOTA_EXPERIMENTAL_FEATURES so any heartbeat invoking a gated CLI
+        gets the same view of enabled flags as the scheduler subprocess
+        paths."""
+        from istota.config import ExperimentalConfig
+        config = Config(
+            nextcloud_mount_path=tmp_path,
+            experimental=ExperimentalConfig(features=["module_health", "money_tax"]),
+        )
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={
+                "command": "echo flags=[$ISTOTA_EXPERIMENTAL_FEATURES]",
+                "condition": "contains:module_health,money_tax",
+            },
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is True
+
     def test_command_failure_no_condition(self, tmp_path):
         config = Config(nextcloud_mount_path=tmp_path)
         check = HeartbeatCheck(

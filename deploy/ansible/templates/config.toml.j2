@@ -38,6 +38,13 @@ disabled_skills = {{ istota_disabled_skills | to_json }}
 # Temporary directory
 temp_dir = "{{ istota_home }}/tmp"
 
+# Experimental feature flags — operator opt-in for rough features that
+# ship in the tree but are off by default. See docs/EXPERIMENTAL.md for
+# the registry. Override via `istota_experimental_features` in
+# host_vars / group_vars. Example: ["module_health", "money_tax"].
+[experimental]
+features = {{ istota_experimental_features | to_json }}
+
 [brain]
 # Which model-invocation backend the executor uses.
 # "claude_code" wraps the `claude` CLI subprocess (current default + only option).
