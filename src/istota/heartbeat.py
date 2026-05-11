@@ -261,6 +261,7 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
             env["ISTOTA_DB_PATH"] = str(config.db_path)
         if user_id:
             env["ISTOTA_USER_ID"] = user_id
+        env["ISTOTA_EXPERIMENTAL_FEATURES"] = ",".join(config.experimental.features)
         result = subprocess.run(
             command,
             shell=True,

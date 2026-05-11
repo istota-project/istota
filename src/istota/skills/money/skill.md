@@ -34,10 +34,10 @@ istota-skill money query "SELECT date, narration, account, position WHERE accoun
 istota-skill money report income-statement [--year YYYY] [--ledger NAME]
 istota-skill money report balance-sheet [--year YYYY] [--ledger NAME]
 
-# Show open lots for a security
+# Show open lots for a security (experimental — operator must enable `money_tax`)
 istota-skill money lots SYMBOL [--ledger NAME]
 
-# Detect wash sale violations
+# Detect wash sale violations (experimental — operator must enable `money_wash_sales`)
 istota-skill money wash-sales [--year YYYY] [--ledger NAME]
 
 # Add a transaction

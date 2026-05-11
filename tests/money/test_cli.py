@@ -233,7 +233,9 @@ class TestReportCommand:
 
 class TestWashSalesCommand:
     @patch("istota.money.core.ledger.run_bean_query")
-    def test_wash_sales(self, mock_query, runner, config_file):
+    def test_wash_sales(self, mock_query, runner, config_file, monkeypatch):
+        # wash-sales is experimental — operator must enable money_wash_sales
+        monkeypatch.setenv("ISTOTA_EXPERIMENTAL_FEATURES", "money_wash_sales")
         config, _ = config_file
         mock_query.return_value = []
         result = runner.invoke(cli, ["-c", str(config), "wash-sales"])

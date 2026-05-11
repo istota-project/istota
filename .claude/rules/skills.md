@@ -19,6 +19,7 @@ class SkillMeta:
     dependencies: list[str] = field(default_factory=list)
     env_specs: list[EnvSpec] = field(default_factory=list)
     cli: bool = False
+    experimental: bool = False  # Operator must enable skill_<name> in [experimental] features
     exclude_memory: bool = False
     exclude_persona: bool = False
     exclude_resources: list[str] = field(default_factory=list)
@@ -31,12 +32,15 @@ load_skill_index(skills_dir: Path, bundled_dir: Path | None = None) -> dict[str,
     # Load skill.md frontmatter (toml fallback). bundled_dir overrides _BUNDLED_SKILLS_DIR (for tests).
 select_skills(prompt, source_type, user_resource_types, skill_index,
               is_admin=True, attachments=None, disabled_skills=None,
-              sticky_skills=None) -> list[str]
+              sticky_skills=None,
+              enabled_experimental_features=frozenset()) -> list[str]
 classify_skills(prompt, skill_index, already_selected,
                 disabled_skills=None, is_admin=True,
-                model="haiku", timeout=3.0) -> list[str]  # Pass 2 LLM classification
+                model="haiku", timeout=3.0,
+                enabled_experimental_features=frozenset()) -> list[str]  # Pass 2 LLM classification
 build_skill_manifest(skill_index, exclude, disabled_skills=None, is_admin=True,
-                     user_resource_types=None) -> str
+                     user_resource_types=None,
+                     enabled_experimental_features=frozenset()) -> str
     # When user_resource_types is given, prepends "User has resources: …" header
     # and appends [needs resource: …] hints per skill — helps Pass 2 disambiguate.
 compute_skills_fingerprint(skills_dir: Path) -> str               # SHA-256, first 12 hex chars
@@ -51,6 +55,7 @@ load_skills(skills_dir: Path, skill_names: list[str], bot_name, bot_dir, skill_i
 
 Filters applied to every candidate before any rule fires:
 - `admin_only=True` skipped when `is_admin=False`
+- `experimental=True` skipped unless `skill_<name>` is in `enabled_experimental_features` — the gate fires on the main loop, the sticky path, the companion pull-in, and the Pass-2 post-filter so an unenabled experimental skill cannot leak into selection via any path
 - Unmet `dependencies` (missing Python packages) skipped via `_check_dependencies()`
 - Names in `disabled_skills` (instance-level + per-user, merged) skipped
 

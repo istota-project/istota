@@ -74,5 +74,9 @@ class SkillMeta:
     exclude_persona: bool = False
     exclude_resources: list[str] = field(default_factory=list)
     cli: bool = False  # skill has a CLI (istota-skill <name>)
+    # Experimental skill — operator must opt in via the matching
+    # ``skill_<name>`` entry in ``[experimental] features``. Filtered out of
+    # ``select_skills`` otherwise.
+    experimental: bool = False
     # Where the skill was loaded from (for doc/code resolution)
     skill_dir: str = ""

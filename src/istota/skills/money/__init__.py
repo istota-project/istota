@@ -12,6 +12,28 @@ import os
 import sys
 
 
+def _unwrap_inner_error(raw: str) -> str:
+    """If ``raw`` is itself an ``{"status":"error","error":"..."}``
+    envelope, return the inner ``error`` string. Otherwise return
+    ``raw`` unchanged. Keeps user-visible messages from gated subcommands
+    readable instead of becoming escaped JSON nested inside the facade's
+    outer envelope.
+    """
+    if not raw.startswith("{"):
+        return raw
+    try:
+        inner = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return raw
+    if (
+        isinstance(inner, dict)
+        and inner.get("status") == "error"
+        and isinstance(inner.get("error"), str)
+    ):
+        return inner["error"]
+    return raw
+
+
 def _run(args: list[str]) -> dict:
     """Resolve the user's UserContext, invoke money.cli.cli, return parsed JSON."""
     from click.testing import CliRunner
@@ -50,10 +72,8 @@ def _run(args: list[str]) -> dict:
     if result.exception is not None and not isinstance(result.exception, SystemExit):
         return {"status": "error", "error": f"{type(result.exception).__name__}: {result.exception}"}
     if result.exit_code not in (0, None):
-        return {
-            "status": "error",
-            "error": (result.output or f"exit {result.exit_code}").strip(),
-        }
+        raw = (result.output or f"exit {result.exit_code}").strip()
+        return {"status": "error", "error": _unwrap_inner_error(raw)}
 
     output = (result.output or "").strip()
     if not output:

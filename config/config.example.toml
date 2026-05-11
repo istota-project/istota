@@ -74,6 +74,15 @@ skills_dir = "config/skills"
 # Temporary directory for task execution
 temp_dir = "/tmp/istota"
 
+# Experimental feature flags — operator opt-in for rough features that ship
+# in the tree but are off by default. See docs/EXPERIMENTAL.md for the
+# registry and graduation policy. Run `uv run istota experimental list` to
+# see what's gateable on this build. Unknown names log a warning at
+# startup. Not exposed in the web UI, not per-user.
+[experimental]
+# features = ["module_health", "money_tax", "money_wash_sales"]
+features = []
+
 # Brain — selects the model-invocation backend. Phase 1 ships only "claude_code"
 # (wraps the `claude` CLI). Future values: "openrouter", "anthropic" for
 # direct-HTTP brains. The Brain protocol lives in src/istota/brain/ so swapping

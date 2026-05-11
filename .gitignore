@@ -51,6 +51,8 @@ site/
 # Test artifacts
 .pytest_cache/
 .testmondata
+.testmondata-shm
+.testmondata-wal
 .coverage
 htmlcov/
 .mypy_cache/
