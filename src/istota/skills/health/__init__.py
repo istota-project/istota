@@ -459,6 +459,63 @@ def cmd_upload(args: argparse.Namespace) -> None:
     _emit({"status": "ok", "id": pid, "draft": True})
 
 
+def cmd_import_csv(args: argparse.Namespace) -> None:
+    """Import a bloodwork CSV from a workspace-accessible file path.
+
+    In sandbox mode the read + parse happens here (CLI is allowed to read
+    files), but the writes are deferred so the scheduler applies them
+    against the per-user health DB outside the sandbox.
+    """
+    path = Path(args.file_path)
+    if not path.exists():
+        _fail(f"file not found: {path}")
+    op = {
+        "op": "import_csv",
+        "source_path": str(path),
+        "on_collision": args.on_collision,
+    }
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+
+    from istota.health import csv_io
+    from istota.health import db as health_db
+
+    csv_text = path.read_text(encoding="utf-8-sig", errors="replace")
+    conn = _connect()
+    try:
+        summary = csv_io.import_csv(conn, csv_text, on_collision=args.on_collision)
+        conn.commit()
+    finally:
+        conn.close()
+    _emit({
+        "status": "ok",
+        "panels_created": summary.panels_created,
+        "panels_replaced": summary.panels_replaced,
+        "panels_skipped": summary.panels_skipped,
+        "biomarkers_created": summary.biomarkers_created,
+        "rows_processed": summary.rows_processed,
+        "warnings": summary.warnings,
+    })
+
+
+def cmd_export_csv(args: argparse.Namespace) -> None:
+    """Export every confirmed panel as CSV. Read-only — never deferred."""
+    from istota.health import csv_io
+
+    conn = _connect()
+    try:
+        text = csv_io.export_csv(conn)
+    finally:
+        conn.close()
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+        _emit({"status": "ok", "path": args.output, "bytes": len(text)})
+        return
+    # No path: print the CSV directly so it can be piped.
+    sys.stdout.write(text)
+
+
 def cmd_summary(args: argparse.Namespace) -> None:
     from istota.health import db as health_db
     from istota.health.units import compute_bmi
@@ -616,6 +673,23 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("--drawn-at", dest="drawn_at", required=True)
     upload.add_argument("--lab")
 
+    import_csv = sub.add_parser(
+        "import-csv",
+        help="Import a bloodwork CSV (Date,Lab,Marker (unit) layout)",
+    )
+    import_csv.add_argument("file_path")
+    import_csv.add_argument(
+        "--on-collision", dest="on_collision",
+        default="skip", choices=["skip", "replace", "append"],
+        help="What to do when a panel with the same (date, lab) already exists",
+    )
+
+    export_csv = sub.add_parser(
+        "export-csv",
+        help="Export confirmed panels as a CSV (prints to stdout if no path)",
+    )
+    export_csv.add_argument("--output", "-o", default=None)
+
     sub.add_parser("summary", help="Dashboard-style snapshot")
 
     sub.add_parser("settings", help="Show current settings")
@@ -642,6 +716,8 @@ def main() -> None:
         "add-biomarker": cmd_add_biomarker,
         "trend": cmd_trend,
         "upload": cmd_upload,
+        "import-csv": cmd_import_csv,
+        "export-csv": cmd_export_csv,
         "summary": cmd_summary,
         "settings": cmd_settings,
         "set": cmd_set,

@@ -901,6 +901,30 @@ export function healthPanelSourceUrl(panelId: number): string {
 	return `${base}/api/health/panels/${panelId}/source`;
 }
 
+export interface CsvImportSummary {
+	status: string;
+	panels_created: number;
+	panels_replaced: number;
+	panels_skipped: number;
+	biomarkers_created: number;
+	rows_processed: number;
+	warnings: string[];
+}
+
+export async function importHealthCsv(
+	file: File,
+	on_collision: 'skip' | 'replace' | 'append' = 'skip',
+): Promise<CsvImportSummary> {
+	const form = new FormData();
+	form.append('file', file);
+	form.append('on_collision', on_collision);
+	return healthFetch('/csv/import', { method: 'POST', body: form });
+}
+
+export function healthCsvExportUrl(): string {
+	return `${base}/api/health/csv/export`;
+}
+
 export async function healthBiomarkerTrend(name: string, params: { since?: string; until?: string } = {}): Promise<BiomarkerTrend> {
 	const q = new URLSearchParams({ name });
 	for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);

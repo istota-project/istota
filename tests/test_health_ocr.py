@@ -26,6 +26,40 @@ def ctx(tmp_path):
     return c
 
 
+def _seed_pdf_source(ctx) -> int:
+    """Panel + dummy .pdf source file (content irrelevant — we mock the parsers)."""
+    with health_db.connect(ctx.db_path) as conn:
+        pid = health_db.insert_panel(
+            conn, drawn_at="2026-05-08", lab_name="Quest",
+            source_mime="application/pdf", draft=True,
+        )
+        panel_dir = ctx.uploads_dir / str(pid)
+        panel_dir.mkdir(parents=True, exist_ok=True)
+        target = panel_dir / "original.pdf"
+        target.write_bytes(b"%PDF-1.4\n")
+        rel = str(target.relative_to(ctx.uploads_dir))
+        conn.execute("UPDATE panels SET source_file = ? WHERE id = ?", (rel, pid))
+        conn.commit()
+    return pid
+
+
+def _seed_image_source(ctx) -> int:
+    """Panel + dummy .png source file."""
+    with health_db.connect(ctx.db_path) as conn:
+        pid = health_db.insert_panel(
+            conn, drawn_at="2026-05-08", lab_name="Quest",
+            source_mime="image/png", draft=True,
+        )
+        panel_dir = ctx.uploads_dir / str(pid)
+        panel_dir.mkdir(parents=True, exist_ok=True)
+        target = panel_dir / "original.png"
+        target.write_bytes(b"\x89PNG\r\n\x1a\n")  # PNG magic, not a real image
+        rel = str(target.relative_to(ctx.uploads_dir))
+        conn.execute("UPDATE panels SET source_file = ? WHERE id = ?", (rel, pid))
+        conn.commit()
+    return pid
+
+
 def _seed_panel_with_source(ctx, *, text: str = "") -> int:
     """Create a panel + a fake source file on disk."""
     with health_db.connect(ctx.db_path) as conn:
@@ -48,16 +82,23 @@ def _seed_panel_with_source(ctx, *, text: str = "") -> int:
     return pid
 
 
-class TestStripCodeFences:
-    def test_plain_passes_through(self):
-        assert health_ocr._strip_code_fences('{"a": 1}') == '{"a": 1}'
-
-    def test_strips_json_fence(self):
-        raw = '```json\n{"a": 1}\n```'
-        assert health_ocr._strip_code_fences(raw) == '{"a": 1}'
-
-
 class TestParseLlmJson:
+    def test_fenced_json_with_leading_prose(self):
+        raw = (
+            "Here are the biomarkers I extracted from the lab report:\n\n"
+            "```json\n"
+            '{"biomarkers": [{"name": "WBC", "value": 6.1, "unit": "10^3/uL"}]}\n'
+            "```"
+        )
+        out = health_ocr._parse_llm_json(raw)
+        assert out and out[0]["name"] == "WBC"
+
+    def test_bare_fence_without_lang_tag(self):
+        raw = '```\n{"biomarkers": [{"name": "HGB", "value": 14.6, "unit": "g/dL"}]}\n```'
+        out = health_ocr._parse_llm_json(raw)
+        assert out and out[0]["name"] == "HGB"
+
+
     def test_object_with_biomarkers_key(self):
         raw = '{"biomarkers": [{"name": "WBC", "value": 7, "unit": "10^3/uL"}]}'
         out = health_ocr._parse_llm_json(raw)
@@ -122,17 +163,11 @@ class TestExtractFromPanel:
         assert result["biomarkers"] == []
         assert any("manually" in w.lower() for w in result["warnings"])
 
-    def test_extraction_when_brain_returns_json(self, ctx):
-        # Use a plain text file so the image/PDF dispatch falls through.
-        # We mock extract_text directly to bypass mime gating.
+    def test_extraction_text_mode_with_pdf(self, ctx):
+        # Text-native PDF path: pdftotext returns enough chars to keep us in
+        # text mode, the brain returns parseable JSON.
+        pid = _seed_pdf_source(ctx)
         with health_db.connect(ctx.db_path) as conn:
-            pid = health_db.insert_panel(
-                conn,
-                drawn_at="2026-05-08",
-                source_mime="text/plain",
-                draft=True,
-            )
-            conn.commit()
             panel = health_db.get_panel(conn, pid)
 
         fake_response = (
@@ -144,31 +179,53 @@ class TestExtractFromPanel:
         )
 
         with patch.object(
-            health_ocr, "extract_text",
+            health_ocr, "_pdftotext",
             return_value="Hemoglobin 14.8 g/dL\nWBC 7.2 10^3/uL\n" * 20,
         ), patch.object(health_ocr, "_call_brain", return_value=fake_response):
             result = health_ocr.extract_from_panel(ctx, panel)
 
+        assert result["mode"] == "text"
         names = {b["name"] for b in result["biomarkers"]}
         assert names == {"Hemoglobin", "WBC"}
-        # OCR text was persisted on the panel row.
         with health_db.connect(ctx.db_path) as conn:
             panel = health_db.get_panel(conn, pid)
         assert (panel.ocr_text or "").startswith("Hemoglobin")
 
-    def test_extraction_when_brain_unavailable(self, ctx):
+    def test_extraction_vision_mode_for_image(self, ctx):
+        # Image source: pdftotext is bypassed; we go straight to vision mode
+        # with allow_read=True.
+        pid = _seed_image_source(ctx)
         with health_db.connect(ctx.db_path) as conn:
-            pid = health_db.insert_panel(
-                conn, drawn_at="2026-05-08",
-                source_mime="text/plain", draft=True,
-            )
-            conn.commit()
+            panel = health_db.get_panel(conn, pid)
+
+        fake_response = (
+            '{"biomarkers": [{"name": "HGB", "value": 14.6, "unit": "g/dL"}]}'
+        )
+        captured: dict = {}
+
+        def _fake_brain(prompt, config, *, allow_read=False):
+            captured["allow_read"] = allow_read
+            captured["prompt"] = prompt
+            return fake_response
+
+        with patch.object(health_ocr, "_call_brain", side_effect=_fake_brain):
+            result = health_ocr.extract_from_panel(ctx, panel)
+
+        assert result["mode"] == "vision"
+        assert captured["allow_read"] is True
+        # Vision prompt references the source path so the brain knows what
+        # to Read.
+        assert "Read the lab report" in captured["prompt"]
+        assert result["biomarkers"][0]["name"] == "HGB"
+
+    def test_extraction_when_brain_unavailable(self, ctx):
+        pid = _seed_pdf_source(ctx)
+        with health_db.connect(ctx.db_path) as conn:
             panel = health_db.get_panel(conn, pid)
         with patch.object(
-            health_ocr, "extract_text", return_value="some lab text " * 50,
+            health_ocr, "_pdftotext", return_value="some lab text " * 50,
         ), patch.object(health_ocr, "_call_brain", return_value=None):
             result = health_ocr.extract_from_panel(ctx, panel)
         assert result["biomarkers"] == []
         assert any("LLM" in w for w in result["warnings"])
-        # Raw text still carries through for diagnostics.
         assert "lab text" in result["raw_text"]

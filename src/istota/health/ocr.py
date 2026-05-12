@@ -159,43 +159,82 @@ def extract_text(ctx: HealthContext, panel: Panel) -> str:
     return ""
 
 
-def _build_extraction_prompt(text: str, refs: list[dict]) -> str:
-    """Construct the LLM prompt for structured extraction."""
-    # Compact reference list — name, unit, aliases. We don't need to ship
-    # the full range table.
-    refs_block: list[str] = []
+def _build_refs_block(refs: list[dict]) -> str:
+    """Format canonical refs without parenthesised units next to the name.
+
+    Putting `Hemoglobin (g/dL)` in the prompt taught the model that the
+    canonical *name* included the unit, no matter what the prose rules
+    said — so it produced `"name": "Hemoglobin (g/dL)"` for every row.
+    Keep the columns visually distinct (name | unit | aliases) so the
+    model can't conflate them.
+    """
+    out: list[str] = []
     for r in refs:
-        aliases = ", ".join(r["aliases"]) if r["aliases"] else ""
-        refs_block.append(
-            f"- {r['name']} ({r['default_unit']}){' aliases: ' + aliases if aliases else ''}"
-        )
-    refs_str = "\n".join(refs_block)
+        parts = [f"- name: {r['name']}", f"unit: {r['default_unit']}"]
+        if r["aliases"]:
+            parts.append("aliases: " + ", ".join(r["aliases"]))
+        out.append(" | ".join(parts))
+    return "\n".join(out)
 
-    return f"""You are extracting structured biomarker data from a lab report.
 
-The text below was extracted from an image or PDF of a lab report. Parse it and
-return a JSON object with a single key, ``biomarkers``, whose value is a JSON
-array. Each element must have these keys:
+# Shared per-field rules + JSON-shape contract used by both the text-mode and
+# vision-mode prompts. Kept here once so we can't drift between the two paths.
+_FIELD_RULES = """Respond with a single JSON object and nothing else. No prose before or after.
+No code fences. No commentary. The first character of your response must be
+``{`` and the last must be ``}``.
 
-- ``name`` (string, REQUIRED) — match the canonical name from the reference
-  list when possible; if none matches, use the name as printed on the report.
-- ``display_name`` (string, OPTIONAL) — exactly as printed on the report.
-- ``value`` (number, REQUIRED).
-- ``unit`` (string, REQUIRED) — exactly as printed on the report.
-- ``ref_range_low`` (number or null, OPTIONAL) — the lab's printed lower bound.
-- ``ref_range_high`` (number or null, OPTIONAL) — the lab's printed upper bound.
-- ``flag`` (string or null, OPTIONAL) — ``H``, ``L``, or ``C`` exactly as the
-  lab reported it. Leave ``null`` if not flagged.
+Shape:
 
-Rules:
-- Output ONLY the JSON object, no commentary, no markdown fences.
-- Skip rows that aren't quantitative biomarker results (header text, footnotes,
-  patient demographics, clinic addresses, comments).
-- For ratios or percentages, use the numeric value and the unit as printed.
-- If you see a value with a unit that doesn't make sense (e.g. extremely far
-  from the canonical range below), include it anyway — the user will review.
+{
+  "biomarkers": [
+    {
+      "name": "Hemoglobin",
+      "display_name": "HGB",
+      "value": 14.6,
+      "unit": "g/dL",
+      "ref_range_low": 13.5,
+      "ref_range_high": 17.5,
+      "flag": null
+    }
+  ]
+}
 
-Canonical biomarker names + units (use these names when the report matches):
+Field rules per element:
+- ``name`` (string, required) — when the report's marker matches a canonical
+  name or alias below, use the canonical name VERBATIM. Otherwise use the
+  name as printed on the report. NEVER append units, parentheses, or extra
+  qualifiers to ``name``. Correct: ``"Hemoglobin"``. Wrong: ``"Hemoglobin
+  (g/dL)"``, ``"Hematocrit (%)"``, ``"MCV (fL)"``. The unit lives in
+  ``unit``, not in ``name``.
+- ``display_name`` (string, optional) — the exact label from the report (e.g.
+  ``HGB`` when the canonical is ``Hemoglobin``). Omit or set null if it would
+  duplicate ``name``.
+- ``value`` (number, required) — numeric only. Strip ``%``, ``H``, ``L``, ``*``.
+- ``unit`` (string, required) — exactly as printed.
+- ``ref_range_low`` / ``ref_range_high`` (number or null) — the lab's printed
+  bounds. For one-sided ranges (``< 100`` or ``≥ 40``) set the missing side to
+  null. Omit when no range is printed.
+- ``flag`` (one of "H", "L", "C", null) — only when the lab flagged the row.
+
+Skip:
+- Header / footer text, patient demographics, clinic address, accession ids.
+- Non-quantitative rows (comments, "see note", "pending").
+- Rows that are duplicates of a row above (some labs reprint the same marker
+  in a summary block).
+
+Include even when the value looks impossible — the user reviews every row.
+
+If the source contains no biomarker results at all, return ``{"biomarkers": []}``.
+"""
+
+
+def _build_extraction_prompt(text: str, refs: list[dict]) -> str:
+    """Prompt for text-mode extraction (OCR'd or pdftotext'd text)."""
+    refs_str = _build_refs_block(refs)
+    return f"""Extract structured biomarker results from the lab report text below.
+
+{_FIELD_RULES}
+Canonical biomarker names + units (match these when the report does):
 
 {refs_str}
 
@@ -207,48 +246,85 @@ Lab report text (between <text> markers):
 """
 
 
-def _strip_code_fences(raw: str) -> str:
-    """LLM sometimes wraps JSON in ```json … ``` despite the prompt."""
-    raw = raw.strip()
-    if raw.startswith("```"):
-        # remove opening fence (optionally with lang tag)
-        raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
-        # remove closing fence
-        if raw.endswith("```"):
-            raw = raw[: -3]
-    return raw.strip()
+def _build_vision_prompt(image_path: Path, refs: list[dict]) -> str:
+    """Prompt for vision-mode extraction. The model uses the Read tool to
+    load the image, then returns the same JSON shape as the text path.
+
+    Used for image uploads and scanned PDFs where Tesseract loses the
+    values (e.g. screenshots where the measured number is rendered as a
+    styled pill on a colored slider).
+    """
+    refs_str = _build_refs_block(refs)
+    return f"""Read the lab report at the following absolute path and extract its
+biomarker results:
+
+{image_path}
+
+{_FIELD_RULES}
+Canonical biomarker names + units (match these when the report does):
+
+{refs_str}
+"""
+
+
+_FENCE_RE = re.compile(r"```(?:[a-zA-Z]+)?\s*\n(.*?)\n```", re.DOTALL)
+
+
+def _candidate_blocks(raw: str) -> list[str]:
+    """Yield JSON candidates to try in order: any fenced blocks first, then
+    the widest ``{ … }`` substring, then the widest ``[ … ]`` substring.
+
+    The LLM occasionally prepends prose ("Here are the biomarkers I found:")
+    or wraps the JSON in a fence even when told not to. Earlier versions
+    only stripped a fence at offset 0, so a single leading sentence was
+    enough to fail the parse.
+    """
+    candidates: list[str] = []
+    candidates.extend(m.group(1).strip() for m in _FENCE_RE.finditer(raw))
+    candidates.append(raw.strip())
+    obj = re.search(r"\{.*\}", raw, re.DOTALL)
+    if obj:
+        candidates.append(obj.group(0))
+    arr = re.search(r"\[.*\]", raw, re.DOTALL)
+    if arr:
+        candidates.append(arr.group(0))
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
 
 
 def _parse_llm_json(raw: str) -> list[dict]:
-    cleaned = _strip_code_fences(raw)
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError:
-        # Try to recover by finding the first { ... } block.
-        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not m:
-            return []
+    for candidate in _candidate_blocks(raw):
         try:
-            parsed = json.loads(m.group(0))
+            parsed = json.loads(candidate)
         except json.JSONDecodeError:
-            return []
-    if isinstance(parsed, dict) and "biomarkers" in parsed:
-        items = parsed["biomarkers"]
-    elif isinstance(parsed, list):
-        items = parsed
-    else:
-        return []
-    out: list[dict] = []
-    if isinstance(items, list):
-        for item in items:
-            if isinstance(item, dict):
-                out.append(item)
-    return out
+            continue
+        if isinstance(parsed, dict) and "biomarkers" in parsed:
+            items = parsed["biomarkers"]
+        elif isinstance(parsed, list):
+            items = parsed
+        else:
+            continue
+        if not isinstance(items, list):
+            continue
+        out = [item for item in items if isinstance(item, dict)]
+        if out:
+            return out
+    return []
 
 
-def _call_brain(prompt: str, config) -> str | None:
-    """Run the extraction prompt through the active brain. Returns the
-    raw response text or ``None`` on failure.
+def _call_brain(prompt: str, config, *, allow_read: bool = False) -> str | None:
+    """Run the extraction prompt through the active brain.
+
+    Returns the raw response text or ``None`` on failure. Pass
+    ``allow_read=True`` for vision-mode prompts that reference an image
+    or PDF by absolute path — the brain needs ``Read`` permission to load
+    the file as a multimodal block.
     """
     try:
         from istota.brain import BrainRequest, make_brain  # noqa: PLC0415
@@ -265,7 +341,7 @@ def _call_brain(prompt: str, config) -> str | None:
         return None
     req = BrainRequest(
         prompt=prompt,
-        allowed_tools=[],
+        allowed_tools=["Read"] if allow_read else [],
         cwd=Path(getattr(config, "temp_dir", None) or "/tmp"),
         env=dict(os.environ),
         timeout_seconds=180,
@@ -349,11 +425,24 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
     pick it up off the panel's environment via the same mechanism the
     routes use; falling back to "no extraction" if unavailable.
     """
-    text = extract_text(ctx, panel)
-    raw_chars = len(text)
-    if not text.strip():
-        # No usable text — persist what we have so the review UI can show
-        # the source document alongside an empty table.
+    source_path = _resolve_source_file(ctx, panel)
+    mime = (panel.source_mime or "").lower()
+
+    # Decide between text-mode and vision-mode extraction. Text-mode wins
+    # whenever we can pull enough text without OCR (text-native PDFs);
+    # vision-mode handles images and scanned PDFs where Tesseract loses
+    # values that are rendered as styled pills, low-contrast cells, or
+    # otherwise non-flowing layout.
+    text = ""
+    mode = "vision"
+    if source_path is not None:
+        if mime == "application/pdf" or source_path.suffix.lower() == ".pdf":
+            text = _pdftotext(source_path) or _pypdf_extract(source_path) or ""
+            if len(text.strip()) >= _TEXT_NATIVE_MIN_CHARS:
+                mode = "text"
+
+    if mode == "vision" and source_path is None:
+        # No file on disk — can't do vision either.
         with health_db.connect(ctx.db_path) as conn:
             conn.execute(
                 "UPDATE panels SET ocr_text = '' WHERE id = ?", (panel.id,),
@@ -362,14 +451,12 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
         return {
             "biomarkers": [],
             "warnings": [
-                "Could not extract text from the source file. "
-                "Add biomarkers manually below.",
+                "Could not access the source file. Add biomarkers manually below.",
             ],
             "raw_text": "",
         }
 
-    # Persist the raw OCR text first — useful for diagnostics and as a
-    # fallback if the LLM call fails.
+    # Persist whatever text we have (may be empty for image uploads).
     with health_db.connect(ctx.db_path) as conn:
         conn.execute(
             "UPDATE panels SET ocr_text = ? WHERE id = ?",
@@ -393,16 +480,22 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
         for r in ref_rows
     ]
 
-    prompt = _build_extraction_prompt(text, refs)
-    response = _call_brain(prompt, config)
+    if mode == "text":
+        prompt = _build_extraction_prompt(text, refs)
+        response = _call_brain(prompt, config)
+    else:
+        prompt = _build_vision_prompt(source_path, refs)
+        response = _call_brain(prompt, config, allow_read=True)
+
     if not response:
         return {
             "biomarkers": [],
             "warnings": [
-                f"Extracted {raw_chars} characters of text but the LLM extraction step "
-                "is unavailable on this instance. Add biomarkers manually below.",
+                "The LLM extraction step is unavailable on this instance. "
+                "Add biomarkers manually below.",
             ],
             "raw_text": text,
+            "mode": mode,
         }
 
     biomarkers = _parse_llm_json(response)
@@ -420,4 +513,127 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
         "biomarkers": biomarkers,
         "warnings": warnings,
         "raw_text": text,
+        "raw_response": response,
+        "mode": mode,
     }
+
+
+# ---------------------------------------------------------------------------
+# Debug entrypoint — ``python -m istota.health.ocr <file>``
+# ---------------------------------------------------------------------------
+
+
+def _debug_main(argv: list[str]) -> int:
+    """One-shot extraction against a local image / PDF for prompt iteration.
+
+    Doesn't touch the per-user health DB — uses an ephemeral context so the
+    panel + uploads dir live in a tmp directory and get torn down on exit.
+    Prints the OCR text, the raw brain response, and the parsed biomarkers
+    so we can see exactly where extraction is breaking.
+    """
+    import argparse
+    import tempfile
+
+    parser = argparse.ArgumentParser(
+        prog="python -m istota.health.ocr",
+        description="Run the health OCR + LLM extraction against a local file.",
+    )
+    parser.add_argument("file", help="Path to a lab image (PNG/JPG) or PDF")
+    parser.add_argument(
+        "--show-prompt", action="store_true",
+        help="Print the full prompt sent to the brain",
+    )
+    parser.add_argument(
+        "--show-text", action="store_true",
+        help="Print the full OCR'd source text",
+    )
+    args = parser.parse_args(argv)
+
+    src = Path(args.file).expanduser().resolve()
+    if not src.is_file():
+        print(f"error: file not found: {src}", flush=True)
+        return 2
+
+    from istota.config import load_config  # noqa: PLC0415
+    from istota.health._migrate import ensure_initialised as _ensure  # noqa: PLC0415
+    from istota.health.workspace import synthesize_health_context  # noqa: PLC0415
+
+    config = load_config()
+    with tempfile.TemporaryDirectory(prefix="health-ocr-debug-") as tmp:
+        ctx = synthesize_health_context("debug", Path(tmp))
+        _ensure(ctx)
+
+        mime = "image/png" if src.suffix.lower() in (".png", ".jpg", ".jpeg") else (
+            "application/pdf" if src.suffix.lower() == ".pdf" else "application/octet-stream"
+        )
+        with health_db.connect(ctx.db_path) as conn:
+            pid = health_db.insert_panel(
+                conn, drawn_at="2026-01-01", lab_name=None,
+                source_mime=mime, draft=True,
+            )
+            conn.commit()
+
+        target_dir = ctx.uploads_dir / str(pid)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"original{src.suffix}"
+        target.write_bytes(src.read_bytes())
+        rel = str(target.relative_to(ctx.uploads_dir))
+        with health_db.connect(ctx.db_path) as conn:
+            conn.execute("UPDATE panels SET source_file = ? WHERE id = ?", (rel, pid))
+            conn.commit()
+            panel = health_db.get_panel(conn, pid)
+            refs = health_db.list_biomarker_refs(conn)
+
+        print(f"file: {src}")
+        print(f"mime: {mime}")
+
+        # Run the same routing as extract_from_panel so debug output reflects
+        # production behavior.
+        result = extract_from_panel(ctx, panel, config=config)
+        text = result.get("raw_text", "")
+        response = result.get("raw_response")
+        biomarkers = result.get("biomarkers", [])
+        mode = result.get("mode", "?")
+
+        print(f"\nmode: {mode}")
+        print(f"\n--- source text ({len(text)} chars) ---")
+        if args.show_text:
+            print(text)
+        else:
+            preview = text[:600] + ("…" if len(text) > 600 else "")
+            print(preview or "(empty — vision mode)")
+
+        if args.show_prompt:
+            refs_dicts = [
+                {
+                    "name": r.name, "display_name": r.display_name,
+                    "default_unit": r.default_unit, "aliases": r.aliases,
+                    "ref_range_low": r.ref_range_low, "ref_range_high": r.ref_range_high,
+                    "ref_range_low_m": r.ref_range_low_m, "ref_range_high_m": r.ref_range_high_m,
+                    "ref_range_low_f": r.ref_range_low_f, "ref_range_high_f": r.ref_range_high_f,
+                }
+                for r in refs
+            ]
+            prompt = (
+                _build_extraction_prompt(text, refs_dicts) if mode == "text"
+                else _build_vision_prompt(target.resolve(), refs_dicts)
+            )
+            print(f"\n--- prompt ({len(prompt)} chars) ---")
+            print(prompt)
+
+        print(f"\n--- brain response ({len(response) if response else 0} chars) ---")
+        print(response or "(no response)")
+        print("---")
+
+        print(f"\nparsed: {len(biomarkers)} biomarkers")
+        print(json.dumps(biomarkers, indent=2))
+        if result.get("warnings"):
+            print("\nwarnings:")
+            for w in result["warnings"]:
+                print(f"  - {w}")
+        return 0
+
+
+if __name__ == "__main__":
+    import sys
+    raise SystemExit(_debug_main(sys.argv[1:]))

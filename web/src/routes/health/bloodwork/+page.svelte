@@ -3,8 +3,11 @@
 	import { base } from '$app/paths';
 	import {
 		getBloodworkMatrix,
+		healthCsvExportUrl,
+		importHealthCsv,
 		listHealthPanels,
 		type BloodworkMatrix,
+		type CsvImportSummary,
 		type HealthPanel,
 	} from '$lib/api';
 
@@ -12,6 +15,33 @@
 	let error = $state('');
 	let matrix: BloodworkMatrix | null = $state(null);
 	let drafts: HealthPanel[] = $state([]);
+
+	let csvInput: HTMLInputElement | undefined = $state(undefined);
+	let csvImporting = $state(false);
+	let csvOnCollision: 'skip' | 'replace' | 'append' = $state('skip');
+	let csvSummary: CsvImportSummary | null = $state(null);
+
+	async function onCsvPicked(e: Event) {
+		const input = e.target as HTMLInputElement;
+		const f = input.files?.[0];
+		if (!f) return;
+		csvImporting = true;
+		csvSummary = null;
+		error = '';
+		try {
+			csvSummary = await importHealthCsv(f, csvOnCollision);
+			await load();
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'CSV import failed';
+		} finally {
+			csvImporting = false;
+			if (csvInput) csvInput.value = '';
+		}
+	}
+
+	function triggerCsvPick() {
+		csvInput?.click();
+	}
 
 	async function load() {
 		loading = true;
@@ -104,8 +134,41 @@
 
 <div class="header">
 	<h1>Bloodwork</h1>
-	<a class="btn" href="{base}/health/bloodwork/upload">Upload lab results</a>
+	<div class="actions">
+		<select bind:value={csvOnCollision} title="What to do when a panel for the same date + lab already exists" class="collision">
+			<option value="skip">Skip duplicates</option>
+			<option value="replace">Replace duplicates</option>
+			<option value="append">Append (allow duplicates)</option>
+		</select>
+		<button class="btn" type="button" onclick={triggerCsvPick} disabled={csvImporting}>
+			{csvImporting ? 'Importing…' : 'Import CSV'}
+		</button>
+		<input
+			bind:this={csvInput}
+			type="file"
+			accept=".csv,text/csv"
+			style="display: none"
+			onchange={onCsvPicked}
+		/>
+		<a class="btn" href={healthCsvExportUrl()} download="bloodwork.csv">Export CSV</a>
+		<a class="btn primary" href="{base}/health/bloodwork/upload">Upload lab results</a>
+	</div>
 </div>
+
+{#if csvSummary}
+	<div class="msg info">
+		Imported {csvSummary.biomarkers_created} biomarkers across
+		{csvSummary.panels_created} panel{csvSummary.panels_created === 1 ? '' : 's'}
+		{#if csvSummary.panels_replaced > 0}({csvSummary.panels_replaced} replaced){/if}
+		{#if csvSummary.panels_skipped > 0}— {csvSummary.panels_skipped} skipped as duplicates{/if}.
+		{#if csvSummary.warnings.length > 0}
+			<details>
+				<summary>{csvSummary.warnings.length} warning{csvSummary.warnings.length === 1 ? '' : 's'}</summary>
+				<ul>{#each csvSummary.warnings as w}<li>{w}</li>{/each}</ul>
+			</details>
+		{/if}
+	</div>
+{/if}
 
 {#if loading}
 	<div class="empty">Loading…</div>
@@ -135,6 +198,16 @@
 		</section>
 	{/if}
 
+	{#if matrix.panels.length === 0}
+		<div class="empty">
+			No confirmed panels yet.
+			{#if drafts.length > 0}
+				Review the draft above to add it to your history,
+			{/if}
+			or
+			<a href="{base}/health/bloodwork/upload">upload another lab report</a>.
+		</div>
+	{:else}
 	<section class="spreadsheet">
 		<div class="scroll">
 			<table>
@@ -197,6 +270,7 @@
 			</table>
 		</div>
 	</section>
+	{/if}
 {/if}
 
 <style>
@@ -211,6 +285,20 @@
 		font-weight: 500;
 		margin: 0;
 	}
+	.actions {
+		display: flex;
+		gap: 0.5rem;
+		align-items: center;
+	}
+	.collision {
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-pill);
+		color: var(--text-primary);
+		font: inherit;
+		font-size: var(--text-sm);
+		padding: 0.4rem 0.6rem;
+	}
 	.btn {
 		padding: 0.4rem 0.85rem;
 		background: var(--surface-card);
@@ -218,9 +306,23 @@
 		border-radius: var(--radius-pill);
 		color: var(--text-primary);
 		text-decoration: none;
+		font: inherit;
 		font-size: var(--text-sm);
+		cursor: pointer;
 	}
-	.btn:hover { background: var(--surface-raised); }
+	.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+	.btn:hover:not(:disabled) { background: var(--surface-raised); }
+	.btn.primary { border-color: #7aa3d8; color: #7aa3d8; }
+	.msg {
+		font-size: var(--text-sm);
+		padding: 0.5rem 0.75rem;
+		border-radius: 0.3rem;
+		margin-bottom: 0.5rem;
+	}
+	.msg.info { background: rgba(122, 163, 216, 0.1); color: #7aa3d8; }
+	.msg details { margin-top: 0.25rem; }
+	.msg summary { cursor: pointer; }
+	.msg ul { margin: 0.25rem 0 0 1rem; padding: 0; }
 
 	.drafts {
 		background: var(--surface-card);

@@ -1524,8 +1524,20 @@ const handlers: MockHandler[] = [
 				};
 			}
 
-			// /biomarkers endpoints
-			if (url.startsWith('/istota/api/health/biomarkers/trend') && method === 'GET') {
+			if (url === '/istota/api/health/csv/import' && method === 'POST') {
+					return {
+						status: 'ok',
+						panels_created: 2,
+						panels_replaced: 0,
+						panels_skipped: 0,
+						biomarkers_created: 8,
+						rows_processed: 2,
+						warnings: [],
+					};
+				}
+
+				// /biomarkers endpoints
+				if (url.startsWith('/istota/api/health/biomarkers/trend') && method === 'GET') {
 				const u = new URL(url, 'http://x');
 				const name = u.searchParams.get('name') || '';
 				// Match by canonical name OR by alias.

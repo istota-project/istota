@@ -191,58 +191,67 @@
 		<div class="split">
 			<div class="review-table">
 				<h2>Extracted biomarkers</h2>
-				{#if extracting}<div class="empty">Extracting…</div>{/if}
-				{#if warnings.length > 0}
-					<div class="msg warn">
-						<strong>Heads up:</strong>
-						<ul>{#each warnings as w}<li>{w}</li>{/each}</ul>
-					</div>
-				{/if}
-				{#if !extracting && extracted.length === 0}
-					<div class="empty">
-						No biomarkers extracted. Add rows manually below, or click
-						<button class="btn" type="button" onclick={doExtract}>Retry extraction</button>.
-					</div>
-				{/if}
-				{#if extracted.length > 0}
-					<table>
-						<thead>
-							<tr>
-								<th>Marker</th><th>Value</th><th>Unit</th><th>Range (low / high)</th><th>Flag</th><th></th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each extracted as b, i (b.id)}
-								<tr>
-									<td><input bind:value={b.name} placeholder="Hemoglobin" /></td>
-									<td><input type="number" step="any" bind:value={b.value} /></td>
-									<td><input bind:value={b.unit} placeholder="g/dL" /></td>
-									<td class="range-pair">
-										<input type="number" step="any" bind:value={b.ref_range_low} placeholder="low" />
-										<input type="number" step="any" bind:value={b.ref_range_high} placeholder="high" />
-									</td>
-									<td>
-										<select bind:value={b.flag}>
-											<option value={null}>—</option>
-											<option value="H">H</option>
-											<option value="L">L</option>
-											<option value="C">C</option>
-										</select>
-									</td>
-									<td><button class="del" type="button" onclick={() => removeRow(i)}>×</button></td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				{/if}
-				<button class="btn add" onclick={addRow} type="button">+ Add row</button>
 
-				{#if error}<div class="msg error">{error}</div>{/if}
-				<div class="actions">
-					<button class="btn primary" disabled={saving || extracted.length === 0} onclick={confirm} type="button">
-						{saving ? 'Saving…' : 'Confirm and save'}
-					</button>
-				</div>
+				{#if extracting}
+					<div class="empty extracting">
+						<span class="spinner" aria-hidden="true"></span>
+						Extracting biomarkers from the source file…
+					</div>
+				{:else}
+					{#if warnings.length > 0}
+						<div class="msg warn">
+							<strong>Heads up:</strong>
+							<ul>{#each warnings as w}<li>{w}</li>{/each}</ul>
+						</div>
+					{/if}
+
+					{#if extracted.length === 0}
+						<div class="empty">
+							No biomarkers extracted yet. Add rows manually, or retry extraction.
+						</div>
+					{:else}
+						<table>
+							<thead>
+								<tr>
+									<th>Marker</th><th>Value</th><th>Unit</th><th>Range (low / high)</th><th>Flag</th><th></th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each extracted as b, i (b.id)}
+									<tr>
+										<td><input bind:value={b.name} placeholder="Hemoglobin" /></td>
+										<td><input type="number" step="any" bind:value={b.value} /></td>
+										<td><input bind:value={b.unit} placeholder="g/dL" /></td>
+										<td class="range-pair">
+											<input type="number" step="any" bind:value={b.ref_range_low} placeholder="low" />
+											<input type="number" step="any" bind:value={b.ref_range_high} placeholder="high" />
+										</td>
+										<td>
+											<select bind:value={b.flag}>
+												<option value={null}>—</option>
+												<option value="H">H</option>
+												<option value="L">L</option>
+												<option value="C">C</option>
+											</select>
+										</td>
+										<td><button class="del" type="button" onclick={() => removeRow(i)}>×</button></td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					{/if}
+
+					{#if error}<div class="msg error">{error}</div>{/if}
+
+					<div class="actions">
+						<button class="btn" onclick={addRow} type="button">+ Add row</button>
+						<button class="btn" type="button" onclick={doExtract}>Retry extraction</button>
+						<div class="spacer"></div>
+						<button class="btn primary" disabled={saving || extracted.length === 0} onclick={confirm} type="button">
+							{saving ? 'Saving…' : 'Confirm and save'}
+						</button>
+					</div>
+				{/if}
 			</div>
 
 			<div class="source">
@@ -320,7 +329,28 @@
 		font-size: var(--text-sm);
 		padding: 0.3rem 0.5rem;
 	}
-	.actions { display: flex; gap: 0.5rem; }
+	.actions {
+		display: flex;
+		gap: 0.5rem;
+		align-items: center;
+		margin-top: 0.75rem;
+	}
+	.actions .spacer { flex: 1; }
+	.extracting {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	.spinner {
+		display: inline-block;
+		width: 0.85rem;
+		height: 0.85rem;
+		border: 2px solid var(--border-default);
+		border-top-color: var(--text-muted);
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+	}
+	@keyframes spin { to { transform: rotate(360deg); } }
 	.btn {
 		padding: 0.4rem 0.85rem;
 		background: var(--surface-card);
@@ -367,7 +397,6 @@
 	}
 	.del { background: none; border: none; color: var(--text-dim); cursor: pointer; }
 	.del:hover { color: #c66; }
-	.add { margin-top: 0.5rem; }
 	.empty { color: var(--text-dim); padding: 0.5rem 0; }
 	.source {
 		background: var(--surface-card);
