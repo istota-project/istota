@@ -72,6 +72,7 @@ class Panel:
     draft: bool
     notes: str | None
     created_at: str = ""
+    content_hash: str | None = None
 
 
 @dataclass

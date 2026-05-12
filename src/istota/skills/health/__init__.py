@@ -472,7 +472,6 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
     op = {
         "op": "import_csv",
         "source_path": str(path),
-        "on_collision": args.on_collision,
     }
     if _defer_op(op):
         _emit({"status": "ok", "deferred": True, "op": op})
@@ -484,15 +483,15 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
     csv_text = path.read_text(encoding="utf-8-sig", errors="replace")
     conn = _connect()
     try:
-        summary = csv_io.import_csv(conn, csv_text, on_collision=args.on_collision)
+        summary = csv_io.import_csv(conn, csv_text)
         conn.commit()
     finally:
         conn.close()
     _emit({
         "status": "ok",
         "panels_created": summary.panels_created,
-        "panels_replaced": summary.panels_replaced,
-        "panels_skipped": summary.panels_skipped,
+        "panels_skipped_identical": summary.panels_skipped_identical,
+        "panels_needs_review": summary.panels_needs_review,
         "biomarkers_created": summary.biomarkers_created,
         "rows_processed": summary.rows_processed,
         "warnings": summary.warnings,
@@ -678,11 +677,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Import a bloodwork CSV (Date,Lab,Marker (unit) layout)",
     )
     import_csv.add_argument("file_path")
-    import_csv.add_argument(
-        "--on-collision", dest="on_collision",
-        default="skip", choices=["skip", "replace", "append"],
-        help="What to do when a panel with the same (date, lab) already exists",
-    )
 
     export_csv = sub.add_parser(
         "export-csv",

@@ -18,7 +18,6 @@
 
 	let csvInput: HTMLInputElement | undefined = $state(undefined);
 	let csvImporting = $state(false);
-	let csvOnCollision: 'skip' | 'replace' | 'append' = $state('skip');
 	let csvSummary: CsvImportSummary | null = $state(null);
 
 	async function onCsvPicked(e: Event) {
@@ -29,7 +28,7 @@
 		csvSummary = null;
 		error = '';
 		try {
-			csvSummary = await importHealthCsv(f, csvOnCollision);
+			csvSummary = await importHealthCsv(f);
 			await load();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'CSV import failed';
@@ -135,11 +134,6 @@
 <div class="header">
 	<h1>Bloodwork</h1>
 	<div class="actions">
-		<select bind:value={csvOnCollision} title="What to do when a panel for the same date + lab already exists" class="collision">
-			<option value="skip">Skip duplicates</option>
-			<option value="replace">Replace duplicates</option>
-			<option value="append">Append (allow duplicates)</option>
-		</select>
 		<button class="btn" type="button" onclick={triggerCsvPick} disabled={csvImporting}>
 			{csvImporting ? 'Importing…' : 'Import CSV'}
 		</button>
@@ -157,10 +151,20 @@
 
 {#if csvSummary}
 	<div class="msg info">
-		Imported {csvSummary.biomarkers_created} biomarkers across
-		{csvSummary.panels_created} panel{csvSummary.panels_created === 1 ? '' : 's'}
-		{#if csvSummary.panels_replaced > 0}({csvSummary.panels_replaced} replaced){/if}
-		{#if csvSummary.panels_skipped > 0}— {csvSummary.panels_skipped} skipped as duplicates{/if}.
+		{#if csvSummary.panels_created > 0}
+			Added {csvSummary.panels_created} panel{csvSummary.panels_created === 1 ? '' : 's'}
+			({csvSummary.biomarkers_created} biomarkers).
+		{:else}
+			Nothing new to add.
+		{/if}
+		{#if csvSummary.panels_skipped_identical > 0}
+			{csvSummary.panels_skipped_identical} already on file —
+			{csvSummary.panels_skipped_identical === 1 ? 'it was' : 'they were'} skipped.
+		{/if}
+		{#if csvSummary.panels_needs_review > 0}
+			{csvSummary.panels_needs_review} differ from existing panel{csvSummary.panels_needs_review === 1 ? '' : 's'}
+			for the same date + lab — saved as drafts for review below.
+		{/if}
 		{#if csvSummary.warnings.length > 0}
 			<details>
 				<summary>{csvSummary.warnings.length} warning{csvSummary.warnings.length === 1 ? '' : 's'}</summary>
@@ -216,7 +220,12 @@
 						<th class="sticky-left date-col"></th>
 						<th class="sticky-left lab-col"></th>
 						{#each matrix.categories as cat, ci (cat.name)}
-							<th class="cat-cell" data-band={ci % 2} colspan={cat.markers.length}>
+							<th
+								class="cat-cell"
+								class:section-start={ci > 0}
+								data-category={cat.name}
+								colspan={cat.markers.length}
+							>
 								{categoryLabel(cat.name)}
 							</th>
 						{/each}
@@ -225,8 +234,8 @@
 						<th class="sticky-left date-col">Date</th>
 						<th class="sticky-left lab-col">Lab</th>
 						{#each matrix.categories as cat, ci (cat.name)}
-							{#each cat.markers as mk (mk.name)}
-								<th data-band={ci % 2}>
+							{#each cat.markers as mk, mi (mk.name)}
+								<th data-category={cat.name} class:section-start={ci > 0 && mi === 0}>
 									<a
 										href="{base}/health/bloodwork/marker?name={encodeMarker(mk.name)}"
 										class="marker-link"
@@ -243,8 +252,8 @@
 						<th class="sticky-left date-col">Reference range</th>
 						<th class="sticky-left lab-col"></th>
 						{#each matrix.categories as cat, ci (cat.name)}
-							{#each cat.markers as mk (mk.name)}
-								<th class="ref" data-band={ci % 2}>{formatRange(mk.ref_range_low, mk.ref_range_high)}</th>
+							{#each cat.markers as mk, mi (mk.name)}
+								<th class="ref" data-category={cat.name} class:section-start={ci > 0 && mi === 0}>{formatRange(mk.ref_range_low, mk.ref_range_high)}</th>
 							{/each}
 						{/each}
 					</tr>
@@ -257,9 +266,9 @@
 							</td>
 							<td class="sticky-left lab-col">{p.lab_name || ''}</td>
 							{#each matrix.categories as cat, ci (cat.name)}
-								{#each cat.markers as mk (mk.name)}
+								{#each cat.markers as mk, mi (mk.name)}
 									{@const c = cell(p.id, mk.name)}
-									<td class={flagClass(c?.flag ?? null)} data-band={ci % 2}>
+									<td class="{flagClass(c?.flag ?? null)}{ci > 0 && mi === 0 ? ' section-start' : ''}" data-category={cat.name}>
 										{#if c}{c.value}{/if}
 									</td>
 								{/each}
@@ -289,15 +298,6 @@
 		display: flex;
 		gap: 0.5rem;
 		align-items: center;
-	}
-	.collision {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-pill);
-		color: var(--text-primary);
-		font: inherit;
-		font-size: var(--text-sm);
-		padding: 0.4rem 0.6rem;
 	}
 	.btn {
 		padding: 0.4rem 0.85rem;
@@ -345,7 +345,7 @@
 		grid-template-columns: auto 7rem 1fr 1fr;
 		gap: 0.6rem;
 		align-items: center;
-		padding: 0.3rem 0.5rem;
+		padding: 0;
 		border-radius: 0.3rem;
 		color: var(--text-primary);
 		text-decoration: none;
@@ -398,7 +398,6 @@
 		letter-spacing: 0.05em;
 		color: var(--text-muted);
 		text-transform: uppercase;
-		border-left: 1px solid var(--border-subtle);
 	}
 	thead tr.markers th {
 		top: 1.65rem;
@@ -411,8 +410,17 @@
 		color: var(--text-dim);
 		font-style: italic;
 	}
-	.cat-cell {
-		border-left: 1px solid var(--border-default);
+	/* Section divider — runs the full height of each biomarker group on
+	   its first column. Uses ``--border-subtle`` (the same value as the
+	   thead bottom border) so the section break reads as the same kind
+	   of structural line. First group at the table's left edge has no
+	   divider — it's already bounded by the sticky Lab column's right
+	   border. */
+	.cat-cell.section-start,
+	thead tr.markers th.section-start,
+	thead tr.reference th.section-start,
+	tbody td.section-start {
+		border-left: 1px solid var(--border-subtle);
 	}
 	thead tr.markers th {
 		vertical-align: bottom;
@@ -464,25 +472,31 @@
 		color: var(--text-primary);
 	}
 
-	/* Alternating-category banding so the eye can group columns by
-	   section (Thyroid, Lipid, etc.) without 11 separate colors. */
-	thead tr.markers th[data-band="0"],
-	thead tr.reference th[data-band="0"],
-	thead tr.categories th[data-band="0"],
-	tbody td[data-band="0"] {
-		background: rgba(255, 255, 255, 0.04);
+	/* Per-category palette. Each section (Thyroid, Lipid, …) carries its
+	   own hue end-to-end: the category banner + marker-name row share the
+	   stronger tint so they read as one header block, and the reference
+	   row + data cells get a subtler version of the same hue. Hues are
+	   stored as CSS vars so the two intensity levels can share one rule
+	   pair. */
+	[data-category="CBC"]          { --cat-h: 0;   --cat-s: 50%; }
+	[data-category="CMP"]          { --cat-h: 210; --cat-s: 45%; }
+	[data-category="Liver"]        { --cat-h: 30;  --cat-s: 55%; }
+	[data-category="Lipid"]        { --cat-h: 145; --cat-s: 40%; }
+	[data-category="Thyroid"]      { --cat-h: 280; --cat-s: 45%; }
+	[data-category="Iron"]         { --cat-h: 18;  --cat-s: 60%; }
+	[data-category="Vitamins"]     { --cat-h: 50;  --cat-s: 55%; }
+	[data-category="Inflammation"] { --cat-h: 335; --cat-s: 50%; }
+	[data-category="Hormones"]     { --cat-h: 185; --cat-s: 45%; }
+	[data-category="Diabetes"]     { --cat-h: 85;  --cat-s: 45%; }
+	[data-category="Other"]        { --cat-h: 220; --cat-s: 8%;  }
+
+	thead tr.categories th[data-category],
+	thead tr.markers th[data-category] {
+		background: hsla(var(--cat-h), var(--cat-s), 65%, 0.22);
 	}
-	thead tr.markers th[data-band="1"],
-	thead tr.reference th[data-band="1"],
-	thead tr.categories th[data-band="1"],
-	tbody td[data-band="1"] {
-		background: rgba(122, 163, 216, 0.13);
-	}
-	thead tr.categories th[data-band="0"] {
-		background: rgba(255, 255, 255, 0.08);
-	}
-	thead tr.categories th[data-band="1"] {
-		background: rgba(122, 163, 216, 0.18);
+	thead tr.reference th[data-category],
+	tbody td[data-category] {
+		background: hsla(var(--cat-h), var(--cat-s), 65%, 0.08);
 	}
 
 	/* Sticky left columns sit above every row's data, fully opaque so
@@ -524,5 +538,55 @@
 		border-radius: 0.3rem;
 		background: rgba(204, 102, 102, 0.1);
 		color: #f0a;
+	}
+
+	@media (max-width: 768px) {
+		.header {
+			flex-direction: column;
+			align-items: stretch;
+			gap: 0.5rem;
+			margin-bottom: 0.75rem;
+		}
+		.actions {
+			gap: 0.3rem;
+			flex-wrap: nowrap;
+		}
+		.btn {
+			padding: 0.2rem 0.5rem;
+			font-size: var(--text-xs);
+			white-space: nowrap;
+			flex: 0 0 auto;
+		}
+		.drafts {
+			padding: 0.75rem 0.6rem;
+		}
+		.drafts a {
+			/* Stack the columns; the desktop 4-column grid wraps off-screen. */
+			grid-template-columns: auto auto 1fr;
+			grid-template-rows: auto auto;
+			gap: 0.2rem 0.5rem;
+			font-size: var(--text-xs);
+		}
+		.drafts a > :nth-child(4) {
+			grid-column: 1 / -1;
+			font-size: 11px;
+		}
+		.spreadsheet {
+			border-radius: 0;
+			border-left: none;
+			border-right: none;
+			margin: 0 -0.75rem;
+		}
+		.scroll {
+			max-height: calc(100vh - 160px);
+		}
+		/* Date stays fixed on horizontal scroll; lab scrolls away
+		   because it's the longer column and would eat the viewport. */
+		td.lab-col,
+		th.lab-col {
+			position: static;
+			left: auto;
+			min-width: 7rem;
+		}
 	}
 </style>

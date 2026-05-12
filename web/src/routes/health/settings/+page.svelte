@@ -5,6 +5,12 @@
 		putHealthSettings,
 		type HealthSettings,
 	} from '$lib/api';
+	import { Button } from '$lib/components/ui';
+	import {
+		SettingsLayout,
+		SettingsCard,
+		SettingsField,
+	} from '$lib/components/settings';
 
 	let loading = $state(true);
 	let saving = $state(false);
@@ -21,6 +27,24 @@
 	let dobInput = $state('');
 	let heightInput = $state('');
 
+	// Dirty tracking: compare a snapshot of the loaded form state to the
+	// current values so the Save button only lights up when there's
+	// something to save.
+	let initialJson = $state('');
+	let currentJson = $derived(
+		JSON.stringify({
+			dob: dobInput,
+			height: heightInput,
+			sex: settings.sex,
+			units: settings.display_units,
+		}),
+	);
+	let dirty = $derived(initialJson !== '' && currentJson !== initialJson);
+
+	function snapshot(): void {
+		initialJson = currentJson;
+	}
+
 	async function load() {
 		loading = true;
 		error = '';
@@ -29,6 +53,7 @@
 			settings = resp.settings;
 			dobInput = settings.dob || '';
 			heightInput = settings.height_cm != null ? String(settings.height_cm) : '';
+			snapshot();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load settings';
 		} finally {
@@ -50,6 +75,7 @@
 			const resp = await putHealthSettings(payload);
 			settings = resp.settings;
 			info = 'Saved.';
+			snapshot();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to save';
 		} finally {
@@ -72,150 +98,69 @@
 	onMount(load);
 </script>
 
-<div class="page">
-	<h1>Health settings</h1>
+<SettingsLayout
+	title="Health settings"
+	description="Profile basics and display preferences. All values are stored in metric; display unit choices only affect what you see."
+	{loading}
+	{error}
+	{info}
+>
+	{#snippet headerActions()}
+		{#if dirty}
+			<span class="dirty-badge">Unsaved changes</span>
+		{/if}
+		<Button variant="primary" onclick={save} disabled={!dirty || saving}>
+			{saving ? 'Saving…' : 'Save changes'}
+		</Button>
+	{/snippet}
 
-	{#if loading}
-		<div class="empty">Loading…</div>
-	{:else}
-		<section class="card">
-			<h2>Profile</h2>
-			<div class="form">
-				<label>
-					<span>Date of birth</span>
-					<input type="date" bind:value={dobInput} />
-					{#if ageYears != null}
-						<span class="age">Age: {ageYears}</span>
-					{/if}
-				</label>
-				<label>
-					<span>Height (cm)</span>
-					<input type="number" step="0.1" bind:value={heightInput} placeholder="178" />
-				</label>
-				<label>
-					<span>Biological sex</span>
-					<select bind:value={settings.sex}>
-						<option value={null}>—</option>
-						<option value="M">Male</option>
-						<option value="F">Female</option>
-					</select>
-					<span class="hint">Used for sex-specific reference ranges on biomarkers.</span>
-				</label>
-			</div>
-		</section>
+	<SettingsCard title="Profile">
+		<SettingsField
+			label="Date of birth"
+			hint={ageYears != null ? `Age: ${ageYears}` : undefined}
+		>
+			<input type="date" bind:value={dobInput} />
+		</SettingsField>
 
-		<section class="card">
-			<h2>Display preferences</h2>
-			<p class="hint">All values are stored in metric. Choose how they're shown.</p>
-			<div class="form">
-				<label>
-					<span>Weight</span>
-					<select bind:value={settings.display_units.weight}>
-						<option value="kg">kg</option>
-						<option value="lb">lb</option>
-					</select>
-				</label>
-				<label>
-					<span>Height</span>
-					<select bind:value={settings.display_units.height}>
-						<option value="cm">cm</option>
-						<option value="ft_in">ft / in</option>
-					</select>
-				</label>
-				<label>
-					<span>Temperature</span>
-					<select bind:value={settings.display_units.temp}>
-						<option value="C">°C</option>
-						<option value="F">°F</option>
-					</select>
-				</label>
-			</div>
-		</section>
+		<SettingsField label="Height (cm)">
+			<input type="number" step="0.1" bind:value={heightInput} placeholder="178" />
+		</SettingsField>
 
-		{#if error}<div class="msg error">{error}</div>{/if}
-		{#if info}<div class="msg info">{info}</div>{/if}
+		<SettingsField
+			label="Biological sex"
+			hint="Used for sex-specific reference ranges on biomarkers."
+		>
+			<select bind:value={settings.sex}>
+				<option value={null}>—</option>
+				<option value="M">Male</option>
+				<option value="F">Female</option>
+			</select>
+		</SettingsField>
+	</SettingsCard>
 
-		<div class="actions">
-			<button class="btn" onclick={save} disabled={saving} type="button">
-				{saving ? 'Saving…' : 'Save'}
-			</button>
-		</div>
-	{/if}
-</div>
+	<SettingsCard
+		title="Display preferences"
+		description="All values are stored in metric. Choose how they're shown."
+	>
+		<SettingsField label="Weight">
+			<select bind:value={settings.display_units.weight}>
+				<option value="kg">kg</option>
+				<option value="lb">lb</option>
+			</select>
+		</SettingsField>
 
-<style>
-	.page {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-	h1 {
-		font-size: var(--text-lg);
-		font-weight: 500;
-		margin: 0;
-	}
-	h2 {
-		font-size: var(--text-base);
-		font-weight: 500;
-		margin: 0 0 0.5rem;
-	}
-	.card {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
-		padding: 1rem;
-	}
-	.form {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-	label {
-		display: grid;
-		grid-template-columns: 9rem 12rem auto;
-		gap: 0.75rem;
-		align-items: center;
-	}
-	label > span:first-child {
-		color: var(--text-muted);
-		font-size: var(--text-sm);
-	}
-	input, select {
-		background: var(--bg-input, var(--surface-raised));
-		border: 1px solid var(--border-default);
-		border-radius: 0.3rem;
-		color: var(--text-primary);
-		font: inherit;
-		font-size: var(--text-sm);
-		padding: 0.3rem 0.5rem;
-	}
-	.hint, .age {
-		color: var(--text-dim);
-		font-size: var(--text-xs);
-	}
-	.actions {
-		display: flex;
-		gap: 0.5rem;
-	}
-	.btn {
-		padding: 0.4rem 1rem;
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-pill);
-		color: var(--text-primary);
-		font: inherit;
-		cursor: pointer;
-	}
-	.btn:hover:not(:disabled) {
-		background: var(--surface-raised);
-	}
-	.btn:disabled { opacity: 0.6; cursor: not-allowed; }
-	.msg {
-		font-size: var(--text-sm);
-		padding: 0.4rem 0.6rem;
-		border-radius: 0.3rem;
-	}
-	.msg.error { background: rgba(204, 102, 102, 0.1); color: #f0a; }
-	.msg.info { background: rgba(122, 163, 216, 0.1); color: #7aa3d8; }
-	.empty { color: var(--text-dim); padding: 1rem 0; }
-</style>
+		<SettingsField label="Height">
+			<select bind:value={settings.display_units.height}>
+				<option value="cm">cm</option>
+				<option value="ft_in">ft / in</option>
+			</select>
+		</SettingsField>
+
+		<SettingsField label="Temperature">
+			<select bind:value={settings.display_units.temp}>
+				<option value="C">°C</option>
+				<option value="F">°F</option>
+			</select>
+		</SettingsField>
+	</SettingsCard>
+</SettingsLayout>

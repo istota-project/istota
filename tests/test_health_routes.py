@@ -347,14 +347,15 @@ class TestCsvImportExport:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["panels_created"] == 2
-        assert body["panels_skipped"] == 0
+        assert body["panels_skipped_identical"] == 0
+        assert body["panels_needs_review"] == 0
         assert body["biomarkers_created"] == 8
 
         panels = client.get("/istota/api/health/panels").json()["panels"]
         assert [p["drawn_at"] for p in panels] == ["2025-11-28", "2024-07-27"]
         assert all(p["draft"] is False for p in panels)
 
-    def test_import_skip_collision(self, client):
+    def test_reimport_silently_skips_identical(self, client):
         for _ in range(2):
             resp = client.post(
                 "/istota/api/health/csv/import",
@@ -362,8 +363,10 @@ class TestCsvImportExport:
             )
             assert resp.status_code == 200
         last = resp.json()
-        assert last["panels_skipped"] == 2
+        # Second pass matches on content hash for every row → silent noop.
+        assert last["panels_skipped_identical"] == 2
         assert last["panels_created"] == 0
+        assert last["panels_needs_review"] == 0
 
     def test_export_then_reimport(self, client):
         client.post(
@@ -375,21 +378,12 @@ class TestCsvImportExport:
         text = resp.text
         # CSV has 3 header rows + 2 data rows.
         assert len(text.strip().splitlines()) == 5
-        # Round-trip into a fresh DB: re-importing into the same DB skips
-        # both rows since lab+date matches.
+        # Round-trip: re-importing the export hits content-hash dedup.
         again = client.post(
             "/istota/api/health/csv/import",
             files={"file": ("re.csv", text.encode(), "text/csv")},
         )
-        assert again.json()["panels_skipped"] == 2
-
-    def test_invalid_collision_param(self, client):
-        resp = client.post(
-            "/istota/api/health/csv/import",
-            files={"file": ("b.csv", self.SAMPLE.encode(), "text/csv")},
-            data={"on_collision": "yolo"},
-        )
-        assert resp.status_code == 400
+        assert again.json()["panels_skipped_identical"] == 2
 
 
 class TestBloodworkMatrix:

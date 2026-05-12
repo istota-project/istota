@@ -144,12 +144,12 @@ class TestCsvCli:
         }
         src = tmp_path / "bw.csv"
         src.write_text(self.SAMPLE)
-        out = _run(["import-csv", str(src), "--on-collision", "replace"], env)
+        out = _run(["import-csv", str(src)], env)
         assert out["deferred"] is True
         ops_file = deferred / "task_7_health_ops.json"
         ops = json.loads(ops_file.read_text())
         assert ops[0]["op"] == "import_csv"
-        assert ops[0]["on_collision"] == "replace"
+        assert ops[0]["source_path"] == str(src)
 
 
 class TestDeferredMode:
