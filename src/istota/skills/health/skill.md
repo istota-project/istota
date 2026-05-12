@@ -46,6 +46,11 @@ istota-skill health add-biomarker 12 WBC 12.5 10^3/uL --flag H
 istota-skill health trend Cholesterol_Total --since 2026-01-01
 istota-skill health upload /path/to/lab.pdf --drawn-at 2026-05-08 --lab Kaiser
 
+# Bulk CSV (Date,Lab,Marker (unit) layout)
+istota-skill health import-csv /path/to/bloodwork.csv             # skip duplicate (date, lab) panels
+istota-skill health import-csv /path/to/bloodwork.csv --on-collision replace
+istota-skill health export-csv --output /tmp/bloodwork.csv        # all confirmed panels
+
 # Dashboard snapshot
 istota-skill health summary
 

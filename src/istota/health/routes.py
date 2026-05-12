@@ -27,7 +27,7 @@ from fastapi import (
 )
 from fastapi import File as FastAPIFile
 from fastapi import Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from istota.health import db as health_db
 from istota.health._loader import UserNotFoundError, resolve_for_user
@@ -997,6 +997,82 @@ async def api_biomarker_refs(
 
     refs = await asyncio.to_thread(_query)
     return {"refs": refs}
+
+
+# ---- CSV import / export --------------------------------------------------
+
+
+@router.post("/csv/import")
+async def api_csv_import(
+    request: Request,
+    file: UploadFile = FastAPIFile(...),
+    on_collision: str = Form("skip"),
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    """Import a bloodwork CSV.
+
+    Accepts the same shape exported by ``GET /csv/export`` (category
+    banner row + ``Marker (unit)`` headers + reference-range row +
+    data rows). Aliases are resolved against ``biomarker_refs`` so
+    column names like ``Hgb`` / ``LDL-C`` land on canonical markers.
+    """
+    from istota.health.csv_io import import_csv
+
+    if on_collision not in ("skip", "replace", "append"):
+        return JSONResponse(
+            {"error": "on_collision must be 'skip', 'replace', or 'append'"},
+            status_code=400,
+        )
+    raw = await file.read()
+    if not raw:
+        return JSONResponse({"error": "empty upload"}, status_code=400)
+    try:
+        csv_text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            csv_text = raw.decode("latin-1")
+        except UnicodeDecodeError:
+            return JSONResponse(
+                {"error": "could not decode file as UTF-8 or latin-1"},
+                status_code=400,
+            )
+
+    def _import():
+        with health_db.connect(ctx.db_path) as conn:
+            summary = import_csv(conn, csv_text, on_collision=on_collision)
+            conn.commit()
+        return summary
+
+    summary = await asyncio.to_thread(_import)
+    return {
+        "status": "ok",
+        "panels_created": summary.panels_created,
+        "panels_replaced": summary.panels_replaced,
+        "panels_skipped": summary.panels_skipped,
+        "biomarkers_created": summary.biomarkers_created,
+        "rows_processed": summary.rows_processed,
+        "warnings": summary.warnings,
+    }
+
+
+@router.get("/csv/export")
+async def api_csv_export(ctx: HealthContext = Depends(get_user_context)):
+    """Stream every confirmed panel as a CSV in the import format."""
+    from istota.health.csv_io import export_csv
+
+    def _export():
+        with health_db.connect(ctx.db_path) as conn:
+            return export_csv(conn)
+
+    text = await asyncio.to_thread(_export)
+    return PlainTextResponse(
+        text,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": 'attachment; filename="bloodwork.csv"',
+        },
+    )
 
 
 # ---- Settings -------------------------------------------------------------

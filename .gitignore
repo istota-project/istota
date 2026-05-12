@@ -1,3 +1,6 @@
+# Local dev loop (scripts/dev-up.sh)
+.devstate/
+
 # Python
 __pycache__/
 *.py[cod]

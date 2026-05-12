@@ -112,7 +112,7 @@
     "default_unit": "%",
     "ref_range_low": 40,
     "ref_range_high": 70,
-    "aliases": ["Neutrophil %", "Neut %"],
+    "aliases": ["Neutrophil %", "Neut %", "Neuts", "Neut"],
     "description": "Frontline white blood cells against bacterial infection. The percentage rises with acute bacterial infection and stress; falls with viral infection or marrow suppression."
   },
   {
@@ -122,7 +122,7 @@
     "default_unit": "%",
     "ref_range_low": 20,
     "ref_range_high": 45,
-    "aliases": ["Lymph %", "Lymphocyte %"],
+    "aliases": ["Lymph %", "Lymphocyte %", "Lymphs", "Lymph"],
     "description": "White blood cells that drive viral immunity and antibody production. Elevated in viral illness; suppressed in some chronic infections, corticosteroid use, and immune disorders."
   },
   {
@@ -132,7 +132,7 @@
     "default_unit": "%",
     "ref_range_low": 2,
     "ref_range_high": 10,
-    "aliases": ["Mono %"],
+    "aliases": ["Mono %", "Monos", "Mono"],
     "description": "Cleanup cells that mature into macrophages. Persistently elevated values can reflect chronic inflammation or recovery from infection."
   },
   {
@@ -142,7 +142,7 @@
     "default_unit": "%",
     "ref_range_low": 0,
     "ref_range_high": 6,
-    "aliases": ["Eos %"],
+    "aliases": ["Eos %", "Eos"],
     "description": "Allergy and parasite-fighting cells. Elevated values are seen with allergies, asthma, parasitic infections, and some drug reactions."
   },
   {
@@ -152,7 +152,7 @@
     "default_unit": "%",
     "ref_range_low": 0,
     "ref_range_high": 2,
-    "aliases": ["Baso %"],
+    "aliases": ["Baso %", "Basos", "Baso"],
     "description": "Rare white blood cells involved in allergic and inflammatory responses. Persistent elevation is uncommon and can warrant follow-up for myeloproliferative disorders."
   },
   {
@@ -194,7 +194,7 @@
     "default_unit": "mL/min/1.73m^2",
     "ref_range_low": 60,
     "ref_range_high": null,
-    "aliases": ["GFR", "Estimated Glomerular Filtration Rate"],
+    "aliases": ["GFR", "Estimated Glomerular Filtration Rate", "Glom Filt Rate"],
     "description": "Estimated kidney filtration rate, calculated from creatinine, age, and sex. ≥60 is considered normal; sustained values below 60 over three months meet the definition of chronic kidney disease."
   },
   {
@@ -254,7 +254,7 @@
     "default_unit": "g/dL",
     "ref_range_low": 6.0,
     "ref_range_high": 8.3,
-    "aliases": ["Protein, Total", "TP"],
+    "aliases": ["Protein, Total", "TP", "Protein"],
     "description": "Sum of albumin and globulin. Low values can reflect malnutrition or liver disease; high values can suggest chronic inflammation or paraprotein disorders."
   },
   {
@@ -294,7 +294,7 @@
     "default_unit": "mg/dL",
     "ref_range_low": 0.1,
     "ref_range_high": 1.2,
-    "aliases": ["Total Bilirubin", "T. Bili"],
+    "aliases": ["Total Bilirubin", "T. Bili", "Bili, Ttl", "Bili Ttl"],
     "description": "Breakdown product of red blood cells, processed by the liver. Elevated values point to liver/biliary issues or accelerated red cell turnover; Gilbert's syndrome is a benign cause of mild elevations."
   },
   {
@@ -306,7 +306,7 @@
     "ref_range_high_m": 130,
     "ref_range_low_f": 35,
     "ref_range_high_f": 105,
-    "aliases": ["Alk Phos", "Alkaline Phos"],
+    "aliases": ["Alk Phos", "Alkaline Phos", "ALP/AlkPhos", "AlkPhos"],
     "description": "Enzyme present in liver, bile ducts, and bone. Elevations are interpreted by which tissue source dominates — biliary obstruction vs bone turnover."
   },
   {
@@ -378,7 +378,7 @@
     "default_unit": "mg/dL",
     "ref_range_low": null,
     "ref_range_high": 150,
-    "aliases": ["TG", "Trigs"],
+    "aliases": ["TG", "Trigs", "Triglyceride"],
     "description": "Circulating fat from diet and liver synthesis. Driven heavily by recent meals, alcohol, and refined carbs; fast >9 hours for an accurate reading."
   },
   {
@@ -398,7 +398,7 @@
     "default_unit": "ratio",
     "ref_range_low": null,
     "ref_range_high": 5.0,
-    "aliases": ["Cholesterol/HDL Ratio"],
+    "aliases": ["Cholesterol/HDL Ratio", "Cholesterol/HDL", "Chol/HDL", "Cholesterol HDL Ratio"],
     "description": "Total cholesterol divided by HDL. A rough single-number indicator of atherosclerotic risk; lower is better."
   },
   {
@@ -482,7 +482,7 @@
     "default_unit": "ng/mL",
     "ref_range_low": 30,
     "ref_range_high": 100,
-    "aliases": ["25-OH Vitamin D", "25-hydroxyvitamin D", "Vit D"],
+    "aliases": ["25-OH Vitamin D", "25-hydroxyvitamin D", "Vit D", "D3", "D3 Total", "Vitamin D3"],
     "description": "The main circulating form of vitamin D and the best marker of vitamin D status. Affects bone health, immune function, and many tissues; insufficiency is common in northern climates."
   },
   {
@@ -602,7 +602,7 @@
     "default_unit": "%",
     "ref_range_low": null,
     "ref_range_high": 5.6,
-    "aliases": ["A1c", "Glycated Hemoglobin", "Glycohemoglobin"],
+    "aliases": ["A1c", "Glycated Hemoglobin", "Glycohemoglobin", "Hemoglobin A1C", "Hemoglobin A1c", "HgbA1c"],
     "description": "Average blood glucose over the last ~3 months, expressed as percentage of glycated hemoglobin. 5.7–6.4% indicates prediabetes; ≥6.5% meets the diabetes threshold."
   },
   {

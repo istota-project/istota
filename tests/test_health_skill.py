@@ -108,6 +108,50 @@ class TestSettingsCli:
         assert du == {"weight": "lb", "temp": "F"}
 
 
+class TestCsvCli:
+    SAMPLE = (
+        ",,MORPHOLOGY,,LIPID PANEL,\n"
+        "Date,Lab,Hgb (g/dL),WBC (th/mm3),LDL-C (mg/dL),HDL (mg/dL)\n"
+        ",,12.7-16.7,4.8-10.5,20-100,40-60\n"
+        "2024-07-27,Kaiser,14.5,6.4,148,51\n"
+        "2025-11-28,Kaiser,14.6,6.1,148,55\n"
+    )
+
+    def test_import_then_export_roundtrip(self, ready, tmp_path):
+        db_path, env = ready
+        src = tmp_path / "bw.csv"
+        src.write_text(self.SAMPLE)
+        out = _run(["import-csv", str(src)], env)
+        assert out["status"] == "ok"
+        assert out["panels_created"] == 2
+        assert out["biomarkers_created"] == 8
+
+        export_path = tmp_path / "out.csv"
+        result = _run(["export-csv", "-o", str(export_path)], env)
+        assert result["status"] == "ok"
+        assert export_path.exists()
+        # 3 header rows + 2 data rows
+        assert len(export_path.read_text().strip().splitlines()) == 5
+
+    def test_import_deferred(self, ready, tmp_path):
+        db_path, env = ready
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = {
+            **env,
+            "ISTOTA_DEFERRED_DIR": str(deferred),
+            "ISTOTA_TASK_ID": "7",
+        }
+        src = tmp_path / "bw.csv"
+        src.write_text(self.SAMPLE)
+        out = _run(["import-csv", str(src), "--on-collision", "replace"], env)
+        assert out["deferred"] is True
+        ops_file = deferred / "task_7_health_ops.json"
+        ops = json.loads(ops_file.read_text())
+        assert ops[0]["op"] == "import_csv"
+        assert ops[0]["on_collision"] == "replace"
+
+
 class TestDeferredMode:
     def test_writes_to_deferred_file(self, ready, tmp_path):
         db_path, env = ready

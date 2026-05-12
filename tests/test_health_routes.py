@@ -296,6 +296,102 @@ class TestBiomarkerRefs:
         assert any(r["name"] == "Hemoglobin" for r in refs)
 
 
+class TestPanelUpload:
+    def test_creates_draft_with_source_file(self, client, ctx):
+        # Upload a tiny text blob — the route doesn't care about file
+        # content here, only that the panel + file get persisted.
+        resp = client.post(
+            "/istota/api/health/panels/upload",
+            files={"file": ("report.pdf", b"%PDF-1.4 fake pdf", "application/pdf")},
+            data={"drawn_at": "2026-05-08", "lab_name": "Quest"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["draft"] is True
+        pid = body["id"]
+
+        detail = client.get(f"/istota/api/health/panels/{pid}").json()
+        assert detail["panel"]["draft"] is True
+        assert detail["source"]["available"] is True
+        assert detail["source"]["mime"] == "application/pdf"
+
+        # The source file is reachable via the auth-gated route.
+        src = client.get(f"/istota/api/health/panels/{pid}/source")
+        assert src.status_code == 200
+        assert src.content.startswith(b"%PDF")
+
+    def test_empty_upload_rejected(self, client):
+        resp = client.post(
+            "/istota/api/health/panels/upload",
+            files={"file": ("empty.pdf", b"", "application/pdf")},
+            data={"drawn_at": "2026-05-08"},
+        )
+        assert resp.status_code == 400
+
+
+class TestCsvImportExport:
+    SAMPLE = (
+        ",,MORPHOLOGY,,LIPID PANEL,\n"
+        "Date,Lab,Hgb (g/dL),WBC (th/mm3),LDL-C (mg/dL),HDL (mg/dL)\n"
+        ",,12.7-16.7,4.8-10.5,20-100,40-60\n"
+        "2024-07-27,Kaiser,14.5,6.4,148,51\n"
+        "2025-11-28,Kaiser,14.6,6.1,148,55\n"
+    )
+
+    def test_import_then_list(self, client):
+        resp = client.post(
+            "/istota/api/health/csv/import",
+            files={"file": ("bloodwork.csv", self.SAMPLE.encode(), "text/csv")},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["panels_created"] == 2
+        assert body["panels_skipped"] == 0
+        assert body["biomarkers_created"] == 8
+
+        panels = client.get("/istota/api/health/panels").json()["panels"]
+        assert [p["drawn_at"] for p in panels] == ["2025-11-28", "2024-07-27"]
+        assert all(p["draft"] is False for p in panels)
+
+    def test_import_skip_collision(self, client):
+        for _ in range(2):
+            resp = client.post(
+                "/istota/api/health/csv/import",
+                files={"file": ("b.csv", self.SAMPLE.encode(), "text/csv")},
+            )
+            assert resp.status_code == 200
+        last = resp.json()
+        assert last["panels_skipped"] == 2
+        assert last["panels_created"] == 0
+
+    def test_export_then_reimport(self, client):
+        client.post(
+            "/istota/api/health/csv/import",
+            files={"file": ("b.csv", self.SAMPLE.encode(), "text/csv")},
+        )
+        resp = client.get("/istota/api/health/csv/export")
+        assert resp.status_code == 200
+        text = resp.text
+        # CSV has 3 header rows + 2 data rows.
+        assert len(text.strip().splitlines()) == 5
+        # Round-trip into a fresh DB: re-importing into the same DB skips
+        # both rows since lab+date matches.
+        again = client.post(
+            "/istota/api/health/csv/import",
+            files={"file": ("re.csv", text.encode(), "text/csv")},
+        )
+        assert again.json()["panels_skipped"] == 2
+
+    def test_invalid_collision_param(self, client):
+        resp = client.post(
+            "/istota/api/health/csv/import",
+            files={"file": ("b.csv", self.SAMPLE.encode(), "text/csv")},
+            data={"on_collision": "yolo"},
+        )
+        assert resp.status_code == 400
+
+
 class TestBloodworkMatrix:
     def _seed(self, client, drawn_at: str, lab: str, items: list[tuple[str, float, str]]):
         pid = client.post("/istota/api/health/panels", json={
