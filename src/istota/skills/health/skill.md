@@ -1,0 +1,102 @@
+---
+name: health
+triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2]
+description: Health tracking — body stats, bloodwork panels, biomarker trends, and lab result analysis. Experimental — only available when module_health is enabled.
+cli: true
+experimental: true
+env: [{"var":"HEALTH_DB_PATH","from":"setup_env"}]
+---
+
+# Health Skill
+
+Body-stats time series, bloodwork panels, biomarker trends, and lab result tracking. Per-user SQLite at `{workspace}/health/data/health.db`. All values stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
+
+Experimental: the whole subcommand surface is gated on the `module_health` operator feature flag. Calls return `{"status":"error", ...}` when the flag is off.
+
+## When to use
+
+- The user logs a measurement ("I weigh 82.5 kg", "BP 128/82", "resting HR 60").
+- The user uploads or mentions lab/bloodwork results.
+- The user asks how a biomarker is trending, what's flagged, or for a health summary.
+- Recording or retrieving any vital sign, weight, or biomarker over time.
+
+Pair with `transcribe` / `whisper` when the user submits a photo of a lab report or speaks measurements.
+
+## CLI
+
+`istota-skill health --help` shows the live arg list. All output is JSON. Writes are deferred under sandbox (the scheduler applies the ops post-task).
+
+```bash
+# Body stats
+istota-skill health log weight 82.5                       # canonical units assumed (kg)
+istota-skill health log weight 182 --unit lb              # converts to kg
+istota-skill health log resting_hr 60
+istota-skill health log blood_pressure_systolic 128
+istota-skill health log blood_pressure_diastolic 82
+istota-skill health log body_fat_pct 18.5 --date 2026-05-08
+istota-skill health stats --metric weight --since 2026-01-01 --limit 30
+istota-skill health latest                                # latest value per metric
+
+# Bloodwork
+istota-skill health panels --since 2026-01-01 --limit 10
+istota-skill health panel 12                              # show panel + biomarkers
+istota-skill health add-panel --drawn-at 2026-05-08 --lab Kaiser --type CBC
+istota-skill health add-biomarker 12 Hemoglobin 14.8 g/dL --ref-low 13.5 --ref-high 17.5
+istota-skill health add-biomarker 12 WBC 12.5 10^3/uL --flag H
+istota-skill health trend Cholesterol_Total --since 2026-01-01
+istota-skill health upload /path/to/lab.pdf --drawn-at 2026-05-08 --lab Kaiser
+
+# Dashboard snapshot
+istota-skill health summary
+
+# Profile + display preferences
+istota-skill health settings
+istota-skill health set dob 1985-03-12
+istota-skill health set height 178                         # cm; accepts "5ft10in" / "70in" too
+istota-skill health set sex M
+istota-skill health set display.weight lb
+istota-skill health set display.temp F
+```
+
+## Metric keys
+
+Canonical names (use these for `log`):
+
+| Key | Unit | Notes |
+|---|---|---|
+| `weight` | `kg` | `lb` input is converted at log time |
+| `resting_hr` | `bpm` | |
+| `blood_pressure_systolic` | `mmHg` | Paired with diastolic |
+| `blood_pressure_diastolic` | `mmHg` | |
+| `body_fat_pct` | `%` | |
+| `body_temp` | `°C` | `°F` input is converted at log time |
+| `respiratory_rate` | `brpm` | |
+| `blood_oxygen` | `%` | SpO2 |
+
+Height is **not** a stat — it's a single value in `settings` (`health set height …`). BMI is derived on read from latest weight + settings height.
+
+## Biomarker naming
+
+Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Total`, `TSH`, `WBC`, `Glucose`, …). The skill normalises common aliases (`Hgb` → `Hemoglobin`) automatically. If the lab uses a name we don't recognise, pass it through verbatim — the trend command matches on canonical name first, then aliases.
+
+`flag` is `H` (high), `L` (low), or `C` (critical). Routes auto-compute `H`/`L` against Istota's canonical reference range (sex-aware when `sex` is set); `C` is only ever respected from the lab.
+
+## Talk patterns
+
+| User says | Run |
+|---|---|
+| "I weigh 82.5 kg" | `log weight 82.5` |
+| "weight is 182 lbs" | `log weight 182 --unit lb` |
+| "BP 128/82" | `log blood_pressure_systolic 128` then `log blood_pressure_diastolic 82` |
+| "Resting HR 60" | `log resting_hr 60` |
+| "What's my latest weight?" | `latest` and format the weight entry |
+| "How's my cholesterol?" | `trend Cholesterol_Total` |
+| "Show me my bloodwork history" | `panels` |
+| "Any biomarkers out of range?" | `summary` — surface entries from `alerts` |
+| "Here are my lab results" (+ image) | OCR via `transcribe`/`whisper`, then `add-panel` + `add-biomarker` per row |
+
+When the user uploads a photo or PDF of a lab report through the web UI, the upload pipeline runs the OCR + LLM extraction automatically and the user confirms the extraction in the web UI. From a Talk message with an image attachment, you can transcribe the image and call `add-panel` + `add-biomarker` directly, or recommend they upload via the web UI for the full review-and-edit flow.
+
+## Privacy
+
+Health data is the most sensitive data in the system. Don't include biomarker values in news / briefings / log channels. Source files for uploaded labs are only served through the auth-gated `/panels/{id}/source` route, never via static file serving.

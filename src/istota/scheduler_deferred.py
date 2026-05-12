@@ -20,6 +20,7 @@ an op count, and its lifecycle is owned by the result-delivery code.
 
 import json
 import logging
+import sqlite3
 from pathlib import Path
 
 from . import db
@@ -43,6 +44,7 @@ _KNOWN_DEFERRED_SUFFIXES = (
     "kg_ops",
     "user_alerts",
     "email_output",
+    "health_ops",
 )
 
 
@@ -468,6 +470,155 @@ def _process_deferred_kg_ops(
 
     if count:
         logger.info("Processed %d deferred KG ops for task %d", count, task.id)
+    path.unlink(missing_ok=True)
+    return count
+
+
+def _process_deferred_health_ops(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> int:
+    """Apply deferred ``health`` skill operations to the user's health DB.
+
+    Resolves the user's :class:`HealthContext` and replays insert / update
+    ops written by sandboxed ``istota-skill health`` invocations. The
+    user id always comes from the task (defense-in-depth).
+    """
+    loaded = _load_deferred_json(user_temp_dir, task.id, "health_ops")
+    if loaded is None:
+        return 0
+    path, data = loaded
+
+    try:
+        from . import health as _health
+        from .health import db as health_db
+    except ImportError as e:
+        logger.warning(
+            "Health module unavailable for deferred ops on task %d: %s",
+            task.id, e,
+        )
+        path.unlink(missing_ok=True)
+        return 0
+
+    try:
+        ctx = _health.resolve_for_user(task.user_id, config)
+    except _health.UserNotFoundError as e:
+        logger.warning(
+            "Skipping health ops for task %d: %s", task.id, e,
+        )
+        path.unlink(missing_ok=True)
+        return 0
+
+    _health.ensure_initialised(ctx)
+
+    count = 0
+    with health_db.connect(ctx.db_path) as conn:
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            op = entry.get("op")
+            try:
+                if op == "insert_stat":
+                    health_db.insert_stat(
+                        conn,
+                        metric=entry["metric"],
+                        value=float(entry["value"]),
+                        unit=entry["unit"],
+                        measured_at=entry.get("measured_at"),
+                        source=entry.get("source", "manual"),
+                        notes=entry.get("notes"),
+                    )
+                    count += 1
+                elif op == "insert_panel":
+                    health_db.insert_panel(
+                        conn,
+                        drawn_at=entry["drawn_at"],
+                        lab_name=entry.get("lab_name"),
+                        panel_type=entry.get("panel_type"),
+                        notes=entry.get("notes"),
+                    )
+                    count += 1
+                elif op == "insert_biomarker":
+                    health_db.insert_biomarker(
+                        conn,
+                        panel_id=int(entry["panel_id"]),
+                        name=entry["name"],
+                        value=float(entry["value"]),
+                        unit=entry["unit"],
+                        ref_range_low=entry.get("ref_range_low"),
+                        ref_range_high=entry.get("ref_range_high"),
+                        flag=entry.get("flag"),
+                    )
+                    count += 1
+                elif op == "register_upload":
+                    # Copy the source file into the uploads dir under the
+                    # new panel id, then record the panel row.
+                    import mimetypes
+                    import shutil as _shutil
+
+                    src = Path(entry["source_path"])
+                    if not src.is_file():
+                        logger.warning(
+                            "register_upload skipped for task %d: source missing %s",
+                            task.id, src,
+                        )
+                        continue
+                    mime = (
+                        mimetypes.guess_type(src.name)[0]
+                        or "application/octet-stream"
+                    )
+                    pid = health_db.insert_panel(
+                        conn,
+                        drawn_at=entry["drawn_at"],
+                        lab_name=entry.get("lab_name"),
+                        source_mime=mime,
+                        draft=True,
+                    )
+                    target_dir = ctx.uploads_dir / str(pid)
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    target = target_dir / f"original{src.suffix}"
+                    try:
+                        _shutil.copyfile(src, target)
+                    except OSError as e:
+                        logger.warning(
+                            "register_upload copy failed for task %d: %s",
+                            task.id, e,
+                        )
+                        continue
+                    rel = str(target.relative_to(ctx.uploads_dir))
+                    conn.execute(
+                        "UPDATE panels SET source_file = ? WHERE id = ?",
+                        (rel, pid),
+                    )
+                    count += 1
+                elif op == "set_setting":
+                    key = entry["key"]
+                    value = entry.get("value")
+                    if key == "display_units_merge":
+                        existing = health_db.get_settings(conn).get(
+                            "display_units"
+                        ) or {}
+                        if isinstance(value, dict):
+                            existing.update(value)
+                            health_db.set_setting(conn, "display_units", existing)
+                            count += 1
+                    else:
+                        health_db.set_setting(conn, key, value)
+                        count += 1
+                else:
+                    logger.warning(
+                        "Unknown health op %r in deferred file for task %d",
+                        op, task.id,
+                    )
+                    continue
+                conn.commit()
+            except (KeyError, ValueError, sqlite3.Error) as e:
+                logger.warning(
+                    "Failed to process health op for task %d: %s",
+                    task.id, e,
+                )
+
+    if count:
+        logger.info("Processed %d deferred health ops for task %d", count, task.id)
     path.unlink(missing_ok=True)
     return count
 
