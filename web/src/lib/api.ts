@@ -25,6 +25,7 @@ export interface User {
 		feeds: boolean;
 		location: boolean;
 		money: boolean;
+		health: boolean;
 		google_workspace: boolean;
 		google_workspace_enabled: boolean;
 		admin: boolean;
@@ -693,6 +694,292 @@ export async function deleteBriefing(
 	id: number,
 ): Promise<{ ok: boolean; deleted: boolean }> {
 	return apiFetch(`/settings/briefings/${id}`, { method: 'DELETE' });
+}
+
+// --- Health (experimental module) ---
+
+export interface HealthStat {
+	id: number;
+	measured_at: string;
+	metric: string;
+	value: number;
+	unit: string;
+	source: string;
+	source_ref?: number | null;
+	notes: string | null;
+}
+
+export interface HealthPanel {
+	id: number;
+	drawn_at: string;
+	lab_name: string | null;
+	panel_type: string | null;
+	biomarker_count: number;
+	flagged_count: number;
+	draft: boolean;
+	notes: string | null;
+	has_source: boolean;
+}
+
+export interface Biomarker {
+	id: number;
+	panel_id: number;
+	name: string;
+	display_name: string | null;
+	value: number;
+	unit: string;
+	ref_range_low: number | null;
+	ref_range_high: number | null;
+	flag: string | null;
+}
+
+export interface BiomarkerTrendPoint {
+	drawn_at: string;
+	value: number;
+	unit: string;
+	flag: string | null;
+}
+
+export interface BiomarkerTrend {
+	name: string;
+	display_name: string;
+	points: BiomarkerTrendPoint[];
+	unit_mismatch: boolean;
+	ref_range_low: number | null;
+	ref_range_high: number | null;
+	unit: string | null;
+}
+
+export interface BiomarkerSummaryEntry {
+	name: string;
+	latest: { drawn_at: string; value: number; unit: string; flag: string | null };
+	previous: { drawn_at: string; value: number; unit: string; flag: string | null } | null;
+	direction: 'up' | 'down' | 'flat';
+	sample_count: number;
+}
+
+export interface BiomarkerRef {
+	name: string;
+	display_name: string;
+	category: string;
+	default_unit: string;
+	ref_range_low: number | null;
+	ref_range_high: number | null;
+	ref_range_low_m: number | null;
+	ref_range_high_m: number | null;
+	ref_range_low_f: number | null;
+	ref_range_high_f: number | null;
+	aliases: string[];
+	description: string | null;
+}
+
+export interface DisplayUnits {
+	weight: 'kg' | 'lb';
+	height: 'cm' | 'ft_in';
+	temp: 'C' | 'F';
+}
+
+export interface HealthSettings {
+	dob: string | null;
+	height_cm: number | null;
+	sex: 'M' | 'F' | null;
+	display_units: DisplayUnits;
+}
+
+export interface HealthDashboard {
+	latest_stats: Record<string, HealthStat>;
+	bmi: number | null;
+	recent_panels: HealthPanel[];
+	alerts: (Biomarker & { panel_id: number; drawn_at: string; lab_name: string | null })[];
+	settings: HealthSettings;
+}
+
+async function healthFetch<T>(path: string, init?: RequestInit): Promise<T> {
+	const resp = await fetch(`${base}/api/health${path}`, {
+		...init,
+		credentials: 'same-origin',
+	});
+	if (resp.status === 401) throw new AuthError();
+	if (!resp.ok) {
+		let body: { error?: string } = {};
+		try {
+			body = await resp.json();
+		} catch {
+			// ignore
+		}
+		throw new Error(body.error || `Health API error: ${resp.status}`);
+	}
+	return resp.json();
+}
+
+export async function listHealthStats(params: { metric?: string; since?: string; until?: string; limit?: number } = {}): Promise<{ stats: HealthStat[] }> {
+	const q = new URLSearchParams();
+	for (const [k, v] of Object.entries(params)) {
+		if (v !== undefined && v !== '') q.set(k, String(v));
+	}
+	const suffix = q.toString() ? `?${q.toString()}` : '';
+	return healthFetch(`/stats${suffix}`);
+}
+
+export async function createHealthStat(body: { metric: string; value: number; unit: string; measured_at?: string; notes?: string }): Promise<{ status: string; id: number }> {
+	return healthFetch('/stats', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function deleteHealthStat(id: number): Promise<{ status: string }> {
+	return healthFetch(`/stats/${id}`, { method: 'DELETE' });
+}
+
+export async function healthStatsLatest(): Promise<{ stats: Record<string, HealthStat> }> {
+	return healthFetch('/stats/latest');
+}
+
+export async function healthStatsSeries(metric: string, params: { since?: string; until?: string } = {}): Promise<{ metric: string; points: { measured_at: string; value: number; unit: string }[] }> {
+	const q = new URLSearchParams({ metric });
+	for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);
+	return healthFetch(`/stats/series?${q.toString()}`);
+}
+
+export async function listHealthPanels(params: { since?: string; until?: string; include_drafts?: number; limit?: number } = {}): Promise<{ panels: HealthPanel[] }> {
+	const q = new URLSearchParams();
+	for (const [k, v] of Object.entries(params)) {
+		if (v !== undefined && v !== '') q.set(k, String(v));
+	}
+	const suffix = q.toString() ? `?${q.toString()}` : '';
+	return healthFetch(`/panels${suffix}`);
+}
+
+export async function getHealthPanel(id: number): Promise<{ panel: HealthPanel; biomarkers: Biomarker[]; source: { available: boolean; mime: string | null } }> {
+	return healthFetch(`/panels/${id}`);
+}
+
+export async function createHealthPanel(body: { drawn_at: string; lab_name?: string; panel_type?: string; notes?: string }): Promise<{ status: string; id: number; collision?: { existing_id: number; drawn_at: string; lab_name: string | null } }> {
+	return healthFetch('/panels', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function updateHealthPanel(id: number, body: Partial<{ drawn_at: string; lab_name: string; panel_type: string; notes: string; draft: boolean }>): Promise<{ status: string }> {
+	return healthFetch(`/panels/${id}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function deleteHealthPanel(id: number): Promise<{ status: string }> {
+	return healthFetch(`/panels/${id}`, { method: 'DELETE' });
+}
+
+export async function saveHealthBiomarkers(panelId: number, biomarkers: Partial<Biomarker>[], confirm: boolean): Promise<{ status: string; count: number }> {
+	return healthFetch(`/panels/${panelId}/biomarkers`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ biomarkers, confirm }),
+	});
+}
+
+export async function uploadHealthPanel(file: File, drawn_at: string, lab_name?: string, panel_type?: string): Promise<{ status: string; id: number; collision?: { existing_id: number; drawn_at: string; lab_name: string | null } }> {
+	const form = new FormData();
+	form.append('file', file);
+	form.append('drawn_at', drawn_at);
+	if (lab_name) form.append('lab_name', lab_name);
+	if (panel_type) form.append('panel_type', panel_type);
+	return healthFetch('/panels/upload', { method: 'POST', body: form });
+}
+
+export async function extractHealthPanel(panelId: number): Promise<{ biomarkers: Partial<Biomarker>[]; warnings: string[]; raw_text: string }> {
+	return healthFetch(`/panels/${panelId}/extract`, { method: 'POST' });
+}
+
+export function healthPanelSourceUrl(panelId: number): string {
+	return `${base}/api/health/panels/${panelId}/source`;
+}
+
+export async function healthBiomarkerTrend(name: string, params: { since?: string; until?: string } = {}): Promise<BiomarkerTrend> {
+	const q = new URLSearchParams({ name });
+	for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);
+	return healthFetch(`/biomarkers/trend?${q.toString()}`);
+}
+
+export async function healthBiomarkerSummary(): Promise<{ summary: BiomarkerSummaryEntry[] }> {
+	return healthFetch('/biomarkers/summary');
+}
+
+export async function healthBiomarkerRefs(): Promise<{ refs: BiomarkerRef[] }> {
+	return healthFetch('/biomarkers/refs');
+}
+
+export interface BloodworkMatrixMarker {
+	name: string;
+	display_name: string;
+	unit: string;
+	ref_range_low: number | null;
+	ref_range_high: number | null;
+	category: string;
+}
+
+export interface BloodworkMatrixCategory {
+	name: string;
+	markers: BloodworkMatrixMarker[];
+}
+
+export interface BloodworkMatrixPanel {
+	id: number;
+	drawn_at: string;
+	lab_name: string | null;
+	panel_type: string | null;
+}
+
+export interface BloodworkMatrix {
+	categories: BloodworkMatrixCategory[];
+	panels: BloodworkMatrixPanel[];
+	values: Record<string, Record<string, { value: number; unit: string; flag: string | null }>>;
+}
+
+export async function getBloodworkMatrix(): Promise<BloodworkMatrix> {
+	return healthFetch('/bloodwork/matrix');
+}
+
+export interface BiomarkerExplainer {
+	name: string;
+	display_name: string;
+	direction: 'high' | 'low';
+	summary: string;
+	causes: string[];
+	mitigations: string[];
+	disclaimer: string;
+	source: 'cache' | 'generated' | 'fallback';
+	generated_at: string | null;
+}
+
+export async function getBiomarkerExplainer(
+	name: string,
+	direction: 'high' | 'low',
+): Promise<BiomarkerExplainer> {
+	const q = new URLSearchParams({ direction });
+	return healthFetch(`/biomarkers/${encodeURIComponent(name)}/explainer?${q.toString()}`);
+}
+
+export async function getHealthSettings(): Promise<{ settings: HealthSettings }> {
+	return healthFetch('/settings');
+}
+
+export async function putHealthSettings(body: Partial<HealthSettings>): Promise<{ status: string; settings: HealthSettings }> {
+	return healthFetch('/settings', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function getHealthDashboard(): Promise<HealthDashboard> {
+	return healthFetch('/dashboard');
 }
 
 export { AuthError };

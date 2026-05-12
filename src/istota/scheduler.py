@@ -55,6 +55,7 @@ from .tasks_file_poller import handle_tasks_file_completion
 from .scheduler_deferred import (  # noqa: F401  -- re-exported for back-compat
     _KNOWN_DEFERRED_SUFFIXES,
     _load_deferred_json,
+    _process_deferred_health_ops,
     _process_deferred_kg_ops,
     _process_deferred_kv_ops,
     _process_deferred_sent_emails,
@@ -1606,6 +1607,7 @@ def process_one_task(
         _process_deferred_sent_emails(config, task, user_temp_dir)
         _process_deferred_kv_ops(config, task, user_temp_dir)
         _process_deferred_kg_ops(config, task, user_temp_dir)
+        _process_deferred_health_ops(config, task, user_temp_dir)
         _process_deferred_user_alerts(config, task, user_temp_dir)
         _deliver_deferred_email_output(config, task, user_temp_dir)
         _warn_unconsumed_deferred_files(task, user_temp_dir)

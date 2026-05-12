@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Health module (experimental).** New per-user module for body-stats time series, bloodwork panels, biomarker trends, and lab-result extraction. Gated behind the `module_health` operator flag in `[experimental] features`; off by default everywhere (API mount, `/api/me` features, skill selection). Per-user SQLite at `{workspace}/health/data/health.db` follows the established feeds/location/money pattern. Surfaces:
+  - `src/istota/health/` package — `models`, `workspace`, `_loader`, `_migrate`, `db`, `units`, `routes`, `ocr` modules.
+  - FastAPI router at `/istota/api/health` — stats CRUD + series + latest, panels CRUD + upload + extract + source streaming, biomarker trend + summary + canonical refs, profile/display settings, dashboard aggregator. Blood-pressure / resting-HR biomarker rows fan out to `stats` so the unified time series picks them up. Flag computation uses Istota canonical ranges (sex-aware when set); lab-printed ranges are preserved per-row but not the flagging source. Panel delete cascades to biomarkers, derived stats, and the on-disk source file.
+  - Skill at `src/istota/skills/health/` — `istota-skill health log|stats|latest|panels|panel|add-panel|add-biomarker|trend|upload|summary|settings|set` plus a `setup_env` hook that injects `HEALTH_DB_PATH`. Writes flow through the deferred-op file (`task_<id>_health_ops.json`) under sandbox; new `scheduler_deferred._process_deferred_health_ops` handler replays them post-task. Skill self-gates on `module_health` so an unenabled instance returns a JSON error envelope.
+  - Web UI at `web/src/routes/health/{dashboard,stats,bloodwork,bloodwork/[id],bloodwork/upload,settings}` — dashboard cards (BMI derived from latest weight + settings height), Chart.js stat trend with metric selector + range picker + manual entry + history table, panels list, panel detail with split biomarker table / source preview / inline edit / draft-confirm flow, drag-and-drop upload page with OCR review-and-edit pipeline, profile + display-unit settings. New `User.features.health` flag drives nav-link visibility.
+  - OCR pipeline (`istota.health.ocr`): PDF text extraction via `pdftotext` / `pypdf` with image-OCR fallback via `pdftoppm` + Tesseract; image input goes straight to Tesseract. The extracted text plus the canonical `biomarker_refs` list is passed to the active brain (`general` role alias) which returns structured JSON. Sanity-checks every biomarker against the widest canonical range and surfaces a warning when a value is >10× outside the bounds (likely OCR error). All stages degrade gracefully when an optional dependency is missing — the review UI lets the user fill in or correct rows by hand either way.
+  - Bundled `biomarker_refs.json` seed (CBC, CMP, Liver, Lipid, Thyroid, Iron, Vitamins, Inflammation, Hormones, Diabetes, other) with sex-specific ranges where clinically meaningful and alias maps for the most common spellings.
+  - 52 new tests across `test_health_db.py`, `test_health_routes.py`, `test_health_skill.py`, `test_health_ocr.py`.
+
 ## [0.11.1] - 2026-05-09
 
 ### Added

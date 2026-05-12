@@ -63,6 +63,9 @@
 			{#if user.features.money}
 				<a href="{base}/money" class:active={isActive('/money')}>Money</a>
 			{/if}
+			{#if user.features.health}
+				<a href="{base}/health" class:active={isActive('/health')}>Health</a>
+			{/if}
 			{#if user.features.admin}
 				<a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
 			{/if}
@@ -125,6 +128,18 @@
 								{/snippet}
 							</DropdownMenu.Item>
 						{/if}
+						{#if user.features.health}
+							<DropdownMenu.Item>
+								{#snippet child({ props })}
+									<a
+										href="{base}/health"
+										class="app-nav-menu-link"
+										class:active={isActive('/health')}
+										{...props}>Health</a
+									>
+								{/snippet}
+							</DropdownMenu.Item>
+						{/if}
 						{#if user.features.admin}
 							<DropdownMenu.Item>
 								{#snippet child({ props })}
@@ -152,7 +167,7 @@
 			</DropdownMenu.Root>
 		</div>
 	</nav>
-	<main class="app-content" class:app-content-fill={isActive('/location') || isActive('/feeds') || isActive('/money')}>
+	<main class="app-content" class:app-content-fill={isActive('/location') || isActive('/feeds') || isActive('/money') || isActive('/health')}>
 		{@render children()}
 	</main>
 {/if}

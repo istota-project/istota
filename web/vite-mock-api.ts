@@ -1,4 +1,7 @@
 import type { Plugin } from 'vite';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 interface MockReq {
 	url: string;
@@ -6,6 +9,43 @@ interface MockReq {
 	body: any;
 }
 type MockHandler = (req: MockReq) => unknown | undefined;
+
+const __mockDir = dirname(fileURLToPath(import.meta.url));
+const BIOMARKER_REFS: Array<{
+	name: string;
+	display_name: string;
+	category: string;
+	default_unit: string;
+	ref_range_low: number | null;
+	ref_range_high: number | null;
+	ref_range_low_m: number | null;
+	ref_range_high_m: number | null;
+	ref_range_low_f: number | null;
+	ref_range_high_f: number | null;
+	aliases: string[];
+	description: string | null;
+}> = (() => {
+	try {
+		const path = resolve(__mockDir, '../src/istota/health/data/biomarker_refs.json');
+		const raw = JSON.parse(readFileSync(path, 'utf-8')) as any[];
+		return raw.map((r) => ({
+			name: r.name,
+			display_name: r.display_name,
+			category: r.category,
+			default_unit: r.default_unit,
+			ref_range_low: r.ref_range_low ?? null,
+			ref_range_high: r.ref_range_high ?? null,
+			ref_range_low_m: r.ref_range_low_m ?? null,
+			ref_range_high_m: r.ref_range_high_m ?? null,
+			ref_range_low_f: r.ref_range_low_f ?? null,
+			ref_range_high_f: r.ref_range_high_f ?? null,
+			aliases: r.aliases ?? [],
+			description: r.description ?? null,
+		}));
+	} catch {
+		return [];
+	}
+})();
 
 const user = {
 	username: 'stefan',
@@ -15,6 +55,7 @@ const user = {
 		feeds: true,
 		location: true,
 		money: true,
+		health: true,
 		google_workspace: false,
 		google_workspace_enabled: false,
 		admin: true,
@@ -23,7 +64,7 @@ const user = {
 
 const mockAdminStats = {
 	system: {
-		version: '0.11.0',
+		version: '0.11.1',
 		uptime_seconds: 345600,
 		db_size_bytes: 119447552,
 		python_version: '3.12.3',
@@ -1042,6 +1083,823 @@ const handlers: MockHandler[] = [
 			},
 		};
 	},
+
+	// Health module mock — populated with a realistic shape so the UI is
+	// browsable end-to-end without a backend.
+	(() => {
+		const iso = (daysAgo: number, hour = 9) => {
+			const d = new Date();
+			d.setUTCDate(d.getUTCDate() - daysAgo);
+			d.setUTCHours(hour, 0, 0, 0);
+			return d.toISOString();
+		};
+
+		interface Stat {
+			id: number; metric: string; value: number; unit: string;
+			measured_at: string; source: string; source_ref: number | null; notes: string | null;
+		}
+		interface Bio {
+			id: number; panel_id: number; name: string; display_name: string | null;
+			value: number; unit: string; ref_range_low: number | null;
+			ref_range_high: number | null; flag: string | null;
+		}
+		interface Panel {
+			id: number; drawn_at: string; lab_name: string | null;
+			panel_type: string | null; source_file: string | null;
+			source_mime: string | null; ocr_text: string | null;
+			draft: boolean; notes: string | null;
+		}
+
+		const settings = {
+			dob: '1985-03-12',
+			height_cm: 178,
+			sex: 'M' as 'M' | 'F' | null,
+			display_units: { weight: 'kg' as 'kg' | 'lb', height: 'cm' as 'cm' | 'ft_in', temp: 'C' as 'C' | 'F' },
+		};
+
+		let nextStatId = 1;
+		const stats: Stat[] = [];
+		// Weight — daily-ish, 2 years of history with a slow downward drift
+		// followed by a stabilization around 82 kg.
+		for (let i = 730; i >= 0; i -= 2) {
+			const trend = 86 - (86 - 82) * Math.min(1, (730 - i) / 500);
+			const noise = (Math.random() - 0.5) * 0.6;
+			stats.push({
+				id: nextStatId++, metric: 'weight',
+				value: Math.round((trend + noise) * 10) / 10,
+				unit: 'kg', measured_at: iso(i), source: 'manual', source_ref: null, notes: null,
+			});
+		}
+		// Resting HR — every 3-4 days, ~60 bpm with seasonal swings.
+		for (let i = 365; i >= 0; i -= 4) {
+			const trend = 60 + Math.sin(i / 30) * 3;
+			const noise = (Math.random() - 0.5) * 4;
+			stats.push({
+				id: nextStatId++, metric: 'resting_hr',
+				value: Math.max(50, Math.round(trend + noise)),
+				unit: 'bpm', measured_at: iso(i), source: 'manual', source_ref: null, notes: null,
+			});
+		}
+		// Body fat % — bi-weekly
+		for (let i = 365; i >= 0; i -= 14) {
+			const trend = 19 - (19 - 17) * Math.min(1, (365 - i) / 365);
+			stats.push({
+				id: nextStatId++, metric: 'body_fat_pct',
+				value: Math.round((trend + (Math.random() - 0.5) * 0.6) * 10) / 10,
+				unit: '%', measured_at: iso(i), source: 'manual', source_ref: null, notes: null,
+			});
+		}
+		// Body temp — sparse, every few weeks
+		for (let i = 180; i >= 0; i -= 20) {
+			stats.push({
+				id: nextStatId++, metric: 'body_temp',
+				value: Math.round((36.6 + (Math.random() - 0.5) * 0.5) * 10) / 10,
+				unit: '°C', measured_at: iso(i), source: 'manual', source_ref: null, notes: null,
+			});
+		}
+		// SpO2 — weekly
+		for (let i = 120; i >= 0; i -= 7) {
+			stats.push({
+				id: nextStatId++, metric: 'blood_oxygen',
+				value: 97 + Math.floor(Math.random() * 2),
+				unit: '%', measured_at: iso(i), source: 'manual', source_ref: null, notes: null,
+			});
+		}
+		// Blood pressure — every few days
+		for (let i = 180; i >= 0; i -= 3) {
+			const sys = 118 + Math.round(Math.random() * 12);
+			const dia = 74 + Math.round(Math.random() * 10);
+			stats.push({
+				id: nextStatId++, metric: 'blood_pressure_systolic',
+				value: sys, unit: 'mmHg', measured_at: iso(i),
+				source: 'manual', source_ref: null, notes: null,
+			});
+			stats.push({
+				id: nextStatId++, metric: 'blood_pressure_diastolic',
+				value: dia, unit: 'mmHg', measured_at: iso(i),
+				source: 'manual', source_ref: null, notes: null,
+			});
+		}
+
+		// Panels: a multi-year longitudinal record + one draft awaiting review.
+		const panels: Panel[] = [
+			{ id: 1, drawn_at: '2018-01-10', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
+			{ id: 2, drawn_at: '2019-04-04', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
+			{ id: 3, drawn_at: '2021-06-23', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
+			{ id: 4, drawn_at: '2022-05-03', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
+			{ id: 5, drawn_at: '2023-09-01', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
+			{ id: 6, drawn_at: '2024-07-27', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
+			{ id: 7, drawn_at: '2025-11-28', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
+			{ id: 8, drawn_at: '2026-04-22', lab_name: 'Quest Diagnostics', panel_type: 'Lipid + Thyroid + Iron + Vitamins', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: 'Pre-surgical workup' },
+			{ id: 9, drawn_at: '2026-05-09', lab_name: 'Quest Diagnostics', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: true, notes: 'Pending review' },
+		];
+
+		const biomarkers: Bio[] = [];
+		let nextBioId = 1;
+		const seed = (
+			panelId: number,
+			items: [string, number, string, number | null, number | null, string | null][],
+		) => {
+			for (const [name, value, unit, low, high, flag] of items) {
+				biomarkers.push({
+					id: nextBioId++, panel_id: panelId, name,
+					display_name: null, value, unit,
+					ref_range_low: low, ref_range_high: high, flag,
+				});
+			}
+		};
+
+		// 2018-01-10 — Kaiser, LA
+		seed(1, [
+			['WBC', 4.9, '10^3/uL', 4.0, 11.0, null],
+			['RBC', 4.61, '10^6/uL', 4.5, 5.9, null],
+			['Hemoglobin', 14.8, 'g/dL', 13.5, 17.5, null],
+			['Hematocrit', 42.5, '%', 41, 53, null],
+			['MCV', 92.2, 'fL', 80, 100, null],
+			['MCH', 32.1, 'pg', 27, 33, null],
+			['MCHC', 34.8, 'g/dL', 32, 36, null],
+			['RDW', 13.3, '%', 11.5, 14.5, null],
+			['Platelets', 242, '10^3/uL', 150, 400, null],
+			['Creatinine', 0.93, 'mg/dL', 0.74, 1.35, null],
+			['eGFR', 107, 'mL/min/1.73m^2', 60, null, null],
+			['Glucose', 96, 'mg/dL', 70, 99, null],
+			['Bilirubin_Total', 0.7, 'mg/dL', 0.1, 1.2, null],
+			['ALT', 22, 'U/L', 7, 56, null],
+			['Cholesterol_Total', 193, 'mg/dL', null, 200, null],
+			['Triglycerides', 97, 'mg/dL', null, 150, null],
+			['HDL', 67, 'mg/dL', 40, null, null],
+			['LDL', 107, 'mg/dL', null, 100, 'H'],
+			['Cholesterol_HDL_Ratio', 2.9, 'ratio', null, 5.0, null],
+		]);
+		// 2019-04-04
+		seed(2, [
+			['WBC', 5.6, '10^3/uL', 4.0, 11.0, null],
+			['RBC', 4.73, '10^6/uL', 4.5, 5.9, null],
+			['Hemoglobin', 15.0, 'g/dL', 13.5, 17.5, null],
+			['Hematocrit', 43.8, '%', 41, 53, null],
+			['Platelets', 274, '10^3/uL', 150, 400, null],
+			['Creatinine', 1.02, 'mg/dL', 0.74, 1.35, null],
+			['Glucose', 89, 'mg/dL', 70, 99, null],
+			['ALT', 19, 'U/L', 7, 56, null],
+			['Vitamin_D', 12, 'ng/mL', 30, 100, 'L'],
+			['HbA1c', 5.4, '%', null, 5.6, null],
+			['Cholesterol_Total', 201, 'mg/dL', null, 200, 'H'],
+			['Triglycerides', 98, 'mg/dL', null, 150, null],
+			['HDL', 57, 'mg/dL', 40, null, null],
+			['LDL', 124, 'mg/dL', null, 100, 'H'],
+			['Cholesterol_HDL_Ratio', 3.5, 'ratio', null, 5.0, null],
+		]);
+		// 2021-06-23
+		seed(3, [
+			['WBC', 5.1, '10^3/uL', 4.0, 11.0, null],
+			['RBC', 4.7, '10^6/uL', 4.5, 5.9, null],
+			['Hemoglobin', 14.8, 'g/dL', 13.5, 17.5, null],
+			['Hematocrit', 43.3, '%', 41, 53, null],
+			['Platelets', 268, '10^3/uL', 150, 400, null],
+			['Creatinine', 0.94, 'mg/dL', 0.74, 1.35, null],
+			['Glucose', 90, 'mg/dL', 70, 99, null],
+			['ALT', 16, 'U/L', 7, 56, null],
+			['Vitamin_D', 14, 'ng/mL', 30, 100, 'L'],
+			['HbA1c', 5.3, '%', null, 5.6, null],
+			['Cholesterol_Total', 187, 'mg/dL', null, 200, null],
+			['Triglycerides', 95, 'mg/dL', null, 150, null],
+			['HDL', 53, 'mg/dL', 40, null, null],
+			['LDL', 115, 'mg/dL', null, 100, 'H'],
+			['Cholesterol_HDL_Ratio', 3.5, 'ratio', null, 5.0, null],
+		]);
+		// 2022-05-03
+		seed(4, [
+			['WBC', 5.4, '10^3/uL', 4.0, 11.0, null],
+			['RBC', 4.59, '10^6/uL', 4.5, 5.9, null],
+			['Hemoglobin', 14.5, 'g/dL', 13.5, 17.5, null],
+			['Hematocrit', 41.4, '%', 41, 53, null],
+			['Platelets', 268, '10^3/uL', 150, 400, null],
+			['Creatinine', 1.00, 'mg/dL', 0.74, 1.35, null],
+			['Glucose', 89, 'mg/dL', 70, 99, null],
+			['ALT', 28, 'U/L', 7, 56, null],
+			['Vitamin_D', 14, 'ng/mL', 30, 100, 'L'],
+			['HbA1c', 5.3, '%', null, 5.6, null],
+			['Cholesterol_Total', 224, 'mg/dL', null, 200, 'H'],
+			['Triglycerides', 121, 'mg/dL', null, 150, null],
+			['HDL', 55, 'mg/dL', 40, null, null],
+			['LDL', 147, 'mg/dL', null, 100, 'H'],
+			['Cholesterol_HDL_Ratio', 4.1, 'ratio', null, 5.0, null],
+		]);
+		// 2023-09-01
+		seed(5, [
+			['WBC', 4.4, '10^3/uL', 4.0, 11.0, null],
+			['RBC', 4.54, '10^6/uL', 4.5, 5.9, null],
+			['Hemoglobin', 14.2, 'g/dL', 13.5, 17.5, null],
+			['Hematocrit', 42.6, '%', 41, 53, null],
+			['Platelets', 250, '10^3/uL', 150, 400, null],
+			['Sodium', 140, 'mmol/L', 135, 145, null],
+			['Potassium', 4.1, 'mmol/L', 3.5, 5.0, null],
+			['Chloride', 104, 'mmol/L', 96, 106, null],
+			['CO2', 30, 'mmol/L', 22, 29, 'H'],
+			['Creatinine', 1.12, 'mg/dL', 0.74, 1.35, null],
+			['ALT', 18, 'U/L', 7, 56, null],
+			['Vitamin_D', 11, 'ng/mL', 30, 100, 'L'],
+			['HbA1c', 5.3, '%', null, 5.6, null],
+			['Cholesterol_Total', 192, 'mg/dL', null, 200, null],
+			['Triglycerides', 129, 'mg/dL', null, 150, null],
+			['HDL', 56, 'mg/dL', 40, null, null],
+			['LDL', 113, 'mg/dL', null, 100, 'H'],
+			['Cholesterol_HDL_Ratio', 3.4, 'ratio', null, 5.0, null],
+		]);
+		// 2024-07-27
+		seed(6, [
+			['WBC', 6.4, '10^3/uL', 4.0, 11.0, null],
+			['RBC', 4.73, '10^6/uL', 4.5, 5.9, null],
+			['Hemoglobin', 14.5, 'g/dL', 13.5, 17.5, null],
+			['Hematocrit', 43.5, '%', 41, 53, null],
+			['Platelets', 278, '10^3/uL', 150, 400, null],
+			['Sodium', 139, 'mmol/L', 135, 145, null],
+			['Potassium', 4.4, 'mmol/L', 3.5, 5.0, null],
+			['Chloride', 102, 'mmol/L', 96, 106, null],
+			['CO2', 28, 'mmol/L', 22, 29, null],
+			['Creatinine', 1.04, 'mg/dL', 0.74, 1.35, null],
+			['ALT', 20, 'U/L', 7, 56, null],
+			['HbA1c', 5.5, '%', null, 5.6, null],
+			['Cholesterol_Total', 229, 'mg/dL', null, 200, 'H'],
+			['Triglycerides', 165, 'mg/dL', null, 150, 'H'],
+			['HDL', 51, 'mg/dL', 40, null, null],
+			['LDL', 148, 'mg/dL', null, 100, 'H'],
+			['Cholesterol_HDL_Ratio', 4.5, 'ratio', null, 5.0, null],
+		]);
+		// 2025-11-28
+		seed(7, [
+			['WBC', 6.1, '10^3/uL', 4.0, 11.0, null],
+			['RBC', 4.66, '10^6/uL', 4.5, 5.9, null],
+			['Hemoglobin', 14.6, 'g/dL', 13.5, 17.5, null],
+			['Hematocrit', 42.9, '%', 41, 53, null],
+			['Platelets', 272, '10^3/uL', 150, 400, null],
+			['Sodium', 135, 'mmol/L', 135, 145, null],
+			['Potassium', 4.3, 'mmol/L', 3.5, 5.0, null],
+			['Chloride', 100, 'mmol/L', 96, 106, null],
+			['CO2', 31, 'mmol/L', 22, 29, 'H'],
+			['Creatinine', 0.99, 'mg/dL', 0.74, 1.35, null],
+			['ALT', 24, 'U/L', 7, 56, null],
+			['Vitamin_B12', 412, 'pg/mL', 200, 900, null],
+			['Homocysteine', 11, 'umol/L', null, 10.4, 'H'],
+			['HbA1c', 5.4, '%', null, 5.6, null],
+			['Cholesterol_Total', 219, 'mg/dL', null, 200, 'H'],
+			['Triglycerides', 90, 'mg/dL', null, 150, null],
+			['HDL', 55, 'mg/dL', 40, null, null],
+			['LDL', 148, 'mg/dL', null, 100, 'H'],
+			['Cholesterol_HDL_Ratio', 4.0, 'ratio', null, 5.0, null],
+		]);
+		// 2026-04-22 — Quest, expanded panel
+		seed(8, [
+			['Cholesterol_Total', 188, 'mg/dL', null, 200, null],
+			['LDL', 108, 'mg/dL', null, 100, 'H'],
+			['HDL', 56, 'mg/dL', 40, null, null],
+			['Triglycerides', 118, 'mg/dL', null, 150, null],
+			['Cholesterol_HDL_Ratio', 3.4, 'ratio', null, 5.0, null],
+			['TSH', 1.8, 'mIU/L', 0.4, 4.0, null],
+			['Free_T3', 3.1, 'pg/mL', 2.3, 4.2, null],
+			['Free_T4', 1.2, 'ng/dL', 0.8, 1.8, null],
+			['Iron', 95, 'ug/dL', 65, 175, null],
+			['Ferritin', 145, 'ng/mL', 30, 400, null],
+			['Iron_Saturation', 32, '%', 20, 50, null],
+			['Vitamin_D', 38, 'ng/mL', 30, 100, null],
+			['Vitamin_B12', 528, 'pg/mL', 200, 900, null],
+			['Homocysteine', 9.2, 'umol/L', null, 10.4, null],
+			['HbA1c', 5.4, '%', null, 5.6, null],
+		]);
+
+		const panelDict = (p: Panel) => {
+			const own = biomarkers.filter((b) => b.panel_id === p.id);
+			const flagged = own.filter((b) => b.flag).length;
+			return {
+				id: p.id, drawn_at: p.drawn_at, lab_name: p.lab_name,
+				panel_type: p.panel_type, biomarker_count: own.length,
+				flagged_count: flagged, draft: p.draft, notes: p.notes,
+				has_source: false,
+			};
+		};
+
+		const latestByMetric = (): Record<string, Stat> => {
+			const out: Record<string, Stat> = {};
+			for (const s of stats) {
+				const prev = out[s.metric];
+				if (!prev || s.measured_at > prev.measured_at) out[s.metric] = s;
+			}
+			return out;
+		};
+
+		return ({ url, method, body }: { url: string; method: string; body?: any }) => {
+			// /stats endpoints
+			if (url.startsWith('/istota/api/health/stats/latest') && method === 'GET') {
+				return { stats: latestByMetric() };
+			}
+			if (url.startsWith('/istota/api/health/stats/series') && method === 'GET') {
+				const u = new URL(url, 'http://x');
+				const metric = u.searchParams.get('metric') || '';
+				const since = u.searchParams.get('since');
+				const points = stats
+					.filter((s) => s.metric === metric && (!since || s.measured_at >= since))
+					.sort((a, b) => a.measured_at.localeCompare(b.measured_at))
+					.map((s) => ({ measured_at: s.measured_at, value: s.value, unit: s.unit }));
+				return { metric, points };
+			}
+			if (url.startsWith('/istota/api/health/stats') && method === 'GET') {
+				const u = new URL(url, 'http://x');
+				const metric = u.searchParams.get('metric');
+				const since = u.searchParams.get('since');
+				const limit = Number(u.searchParams.get('limit') || 200);
+				let rows = [...stats];
+				if (metric) rows = rows.filter((s) => s.metric === metric);
+				if (since) rows = rows.filter((s) => s.measured_at >= since);
+				rows.sort((a, b) => b.measured_at.localeCompare(a.measured_at));
+				return { stats: rows.slice(0, limit) };
+			}
+			if (url === '/istota/api/health/stats' && method === 'POST') {
+				const s: Stat = {
+					id: nextStatId++,
+					metric: body.metric,
+					value: Number(body.value),
+					unit: body.unit,
+					measured_at: body.measured_at || new Date().toISOString(),
+					source: body.source || 'manual',
+					source_ref: null,
+					notes: body.notes ?? null,
+				};
+				stats.push(s);
+				return { status: 'ok', id: s.id };
+			}
+			const delStatMatch = url.match(/^\/istota\/api\/health\/stats\/(\d+)$/);
+			if (delStatMatch && method === 'DELETE') {
+				const id = Number(delStatMatch[1]);
+				const idx = stats.findIndex((s) => s.id === id);
+				if (idx >= 0) stats.splice(idx, 1);
+				return { status: 'ok' };
+			}
+
+			// /panels endpoints
+			if (url === '/istota/api/health/panels' && method === 'GET') {
+				return { panels: panels.slice().sort((a, b) => b.drawn_at.localeCompare(a.drawn_at)).map(panelDict) };
+			}
+			if (url.startsWith('/istota/api/health/panels?') && method === 'GET') {
+				return { panels: panels.slice().sort((a, b) => b.drawn_at.localeCompare(a.drawn_at)).map(panelDict) };
+			}
+			if (url === '/istota/api/health/panels' && method === 'POST') {
+				const p: Panel = {
+					id: panels.length + 1,
+					drawn_at: body.drawn_at,
+					lab_name: body.lab_name || null,
+					panel_type: body.panel_type || null,
+					source_file: null, source_mime: null, ocr_text: null,
+					draft: false, notes: body.notes ?? null,
+				};
+				panels.push(p);
+				return { status: 'ok', id: p.id };
+			}
+			const panelDetailMatch = url.match(/^\/istota\/api\/health\/panels\/(\d+)$/);
+			if (panelDetailMatch) {
+				const id = Number(panelDetailMatch[1]);
+				const p = panels.find((x) => x.id === id);
+				if (!p) return { error: 'not found' };
+				if (method === 'GET') {
+					return {
+						panel: panelDict(p),
+						biomarkers: biomarkers.filter((b) => b.panel_id === id),
+						source: { available: false, mime: null },
+					};
+				}
+				if (method === 'PUT') {
+					if (typeof body.draft === 'boolean') p.draft = body.draft;
+					if (body.lab_name !== undefined) p.lab_name = body.lab_name;
+					if (body.panel_type !== undefined) p.panel_type = body.panel_type;
+					if (body.notes !== undefined) p.notes = body.notes;
+					return { status: 'ok' };
+				}
+				if (method === 'DELETE') {
+					const idx = panels.findIndex((x) => x.id === id);
+					if (idx >= 0) panels.splice(idx, 1);
+					for (let i = biomarkers.length - 1; i >= 0; i--) {
+						if (biomarkers[i].panel_id === id) biomarkers.splice(i, 1);
+					}
+					return { status: 'ok' };
+				}
+			}
+			const bioMatch = url.match(/^\/istota\/api\/health\/panels\/(\d+)\/biomarkers$/);
+			if (bioMatch) {
+				const id = Number(bioMatch[1]);
+				if (method === 'POST') {
+					for (let i = biomarkers.length - 1; i >= 0; i--) {
+						if (biomarkers[i].panel_id === id) biomarkers.splice(i, 1);
+					}
+					const incoming: any[] = body?.biomarkers || [];
+					for (const b of incoming) {
+						biomarkers.push({
+							id: nextBioId++, panel_id: id, name: b.name,
+							display_name: b.display_name ?? null,
+							value: Number(b.value), unit: b.unit,
+							ref_range_low: b.ref_range_low ?? null,
+							ref_range_high: b.ref_range_high ?? null,
+							flag: b.flag ?? null,
+						});
+					}
+					if (body?.confirm) {
+						const p = panels.find((x) => x.id === id);
+						if (p) p.draft = false;
+					}
+					return { status: 'ok', count: incoming.length };
+				}
+				if (method === 'GET') {
+					return { biomarkers: biomarkers.filter((b) => b.panel_id === id) };
+				}
+			}
+			const extractMatch = url.match(/^\/istota\/api\/health\/panels\/(\d+)\/extract$/);
+			if (extractMatch && method === 'POST') {
+				return {
+					biomarkers: [
+						{ name: 'WBC', value: 7.4, unit: '10^3/uL', ref_range_low: 4.0, ref_range_high: 11.0, flag: null },
+						{ name: 'Hemoglobin', value: 15.0, unit: 'g/dL', ref_range_low: 13.5, ref_range_high: 17.5, flag: null },
+						{ name: 'LDL', value: 112, unit: 'mg/dL', ref_range_low: null, ref_range_high: 100, flag: 'H' },
+						{ name: 'HDL', value: 54, unit: 'mg/dL', ref_range_low: 40, ref_range_high: null, flag: null },
+					],
+					warnings: [],
+					raw_text: 'Mock OCR text — replace with real extraction output.',
+				};
+			}
+
+			// /biomarkers endpoints
+			if (url.startsWith('/istota/api/health/biomarkers/trend') && method === 'GET') {
+				const u = new URL(url, 'http://x');
+				const name = u.searchParams.get('name') || '';
+				// Match by canonical name OR by alias.
+				const ref = BIOMARKER_REFS.find((r) => r.name === name)
+					|| BIOMARKER_REFS.find((r) => (r.aliases || []).some((a) => a.toLowerCase() === name.toLowerCase()));
+				const canonical = ref?.name || name;
+				const matches = biomarkers
+					.filter((b) => b.name === canonical)
+					.map((b) => {
+						const p = panels.find((x) => x.id === b.panel_id);
+						return { drawn_at: p?.drawn_at || '', value: b.value, unit: b.unit, flag: b.flag };
+					})
+					.filter((x) => Boolean(x.drawn_at) && panels.find((p) => p.drawn_at === x.drawn_at && !p.draft))
+					.sort((a, b) => a.drawn_at.localeCompare(b.drawn_at));
+				// Use sex-specific male range if present, else unisex, else widest.
+				const lowM = ref?.ref_range_low_m ?? null;
+				const highM = ref?.ref_range_high_m ?? null;
+				const low = lowM ?? ref?.ref_range_low ?? null;
+				const high = highM ?? ref?.ref_range_high ?? null;
+				return {
+					name: canonical,
+					display_name: ref?.display_name || canonical,
+					points: matches,
+					unit_mismatch: false,
+					ref_range_low: low,
+					ref_range_high: high,
+					unit: ref?.default_unit ?? null,
+				};
+			}
+			if (url === '/istota/api/health/biomarkers/summary' && method === 'GET') {
+				const byName = new Map<string, Bio[]>();
+				for (const b of biomarkers) {
+					const arr = byName.get(b.name) || [];
+					arr.push(b);
+					byName.set(b.name, arr);
+				}
+				const summary: any[] = [];
+				for (const [name, items] of byName.entries()) {
+					items.sort((a, b) => {
+						const pa = panels.find((p) => p.id === a.panel_id);
+						const pb = panels.find((p) => p.id === b.panel_id);
+						return (pa?.drawn_at || '').localeCompare(pb?.drawn_at || '');
+					});
+					const latestBio = items[items.length - 1];
+					const previousBio = items.length > 1 ? items[items.length - 2] : null;
+					const drawn = (b: Bio) => panels.find((p) => p.id === b.panel_id)?.drawn_at || '';
+					const dir =
+						previousBio && latestBio.value > previousBio.value * 1.01
+							? 'up'
+							: previousBio && latestBio.value < previousBio.value * 0.99
+								? 'down'
+								: 'flat';
+					summary.push({
+						name,
+						latest: { drawn_at: drawn(latestBio), value: latestBio.value, unit: latestBio.unit, flag: latestBio.flag },
+						previous: previousBio
+							? { drawn_at: drawn(previousBio), value: previousBio.value, unit: previousBio.unit, flag: previousBio.flag }
+							: null,
+						direction: dir,
+						sample_count: items.length,
+					});
+				}
+				summary.sort((a, b) => a.name.localeCompare(b.name));
+				return { summary };
+			}
+			if (url === '/istota/api/health/biomarkers/refs' && method === 'GET') {
+				return { refs: BIOMARKER_REFS };
+			}
+
+			// Biomarker out-of-range explainer.
+			const explainerMatch = url.match(
+				/^\/istota\/api\/health\/biomarkers\/([^/]+)\/explainer(?:\?(.*))?$/,
+			);
+			if (explainerMatch && method === 'GET') {
+				const requestedName = decodeURIComponent(explainerMatch[1]);
+				const params = new URLSearchParams(explainerMatch[2] || '');
+				const direction = params.get('direction');
+				if (direction !== 'high' && direction !== 'low') {
+					return { error: "direction must be 'high' or 'low'" };
+				}
+				// Canonicalise via the loaded refs (handles alias lookups).
+				const ref = BIOMARKER_REFS.find((r) => r.name === requestedName)
+					|| BIOMARKER_REFS.find((r) => (r.aliases || []).some(
+						(a) => a.toLowerCase() === requestedName.toLowerCase(),
+					));
+				const canonical = ref?.name || requestedName;
+				const displayName = ref?.display_name || canonical;
+
+				const STUBS: Record<string, { summary: string; causes: string[]; mitigations: string[] }> = {
+					'CO2:high': {
+						summary:
+							'Elevated CO2 (bicarbonate) can reflect a shift in acid-base balance. A single high reading is rarely meaningful on its own — context, hydration, and trends matter.',
+						causes: [
+							'Mild dehydration or volume contraction may raise bicarbonate transiently.',
+							'Chronic diuretic use is commonly associated with elevated CO2.',
+							'Persistent vomiting or low potassium can drive metabolic alkalosis.',
+							'Compensatory response to chronic respiratory conditions may show up here.',
+							'Antacid-heavy regimens (calcium carbonate, baking soda) can nudge values up.',
+						],
+						mitigations: [
+							'Consider a repeat test in 2–4 weeks to confirm the trend.',
+							'Review hydration status — measure intake and salt loss over recent weeks.',
+							'Discuss any diuretics, PPIs, or alkali supplements with your prescriber.',
+							'Bring electrolyte panel context (Na, K, Cl) to your clinician for interpretation.',
+						],
+					},
+					'Vitamin_D:low': {
+						summary:
+							'Low 25-OH Vitamin D is common, especially in northern latitudes and during winter. It plays roles in bone, immune, and muscle health.',
+						causes: [
+							'Limited sun exposure or sunscreen use, especially in winter months.',
+							'Darker skin can be associated with lower endogenous synthesis at the same exposure.',
+							'Malabsorption (celiac, IBD, gastric bypass) reduces dietary uptake.',
+							'Obesity may sequester vitamin D in adipose tissue and lower serum levels.',
+							'Some medications (corticosteroids, anticonvulsants) accelerate breakdown.',
+						],
+						mitigations: [
+							'Discuss whether a vitamin D supplement is appropriate with your clinician.',
+							'Increase dietary sources (fatty fish, fortified dairy, egg yolks) gradually.',
+							'Aim for safe, regular sun exposure — minutes vary by skin tone and season.',
+							'Retest in 8–12 weeks after any intervention to gauge response.',
+						],
+					},
+					'LDL:high': {
+						summary:
+							'Elevated LDL cholesterol is the strongest routine lipid contributor to atherosclerotic cardiovascular risk. Targets depend on overall risk profile, not a single value.',
+						causes: [
+							'Diet high in saturated fat, refined carbohydrates, or trans fats.',
+							'Genetic factors (familial hypercholesterolemia is more common than appreciated).',
+							'Hypothyroidism can raise LDL noticeably.',
+							'Sedentary lifestyle and excess body weight are associated with higher LDL.',
+							'Some medications (corticosteroids, beta blockers, retinoids) can elevate it.',
+						],
+						mitigations: [
+							'Discuss overall cardiovascular risk with your clinician — not just the LDL number.',
+							'Consider dietary changes emphasising fiber, fish, nuts, and unsaturated fats.',
+							'Review activity levels and sleep — both move LDL over time.',
+							'If recent results have trended up, ask about thyroid and family-history workup.',
+						],
+					},
+					'Cholesterol_Total:high': {
+						summary:
+							'Total cholesterol above ~200 mg/dL is a coarse signal — the breakdown into LDL, HDL, and triglycerides gives a far better picture of cardiovascular risk.',
+						causes: [
+							'Genetics often dominate, especially when LDL is the bulk of the elevation.',
+							'Diet quality (saturated and trans fats) shifts total cholesterol over weeks.',
+							'High HDL can elevate total cholesterol without raising risk.',
+							'Hypothyroidism and kidney disease are commonly associated.',
+							'Pregnancy and the post-partum period can transiently raise total cholesterol.',
+						],
+						mitigations: [
+							'Look at LDL, HDL, and triglycerides separately rather than total alone.',
+							'Discuss whether a calculated risk score is appropriate for the next visit.',
+							'Repeat fasted if the prior test was non-fasting.',
+							'Review lifestyle changes incrementally rather than chasing a single number.',
+						],
+					},
+					'Triglycerides:high': {
+						summary:
+							'Elevated triglycerides are sensitive to recent meals, alcohol, and refined carbohydrates — a single non-fasted value is often not informative on its own.',
+						causes: [
+							'Non-fasting samples can read 30–50% higher than fasted.',
+							'Recent heavy alcohol intake elevates triglycerides for days.',
+							'Diets high in refined carbohydrates and fructose drive triglyceride production.',
+							'Uncontrolled diabetes and insulin resistance commonly raise triglycerides.',
+							'Some medications (estrogens, retinoids, beta blockers, thiazides) are associated.',
+						],
+						mitigations: [
+							'Re-test fasted (9+ hours, water only) before drawing conclusions.',
+							'Discuss alcohol patterns over the past week with your clinician.',
+							'Consider reducing refined-carb intake and increasing fiber.',
+							'Bring HbA1c context if insulin resistance is a known concern.',
+						],
+					},
+					'Homocysteine:high': {
+						summary:
+							'Elevated homocysteine is associated with cardiovascular and cognitive risk over time. It often responds well to specific B-vitamin support.',
+						causes: [
+							'B12, folate, or B6 deficiency is the most common driver.',
+							'MTHFR polymorphisms can reduce homocysteine clearance.',
+							'Kidney disease impairs homocysteine excretion.',
+							'Hypothyroidism is commonly associated.',
+							'Some medications (methotrexate, anticonvulsants, metformin) can raise it.',
+						],
+						mitigations: [
+							'Discuss B12, folate, and B6 levels with your clinician before supplementing blindly.',
+							'Consider methylated B-vitamin forms if MTHFR variants are suspected.',
+							'Review thyroid and kidney panels for context.',
+							'Re-test in 8–12 weeks after any intervention to gauge response.',
+						],
+					},
+					'Sodium:low': {
+						summary:
+							'Mildly low sodium (hyponatremia) typically reflects water balance rather than salt intake — the body is holding more water than usual relative to electrolytes.',
+						causes: [
+							'Over-hydration (especially in endurance athletes) can dilute serum sodium.',
+							'Thiazide diuretics commonly cause mild hyponatremia.',
+							'SIADH (a hormone signaling issue) keeps water in the body.',
+							'Heart, kidney, or liver dysfunction can shift fluid balance.',
+							'Severe vomiting or diarrhea, paired with plain-water replacement, can lower sodium.',
+						],
+						mitigations: [
+							'Avoid drinking large volumes of plain water on the day of testing.',
+							'Discuss any diuretic, SSRI, or chemotherapy use with your prescriber.',
+							'Bring osmolality and a urine sodium to the next visit if hyponatremia persists.',
+							'Repeat the test — single mildly-low values are common with no clinical relevance.',
+						],
+					},
+				};
+
+				const key = `${canonical}:${direction}`;
+				const stub = STUBS[key];
+				if (stub) {
+					return {
+						name: canonical,
+						display_name: displayName,
+						direction,
+						summary: stub.summary,
+						causes: stub.causes,
+						mitigations: stub.mitigations,
+						disclaimer:
+							'Educational information only — not medical advice or diagnosis. Discuss your results with a healthcare professional before acting on them.',
+						source: 'cache',
+						generated_at: new Date(Date.now() - 86400_000).toISOString(),
+					};
+				}
+				// Generic fallback for any other biomarker.
+				return {
+					name: canonical,
+					display_name: displayName,
+					direction,
+					summary: `A ${direction} ${displayName} reading sits outside the typical reference range. A single value isn't enough to draw conclusions — trends, recent context, and clinical correlation matter.`,
+					causes: [
+						'Recent illness, dehydration, or stress can shift values temporarily.',
+						'Medications, supplements, and recent meals can move many markers.',
+						'Inter-lab and inter-assay variability is real; repeat testing helps confirm.',
+					],
+					mitigations: [
+						'Discuss the result with your healthcare provider before acting on it.',
+						'Consider a repeat test in a few weeks to confirm the trend.',
+						'Review recent changes in medication, diet, and lifestyle for context.',
+					],
+					disclaimer:
+						'Educational information only — not medical advice or diagnosis. Discuss your results with a healthcare professional before acting on them.',
+					source: 'fallback',
+					generated_at: null,
+				};
+			}
+
+			// Spreadsheet matrix: confirmed panels × every biomarker, grouped by category.
+			if (url === '/istota/api/health/bloodwork/matrix' && method === 'GET') {
+				const confirmed = panels
+					.filter((p) => !p.draft)
+					.sort((a, b) => a.drawn_at.localeCompare(b.drawn_at));
+				const seenMarker: Record<string, { unit: string }> = {};
+				const values: Record<string, Record<string, { value: number; unit: string; flag: string | null }>> = {};
+				for (const p of confirmed) {
+					values[String(p.id)] = {};
+					for (const b of biomarkers.filter((b) => b.panel_id === p.id)) {
+						if (!seenMarker[b.name]) seenMarker[b.name] = { unit: b.unit };
+						values[String(p.id)][b.name] = { value: b.value, unit: b.unit, flag: b.flag };
+					}
+				}
+				const refByName = new Map(BIOMARKER_REFS.map((r) => [r.name, r] as const));
+				const widestRange = (r: typeof BIOMARKER_REFS[number]) => {
+					const lows: number[] = [];
+					const highs: number[] = [];
+					if (r.ref_range_low != null) lows.push(r.ref_range_low);
+					if (r.ref_range_low_m != null) lows.push(r.ref_range_low_m);
+					if (r.ref_range_low_f != null) lows.push(r.ref_range_low_f);
+					if (r.ref_range_high != null) highs.push(r.ref_range_high);
+					if (r.ref_range_high_m != null) highs.push(r.ref_range_high_m);
+					if (r.ref_range_high_f != null) highs.push(r.ref_range_high_f);
+					return [
+						lows.length ? Math.min(...lows) : null,
+						highs.length ? Math.max(...highs) : null,
+					] as const;
+				};
+				const catOrder: string[] = [];
+				const catMarkers: Record<string, any[]> = {};
+				for (const r of BIOMARKER_REFS) {
+					if (!catMarkers[r.category]) {
+						catOrder.push(r.category);
+						catMarkers[r.category] = [];
+					}
+				}
+				for (const name of Object.keys(seenMarker)) {
+					const r = refByName.get(name);
+					const cat = r?.category || 'Other';
+					if (!catMarkers[cat]) {
+						catOrder.push(cat);
+						catMarkers[cat] = [];
+					}
+					let low: number | null = null, high: number | null = null;
+					if (r) [low, high] = widestRange(r);
+					catMarkers[cat].push({
+						name,
+						display_name: r?.display_name || name,
+						unit: r?.default_unit || seenMarker[name].unit,
+						ref_range_low: low,
+						ref_range_high: high,
+						category: cat,
+					});
+				}
+				const orderedCats = catOrder
+					.filter((c) => catMarkers[c]?.length)
+					.map((c) => ({
+						name: c,
+						markers: [...catMarkers[c]].sort((a, b) => a.display_name.localeCompare(b.display_name)),
+					}));
+				return {
+					categories: orderedCats,
+					panels: confirmed.map((p) => ({
+						id: p.id,
+						drawn_at: p.drawn_at,
+						lab_name: p.lab_name,
+						panel_type: p.panel_type,
+					})),
+					values,
+				};
+			}
+
+			// /settings endpoints
+			if (url === '/istota/api/health/settings' && method === 'GET') {
+				return { settings };
+			}
+			if (url === '/istota/api/health/settings' && method === 'PUT') {
+				if (body && typeof body === 'object') {
+					if ('dob' in body) settings.dob = body.dob;
+					if ('height_cm' in body) settings.height_cm = body.height_cm;
+					if ('sex' in body) settings.sex = body.sex;
+					if (body.display_units) {
+						settings.display_units = { ...settings.display_units, ...body.display_units };
+					}
+				}
+				return { status: 'ok', settings };
+			}
+
+			// /dashboard
+			if (url === '/istota/api/health/dashboard' && method === 'GET') {
+				const latest = latestByMetric();
+				const recent = panels
+					.filter((p) => !p.draft)
+					.sort((a, b) => b.drawn_at.localeCompare(a.drawn_at))
+					.slice(0, 3)
+					.map(panelDict);
+				const flagged: any[] = [];
+				const seen = new Set<string>();
+				const sortedPanels = [...panels].sort((a, b) => b.drawn_at.localeCompare(a.drawn_at));
+				for (const p of sortedPanels) {
+					if (p.draft) continue;
+					for (const b of biomarkers.filter((b) => b.panel_id === p.id && b.flag)) {
+						if (seen.has(b.name)) continue;
+						seen.add(b.name);
+						flagged.push({ ...b, panel_id: p.id, drawn_at: p.drawn_at, lab_name: p.lab_name });
+					}
+				}
+				const weight = latest['weight'];
+				const bmi =
+					weight && settings.height_cm
+						? Math.round((weight.value / Math.pow(settings.height_cm / 100, 2)) * 100) / 100
+						: null;
+				return {
+					latest_stats: latest,
+					bmi,
+					recent_panels: recent,
+					alerts: flagged.slice(0, 20),
+					settings,
+				};
+			}
+
+			return undefined;
+		};
+	})(),
 ];
 
 function readBody(req: any): Promise<any> {

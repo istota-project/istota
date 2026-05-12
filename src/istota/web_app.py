@@ -447,6 +447,18 @@ def _user_has_location(username: str) -> bool:
     return _config.is_module_enabled(username, "location")
 
 
+def _user_has_health(username: str) -> bool:
+    """True if the experimental health module is enabled for the user.
+
+    Double-gated: ``is_module_enabled`` short-circuits on the
+    ``module_health`` experimental flag before consulting the per-user
+    opt-out.
+    """
+    if not _config:
+        return False
+    return _config.is_module_enabled(username, "health")
+
+
 def _has_google_token(username: str) -> bool:
     """Check if a user has connected their Google account."""
     if not _config:
@@ -503,6 +515,7 @@ async def api_me(user: dict = Depends(_require_api_auth)):
         "feeds": False,
         "location": False,
         "money": False,
+        "health": False,
         "google_workspace": False,
         "google_workspace_enabled": False,
         "admin": is_admin,
@@ -511,6 +524,7 @@ async def api_me(user: dict = Depends(_require_api_auth)):
         features["feeds"] = _user_has_feeds(username)
         features["location"] = _user_has_location(username)
         features["money"] = _user_has_money(username)
+        features["health"] = _user_has_health(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
         if _config.google_workspace.enabled:
             features["google_workspace"] = _has_google_token(username)
@@ -2690,6 +2704,18 @@ try:
     app.dependency_overrides[_money_verify_origin] = _verify_origin
 except ImportError:
     pass
+
+# Health web API — experimental module, gated by ``module_health`` in
+# ``[experimental] features``. Routes mount unconditionally; per-request
+# auth resolves via ``is_module_enabled``, which short-circuits when the
+# flag isn't set.
+from istota.health.routes import require_auth as _health_require_auth
+from istota.health.routes import router as _health_router
+from istota.health.routes import verify_origin as _health_verify_origin
+
+app.include_router(_health_router, prefix="/istota/api/health", tags=["health"])
+app.dependency_overrides[_health_require_auth] = _require_api_auth
+app.dependency_overrides[_health_verify_origin] = _verify_origin
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():
