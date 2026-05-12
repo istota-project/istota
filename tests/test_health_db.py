@@ -46,6 +46,56 @@ class TestInitDb:
             ).fetchone()
         assert row["value"] == str(health_db.SCHEMA_VERSION)
 
+    def test_migrates_pre_content_hash_db(self, tmp_path):
+        """A DB created before the content_hash column must migrate cleanly.
+
+        Regression for prod 500s where executescript hit
+        ``CREATE INDEX … ON panels(content_hash)`` before the migration's
+        ALTER on the existing panels table.
+        """
+        import sqlite3
+
+        ctx = _ctx(tmp_path)
+        ctx.ensure_dirs()
+        # Materialise an older panels table without the content_hash column.
+        conn = sqlite3.connect(ctx.db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE panels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    drawn_at TEXT NOT NULL,
+                    lab_name TEXT,
+                    panel_type TEXT,
+                    source_file TEXT,
+                    source_mime TEXT,
+                    ocr_text TEXT,
+                    draft INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO panels (drawn_at) VALUES ('2026-05-01T00:00:00+00:00');
+                """,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        # This used to raise sqlite3.OperationalError: no such column.
+        health_db.init_db(ctx.db_path)
+        with health_db.connect(ctx.db_path) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(panels)")}
+            assert "content_hash" in cols
+            indices = {
+                r["name"]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                ).fetchall()
+            }
+            assert "idx_panels_content_hash" in indices
+            # Pre-existing rows survive with a NULL hash.
+            row = conn.execute("SELECT content_hash FROM panels").fetchone()
+            assert row["content_hash"] is None
+
 
 class TestStats:
     def test_insert_and_list(self, tmp_path):

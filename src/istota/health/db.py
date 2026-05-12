@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS panels (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_panels_drawn ON panels(drawn_at);
-CREATE INDEX IF NOT EXISTS idx_panels_content_hash ON panels(content_hash);
+-- idx_panels_content_hash is created in _migrate_add_content_hash so it
+-- runs *after* the ALTER TABLE on older DBs that pre-date the column.
 
 CREATE TABLE IF NOT EXISTS biomarkers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,10 +145,15 @@ def init_db(db_path: Path) -> None:
 
 
 def _migrate_add_content_hash(conn: sqlite3.Connection) -> None:
-    """Add ``panels.content_hash`` on older DBs. Idempotent.
+    """Add ``panels.content_hash`` on older DBs + ensure its index. Idempotent.
 
     Pre-existing rows are left NULL; backfill runs once via
     :func:`backfill_panel_content_hashes` from ``_migrate.ensure_initialised``.
+
+    Index creation lives here rather than in ``SCHEMA_SQL`` because
+    ``executescript`` would otherwise hit the ``CREATE INDEX`` line before
+    the ALTER on a pre-migration DB and blow up with
+    ``no such column: content_hash``.
     """
     # PRAGMA table_info returns: (cid, name, type, notnull, dflt_value, pk).
     # ``init_db`` opens the connection without a row factory, so index by
@@ -155,10 +161,10 @@ def _migrate_add_content_hash(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(panels)")}
     if "content_hash" not in cols:
         conn.execute("ALTER TABLE panels ADD COLUMN content_hash TEXT")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_panels_content_hash "
-            "ON panels(content_hash)",
-        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_panels_content_hash "
+        "ON panels(content_hash)",
+    )
 
 
 @contextmanager
