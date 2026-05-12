@@ -23,7 +23,9 @@
 
 	Chart.register(LineController, LineElement, PointElement, CategoryScale, LinearScale, Tooltip, Filler);
 
-	let name = $derived(decodeURIComponent(page.params.name ?? ''));
+	// Read the canonical biomarker name from ?name=… so this page is
+	// statically prerenderable under adapter-static.
+	let name = $derived(page.url.searchParams.get('name') ?? '');
 
 	let loading = $state(true);
 	let error = $state('');
@@ -289,7 +291,7 @@
 		<div class="related">
 			<span class="related-label">Related:</span>
 			{#each related as r (r.name)}
-				<a href="{base}/health/bloodwork/marker/{encodeMarker(r.name)}">{r.display_name}</a>
+				<a href="{base}/health/bloodwork/marker?name={encodeMarker(r.name)}">{r.display_name}</a>
 			{/each}
 		</div>
 	{/if}
