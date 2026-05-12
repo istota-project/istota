@@ -82,7 +82,10 @@ After successful task completion (not confirmation, not failure), the scheduler 
 - `_process_deferred_kg_ops` — `task_{id}_kg_ops.json` from `istota-skill memory_search add-fact|invalidate|delete-fact`. Commits per op so a mid-loop crash can't roll back ops we've already accepted.
 - `_process_deferred_kv_ops` — `task_{id}_kv_ops.json` from `istota-skill kv set|delete`.
 - `_process_deferred_user_alerts` — `task_{id}_user_alerts.json` for the alerts/notification path.
+- `_process_deferred_health_ops` — `task_{id}_health_ops.json` from `istota-skill health log|add-panel|add-biomarker|upload|set|...`. Resolves the user's `HealthContext` and replays insert/update ops against the per-user `health.db`. User id always comes from the task (defense-in-depth); recognized suffix lives in `_KNOWN_DEFERRED_SUFFIXES` so unknown-suffix warnings stay clean.
 - `_load_deferred_email_output` — `task_{id}_email_output.json` for structured email replies (preferred over the legacy stdout-JSON parser).
+
+All deferred-op handlers now live in `scheduler_deferred.py` (`_KNOWN_DEFERRED_SUFFIXES`, `_load_deferred_json`, per-handler functions, `_purge_deferred_files_for_retry`, `_warn_unconsumed_deferred_files`). `scheduler.py` calls into it as a thin orchestrator.
 
 **Retry replay safety (ISSUE-074)**: deferred-op producers append to per-task files keyed only by `task.id`. `set_task_pending_retry` keeps the same id, so `_purge_deferred_files_for_retry()` clears the slate in the retry-eligible failure branch — eventual success replays only the final attempt's writes (matters most for non-idempotent KG `invalidate`/`delete`).
 

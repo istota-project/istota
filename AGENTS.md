@@ -32,7 +32,8 @@ src/istota/
 ├── web_app.py            # Authenticated web UI (Nextcloud OAuth2 + admin dashboard)
 ├── secrets_store.py      # Encrypted credential store (Fernet via scrypt-derived key)
 ├── secret_schema.py      # Shared service/key schema for `istota secret` CLI + web UI
-├── modules.py            # MODULE_NAMES registry (feeds, money, location)
+├── modules.py            # MODULE_NAMES (feeds, money, location, health) + EXPERIMENTAL_MODULES
+├── experimental.py       # Operator feature-flag gate (`@requires_feature`, env helpers)
 ├── user_profiles.py      # Per-user profile store (Phase 6)
 ├── user_briefings.py     # Per-user briefings store (Phase 7b)
 ├── notifications.py      # Talk / Email / ntfy dispatcher
@@ -42,7 +43,9 @@ src/istota/
 ├── nextcloud_client.py   # OCS + WebDAV plumbing
 ├── storage.py            # Bot-managed Nextcloud storage
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML
+├── health/               # Experimental: body stats, bloodwork, biomarker trends, OCR, explainer
 ├── location_logic.py     # Place stats / cluster discovery (shared web ⇄ skill)
+├── scheduler_deferred.py # Deferred-op replay (subtasks, KG, KV, health_ops, …)
 ├── shared_file_organizer.py
 ├── commands.py           # !command dispatch
 ├── cron_loader.py        # CRON.md → DB sync
@@ -66,7 +69,8 @@ TASKS.md ────►│
 CLI ─────────►┘
 
 GPS Webhook ──► Location DB → Place detection → ntfy/Talk
-Web App ──► Nextcloud OAuth2 → Dashboard / Feeds / Location / Money / Settings / Admin
+Web App ──► Nextcloud OAuth2 → Dashboard / Feeds / Location / Money / Health* / Settings / Admin
+                                                                (* experimental)
 ```
 
 - **Talk poller**: daemon thread, long-poll per conversation, WAL-mode DB.
@@ -94,8 +98,18 @@ Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped m
 
 ### Modules vs resources vs connected services
 - **Resources** — paths/identifiers a user owns (calendars, folders, todo files, notes folders, email folders, reminders files). Multiple per user. Live in `[[users.X.resources]]` + the `user_resources` DB table.
-- **Modules** — on-by-default features with their own UI tab and a settings page reachable via a cog icon (`feeds`, `money`, `location`). Names live in `istota.modules.MODULE_NAMES`. Per-user opt-out via `disabled_modules`. Single source of truth: `Config.is_module_enabled(user_id, module)`.
+- **Modules** — on-by-default features with their own UI tab and a settings page reachable via a cog icon (`feeds`, `money`, `location`, plus the experimental `health`). Names live in `istota.modules.MODULE_NAMES`. Per-user opt-out via `disabled_modules`. Single source of truth: `Config.is_module_enabled(user_id, module)`. Names that also appear in `EXPERIMENTAL_MODULES` are AND-gated on the matching `[experimental] features` flag — disabled-by-default until the operator opts in, after which they behave like any other module.
 - **Connected services** — per-user external API credentials consumed by skills (`karakeep`, `google_workspace`, `ntfy`). Stored encrypted in the `secrets` table (Fernet over scrypt-derived key from `ISTOTA_SECRET_KEY`); the bookmarks skill resolves both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` from there. Provisioned via `istota secret ensure|list|remove` (Ansible) or `/istota/settings` (web). Schema for both surfaces lives in `secret_schema.py`.
+
+### Experimental features
+Operator-scoped feature flags for in-tree-but-off-by-default work. Configured via `[experimental] features = [...]` in `config.toml` (or `istota_experimental_features` in Ansible). Off by default; never exposed in the web UI; not toggleable per user. The flag list flows to every subprocess builder as `ISTOTA_EXPERIMENTAL_FEATURES` (CSV), so subprocess-paths see the same gate as the LLM path. Four surfaces honor the gate:
+
+- **CLI subcommands** — `@requires_feature("name")` Click decorator (`src/istota/experimental.py`). Gated-off calls emit the standard `{"status":"error","error":"…"}` JSON envelope; in `_execute_command_task` / `_execute_skill_task` the envelope detector reclassifies stdout-OK exits as task failures with the human-readable message intact. Currently used by `money lots` (`money_tax`) and `money wash-sales` (`money_wash_sales`).
+- **Skills** — `experimental: true` in `skill.md` frontmatter requires `skill_<name>` in the enabled set. The gate fires in the Pass-1 main loop, the sticky path, the companion pull-in, and the Pass-2 post-filter; `build_skill_manifest` also strips gated-off skills so they don't reach the Pass-2 prompt.
+- **Modules** — `EXPERIMENTAL_MODULES` mapping in `modules.py` (`{"health": "module_health"}`). `Config.is_module_enabled` AND-s the flag in before the per-user DB read; the `/settings/modules` web endpoint and `_coerce_profile_value("disabled_modules", …)` validation consult the same gate so a disabled experimental module never appears in the user-facing surface at all.
+- **Web routes** — module-shaped surfaces (e.g. `/health/*`, `/api/health/*`) only register when the gate is on; `/api/me` filters its `features` payload through the same check.
+
+`istota experimental list` prints the `KNOWN_FEATURES` registry with on/off status from the loaded config. Unknown names in TOML log a warning but don't fail startup, so graduating a feature in code stays a code-only change. Naming convention: `module_<x>` for module gates, `skill_<x>` for skill gates, free-form for CLI subcommand gates. See `docs/EXPERIMENTAL.md` for the registry and graduation policy.
 
 ### ntfy push notifications
 ntfy is a per-user connected service — there is no global `[ntfy]` block. Each user supplies their own server URL, topic, and (optional) auth via the encrypted `secrets` table (web settings or `istota secret ensure -s ntfy ...`). `notifications._send_ntfy` reads everything from the user's secret rows; if the user has no `topic` set, ntfy is a no-op for them. Default priority is hardcoded to `3`; per-call overrides flow through `send_notification(...)`.
@@ -143,8 +157,19 @@ Nightly extraction goes through the configured Brain (no streaming, no sandbox).
 ### GPS Location
 Overland webhook → `webhook_receiver.py`. Asymmetric place detection (hysteresis on entry, continuous away on exit). Reconciler re-derives closed visits. Discovered clusters dismissable. Per-user `location.db` at `{workspace}/location/data/location.db` holds `location_pings`, `places`, `visits`, `location_state`, `dismissed_clusters` — module package at `src/istota/location/` with `resolve_for_user(user_id, config) -> LocationContext` (mirrors `feeds` / `money`). Skill CLI subcommands and web routes that need reverse-geocoding open a second connection to framework `istota.db` for the global `geocode_cache` / `reverse_geocode_cache` tables (cross-user Nominatim dedup); `location.db.with_geocode_conn(framework_db_path)` is the dual-conn entry point. One-time framework→per-user migrator at `python -m istota.location._migrate`, gated in Ansible by a `location_pings`-presence check.
 
+### Health (experimental)
+Body stats, bloodwork panels, biomarker trends. Gated by the `module_health` experimental flag — off by default. Per-user SQLite at `{workspace}/health/data/health.db` (stats, panels, biomarkers, biomarker_explainers, profile, display settings). All measurements stored metric (kg, cm, °C, mmHg, bpm); display layer converts to the user's preferred units. Module package at `src/istota/health/` with `models`, `db`, `units`, `routes`, `workspace`, `_loader`, `_migrate`, `ocr`, `explainer`. Bundled `biomarker_refs.json` seeds 60+ canonical markers with sex-specific reference ranges, alias lists, and one-paragraph clinical descriptions; Istota's canonical ranges drive flagging (lab-printed ranges are preserved per-row but not the flagging source). Blood-pressure / resting-HR biomarker rows fan out to `stats` so the unified time series picks them up.
+
+OCR pipeline (`ocr.py`): PDF via `pdftotext`/`pypdf` with `pdftoppm` + Tesseract fallback; image via Tesseract. Extracted text plus the canonical marker list goes to the active brain (general role alias) which returns structured JSON; values >10× outside the widest canonical range surface as a likely-OCR-error warning. Optional deps degrade gracefully.
+
+Biomarker explainer (`explainer.py`): out-of-range marker pages display an educational alert generated by the active brain. Hard guardrails in the prompt (never diagnose, never prescribe, always hedge, JSON-only output); strict response parsing rejects malformed output and falls back to a fixed safe payload so the UI never shows raw model output. Cached per-user per `(name, direction)` in `biomarker_explainers`; fallback responses are NOT cached so later brain availability still produces real content.
+
+Surfaces: FastAPI router at `/istota/api/health/*` (stats CRUD + series + latest; panels CRUD + upload + extract + source streaming; biomarker trend + summary + canonical refs + matrix endpoint + cached explainer; profile / display settings; dashboard aggregator). SvelteKit pages under `/health/*` — `/stats` (netdata-style grid with sparklines), `/bloodwork` (dates-as-rows × markers-as-columns spreadsheet with category bands and flag-colored cells), `/bloodwork/panel?id=…` (panel detail + inline-edit table + source preview), `/bloodwork/upload` (drag-and-drop OCR review-and-confirm), `/bloodwork/marker?name=…` (trend chart with out-of-range zones shaded, related-marker chips, clinical description, history table, LLM explainer card), `/health/settings` (DOB/height/sex + display preferences). The two formerly-dynamic routes use query params because `adapter-static` can't crawl runtime-only ids (commit 629c2ac).
+
+`health` skill (`src/istota/skills/health/`): `log|stats|latest|panels|panel|add-panel|add-biomarker|trend|upload|summary|settings|set`. `setup_env` hook injects `HEALTH_DB_PATH`. Writes flow through the deferred-op file `task_<id>_health_ops.json` under sandbox; `_process_deferred_health_ops` replays them post-task. Skill self-gates on `module_health` and returns a JSON error envelope when the flag is off.
+
 ### Web UI
-SvelteKit (`web/`, `adapter-static`, base `/istota`) + FastAPI (`web_app.py`). Nextcloud-hosted OAuth2 (the legacy generic OIDC fallback was retired — Docker provisions the OAuth2 client via `provision-nc.sh`; Ansible templates `[web.oauth2]` directly), 7-day session. Routes: dashboard, feeds (reader + sprocket-icon settings page served by `istota.feeds.routes` against per-user SQLite), location (today + history with cluster discovery; `/location/settings` for Overland ingest token), money (`/istota/money/*`), admin (read-only system health at `/istota/admin`, gated by a new `_user_is_web_admin` helper that uses the `/etc/istota/admins` allowlist and fails closed on empty allowlist — distinct from `Config.is_admin`, which retains its back-compat "empty = all admin" rule for sandbox/skill/command checks). Single-payload `GET /istota/api/admin/stats` aggregator; all timestamps normalized to canonical ISO 8601 UTC via `_iso_utc()`. Dev: `VITE_MOCK_API=1 npm run dev` for in-process mock backend. Frontend primitives in `web/src/lib/components/ui/` (AppShell, ShellHeader, Sidebar, Chip, Button, Select, Modal, etc.); shared settings primitives in `web/src/lib/components/settings/` (`SecretField`, `ServiceCard`).
+SvelteKit (`web/`, `adapter-static`, base `/istota`) + FastAPI (`web_app.py`). Nextcloud-hosted OAuth2 (the legacy generic OIDC fallback was retired — Docker provisions the OAuth2 client via `provision-nc.sh`; Ansible templates `[web.oauth2]` directly), 7-day session. Routes: dashboard, feeds (reader + sprocket-icon settings page served by `istota.feeds.routes` against per-user SQLite), location (today + history with cluster discovery; `/location/settings` for Overland ingest token), money (`/istota/money/*`), health (experimental — see "Health" above; only mounted when `module_health` is on), admin (read-only system health at `/istota/admin`, gated by a new `_user_is_web_admin` helper that uses the `/etc/istota/admins` allowlist and fails closed on empty allowlist — distinct from `Config.is_admin`, which retains its back-compat "empty = all admin" rule for sandbox/skill/command checks). Single-payload `GET /istota/api/admin/stats` aggregator; all timestamps normalized to canonical ISO 8601 UTC via `_iso_utc()`. Dev: `VITE_MOCK_API=1 npm run dev` for in-process mock backend. Frontend primitives in `web/src/lib/components/ui/` (AppShell, ShellHeader, Sidebar, Chip, Button, Select, Modal, etc.); shared settings primitives in `web/src/lib/components/settings/` (`SecretField`, `ServiceCard`).
 
 Settings split (modules refactor, Phase 2): `GET /settings/services` returns only Connected services (`karakeep`, `google_workspace`); module-owned services (`monarch`, `feeds.tumblr_api_key`, `overland.ingest_token`) live on the per-module settings page and are reachable via `GET /settings/module-services/{module}`. Both endpoints share `_build_service_card`. `GET /settings/modules` returns the module registry plus per-user `disabled_modules` so the Preferences card can render the opt-out multiselect. Secret PUT/DELETE accept any service in `_all_known_services()` (connected ∪ module). Each per-module page calls `getModuleServices(<module>)` first; when `module_enabled=false`, it shows a "Module disabled — enable in /settings → Preferences" banner instead of the configuration UI. `/location/settings` adds an `/location/settings-info` endpoint that returns the webhook-URL placeholder (`https://<host>/webhooks/location?token=<token>`) and read-only place-detection knobs.
 

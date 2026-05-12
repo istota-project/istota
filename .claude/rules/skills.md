@@ -136,6 +136,7 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe, opml | — | — |
 | `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws | — | — |
 | `money` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | — | — |
+| `health` | — | health, weight, bloodwork, labs, biomarker, panel, blood pressure, ... | — | — | experimental (`module_health`) |
 | `untrusted_input` | — | — | — | — |
 
 Note: `money` is the sole accounting skill. It runs in-process via the vendored `money` package (no subprocess, no HTTP).
@@ -213,7 +214,13 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 ### `money/` - Accounting (in-process)
 **Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `add-transaction`, `sync-monarch`, `import-csv`, `invoice` (sub: `generate`, `list`, `paid`, `create`, `void`), `work` (sub: `list`, `add`, `update`, `remove`)
 **Env vars**: `MONEY_CONFIG`, `MONEY_USER`
-**Note**: In-process facade — imports the vendored `money` package and invokes its Click CLI via `CliRunner`. No subprocess, no HTTP.
+**Note**: In-process facade — imports the vendored `money` package and invokes its Click CLI via `CliRunner`. No subprocess, no HTTP. `lots` and `wash-sales` are `@requires_feature`-gated (`money_tax` / `money_wash_sales`); gated-off calls return the standard error envelope.
+
+### `health/` - Body Stats, Bloodwork, Biomarker Trends (experimental)
+**Subcommands**: `log`, `stats`, `latest`, `panels`, `panel`, `add-panel`, `add-biomarker`, `trend`, `upload`, `summary`, `settings`, `set`
+**Env vars**: `HEALTH_DB_PATH` (injected via `setup_env` hook from `istota.health.resolve_for_user(user_id, config).db_path`); the OCR/explainer paths additionally use the active brain for structured extraction.
+**Gate**: experimental — the whole subcommand surface is gated on `module_health` and returns a JSON error envelope when the flag is off.
+**Note**: All values stored metric. Writes flow through deferred ops (`task_<id>_health_ops.json`) under sandbox; `scheduler_deferred._process_deferred_health_ops` replays them post-task. The web UI ships pre-written explainer payloads in the mock API for development.
 
 ### Module-skill facade exit-code contract
 
