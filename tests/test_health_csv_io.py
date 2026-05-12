@@ -109,7 +109,8 @@ class TestImportCsv:
             conn.commit()
 
         assert summary.panels_created == 2
-        assert summary.panels_skipped == 0
+        assert summary.panels_skipped_identical == 0
+        assert summary.panels_needs_review == 0
         assert summary.biomarkers_created > 0
 
         with health_db.connect(ctx.db_path) as conn:
@@ -131,26 +132,52 @@ class TestImportCsv:
             panels = health_db.list_panels(conn, include_drafts=True)
         assert all(p.draft is False for p in panels)
 
-    def test_collision_skip(self, ctx):
+    def test_reimport_is_noop_via_content_hash(self, ctx):
+        # Re-importing the exact same CSV is silently skipped — content
+        # hash matches and no second panel row is created.
         with health_db.connect(ctx.db_path) as conn:
             csv_io.import_csv(conn, SAMPLE_CSV)
             conn.commit()
-            summary = csv_io.import_csv(conn, SAMPLE_CSV, on_collision="skip")
-            conn.commit()
-        assert summary.panels_skipped == 2
-        assert summary.panels_created == 0
-
-    def test_collision_replace(self, ctx):
-        with health_db.connect(ctx.db_path) as conn:
-            csv_io.import_csv(conn, SAMPLE_CSV)
-            conn.commit()
-            summary = csv_io.import_csv(conn, SAMPLE_CSV, on_collision="replace")
+            summary = csv_io.import_csv(conn, SAMPLE_CSV)
             conn.commit()
             panels = health_db.list_panels(conn, include_drafts=True)
-        # Same lab+date pairs, so still 2 panels total — replaced in place.
-        assert summary.panels_created == 2
-        assert summary.panels_replaced == 2
-        assert len(panels) == 2
+        assert summary.panels_skipped_identical == 2
+        assert summary.panels_created == 0
+        assert summary.panels_needs_review == 0
+        assert len(panels) == 2  # still just the original two
+
+    def test_same_date_lab_different_content_lands_as_draft(self, ctx):
+        # Same (date, lab) as an existing confirmed panel but with one
+        # marker value changed — the new row lands as a draft for review,
+        # the confirmed original is untouched.
+        with health_db.connect(ctx.db_path) as conn:
+            csv_io.import_csv(conn, SAMPLE_CSV)
+            conn.commit()
+            tweaked = SAMPLE_CSV.replace("6.4,14.5,43.5", "6.4,14.5,44.0")
+            summary = csv_io.import_csv(conn, tweaked)
+            conn.commit()
+            panels = health_db.list_panels(conn, include_drafts=True)
+        assert summary.panels_needs_review == 1
+        # The other row matches exactly → silent skip.
+        assert summary.panels_skipped_identical == 1
+        assert summary.panels_created == 0
+        # 2 confirmed originals + 1 draft.
+        assert len(panels) == 3
+        drafts = [p for p in panels if p.draft]
+        assert len(drafts) == 1
+
+    def test_content_hash_is_order_invariant(self, ctx):
+        # Reordering biomarker rows under the hood doesn't bust dedup —
+        # the hash is computed on a sorted canonical tuple set.
+        biomarkers_a = [
+            {"name": "Hemoglobin", "value": 14.0, "unit": "g/dL"},
+            {"name": "Hematocrit", "value": 42.0, "unit": "%"},
+        ]
+        biomarkers_b = list(reversed(biomarkers_a))
+        assert (
+            health_db.compute_content_hash(biomarkers_a)
+            == health_db.compute_content_hash(biomarkers_b)
+        )
 
     def test_flags_computed_against_canonical(self, ctx):
         # Hgb 11.0 below the unisex Hemoglobin low (12.0 for F, 13.5 for M).
@@ -214,12 +241,12 @@ class TestExportCsv:
         assert len(lines) == 5
         # Date column header on row 2.
         assert lines[1].split(",")[0] == "Date"
-        # Re-import the export — should be a no-op via collision skip.
+        # Re-import the export — content-hash dedup makes it a true noop.
         with health_db.connect(ctx.db_path) as conn:
-            summary = csv_io.import_csv(conn, exported, on_collision="skip")
+            summary = csv_io.import_csv(conn, exported)
             conn.commit()
         assert summary.panels_created == 0
-        assert summary.panels_skipped == 2
+        assert summary.panels_skipped_identical == 2
 
     def test_empty_db_emits_header_only(self, ctx):
         with health_db.connect(ctx.db_path) as conn:
@@ -247,11 +274,7 @@ class TestExportCsv:
         task_id = 999
         ops_file = user_temp / f"task_{task_id}_health_ops.json"
         ops_file.write_text(json.dumps([
-            {
-                "op": "import_csv",
-                "source_path": str(src),
-                "on_collision": "skip",
-            },
+            {"op": "import_csv", "source_path": str(src)},
         ]))
 
         # Stub the loader on the package namespace the deferred handler imports.

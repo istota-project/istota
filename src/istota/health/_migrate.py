@@ -159,3 +159,27 @@ def ensure_initialised(ctx: HealthContext) -> None:
     health_db.init_db(ctx.db_path)
     seed_biomarker_refs(ctx)
     recanonicalize_biomarker_names(ctx)
+    _backfill_content_hashes(ctx)
+
+
+def _backfill_content_hashes(ctx: HealthContext) -> None:
+    """One-shot backfill of ``panels.content_hash``.
+
+    Replays per-panel hash computation for any panel created before the
+    column existed. Gated by a ``schema_meta`` sentinel so it runs once.
+    """
+    with health_db.connect(ctx.db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = ?",
+            ("panels_content_hash_backfilled",),
+        ).fetchone()
+        if row:
+            return
+        n = health_db.backfill_panel_content_hashes(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+            ("panels_content_hash_backfilled", _iso_now()),
+        )
+        conn.commit()
+    if n:
+        logger.info("health_panels_content_hash_backfilled count=%d", n)

@@ -62,9 +62,20 @@ class ParsedPanel:
 
 @dataclass
 class ImportSummary:
+    """Per-panel outcomes for a CSV import.
+
+    Three terminal states per input row:
+
+    * ``panels_created`` — written as a new confirmed panel.
+    * ``panels_skipped_identical`` — exact content hash already on file;
+      silently noop'd (idempotent re-import).
+    * ``panels_needs_review`` — same ``(date, lab)`` as an existing
+      confirmed panel but the biomarker content differs; saved as a draft
+      for the user to merge or discard from the Bloodwork page.
+    """
     panels_created: int = 0
-    panels_replaced: int = 0
-    panels_skipped: int = 0
+    panels_skipped_identical: int = 0
+    panels_needs_review: int = 0
     biomarkers_created: int = 0
     rows_processed: int = 0
     warnings: list[str] = field(default_factory=list)
@@ -188,26 +199,24 @@ def _resolve_canonical(
 def import_csv(
     conn: sqlite3.Connection,
     csv_text: str,
-    *,
-    on_collision: str = "skip",
 ) -> ImportSummary:
     """Parse and persist a CSV of bloodwork results.
 
-    ``on_collision`` controls behaviour when a panel with the same
-    (drawn_at, lab_name) already exists:
+    Deduplication is content-based, not user-driven:
 
-    * ``"skip"`` (default) — leave the existing panel intact.
-    * ``"replace"`` — delete the existing panel's biomarkers and derived
-      stats, then write the new values into the existing panel id.
-    * ``"append"`` — create a new panel anyway (rarely useful; trends
-      will see two values for the same date).
+    * If a panel with the exact same biomarker content already exists
+      (matched via ``panels.content_hash``), the row is silently skipped.
+      This makes re-importing the same CSV — or the export round-trip —
+      a true noop.
+    * If a confirmed panel exists for the same ``(drawn_at, lab_name)``
+      but its biomarker content differs, the new row is saved as a
+      ``draft`` panel so the user can compare and merge from the
+      Bloodwork page rather than having one version silently win.
+    * Otherwise the row is written as a new confirmed panel.
 
-    Returns an :class:`ImportSummary`. Caller owns the commit so the
-    import can be rolled back as a whole on application-level failure.
+    Caller owns the commit so the import can be rolled back as a whole
+    on application-level failure.
     """
-    if on_collision not in ("skip", "replace", "append"):
-        raise ValueError(f"unknown on_collision: {on_collision!r}")
-
     parsed, warnings = parse_csv_text(csv_text)
     summary = ImportSummary(warnings=list(warnings))
     if not parsed:
@@ -222,34 +231,6 @@ def import_csv(
 
     for parsed_panel in parsed:
         summary.rows_processed += 1
-
-        existing = health_db.find_panel_collision(
-            conn,
-            drawn_at=parsed_panel.drawn_at,
-            lab_name=parsed_panel.lab_name,
-        )
-
-        if existing is not None and on_collision == "skip":
-            summary.panels_skipped += 1
-            continue
-
-        if existing is not None and on_collision == "replace":
-            health_db.delete_stats_for_panel(conn, existing.id)
-            conn.execute(
-                "DELETE FROM biomarkers WHERE panel_id = ?", (existing.id,),
-            )
-            health_db.update_panel(conn, existing.id, draft=False)
-            panel_id = existing.id
-            summary.panels_replaced += 1
-        else:
-            panel_id = health_db.insert_panel(
-                conn,
-                drawn_at=parsed_panel.drawn_at,
-                lab_name=parsed_panel.lab_name,
-                draft=False,
-            )
-
-        summary.panels_created += 1
 
         enriched: list[dict] = []
         for b in parsed_panel.biomarkers:
@@ -276,10 +257,45 @@ def import_csv(
                 "flag": flag,
             })
 
+        if not enriched:
+            continue
+
+        new_hash = health_db.compute_content_hash(enriched)
+
+        # Exact content already on file — silent noop. Covers both
+        # idempotent re-imports of the same CSV and an OCR-confirmed
+        # panel later being re-imported via CSV.
+        if health_db.find_panel_by_content_hash(conn, new_hash) is not None:
+            summary.panels_skipped_identical += 1
+            continue
+
+        # Same (date, lab) but different content → land as a draft so
+        # the user can review the diff before it joins the trend.
+        same_slot = health_db.find_panel_collision(
+            conn,
+            drawn_at=parsed_panel.drawn_at,
+            lab_name=parsed_panel.lab_name,
+        )
+        is_draft = same_slot is not None and not same_slot.draft
+
+        panel_id = health_db.insert_panel(
+            conn,
+            drawn_at=parsed_panel.drawn_at,
+            lab_name=parsed_panel.lab_name,
+            draft=is_draft,
+        )
         health_db.replace_biomarkers(conn, panel_id, enriched)
         summary.biomarkers_created += len(enriched)
+        if is_draft:
+            summary.panels_needs_review += 1
+        else:
+            summary.panels_created += 1
 
-        # BP / resting-HR fan-out so the unified time series picks them up.
+        # BP / resting-HR fan-out so the unified time series picks them
+        # up. Only fan out confirmed panels — drafts shouldn't pollute
+        # the unified time series until the user merges them.
+        if is_draft:
+            continue
         for b in enriched:
             hit = stat_fanout_by_marker.get(b["name"].lower())
             if not hit:

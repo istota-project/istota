@@ -1006,7 +1006,6 @@ async def api_biomarker_refs(
 async def api_csv_import(
     request: Request,
     file: UploadFile = FastAPIFile(...),
-    on_collision: str = Form("skip"),
     _csrf: None = Depends(verify_origin),
     ctx: HealthContext = Depends(get_user_context),
 ):
@@ -1016,14 +1015,13 @@ async def api_csv_import(
     banner row + ``Marker (unit)`` headers + reference-range row +
     data rows). Aliases are resolved against ``biomarker_refs`` so
     column names like ``Hgb`` / ``LDL-C`` land on canonical markers.
+
+    Dedup is content-based: identical biomarker sets are silently
+    skipped; a same-date / same-lab collision with different content
+    lands as a draft for user review. No user-facing choice.
     """
     from istota.health.csv_io import import_csv
 
-    if on_collision not in ("skip", "replace", "append"):
-        return JSONResponse(
-            {"error": "on_collision must be 'skip', 'replace', or 'append'"},
-            status_code=400,
-        )
     raw = await file.read()
     if not raw:
         return JSONResponse({"error": "empty upload"}, status_code=400)
@@ -1040,7 +1038,7 @@ async def api_csv_import(
 
     def _import():
         with health_db.connect(ctx.db_path) as conn:
-            summary = import_csv(conn, csv_text, on_collision=on_collision)
+            summary = import_csv(conn, csv_text)
             conn.commit()
         return summary
 
@@ -1048,8 +1046,8 @@ async def api_csv_import(
     return {
         "status": "ok",
         "panels_created": summary.panels_created,
-        "panels_replaced": summary.panels_replaced,
-        "panels_skipped": summary.panels_skipped,
+        "panels_skipped_identical": summary.panels_skipped_identical,
+        "panels_needs_review": summary.panels_needs_review,
         "biomarkers_created": summary.biomarkers_created,
         "rows_processed": summary.rows_processed,
         "warnings": summary.warnings,

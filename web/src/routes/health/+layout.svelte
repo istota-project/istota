@@ -58,4 +58,12 @@
 		width: 100%;
 		box-sizing: border-box;
 	}
+
+	@media (max-width: 768px) {
+		.health-frame {
+			/* Match ShellHeader's mobile padding so the page heading lines
+			   up with the subnav title above it. */
+			padding: 0.5rem 0.75rem;
+		}
+	}
 </style>

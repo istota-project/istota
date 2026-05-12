@@ -16,13 +16,14 @@ Tables:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator, Mapping
 
 from istota.health.models import (
     Biomarker,
@@ -68,9 +69,11 @@ CREATE TABLE IF NOT EXISTS panels (
     ocr_text TEXT,
     draft INTEGER NOT NULL DEFAULT 0,
     notes TEXT,
+    content_hash TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_panels_drawn ON panels(drawn_at);
+CREATE INDEX IF NOT EXISTS idx_panels_content_hash ON panels(content_hash);
 
 CREATE TABLE IF NOT EXISTS biomarkers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +133,7 @@ def init_db(db_path: Path) -> None:
         if fresh:
             conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA_SQL)
+        _migrate_add_content_hash(conn)
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
             (str(SCHEMA_VERSION),),
@@ -137,6 +141,24 @@ def init_db(db_path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate_add_content_hash(conn: sqlite3.Connection) -> None:
+    """Add ``panels.content_hash`` on older DBs. Idempotent.
+
+    Pre-existing rows are left NULL; backfill runs once via
+    :func:`backfill_panel_content_hashes` from ``_migrate.ensure_initialised``.
+    """
+    # PRAGMA table_info returns: (cid, name, type, notnull, dflt_value, pk).
+    # ``init_db`` opens the connection without a row factory, so index by
+    # position rather than name.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(panels)")}
+    if "content_hash" not in cols:
+        conn.execute("ALTER TABLE panels ADD COLUMN content_hash TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_panels_content_hash "
+            "ON panels(content_hash)",
+        )
 
 
 @contextmanager
@@ -253,6 +275,13 @@ def delete_stats_for_panel(conn: sqlite3.Connection, panel_id: int) -> int:
 
 
 def _row_to_panel(row: sqlite3.Row) -> Panel:
+    # Older rows (pre content_hash migration) won't have the column on a
+    # row factory built before the ALTER. Guarded so the migration window
+    # doesn't crash readers.
+    try:
+        content_hash = row["content_hash"]
+    except (IndexError, KeyError):
+        content_hash = None
     return Panel(
         id=row["id"],
         drawn_at=row["drawn_at"],
@@ -264,7 +293,92 @@ def _row_to_panel(row: sqlite3.Row) -> Panel:
         draft=bool(row["draft"]),
         notes=row["notes"],
         created_at=row["created_at"],
+        content_hash=content_hash,
     )
+
+
+def compute_content_hash(biomarkers: Iterable[Mapping[str, Any]]) -> str:
+    """SHA-256 hex digest of a biomarker set's normalized content.
+
+    Two panels with the same canonical biomarker rows produce the same
+    hash regardless of insertion order, case, or trivial unit casing.
+    Values are rounded to 6 significant figures so a CSV roundtrip
+    (which formats with ``%g``) reproduces an identical hash.
+
+    Returns the first 16 hex chars of the digest — collision-free for
+    realistic per-user panel counts and short enough to be readable in
+    logs.
+    """
+    rows: list[tuple[str, str, str]] = []
+    for b in biomarkers:
+        name = str(b.get("name") or "").strip().lower()
+        unit = str(b.get("unit") or "").strip().lower()
+        try:
+            value = float(b.get("value") or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        rows.append((name, f"{value:.6g}", unit))
+    rows.sort()
+    blob = json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def set_panel_content_hash(
+    conn: sqlite3.Connection, panel_id: int, content_hash: str | None,
+) -> None:
+    conn.execute(
+        "UPDATE panels SET content_hash = ? WHERE id = ?",
+        (content_hash, panel_id),
+    )
+
+
+def find_panel_by_content_hash(
+    conn: sqlite3.Connection, content_hash: str,
+) -> Panel | None:
+    """Return any panel (draft or confirmed) matching this content hash."""
+    row = conn.execute(
+        "SELECT * FROM panels WHERE content_hash = ? ORDER BY id ASC LIMIT 1",
+        (content_hash,),
+    ).fetchone()
+    if not row:
+        return None
+    return _row_to_panel(row)
+
+
+def recompute_panel_content_hash(
+    conn: sqlite3.Connection, panel_id: int,
+) -> str | None:
+    """Recompute and store the content_hash for a panel from its biomarkers.
+
+    Returns the computed hash, or ``None`` if the panel has no biomarkers.
+    """
+    rows = conn.execute(
+        "SELECT name, value, unit FROM biomarkers WHERE panel_id = ?",
+        (panel_id,),
+    ).fetchall()
+    if not rows:
+        set_panel_content_hash(conn, panel_id, None)
+        return None
+    h = compute_content_hash([dict(r) for r in rows])
+    set_panel_content_hash(conn, panel_id, h)
+    return h
+
+
+def backfill_panel_content_hashes(conn: sqlite3.Connection) -> int:
+    """Populate ``content_hash`` for every panel that doesn't have one.
+
+    One-shot helper used by the migration in
+    :func:`istota.health._migrate.ensure_initialised`. Returns the number
+    of panels updated.
+    """
+    rows = conn.execute(
+        "SELECT id FROM panels WHERE content_hash IS NULL",
+    ).fetchall()
+    n = 0
+    for r in rows:
+        if recompute_panel_content_hash(conn, int(r["id"])) is not None:
+            n += 1
+    return n
 
 
 def insert_panel(
@@ -461,7 +575,9 @@ def replace_biomarkers(
     """Delete all biomarkers for a panel and insert the new list.
 
     Used by the OCR review flow when the user confirms / edits the extracted
-    table. Returns the number of rows inserted.
+    table. Also refreshes the panel's ``content_hash`` so dedup catches
+    later imports of the same content. Returns the number of rows
+    inserted.
     """
     conn.execute("DELETE FROM biomarkers WHERE panel_id = ?", (panel_id,))
     inserted = 0
@@ -478,6 +594,7 @@ def replace_biomarkers(
             flag=b.get("flag"),
         )
         inserted += 1
+    recompute_panel_content_hash(conn, panel_id)
     return inserted
 
 

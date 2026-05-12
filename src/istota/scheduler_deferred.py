@@ -601,21 +601,14 @@ def _process_deferred_health_ops(
                         )
                         continue
                     csv_text = src.read_text(encoding="utf-8-sig", errors="replace")
-                    on_collision = entry.get("on_collision") or "skip"
-                    try:
-                        summary = _csv_io.import_csv(
-                            conn, csv_text, on_collision=on_collision,
-                        )
-                    except ValueError as e:
-                        logger.warning(
-                            "import_csv invalid args for task %d: %s",
-                            task.id, e,
-                        )
-                        continue
+                    summary = _csv_io.import_csv(conn, csv_text)
                     logger.info(
-                        "Imported CSV for task %d: created=%d replaced=%d skipped=%d biomarkers=%d",
-                        task.id, summary.panels_created, summary.panels_replaced,
-                        summary.panels_skipped, summary.biomarkers_created,
+                        "Imported CSV for task %d: created=%d skipped_identical=%d "
+                        "needs_review=%d biomarkers=%d",
+                        task.id, summary.panels_created,
+                        summary.panels_skipped_identical,
+                        summary.panels_needs_review,
+                        summary.biomarkers_created,
                     )
                     count += 1
                 elif op == "set_setting":

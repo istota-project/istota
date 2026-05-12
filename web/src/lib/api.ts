@@ -911,20 +911,16 @@ export function healthPanelSourceUrl(panelId: number): string {
 export interface CsvImportSummary {
 	status: string;
 	panels_created: number;
-	panels_replaced: number;
-	panels_skipped: number;
+	panels_skipped_identical: number;
+	panels_needs_review: number;
 	biomarkers_created: number;
 	rows_processed: number;
 	warnings: string[];
 }
 
-export async function importHealthCsv(
-	file: File,
-	on_collision: 'skip' | 'replace' | 'append' = 'skip',
-): Promise<CsvImportSummary> {
+export async function importHealthCsv(file: File): Promise<CsvImportSummary> {
 	const form = new FormData();
 	form.append('file', file);
-	form.append('on_collision', on_collision);
 	return healthFetch('/csv/import', { method: 'POST', body: form });
 }
 
