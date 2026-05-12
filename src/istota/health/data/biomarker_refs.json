@@ -156,6 +156,56 @@
     "description": "Rare white blood cells involved in allergic and inflammatory responses. Persistent elevation is uncommon and can warrant follow-up for myeloproliferative disorders."
   },
   {
+    "name": "Neutrophils_Abs",
+    "display_name": "Neutrophils (absolute)",
+    "category": "CBC",
+    "default_unit": "10^3/uL",
+    "ref_range_low": 1.5,
+    "ref_range_high": 6.7,
+    "aliases": ["Abs neuts", "ANC", "Absolute Neutrophils", "Neutrophils #"],
+    "description": "Absolute neutrophil count — the reported percentage multiplied by WBC. Below 1.5 (mild neutropenia) and below 0.5 (severe) carry infection risk. Often paired with the percentage on a CBC differential."
+  },
+  {
+    "name": "Lymphocytes_Abs",
+    "display_name": "Lymphocytes (absolute)",
+    "category": "CBC",
+    "default_unit": "10^3/uL",
+    "ref_range_low": 1.0,
+    "ref_range_high": 4.0,
+    "aliases": ["Abs lymphs", "Absolute Lymphocytes", "Lymphocytes #"],
+    "description": "Absolute lymphocyte count. Elevated with viral infection; suppressed with corticosteroid use, stress, and some immune disorders."
+  },
+  {
+    "name": "Monocytes_Abs",
+    "display_name": "Monocytes (absolute)",
+    "category": "CBC",
+    "default_unit": "10^3/uL",
+    "ref_range_low": 0.2,
+    "ref_range_high": 0.9,
+    "aliases": ["Abs monos", "Absolute Monocytes", "Monocytes #"],
+    "description": "Absolute monocyte count. Persistently elevated values can reflect chronic inflammation or recovery from infection."
+  },
+  {
+    "name": "Eosinophils_Abs",
+    "display_name": "Eosinophils (absolute)",
+    "category": "CBC",
+    "default_unit": "10^3/uL",
+    "ref_range_low": 0,
+    "ref_range_high": 0.5,
+    "aliases": ["Abs eos", "Absolute Eosinophils", "Eosinophils #"],
+    "description": "Absolute eosinophil count. Elevated with allergies, asthma, parasitic infections, and some drug reactions."
+  },
+  {
+    "name": "Basophils_Abs",
+    "display_name": "Basophils (absolute)",
+    "category": "CBC",
+    "default_unit": "10^3/uL",
+    "ref_range_low": 0,
+    "ref_range_high": 0.2,
+    "aliases": ["Abs basos", "Absolute Basophils", "Basophils #"],
+    "description": "Absolute basophil count. Persistent elevation is uncommon and can warrant follow-up for myeloproliferative disorders."
+  },
+  {
     "name": "Glucose",
     "display_name": "Glucose (fasting)",
     "category": "CMP",
@@ -346,7 +396,7 @@
     "default_unit": "mg/dL",
     "ref_range_low": null,
     "ref_range_high": 200,
-    "aliases": ["Total Cholesterol", "TC"],
+    "aliases": ["Total Cholesterol", "TC", "Cholesterol", "Cholesterol, Total", "Chol Total"],
     "description": "Sum of all cholesterol fractions. A blunt instrument by itself — LDL, HDL, and triglycerides give the real risk picture."
   },
   {
@@ -390,6 +440,16 @@
     "ref_range_high": 40,
     "aliases": ["VLDL-C", "Very Low Density Lipoprotein"],
     "description": "Triglyceride-rich lipoprotein, usually estimated as triglycerides ÷ 5. Tracks closely with triglycerides."
+  },
+  {
+    "name": "Non_HDL_Cholesterol",
+    "display_name": "Non-HDL Cholesterol",
+    "category": "Lipid",
+    "default_unit": "mg/dL",
+    "ref_range_low": null,
+    "ref_range_high": 130,
+    "aliases": ["Non-HDL", "Non HDL", "Non-HDL Cholesterol", "Non-HDL-C"],
+    "description": "Total cholesterol minus HDL. Captures all atherogenic (apoB-containing) particles in one number — LDL + VLDL + IDL + Lp(a) — and tracks cardiovascular risk slightly better than LDL alone. Common target for adults is < 130 mg/dL."
   },
   {
     "name": "Cholesterol_HDL_Ratio",
