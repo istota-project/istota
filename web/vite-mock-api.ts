@@ -1519,6 +1519,9 @@ const handlers: MockHandler[] = [
 						{ name: 'LDL', value: 112, unit: 'mg/dL', ref_range_low: null, ref_range_high: 100, flag: 'H' },
 						{ name: 'HDL', value: 54, unit: 'mg/dL', ref_range_low: 40, ref_range_high: null, flag: null },
 					],
+					drawn_at: '2025-11-28',
+					lab_name: 'Kaiser',
+					panel_type: 'CBC + Lipid Panel',
 					warnings: [],
 					raw_text: 'Mock OCR text — replace with real extraction output.',
 				};
