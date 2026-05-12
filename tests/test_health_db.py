@@ -230,6 +230,43 @@ class TestBiomarkerRefs:
         assert hgb.ref_range_low_m != hgb.ref_range_low_f
 
 
+class TestRecanonicalize:
+    def test_rewrites_alias_to_canonical(self, tmp_path):
+        # ensure_initialised must rewrite biomarker rows that match an
+        # alias of a canonical ref. Regression for the CSV-import path
+        # that stored raw column names before the alias table caught up.
+        from istota.health._migrate import recanonicalize_biomarker_names
+
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            pid = health_db.insert_panel(
+                conn, drawn_at="2026-05-08", lab_name="Quest", draft=False,
+            )
+            # Insert a row under a raw alias name (NOT canonical).
+            bid = health_db.insert_biomarker(
+                conn, panel_id=pid, name="Cholesterol",
+                value=180, unit="mg/dL",
+            )
+            conn.commit()
+            # Force a re-run: clear the recanon sentinel.
+            conn.execute(
+                "DELETE FROM schema_meta WHERE key = 'biomarker_recanonicalize_hash'",
+            )
+            conn.commit()
+
+        fixed = recanonicalize_biomarker_names(ctx)
+        assert fixed == 1
+        with health_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT name FROM biomarkers WHERE id = ?", (bid,),
+            ).fetchone()
+        assert row["name"] == "Cholesterol_Total"
+
+        # Idempotent — second call is a no-op.
+        assert recanonicalize_biomarker_names(ctx) == 0
+
+
 class TestSettings:
     def test_roundtrip(self, tmp_path):
         ctx = _ctx(tmp_path)
