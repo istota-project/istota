@@ -4,15 +4,13 @@
 	import {
 		extractHealthPanel,
 		saveHealthBiomarkers,
+		updateHealthPanel,
 		uploadHealthPanel,
 		healthPanelSourceUrl,
 		type Biomarker,
 	} from '$lib/api';
 
 	let file: File | null = $state(null);
-	let drawnAt = $state(new Date().toISOString().slice(0, 10));
-	let labName = $state('');
-	let panelType = $state('');
 
 	let uploading = $state(false);
 	let extracting = $state(false);
@@ -24,6 +22,13 @@
 		$state(null);
 	let warnings: string[] = $state([]);
 	let extracted: Partial<Biomarker>[] = $state([]);
+
+	// Panel-level metadata — uploaded with a placeholder date, replaced from
+	// the LLM extraction, then editable before confirm.
+	const today = new Date().toISOString().slice(0, 10);
+	let drawnAt = $state(today);
+	let labName = $state('');
+	let panelType = $state('');
 
 	let error = $state('');
 	let info = $state('');
@@ -48,7 +53,9 @@
 		info = '';
 		uploading = true;
 		try {
-			const resp = await uploadHealthPanel(file, drawnAt, labName || undefined, panelType || undefined);
+			// Use today as a placeholder date so the panel row creates cleanly;
+			// the LLM will fill the real ``drawn_at`` during extraction.
+			const resp = await uploadHealthPanel(file, today);
 			panelId = resp.id;
 			mime = file.type || null;
 			collision = resp.collision ?? null;
@@ -78,6 +85,12 @@
 				flag: b.flag ?? null,
 			}));
 			warnings = resp.warnings || [];
+			// Prefill the editable header from the LLM's metadata extraction.
+			// Falls back to today (the placeholder we uploaded with) when the
+			// model couldn't find a date.
+			if (resp.drawn_at) drawnAt = resp.drawn_at;
+			if (resp.lab_name) labName = resp.lab_name;
+			if (resp.panel_type) panelType = resp.panel_type;
 			info = `Extracted ${extracted.length} biomarkers. Review and confirm.`;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Extraction failed';
@@ -112,6 +125,13 @@
 		saving = true;
 		error = '';
 		try {
+			// Persist whatever the user has in the metadata fields (extracted
+			// values or their edits) before flipping the panel out of draft.
+			await updateHealthPanel(panelId, {
+				drawn_at: drawnAt,
+				lab_name: labName,
+				panel_type: panelType,
+			});
 			await saveHealthBiomarkers(
 				panelId,
 				extracted.map((b) => ({
@@ -150,23 +170,9 @@
 					<div class="picked">{file.name} <span class="hint">({Math.round(file.size / 1024)} KB)</span></div>
 				{:else}
 					<p>Drop a PDF or image of the lab report here, or use the file picker.</p>
+					<p class="hint">Date drawn, lab, and panel type are extracted automatically; you'll review them next.</p>
 				{/if}
 				<input type="file" accept="image/*,application/pdf" onchange={handleFile} />
-			</div>
-
-			<div class="form">
-				<label>
-					<span>Date drawn</span>
-					<input type="date" bind:value={drawnAt} required />
-				</label>
-				<label>
-					<span>Lab</span>
-					<input type="text" bind:value={labName} placeholder="Quest, Kaiser, …" />
-				</label>
-				<label>
-					<span>Panel type</span>
-					<input type="text" bind:value={panelType} placeholder="CBC, CMP, Lipid, …" />
-				</label>
 			</div>
 
 			{#if error}<div class="msg error">{error}</div>{/if}
@@ -190,12 +196,29 @@
 
 		<div class="split">
 			<div class="review-table">
+				{#if !extracting}
+					<div class="metadata">
+						<label>
+							<span>Date drawn</span>
+							<input type="date" bind:value={drawnAt} required />
+						</label>
+						<label>
+							<span>Lab</span>
+							<input type="text" bind:value={labName} placeholder="Quest, Kaiser, …" />
+						</label>
+						<label>
+							<span>Panel type</span>
+							<input type="text" bind:value={panelType} placeholder="CBC, CMP, Lipid, …" />
+						</label>
+					</div>
+				{/if}
+
 				<h2>Extracted biomarkers</h2>
 
 				{#if extracting}
 					<div class="empty extracting">
 						<span class="spinner" aria-hidden="true"></span>
-						Extracting biomarkers from the source file…
+						Extracting biomarkers and panel metadata from the source file…
 					</div>
 				{:else}
 					{#if warnings.length > 0}
@@ -308,10 +331,13 @@
 	}
 	.picked { color: var(--text-primary); }
 	.hint { color: var(--text-dim); font-size: var(--text-xs); }
-	.form {
+	.metadata {
 		display: grid;
-		grid-template-columns: 1fr 1fr 1fr;
-		gap: 0.5rem;
+		grid-template-columns: auto 1fr 1fr;
+		gap: 0.5rem 0.75rem;
+		margin-bottom: 0.75rem;
+		padding-bottom: 0.75rem;
+		border-bottom: 1px solid var(--border-subtle);
 	}
 	label {
 		display: flex;

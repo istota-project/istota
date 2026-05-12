@@ -893,7 +893,14 @@ export async function uploadHealthPanel(file: File, drawn_at: string, lab_name?:
 	return healthFetch('/panels/upload', { method: 'POST', body: form });
 }
 
-export async function extractHealthPanel(panelId: number): Promise<{ biomarkers: Partial<Biomarker>[]; warnings: string[]; raw_text: string }> {
+export async function extractHealthPanel(panelId: number): Promise<{
+	biomarkers: Partial<Biomarker>[];
+	drawn_at: string | null;
+	lab_name: string | null;
+	panel_type: string | null;
+	warnings: string[];
+	raw_text: string;
+}> {
 	return healthFetch(`/panels/${panelId}/extract`, { method: 'POST' });
 }
 

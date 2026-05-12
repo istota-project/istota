@@ -186,6 +186,9 @@ No code fences. No commentary. The first character of your response must be
 Shape:
 
 {
+  "drawn_at": "2025-11-28",
+  "lab_name": "Kaiser",
+  "panel_type": "CBC",
   "biomarkers": [
     {
       "name": "Hemoglobin",
@@ -199,7 +202,19 @@ Shape:
   ]
 }
 
-Field rules per element:
+Panel-level fields (at the top level, alongside ``biomarkers``):
+- ``drawn_at`` (string ``YYYY-MM-DD``, required) — the date the sample was
+  collected, NOT the date the report was generated or received. Look for
+  phrases like "Collected", "Drawn", "Specimen received". If absent, use
+  the report-date as a fallback. If no date is parseable, omit the field.
+- ``lab_name`` (string, optional) — the lab or clinic that ran the test
+  (e.g. "Kaiser", "Quest Diagnostics", "Labcorp"). Omit or set null when
+  not clearly stated.
+- ``panel_type`` (string, optional) — a short tag for the panel grouping
+  (e.g. "CBC", "CMP", "Lipid Panel", "Thyroid"). Omit when the report
+  doesn't name a panel or covers many.
+
+Field rules per biomarker element:
 - ``name`` (string, required) — when the report's marker matches a canonical
   name or alias below, use the canonical name VERBATIM. Otherwise use the
   name as printed on the report. NEVER append units, parentheses, or extra
@@ -224,7 +239,8 @@ Skip:
 
 Include even when the value looks impossible — the user reviews every row.
 
-If the source contains no biomarker results at all, return ``{"biomarkers": []}``.
+If the source contains no biomarker results at all, return
+``{"biomarkers": [], "drawn_at": null, "lab_name": null, "panel_type": null}``.
 """
 
 
@@ -299,6 +315,27 @@ def _candidate_blocks(raw: str) -> list[str]:
 
 
 def _parse_llm_json(raw: str) -> list[dict]:
+    """Back-compat shim: return just the biomarker list.
+
+    Newer callers should use :func:`_parse_llm_response`, which returns
+    the panel-level metadata alongside the biomarkers.
+    """
+    parsed = _parse_llm_response(raw)
+    return parsed["biomarkers"]
+
+
+def _parse_llm_response(raw: str) -> dict:
+    """Parse the LLM response into ``{biomarkers, drawn_at, lab_name, panel_type}``.
+
+    Falls back to an empty payload (``biomarkers=[]``, metadata fields
+    None) when the response can't be coerced into the expected shape.
+    """
+    empty: dict = {
+        "biomarkers": [],
+        "drawn_at": None,
+        "lab_name": None,
+        "panel_type": None,
+    }
     for candidate in _candidate_blocks(raw):
         try:
             parsed = json.loads(candidate)
@@ -306,16 +343,32 @@ def _parse_llm_json(raw: str) -> list[dict]:
             continue
         if isinstance(parsed, dict) and "biomarkers" in parsed:
             items = parsed["biomarkers"]
+            metadata = {
+                "drawn_at": _coerce_str(parsed.get("drawn_at")),
+                "lab_name": _coerce_str(parsed.get("lab_name")),
+                "panel_type": _coerce_str(parsed.get("panel_type")),
+            }
         elif isinstance(parsed, list):
             items = parsed
+            metadata = {"drawn_at": None, "lab_name": None, "panel_type": None}
         else:
             continue
         if not isinstance(items, list):
             continue
         out = [item for item in items if isinstance(item, dict)]
         if out:
-            return out
-    return []
+            return {"biomarkers": out, **metadata}
+    return empty
+
+
+def _coerce_str(v) -> str | None:
+    """Normalise LLM-returned strings: trim, drop empties / null sentinels."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() in ("null", "none", "n/a", "unknown"):
+        return None
+    return s
 
 
 def _call_brain(prompt: str, config, *, allow_read: bool = False) -> str | None:
@@ -490,6 +543,9 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
     if not response:
         return {
             "biomarkers": [],
+            "drawn_at": None,
+            "lab_name": None,
+            "panel_type": None,
             "warnings": [
                 "The LLM extraction step is unavailable on this instance. "
                 "Add biomarkers manually below.",
@@ -498,7 +554,8 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
             "mode": mode,
         }
 
-    biomarkers = _parse_llm_json(response)
+    parsed = _parse_llm_response(response)
+    biomarkers = parsed["biomarkers"]
     refs_by_name = {r["name"]: r for r in refs}
     warnings = _sanity_check(biomarkers, refs_by_name)
 
@@ -511,6 +568,9 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
 
     return {
         "biomarkers": biomarkers,
+        "drawn_at": parsed["drawn_at"],
+        "lab_name": parsed["lab_name"],
+        "panel_type": parsed["panel_type"],
         "warnings": warnings,
         "raw_text": text,
         "raw_response": response,

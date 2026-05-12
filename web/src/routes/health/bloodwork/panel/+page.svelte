@@ -28,6 +28,21 @@
 	let saving = $state(false);
 	let confirmDelete = $state(false);
 
+	// Header field edits — populated when entering edit mode so Cancel can
+	// discard cleanly without re-fetching.
+	let editDrawnAt = $state('');
+	let editLabName = $state('');
+	let editPanelType = $state('');
+
+	function startEditing() {
+		if (!panel) return;
+		// Truncate any time-of-day portion for the <input type="date">.
+		editDrawnAt = (panel.drawn_at || '').slice(0, 10);
+		editLabName = panel.lab_name || '';
+		editPanelType = panel.panel_type || '';
+		editing = true;
+	}
+
 	async function load() {
 		loading = true;
 		error = '';
@@ -44,10 +59,28 @@
 	}
 
 	async function save(confirmDraft: boolean) {
+		if (!panel) return;
 		saving = true;
 		error = '';
 		info = '';
 		try {
+			// Only send header fields that actually changed; the API treats
+			// an explicit empty string as "set to null", which we want for
+			// the user clearing lab/panel_type but not as an accidental wipe.
+			const headerPatch: Record<string, string> = {};
+			if (editDrawnAt && editDrawnAt !== (panel.drawn_at || '').slice(0, 10)) {
+				headerPatch.drawn_at = editDrawnAt;
+			}
+			if (editLabName !== (panel.lab_name || '')) {
+				headerPatch.lab_name = editLabName;
+			}
+			if (editPanelType !== (panel.panel_type || '')) {
+				headerPatch.panel_type = editPanelType;
+			}
+			if (Object.keys(headerPatch).length > 0) {
+				await updateHealthPanel(id, headerPatch);
+			}
+
 			const payload = biomarkers.map((b) => ({
 				name: b.name,
 				display_name: b.display_name ?? undefined,
@@ -128,18 +161,35 @@
 		<div class="msg error">{error}</div>
 	{:else if panel}
 		<div class="header">
-			<div>
+			<div class="header-meta">
 				<a href="{base}/health/bloodwork" class="back">← Bloodwork</a>
-				<h1>
-					{formatDate(panel.drawn_at)}
-					<span class="lab">· {panel.lab_name || 'Unknown lab'}</span>
-					{#if panel.panel_type}<span class="type">· {panel.panel_type}</span>{/if}
-				</h1>
+				{#if editing}
+					<div class="header-edit">
+						<label>
+							<span>Date drawn</span>
+							<input type="date" bind:value={editDrawnAt} />
+						</label>
+						<label>
+							<span>Lab</span>
+							<input type="text" bind:value={editLabName} placeholder="Quest, Kaiser, …" />
+						</label>
+						<label>
+							<span>Panel type</span>
+							<input type="text" bind:value={editPanelType} placeholder="CBC, CMP, Lipid, …" />
+						</label>
+					</div>
+				{:else}
+					<h1>
+						{formatDate(panel.drawn_at)}
+						<span class="lab">· {panel.lab_name || 'Unknown lab'}</span>
+						{#if panel.panel_type}<span class="type">· {panel.panel_type}</span>{/if}
+					</h1>
+				{/if}
 				{#if panel.draft}<span class="badge draft">DRAFT — review and confirm</span>{/if}
 			</div>
 			<div class="actions">
 				{#if !editing}
-					<button class="btn" type="button" onclick={() => (editing = true)}>Edit biomarkers</button>
+					<button class="btn" type="button" onclick={startEditing}>Edit panel</button>
 					{#if panel.draft}
 						<button class="btn primary" type="button" onclick={confirmDraftOnly}>Confirm</button>
 					{/if}
@@ -277,6 +327,34 @@
 	.lab, .type {
 		color: var(--text-muted);
 		font-weight: 400;
+	}
+	.header-meta { display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
+	.header-edit {
+		display: grid;
+		grid-template-columns: auto 1fr 1fr;
+		gap: 0.5rem 0.75rem;
+		max-width: 32rem;
+	}
+	.header-edit label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		font-size: var(--text-sm);
+		min-width: 0;
+	}
+	.header-edit label > span {
+		color: var(--text-muted);
+		font-size: var(--text-xs);
+	}
+	.header-edit input {
+		background: var(--surface-raised);
+		border: 1px solid var(--border-default);
+		border-radius: 0.3rem;
+		color: var(--text-primary);
+		font: inherit;
+		font-size: var(--text-sm);
+		padding: 0.3rem 0.5rem;
+		min-width: 0;
 	}
 	.badge {
 		font-size: var(--text-xs);
