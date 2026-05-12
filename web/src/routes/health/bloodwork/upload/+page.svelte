@@ -125,7 +125,7 @@
 				})),
 				true,
 			);
-			goto(`${base}/health/bloodwork/${panelId}`);
+			goto(`${base}/health/bloodwork/panel?id=${panelId}`);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to save';
 		} finally {
@@ -183,7 +183,7 @@
 			<div class="msg warn">
 				A panel from {collision.lab_name || '—'} on {collision.drawn_at} already exists.
 				This upload is saved separately;
-				<a href="{base}/health/bloodwork/{collision.existing_id}">view the existing one</a>
+				<a href="{base}/health/bloodwork/panel?id={collision.existing_id}">view the existing one</a>
 				to decide which to keep.
 			</div>
 		{/if}
