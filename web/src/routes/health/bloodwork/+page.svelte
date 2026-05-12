@@ -123,7 +123,7 @@
 			<ul>
 				{#each drafts as p (p.id)}
 					<li>
-						<a href="{base}/health/bloodwork/{p.id}">
+						<a href="{base}/health/bloodwork/panel?id={p.id}">
 							<span class="badge">DRAFT</span>
 							<span>{formatDate(p.drawn_at)}</span>
 							<span class="muted">{p.lab_name || '—'}</span>
@@ -155,7 +155,7 @@
 							{#each cat.markers as mk (mk.name)}
 								<th data-band={ci % 2}>
 									<a
-										href="{base}/health/bloodwork/marker/{encodeMarker(mk.name)}"
+										href="{base}/health/bloodwork/marker?name={encodeMarker(mk.name)}"
 										class="marker-link"
 										title={mk.display_name}
 									>
@@ -180,7 +180,7 @@
 					{#each matrix.panels as p (p.id)}
 						<tr>
 							<td class="sticky-left date-col">
-								<a href="{base}/health/bloodwork/{p.id}">{formatDate(p.drawn_at)}</a>
+								<a href="{base}/health/bloodwork/panel?id={p.id}">{formatDate(p.drawn_at)}</a>
 							</td>
 							<td class="sticky-left lab-col">{p.lab_name || ''}</td>
 							{#each matrix.categories as cat, ci (cat.name)}

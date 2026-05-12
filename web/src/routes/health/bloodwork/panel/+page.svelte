@@ -13,7 +13,9 @@
 		type HealthPanel,
 	} from '$lib/api';
 
-	let id = $derived(Number(page.params.id));
+	// Read the panel id from ?id=… so the page is statically prerenderable
+	// under adapter-static; the actual lookup happens client-side.
+	let id = $derived(Number(page.url.searchParams.get('id') ?? 0));
 
 	let loading = $state(true);
 	let error = $state('');
@@ -174,7 +176,7 @@
 									{#if editing}
 										<input bind:value={b.name} placeholder="Hemoglobin" />
 									{:else}
-										<a class="marker-link" href="{base}/health/bloodwork/marker/{encodeURIComponent(b.name)}">
+										<a class="marker-link" href="{base}/health/bloodwork/marker?name={encodeURIComponent(b.name)}">
 											{b.display_name || b.name}
 										</a>
 									{/if}
