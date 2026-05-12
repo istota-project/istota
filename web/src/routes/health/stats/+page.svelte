@@ -19,7 +19,14 @@
 		type HealthSettings,
 		type HealthStat,
 	} from '$lib/api';
-	import { METRIC_LABELS, METRIC_UNITS, formatStat, metricLabel } from '$lib/health/units';
+	import {
+		LOG_UNIT_CHOICES,
+		METRIC_LABELS,
+		METRIC_UNITS,
+		formatStat,
+		metricLabel,
+		toCanonical,
+	} from '$lib/health/units';
 
 	Chart.register(LineController, LineElement, PointElement, CategoryScale, LinearScale, Tooltip, Filler);
 
@@ -51,6 +58,23 @@
 	let formNotes = $state('');
 	let saving = $state(false);
 	let formError = $state('');
+
+	function defaultUnitFor(metric: string): string {
+		const choices = LOG_UNIT_CHOICES[metric];
+		if (!choices) return METRIC_UNITS[metric] || '';
+		const display = settings?.display_units;
+		if (metric === 'weight' && display?.weight === 'lb') return 'lb';
+		if (metric === 'body_temp' && display?.temp === 'F') return '°F';
+		return choices[0];
+	}
+
+	// Reset formUnit to a sensible default whenever the chosen metric changes.
+	$effect(() => {
+		formMetric;
+		untrack(() => {
+			formUnit = defaultUnitFor(formMetric);
+		});
+	});
 
 	function rangeSince(r: Range): string | undefined {
 		if (r === 'all') return undefined;
@@ -232,10 +256,11 @@
 		saving = true;
 		formError = '';
 		try {
+			const canonical = toCanonical(formMetric, Number(formValue), formUnit);
 			await createHealthStat({
 				metric: formMetric,
-				value: Number(formValue),
-				unit: formUnit.trim() || METRIC_UNITS[formMetric],
+				value: canonical.value,
+				unit: canonical.unit,
 				measured_at: formDate || undefined,
 				notes: formNotes.trim() || undefined,
 			});
@@ -243,7 +268,7 @@
 			formValue = '';
 			formNotes = '';
 			formDate = '';
-			formUnit = '';
+			formUnit = defaultUnitFor(formMetric);
 			await load();
 		} catch (e) {
 			formError = e instanceof Error ? e.message : 'Failed to save';
@@ -254,6 +279,7 @@
 
 	function openEntry(metric?: string) {
 		if (metric) formMetric = metric;
+		formUnit = defaultUnitFor(formMetric);
 		modalOpen = true;
 	}
 
@@ -391,11 +417,18 @@
 				</label>
 				<label>
 					<span>Value</span>
-					<input type="number" step="any" bind:value={formValue} required />
-				</label>
-				<label>
-					<span>Unit</span>
-					<input type="text" placeholder={METRIC_UNITS[formMetric]} bind:value={formUnit} />
+					<div class="value-row">
+						<input type="number" step="any" bind:value={formValue} required />
+						{#if LOG_UNIT_CHOICES[formMetric]}
+							<select class="unit-select" bind:value={formUnit}>
+								{#each LOG_UNIT_CHOICES[formMetric] as u}
+									<option value={u}>{u}</option>
+								{/each}
+							</select>
+						{:else}
+							<span class="unit-static">{METRIC_UNITS[formMetric]}</span>
+						{/if}
+					</div>
 				</label>
 				<label>
 					<span>When</span>
@@ -567,6 +600,24 @@
 	.modal label > span {
 		color: var(--text-muted);
 		font-size: var(--text-xs);
+	}
+	.value-row {
+		display: flex;
+		gap: 0.4rem;
+		align-items: center;
+	}
+	.value-row input {
+		flex: 1;
+	}
+	.unit-select {
+		width: auto;
+		min-width: 4.5rem;
+		flex: 0 0 auto;
+	}
+	.unit-static {
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+		padding: 0.3rem 0.2rem;
 	}
 	.modal input, .modal select {
 		background: var(--surface-raised);

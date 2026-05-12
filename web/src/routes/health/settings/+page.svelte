@@ -11,6 +11,7 @@
 		SettingsCard,
 		SettingsField,
 	} from '$lib/components/settings';
+	import { cmToFtIn, ftInToCm } from '$lib/health/units';
 
 	let loading = $state(true);
 	let saving = $state(false);
@@ -26,6 +27,22 @@
 
 	let dobInput = $state('');
 	let heightInput = $state('');
+	let heightFtInput = $state('');
+	let heightInInput = $state('');
+
+	// Compute the effective height in cm based on the active input mode.
+	function effectiveHeightCm(): number | null {
+		if (settings.display_units.height === 'ft_in') {
+			const ft = Number(heightFtInput);
+			const inches = Number(heightInInput);
+			if (!heightFtInput && !heightInInput) return null;
+			if (!Number.isFinite(ft) || !Number.isFinite(inches)) return null;
+			return Math.round(ftInToCm(ft, inches) * 10) / 10;
+		}
+		if (!heightInput) return null;
+		const n = Number(heightInput);
+		return Number.isFinite(n) ? n : null;
+	}
 
 	// Dirty tracking: compare a snapshot of the loaded form state to the
 	// current values so the Save button only lights up when there's
@@ -34,7 +51,10 @@
 	let currentJson = $derived(
 		JSON.stringify({
 			dob: dobInput,
-			height: heightInput,
+			height_cm:
+				settings.display_units.height === 'ft_in'
+					? `${heightFtInput}|${heightInInput}`
+					: heightInput,
 			sex: settings.sex,
 			units: settings.display_units,
 		}),
@@ -52,7 +72,7 @@
 			const resp = await getHealthSettings();
 			settings = resp.settings;
 			dobInput = settings.dob || '';
-			heightInput = settings.height_cm != null ? String(settings.height_cm) : '';
+			syncHeightInputs(settings.height_cm);
 			snapshot();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load settings';
@@ -61,6 +81,43 @@
 		}
 	}
 
+	function syncHeightInputs(cm: number | null): void {
+		// Only populate the input matching the active display unit; leave
+		// the other empty so a unit toggle reads cleanly from the
+		// already-populated side.
+		heightInput = '';
+		heightFtInput = '';
+		heightInInput = '';
+		if (cm == null) return;
+		if (settings.display_units.height === 'ft_in') {
+			const { feet, inches } = cmToFtIn(cm);
+			heightFtInput = String(feet);
+			heightInInput = String(inches);
+		} else {
+			heightInput = String(Math.round(cm * 10) / 10);
+		}
+	}
+
+	// When the user toggles the height display unit, populate the
+	// newly-visible input from the other (without touching the off-screen
+	// input, so toggling back is a no-op for the dirty check).
+	let prevHeightUnit = $state<'cm' | 'ft_in' | null>(null);
+	$effect(() => {
+		const u = settings.display_units.height;
+		if (prevHeightUnit !== null && u !== prevHeightUnit) {
+			if (u === 'ft_in' && heightInput && !heightFtInput && !heightInInput) {
+				const { feet, inches } = cmToFtIn(Number(heightInput));
+				heightFtInput = String(feet);
+				heightInInput = String(inches);
+			} else if (u === 'cm' && (heightFtInput || heightInInput) && !heightInput) {
+				const ft = Number(heightFtInput) || 0;
+				const inches = Number(heightInInput) || 0;
+				heightInput = String(Math.round(ftInToCm(ft, inches) * 10) / 10);
+			}
+		}
+		prevHeightUnit = u;
+	});
+
 	async function save() {
 		saving = true;
 		error = '';
@@ -68,12 +125,13 @@
 		try {
 			const payload: Partial<HealthSettings> = {
 				dob: dobInput || null,
-				height_cm: heightInput ? Number(heightInput) : null,
+				height_cm: effectiveHeightCm(),
 				sex: settings.sex || null,
 				display_units: settings.display_units,
 			};
 			const resp = await putHealthSettings(payload);
 			settings = resp.settings;
+			syncHeightInputs(settings.height_cm);
 			info = 'Saved.';
 			snapshot();
 		} catch (e) {
@@ -122,8 +180,20 @@
 			<input type="date" bind:value={dobInput} />
 		</SettingsField>
 
-		<SettingsField label="Height (cm)">
-			<input type="number" step="0.1" bind:value={heightInput} placeholder="178" />
+		<SettingsField label="Height">
+			{#if settings.display_units.height === 'ft_in'}
+				<div class="ft-in-row">
+					<input type="number" step="1" min="0" bind:value={heightFtInput} placeholder="5" aria-label="Feet" />
+					<span class="suffix">ft</span>
+					<input type="number" step="0.1" min="0" bind:value={heightInInput} placeholder="10" aria-label="Inches" />
+					<span class="suffix">in</span>
+				</div>
+			{:else}
+				<div class="cm-row">
+					<input type="number" step="0.1" bind:value={heightInput} placeholder="178" />
+					<span class="suffix">cm</span>
+				</div>
+			{/if}
 		</SettingsField>
 
 		<SettingsField
@@ -164,3 +234,21 @@
 		</SettingsField>
 	</SettingsCard>
 </SettingsLayout>
+
+<style>
+	.ft-in-row,
+	.cm-row {
+		display: flex;
+		gap: 0.4rem;
+		align-items: center;
+	}
+	.ft-in-row input,
+	.cm-row input {
+		flex: 1;
+		min-width: 0;
+	}
+	.suffix {
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+	}
+</style>

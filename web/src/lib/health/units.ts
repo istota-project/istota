@@ -49,6 +49,34 @@ export function cmToFtIn(cm: number): { feet: number; inches: number } {
 	return { feet, inches };
 }
 
+export function ftInToCm(feet: number, inches: number): number {
+	return (feet * 12 + inches) * 2.54;
+}
+
+export function fToC(f: number): number {
+	return ((f - 32) * 5) / 9;
+}
+
+export const LOG_UNIT_CHOICES: Record<string, readonly string[]> = {
+	weight: ['kg', 'lb'],
+	body_temp: ['°C', '°F'],
+};
+
+export function toCanonical(
+	metric: string,
+	value: number,
+	unit: string,
+): { value: number; unit: string } {
+	const canonical = METRIC_UNITS[metric] || unit;
+	if (metric === 'weight' && unit === 'lb') {
+		return { value: lbToKg(value), unit: canonical };
+	}
+	if (metric === 'body_temp' && unit === '°F') {
+		return { value: fToC(value), unit: canonical };
+	}
+	return { value, unit: canonical };
+}
+
 /** Display a metric value in the user's preferred units. */
 export function formatStat(
 	metric: string,
