@@ -104,4 +104,10 @@ When the user uploads a photo or PDF of a lab report through the web UI, the upl
 
 ## Privacy
 
-Health data is the most sensitive data in the system. Don't include biomarker values in news / briefings / log channels. Source files for uploaded labs are only served through the auth-gated `/panels/{id}/source` route, never via static file serving.
+Health data is the most sensitive data in the system. The health DB is the single source of truth — quantitative health data must not be duplicated elsewhere.
+
+- Never write measurements, biomarker values, medication doses, lab dates, or current symptoms to USER.md, the knowledge graph, dated memories, or KV. Those stores are not scoped for clinical data and surface in unrelated prompt contexts.
+- Don't include biomarker values in news / briefings / log channels.
+- When another skill or response needs a current value, call `istota-skill health latest` or `health trend NAME` at the moment of use rather than caching the number.
+- Stable identity-level medical facts (allergies, named chronic conditions) stay in the knowledge graph via the `memory` skill — see its classification rules.
+- Source files for uploaded labs are only served through the auth-gated `/panels/{id}/source` route, never via static file serving.

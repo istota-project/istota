@@ -364,6 +364,11 @@ What to skip:
 - Greetings, acknowledgments, and small talk
 - Temporary states no longer relevant (e.g., "waiting for a response" when the response already came)
 - Raw data dumps or lengthy command output
+- Quantitative health data — specific numerical measurements (weight, BP, HR, body temp, SpO2),
+  biomarker / lab values, medication doses or schedules, dates of specific labs or procedures,
+  and current symptoms or transient illnesses. The `health` module owns these in its own DB.
+  Stable identity-level medical facts ARE in scope: allergies and named chronic conditions
+  belong in FACTS (e.g. allergic_to, has_condition).
 
 ## Source type guidance
 
@@ -461,6 +466,10 @@ Bad fact examples (do NOT produce facts like these):
   (Max was mentioned in a briefing the bot generated — {user_id} never said this about Max)
 - {{"subject": "dana", "predicate": "works_at", "object": "acme corp"}}
   (Dana appeared in an automated email summary — {user_id} didn't state this)
+- {{"subject": "{user_id}", "predicate": "weighs", "object": "82.5 kg"}}
+  (Measurements belong in the health module DB, not the knowledge graph)
+- {{"subject": "{user_id}", "predicate": "ldl", "object": "142"}}
+  (Biomarker / lab values belong in the health module DB, not the knowledge graph)
 
 Good fact examples:
 - {{"subject": "{user_id}", "predicate": "prefers", "object": "morning briefings"}}
