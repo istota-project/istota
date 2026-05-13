@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **SQLite self-healing sweep** — new `db_health` module (`PRAGMA quick_check` + self-healing `REINDEX`) and a daily scheduler tick that walks the framework DB plus every configured user's `feeds`, `health`, `location`, `money` DB. Self-heals stale-index corruption (the failure mode you get when a WAL DB on a FUSE-backed mount sees an ungraceful shutdown or network hiccup mid-write — visible in the reader UI as an entry stuck on `status=unread` in counters while rendering with the `SEEN` overlay). Unrepairable damage is logged at ERROR for operator follow-up. Runs immediately on the first daemon tick after start, then every `db_health_check_interval` (default 24h).
 - **Health module (experimental).** New per-user module for body-stats time series, bloodwork panels, biomarker trends, and lab-result extraction. Gated behind the `module_health` operator flag in `[experimental] features`; off by default everywhere (API mount, `/api/me` features, skill selection). Per-user SQLite at `{workspace}/health/data/health.db` follows the established feeds/location/money pattern. Surfaces:
   - `src/istota/health/` package — `models`, `workspace`, `_loader`, `_migrate`, `db`, `units`, `routes`, `ocr` modules.
   - FastAPI router at `/istota/api/health` — stats CRUD + series + latest, panels CRUD + upload + extract + source streaming, biomarker trend + summary + canonical refs, profile/display settings, dashboard aggregator. Blood-pressure / resting-HR biomarker rows fan out to `stats` so the unified time series picks them up. Flag computation uses Istota canonical ranges (sex-aware when set); lab-printed ranges are preserved per-row but not the flagging source. Panel delete cascades to biomarkers, derived stats, and the on-disk source file.
@@ -16,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - OCR pipeline (`istota.health.ocr`): PDF text extraction via `pdftotext` / `pypdf` with image-OCR fallback via `pdftoppm` + Tesseract; image input goes straight to Tesseract. The extracted text plus the canonical `biomarker_refs` list is passed to the active brain (`general` role alias) which returns structured JSON. Sanity-checks every biomarker against the widest canonical range and surfaces a warning when a value is >10× outside the bounds (likely OCR error). All stages degrade gracefully when an optional dependency is missing — the review UI lets the user fill in or correct rows by hand either way.
   - Bundled `biomarker_refs.json` seed (CBC, CMP, Liver, Lipid, Thyroid, Iron, Vitamins, Inflammation, Hormones, Diabetes, other) with sex-specific ranges where clinically meaningful and alias maps for the most common spellings.
   - 52 new tests across `test_health_db.py`, `test_health_routes.py`, `test_health_skill.py`, `test_health_ocr.py`.
+
+### Fixed
+- **Feed entry stuck "unread" after being seen** — a feed entry could keep contributing to the unread badge in the reader UI while individually rendering with the `SEEN` overlay. Root cause was stale-index corruption on the per-user `feeds.db` (FUSE-mounted WAL DB after an ungraceful event): the `(feed_id, status)` covering index held a pointer with no matching row, so count queries used the index and returned 1, while the row-fetching card query saw the true `status='read'`. The new daily SQLite self-healing sweep detects and repairs this with `REINDEX`.
 
 ## [0.11.1] - 2026-05-09
 

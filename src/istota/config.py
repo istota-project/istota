@@ -93,6 +93,7 @@ class SchedulerConfig:
     tasks_file_poll_interval: int = 30  # seconds between TASKS.md file polls
     shared_file_check_interval: int = 120  # seconds between shared file organization checks
     heartbeat_check_interval: int = 60  # seconds between heartbeat checks
+    db_health_check_interval: int = 86400  # seconds between SQLite quick_check sweeps over per-user DBs
     talk_poll_interval: int = 10  # seconds between Talk polls
     talk_poll_timeout: int = 30  # long-poll timeout for Talk API
     talk_poll_wait: float = 2.0  # max seconds to wait for all rooms before processing available results
@@ -873,6 +874,7 @@ def load_config(config_path: Path | None = None) -> Config:
             tasks_file_poll_interval=sched.get("tasks_file_poll_interval", sched.get("istota_file_poll_interval", 30)),
             shared_file_check_interval=sched.get("shared_file_check_interval", 120),
             heartbeat_check_interval=sched.get("heartbeat_check_interval", 60),
+            db_health_check_interval=sched.get("db_health_check_interval", 86400),
             talk_poll_interval=sched.get("talk_poll_interval", 10),
             talk_poll_timeout=sched.get("talk_poll_timeout", 30),
             talk_poll_wait=sched.get("talk_poll_wait", 2.0),

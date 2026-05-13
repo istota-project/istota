@@ -22,6 +22,7 @@ src/istota/
 ├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── context.py            # Hybrid conversation context selection
 ├── db.py                 # SQLite operations (all tables)
+├── db_health.py          # `PRAGMA quick_check` + self-healing `REINDEX` for SQLite DBs on the FUSE-backed mount
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
 ├── scheduler.py          # Task processor, briefings, all polling
 ├── email_poller.py       # IMAP polling + plus-address routing
