@@ -5695,3 +5695,86 @@ class TestTaskIdInProgress:
 
         done_no_actions = f"`#{task_id}` ✅ Done ({elapsed}s)"
         assert f"`#{task_id}`" in done_no_actions
+
+
+class TestCheckDbHealth:
+    """Scheduler-level sweep: framework DB + per-user module DBs.
+
+    Self-healing of an individual DB is covered in ``tests/test_db_health.py``;
+    here we just verify the enumeration covers what it should.
+    """
+
+    def _make_db(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+
+    def test_sweep_covers_framework_and_per_user_dbs(self, tmp_path):
+        from istota.scheduler import check_db_health
+
+        mount = tmp_path / "mount"
+        framework_db = tmp_path / "istota.db"
+        self._make_db(framework_db)
+
+        # alice has feeds + health; bob has location only; the absent
+        # files should be silently skipped, not error out.
+        for user, modules in (("alice", ("feeds", "health")), ("bob", ("location",))):
+            for module in modules:
+                self._make_db(
+                    mount / "Users" / user / "istota" / module / "data" / f"{module}.db"
+                )
+
+        config = Config(
+            db_path=framework_db,
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(),
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=mount,
+            users={"alice": UserConfig(), "bob": UserConfig()},
+        )
+
+        reports = check_db_health(config)
+        labels = {r.label: r for r in reports}
+
+        # Framework + 4 per-user modules per user (feeds/health/location/money)
+        # = 1 + 2*4 = 9 reports. Missing per-module files are still reported
+        # so operators can see what was probed.
+        assert "framework" in labels
+        assert labels["framework"].ok
+        for user in ("alice", "bob"):
+            for module in ("feeds", "health", "location", "money"):
+                assert f"{module}:{user}" in labels
+
+        # The two DBs we didn't create should report as missing (ok=True,
+        # no issues, no repair attempted).
+        missing = labels["money:alice"]
+        assert missing.ok and not missing.repair_attempted
+
+        # And the ones we did create should be clean.
+        present = labels["feeds:alice"]
+        assert present.ok and not present.repair_attempted
+
+    def test_no_mount_skips_per_user_dbs(self, tmp_path):
+        from istota.scheduler import check_db_health
+
+        framework_db = tmp_path / "istota.db"
+        self._make_db(framework_db)
+
+        config = Config(
+            db_path=framework_db,
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(),
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=None,
+            users={"alice": UserConfig()},
+        )
+
+        reports = check_db_health(config)
+        # Only the framework DB — no mount means no per-user paths to probe.
+        assert [r.label for r in reports] == ["framework"]

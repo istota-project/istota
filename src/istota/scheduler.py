@@ -24,6 +24,7 @@ logger = logging.getLogger("istota.scheduler")
 
 from . import db
 from .brain import make_brain
+from .db_health import CheckReport, check_and_repair
 from .skills.briefing import (
     build_briefing_prompt,
     get_briefings_for_user,
@@ -2329,6 +2330,51 @@ def cleanup_old_temp_files(config: Config, retention_days: int) -> int:
     return deleted
 
 
+def check_db_health(config: Config) -> list[CheckReport]:
+    """Sweep ``PRAGMA quick_check`` + ``REINDEX`` across all known SQLite DBs.
+
+    Covers the framework DB and every configured user's module DBs
+    (feeds, health, location, money). Each check is independent —
+    one failed open or one disabled module doesn't stop the sweep.
+
+    Returns the per-DB :class:`CheckReport` list so callers (tests,
+    operator tooling) can inspect outcomes. The scheduler tick ignores
+    the return value; results are already logged.
+    """
+    reports: list[CheckReport] = []
+
+    # 1. Framework DB (local disk, but cheap to check and worth confirming).
+    reports.append(check_and_repair(config.db_path, label="framework"))
+
+    # 2. Per-user module DBs on the Nextcloud mount. Probe the filesystem
+    #    rather than calling each module's resolver: resolvers raise for
+    #    disabled-module, missing-mount, missing-user, etc., and we don't
+    #    want any of those to skip a *file* that's actually on disk and
+    #    might be corrupt.
+    mount = getattr(config, "nextcloud_mount_path", None)
+    if mount is None:
+        return reports
+
+    from .storage import get_user_bot_path  # local import: avoids cycle
+
+    for user_id in config.users:
+        try:
+            bot_path = get_user_bot_path(user_id, config.bot_dir_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "db_health_user_path_failed user=%s err=%s", user_id, exc,
+            )
+            continue
+        user_root = Path(mount) / bot_path.lstrip("/")
+        for module in ("feeds", "health", "location", "money"):
+            db_path = user_root / module / "data" / f"{module}.db"
+            reports.append(
+                check_and_repair(db_path, label=f"{module}:{user_id}")
+            )
+
+    return reports
+
+
 async def run_cleanup_checks(config: Config) -> None:
     """
     Run all cleanup checks for scheduler robustness.
@@ -3091,6 +3137,7 @@ def run_daemon(config: Config) -> None:
     logger.info("STARTUP TASKS.md poll interval: %ds", config.scheduler.tasks_file_poll_interval)
     logger.info("STARTUP Shared file check interval: %ds", config.scheduler.shared_file_check_interval)
     logger.info("STARTUP Heartbeat check interval: %ds", config.scheduler.heartbeat_check_interval)
+    logger.info("STARTUP DB health check interval: %ds", config.scheduler.db_health_check_interval)
     logger.info("STARTUP Scheduled job check interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Cleanup interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Confirmation timeout: %d min", config.scheduler.confirmation_timeout_minutes)
@@ -3222,6 +3269,7 @@ def run_daemon(config: Config) -> None:
     last_sleep_cycle_check = 0.0
     last_channel_sleep_cycle_check = 0.0
     last_heartbeat_check = 0.0
+    last_db_health_check = 0.0
     last_status_write = 0.0
     last_trigger_check = 0.0
 
@@ -3347,6 +3395,18 @@ def run_daemon(config: Config) -> None:
             except Exception as e:
                 logger.error("Error writing status: %s", e)
             last_status_write = now
+
+        # Sweep SQLite DBs (framework + per-user modules) for index corruption
+        # once per ``db_health_check_interval`` (default 24h). Self-heals with
+        # REINDEX; unrepairable damage is logged at ERROR. Runs immediately on
+        # the first tick of a fresh daemon so we don't wait 24h to surface
+        # latent corruption after a deploy.
+        if now - last_db_health_check >= config.scheduler.db_health_check_interval:
+            try:
+                check_db_health(config)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Error running DB health checks: %s", e)
+            last_db_health_check = now
 
         # Check heartbeats periodically
         if now - last_heartbeat_check >= config.scheduler.heartbeat_check_interval:

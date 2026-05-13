@@ -22,6 +22,7 @@ def run_daemon(config: Config) -> None
    - Poll TASKS.md files (every `tasks_file_poll_interval`)
    - Run cleanup checks (every `briefing_check_interval`)
    - Check heartbeats (every `heartbeat_check_interval`)
+   - Sweep SQLite DBs (framework + per-user feeds/health/location/money) with `PRAGMA quick_check` + self-healing `REINDEX` (every `db_health_check_interval`, default 24h; runs immediately on the first tick of the daemon so a fresh deploy surfaces latent index corruption without waiting a day)
    - Check invoice schedules (every `briefing_check_interval`)
    - `pool.dispatch()`
    - Sleep `poll_interval`
@@ -128,6 +129,7 @@ class UserWorker(threading.Thread):
 | Email | `poll_emails()` (email_poller.py) | `email_poll_interval` | `processed_emails` |
 | TASKS.md | `poll_all_tasks_files()` (tasks_file_poller.py) | `tasks_file_poll_interval` | `istota_file_tasks` |
 | Heartbeat | `check_heartbeats()` (heartbeat.py) | `heartbeat_check_interval` | `heartbeat_state` |
+| DB health | `check_db_health()` → `db_health.check_and_repair()` | `db_health_check_interval` | — (logs only) |
 | Shared files | `discover_and_organize_shared_files()` (shared_file_organizer.py) | `shared_file_check_interval` | `user_resources` |
 | Briefings | `check_briefings()` | `briefing_check_interval` | `briefing_state` |
 | Scheduled jobs | `check_scheduled_jobs()` | `briefing_check_interval` | `scheduled_jobs` |
@@ -159,6 +161,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `tasks_file_poll_interval` | 30s | TASKS.md poller |
 | `shared_file_check_interval` | 120s | Shared file organizer |
 | `heartbeat_check_interval` | 60s | Heartbeat checks |
+| `db_health_check_interval` | 86400s (24h) | SQLite `quick_check` + `REINDEX` self-heal across framework + per-user feeds/health/location/money DBs (covers Nextcloud-mount FUSE/network induced index corruption) |
 | `worker_idle_timeout` | 30s | Worker thread exit |
 | `max_foreground_workers` | 5 | Instance-level fg worker cap |
 | `max_background_workers` | 3 | Instance-level bg worker cap |

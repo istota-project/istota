@@ -2,6 +2,49 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-12: SQLite self-healing for per-user DBs on the FUSE mount
+
+A single Tumblr post in the reader UI kept rendering with both the `SEEN` overlay *and* a "1 unread" badge that never went to zero. Tracking down the source revealed it wasn't a frontend cache mismatch or a stale row — it was index corruption on the per-user `feeds.db` living on the FUSE-backed Nextcloud mount.
+
+`PRAGMA quick_check` on the affected DB returned:
+
+```
+wrong # of entries in index idx_entries_feed_status
+wrong # of entries in index sqlite_autoindex_feed_entries_1
+```
+
+`idx_entries_feed_status` is the `(feed_id, status)` covering index. The "unread count" badge runs through `count_entries(status='unread')`, which the planner serves as a covering-index scan — so it confidently reported 1, forever. The card view, which has to look up the row, fetched the real `status='read'` and rendered the SEEN overlay. The bad index was a stale pointer with no row behind it.
+
+`sqlite_autoindex_feed_entries_1` is the `UNIQUE(feed_id, guid)` index that backs the `INSERT OR IGNORE` dedup path in `insert_entries`. No duplicate rows had shipped (verified via `GROUP BY feed_id, guid HAVING COUNT(*)>1`), but the same kind of damage could have eventually let real dupes land.
+
+`REINDEX` cleared both. Root cause is almost certainly an ungraceful shutdown or FUSE/network hiccup between the table page and an index page — exactly the failure mode you get when a WAL DB lives behind a network filesystem. Going forward, **assume every per-user module DB on the mount is exposed to this**.
+
+**The fix has three layers:**
+
+1. **Detection helper.** New `src/istota/db_health.py` with `quick_check` / `reindex` / `check_and_repair(path, label=)`. `check_and_repair` runs `quick_check`, attempts `REINDEX` if dirty, re-runs `quick_check`, and returns a `CheckReport(issues_before, issues_after, repair_attempted, repaired)`. `repaired = True` only when the post-REINDEX check is clean (table-level damage that REINDEX can't fix stays at `repaired=False` so callers can escalate). Missing files are silently clean — callers can blindly enumerate optional per-user paths. Garbage files (non-SQLite content) fail the open and are reported as unrepairable.
+
+2. **Scheduler sweep.** `check_db_health(config)` walks the framework DB plus every configured user's `feeds`, `health`, `location`, `money` DB and calls `check_and_repair` on each. Path enumeration probes the filesystem directly (`{mount}/Users/{user}/{bot_dir}/{module}/data/{module}.db`) rather than going through the per-module resolvers — a disabled module shouldn't skip a file that's actually on disk and might be corrupt. Wired into the daemon loop alongside the other periodic checks, with `last_db_health_check = 0.0` so the first tick after a daemon start runs immediately rather than waiting for the interval.
+
+3. **Config knob.** `SchedulerConfig.db_health_check_interval` defaults to 86400 (24h). Plumbed through `config.py`, Ansible defaults (`istota_scheduler_db_health_check_interval`), and the `config.toml.j2` template. Logged on STARTUP next to the other interval lines.
+
+**Decision: don't run quick_check inside `init_db`.** Tempting, but `init_db` runs on every CLI invocation and from every module resolver — wiring quick_check in would hammer the FUSE mount on every short-lived skill subprocess. The periodic sweep gives the right granularity for a 24h decay window.
+
+**Decision: REINDEX rather than DROP/CREATE INDEX.** REINDEX rebuilds every index in the DB from table data in one statement. The DBs are small (under 10K rows even on the busy feed user), the operation is fast, and it covers index types we might add later without keeping a list in sync. Briefly grabs an exclusive lock per index — WAL readers keep working through it.
+
+**Decision: don't try to forge real corruption in tests.** Synthesizing a genuine corrupt index page from Python is fiddly (you'd have to find the right byte offset in the file and write through SQLite's back). The integration path is already validated in prod (manually ran REINDEX on the affected DB, verified `quick_check → ok`). Tests cover the control flow with mocked `quick_check` results — clean/dirty/unrepairable/garbage/missing — plus the scheduler enumeration walking a fake mount with two users and four module DBs each.
+
+**Production fix.** Ran `REINDEX` on the affected user's `feeds.db`; `quick_check` returns `ok` and the badge count clears. Cross-checked the other configured users' feeds/health/location/money DBs — all clean. Only one DB was hit. Once the daily sweep ships, the same incident will self-heal within 24h instead of needing a manual `sqlite3` session.
+
+**Files added/modified:**
+- `src/istota/db_health.py` — new helper module (≈110 lines): `CheckReport`, `quick_check`, `reindex`, `check_and_repair`.
+- `src/istota/scheduler.py` — imports `CheckReport`/`check_and_repair`, adds `check_db_health(config)` that enumerates `{mount}/Users/{user}/{bot_dir}/{module}/data/{module}.db` paths, wires `last_db_health_check` + the periodic-tick block into `run_daemon`, adds the STARTUP log line.
+- `src/istota/config.py` — `SchedulerConfig.db_health_check_interval: int = 86400`, parsed in `load_config()` next to the other scheduler ints.
+- `deploy/ansible/defaults/main.yml` + `deploy/ansible/templates/config.toml.j2` — new `istota_scheduler_db_health_check_interval` variable.
+- `tests/test_db_health.py` — 6 cases: clean DB, missing file, dirty→repaired, dirty→unrepairable, unreadable file, plain `quick_check` returns empty on a clean DB.
+- `tests/test_scheduler.py::TestCheckDbHealth` — sweep enumeration covers framework + four module DBs per user, and the no-mount short-circuit case.
+- `.claude/rules/scheduler.md` — main-loop step list, poller-integrations table, and config-defaults table all updated.
+- `AGENTS.md` — `db_health.py` line added to the project-structure tree.
+
 ## 2026-05-09: KV set ops for membership-tracking patterns
 
 A scheduled task choked on `istota-skill kv get <ns> <key>` returning a ~44 KB JSON array of seen-item IDs — the array had grown past the size where the skill-proxy path could comfortably round-trip the value through subprocess pipes and into the LLM's tool-result. The CLI hung, the bash sandbox routed it to background execution, and the task burned its action budget across nine recovery attempts before producing a partial result. The KV store itself was healthy; the failure mode was "membership check forces a full-array round-trip when the user really just needed `id in seen?`".

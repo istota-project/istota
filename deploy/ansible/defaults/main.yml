@@ -132,6 +132,7 @@ istota_scheduler_briefing_check_interval: 60
 istota_scheduler_tasks_file_poll_interval: 30
 istota_scheduler_shared_file_check_interval: 120  # Shared file organization check interval
 istota_scheduler_heartbeat_check_interval: 60    # Heartbeat monitoring check interval
+istota_scheduler_db_health_check_interval: 86400 # SQLite quick_check + REINDEX sweep (default daily)
 
 # Scheduler progress updates (Talk only)
 istota_scheduler_progress_updates: true                # Show real-time progress in Talk during execution
