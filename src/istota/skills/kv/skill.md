@@ -68,3 +68,5 @@ All commands return JSON with a `status` field (`ok`, `not_found`, or `error`).
 
 - Values must be valid JSON (strings, numbers, objects, arrays, booleans, null)
 - KV store is the standard way to persist runtime state — prefer it over JSON files in `data/`
+- Do not store secrets (passwords, tokens, API keys) here — use the encrypted `secrets` table via `istota secret`.
+- Do not store quantitative health data (measurements, biomarker / lab values, medication doses, current symptoms). That belongs in the `health` module's per-user DB; query it on demand via `istota-skill health latest` / `health trend`.
