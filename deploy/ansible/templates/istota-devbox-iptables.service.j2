@@ -1,0 +1,16 @@
+[Unit]
+Description=Re-apply {{ istota_namespace }} devbox DOCKER-USER iptables rules
+# Docker programs its own POSTROUTING / DOCKER-FORWARD entries at daemon
+# start. We ride in behind it to ensure the user-defined DROP rules in
+# DOCKER-USER are present. Docker preserves DOCKER-USER across daemon
+# restarts, so this only really matters at boot.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/istota-devbox-iptables
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

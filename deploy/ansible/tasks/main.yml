@@ -1282,16 +1282,19 @@
     - (devbox_running.stdout | default('')) | trim | length == 0
 
 # --- Network isolation. The devbox network is bridged for outbound
-# internet; we layer iptables rules into DOCKER-USER (preserved across
-# iptables -F) and persist them with iptables-persistent so they survive
-# host reboots. The bridge-nf sysctl is what makes intra-bridge traffic
+# internet; we layer iptables rules into DOCKER-USER (preserved by Docker
+# across daemon restarts) and re-apply them at boot via a custom oneshot
+# systemd unit ordered After=docker.service. We deliberately do NOT use
+# iptables-persistent here — its snapshot-the-whole-table model fights
+# Docker's runtime rule management and produced the outage where the
+# devbox bridge's MASQUERADE / DOCKER-FORWARD entries were silently
+# clobbered. The bridge-nf sysctl is what makes intra-bridge traffic
 # visible to iptables — without it, container ↔ container traffic on the
 # same bridge bypasses the DROP rules entirely.
-- name: Ensure iptables + iptables-persistent are installed
+- name: Ensure iptables is installed
   apt:
     name:
       - iptables
-      - iptables-persistent
     state: present
   when: istota_devbox_enabled and not istota_web_only
 
@@ -1320,6 +1323,10 @@
   when: istota_devbox_enabled and not istota_web_only
   failed_when: false
 
+# DROP rules are applied immediately for the running host. Reboot
+# persistence is handled by the istota-devbox-iptables.service oneshot
+# below — it re-applies the same rules After=docker.service so we never
+# race with dockerd's own iptables programming.
 - name: Block cloud metadata endpoint from the devbox subnet
   ansible.builtin.iptables:
     chain: DOCKER-USER
@@ -1329,8 +1336,6 @@
     comment: "istota-devbox: block cloud metadata"
     state: present
   when: istota_devbox_enabled and istota_devbox_block_metadata and not istota_web_only
-  notify:
-    - "save iptables (devbox)"
 
 - name: Block RFC1918 destinations from the devbox subnet
   ansible.builtin.iptables:
@@ -1345,8 +1350,37 @@
     - 172.16.0.0/12
     - 192.168.0.0/16
   when: istota_devbox_enabled and istota_devbox_block_rfc1918 and not istota_web_only
+
+# Reboot persistence: a small oneshot unit re-applies the DROP rules
+# after dockerd has come up and re-installed its own POSTROUTING /
+# DOCKER-FORWARD rules. Idempotent (`iptables -C || -A`) so it's safe
+# to retrigger.
+- name: Deploy devbox iptables reapply script
+  template:
+    src: istota-devbox-iptables.sh.j2
+    dest: /usr/local/sbin/istota-devbox-iptables
+    owner: root
+    group: root
+    mode: '0755'
+  when: istota_devbox_enabled and not istota_web_only
+
+- name: Deploy devbox iptables systemd unit
+  template:
+    src: istota-devbox-iptables.service.j2
+    dest: "/etc/systemd/system/{{ istota_namespace }}-devbox-iptables.service"
+    owner: root
+    group: root
+    mode: '0644'
+  when: istota_devbox_enabled and not istota_web_only
   notify:
-    - "save iptables (devbox)"
+    - reload systemd
+
+- name: Enable devbox iptables systemd unit
+  systemd:
+    name: "{{ istota_namespace }}-devbox-iptables.service"
+    enabled: yes
+    daemon_reload: yes
+  when: istota_devbox_enabled and not istota_web_only
 
 # --- Cleanup when disabled ---
 - name: Check if devbox compose file exists
@@ -1386,8 +1420,25 @@
     - 192.168.0.0/16
   when: not istota_devbox_enabled and not istota_web_only
   failed_when: false
+
+- name: Disable devbox iptables systemd unit when disabled
+  systemd:
+    name: "{{ istota_namespace }}-devbox-iptables.service"
+    enabled: no
+    state: stopped
+  when: not istota_devbox_enabled and not istota_web_only
+  failed_when: false
+
+- name: Remove devbox iptables systemd unit + script when disabled
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/systemd/system/{{ istota_namespace }}-devbox-iptables.service"
+    - "/usr/local/sbin/istota-devbox-iptables"
+  when: not istota_devbox_enabled and not istota_web_only
   notify:
-    - "save iptables (devbox)"
+    - reload systemd
 
 # ============================================================
 # WEBHOOK RECEIVER (location tracking, etc.)

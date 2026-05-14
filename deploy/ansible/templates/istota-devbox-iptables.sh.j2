@@ -1,0 +1,39 @@
+#!/bin/bash
+# Re-apply the devbox DOCKER-USER DROP rules at boot.
+#
+# Why this exists: Docker manages POSTROUTING MASQUERADE and DOCKER-FORWARD
+# rules dynamically at network-create / daemon-start time. We previously
+# tried to persist firewall state with iptables-persistent, but its
+# snapshot-the-whole-table model fought Docker's runtime programming and
+# silently lost the devbox bridge's outbound NAT rules on reboot. Instead,
+# we let Docker own its own chains, and use this small oneshot to ensure
+# our user-defined DROP rules in DOCKER-USER (which Docker preserves
+# across daemon restarts) are present after every boot.
+#
+# Ordering: the istota-devbox-iptables.service unit specifies
+# After=docker.service, so the DOCKER-USER chain exists by the time this
+# runs. Each rule is checked with `iptables -C` before being added, so
+# the script is idempotent.
+
+set -euo pipefail
+
+SUBNET="{{ istota_devbox_network_subnet }}"
+
+ensure_drop() {
+    local dest="$1"
+    local comment="$2"
+    if ! iptables -C DOCKER-USER -s "$SUBNET" -d "$dest" \
+            -m comment --comment "$comment" -j DROP 2>/dev/null; then
+        iptables -A DOCKER-USER -s "$SUBNET" -d "$dest" \
+            -m comment --comment "$comment" -j DROP
+    fi
+}
+
+{% if istota_devbox_block_metadata | default(true) %}
+ensure_drop "169.254.169.254/32" "istota-devbox: block cloud metadata"
+{% endif %}
+{% if istota_devbox_block_rfc1918 | default(true) %}
+ensure_drop "10.0.0.0/8" "istota-devbox: block 10.0.0.0/8"
+ensure_drop "172.16.0.0/12" "istota-devbox: block 172.16.0.0/12"
+ensure_drop "192.168.0.0/16" "istota-devbox: block 192.168.0.0/16"
+{% endif %}
