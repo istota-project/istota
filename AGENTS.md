@@ -17,7 +17,7 @@ For module-specific internals, see `.claude/rules/`:
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
-├── skills/               # 28 self-contained skills (skill.md + optional CLI)
+├── skills/               # 29 self-contained skills (skill.md + optional CLI)
 ├── cli.py                # Local CLI (task, resource, briefing, secret, user, run, …)
 ├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── context.py            # Hybrid conversation context selection

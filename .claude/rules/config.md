@@ -38,6 +38,14 @@ ntfy default); per-call overrides flow through `send_notification(...)`.
 enabled: bool = False        api_url: str = "http://localhost:9223"    vnc_url: str = ""
 ```
 
+### `DevboxConfig`
+```
+enabled: bool = False                container_prefix: str = "devbox-"
+docker_cli: str = "/usr/bin/docker"  docker_socket: str = "/var/run/docker.sock"
+exec_timeout_seconds: int = 300      max_output_bytes: int = 102_400
+```
+Per-user persistent Docker container — the agent's escape hatch for tasks the bwrap sandbox can't handle (installing packages, network diagnostics, raw sockets). When `enabled`, the executor exports `ISTOTA_DEVBOX_*` env vars (container name = `f"{container_prefix}{task.user_id}"`) and `build_bwrap_cmd` `--ro-bind`s `docker_cli` + `--bind`s `docker_socket` into the sandbox so the `devbox` skill CLI can issue `docker exec/cp/inspect/restart` against the user's own container. Image is built from `docker/devbox/Dockerfile`; compose runs it under the `devbox` profile (`docker compose --profile devbox up`).
+
 ### `ConversationConfig`
 ```
 enabled: bool = True                lookback_count: int = 25
@@ -209,6 +217,7 @@ custom_system_prompt: bool = False  # Use config/system-prompt.md instead of CC 
 nextcloud: NextcloudConfig          talk: TalkConfig
 email: EmailConfig                  conversation: ConversationConfig
 scheduler: SchedulerConfig          browser: BrowserConfig
+devbox: DevboxConfig
 logging: LoggingConfig
 briefing_defaults: BriefingDefaultsConfig   skills: SkillsConfig
 brain: BrainConfig                          # selects model-invocation backend

@@ -114,6 +114,7 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `scripts` | yes | — | — | — |
 | `memory_search` | yes | — | — | — |
 | `kv` | yes | — | — | — |
+| `devbox` | — | devbox, install package, pip install, apt install, dig, nslookup, traceroute, whois, ping, nmap, ... | — | — |
 | `email` | — | email, mail, send, inbox, reply, message | email_folder | email |
 | `calendar` | — | calendar, event, meeting, schedule, appointment, caldav | calendar | briefing |
 | `todos` | — | todo, task, checklist, reminder, done, complete | todo_file | — |
@@ -146,6 +147,11 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 `untrusted_input` is a doc-only companion skill — no triggers, no source_types, never selected directly. It loads via `companion_skills` declarations on the seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`) so its rules ride along whenever a task is processing content from outside the trust boundary. Paired with `sensitive_actions`: outbound rules in that one, inbound-reading rules here, per-action authorization principle stated in both.
 
 ## Skill CLI Modules (`src/istota/skills/`)
+
+### `devbox/` - Persistent dev container
+**Subcommands**: `exec <command> [--timeout N]`, `exec-file <path> [--interpreter X] [--timeout N]`, `cp-in <src> <dest>`, `cp-out <src> <dest>`, `status`, `reset --yes`
+**Env vars**: `ISTOTA_USER_ID`, `ISTOTA_DEVBOX_CONTAINER` (default `devbox-<user_id>`), `ISTOTA_DEVBOX_DOCKER_CLI`, `ISTOTA_DEVBOX_DOCKER_SOCKET`, `ISTOTA_DEVBOX_EXEC_TIMEOUT`, `ISTOTA_DEVBOX_MAX_OUTPUT_BYTES`
+**Note**: Keyword-triggered; **not** `always_include`. The seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`) list `exclude_skills: [devbox]` so the devbox is never co-selected with untrusted-content tasks. `build_bwrap_cmd` further gates the docker CLI / socket bind on `"devbox" in selected_skills` — when the skill isn't in the per-task selection, the socket isn't reachable from inside the sandbox at all. Container name is validated against `^[a-zA-Z0-9_.-]+$` before every `docker exec/cp/inspect/restart`. Each container carries a `com.istota.user_id=<user_id>` label and `_running()` verifies the label matches `ISTOTA_USER_ID` before any operation — defence-in-depth against stale containers from a prior tenant. `cp-in` / `cp-out` host paths are validated to stay under `ISTOTA_DEFERRED_DIR` or the user's `NEXTCLOUD_MOUNT_PATH` subtree (and rejects host-side symlinks). `args.command` is capped at 32 KB and refuses NUL bytes. Stdout/stderr capped at `max_output_bytes` per stream with a `[truncated: N more bytes]` marker. Image (`istota-devbox:latest`) built from `docker/devbox/Dockerfile`; production deploys via Ansible (one container per `istota_devbox_users` entry, isolated on `devbox-net` with `DOCKER-USER` iptables drops for `169.254.169.254/32` + RFC1918). The residual trade-off — anything inside the sandbox that *does* have the socket bound can in principle launch a privileged container — is documented in `executor.py:build_bwrap_cmd`; the proper fix (a Docker-API allowlist proxy) is filed for a later iteration.
 
 ### `kv/` - Key-Value Store
 **Subcommands**: `get NAMESPACE KEY`, `set NAMESPACE KEY '<json>'`, `list NAMESPACE`, `delete NAMESPACE KEY`, `namespaces`, `set-contains NS KEY MEMBER`, `set-size NS KEY`, `set-members NS KEY [--limit N] [--offset N]`, `set-add NS KEY MEMBER [MEMBER...]`, `set-remove NS KEY MEMBER [MEMBER...]`

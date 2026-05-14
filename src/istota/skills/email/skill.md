@@ -5,6 +5,7 @@ description: Email sending and response formatting
 cli: true
 source_types: [email]
 companion_skills: [untrusted_input]
+exclude_skills: [devbox]
 dependencies: [imap_tools]
 env: [{"var":"SMTP_HOST","from":"config","config_path":"email.smtp_host","when":"email.enabled"},{"var":"SMTP_PORT","from":"config","config_path":"email.smtp_port","when":"email.enabled"},{"var":"SMTP_USER","from":"config","config_path":"email.effective_smtp_user","when":"email.enabled"},{"var":"SMTP_PASSWORD","from":"config","config_path":"email.effective_smtp_password","when":"email.enabled","sensitive":true},{"var":"SMTP_FROM","from":"config","config_path":"email.bot_email","when":"email.enabled"},{"var":"IMAP_HOST","from":"config","config_path":"email.imap_host","when":"email.enabled"},{"var":"IMAP_PORT","from":"config","config_path":"email.imap_port","when":"email.enabled"},{"var":"IMAP_USER","from":"config","config_path":"email.imap_user","when":"email.enabled"},{"var":"IMAP_PASSWORD","from":"config","config_path":"email.imap_password","when":"email.enabled","sensitive":true}]
 ---

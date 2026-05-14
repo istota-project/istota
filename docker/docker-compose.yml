@@ -429,6 +429,47 @@ services:
     command: []
     restart: unless-stopped
 
+  # Devbox — persistent dev container for the docker-compose user
+  # (single-user standalone deploy). Production / multi-user deploys go
+  # through Ansible, which renders one service per user from the same
+  # Dockerfile + template — keep this entry in sync with
+  # deploy/ansible/templates/docker-compose.devbox.yml.j2.
+  #
+  # Skill CLI shells in via the host docker socket. Not brought up by
+  # default — enable the ``devbox`` profile:
+  #   docker compose --profile devbox up -d devbox
+  # and set ISTOTA_DEVBOX_ENABLED=true in the istota service env.
+  devbox:
+    profiles:
+      - devbox
+    build:
+      context: ..
+      dockerfile: docker/devbox/Dockerfile
+    image: istota-devbox:latest
+    container_name: devbox-${USER_NAME}
+    hostname: devbox-${USER_NAME}
+    restart: unless-stopped
+    labels:
+      com.istota.user_id: "${USER_NAME}"
+    cap_add:
+      - NET_RAW          # ping, traceroute, mtr, tcpdump
+    volumes:
+      - devbox_home:/home/dev
+    tmpfs:
+      - /workspace:size=1g,mode=1777
+    networks:
+      - devbox-net
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 512
+    # Real network access — no shared bridge with the istota stack. The
+    # devbox cannot reach postgres/nextcloud/redis on the default network.
+    # Cloud-metadata / RFC1918 filtering is not in this compose file (the
+    # Docker-compose path doesn't have a place to manage host iptables);
+    # for production isolation use the Ansible role, which adds DOCKER-USER
+    # rules and the bridge-nf sysctl.
+    command: ["sleep", "infinity"]
+
 volumes:
   postgres_data:
   redis_data:
@@ -437,3 +478,13 @@ volumes:
   shared_files:
   istota_data:
   browser_profile:
+  devbox_home:
+
+networks:
+  # Dedicated network for the devbox. ``internal: false`` keeps public
+  # internet access; the absence from other services keeps internal
+  # services unreachable. Host LAN / cloud metadata filtering is layered
+  # on at the iptables level by Ansible (out of scope for compose).
+  devbox-net:
+    driver: bridge
+    internal: false

@@ -5,6 +5,7 @@ description: Calendar operations with CalDAV
 cli: true
 source_types: [briefing]
 companion_skills: [untrusted_input]
+exclude_skills: [devbox]
 dependencies: [caldav, icalendar]
 env: [{"var":"CALDAV_URL","from":"config","config_path":"caldav_url","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_USERNAME","from":"config","config_path":"caldav_username","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_PASSWORD","from":"config","config_path":"caldav_password","when":"caldav_url","gate_has_discovered_calendars":true,"sensitive":true}]
 ---

@@ -4,6 +4,7 @@ triggers: [feed, feeds, rss, subscribe, subscription, add feed, remove feed, uns
 description: Native RSS/Atom/Tumblr/Are.na feed manager (in-tree)
 cli: true
 companion_skills: [untrusted_input]
+exclude_skills: [devbox]
 env: [{"var":"FEEDS_USER","from":"user_id"},{"var":"TUMBLR_API_KEY","from":"secret","service":"feeds","key":"tumblr_api_key","sensitive":true,"fallback_var":"TUMBLR_API_KEY"}]
 ---
 # Feeds (native)

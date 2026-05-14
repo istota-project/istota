@@ -1,0 +1,44 @@
+# Managed by Ansible — do not edit by hand.
+# One devbox service per istota_devbox_users entry. The agent shells in via
+# the host docker socket; nothing else talks to this stack.
+
+services:
+{% for devbox_user in istota_devbox_users %}
+  {{ istota_devbox_container_prefix }}{{ devbox_user }}:
+    image: {{ istota_devbox_image }}
+    build:
+      context: {{ istota_repo_dir }}/docker/devbox
+      dockerfile: Dockerfile
+    container_name: {{ istota_devbox_container_prefix }}{{ devbox_user }}
+    hostname: {{ istota_devbox_container_prefix }}{{ devbox_user }}
+    restart: unless-stopped
+    labels:
+      com.istota.user_id: "{{ devbox_user }}"
+    cap_add:
+      - NET_RAW
+    volumes:
+      - devbox_home_{{ devbox_user }}:/home/dev
+    tmpfs:
+      - /workspace:size={{ istota_devbox_workspace_tmpfs_size }},mode=1777
+    networks:
+      - devbox-net
+    mem_limit: {{ istota_devbox_mem_limit }}
+    cpus: {{ istota_devbox_cpus }}
+    pids_limit: {{ istota_devbox_pids_limit }}
+    command: ["sleep", "infinity"]
+{% endfor %}
+
+volumes:
+{% for devbox_user in istota_devbox_users %}
+  devbox_home_{{ devbox_user }}:
+    name: {{ istota_namespace }}-devbox-home-{{ devbox_user }}
+{% endfor %}
+
+networks:
+  devbox-net:
+    name: {{ istota_devbox_network_name }}
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: {{ istota_devbox_network_subnet }}

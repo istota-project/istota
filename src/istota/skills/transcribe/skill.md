@@ -5,6 +5,7 @@ description: OCR transcription for images with text
 cli: true
 file_types: [png, jpg, jpeg, gif, webp, bmp, tiff, tif, heic]
 companion_skills: [notes, untrusted_input]
+exclude_skills: [devbox]
 dependencies: [pytesseract]
 ---
 # Image Transcription with OCR
