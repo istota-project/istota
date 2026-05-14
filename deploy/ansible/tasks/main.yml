@@ -1261,6 +1261,35 @@
   notify:
     - "restart istota-devbox"
 
+# Detect Dockerfile changes so an edit to docker/devbox/Dockerfile (which
+# Ansible doesn't otherwise track — it lives in the repo, not in a
+# template) triggers an image rebuild. We hash the file on the host and
+# pin the digest into a marker under {{ istota_home }}. When the digest
+# differs from the previous run, the copy is "changed" and notifies the
+# restart-devbox handler, which does `build && up -d --force-recreate`.
+# Without this, a Dockerfile-only change ships to the host via git but
+# the running container keeps the old image until something else
+# changes the compose template.
+- name: Hash devbox Dockerfile
+  ansible.builtin.stat:
+    path: "{{ istota_repo_dir }}/docker/devbox/Dockerfile"
+    checksum_algorithm: sha256
+  register: devbox_dockerfile_stat
+  when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Track devbox Dockerfile checksum (triggers rebuild on change)
+  ansible.builtin.copy:
+    dest: "{{ istota_home }}/.devbox-dockerfile.sha256"
+    content: "{{ devbox_dockerfile_stat.stat.checksum }}\n"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0644"
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - devbox_dockerfile_stat.stat.exists | default(false)
+  notify:
+    - "restart istota-devbox"
+
 - name: Check whether devbox compose currently has containers running
   shell: docker compose -f docker-compose.devbox.yml ps -q
   args:
