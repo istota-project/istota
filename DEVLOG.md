@@ -2,6 +2,34 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-14: Stop fighting Docker's iptables on the devbox bridge
+
+The freshly-deployed devbox container could resolve DNS but couldn't reach anything outbound — every TCP/UDP/ICMP packet to the public internet timed out. The deployment host had been running fine all week; the breakage appeared the moment Ansible brought the devbox up alongside the existing browser bridge.
+
+The diagnosis ran out a few false trails first. DNS worked because Docker's embedded resolver answers from the bridge gateway address, which never leaves the host. ICMP and TCP failed because `POSTROUTING -s 172.30.0.0/24 -j MASQUERADE` was missing for the new bridge, and the corresponding `-A DOCKER-FORWARD -i br-<id> -j ACCEPT` was missing too. Docker normally programs both at network-create time. They weren't there.
+
+Initial hypothesis was that Docker 29 had simply failed to add them, and the temptation was to add them ourselves in the Ansible role. I did, briefly — a MASQUERADE block plus a discovered-bridge ACCEPT — before realizing this was patching the symptom. Why would Docker, which has reliably managed bridge networks for a decade, suddenly stop?
+
+Looking at `/etc/iptables/rules.v4` gave it away: the saved snapshot contained Docker's runtime rules for `docker0` and `br-<browser-id>` but nothing for the new devbox bridge. The role was running `netfilter-persistent save` as a handler after every iptables change, which captured a point-in-time view of *everything currently in the table*, including Docker's own rules. On the next reboot, `netfilter-persistent.service` restored that stale snapshot — and dockerd's rules for any bridge created *after* the last save were silently lost. We were snapshotting Docker's mutable state into a file we then treated as authoritative.
+
+`systemctl restart docker` on the host fixed it immediately. That confirmed the theory: dockerd, given a chance to re-walk its known networks at startup, programs the right iptables rules on its own. Our role just needed to stop interfering.
+
+**Why iptables at all?** Worth being explicit because removing it crossed my mind. The DROP rules in DOCKER-USER are the devbox's egress firewall — without them the agent (root-equivalent inside the container via sudo) could `curl http://169.254.169.254/latest/meta-data/iam/security-credentials/` to lift cloud IAM credentials from the host metadata service, or `nmap` across RFC1918 to reach LAN/VPC peers. Docker bridge networking has no built-in egress filter; iptables is the conventional way to add one. So the DROPs stay. What goes is `iptables-persistent` as the mechanism for surviving reboots.
+
+**The new persistence model.** A small idempotent shell script at `/usr/local/sbin/istota-devbox-iptables` does `iptables -C ... || -A` for the same DOCKER-USER DROP rules the role applies at deploy time. A oneshot systemd unit `istota-devbox-iptables.service` runs it with `After=docker.service`, so by the time it executes, dockerd has come up and the DOCKER-USER chain exists. Docker preserves DOCKER-USER across daemon restarts by design, so this unit only really matters at boot. The role no longer installs `iptables-persistent` for fresh deploys, no longer runs `netfilter-persistent save`, and removes the matching `notify:` references.
+
+**Manual recovery for existing hosts.** The deployment host already has `iptables-persistent` installed with a stale snapshot. The role leaves the package alone — removing it is an operator-policy call, not something the role should impose. After deploying the change, a one-time `sudo systemctl restart docker` on the host repopulates the missing bridge rules. If an operator wants a fully clean boot path, `sudo systemctl disable --now netfilter-persistent.service` stops the stale snapshot from being restored on next boot. Both steps are documented in the CHANGELOG entry.
+
+**Secondary fix: `/etc/services` in the devbox image.** While diagnosing, `whois` from inside the container failed with "service not found" because Debian's slim base ships without `/etc/services`. Anything that resolves a port name symbolically (whois → 43/tcp, etc.) breaks the same way. Added `netbase` to the apt install layer in `docker/devbox/Dockerfile`.
+
+**Files modified:**
+- `deploy/ansible/tasks/main.yml` — reverted the MASQUERADE patch, dropped `iptables-persistent` from the install list, removed all `notify: save iptables (devbox)` references, added tasks to deploy/enable/cleanup the new oneshot unit + script.
+- `deploy/ansible/handlers/main.yml` — removed the `save iptables (devbox)` handler.
+- `deploy/ansible/templates/istota-devbox-iptables.sh.j2` — new. Idempotent re-apply of DOCKER-USER DROP rules.
+- `deploy/ansible/templates/istota-devbox-iptables.service.j2` — new. Oneshot, `After=docker.service`, `RemainAfterExit=yes`.
+- `docker/devbox/Dockerfile` — added `netbase` to the apt install line.
+- `CHANGELOG.md` — two Fixed entries under `[Unreleased]`: the iptables/persistence rework (with manual-recovery steps) and the `netbase` fix.
+
 ## 2026-05-12: SQLite self-healing for per-user DBs on the FUSE mount
 
 A single Tumblr post in the reader UI kept rendering with both the `SEEN` overlay *and* a "1 unread" badge that never went to zero. Tracking down the source revealed it wasn't a frontend cache mismatch or a stale row — it was index corruption on the per-user `feeds.db` living on the FUSE-backed Nextcloud mount.

@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg imagemagick pandoc poppler-utils tesseract-ocr \
         dnsutils whois iputils-ping traceroute mtr-tiny \
         nmap netcat-openbsd openssl httpie iproute2 \
-        tcpdump iperf3 \
+        tcpdump iperf3 netbase \
         sudo ca-certificates locales \
     && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen \
     && rm -rf /var/lib/apt/lists/*

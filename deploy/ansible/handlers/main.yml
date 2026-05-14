@@ -22,14 +22,6 @@
     chdir: "{{ istota_home }}"
   when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
 
-- name: "save iptables (devbox)"
-  # Persist the DOCKER-USER rules so they survive host reboots. On Debian /
-  # Ubuntu, iptables-persistent reads from /etc/iptables/rules.v4 — netfilter-
-  # persistent save writes the live ruleset to that file.
-  command: netfilter-persistent save
-  when: not istota_web_only
-  failed_when: false
-
 - name: "restart istota-web"
   systemd:
     name: "{{ istota_namespace }}-web"
