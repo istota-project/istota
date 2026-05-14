@@ -70,6 +70,22 @@ class BrowserConfig:
 
 
 @dataclass
+class DevboxConfig:
+    """Per-user devbox container — persistent Linux workbench.
+
+    The scheduler exposes an ``istota-skill devbox`` CLI that shells into
+    ``devbox-<user_id>`` via the host's Docker socket. Everything else
+    (image, network, volume) is provisioned by docker-compose / Ansible.
+    """
+    enabled: bool = False
+    container_prefix: str = "devbox-"           # container name = f"{prefix}{user_id}"
+    docker_cli: str = "/usr/bin/docker"         # host path to the Docker CLI binary
+    docker_socket: str = "/var/run/docker.sock"  # host path to the Docker socket
+    exec_timeout_seconds: int = 300             # default per-exec timeout
+    max_output_bytes: int = 102_400             # stdout/stderr cap per stream
+
+
+@dataclass
 class ConversationConfig:
     enabled: bool = True
     lookback_count: int = 25
@@ -439,6 +455,7 @@ class Config:
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
+    devbox: DevboxConfig = field(default_factory=DevboxConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefing_defaults: BriefingDefaultsConfig = field(default_factory=BriefingDefaultsConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
@@ -908,6 +925,17 @@ def load_config(config_path: Path | None = None) -> Config:
             enabled=br.get("enabled", False),
             api_url=br.get("api_url", "http://localhost:9223"),
             vnc_url=br.get("vnc_url", ""),
+        )
+
+    if "devbox" in data:
+        dx = data["devbox"]
+        config.devbox = DevboxConfig(
+            enabled=dx.get("enabled", False),
+            container_prefix=dx.get("container_prefix", "devbox-"),
+            docker_cli=dx.get("docker_cli", "/usr/bin/docker"),
+            docker_socket=dx.get("docker_socket", "/var/run/docker.sock"),
+            exec_timeout_seconds=dx.get("exec_timeout_seconds", 300),
+            max_output_bytes=dx.get("max_output_bytes", 102_400),
         )
 
     if "ntfy" in data:

@@ -87,6 +87,7 @@ def build_prompt(
 | Nextcloud | `NEXTCLOUD_MOUNT_PATH` | `str(config.nextcloud_mount_path)` |
 | CalDAV | `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD` | `config.caldav_*` |
 | Browser | `BROWSER_API_URL`, `BROWSER_VNC_URL` | `config.browser.*` (if enabled) |
+| Devbox | `ISTOTA_DEVBOX_CONTAINER`, `ISTOTA_DEVBOX_DOCKER_CLI`, `ISTOTA_DEVBOX_DOCKER_SOCKET`, `ISTOTA_DEVBOX_EXEC_TIMEOUT`, `ISTOTA_DEVBOX_MAX_OUTPUT_BYTES` | `config.devbox.*` (if enabled). Container name defaults to `f"{container_prefix}{task.user_id}"`. `build_bwrap_cmd` additionally `--ro-bind`s `docker_cli` and `--bind`s `docker_socket` so the `devbox` skill CLI can reach the host docker daemon from inside the sandbox. |
 | Email | `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM` | `config.email.*` (`SMTP_FROM` is plus-addressed: `bot+user_id@domain`) |
 | Email | `IMAP_HOST/PORT/USER/PASSWORD` | `config.email.*` |
 | Karakeep | `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY` | From resource config `extra` |

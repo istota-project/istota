@@ -206,6 +206,17 @@ enabled = true
 api_url = "http://localhost:{{ istota_browser_api_port }}"
 vnc_url = "{{ istota_browser_vnc_external_url }}"
 {% endif %}
+
+{% if istota_devbox_enabled %}
+
+[devbox]
+enabled = true
+container_prefix = "{{ istota_devbox_container_prefix }}"
+docker_cli = "{{ istota_devbox_docker_cli }}"
+docker_socket = "{{ istota_devbox_docker_socket }}"
+exec_timeout_seconds = {{ istota_devbox_exec_timeout_seconds }}
+max_output_bytes = {{ istota_devbox_max_output_bytes }}
+{% endif %}
 {# The money skill is in-process and resolves per-user config from each
    user's [[resources]] entry — no instance-level [money] block. #}
 

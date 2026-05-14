@@ -701,6 +701,7 @@ def build_bwrap_cmd(
     proxy_sock: Path | None = None,
     net_proxy_sock: Path | None = None,
     extra_ro_binds: list[Path] | None = None,
+    selected_skills: "frozenset[str] | set[str] | list[str] | None" = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -823,6 +824,30 @@ def build_bwrap_cmd(
     for path in (extra_ro_binds or []):
         if path.exists():
             _ro_bind(path)
+
+    # --- Devbox: Docker CLI + socket for the devbox skill ---
+    # The Docker socket is root-equivalent on the host: anything inside the
+    # sandbox that can write to it can launch a privileged container that
+    # mounts the host root. The skill CLI validates container names before
+    # every call, but that check is bypassable from any other Bash invocation
+    # in the same sandbox (curl --unix-socket, python socket.AF_UNIX, …).
+    #
+    # Mitigation in place: only bind the socket when the devbox skill is
+    # actually selected for this task. Selection in turn excludes ingest-
+    # shaped skills (email, browse, calendar, transcribe, whisper, feeds,
+    # bookmarks) so untrusted-content tasks never see the socket at all.
+    #
+    # TODO: a Docker-API allowlist proxy (à la the gitlab-api wrapper) would
+    # close the gap entirely — restrict to exec/cp/inspect/restart on the
+    # user's own container and refuse run/create/network/--privileged. Track
+    # in the devbox spec; not in this iteration.
+    if config.devbox.enabled and selected_skills and "devbox" in selected_skills:
+        docker_cli = Path(config.devbox.docker_cli)
+        if docker_cli.exists():
+            _ro_bind(docker_cli)
+        docker_sock = Path(config.devbox.docker_socket)
+        if docker_sock.exists():
+            _bind(docker_sock)
 
     # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
     mount = config.nextcloud_mount_path
@@ -2270,6 +2295,21 @@ def execute_task(
             env["BROWSER_API_URL"] = config.browser.api_url
             env["BROWSER_VNC_URL"] = config.browser.vnc_url
 
+        # Devbox: the agent's persistent dev container. Skill CLI shells
+        # into ``devbox-<user_id>`` via the host docker socket.
+        if config.devbox.enabled:
+            env["ISTOTA_DEVBOX_CONTAINER"] = (
+                f"{config.devbox.container_prefix}{task.user_id}"
+            )
+            env["ISTOTA_DEVBOX_DOCKER_CLI"] = config.devbox.docker_cli
+            env["ISTOTA_DEVBOX_DOCKER_SOCKET"] = config.devbox.docker_socket
+            env["ISTOTA_DEVBOX_EXEC_TIMEOUT"] = str(
+                config.devbox.exec_timeout_seconds
+            )
+            env["ISTOTA_DEVBOX_MAX_OUTPUT_BYTES"] = str(
+                config.devbox.max_output_bytes
+            )
+
         # Static website hosting
         if config.site.enabled and task:
             user_config = config.get_user(task.user_id)
@@ -2389,6 +2429,7 @@ def execute_task(
                 Path(user_temp_dir), proxy_sock=_proxy_sock,
                 net_proxy_sock=_net_proxy_sock,
                 extra_ro_binds=_extra_ro_binds,
+                selected_skills=frozenset(selected_skills),
             )
 
         # Adapt the brain's StreamEvent stream to the executor's str-based

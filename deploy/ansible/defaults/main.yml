@@ -384,6 +384,35 @@ istota_browser_cpu_limit: "{{ ansible_facts['processor_vcpus'] }}"
 istota_browser_memory_limit: "3G"
 istota_browser_restart_cron: "0 5 * * *"  # Daily restart (5 AM)
 
+# Devbox container (per-user persistent dev / network-diagnostics environment).
+# When enabled, one container per entry in istota_devbox_users is brought up
+# via docker-compose. The skill CLI shells in over the host docker socket; the
+# bwrap sandbox in executor.py bind-mounts the socket only when the [devbox]
+# block is rendered into config.toml.
+istota_devbox_enabled: false
+istota_devbox_image: "istota-devbox:latest"
+istota_devbox_container_prefix: "devbox-"
+istota_devbox_docker_cli: "/usr/bin/docker"
+istota_devbox_docker_socket: "/var/run/docker.sock"
+istota_devbox_exec_timeout_seconds: 300
+istota_devbox_max_output_bytes: 102400
+istota_devbox_mem_limit: "2g"
+istota_devbox_cpus: 2
+istota_devbox_pids_limit: 512
+istota_devbox_workspace_tmpfs_size: "1g"
+istota_devbox_network_name: "{{ istota_namespace }}-devbox-net"
+istota_devbox_network_subnet: "172.30.0.0/24"
+# Cloud metadata endpoint blocked by default — link-local + DigitalOcean/GCP/
+# AWS/Azure all rendezvous at 169.254.169.254.
+istota_devbox_block_metadata: true
+# RFC1918 blocking: drops outbound traffic from the devbox network targeting
+# private ranges so a compromised devbox can't pivot to the host's LAN.
+# Disable when you want the devbox to reach a colocated service intentionally.
+istota_devbox_block_rfc1918: true
+# Users whose containers should be created. Each entry is a user_id; the
+# container is named "{{ istota_devbox_container_prefix }}{{ user_id }}".
+istota_devbox_users: []
+
 # ntfy push notifications are configured per-user via the encrypted secrets
 # table (`istota secret ensure -s ntfy ...` or web settings). There is no
 # operator-shared ntfy config — each user supplies their own server/topic/auth.

@@ -149,10 +149,10 @@
   stat:
     path: /etc/apt/sources.list.d/download_docker_com_linux_{{ ansible_facts['distribution'] | lower }}.list
   register: docker_repo_file
-  when: not istota_update_only and not istota_web_only and istota_browser_enabled
+  when: not istota_update_only and not istota_web_only and (istota_browser_enabled or istota_devbox_enabled)
 
 - name: Add Docker CE apt repository
-  when: not istota_update_only and not istota_web_only and istota_browser_enabled and not docker_repo_file.stat.exists
+  when: not istota_update_only and not istota_web_only and (istota_browser_enabled or istota_devbox_enabled) and not docker_repo_file.stat.exists
   block:
     - name: Install apt dependencies for Docker repo
       apt:
@@ -182,14 +182,14 @@
       - containerd.io
       - docker-compose-plugin
     state: present
-  when: not istota_update_only and not istota_web_only and istota_browser_enabled
+  when: not istota_update_only and not istota_web_only and (istota_browser_enabled or istota_devbox_enabled)
 
 - name: Add istota user to docker group
   user:
     name: "{{ istota_user }}"
     groups: docker
     append: yes
-  when: not istota_update_only and not istota_web_only and istota_browser_enabled
+  when: not istota_update_only and not istota_web_only and (istota_browser_enabled or istota_devbox_enabled)
 
 - name: Add istota user to www-data group
   user:
@@ -211,7 +211,7 @@
     rule: allow
     from_ip: "172.18.0.0/16"
     comment: "Docker containers ({{ istota_namespace }})"
-  when: not istota_update_only and not istota_web_only and istota_browser_enabled
+  when: not istota_update_only and not istota_web_only and (istota_browser_enabled or istota_devbox_enabled)
 
 # Node.js — inlined (replace with a dedicated role if you prefer)
 - name: Install Node.js for developer skill
@@ -1245,6 +1245,149 @@
     path: "/etc/cron.d/{{ istota_namespace }}-browser-health"
     state: absent
   when: not istota_browser_enabled and not istota_web_only
+
+# ============================================================
+# DEVBOX (per-user persistent dev / network-diagnostics container)
+# ============================================================
+
+- name: Deploy devbox compose file
+  template:
+    src: docker-compose.devbox.yml.j2
+    dest: "{{ istota_home }}/docker-compose.devbox.yml"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0644"
+  when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  notify:
+    - "restart istota-devbox"
+
+- name: Check whether devbox compose currently has containers running
+  shell: docker compose -f docker-compose.devbox.yml ps -q
+  args:
+    chdir: "{{ istota_home }}"
+  register: devbox_running
+  changed_when: false
+  failed_when: false
+  when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Build + start devbox containers on first deploy
+  shell: docker compose -f docker-compose.devbox.yml up -d --build
+  args:
+    chdir: "{{ istota_home }}"
+  when:
+    - istota_devbox_enabled
+    - not istota_web_only
+    - istota_devbox_users | length > 0
+    - devbox_running is defined
+    - (devbox_running.stdout | default('')) | trim | length == 0
+
+# --- Network isolation. The devbox network is bridged for outbound
+# internet; we layer iptables rules into DOCKER-USER (preserved across
+# iptables -F) and persist them with iptables-persistent so they survive
+# host reboots. The bridge-nf sysctl is what makes intra-bridge traffic
+# visible to iptables — without it, container ↔ container traffic on the
+# same bridge bypasses the DROP rules entirely.
+- name: Ensure iptables + iptables-persistent are installed
+  apt:
+    name:
+      - iptables
+      - iptables-persistent
+    state: present
+  when: istota_devbox_enabled and not istota_web_only
+
+- name: Enable netfilter visibility on bridge traffic (devbox cross-container isolation)
+  ansible.posix.sysctl:
+    name: net.bridge.bridge-nf-call-iptables
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-{{ istota_namespace }}-devbox.conf
+    reload: yes
+  when: istota_devbox_enabled and not istota_web_only
+  failed_when: false  # br_netfilter module may not be loaded on minimal images
+
+- name: Ensure br_netfilter module loads at boot
+  copy:
+    dest: /etc/modules-load.d/{{ istota_namespace }}-devbox.conf
+    content: "br_netfilter\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when: istota_devbox_enabled and not istota_web_only
+
+- name: Load br_netfilter module now (best-effort)
+  community.general.modprobe:
+    name: br_netfilter
+    state: present
+  when: istota_devbox_enabled and not istota_web_only
+  failed_when: false
+
+- name: Block cloud metadata endpoint from the devbox subnet
+  ansible.builtin.iptables:
+    chain: DOCKER-USER
+    source: "{{ istota_devbox_network_subnet }}"
+    destination: "169.254.169.254/32"
+    jump: DROP
+    comment: "istota-devbox: block cloud metadata"
+    state: present
+  when: istota_devbox_enabled and istota_devbox_block_metadata and not istota_web_only
+  notify:
+    - "save iptables (devbox)"
+
+- name: Block RFC1918 destinations from the devbox subnet
+  ansible.builtin.iptables:
+    chain: DOCKER-USER
+    source: "{{ istota_devbox_network_subnet }}"
+    destination: "{{ item }}"
+    jump: DROP
+    comment: "istota-devbox: block {{ item }}"
+    state: present
+  loop:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+  when: istota_devbox_enabled and istota_devbox_block_rfc1918 and not istota_web_only
+  notify:
+    - "save iptables (devbox)"
+
+# --- Cleanup when disabled ---
+- name: Check if devbox compose file exists
+  stat:
+    path: "{{ istota_home }}/docker-compose.devbox.yml"
+  register: devbox_compose_file
+  when: not istota_devbox_enabled and not istota_web_only
+
+- name: Stop and remove devbox containers when disabled
+  shell: docker compose -f docker-compose.devbox.yml down --rmi local
+  args:
+    chdir: "{{ istota_home }}"
+  when:
+    - not istota_devbox_enabled
+    - not istota_web_only
+    - devbox_compose_file is defined
+    - devbox_compose_file.stat.exists | default(false)
+  failed_when: false
+
+- name: Remove devbox compose file when disabled
+  file:
+    path: "{{ istota_home }}/docker-compose.devbox.yml"
+    state: absent
+  when: not istota_devbox_enabled and not istota_web_only
+
+- name: Drop devbox iptables rules when disabled
+  ansible.builtin.iptables:
+    chain: DOCKER-USER
+    source: "{{ istota_devbox_network_subnet }}"
+    destination: "{{ item }}"
+    jump: DROP
+    state: absent
+  loop:
+    - 169.254.169.254/32
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+  when: not istota_devbox_enabled and not istota_web_only
+  failed_when: false
+  notify:
+    - "save iptables (devbox)"
 
 # ============================================================
 # WEBHOOK RECEIVER (location tracking, etc.)
