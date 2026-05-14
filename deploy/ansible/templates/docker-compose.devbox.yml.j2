@@ -1,6 +1,14 @@
 # Managed by Ansible — do not edit by hand.
 # One devbox service per istota_devbox_users entry. The agent shells in via
 # the host docker socket; nothing else talks to this stack.
+#
+# Explicit project name — without this, ``docker compose`` defaults the
+# project to the parent directory name and pools containers across every
+# compose file that lives in ``{{ istota_home }}``. ``ps -q`` against this
+# file would then return browser / nextcloud / istota containers too and
+# our "first deploy" check (which gates on an empty container list) would
+# never fire.
+name: {{ istota_namespace }}-devbox
 
 services:
 {% for devbox_user in istota_devbox_users %}
