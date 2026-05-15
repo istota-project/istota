@@ -80,7 +80,7 @@ temp_dir = "/tmp/istota"
 # see what's gateable on this build. Unknown names log a warning at
 # startup. Not exposed in the web UI, not per-user.
 [experimental]
-# features = ["module_health", "money_tax", "money_wash_sales"]
+# features = ["money_tax", "money_wash_sales"]
 features = []
 
 # Brain — selects the model-invocation backend. Phase 1 ships only "claude_code"

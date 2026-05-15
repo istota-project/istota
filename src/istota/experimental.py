@@ -21,7 +21,7 @@ This module owns three things:
 
 Naming convention for flag names:
 
-* ``module_<name>`` — module-level gate (e.g. ``module_health``)
+* ``module_<name>`` — module-level gate (e.g. ``module_foo``)
 * ``skill_<name>`` — skill-level gate (e.g. ``skill_foo``)
 * free-form — CLI subcommand gates (e.g. ``money_tax``)
 """
@@ -36,7 +36,6 @@ from typing import Callable
 
 
 KNOWN_FEATURES: dict[str, str] = {
-    "module_health": "Module: health tracking (body stats, bloodwork, biomarker trends) — work in progress",
     "money_tax": "Money: tax-lot commands (lots)",
     "money_wash_sales": "Money: IRS wash-sale violation detector",
 }

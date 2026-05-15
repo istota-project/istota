@@ -2,10 +2,6 @@
 
 Single entry point for the web routes, scheduler hooks, and the CLI/skill
 facade. Mirrors :mod:`istota.location._loader` and :mod:`istota.feeds._loader`.
-
-Health is an experimental module: gated by ``module_health`` in
-``Config.experimental.features`` before any per-user opt-out check. The
-gate is enforced inside ``Config.is_module_enabled``.
 """
 
 from __future__ import annotations
@@ -30,8 +26,7 @@ def resolve_for_user(
     """Build a health context for ``user_id``.
 
     Raises :class:`UserNotFoundError` if the config is missing, the user is
-    unknown, the module is opted out (or the operator has not enabled the
-    ``module_health`` experimental flag), or the Nextcloud mount path is
+    unknown, the module is opted out, or the Nextcloud mount path is
     unset.
 
     Pass ``conn`` to reuse an existing framework-DB connection for the

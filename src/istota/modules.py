@@ -25,6 +25,4 @@ from __future__ import annotations
 
 MODULE_NAMES: frozenset[str] = frozenset({"feeds", "money", "location", "health"})
 
-EXPERIMENTAL_MODULES: dict[str, str] = {
-    "health": "module_health",
-}
+EXPERIMENTAL_MODULES: dict[str, str] = {}

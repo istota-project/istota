@@ -31,26 +31,11 @@ def ready(tmp_path) -> tuple[Path, dict]:
     env = {
         **os.environ,
         "HEALTH_DB_PATH": str(ctx.db_path),
-        "ISTOTA_EXPERIMENTAL_FEATURES": "module_health",
         # Direct mode — no deferred dir.
         "ISTOTA_DEFERRED_DIR": "",
         "ISTOTA_TASK_ID": "",
     }
     return ctx.db_path, env
-
-
-class TestExperimentalGate:
-    def test_blocks_when_flag_off(self, ready):
-        db_path, env = ready
-        env = {**env, "ISTOTA_EXPERIMENTAL_FEATURES": ""}
-        proc = subprocess.run(
-            [sys.executable, "-m", "istota.skills.health", "latest"],
-            capture_output=True, text=True, env=env,
-        )
-        assert proc.returncode == 1
-        payload = json.loads(proc.stdout)
-        assert payload["status"] == "error"
-        assert "module_health" in payload["error"]
 
 
 class TestStatsCli:

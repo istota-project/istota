@@ -448,12 +448,7 @@ def _user_has_location(username: str) -> bool:
 
 
 def _user_has_health(username: str) -> bool:
-    """True if the experimental health module is enabled for the user.
-
-    Double-gated: ``is_module_enabled`` short-circuits on the
-    ``module_health`` experimental flag before consulting the per-user
-    opt-out.
-    """
+    """True if the health module is enabled for the user (default-on)."""
     if not _config:
         return False
     return _config.is_module_enabled(username, "health")
@@ -2800,10 +2795,8 @@ try:
 except ImportError:
     pass
 
-# Health web API — experimental module, gated by ``module_health`` in
-# ``[experimental] features``. Routes mount unconditionally; per-request
-# auth resolves via ``is_module_enabled``, which short-circuits when the
-# flag isn't set.
+# Health web API. Routes mount unconditionally; per-request auth
+# resolves via ``is_module_enabled``, which honors the per-user opt-out.
 from istota.health.routes import require_auth as _health_require_auth
 from istota.health.routes import router as _health_router
 from istota.health.routes import verify_origin as _health_verify_origin

@@ -1630,7 +1630,7 @@ class TestDeferredDirEnvVar:
         see consistent gating with the scheduler subprocess paths."""
         from istota.config import ExperimentalConfig
         config = self._make_config(tmp_path)
-        config.experimental = ExperimentalConfig(features=["module_health", "money_tax"])
+        config.experimental = ExperimentalConfig(features=["money_tax", "money_wash_sales"])
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
@@ -1640,7 +1640,7 @@ class TestDeferredDirEnvVar:
             execute_task(task, config, [], conn=conn)
 
         env = mock_run.call_args[1]["env"]
-        assert env["ISTOTA_EXPERIMENTAL_FEATURES"] == "module_health,money_tax"
+        assert env["ISTOTA_EXPERIMENTAL_FEATURES"] == "money_tax,money_wash_sales"
 
     @patch("istota.executor.subprocess.run")
     def test_experimental_features_empty_when_unset(self, mock_run, tmp_path):

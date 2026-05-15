@@ -2252,11 +2252,11 @@ class TestExecuteCommandTask:
         the CSV propagated. Regression check for the heartbeat-shaped gap."""
         from istota.config import ExperimentalConfig
         config = self._make_config(db_path, tmp_path)
-        config.experimental = ExperimentalConfig(features=["module_health", "money_tax"])
+        config.experimental = ExperimentalConfig(features=["money_tax", "money_wash_sales"])
         task = self._make_task(command="echo flags=[$ISTOTA_EXPERIMENTAL_FEATURES]")
         success, result = _execute_command_task(task, config)
         assert success is True
-        assert "flags=[module_health,money_tax]" in result
+        assert "flags=[money_tax,money_wash_sales]" in result
 
     def test_experimental_features_empty_when_unset(self, db_path, tmp_path):
         """Always-set contract: the var exists even when no flags are on,
@@ -2596,7 +2596,7 @@ class TestExecuteSkillTask:
         LLM, skill-task, and command-task subprocess paths."""
         from istota.config import ExperimentalConfig
         config = self._make_config(db_path, tmp_path)
-        config.experimental = ExperimentalConfig(features=["module_health", "money_tax"])
+        config.experimental = ExperimentalConfig(features=["money_tax", "money_wash_sales"])
         task = self._task(skill="feeds", skill_args='["--help"]')
         captured = {}
 
@@ -2611,7 +2611,7 @@ class TestExecuteSkillTask:
             ):
                 success, _ = _execute_skill_task(task, config)
         assert success is True
-        assert captured["env"]["ISTOTA_EXPERIMENTAL_FEATURES"] == "module_health,money_tax"
+        assert captured["env"]["ISTOTA_EXPERIMENTAL_FEATURES"] == "money_tax,money_wash_sales"
 
     def test_caldav_env_resolved_when_calendars_discovered(
         self, db_path, tmp_path,

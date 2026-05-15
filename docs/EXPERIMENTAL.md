@@ -4,15 +4,15 @@ Operator-scoped flags for features that ship in the tree but are off by default.
 
 ```toml
 [experimental]
-features = ["module_health", "money_tax"]
+features = ["money_tax", "money_wash_sales"]
 ```
 
 Or via Ansible (`group_vars` / `host_vars`):
 
 ```yaml
 istota_experimental_features:
-  - module_health
   - money_tax
+  - money_wash_sales
 ```
 
 Run `uv run istota experimental list` on the host to see the current registry and which flags are on. Unknown names in the TOML list log a warning at startup but don't fail.
@@ -26,10 +26,6 @@ These flags are **operator-scoped** — not per-user, not exposed in the web UI,
 - free-form — a single CLI subcommand inside a shipping skill
 
 ## Registered flags
-
-### `module_health`
-
-Health tracking module — body stats, bloodwork panel ingestion + OCR, biomarker trend analysis. Work in progress. When off, `Config.is_module_enabled("…", "health")` returns False and the entire module stays dark (no nav tab, no API mount, no scheduled jobs). Graduation: when the module has stable schema, a test suite, and a documented review path for OCR extractions, the flag goes away and `health` moves to the standard on-by-default module list.
 
 ### `money_tax`
 
