@@ -177,6 +177,10 @@ def cmd_sync_monarch(args):
     _output(_run(cli_args))
 
 
+def cmd_debug_monarch(args):  # noqa: ARG001
+    _output(_run(["debug-monarch"]))
+
+
 def cmd_import_csv(args):
     cli_args = ["import-csv", args.file, "--account", args.account]
     if args.tag:
@@ -379,6 +383,11 @@ def build_parser():
     p_sync.add_argument("--dry-run", action="store_true", help="Preview without writing")
     p_sync.add_argument("--ledger", "-l", help="Ledger name")
 
+    sub.add_parser(
+        "debug-monarch",
+        help="Health-check Monarch credentials (whoami probe).",
+    )
+
     p_csv = sub.add_parser("import-csv", help="Import transactions from CSV")
     p_csv.add_argument("file", help="CSV file path")
     p_csv.add_argument("--account", "-a", required=True, help="Bank account")
@@ -475,6 +484,7 @@ def main(argv=None):
         "wash-sales": cmd_wash_sales,
         "add-transaction": cmd_add_transaction,
         "sync-monarch": cmd_sync_monarch,
+        "debug-monarch": cmd_debug_monarch,
         "import-csv": cmd_import_csv,
         "run-scheduled": cmd_run_scheduled,
     }

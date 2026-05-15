@@ -1,7 +1,11 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { base } from '$app/paths';
-	import { getModuleServices, type ServiceCard as ServiceCardData } from '$lib/api';
+	import {
+		getModuleServices,
+		monarchLogin,
+		type ServiceCard as ServiceCardData,
+	} from '$lib/api';
 	import {
 		getBusinessSettings,
 		type EntityRow,
@@ -10,6 +14,7 @@
 	} from '$lib/money/api';
 	import { selectedLedger } from '$lib/money/stores/ledger';
 	import { ServiceCard, SettingsLayout, SettingsCard } from '$lib/components/settings';
+	import { Button } from '$lib/components/ui';
 
 	let loading = $state(true);
 	let error = $state('');
@@ -21,6 +26,16 @@
 	let services: ServiceRow[] = $state([]);
 	let defaults: BusinessDefaults | null = $state(null);
 	let businessError = $state('');
+
+	// Programmatic-login form state. Plain bindings — values are POSTed to
+	// /money/monarch/login and never persisted in the browser beyond the
+	// in-memory component state.
+	let loginEmail = $state('');
+	let loginPassword = $state('');
+	let loginMfa = $state('');
+	let loginBusy = $state(false);
+	let loginMessage = $state('');
+	let loginErrorKind = $state<'' | 'auth' | 'mfa' | 'cloudflare' | 'captcha' | 'other'>('');
 
 	async function loadServices() {
 		const mod = await getModuleServices('money');
@@ -60,6 +75,39 @@
 		void loadBusiness();
 	});
 
+	async function submitLogin() {
+		if (!loginEmail || !loginPassword) return;
+		loginBusy = true;
+		loginMessage = '';
+		loginErrorKind = '';
+		try {
+			await monarchLogin(loginEmail, loginPassword, loginMfa);
+			loginMessage = 'Logged in — session_id and csrftoken saved.';
+			loginPassword = '';
+			loginMfa = '';
+			await loadServices();
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : 'Login failed';
+			// FastAPI HTTPException details flow through apiFetch's error
+			// message — match on status hints we surface server-side.
+			const lower = msg.toLowerCase();
+			if (msg.includes('MFA required')) {
+				loginErrorKind = 'mfa';
+			} else if (lower.includes('captcha')) {
+				loginErrorKind = 'captcha';
+			} else if (lower.includes('cloudflare')) {
+				loginErrorKind = 'cloudflare';
+			} else if (msg.match(/HTTP 4\d\d/) || msg.includes('rejected')) {
+				loginErrorKind = 'auth';
+			} else {
+				loginErrorKind = 'other';
+			}
+			loginMessage = msg;
+		} finally {
+			loginBusy = false;
+		}
+	}
+
 	function formatRate(rate: number): string {
 		return rate.toLocaleString(undefined, {
 			minimumFractionDigits: 2,
@@ -93,6 +141,105 @@
 		</div>
 	{:else}
 		{#each moduleServices as svc (svc.service)}
+			{#if svc.service === 'monarch'}
+				<div class="monarch-help">
+					<h3>Connect to Monarch Money</h3>
+					<p>
+						Monarch's API requires browser session cookies. Pick the
+						method that works for your account:
+					</p>
+
+					<details open>
+						<summary>Option A — Login with email and password</summary>
+						<p class="hint">
+							We call Monarch's <code>/auth/login/</code> on your behalf and
+							store the resulting <code>session_id</code> + <code>csrftoken</code>.
+							Your password is used once and never written to disk. If
+							Cloudflare blocks the request from this server, fall back to
+							Option B.
+						</p>
+						<form
+							class="login-form"
+							onsubmit={(e) => {
+								e.preventDefault();
+								void submitLogin();
+							}}
+						>
+							<label>
+								<span>Email</span>
+								<input
+									type="email"
+									bind:value={loginEmail}
+									autocomplete="off"
+									disabled={loginBusy}
+									required
+								/>
+							</label>
+							<label>
+								<span>Password</span>
+								<input
+									type="password"
+									bind:value={loginPassword}
+									autocomplete="off"
+									disabled={loginBusy}
+									required
+								/>
+							</label>
+							<label>
+								<span>MFA code <small>(if MFA enabled)</small></span>
+								<input
+									type="text"
+									inputmode="numeric"
+									pattern="[0-9]*"
+									bind:value={loginMfa}
+									autocomplete="off"
+									disabled={loginBusy}
+									placeholder="6-digit code"
+								/>
+							</label>
+							<div class="login-actions">
+								<Button
+									variant="primary"
+									size="sm"
+									disabled={loginBusy || !loginEmail || !loginPassword}
+									type="submit"
+								>
+									{loginBusy ? 'Logging in…' : 'Login & save cookies'}
+								</Button>
+							</div>
+							{#if loginMessage}
+								<div
+									class="login-status"
+									data-kind={loginErrorKind || 'ok'}
+								>
+									{loginMessage}
+								</div>
+							{/if}
+						</form>
+					</details>
+
+					<details>
+						<summary>Option B — Paste cookies from your browser</summary>
+						<p class="hint">
+							Use this when programmatic login is blocked by Cloudflare
+							(common on cloud-hosted Istota deploys).
+						</p>
+						<ol>
+							<li>Open <a href="https://app.monarch.com" target="_blank" rel="noopener noreferrer">app.monarch.com</a> in a logged-in browser tab.</li>
+							<li>Open DevTools (Cmd/Ctrl+Option+I) → <strong>Application</strong> → <strong>Cookies</strong> → <code>https://api.monarch.com</code>.</li>
+							<li>Copy the value of <code>session_id</code> into the field below.</li>
+							<li>Copy the value of <code>csrftoken</code> into the field below.</li>
+							<li>Click <strong>Save</strong>.</li>
+						</ol>
+					</details>
+
+					<p class="legacy-note">
+						Cookies are the durable credential and last months on a trusted-device
+						login. The legacy fields (session token, email, password) are kept
+						for backward compatibility and not expected to work.
+					</p>
+				</div>
+			{/if}
 			<ServiceCard service={svc} onChanged={loadServices} />
 		{/each}
 
@@ -267,6 +414,123 @@
 	   fixed layout, so opt back to auto here. */
 	.grid {
 		table-layout: auto;
+	}
+
+	.monarch-help {
+		background: var(--surface-base);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-card);
+		padding: 0.75rem 1rem;
+		font-size: var(--text-sm);
+		color: var(--text-secondary);
+	}
+
+	.monarch-help h3 {
+		margin: 0 0 0.4rem;
+		font-size: var(--text-sm);
+		color: var(--text-primary);
+	}
+
+	.monarch-help p,
+	.monarch-help ol {
+		margin: 0.25rem 0;
+	}
+
+	.monarch-help ol {
+		padding-left: 1.25rem;
+	}
+
+	.monarch-help li {
+		margin: 0.1rem 0;
+	}
+
+	.monarch-help code {
+		background: var(--surface-raised);
+		padding: 0 0.25rem;
+		border-radius: 0.2rem;
+		font-size: 0.92em;
+	}
+
+	.monarch-help .legacy-note {
+		margin-top: 0.5rem;
+		color: var(--text-dim);
+		font-size: var(--text-xs);
+	}
+
+	.monarch-help details {
+		margin: 0.4rem 0;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-card);
+		padding: 0.5rem 0.75rem;
+		background: var(--surface-raised);
+	}
+
+	.monarch-help summary {
+		cursor: pointer;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+
+	.monarch-help .hint {
+		color: var(--text-dim);
+		font-size: var(--text-xs);
+		margin: 0.3rem 0;
+	}
+
+	.login-form {
+		display: grid;
+		gap: 0.5rem;
+		margin-top: 0.5rem;
+	}
+
+	.login-form label {
+		display: grid;
+		grid-template-columns: 120px 1fr;
+		gap: 0.5rem;
+		align-items: center;
+		font-size: var(--text-sm);
+	}
+
+	.login-form label span {
+		color: var(--text-dim);
+	}
+
+	.login-form input {
+		font: inherit;
+		padding: 0.35rem 0.5rem;
+		border-radius: var(--radius-sm, 0.3rem);
+		border: 1px solid var(--border-default);
+		background: var(--surface-base);
+		color: var(--text-primary);
+	}
+
+	.login-actions {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.login-status {
+		font-size: var(--text-xs);
+		padding: 0.35rem 0.5rem;
+		border-radius: var(--radius-sm, 0.3rem);
+		border: 1px solid var(--border-default);
+	}
+
+	.login-status[data-kind='ok'] {
+		color: #6eb884;
+		border-color: #2d4a32;
+	}
+
+	.login-status[data-kind='auth'],
+	.login-status[data-kind='other'] {
+		color: var(--text-secondary);
+		border-color: var(--border-default);
+	}
+
+	.login-status[data-kind='mfa'],
+	.login-status[data-kind='cloudflare'] {
+		color: var(--text-secondary);
+		background: var(--surface-base);
 	}
 
 	.grid th.num,

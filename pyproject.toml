@@ -59,7 +59,9 @@ money = [
     "beancount>=3.0.0",
     "beanquery>=0.1.0",
     "weasyprint>=62.0",
-    "monarchmoneycommunity @ git+https://github.com/bradleyseanf/monarchmoney@main",
+    # Used by the vendored Monarch client (money/_vendor/monarch_client.py)
+    # to talk to api.monarch.com over HTTP with cookie-based auth.
+    "aiohttp>=3.10",
 ]
 feeds = [
     "feedparser>=6.0.0",

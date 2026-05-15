@@ -574,6 +574,31 @@ export async function deleteSecret(
 	});
 }
 
+/**
+ * Derive Monarch session cookies from email+password and store them.
+ *
+ * The plaintext credentials never persist on the server — they're used
+ * once to call api.monarch.com/auth/login/, the resulting session_id +
+ * csrftoken get written to the encrypted secrets table, and the password
+ * is dropped at the end of the request. The MFA code (if any) is the
+ * *current* 6-digit TOTP, not the secret.
+ */
+export async function monarchLogin(
+	email: string,
+	password: string,
+	mfaTotp?: string,
+): Promise<{ ok: true }> {
+	return apiFetch(`/money/monarch/login`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			email,
+			password,
+			mfa_totp: mfaTotp ?? '',
+		}),
+	});
+}
+
 // --- Phase 6: profile + resources ---
 
 export interface UserProfile {

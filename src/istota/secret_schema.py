@@ -86,10 +86,17 @@ MODULE_SERVICE_SCHEMA: dict[str, dict[str, dict]] = {
         "monarch": {
             "label": "Monarch Money",
             "used_by": ("money",),
+            # Monarch's API now enforces Django CSRF on /graphql, so we
+            # authenticate with the browser session cookies. ``session_id`` and
+            # ``csrftoken`` are pasted once from DevTools and last months on a
+            # trusted-device login. Other fields are kept for backward
+            # compatibility but the cookie pair is what actually works today.
             "fields": [
-                {"key": "email",         "label": "Email",                     "type": "email"},
-                {"key": "password",      "label": "Password",                  "type": "password"},
-                {"key": "session_token", "label": "Session token (optional)",  "type": "password"},
+                {"key": "session_id",    "label": "session_id cookie",         "type": "password"},
+                {"key": "csrftoken",     "label": "csrftoken cookie",          "type": "password"},
+                {"key": "session_token", "label": "Session token (legacy)",    "type": "password"},
+                {"key": "email",         "label": "Email (legacy)",            "type": "email"},
+                {"key": "password",      "label": "Password (legacy)",         "type": "password"},
             ],
         },
     },

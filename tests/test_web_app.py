@@ -1162,6 +1162,197 @@ class TestSettingsEndpoints:
         assert secrets_store.get_secret(self._db_path, "bob", "monarch", "email") is None
 
 
+@_needs_web_deps
+class TestMonarchLoginRoute:
+    """The /money/monarch/login endpoint takes plaintext credentials,
+    POSTs them to Monarch's /auth/login/ via the vendored client, and on
+    success persists the returned session_id + csrftoken cookies. The
+    plaintext credentials are never written to disk."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _make_test_config(self, tmp_path):
+        cfg = _make_config(
+            tmp_path,
+            users={"alice": UserConfig(display_name="Alice")},
+        )
+        cfg.db_path = self._db_path
+        return cfg
+
+    async def _login_alice(self, client, app):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": "alice",
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def test_login_persists_cookies_on_success(
+        self, monkeypatch, tmp_path, client, app,
+    ):
+        from istota import secrets_store
+        from istota.money._vendor.monarch_client import MonarchCookieAuth
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        # Stub the vendored client so the test never hits the network.
+        async def fake_login(*, email, password, mfa_totp=None, **kw):
+            assert email == "alice@example.com"
+            assert password == "hunter2"
+            assert mfa_totp == "123456"
+            return MonarchCookieAuth(session_id="SID-new", csrftoken="CSRF-new")
+
+        monkeypatch.setattr(
+            "istota.money._vendor.monarch_client.MonarchClient.login_with_credentials",
+            staticmethod(fake_login),
+        )
+
+        resp = await client.post(
+            "/istota/api/money/monarch/login",
+            json={
+                "email": "alice@example.com",
+                "password": "hunter2",
+                "mfa_totp": "123456",
+            },
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"ok": True}
+        # Cookies were persisted ...
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "monarch", "session_id",
+        ) == "SID-new"
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "monarch", "csrftoken",
+        ) == "CSRF-new"
+        # ... and plaintext password did NOT leak into secrets.
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "monarch", "password",
+        ) is None
+
+    async def test_login_returns_412_when_mfa_required(
+        self, monkeypatch, tmp_path, client, app,
+    ):
+        from istota.money._vendor.monarch_client import MonarchMFARequired
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        async def fake_login(**kw):
+            raise MonarchMFARequired("MFA token required")
+        monkeypatch.setattr(
+            "istota.money._vendor.monarch_client.MonarchClient.login_with_credentials",
+            staticmethod(fake_login),
+        )
+
+        resp = await client.post(
+            "/istota/api/money/monarch/login",
+            json={"email": "a@b.com", "password": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 412
+        assert "MFA required" in resp.json()["detail"]
+
+    async def test_login_returns_503_when_cloudflare_blocks(
+        self, monkeypatch, tmp_path, client, app,
+    ):
+        from istota.money._vendor.monarch_client import MonarchCloudflareBlocked
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        async def fake_login(**kw):
+            raise MonarchCloudflareBlocked("blocked")
+        monkeypatch.setattr(
+            "istota.money._vendor.monarch_client.MonarchClient.login_with_credentials",
+            staticmethod(fake_login),
+        )
+
+        resp = await client.post(
+            "/istota/api/money/monarch/login",
+            json={"email": "a@b.com", "password": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 503
+
+    async def test_login_returns_401_on_bad_credentials(
+        self, monkeypatch, tmp_path, client, app,
+    ):
+        from istota.money._vendor.monarch_client import MonarchAuthError
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        async def fake_login(**kw):
+            raise MonarchAuthError("wrong password")
+        monkeypatch.setattr(
+            "istota.money._vendor.monarch_client.MonarchClient.login_with_credentials",
+            staticmethod(fake_login),
+        )
+
+        resp = await client.post(
+            "/istota/api/money/monarch/login",
+            json={"email": "a@b.com", "password": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 401
+
+    async def test_login_returns_400_on_missing_fields(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.post(
+            "/istota/api/money/monarch/login",
+            json={"email": "", "password": ""},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_login_requires_auth(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+
+        resp = await client.post(
+            "/istota/api/money/monarch/login",
+            json={"email": "x", "password": "y"},
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 401
+
+    async def test_login_rejects_bad_origin(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.post(
+            "/istota/api/money/monarch/login",
+            json={"email": "x", "password": "y"},
+            cookies=cookies,
+            headers={"origin": "https://evil.example.com"},
+        )
+        assert resp.status_code == 403
+
+
 # ============================================================================
 # Phase 6 — profile + resources endpoints
 # ============================================================================
