@@ -4,9 +4,11 @@
 # audit-log key and the suffix of the socket path it listens on.
 #
 # Tokens are read from the EnvironmentFile and held only in this process's
-# memory — the per-user devbox container never sees them. The socket is
-# bind-mounted into the container at /run/istota-cred.sock via the compose
-# template's volumes entry.
+# memory — the per-user devbox container never sees them. The proxy
+# socket lives under /var/run/{namespace}/<user>/sock; the compose
+# template bind-mounts that per-user directory (not the file) into the
+# container at /run/istota-cred so a daemon restart can recreate the
+# socket inode without stranding the container against a dead inode.
 
 [Unit]
 Description=Istota devbox credential proxy ({{ istota_namespace }}, user %i)

@@ -631,10 +631,18 @@ class TestDeveloperEnvVars:
         # Allowlist case statement is present
         assert "case" in api_content
         assert "endpoint not allowed" in api_content
-        # Default allowlisted endpoints are present
-        assert "GET /api/v4/projects/" in api_content
-        assert "POST /api/v4/projects/" in api_content
+        # Default allowlisted endpoints are present (bare paths — the
+        # ``/api/v4`` prefix is baked into the curl target instead, so the
+        # host-side wrapper and the devbox proxy share one allowlist).
+        assert "GET /projects/" in api_content
+        assert "POST /projects/" in api_content
         assert "merge_requests" in api_content
+        # The curl target carries /api/v4 — keeps existing GitLab URLs
+        # reachable without changing every $GITLAB_API_CMD caller.
+        assert "/api/v4$ENDPOINT" in api_content
+        # Back-compat: callers that still pass `/api/v4/...` get the
+        # prefix stripped before matching.
+        assert "/api/v4/*" in api_content
         # No exec — plain curl for reliable piping
         assert "exec curl" not in api_content
         assert "curl -s" in api_content

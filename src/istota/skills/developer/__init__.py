@@ -108,10 +108,19 @@ def setup_env(ctx) -> dict[str, str]:
         else:
             token_line = ""
             curl_header = '"PRIVATE-TOKEN: $GITLAB_TOKEN"'
+        # The GitLab API root is ``<host>/api/v4`` — we build that into
+        # the curl target so callers pass bare paths (``/projects/...``,
+        # ``/user``) matching the bundled allowlist patterns. A leading
+        # ``/api/v4`` in the endpoint is stripped for back-compat with
+        # prompts written against the old convention; allowlist matching
+        # is always done on the bare form.
         api_script.write_text(
             "#!/bin/sh\n"
             'METHOD="$1"; shift\n'
             'ENDPOINT="$1"; shift\n'
+            'case "$ENDPOINT" in\n'
+            '  /api/v4/*) ENDPOINT="${ENDPOINT#/api/v4}" ;;\n'
+            'esac\n'
             'CLEAN="${ENDPOINT%%\\?*}"\n'
             'case "$METHOD $CLEAN" in\n'
             f"{allowlist_cases}\n"
@@ -120,7 +129,7 @@ def setup_env(ctx) -> dict[str, str]:
             "esac\n"
             f'{token_line}'
             f'curl -s --header {curl_header} '
-            f'--request "$METHOD" "{gitlab_host}$ENDPOINT" "$@"\n'
+            f'--request "$METHOD" "{gitlab_host}/api/v4$ENDPOINT" "$@"\n'
         )
         api_script.chmod(0o700)
         env["GITLAB_API_CMD"] = str(api_script)

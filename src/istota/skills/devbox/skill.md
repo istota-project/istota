@@ -40,7 +40,7 @@ istota-skill devbox reset        # wipe volume, recreate from base image (destru
 
 ## What works inside the devbox
 
-- **`git clone` / `git push` over HTTPS** to GitHub / GitLab. The image's `/etc/gitconfig` wires `[credential] helper = istota`, which proxies every credential lookup to a host-side daemon over `/run/istota-cred.sock`. Tokens never enter the container — the daemon injects `username=x-access-token` + `password=<token>` only for the duration of the request. Unknown hosts (e.g. `bitbucket.org`) get a no-token response so git fails cleanly with its standard "authentication failed".
+- **`git clone` / `git push` over HTTPS** to GitHub / GitLab. The image's `/etc/gitconfig` wires `[credential] helper = istota`, which proxies every credential lookup to a host-side daemon over `/run/istota-cred/sock`. Tokens never enter the container — the daemon injects `username=x-access-token` + `password=<token>` only for the duration of the request. Unknown hosts (e.g. `bitbucket.org`) get a no-token response so git fails cleanly with its standard "authentication failed".
 - **`gh` and `glab`** curated CLI shims. The supported subcommands route through the proxy:
   - `gh`: `pr create|view|list|close`, `issue create|view|list`, `repo view`, `auth status`.
   - `glab`: `mr create|view|list|close`, `issue create|view|list`, `repo view`, `auth status`.

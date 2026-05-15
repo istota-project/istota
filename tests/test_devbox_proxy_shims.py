@@ -779,4 +779,4 @@ class TestImageStaticContent:
         # ENV defaults that the developer skill's prompt language depends on.
         assert "GITLAB_API_CMD=/usr/local/bin/gitlab-api" in dockerfile
         assert "GITHUB_API_CMD=/usr/local/bin/github-api" in dockerfile
-        assert "ISTOTA_CRED_SOCK=/run/istota-cred.sock" in dockerfile
+        assert "ISTOTA_CRED_SOCK=/run/istota-cred/sock" in dockerfile

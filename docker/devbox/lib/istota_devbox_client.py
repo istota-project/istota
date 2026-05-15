@@ -19,7 +19,7 @@ import socket
 import sys
 from typing import Any
 
-_DEFAULT_SOCK = "/run/istota-cred.sock"
+_DEFAULT_SOCK = "/run/istota-cred/sock"
 _MAX_RESPONSE_BYTES = 32 * 1024 * 1024  # 2x request cap; plenty of room
 
 
