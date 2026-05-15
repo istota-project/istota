@@ -385,15 +385,14 @@ class TestMonarchRoundTrip:
 
     def test_credentials_omitted_from_export(self, tmp_path):
         cfg = MonarchConfig(
-            credentials=MonarchCredentials(email="a@b", password="x"),
+            credentials=MonarchCredentials(session_id="s", csrftoken="c"),
             sync=MonarchSyncSettings(),
             accounts={}, categories={}, tags=MonarchTagFilters(),
             profiles=[],
         )
         out = cs.monarch_to_toml_dict(cfg)
-        assert "email" not in out["monarch"]
-        assert "password" not in out["monarch"]
-        assert "session_token" not in out["monarch"]
+        assert "session_id" not in out["monarch"]
+        assert "csrftoken" not in out["monarch"]
 
     def test_credentials_loaded_from_secrets(self, tmp_path):
         db_path = tmp_path / "money.db"
@@ -405,10 +404,11 @@ class TestMonarchRoundTrip:
         )
         cs.save_monarch(db_path, cfg)
         loaded = cs.load_monarch(
-            db_path, secrets={"monarch": {"email": "a@b", "session_token": "tok"}},
+            db_path,
+            secrets={"monarch": {"session_id": "SID-x", "csrftoken": "CSRF-y"}},
         )
-        assert loaded.credentials.email == "a@b"
-        assert loaded.credentials.session_token == "tok"
+        assert loaded.credentials.session_id == "SID-x"
+        assert loaded.credentials.csrftoken == "CSRF-y"
 
 
 class TestMonarchGranular:

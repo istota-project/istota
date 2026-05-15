@@ -1050,26 +1050,26 @@ class TestSettingsEndpoints:
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         from istota import secrets_store
-        secrets_store.set_secret(self._db_path, "alice", "monarch", "email", "secret@x.com")
+        secrets_store.set_secret(self._db_path, "alice", "monarch", "session_id", "secret-sid-x")
         cookies = await self._login_alice(client, app)
         resp = await client.get("/istota/api/settings/services", cookies=cookies)
         body = resp.text
-        assert "secret@x.com" not in body
+        assert "secret-sid-x" not in body
 
     async def test_set_secret_persists(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         cookies = await self._login_alice(client, app)
         resp = await client.put(
-            "/istota/api/settings/secrets/monarch/email",
-            json={"value": "alice@example.com"},
+            "/istota/api/settings/secrets/monarch/session_id",
+            json={"value": "SID-alice"},
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
         assert resp.json()["configured"] is True
         from istota import secrets_store
-        assert secrets_store.get_secret(self._db_path, "alice", "monarch", "email") == "alice@example.com"
+        assert secrets_store.get_secret(self._db_path, "alice", "monarch", "session_id") == "SID-alice"
 
     async def test_set_secret_rejects_unknown_service(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
@@ -1100,7 +1100,7 @@ class TestSettingsEndpoints:
         _patch_app(cfg)
         cookies = await self._login_alice(client, app)
         resp = await client.put(
-            "/istota/api/settings/secrets/monarch/email",
+            "/istota/api/settings/secrets/monarch/session_id",
             json={"value": "x"},
             cookies=cookies,
             # wrong origin
@@ -1112,7 +1112,7 @@ class TestSettingsEndpoints:
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         resp = await client.put(
-            "/istota/api/settings/secrets/monarch/email",
+            "/istota/api/settings/secrets/monarch/session_id",
             json={"value": "x"},
             headers={"origin": "https://example.com"},
         )
@@ -1122,16 +1122,16 @@ class TestSettingsEndpoints:
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         from istota import secrets_store
-        secrets_store.set_secret(self._db_path, "alice", "monarch", "email", "x@y")
+        secrets_store.set_secret(self._db_path, "alice", "monarch", "session_id", "SID-x")
         cookies = await self._login_alice(client, app)
         resp = await client.delete(
-            "/istota/api/settings/secrets/monarch/email",
+            "/istota/api/settings/secrets/monarch/session_id",
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
         assert resp.json()["deleted"] is True
-        assert secrets_store.get_secret(self._db_path, "alice", "monarch", "email") is None
+        assert secrets_store.get_secret(self._db_path, "alice", "monarch", "session_id") is None
 
     async def test_delete_rejects_unknown_key(self, tmp_path, client, app):
         """Symmetric with the PUT handler — DELETE must not let callers remove
@@ -1152,14 +1152,14 @@ class TestSettingsEndpoints:
         _patch_app(cfg)
         cookies = await self._login_alice(client, app)
         await client.put(
-            "/istota/api/settings/secrets/monarch/email",
-            json={"value": "alice@x"},
+            "/istota/api/settings/secrets/monarch/session_id",
+            json={"value": "SID-alice"},
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
         from istota import secrets_store
-        assert secrets_store.get_secret(self._db_path, "alice", "monarch", "email") == "alice@x"
-        assert secrets_store.get_secret(self._db_path, "bob", "monarch", "email") is None
+        assert secrets_store.get_secret(self._db_path, "alice", "monarch", "session_id") == "SID-alice"
+        assert secrets_store.get_secret(self._db_path, "bob", "monarch", "session_id") is None
 
 
 @_needs_web_deps

@@ -182,17 +182,17 @@ class TestSecretList:
 
         cfg, db_path = cfg_with_db
         secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "kk-secret-value")
-        secrets_store.set_secret(db_path, "alice", "monarch", "email", "alice@example.com")
+        secrets_store.set_secret(db_path, "alice", "monarch", "session_id", "sid-alice")
 
         cmd_secret(_FakeArgs(action="list", config=str(cfg), user="alice"))
         out = capsys.readouterr().out
         assert "karakeep" in out
         assert "api_key" in out
         assert "monarch" in out
-        assert "email" in out
+        assert "session_id" in out
         # Plaintext never leaks.
         assert "kk-secret-value" not in out
-        assert "alice@example.com" not in out
+        assert "sid-alice" not in out
 
     def test_list_empty_for_user_with_no_secrets(self, cfg_with_db, capsys):
         from istota.cli import cmd_secret

@@ -60,7 +60,7 @@ class TestSecretsFile:
     def test_secrets_file_loaded_from_config(self, runner, tmp_path):
         """secrets_file in config.toml is loaded and stored on context."""
         secrets = tmp_path / "secrets.toml"
-        secrets.write_text('[monarch]\nsession_token = "secret-123"\n')
+        secrets.write_text('[monarch]\nsession_id = "sid-123"\ncsrftoken = "csrf-123"\n')
         config = tmp_path / "config.toml"
         config.write_text(
             f'data_dir = "{tmp_path}"\n'
@@ -74,7 +74,7 @@ class TestSecretsFile:
     def test_secrets_file_env_var_override(self, runner, tmp_path):
         """MONEY_SECRETS_FILE env var overrides config."""
         secrets = tmp_path / "env-secrets.toml"
-        secrets.write_text('[monarch]\nsession_token = "env-secret"\n')
+        secrets.write_text('[monarch]\nsession_id = "env-sid"\ncsrftoken = "env-csrf"\n')
         config = tmp_path / "config.toml"
         config.write_text(
             f'data_dir = "{tmp_path}"\n\n'
@@ -96,12 +96,13 @@ class TestSecretsFile:
     def test_secrets_passed_to_monarch_config(self, runner, tmp_path):
         """Secrets overlay is passed through to monarch config parsing."""
         secrets = tmp_path / "secrets.toml"
-        secrets.write_text('[monarch]\nsession_token = "from-secrets"\n')
+        secrets.write_text(
+            '[monarch]\nsession_id = "sid-from-secrets"\ncsrftoken = "csrf-from-secrets"\n',
+        )
 
         monarch_config = tmp_path / "monarch.toml"
         monarch_config.write_text(
-            '[monarch]\nemail = "test@test.com"\n\n'
-            '[monarch.sync]\nlookback_days = 7\n'
+            '[monarch]\n\n[monarch.sync]\nlookback_days = 7\n'
         )
 
         config = tmp_path / "config.toml"
@@ -119,11 +120,10 @@ class TestSecretsFile:
             mock_sync.return_value = {"status": "ok", "message": "test"}
             result = runner.invoke(cli, ["-c", str(config), "sync-monarch"])
             assert result.exit_code == 0
-            # Check that parse_monarch_config was called and secrets were overlaid
             call_args = mock_sync.call_args
             monarch_cfg = call_args[1].get("config") or call_args[0][1]
-            assert monarch_cfg.credentials.session_token == "from-secrets"
-            assert monarch_cfg.credentials.email == "test@test.com"
+            assert monarch_cfg.credentials.session_id == "sid-from-secrets"
+            assert monarch_cfg.credentials.csrftoken == "csrf-from-secrets"
 
 
 class TestWorkCommands:
@@ -547,7 +547,7 @@ class TestSyncMonarchProfiles:
         """sync-monarch without --ledger calls sync_all_profiles."""
         monarch_config = tmp_path / "monarch.toml"
         monarch_config.write_text(
-            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
             '[monarch.sync]\nlookback_days = 30\n'
         )
         config = tmp_path / "config.toml"
@@ -569,7 +569,7 @@ class TestSyncMonarchProfiles:
         """sync-monarch --ledger syncs only matching profile."""
         monarch_config = tmp_path / "monarch.toml"
         monarch_config.write_text(
-            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
             '[monarch.sync]\nlookback_days = 30\n\n'
             '[monarch.profiles.business]\n'
             'ledger = "biz"\n\n'
@@ -628,7 +628,7 @@ class TestRunScheduled:
         """--skip-monarch path — succeeds even with monarch_config set."""
         monarch_config = tmp_path / "monarch.toml"
         monarch_config.write_text(
-            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
             '[monarch.sync]\nlookback_days = 30\n'
         )
         ledger = tmp_path / "main.beancount"
@@ -652,7 +652,7 @@ class TestRunScheduled:
         invisibly under out['monarch']."""
         monarch_config = tmp_path / "monarch.toml"
         monarch_config.write_text(
-            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
             '[monarch.sync]\nlookback_days = 30\n'
         )
         ledger = tmp_path / "main.beancount"
@@ -679,7 +679,7 @@ class TestRunScheduled:
         failed, surface as partial_error so logs reflect the issue."""
         monarch_config = tmp_path / "monarch.toml"
         monarch_config.write_text(
-            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
             '[monarch.sync]\nlookback_days = 30\n'
         )
         ledger = tmp_path / "main.beancount"

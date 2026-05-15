@@ -51,14 +51,11 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
         return {}
 
     monarch: dict[str, str] = {}
-    # Order matters for parity with secrets_store schema. Cookie pair is the
-    # current durable credential; the rest are kept for backward compat.
+    # Cookie pair is the only credential — paste once from browser DevTools
+    # and it lasts months on a trusted-device login.
     env_vars = {
         "session_id": "MONARCH_SESSION_ID",
         "csrftoken": "MONARCH_CSRFTOKEN",
-        "session_token": "MONARCH_SESSION_TOKEN",
-        "email": "MONARCH_EMAIL",
-        "password": "MONARCH_PASSWORD",
     }
     # Env-first: subprocess context (Phase 1.4+) gets these pre-resolved
     # by build_skill_env. Trusted-daemon context falls back to the

@@ -343,11 +343,13 @@ class TestDeriveSkillCredentialMap:
 
     def test_money_gets_monarch_credentials(self):
         """money's Monarch credentials are pre-resolved on the trusted
-        side via the manifest ``from: "secret"`` blocks."""
+        side via the manifest ``from: "secret"`` blocks. The cookie pair is
+        the only credential we store (programmatic email/password login is
+        a transient input flow handled separately)."""
         idx = _bundled_skill_index()
         result = derive_skill_credential_map(["money"], idx)
         assert result == {
-            "money": {"MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_SESSION_TOKEN"},
+            "money": {"MONARCH_SESSION_ID", "MONARCH_CSRFTOKEN"},
         }
 
     def test_feeds_gets_tumblr_key(self):
@@ -408,18 +410,18 @@ class TestSplitCredentialEnv:
         env = {
             "PATH": "/usr/bin",
             "HOME": "/tmp",
-            "MONARCH_SESSION_TOKEN": "tok-abc",
+            "MONARCH_SESSION_ID": "sid-abc",
             "TUMBLR_API_KEY": "tk-xyz",
             "ISTOTA_TASK_ID": "42",
         }
         credential_env, clean_env = _split_credential_env(
-            env, frozenset({"MONARCH_SESSION_TOKEN", "TUMBLR_API_KEY"}),
+            env, frozenset({"MONARCH_SESSION_ID", "TUMBLR_API_KEY"}),
         )
         assert credential_env == {
-            "MONARCH_SESSION_TOKEN": "tok-abc",
+            "MONARCH_SESSION_ID": "sid-abc",
             "TUMBLR_API_KEY": "tk-xyz",
         }
-        assert "MONARCH_SESSION_TOKEN" not in clean_env
+        assert "MONARCH_SESSION_ID" not in clean_env
         assert "TUMBLR_API_KEY" not in clean_env
         assert clean_env["PATH"] == "/usr/bin"
         assert clean_env["ISTOTA_TASK_ID"] == "42"
