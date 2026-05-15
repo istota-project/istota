@@ -24,13 +24,23 @@ services:
       com.istota.user_id: "{{ devbox_user }}"
     cap_add:
       - NET_RAW
+{% if istota_devbox_proxy_enabled and istota_devbox_proxy_group_gid is defined %}
+    # Grant the container's `dev` user the host's istota group as a
+    # supplementary group. The proxy socket is mode 0o660 owned by
+    # istota:istota — without this group membership the container's uid
+    # 1000 can't connect even though the socket is bind-mounted.
+    group_add:
+      - "{{ istota_devbox_proxy_group_gid }}"
+{% endif %}
     volumes:
       - devbox_home_{{ devbox_user }}:/home/dev
 {% if istota_devbox_proxy_enabled %}
-      # Host-side credential proxy socket. The container talks to the
-      # daemon over this Unix socket; the daemon injects tokens server-
-      # side so they never appear in the container's env or filesystem.
-      - {{ istota_devbox_proxy_socket_dir }}/devbox-cred-{{ devbox_user }}.sock:/run/istota-cred.sock
+      # Host-side credential proxy directory. We mount the per-user
+      # directory (not the socket file) so daemon restarts can unlink
+      # and recreate the socket inode without stranding the container
+      # against a dead bind-mount target. Per-user subdir keeps cross-
+      # tenant isolation — container alice sees only alice's socket.
+      - {{ istota_devbox_proxy_socket_dir }}/{{ devbox_user }}:/run/istota-cred
 {% endif %}
     tmpfs:
       - /workspace:size={{ istota_devbox_workspace_tmpfs_size }},mode=1777

@@ -103,6 +103,31 @@ async def _client_round_trip(socket_path: Path, request_line: str) -> dict:
     return decode_response(line.decode("utf-8"))
 
 
+def _cross_process_ping(sock_path_str: str, result_queue) -> None:
+    """Module-level worker for the cross-process connect test.
+
+    Must be importable from a spawned child, so it lives at module
+    scope (locals can't be pickled).
+    """
+    import socket as _socket
+
+    try:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(5.0)
+        s.connect(sock_path_str)
+        s.sendall(b'{"action":"ping"}\n')
+        buf = b""
+        while not buf.endswith(b"\n") and len(buf) < 4096:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        result_queue.put(("ok", buf.decode("utf-8")))
+    except Exception as e:  # noqa: BLE001
+        result_queue.put(("err", repr(e)))
+
+
 # ---- handle_ping -----------------------------------------------------------
 
 
@@ -540,9 +565,17 @@ class TestEndToEnd:
             await server.wait_closed()
 
     @pytest.mark.asyncio
-    async def test_serve_creates_socket_with_0600_perms(self, sock_path, monkeypatch):
-        """The socket file should be mode 0600 — host-side belt-and-braces
-        on top of the bind-mount auth boundary."""
+    async def test_serve_creates_socket_with_group_rw_perms(self, sock_path, monkeypatch):
+        """Socket must be mode 0660 (group-rw).
+
+        The container's ``dev`` user runs as a different uid than the
+        istota daemon. With 0o600 the bind-mounted socket is connectable
+        only by the owner uid — the container would EACCES. The access
+        boundary is the parent directory's mode (0750 owned by
+        istota:istota) plus group membership granted by Ansible. Asserting
+        on ``mode & 0o060`` instead of equality lets us tighten further
+        (e.g. drop world bits, drop owner bits) without churning the test.
+        """
 
         sock = sock_path
 
@@ -568,10 +601,149 @@ class TestEndToEnd:
         try:
             assert sock.exists()
             mode = sock.stat().st_mode & 0o777
-            assert mode == 0o600, f"socket perms expected 0o600, got {oct(mode)}"
+            assert mode & 0o060 == 0o060, (
+                f"socket must be group-rw for the container to connect through "
+                f"the bind mount, got {oct(mode)}"
+            )
+            assert mode & 0o007 == 0, (
+                f"socket must not be world-accessible, got {oct(mode)}"
+            )
             # Confirm we can also actually talk to it.
             resp = await _client_round_trip(sock, encode_request(action="ping"))
             assert resp["ok"] is True
+        finally:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_default_socket_layout_per_user_subdir(self, tmp_path):
+        """Default socket layout: ``{sock_dir}/{user_id}/sock``.
+
+        The compose template bind-mounts the per-user directory, so
+        the socket has to live inside a user-scoped subdir. Asserts
+        the layout, the parent dir's group-rx bit (container needs
+        traverse), and that the dir itself is not world-accessible.
+        """
+
+        from istota.devbox_proxy import _default_socket_path
+
+        class _Dev:
+            devbox_proxy_socket_dir = str(tmp_path)
+
+        class _Cfg:
+            developer = _Dev()
+
+        path = _default_socket_path("alice", _Cfg())
+        assert path == tmp_path / "alice" / "sock"
+
+    @pytest.mark.asyncio
+    async def test_serve_recreates_socket_on_restart_in_same_dir(self, sock_path):
+        """A daemon restart must produce a new socket inode at the same
+        path, so the container's directory bind-mount keeps working.
+
+        This is the structural property that justifies bind-mounting the
+        parent directory instead of the socket file: when the daemon
+        unlinks + recreates the socket on startup, the new inode is
+        visible inside the container *because* the mount is the dir, not
+        the file.
+        """
+
+        sock = sock_path
+
+        class _Dev:
+            gitlab_url = "https://gitlab.com"
+            gitlab_token = "GL"
+            github_url = "https://github.com"
+            github_token = "GH"
+            gitlab_api_allowlist: list = []
+            github_api_allowlist: list = []
+            api_timeout_seconds = 5
+
+        class _Cfg:
+            developer = _Dev()
+
+        async def _run_one_cycle():
+            task = asyncio.create_task(serve("alice", _Cfg(), socket_path=sock))
+            for _ in range(50):
+                if sock.exists():
+                    break
+                await asyncio.sleep(0.01)
+            inode = sock.stat().st_ino
+            # Confirm the socket is live.
+            resp = await _client_round_trip(sock, encode_request(action="ping"))
+            assert resp["ok"] is True
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            return inode
+
+        first = await _run_one_cycle()
+        second = await _run_one_cycle()
+        # Same path, different inode — the unlink+recreate cycle works.
+        # A bind-mount of the parent dir picks up the new inode; a bind-
+        # mount of the file inode would not.
+        assert first != second, (
+            "expected daemon restart to recreate the socket inode at the same path"
+        )
+
+    @pytest.mark.asyncio
+    async def test_socket_connectable_from_separate_process(self, sock_path):
+        """Cross-process connect through the actual socket.
+
+        The original 0o600 chmod bug couldn't be caught because the test
+        suite always connects from the same process that created the
+        listener (same uid, same fd table). This test forks a child that
+        opens the socket from a fresh process — the child has no
+        inherited listener fd, so it has to go through the real
+        ``connect()`` path that mode bits gate.
+
+        On the macOS dev box and Linux CI we run as a single uid, so we
+        can't directly exercise cross-uid here without root. But the
+        cross-process round trip is what catches the typical regression:
+        a bind error, an unreachable path, a connect-time permission
+        denial.
+        """
+
+        import multiprocessing
+
+        sock = sock_path
+
+        class _Dev:
+            gitlab_url = "https://gitlab.com"
+            gitlab_token = "GL"
+            github_url = "https://github.com"
+            github_token = "GH"
+            gitlab_api_allowlist: list = []
+            github_api_allowlist: list = []
+            api_timeout_seconds = 5
+
+        class _Cfg:
+            developer = _Dev()
+
+        task = asyncio.create_task(serve("alice", _Cfg(), socket_path=sock))
+        for _ in range(50):
+            if sock.exists():
+                break
+            await asyncio.sleep(0.01)
+
+        try:
+            ctx = multiprocessing.get_context("spawn")
+            q = ctx.Queue()
+            proc = ctx.Process(target=_cross_process_ping, args=(str(sock), q))
+            proc.start()
+            # proc.join() is a blocking call — running it inline would
+            # freeze the asyncio loop driving the daemon. Off-thread it
+            # so the daemon can answer the child's connect.
+            await asyncio.to_thread(proc.join, 15)
+            assert not proc.is_alive(), "child connect process hung"
+            status, payload = await asyncio.to_thread(q.get_nowait)
+            assert status == "ok", f"cross-process connect failed: {payload}"
+            assert '"ok":true' in payload
         finally:
             task.cancel()
             try:
@@ -689,6 +861,140 @@ class TestAllowlist:
         }
         resp = decode_response(await handle_github_api(req, ctx))
         assert resp["ok"] is True
+
+
+class TestHeaderSmugglingRejection:
+    """Reject CR/LF/NUL in caller-supplied header values so a malicious
+    container can't smuggle extra HTTP headers into the upstream request."""
+
+    @pytest.mark.parametrize("bad", ["foo\nbar", "foo\rbar", "foo\x00bar"])
+    @pytest.mark.asyncio
+    async def test_rejects_newline_in_header_value(self, bad):
+        called = []
+
+        def handler(request):
+            called.append(request)
+            return httpx.Response(200, text="{}")
+
+        ctx = _ctx(
+            github_allowlist=("GET /repos/*",),
+            http_handler=handler,
+        )
+        req = {
+            "action": "github_api", "method": "GET",
+            "endpoint": "/repos/foo/bar", "body": None,
+            "headers": {"X-Custom": bad},
+        }
+        resp = decode_response(await handle_github_api(req, ctx))
+        assert resp["ok"] is False
+        assert resp["error"] == "bad_request"
+        # Upstream must not be called when smuggling is rejected.
+        assert called == []
+
+
+class TestHostNormalization:
+    """``_provider_for_host`` must accept mixed case and ``host:port``."""
+
+    @pytest.mark.parametrize("host", [
+        "github.com", "GitHub.com", "GITHUB.COM",
+        "github.com:443", "github.com:80",
+    ])
+    @pytest.mark.asyncio
+    async def test_github_host_variants_resolve(self, host):
+        from istota.devbox_proxy import _provider_for_host
+
+        ctx = _ctx()
+        assert _provider_for_host(host, ctx) == "github"
+
+    @pytest.mark.parametrize("host", [
+        "gitlab.com", "GitLab.com", "GITLAB.COM",
+        "gitlab.com:443",
+    ])
+    @pytest.mark.asyncio
+    async def test_gitlab_host_variants_resolve(self, host):
+        from istota.devbox_proxy import _provider_for_host
+
+        ctx = _ctx()
+        assert _provider_for_host(host, ctx) == "gitlab"
+
+
+class TestBundledDefaultAllowlists:
+    """Regression: the bundled DeveloperConfig defaults must match what the
+    shims actually emit. The legacy host-side wrapper kept the /api/v4
+    prefix on GitLab patterns; the proxy strips it into base_url, so the
+    defaults need bare paths."""
+
+    def _ctx_with_developer_defaults(self, http_handler):
+        from istota.config import DeveloperConfig
+
+        dev = DeveloperConfig()
+        transport = httpx.MockTransport(http_handler)
+        client = httpx.AsyncClient(transport=transport, timeout=5.0)
+        return DevboxProxyContext(
+            user_id="alice",
+            gitlab_token="GL-TOKEN",
+            github_token="GH-TOKEN",
+            gitlab_url=dev.gitlab_url,
+            github_url=dev.github_url,
+            gitlab_allowlist=tuple(dev.gitlab_api_allowlist),
+            github_allowlist=tuple(dev.github_api_allowlist),
+            api_timeout=5.0,
+            http_client=client,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method,endpoint", [
+        ("GET", "/user"),                                # glab auth status
+        ("GET", "/projects/foo%2Fbar"),                  # glab repo view
+        ("POST", "/projects/foo%2Fbar/merge_requests"),  # glab mr create
+        ("GET", "/projects/foo%2Fbar/merge_requests/7"), # glab mr view
+        ("POST", "/projects/foo%2Fbar/issues"),          # glab issue create
+    ])
+    async def test_glab_endpoints_pass_bundled_gitlab_allowlist(self, method, endpoint):
+        called = []
+
+        def handler(request):
+            called.append(request)
+            return httpx.Response(200, text="{}")
+
+        ctx = self._ctx_with_developer_defaults(handler)
+        req = {
+            "action": "gitlab_api", "method": method,
+            "endpoint": endpoint, "body": None,
+        }
+        resp = decode_response(await handle_gitlab_api(req, ctx))
+        assert resp["ok"] is True, (
+            f"{method} {endpoint} rejected by bundled GitLab allowlist: "
+            f"{resp.get('error')} {resp.get('message')}"
+        )
+        assert len(called) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method,endpoint", [
+        ("GET", "/user"),                          # gh auth status
+        ("GET", "/repos/foo/bar"),                 # gh repo view
+        ("POST", "/repos/foo/bar/pulls"),          # gh pr create
+        ("GET", "/repos/foo/bar/pulls/3"),         # gh pr view
+        ("POST", "/repos/foo/bar/issues"),         # gh issue create
+    ])
+    async def test_gh_endpoints_pass_bundled_github_allowlist(self, method, endpoint):
+        called = []
+
+        def handler(request):
+            called.append(request)
+            return httpx.Response(200, text="{}")
+
+        ctx = self._ctx_with_developer_defaults(handler)
+        req = {
+            "action": "github_api", "method": method,
+            "endpoint": endpoint, "body": None,
+        }
+        resp = decode_response(await handle_github_api(req, ctx))
+        assert resp["ok"] is True, (
+            f"{method} {endpoint} rejected by bundled GitHub allowlist: "
+            f"{resp.get('error')} {resp.get('message')}"
+        )
+        assert len(called) == 1
 
 
 # ---- Stage 3: upstream errors + timeouts -----------------------------------

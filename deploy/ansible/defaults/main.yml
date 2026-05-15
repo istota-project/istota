@@ -413,12 +413,15 @@ istota_devbox_block_rfc1918: true
 # container is named "{{ istota_devbox_container_prefix }}{{ user_id }}".
 istota_devbox_users: []
 
-# Devbox credential proxy. One systemd unit per devbox user listens on a
-# per-user Unix socket; the socket is bind-mounted into the corresponding
-# container at /run/istota-cred.sock. Container-side shims (gitlab-api,
-# github-api, gh, glab, git-credential-istota) talk to the socket; the
-# daemon injects the configured developer.{gitlab,github}_token server-
-# side. Tokens never enter the container. Defaults on when devbox is on.
+# Devbox credential proxy. One systemd unit per devbox user listens on
+# a per-user Unix socket under /var/run/{namespace}/<user>/sock. The
+# compose template bind-mounts that per-user directory into the
+# container at /run/istota-cred (directory, not file — so daemon
+# restarts don't strand the container against a dead inode). Container-
+# side shims (gitlab-api, github-api, gh, glab, git-credential-istota)
+# connect to /run/istota-cred/sock and the daemon injects the configured
+# developer.{gitlab,github}_token server-side. Tokens never enter the
+# container. Defaults on when devbox is on.
 istota_devbox_proxy_enabled: true
 istota_devbox_proxy_socket_dir: "/var/run/{{ istota_namespace }}"
 # Empty string → audit lines go to the journal only. Set to an absolute
@@ -536,15 +539,16 @@ istota_developer_gitlab_token: ""                 # API token (read_api + write_
 istota_developer_gitlab_username: ""              # GitLab username for HTTPS auth
 istota_developer_gitlab_default_namespace: ""     # Default namespace for short repo names
 istota_developer_gitlab_reviewer_id: ""          # GitLab user ID to assign as MR reviewer
-istota_developer_gitlab_api_allowlist:            # API endpoint allowlist (enforced in wrapper script)
-  - "GET /api/v4/projects/*"
-  - "GET /api/v4/groups/*"
-  - "GET /api/v4/users*"
-  - "POST /api/v4/projects/*/merge_requests"
-  - "POST /api/v4/projects/*/merge_requests/*/notes"
-  - "POST /api/v4/projects/*/issues"
-  - "POST /api/v4/projects/*/issues/*/notes"
-  - "PUT /api/v4/projects/*/merge_requests/*/merge"
+istota_developer_gitlab_api_allowlist:            # Devbox proxy strips /api/v4 into base_url; match against the bare path
+  - "GET /user"
+  - "GET /projects/*"
+  - "GET /groups/*"
+  - "GET /users*"
+  - "POST /projects/*/merge_requests"
+  - "POST /projects/*/merge_requests/*/notes"
+  - "POST /projects/*/issues"
+  - "POST /projects/*/issues/*/notes"
+  - "PUT /projects/*/merge_requests/*/merge"
 # GitHub settings
 istota_developer_github_url: "https://github.com"
 istota_developer_github_token: ""                 # Personal access token (repo scope)
@@ -552,6 +556,7 @@ istota_developer_github_username: ""              # GitHub username for HTTPS au
 istota_developer_github_default_owner: ""         # Default org/user for short repo names
 istota_developer_github_reviewer: ""              # GitHub username to request as PR reviewer
 istota_developer_github_api_allowlist:            # API endpoint allowlist (enforced in wrapper script)
+  - "GET /user"
   - "GET /repos/*"
   - "GET /orgs/*"
   - "GET /users/*"

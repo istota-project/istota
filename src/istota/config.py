@@ -260,15 +260,22 @@ class DeveloperConfig:
     gitlab_username: str = ""     # GitLab username for HTTPS auth
     gitlab_default_namespace: str = ""  # Default namespace for resolving short repo names (e.g., "myorg")
     gitlab_reviewer_id: str = ""       # GitLab user ID to assign as MR reviewer
+    # Patterns are matched against the bare path the shim emits — the
+    # devbox proxy strips ``/api/v4`` into the upstream ``base_url``
+    # (devbox_proxy.py:handle_gitlab_api) before matching. Don't add the
+    # ``/api/v4`` prefix here or every GitLab call will reject as
+    # not_allowed. The legacy host-side gitlab-api wrapper used the
+    # prefixed form; this codepath is different.
     gitlab_api_allowlist: list[str] = field(default_factory=lambda: [
-        "GET /api/v4/projects/*",
-        "GET /api/v4/groups/*",
-        "GET /api/v4/users*",
-        "POST /api/v4/projects/*/merge_requests",
-        "POST /api/v4/projects/*/merge_requests/*/notes",
-        "POST /api/v4/projects/*/issues",
-        "POST /api/v4/projects/*/issues/*/notes",
-        "PUT /api/v4/projects/*/merge_requests/*/merge",
+        "GET /user",
+        "GET /projects/*",
+        "GET /groups/*",
+        "GET /users*",
+        "POST /projects/*/merge_requests",
+        "POST /projects/*/merge_requests/*/notes",
+        "POST /projects/*/issues",
+        "POST /projects/*/issues/*/notes",
+        "PUT /projects/*/merge_requests/*/merge",
     ])
     github_url: str = "https://github.com"
     github_token: str = ""        # Personal access token (repo scope recommended)
@@ -277,6 +284,7 @@ class DeveloperConfig:
     github_reviewer: str = ""     # GitHub username to request as PR reviewer
     author_credit: str = ""       # Appended to every commit message (e.g., "Co-Authored-By: Name <email>")
     github_api_allowlist: list[str] = field(default_factory=lambda: [
+        "GET /user",
         "GET /repos/*",
         "GET /orgs/*",
         "GET /users/*",

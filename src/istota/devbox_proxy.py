@@ -24,6 +24,7 @@ import fnmatch
 import json
 import logging
 import os
+import signal
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -131,8 +132,11 @@ def _audit(
         if value is None:
             continue
         s = str(value)
-        if any(c in s for c in (" ", "=", "'")):
-            s = "'" + s.replace("'", "\\'") + "'"
+        if any(c in s for c in (" ", "=", "'", "\\")):
+            # Backslash must be escaped before single-quote, else a value
+            # containing ``\'`` would be parsed ambiguously by downstream
+            # key=value log parsers.
+            s = "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
         parts.append(f"{key}={s}")
     audit_logger.info("devbox_proxy " + " ".join(parts))
 
@@ -177,11 +181,17 @@ def _parse_git_credential_input(raw: str) -> dict[str, str]:
 
 
 def _provider_for_host(host: str, ctx: DevboxProxyContext) -> str | None:
-    """Map a hostname to ``"github"`` / ``"gitlab"`` / ``None``."""
+    """Map a hostname to ``"github"`` / ``"gitlab"`` / ``None``.
+
+    Comparison is case-insensitive and strips any ``:port`` suffix —
+    git can send mixed case (``GitHub.com``) and some setups append
+    ports to the host field.
+    """
     if not host:
         return None
-    gh_host = urllib.parse.urlparse(ctx.github_url).hostname or "github.com"
-    gl_host = urllib.parse.urlparse(ctx.gitlab_url).hostname or "gitlab.com"
+    host = host.strip().lower().split(":", 1)[0]
+    gh_host = (urllib.parse.urlparse(ctx.github_url).hostname or "github.com").lower()
+    gl_host = (urllib.parse.urlparse(ctx.gitlab_url).hostname or "gitlab.com").lower()
     if host == gh_host or host == "github.com":
         return "github"
     if host == gl_host or host == "gitlab.com":
@@ -368,6 +378,33 @@ async def _handle_provider_api(
     body = request.get("body")
     extra_headers = request.get("headers") or {}
 
+    # Defense in depth: a header value containing CR/LF or NUL would let
+    # a malicious caller smuggle extra HTTP headers into the upstream
+    # request. httpx blocks most of these at its own layer, but we reject
+    # at our boundary so the daemon's audit log shows the attempt and we
+    # never depend on the upstream library's policy.
+    if isinstance(extra_headers, dict):
+        for k, v in extra_headers.items():
+            if not isinstance(k, str) or not isinstance(v, (str, int, float)):
+                _audit(
+                    user_id=ctx.user_id, action=action,
+                    result="bad_request", dur_ms=_elapsed_ms(start),
+                    method=method, endpoint=endpoint, reason="header_type",
+                )
+                return encode_error(
+                    ERR_BAD_REQUEST, "header keys must be str, values str/number",
+                )
+            if any(c in str(v) for c in ("\r", "\n", "\x00")):
+                _audit(
+                    user_id=ctx.user_id, action=action,
+                    result="bad_request", dur_ms=_elapsed_ms(start),
+                    method=method, endpoint=endpoint, reason="header_smuggling",
+                )
+                return encode_error(
+                    ERR_BAD_REQUEST,
+                    f"header {k!r} contains CR/LF/NUL — rejected",
+                )
+
     if not _endpoint_allowed(method, endpoint, allowlist):
         _audit(
             user_id=ctx.user_id, action=action,
@@ -448,6 +485,16 @@ _ACTION_HANDLERS = {
     ACTION_GL_API: handle_gitlab_api,
     ACTION_GH_API: handle_github_api,
 }
+
+
+# Per-daemon connection cap. asyncio.start_unix_server has no built-in
+# concurrency limit, and each in-flight connection can carry up to
+# MAX_REQUEST_BYTES (16 MiB) buffered in the StreamReader. A loop of
+# fast-open + slow-read connections from inside the container would
+# otherwise grow memory linearly. 32 is plenty for the legitimate
+# workload (one container, sequential git operations + the occasional
+# fan-out from the shims).
+MAX_CONCURRENT_CONNECTIONS: int = 32
 
 
 async def handle_connection(
@@ -533,8 +580,20 @@ async def build_context(user_id: str, config) -> DevboxProxyContext:
 
 
 def _default_socket_path(user_id: str, config) -> Path:
+    """Per-user subdirectory holds the socket.
+
+    Layout: ``{sock_dir}/{user_id}/sock``. The compose template bind-
+    mounts the per-user directory (not the socket file) so that when the
+    daemon restarts and unlinks+recreates the socket, the container sees
+    the new inode through the same mount. A file bind-mount would pin
+    the original inode and break every reconnect after a daemon restart.
+
+    Per-user directories also enforce cross-tenant isolation: container
+    alice's bind mount only contains alice's socket, even though the
+    sockets are all group-readable by ``istota``.
+    """
     sock_dir = getattr(config.developer, "devbox_proxy_socket_dir", "/var/run/istota")
-    return Path(sock_dir) / f"devbox-cred-{user_id}.sock"
+    return Path(sock_dir) / user_id / "sock"
 
 
 async def serve(
@@ -552,28 +611,105 @@ async def serve(
     audit_log_path = getattr(config.developer, "devbox_proxy_audit_log", "") or ""
     configure_audit_log(audit_log_path or None)
     sock_path = socket_path or _default_socket_path(user_id, config)
+    # Per-user parent dir is part of the access boundary. Create it 0o750
+    # explicitly (mkdir() defaults respect umask but we don't want to
+    # depend on the systemd-set umask here). The container's `dev` user
+    # gains traverse access via the istota group membership granted by
+    # the compose template's group_add.
     sock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(str(sock_path.parent), 0o750)
+    except OSError:
+        # Test harnesses sometimes run with a parent dir we don't own;
+        # the chmod is best-effort. Production deploys put the dir under
+        # /var/run/istota which the daemon owns.
+        pass
     if sock_path.exists():
         sock_path.unlink()
+
+    connection_sem = asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
 
     async def _client_callback(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     ) -> None:
-        await handle_connection(reader, writer, ctx)
+        # Bound in-flight connections. If we're already at the cap, reply
+        # with the structured envelope and close — the client sees a
+        # clean ``internal`` rather than a hang.
+        if connection_sem.locked():
+            try:
+                await _write_line(
+                    writer,
+                    encode_error(ERR_INTERNAL, "proxy at concurrent-connection cap"),
+                )
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+            return
+        async with connection_sem:
+            await handle_connection(reader, writer, ctx)
 
-    server = await asyncio.start_unix_server(
-        _client_callback,
-        path=str(sock_path),
-        limit=MAX_REQUEST_BYTES + 4096,
-    )
-    os.chmod(str(sock_path), 0o600)
+    # Tighten the umask so start_unix_server() creates the socket inode
+    # already at mode 0o660 — closes the window where a fast-reconnecting
+    # client could race the chmod and see the default-permission inode.
+    # The explicit chmod afterwards is belt-and-suspenders for setups
+    # with a wider umask (e.g. test harnesses).
+    #
+    # Mode 0o660 + adding the devbox container's runtime group to the
+    # istota group (via Ansible) is the access boundary. 0o600 would
+    # leave the container's `dev` user (uid 1000) unable to connect
+    # through the bind-mounted socket since it runs as a different uid
+    # than the daemon (the istota system user).
+    previous_umask = os.umask(0o117)
+    try:
+        server = await asyncio.start_unix_server(
+            _client_callback,
+            path=str(sock_path),
+            limit=MAX_REQUEST_BYTES + 4096,
+        )
+    finally:
+        os.umask(previous_umask)
+    os.chmod(str(sock_path), 0o660)
+
+    # SIGTERM cleanup: systemd sends SIGTERM on stop. Without an explicit
+    # handler asyncio surfaces it as KeyboardInterrupt only on the main
+    # thread; cancelling the server task lets the finally-block unlink
+    # the socket before the process exits, so we never leave a stale
+    # inode that confuses the next start.
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+
+    def _request_stop() -> None:
+        stop_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _request_stop)
+        except (NotImplementedError, RuntimeError):
+            # Signal handlers aren't supported on every platform (e.g.
+            # Windows asyncio); fall through and rely on cancellation.
+            pass
+
     logger.info(
         "devbox_proxy listening user_id=%s socket=%s providers=%s",
         user_id, sock_path, ",".join(ctx.providers) or "none",
     )
     try:
         async with server:
-            await server.serve_forever()
+            serve_task = asyncio.create_task(server.serve_forever())
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, pending = await asyncio.wait(
+                {serve_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                exc = task.exception()
+                if exc and not isinstance(exc, asyncio.CancelledError):
+                    raise exc
     finally:
         await ctx.http_client.aclose()
         try:

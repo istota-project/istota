@@ -1250,6 +1250,29 @@
 # DEVBOX (per-user persistent dev / network-diagnostics container)
 # ============================================================
 
+# Look up the istota group's numeric gid so the devbox compose template
+# can grant it to the container's `dev` user as a supplementary group.
+# That's what lets the container connect to the bind-mounted proxy
+# socket (mode 0o660, group=istota). Without this the daemon's uid
+# (999) and the container's uid (1000) never agree and every connect
+# returns EACCES.
+- name: Look up istota group gid for devbox bind-mount access
+  ansible.builtin.getent:
+    database: group
+    key: "{{ istota_group }}"
+  register: istota_group_lookup
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Set istota gid fact for devbox compose template
+  ansible.builtin.set_fact:
+    istota_devbox_proxy_group_gid: "{{ istota_group_lookup.ansible_facts.getent_group[istota_group][1] }}"
+  when:
+    - istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_group_lookup is defined
+    - istota_group_lookup.ansible_facts is defined
+    - istota_group_lookup.ansible_facts.getent_group is defined
+    - istota_group_lookup.ansible_facts.getent_group[istota_group] is defined
+
 - name: Deploy devbox compose file
   template:
     src: docker-compose.devbox.yml.j2
@@ -1322,6 +1345,21 @@
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
     mode: "0750"
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+# Pre-create the per-user subdirs so the compose template's directory
+# bind-mount has a real source on first deploy — otherwise Docker
+# auto-creates the path as root:root and the daemon can't write the
+# socket into it. Group=istota with mode 0750 lets the container's dev
+# user traverse via group_add.
+- name: Ensure per-user devbox-proxy socket subdirectories exist
+  file:
+    path: "{{ istota_devbox_proxy_socket_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0750"
+  loop: "{{ istota_devbox_users }}"
   when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
 
 - name: Deploy devbox-proxy systemd instance unit
