@@ -113,7 +113,7 @@ class TestDeriveCredentialSet:
             "CALDAV_PASSWORD", "NC_PASS", "SMTP_PASSWORD", "IMAP_PASSWORD",
             "KARAKEEP_API_KEY", "GITLAB_TOKEN", "GITHUB_TOKEN",
             "GOOGLE_WORKSPACE_CLI_TOKEN", "NTFY_TOKEN", "NTFY_PASSWORD",
-            "MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_SESSION_TOKEN",
+            "MONARCH_SESSION_ID", "MONARCH_CSRFTOKEN",
             "TUMBLR_API_KEY",
         ):
             assert var in creds, f"{var} missing from derived credential set"

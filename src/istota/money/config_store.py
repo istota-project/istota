@@ -1306,11 +1306,6 @@ def monarch_config_from_toml_dict(
         csrftoken=(
             secret_creds.get("csrftoken") or monarch.get("csrftoken")
         ),
-        session_token=(
-            secret_creds.get("session_token") or monarch.get("session_token")
-        ),
-        email=secret_creds.get("email") or monarch.get("email"),
-        password=secret_creds.get("password") or monarch.get("password"),
     )
 
     sync_data = monarch.get("sync", {}) or {}
@@ -1486,9 +1481,6 @@ def load_monarch(
     credentials = MonarchCredentials(
         session_id=secret_creds.get("session_id"),
         csrftoken=secret_creds.get("csrftoken"),
-        session_token=secret_creds.get("session_token"),
-        email=secret_creds.get("email"),
-        password=secret_creds.get("password"),
     )
 
     return MonarchConfig(

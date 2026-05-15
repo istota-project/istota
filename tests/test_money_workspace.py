@@ -221,10 +221,11 @@ class TestParsersAcceptMd:
         from istota.money.core.transactions import parse_monarch_config
         p = tmp_path / "MONARCH.md"
         p.write_text(
-            "# Mon\n\n```toml\n[monarch]\nemail = \"x@y.z\"\n```\n"
+            "# Mon\n\n```toml\n[monarch]\nsession_id = \"sid-x\"\ncsrftoken = \"csrf-y\"\n```\n"
         )
         cfg = parse_monarch_config(p)
-        assert cfg.credentials.email == "x@y.z"
+        assert cfg.credentials.session_id == "sid-x"
+        assert cfg.credentials.csrftoken == "csrf-y"
 
     def test_tax_md(self, tmp_path):
         from istota.money.core.tax import parse_tax_config
@@ -302,11 +303,14 @@ class TestMigrationScript:
         src = tmp_path / "src"
         dst = tmp_path / "dst"
         src.mkdir()
-        (src / "monarch.toml").write_text('[monarch]\nemail = "x@y.z"\n')
+        (src / "monarch.toml").write_text(
+            '[monarch]\nsession_id = "sid-x"\ncsrftoken = "csrf-y"\n',
+        )
         mod = self._import_script()
         mod.migrate(src, dst, dry_run=False)
         cfg = parse_monarch_config(dst / "MONARCH.md")
-        assert cfg.credentials.email == "x@y.z"
+        assert cfg.credentials.session_id == "sid-x"
+        assert cfg.credentials.csrftoken == "csrf-y"
 
     def test_dry_run_writes_nothing(self, tmp_path):
         src = tmp_path / "src"
@@ -339,11 +343,14 @@ class TestLoadUserSecrets:
         from istota.money import load_user_secrets
 
         secrets_file = tmp_path / "money.toml"
-        secrets_file.write_text('[monarch]\nsession_token = "tok-from-env"\n')
+        secrets_file.write_text(
+            '[monarch]\nsession_id = "sid-from-env"\ncsrftoken = "csrf-from-env"\n'
+        )
         monkeypatch.setenv("MONEY_SECRETS_FILE", str(secrets_file))
 
         result = load_user_secrets("alice", self._cfg_with_db(tmp_path))
-        assert result["monarch"]["session_token"] == "tok-from-env"
+        assert result["monarch"]["session_id"] == "sid-from-env"
+        assert result["monarch"]["csrftoken"] == "csrf-from-env"
 
     def test_reads_from_secrets_store(self, monkeypatch, tmp_path):
         from istota import secrets_store
@@ -353,12 +360,16 @@ class TestLoadUserSecrets:
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
 
         cfg = self._cfg_with_db(tmp_path)
-        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "session_token", "tok-resource")
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "session_id", "sid-resource")
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "csrftoken", "csrf-resource")
 
         result = load_user_secrets("alice", cfg)
-        assert result["monarch"]["session_token"] == "tok-resource"
+        assert result["monarch"]["session_id"] == "sid-resource"
+        assert result["monarch"]["csrftoken"] == "csrf-resource"
 
-    def test_includes_email_and_password_when_present(self, monkeypatch, tmp_path):
+    def test_returns_only_cookie_pair(self, monkeypatch, tmp_path):
+        """Other monarch.* secret rows that may exist on legacy installs are
+        silently ignored — the loader only surfaces the cookie pair."""
         from istota import secrets_store
         from istota.money import load_user_secrets
 
@@ -366,16 +377,15 @@ class TestLoadUserSecrets:
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
 
         cfg = self._cfg_with_db(tmp_path)
-        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "session_token", "tok")
-        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "email", "alice@example.com")
-        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "password", "hunter2")
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "session_id", "SID")
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "csrftoken", "CSRF")
+        # Legacy keys still in the DB on a freshly-migrated deploy:
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "session_token", "ignored")
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "email", "ignored")
+        secrets_store.set_secret(cfg.db_path, "alice", "monarch", "password", "ignored")
 
         result = load_user_secrets("alice", cfg)
-        assert result["monarch"] == {
-            "session_token": "tok",
-            "email": "alice@example.com",
-            "password": "hunter2",
-        }
+        assert result["monarch"] == {"session_id": "SID", "csrftoken": "CSRF"}
 
     def test_returns_empty_when_no_secrets_stored(self, monkeypatch, tmp_path):
         from istota.money import load_user_secrets

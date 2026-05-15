@@ -234,9 +234,8 @@
 					</details>
 
 					<p class="legacy-note">
-						Cookies are the durable credential and last months on a trusted-device
-						login. The legacy fields (session token, email, password) are kept
-						for backward compatibility and not expected to work.
+						Cookies are the only credential we store. They last months
+						on a trusted-device login.
 					</p>
 				</div>
 			{/if}

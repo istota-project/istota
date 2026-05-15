@@ -389,15 +389,13 @@ def resolve_secret(
 # secret_service it maps to plus (resource_attr, secret_key) pairs to copy.
 # resource_attr "extra:foo" reads from the ResourceConfig.extra dict.
 _IMPORT_MAP: dict[str, tuple[str, list[tuple[str, str]]]] = {
-    "money": ("monarch", [
-        ("extra:monarch_email", "email"),
-        ("extra:monarch_password", "password"),
-    ]),
-    "monarch": ("monarch", [
-        ("extra:session_token", "session_token"),
-        ("extra:email", "email"),
-        ("extra:password", "password"),
-    ]),
+    # Monarch credentials moved to a cookie-pair (session_id + csrftoken)
+    # auth model in 7c896c5; the legacy email/password/session_token columns
+    # on the retired [[resources]] type=money/monarch blocks have nowhere
+    # to land in the new schema. Empty lists keep the resource cleanup pass
+    # in db.py:cleanup_obsolete_resources running, just with no field copies.
+    "money": ("monarch", []),
+    "monarch": ("monarch", []),
     # base_url moves into the secrets table alongside api_key as part of
     # the modules/connected-services refactor — once the bookmarks resource
     # type is dropped, the secrets table is the only place these values live.

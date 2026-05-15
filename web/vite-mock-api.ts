@@ -600,9 +600,6 @@ const _MODULE_SCHEMAS: Record<string, ServiceSchema[]> = {
 			fields: [
 				{ key: 'session_id', label: 'session_id cookie', type: 'password' },
 				{ key: 'csrftoken', label: 'csrftoken cookie', type: 'password' },
-				{ key: 'session_token', label: 'Session token (legacy)', type: 'password' },
-				{ key: 'email', label: 'Email (legacy)', type: 'email' },
-				{ key: 'password', label: 'Password (legacy)', type: 'password' },
 			],
 		},
 	],

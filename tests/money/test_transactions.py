@@ -298,67 +298,67 @@ class TestConfigParsing:
     def test_parse_monarch_config(self, tmp_path):
         config_file = tmp_path / "monarch.toml"
         config_file.write_text(
-            '[monarch]\nemail = "test@example.com"\n\n'
+            '[monarch]\nsession_id = "inline-sid"\ncsrftoken = "inline-csrf"\n\n'
             '[monarch.sync]\nlookback_days = 60\n\n'
             '[monarch.accounts]\n"Chase" = "Assets:Bank:Chase"\n\n'
             '[monarch.categories]\n"Custom" = "Expenses:Custom"\n\n'
             '[monarch.tags]\ninclude = ["Business"]\n'
         )
         config = parse_monarch_config(config_file)
-        assert config.credentials.email == "test@example.com"
+        assert config.credentials.session_id == "inline-sid"
+        assert config.credentials.csrftoken == "inline-csrf"
         assert config.sync.lookback_days == 60
         assert config.accounts["Chase"] == "Assets:Bank:Chase"
         assert config.categories["Custom"] == "Expenses:Custom"
         assert config.tags.include == ["Business"]
 
     def test_parse_monarch_config_with_secrets_overlay(self, tmp_path):
-        """Secrets file credentials override monarch config credentials."""
+        """Secrets dict overlays cookie pair onto monarch config credentials."""
         config_file = tmp_path / "monarch.toml"
         config_file.write_text(
-            '[monarch]\nemail = "test@example.com"\n\n'
-            '[monarch.sync]\nlookback_days = 60\n'
+            '[monarch]\n\n[monarch.sync]\nlookback_days = 60\n'
         )
-        secrets = {"monarch": {"session_token": "secret-token-123"}}
+        secrets = {"monarch": {"session_id": "SID-secret", "csrftoken": "CSRF-secret"}}
         config = parse_monarch_config(config_file, secrets=secrets)
-        assert config.credentials.session_token == "secret-token-123"
-        # email from config file is still present
-        assert config.credentials.email == "test@example.com"
+        assert config.credentials.session_id == "SID-secret"
+        assert config.credentials.csrftoken == "CSRF-secret"
 
     def test_parse_monarch_config_secrets_override_config_credentials(self, tmp_path):
-        """Secrets file takes precedence over config file for the same field."""
+        """Secrets dict takes precedence over config file for the same field."""
         config_file = tmp_path / "monarch.toml"
         config_file.write_text(
-            '[monarch]\nsession_token = "old-token"\n\n'
+            '[monarch]\nsession_id = "old-sid"\n\n'
             '[monarch.sync]\nlookback_days = 30\n'
         )
-        secrets = {"monarch": {"session_token": "new-secret-token"}}
+        secrets = {"monarch": {"session_id": "new-sid"}}
         config = parse_monarch_config(config_file, secrets=secrets)
-        assert config.credentials.session_token == "new-secret-token"
+        assert config.credentials.session_id == "new-sid"
 
     def test_parse_monarch_config_no_secrets(self, tmp_path):
         """Without secrets, behavior is unchanged."""
         config_file = tmp_path / "monarch.toml"
         config_file.write_text(
-            '[monarch]\nsession_token = "inline-token"\n\n'
+            '[monarch]\nsession_id = "inline-sid"\ncsrftoken = "inline-csrf"\n\n'
             '[monarch.sync]\nlookback_days = 30\n'
         )
         config = parse_monarch_config(config_file, secrets=None)
-        assert config.credentials.session_token == "inline-token"
+        assert config.credentials.session_id == "inline-sid"
+        assert config.credentials.csrftoken == "inline-csrf"
 
     def test_parse_monarch_config_empty_secrets(self, tmp_path):
         """Empty secrets dict doesn't break anything."""
         config_file = tmp_path / "monarch.toml"
-        config_file.write_text('[monarch]\nemail = "test@example.com"\n')
+        config_file.write_text('[monarch]\n')
         config = parse_monarch_config(config_file, secrets={})
-        assert config.credentials.email == "test@example.com"
-        assert config.credentials.session_token is None
+        assert config.credentials.session_id is None
+        assert config.credentials.csrftoken is None
 
 
 class TestProfileConfigParsing:
     def test_parse_profiles(self, tmp_path):
         config_file = tmp_path / "monarch.toml"
         config_file.write_text(
-            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
             '[monarch.sync]\nlookback_days = 60\ndefault_account = "Expenses:Default"\n\n'
             '[monarch.accounts]\n"Chase" = "Assets:Bank:Chase"\n\n'
             '[monarch.profiles.business]\n'
@@ -410,7 +410,7 @@ class TestProfileConfigParsing:
         """Profile without explicit sync settings inherits from top-level."""
         config_file = tmp_path / "monarch.toml"
         config_file.write_text(
-            '[monarch]\nsession_token = "tok"\n\n'
+            '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
             '[monarch.sync]\n'
             'lookback_days = 45\n'
             'default_account = "Expenses:TopLevel"\n'
@@ -432,7 +432,7 @@ class TestSyncAllProfiles:
         ledger = tmp_path / "main.beancount"
         ledger.write_text("")
         config = MonarchConfig(
-            credentials=MonarchCredentials(session_token="tok"),
+            credentials=MonarchCredentials(session_id="sid", csrftoken="csrf"),
             sync=MonarchSyncSettings(lookback_days=30),
             accounts={}, categories={}, tags=MonarchTagFilters(),
         )
@@ -453,7 +453,7 @@ class TestSyncAllProfiles:
         personal_ledger.write_text("")
 
         config = MonarchConfig(
-            credentials=MonarchCredentials(session_token="tok"),
+            credentials=MonarchCredentials(session_id="sid", csrftoken="csrf"),
             sync=MonarchSyncSettings(lookback_days=30),
             accounts={}, categories={}, tags=MonarchTagFilters(),
             profiles=[
@@ -496,7 +496,7 @@ class TestSyncAllProfiles:
         personal_ledger.write_text("")
 
         config = MonarchConfig(
-            credentials=MonarchCredentials(session_token="tok"),
+            credentials=MonarchCredentials(session_id="sid", csrftoken="csrf"),
             sync=MonarchSyncSettings(lookback_days=30),
             accounts={}, categories={}, tags=MonarchTagFilters(),
             profiles=[
@@ -554,7 +554,7 @@ class TestSyncAllProfiles:
     def test_profile_ledger_not_found(self, tmp_path):
         """Error when a profile references a non-existent ledger."""
         config = MonarchConfig(
-            credentials=MonarchCredentials(session_token="tok"),
+            credentials=MonarchCredentials(session_id="sid", csrftoken="csrf"),
             sync=MonarchSyncSettings(), accounts={}, categories={},
             tags=MonarchTagFilters(),
             profiles=[

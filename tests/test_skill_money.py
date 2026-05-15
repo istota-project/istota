@@ -53,7 +53,8 @@ class TestMoneySkillManifest:
         assert "money" not in selected
 
     def test_env_specs(self, tmp_path):
-        """MONEY_USER plus the Monarch credential triple."""
+        """MONEY_USER plus the Monarch cookie pair (the only credential we
+        store post-cookie-auth refactor)."""
         from istota.skills._loader import load_skill_index
 
         index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
@@ -61,15 +62,13 @@ class TestMoneySkillManifest:
         env_vars = {spec.var for spec in meta.env_specs}
         assert env_vars == {
             "MONEY_USER",
-            "MONARCH_EMAIL",
-            "MONARCH_PASSWORD",
-            "MONARCH_SESSION_TOKEN",
+            "MONARCH_SESSION_ID",
+            "MONARCH_CSRFTOKEN",
         }
         sensitive = {s.var for s in meta.env_specs if s.sensitive}
         assert sensitive == {
-            "MONARCH_EMAIL",
-            "MONARCH_PASSWORD",
-            "MONARCH_SESSION_TOKEN",
+            "MONARCH_SESSION_ID",
+            "MONARCH_CSRFTOKEN",
         }
 
 
@@ -208,7 +207,7 @@ class TestRunInProcess:
         fake_result.exit_code = 0
         fake_result.output = '{"status": "ok"}'
 
-        secrets = {"monarch": {"session_token": "tok-abc"}}
+        secrets = {"monarch": {"session_id": "sid-abc", "csrftoken": "csrf-abc"}}
 
         with patch.dict(os.environ, {"MONEY_USER": "alice"}, clear=True), \
              self._patch_resolver(), \
@@ -323,9 +322,6 @@ class TestMoneyLoaderEnvFirst:
     _ALL_ENV_VARS = (
         "MONARCH_SESSION_ID",
         "MONARCH_CSRFTOKEN",
-        "MONARCH_SESSION_TOKEN",
-        "MONARCH_EMAIL",
-        "MONARCH_PASSWORD",
     )
 
     def test_env_takes_precedence_over_store(self, tmp_path, monkeypatch):
@@ -338,9 +334,6 @@ class TestMoneyLoaderEnvFirst:
         )
         monkeypatch.setenv("MONARCH_SESSION_ID", "env-sid")
         monkeypatch.setenv("MONARCH_CSRFTOKEN", "env-csrf")
-        monkeypatch.setenv("MONARCH_EMAIL", "env@example.com")
-        monkeypatch.setenv("MONARCH_PASSWORD", "env-pw")
-        monkeypatch.setenv("MONARCH_SESSION_TOKEN", "env-tok")
         called = []
         monkeypatch.setattr(
             "istota.secrets_store.get_secret",
@@ -351,9 +344,6 @@ class TestMoneyLoaderEnvFirst:
         assert result == {"monarch": {
             "session_id": "env-sid",
             "csrftoken": "env-csrf",
-            "email": "env@example.com",
-            "password": "env-pw",
-            "session_token": "env-tok",
         }}
         assert called == []
 
@@ -373,9 +363,6 @@ class TestMoneyLoaderEnvFirst:
             return {
                 "session_id": "store-sid",
                 "csrftoken": "store-csrf",
-                "email": "store@x",
-                "password": "store-pw",
-                "session_token": "store-tok",
             }.get(k)
 
         monkeypatch.setattr("istota.secrets_store.get_secret", fake_get)
@@ -383,14 +370,10 @@ class TestMoneyLoaderEnvFirst:
         assert result == {"monarch": {
             "session_id": "store-sid",
             "csrftoken": "store-csrf",
-            "email": "store@x",
-            "password": "store-pw",
-            "session_token": "store-tok",
         }}
 
     def test_partial_env_partial_store(self, tmp_path, monkeypatch):
-        """Mixed: env supplies some, store fills the rest. (Operator-only env
-        vars during the migration window combined with per-user store rows.)"""
+        """Mixed: env supplies one cookie, store fills the other."""
         from istota.config import Config, UserConfig
         from istota.money._loader import load_user_secrets
 
@@ -399,9 +382,7 @@ class TestMoneyLoaderEnvFirst:
             users={"alice": UserConfig()},
         )
         monkeypatch.setenv("MONARCH_SESSION_ID", "env-sid")
-        for v in ("MONARCH_CSRFTOKEN", "MONARCH_SESSION_TOKEN",
-                  "MONARCH_EMAIL", "MONARCH_PASSWORD"):
-            monkeypatch.delenv(v, raising=False)
+        monkeypatch.delenv("MONARCH_CSRFTOKEN", raising=False)
 
         def fake_get(db, u, s, k):
             return {"csrftoken": "store-csrf"}.get(k)

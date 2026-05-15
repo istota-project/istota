@@ -157,7 +157,7 @@ class TestResolution:
 
 
 class TestImport:
-    def _user_config_with_money(self, **monarch_extras) -> UserConfig:
+    def _user_config_with_karakeep(self, **kwargs) -> UserConfig:
         # _allow_obsolete=True: this fixture simulates the load-time
         # migration window where TOML still carries the retired type and
         # import_from_user_configs is meant to absorb its credentials
@@ -167,31 +167,31 @@ class TestImport:
             timezone="UTC",
             resources=[
                 ResourceConfig(
-                    type="money",
-                    name="Money",
-                    extra=monarch_extras,
+                    type="karakeep",
+                    name="Karakeep",
+                    base_url=kwargs.get("base_url", ""),
+                    api_key=kwargs.get("api_key", ""),
                     _allow_obsolete=True,
                 )
             ],
         )
 
-    def test_imports_money_credentials(self, db_path, secret_key_env):
+    def test_imports_karakeep_credentials(self, db_path, secret_key_env):
         users = {
-            "alice": self._user_config_with_money(
-                monarch_email="a@b.com",
-                monarch_password="p",
+            "alice": self._user_config_with_karakeep(
+                base_url="https://k.example",
+                api_key="abcd",
             )
         }
         n = secrets_store.import_from_user_configs(db_path, users)
         assert n == 2
-        assert secrets_store.get_secret(db_path, "alice", "monarch", "email") == "a@b.com"
-        assert secrets_store.get_secret(db_path, "alice", "monarch", "password") == "p"
+        assert secrets_store.get_secret(db_path, "alice", "karakeep", "base_url") == "https://k.example"
+        assert secrets_store.get_secret(db_path, "alice", "karakeep", "api_key") == "abcd"
 
     def test_idempotent(self, db_path, secret_key_env):
         users = {
-            "alice": self._user_config_with_money(
-                monarch_email="a@b.com",
-                monarch_password="p",
+            "alice": self._user_config_with_karakeep(
+                base_url="https://k.example", api_key="abcd",
             )
         }
         secrets_store.import_from_user_configs(db_path, users)
@@ -201,12 +201,12 @@ class TestImport:
     def test_does_not_overwrite_existing_secret(self, db_path, secret_key_env):
         """A user may have already set a value via web UI; the import should not
         clobber it with a stale TOML default."""
-        secrets_store.set_secret(db_path, "alice", "monarch", "email", "set-via-web")
+        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "set-via-web")
         users = {
-            "alice": self._user_config_with_money(monarch_email="from-toml")
+            "alice": self._user_config_with_karakeep(api_key="from-toml")
         }
         secrets_store.import_from_user_configs(db_path, users)
-        assert secrets_store.get_secret(db_path, "alice", "monarch", "email") == "set-via-web"
+        assert secrets_store.get_secret(db_path, "alice", "karakeep", "api_key") == "set-via-web"
 
     def test_imports_karakeep_base_url_and_api_key(self, db_path, secret_key_env):
         """Both endpoint and key now flow into the encrypted store — once
@@ -252,7 +252,7 @@ class TestImport:
         TOML extras at resolution time."""
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ISTOTA_SECRET_KEY", None)
-            users = {"alice": self._user_config_with_money(monarch_email="x")}
+            users = {"alice": self._user_config_with_karakeep(api_key="x")}
             assert secrets_store.import_from_user_configs(db_path, users) == 0
 
     def test_does_not_re_encrypt_after_key_rotation(self, db_path):
@@ -261,10 +261,10 @@ class TestImport:
         re-import stale TOML over a web-UI-managed value. The fix is the
         decrypt-free ``secret_exists`` check inside the import."""
         with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "k1" * 16}):
-            secrets_store.set_secret(db_path, "alice", "monarch", "email", "set-via-web")
+            secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "set-via-web")
         # Operator rotates the key. Existing rows are now undecryptable.
         with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "k2" * 16}):
-            users = {"alice": self._user_config_with_money(monarch_email="from-toml")}
+            users = {"alice": self._user_config_with_karakeep(api_key="from-toml")}
             written = secrets_store.import_from_user_configs(db_path, users)
             # Import must not write — the row exists, even if it can't be read.
             assert written == 0
