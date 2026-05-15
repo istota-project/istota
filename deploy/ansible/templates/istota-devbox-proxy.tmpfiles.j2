@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# /var/run/{{ istota_namespace }} hosts the per-user devbox proxy sockets.
+# Owned by the istota user so the daemon can chmod its own socket; mode
+# 0750 so non-istota host users can't see what's there.
+d {{ istota_devbox_proxy_socket_dir }} 0750 {{ istota_user }} {{ istota_group }} -

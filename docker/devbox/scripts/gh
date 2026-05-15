@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Curated GitHub CLI subset routed through the devbox proxy.
+
+Mirrors the host-side ``gh`` for the subcommands the agent actually uses:
+``pr create|view|list|close``, ``issue create|view|list``, ``repo view``,
+``auth status``. Anything outside that set exits 2 with a clear message
+pointing at ``github-api`` for raw REST access.
+
+Each subcommand maps to a single REST endpoint that the daemon's
+``github_api_allowlist`` must permit. We deliberately don't re-implement
+the full real CLI — translating only the path the agent depends on
+keeps the surface honest about what's actually proxy-safe.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.environ.get("ISTOTA_DEVBOX_LIB", "/usr/local/lib/istota_devbox"))
+from istota_devbox_client import (  # noqa: E402
+    ProxyProtocolError,
+    ProxyUnreachable,
+    RepoUnknown,
+    call,
+    die,
+    emit_response,
+    get_repo_slug,
+)
+
+
+_ACTION = "github_api"
+_BIN = "gh"
+
+
+def _call(method: str, endpoint: str, *, body: str | None = None) -> int:
+    try:
+        response = call(_ACTION, method=method, endpoint=endpoint, body=body, headers={})
+    except (ProxyUnreachable, ProxyProtocolError) as e:
+        die(f"{_BIN}: {e}", exit_code=1)
+    return emit_response(response, _BIN)
+
+
+def _slug() -> str:
+    try:
+        return get_repo_slug()
+    except RepoUnknown as e:
+        die(f"{_BIN}: {e}", exit_code=1)
+
+
+def cmd_auth_status(argv: list[str]) -> int:
+    return _call("GET", "/user")
+
+
+def cmd_repo_view(argv: list[str]) -> int:
+    return _call("GET", f"/repos/{_slug()}")
+
+
+def cmd_pr_create(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} pr create")
+    p.add_argument("--title", required=True)
+    p.add_argument("--body", default="")
+    p.add_argument("--base", default="main")
+    p.add_argument("--head", required=True)
+    p.add_argument("--draft", action="store_true")
+    args = p.parse_args(argv)
+    payload: dict = {
+        "title": args.title,
+        "body": args.body,
+        "base": args.base,
+        "head": args.head,
+    }
+    if args.draft:
+        payload["draft"] = True
+    return _call("POST", f"/repos/{_slug()}/pulls", body=json.dumps(payload))
+
+
+def cmd_pr_view(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} pr view")
+    p.add_argument("number")
+    args = p.parse_args(argv)
+    return _call("GET", f"/repos/{_slug()}/pulls/{args.number}")
+
+
+def cmd_pr_list(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} pr list")
+    p.add_argument("--state", choices=("open", "closed", "all"), default="open")
+    args = p.parse_args(argv)
+    return _call("GET", f"/repos/{_slug()}/pulls?state={args.state}")
+
+
+def cmd_pr_close(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} pr close")
+    p.add_argument("number")
+    args = p.parse_args(argv)
+    return _call(
+        "PATCH",
+        f"/repos/{_slug()}/pulls/{args.number}",
+        body=json.dumps({"state": "closed"}),
+    )
+
+
+def cmd_issue_create(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} issue create")
+    p.add_argument("--title", required=True)
+    p.add_argument("--body", default="")
+    args = p.parse_args(argv)
+    return _call(
+        "POST",
+        f"/repos/{_slug()}/issues",
+        body=json.dumps({"title": args.title, "body": args.body}),
+    )
+
+
+def cmd_issue_view(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} issue view")
+    p.add_argument("number")
+    args = p.parse_args(argv)
+    return _call("GET", f"/repos/{_slug()}/issues/{args.number}")
+
+
+def cmd_issue_list(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} issue list")
+    p.add_argument("--state", choices=("open", "closed", "all"), default="open")
+    args = p.parse_args(argv)
+    return _call("GET", f"/repos/{_slug()}/issues?state={args.state}")
+
+
+ROUTES: dict[str, dict[str, callable]] = {
+    "auth": {"status": cmd_auth_status},
+    "repo": {"view": cmd_repo_view},
+    "pr": {
+        "create": cmd_pr_create,
+        "view": cmd_pr_view,
+        "list": cmd_pr_list,
+        "close": cmd_pr_close,
+    },
+    "issue": {
+        "create": cmd_issue_create,
+        "view": cmd_issue_view,
+        "list": cmd_issue_list,
+    },
+}
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        die(f"usage: {_BIN} <command> <subcommand> [args]", exit_code=2)
+    cmd = argv[0]
+    if cmd not in ROUTES:
+        die(
+            f"{_BIN}: command {cmd!r} not yet routed through devbox proxy; "
+            f"use github-api directly",
+            exit_code=2,
+        )
+    if len(argv) < 2:
+        subs = ", ".join(sorted(ROUTES[cmd]))
+        die(f"usage: {_BIN} {cmd} <{subs}>", exit_code=2)
+    sub = argv[1]
+    handler = ROUTES[cmd].get(sub)
+    if handler is None:
+        die(
+            f"{_BIN}: subcommand {cmd!r} {sub!r} not yet routed through "
+            f"devbox proxy; use github-api directly",
+            exit_code=2,
+        )
+    return handler(argv[2:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

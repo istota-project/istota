@@ -413,6 +413,21 @@ istota_devbox_block_rfc1918: true
 # container is named "{{ istota_devbox_container_prefix }}{{ user_id }}".
 istota_devbox_users: []
 
+# Devbox credential proxy. One systemd unit per devbox user listens on a
+# per-user Unix socket; the socket is bind-mounted into the corresponding
+# container at /run/istota-cred.sock. Container-side shims (gitlab-api,
+# github-api, gh, glab, git-credential-istota) talk to the socket; the
+# daemon injects the configured developer.{gitlab,github}_token server-
+# side. Tokens never enter the container. Defaults on when devbox is on.
+istota_devbox_proxy_enabled: true
+istota_devbox_proxy_socket_dir: "/var/run/{{ istota_namespace }}"
+# Empty string → audit lines go to the journal only. Set to an absolute
+# path to also tail audit lines into a file.
+istota_devbox_proxy_audit_log: ""
+# Per-API call timeout, used by both the host-side developer skill and
+# the devbox proxy.
+istota_developer_api_timeout_seconds: 30
+
 # ntfy push notifications are configured per-user via the encrypted secrets
 # table (`istota secret ensure -s ntfy ...` or web settings). There is no
 # operator-shared ntfy config — each user supplies their own server/topic/auth.

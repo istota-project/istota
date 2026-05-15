@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Curated GitLab CLI subset routed through the devbox proxy.
+
+Mirror of the ``gh`` shim for GitLab: ``mr create|view|list|close``,
+``issue create|view|list``, ``repo view``, ``auth status``. Anything else
+exits 2 with a pointer to ``gitlab-api``.
+
+The GitLab REST API takes the project ID (or a URL-encoded
+``namespace/path``) in the path; ``get_repo_slug()`` returns the slug
+and we URL-encode the slash so the endpoint becomes
+``/projects/<namespace%2Fpath>/...``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.parse
+
+sys.path.insert(0, os.environ.get("ISTOTA_DEVBOX_LIB", "/usr/local/lib/istota_devbox"))
+from istota_devbox_client import (  # noqa: E402
+    ProxyProtocolError,
+    ProxyUnreachable,
+    RepoUnknown,
+    call,
+    die,
+    emit_response,
+    get_repo_slug,
+)
+
+
+_ACTION = "gitlab_api"
+_BIN = "glab"
+
+
+def _call(method: str, endpoint: str, *, body: str | None = None) -> int:
+    try:
+        response = call(_ACTION, method=method, endpoint=endpoint, body=body, headers={})
+    except (ProxyUnreachable, ProxyProtocolError) as e:
+        die(f"{_BIN}: {e}", exit_code=1)
+    return emit_response(response, _BIN)
+
+
+def _project_id() -> str:
+    try:
+        slug = get_repo_slug()
+    except RepoUnknown as e:
+        die(f"{_BIN}: {e}", exit_code=1)
+    return urllib.parse.quote(slug, safe="")
+
+
+def cmd_auth_status(argv: list[str]) -> int:
+    return _call("GET", "/user")
+
+
+def cmd_repo_view(argv: list[str]) -> int:
+    return _call("GET", f"/projects/{_project_id()}")
+
+
+def cmd_mr_create(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} mr create")
+    p.add_argument("--title", required=True)
+    p.add_argument("--description", default="")
+    p.add_argument("--source-branch", required=True)
+    p.add_argument("--target-branch", default="main")
+    args = p.parse_args(argv)
+    payload = {
+        "title": args.title,
+        "description": args.description,
+        "source_branch": args.source_branch,
+        "target_branch": args.target_branch,
+    }
+    return _call(
+        "POST",
+        f"/projects/{_project_id()}/merge_requests",
+        body=json.dumps(payload),
+    )
+
+
+def cmd_mr_view(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} mr view")
+    p.add_argument("iid")
+    args = p.parse_args(argv)
+    return _call("GET", f"/projects/{_project_id()}/merge_requests/{args.iid}")
+
+
+def cmd_mr_list(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} mr list")
+    p.add_argument("--state", choices=("opened", "closed", "merged", "all"), default="opened")
+    args = p.parse_args(argv)
+    return _call(
+        "GET",
+        f"/projects/{_project_id()}/merge_requests?state={args.state}",
+    )
+
+
+def cmd_mr_close(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} mr close")
+    p.add_argument("iid")
+    args = p.parse_args(argv)
+    return _call(
+        "PUT",
+        f"/projects/{_project_id()}/merge_requests/{args.iid}",
+        body=json.dumps({"state_event": "close"}),
+    )
+
+
+def cmd_issue_create(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} issue create")
+    p.add_argument("--title", required=True)
+    p.add_argument("--description", default="")
+    args = p.parse_args(argv)
+    return _call(
+        "POST",
+        f"/projects/{_project_id()}/issues",
+        body=json.dumps({"title": args.title, "description": args.description}),
+    )
+
+
+def cmd_issue_view(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} issue view")
+    p.add_argument("iid")
+    args = p.parse_args(argv)
+    return _call("GET", f"/projects/{_project_id()}/issues/{args.iid}")
+
+
+def cmd_issue_list(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog=f"{_BIN} issue list")
+    p.add_argument("--state", choices=("opened", "closed", "all"), default="opened")
+    args = p.parse_args(argv)
+    return _call(
+        "GET",
+        f"/projects/{_project_id()}/issues?state={args.state}",
+    )
+
+
+ROUTES: dict[str, dict[str, callable]] = {
+    "auth": {"status": cmd_auth_status},
+    "repo": {"view": cmd_repo_view},
+    "mr": {
+        "create": cmd_mr_create,
+        "view": cmd_mr_view,
+        "list": cmd_mr_list,
+        "close": cmd_mr_close,
+    },
+    "issue": {
+        "create": cmd_issue_create,
+        "view": cmd_issue_view,
+        "list": cmd_issue_list,
+    },
+}
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        die(f"usage: {_BIN} <command> <subcommand> [args]", exit_code=2)
+    cmd = argv[0]
+    if cmd not in ROUTES:
+        die(
+            f"{_BIN}: command {cmd!r} not yet routed through devbox proxy; "
+            f"use gitlab-api directly",
+            exit_code=2,
+        )
+    if len(argv) < 2:
+        subs = ", ".join(sorted(ROUTES[cmd]))
+        die(f"usage: {_BIN} {cmd} <{subs}>", exit_code=2)
+    sub = argv[1]
+    handler = ROUTES[cmd].get(sub)
+    if handler is None:
+        die(
+            f"{_BIN}: subcommand {cmd!r} {sub!r} not yet routed through "
+            f"devbox proxy; use gitlab-api directly",
+            exit_code=2,
+        )
+    return handler(argv[2:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

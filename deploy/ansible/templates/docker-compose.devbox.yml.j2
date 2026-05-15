@@ -26,6 +26,12 @@ services:
       - NET_RAW
     volumes:
       - devbox_home_{{ devbox_user }}:/home/dev
+{% if istota_devbox_proxy_enabled %}
+      # Host-side credential proxy socket. The container talks to the
+      # daemon over this Unix socket; the daemon injects tokens server-
+      # side so they never appear in the container's env or filesystem.
+      - {{ istota_devbox_proxy_socket_dir }}/devbox-cred-{{ devbox_user }}.sock:/run/istota-cred.sock
+{% endif %}
     tmpfs:
       - /workspace:size={{ istota_devbox_workspace_tmpfs_size }},mode=1777
     networks:

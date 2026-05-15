@@ -683,6 +683,28 @@ class TestDeveloperConfig:
         assert dev.github_reviewer == ""
         assert isinstance(dev.github_api_allowlist, list)
         assert len(dev.github_api_allowlist) > 0
+        # Devbox proxy defaults.
+        assert dev.api_timeout_seconds == 30
+        assert dev.devbox_proxy_enabled is True
+        assert dev.devbox_proxy_socket_dir == "/var/run/istota"
+        assert dev.devbox_proxy_audit_log == ""
+
+    def test_load_devbox_proxy_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+api_timeout_seconds = 60
+devbox_proxy_enabled = false
+devbox_proxy_socket_dir = "/run/istota"
+devbox_proxy_audit_log = "/var/log/istota/devbox-proxy-audit.log"
+""")
+        cfg = load_config(config_file)
+        assert cfg.developer.api_timeout_seconds == 60
+        assert cfg.developer.devbox_proxy_enabled is False
+        assert cfg.developer.devbox_proxy_socket_dir == "/run/istota"
+        assert cfg.developer.devbox_proxy_audit_log == "/var/log/istota/devbox-proxy-audit.log"
 
     def test_config_default(self):
         cfg = Config()

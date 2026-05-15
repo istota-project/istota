@@ -1270,25 +1270,112 @@
 # Without this, a Dockerfile-only change ships to the host via git but
 # the running container keeps the old image until something else
 # changes the compose template.
-- name: Hash devbox Dockerfile
-  ansible.builtin.stat:
-    path: "{{ istota_repo_dir }}/docker/devbox/Dockerfile"
-    checksum_algorithm: sha256
-  register: devbox_dockerfile_stat
+- name: Hash devbox image content (Dockerfile + lib + scripts + etc)
+  ansible.builtin.shell: |
+    find {{ istota_repo_dir }}/docker/devbox \
+        -type f \( -name Dockerfile -o -path '*/lib/*' -o -path '*/scripts/*' -o -path '*/etc/*' \) \
+        -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 sha256sum \
+        | sha256sum \
+        | awk '{print $1}'
+  register: devbox_content_hash
+  changed_when: false
   when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
 
-- name: Track devbox Dockerfile checksum (triggers rebuild on change)
+- name: Track devbox image-content checksum (triggers rebuild on change)
   ansible.builtin.copy:
     dest: "{{ istota_home }}/.devbox-dockerfile.sha256"
-    content: "{{ devbox_dockerfile_stat.stat.checksum }}\n"
+    content: "{{ devbox_content_hash.stdout }}\n"
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
     mode: "0644"
   when:
     - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
-    - devbox_dockerfile_stat.stat.exists | default(false)
+    - devbox_content_hash.stdout is defined
   notify:
     - "restart istota-devbox"
+
+# --- Devbox credential proxy ----------------------------------------------
+# Per-user host-side daemon that holds GitLab/GitHub tokens and answers
+# JSON requests over a Unix socket bind-mounted into each container. The
+# socket must exist before any devbox container starts — without the
+# bind-mount target Docker refuses to create the container — so the
+# tmpfiles + unit setup runs synchronously before the compose check.
+
+- name: Install devbox-proxy socket-directory tmpfiles snippet
+  template:
+    src: istota-devbox-proxy.tmpfiles.j2
+    dest: "/etc/tmpfiles.d/{{ istota_namespace }}-devbox-proxy.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  notify:
+    - "reload systemd-tmpfiles for devbox proxy"
+    - "restart istota-devbox-proxy"
+
+- name: Ensure devbox-proxy socket directory exists right now
+  file:
+    path: "{{ istota_devbox_proxy_socket_dir }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0750"
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Deploy devbox-proxy systemd instance unit
+  template:
+    src: istota-devbox-proxy@.service.j2
+    dest: "/etc/systemd/system/{{ istota_namespace }}-devbox-proxy@.service"
+    owner: root
+    group: root
+    mode: "0644"
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  notify:
+    - "reload systemd for devbox proxy"
+    - "restart istota-devbox-proxy"
+
+- name: Reload systemd before enabling devbox-proxy instances
+  systemd:
+    daemon_reload: yes
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  changed_when: false
+
+- name: Enable + start devbox-proxy per devbox user
+  systemd:
+    name: "{{ istota_namespace }}-devbox-proxy@{{ item }}.service"
+    enabled: yes
+    state: started
+  loop: "{{ istota_devbox_users }}"
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Stop + disable devbox-proxy units no longer in istota_devbox_users
+  block:
+    - name: List existing devbox-proxy instance units
+      ansible.builtin.shell: |
+        systemctl list-units --type=service --all --no-legend \
+          '{{ istota_namespace }}-devbox-proxy@*.service' \
+          | awk '{print $1}' \
+          || true
+      register: existing_proxy_units
+      changed_when: false
+
+    - name: Stop and disable proxy units no longer wanted
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop: "{{ existing_proxy_units.stdout_lines | default([]) }}"
+      when:
+        - item != ""
+        - >-
+            (item | regex_replace('^.*-devbox-proxy@(.+)\\.service$', '\\1'))
+            not in istota_devbox_users
+      failed_when: false
+  when:
+    - istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only
+    - istota_devbox_users | length > 0
 
 - name: Check whether devbox compose currently has containers running
   shell: docker compose -f docker-compose.devbox.yml ps -q
@@ -1465,6 +1552,45 @@
   loop:
     - "/etc/systemd/system/{{ istota_namespace }}-devbox-iptables.service"
     - "/usr/local/sbin/istota-devbox-iptables"
+  when: not istota_devbox_enabled and not istota_web_only
+  notify:
+    - reload systemd
+
+# --- Devbox credential proxy cleanup. Fires when devbox itself is off OR
+# when only the proxy is off but devbox is still on. In both cases the
+# per-user units come down; the unit file + tmpfiles snippet survive
+# istota_devbox_proxy_enabled=false only when devbox itself is still up
+# (operator may flip it back), but are removed when devbox is fully off.
+
+- name: List devbox-proxy instance units for cleanup
+  ansible.builtin.shell: |
+    systemctl list-units --type=service --all --no-legend \
+      '{{ istota_namespace }}-devbox-proxy@*.service' \
+      | awk '{print $1}' \
+      || true
+  register: existing_proxy_units_cleanup
+  changed_when: false
+  when: not istota_devbox_enabled or not istota_devbox_proxy_enabled
+  failed_when: false
+
+- name: Stop + disable all devbox-proxy units when proxy or devbox is disabled
+  systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: no
+  loop: "{{ existing_proxy_units_cleanup.stdout_lines | default([]) }}"
+  when:
+    - (not istota_devbox_enabled or not istota_devbox_proxy_enabled) and not istota_web_only
+    - item != ""
+  failed_when: false
+
+- name: Remove devbox-proxy unit + tmpfiles snippet when devbox itself is disabled
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/systemd/system/{{ istota_namespace }}-devbox-proxy@.service"
+    - "/etc/tmpfiles.d/{{ istota_namespace }}-devbox-proxy.conf"
   when: not istota_devbox_enabled and not istota_web_only
   notify:
     - reload systemd

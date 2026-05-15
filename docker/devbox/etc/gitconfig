@@ -1,0 +1,24 @@
+# /etc/gitconfig — baked into the devbox image.
+#
+# The credential helper proxies all credential lookups through the host-
+# side devbox daemon over the bind-mounted Unix socket. Per-host blocks
+# are intentionally omitted: the global helper line catches every host,
+# the daemon returns no_token for hosts it can't serve, and git treats
+# that as "no credential" — the right outcome.
+#
+# The placeholder [user] keeps `git commit` working without per-container
+# bootstrap; agents typically commit to bot-owned branches where the
+# placeholder is fine, and any project can override via `git config user.*`.
+
+[credential]
+	helper = istota
+
+[user]
+	name = Istota Agent
+	email = istota@local
+
+[init]
+	defaultBranch = main
+
+[safe]
+	directory = *

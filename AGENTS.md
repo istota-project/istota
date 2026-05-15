@@ -40,6 +40,8 @@ src/istota/
 ├── notifications.py      # Talk / Email / ntfy dispatcher
 ├── skill_proxy.py        # Unix-socket proxy for credential isolation
 ├── network_proxy.py      # CONNECT proxy for network isolation
+├── devbox_proxy.py       # Per-user host-side daemon: tokens stay out of the devbox container
+├── devbox_proxy_protocol.py  # Wire protocol for devbox_proxy (single-line JSON, 16 MiB cap)
 ├── nextcloud_api.py      # NC user metadata
 ├── nextcloud_client.py   # OCS + WebDAV plumbing
 ├── storage.py            # Bot-managed Nextcloud storage

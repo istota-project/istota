@@ -53,5 +53,32 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --no-modify-path --profile minimal
 ENV PATH="/home/dev/.cargo/bin:/home/dev/.local/bin:${PATH}"
 
+# Layer 5: devbox credential-proxy client shims. Each shim is a thin
+# Python script that frames a JSON request and writes it to the Unix
+# socket bind-mounted at /run/istota-cred.sock — the host-side daemon
+# injects the actual token. Tokens never enter the container.
+USER root
+COPY lib/istota_devbox_client.py /usr/local/lib/istota_devbox/istota_devbox_client.py
+COPY scripts/git-credential-istota /usr/local/bin/git-credential-istota
+COPY scripts/gitlab-api /usr/local/bin/gitlab-api
+COPY scripts/github-api /usr/local/bin/github-api
+COPY scripts/gh /usr/local/bin/gh
+COPY scripts/glab /usr/local/bin/glab
+COPY etc/gitconfig /etc/gitconfig
+RUN chmod 0755 /usr/local/bin/git-credential-istota \
+        /usr/local/bin/gitlab-api /usr/local/bin/github-api \
+        /usr/local/bin/gh /usr/local/bin/glab \
+    && chmod 0644 /usr/local/lib/istota_devbox/istota_devbox_client.py \
+        /etc/gitconfig
+USER dev
+
+# Wire the API wrappers and curated CLI shims into env so the developer
+# skill's prompt picks them up unchanged ($GITLAB_API_CMD / $GITHUB_API_CMD).
+ENV GITLAB_API_CMD=/usr/local/bin/gitlab-api \
+    GITHUB_API_CMD=/usr/local/bin/github-api \
+    GH_PATH=/usr/local/bin/gh \
+    GLAB_PATH=/usr/local/bin/glab \
+    ISTOTA_CRED_SOCK=/run/istota-cred.sock
+
 # The container is an exec target — keep it alive, no PID 1 service.
 CMD ["sleep", "infinity"]
