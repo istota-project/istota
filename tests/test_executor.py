@@ -2065,16 +2065,29 @@ class TestPreTranscribeAttachments:
 # ---------------------------------------------------------------------------
 
 
-def _make_image(path: Path, size: tuple[int, int], exif_orientation: int | None = None):
-    """Helper: write a JPEG of given pixel size, optionally with an EXIF rotation tag."""
+def _make_image(
+    path: Path,
+    size: tuple[int, int],
+    exif_orientation: int | None = None,
+    fmt: str = "JPEG",
+    mode: str = "RGB",
+    color=(200, 50, 50),
+    icc_profile: bytes | None = None,
+):
+    """Helper: write an image of given format/mode/size, optionally with EXIF
+    orientation or an ICC profile attached."""
     from PIL import Image
-    img = Image.new("RGB", size, color=(200, 50, 50))
-    kwargs: dict = {"quality": 90}
+    img = Image.new(mode, size, color=color)
+    kwargs: dict = {}
+    if fmt == "JPEG":
+        kwargs["quality"] = 90
     if exif_orientation is not None:
         exif = img.getexif()
         exif[0x0112] = exif_orientation  # Orientation tag
         kwargs["exif"] = exif.tobytes()
-    img.save(path, "JPEG", **kwargs)
+    if icc_profile is not None:
+        kwargs["icc_profile"] = icc_profile
+    img.save(path, fmt, **kwargs)
 
 
 class TestPreshrinkImageAttachments:
@@ -2157,6 +2170,99 @@ class TestPreshrinkImageAttachments:
                 ["/tmp/photo.jpg"], tmp_path, 1,
             )
             assert result == ["/tmp/photo.jpg"]
+
+    def test_large_png_resized(self, tmp_path):
+        from PIL import Image
+        src = tmp_path / "big.png"
+        _make_image(src, (3000, 2250), fmt="PNG")
+        result = _preshrink_image_attachments([str(src)], tmp_path, 13)
+        out = Path(result[0])
+        assert out != src
+        assert out.suffix == ".jpg"
+        with Image.open(out) as resized:
+            assert max(resized.size) == _IMAGE_MAX_EDGE
+
+    def test_large_webp_resized(self, tmp_path):
+        from PIL import Image
+        src = tmp_path / "big.webp"
+        _make_image(src, (3000, 2250), fmt="WEBP")
+        result = _preshrink_image_attachments([str(src)], tmp_path, 14)
+        out = Path(result[0])
+        assert out.suffix == ".jpg"
+        with Image.open(out) as resized:
+            assert max(resized.size) == _IMAGE_MAX_EDGE
+
+    def test_rgba_flattens_onto_white(self, tmp_path):
+        """Transparent screenshots should land on white, not the default black."""
+        from PIL import Image
+        src = tmp_path / "translucent.png"
+        # Fully transparent RGBA — every pixel should resolve to the background.
+        _make_image(src, (3000, 2000), fmt="PNG", mode="RGBA", color=(0, 0, 0, 0))
+        result = _preshrink_image_attachments([str(src)], tmp_path, 15)
+        out = Path(result[0])
+        with Image.open(out) as resized:
+            # JPEG quantization is lossy at quality=85, so allow some slack but
+            # the result has to be far closer to white than to black.
+            px = resized.convert("RGB").getpixel((resized.size[0] // 2, resized.size[1] // 2))
+            assert min(px) > 200, f"expected near-white, got {px}"
+
+    def test_small_rotated_image_is_still_rewritten(self, tmp_path):
+        """H1 regression: an 800x600 scan with orientation=6 needs a physically
+        rotated copy because Tesseract OCR doesn't honor EXIF."""
+        from PIL import Image
+        src = tmp_path / "scan.jpg"
+        _make_image(src, (800, 600), exif_orientation=6)
+        result = _preshrink_image_attachments([str(src)], tmp_path, 16)
+        out = Path(result[0])
+        assert out != src, "small but rotated image should still be rewritten"
+        with Image.open(out) as fixed:
+            w, h = fixed.size
+            # After applying orientation=6 (CW 90°) the image becomes portrait.
+            assert h > w
+            # Output drops the orientation tag.
+            assert fixed.getexif().get(0x0112, 1) == 1
+
+    def test_colliding_stems_do_not_overwrite(self, tmp_path):
+        """M1 regression: two attachments sharing a stem (photo.png + photo.jpg,
+        or duplicate IMG_1234.jpg from different dirs) must not overwrite."""
+        from PIL import Image
+        a_dir = tmp_path / "a"
+        b_dir = tmp_path / "b"
+        a_dir.mkdir()
+        b_dir.mkdir()
+        # Distinguishable colors so we can verify content survives.
+        _make_image(a_dir / "photo.jpg", (3000, 2000), color=(255, 0, 0))
+        _make_image(b_dir / "photo.jpg", (3000, 2000), color=(0, 255, 0))
+        result = _preshrink_image_attachments(
+            [str(a_dir / "photo.jpg"), str(b_dir / "photo.jpg")],
+            tmp_path,
+            17,
+        )
+        assert len(result) == 2
+        out_a = Path(result[0])
+        out_b = Path(result[1])
+        assert out_a != out_b, "outputs must not collide"
+        assert out_a.exists() and out_b.exists()
+        with Image.open(out_a) as ia, Image.open(out_b) as ib:
+            # A is mostly red, B is mostly green.
+            pa = ia.getpixel((ia.size[0] // 2, ia.size[1] // 2))
+            pb = ib.getpixel((ib.size[0] // 2, ib.size[1] // 2))
+            assert pa[0] > pa[1], f"first output should still be red-dominant, got {pa}"
+            assert pb[1] > pb[0], f"second output should still be green-dominant, got {pb}"
+
+    def test_icc_profile_preserved(self, tmp_path):
+        """Md2: color-managed images keep their ICC profile through the
+        re-encode (matters for bloodwork OCR with color reference charts)."""
+        from PIL import Image, ImageCms
+        # Build a synthetic sRGB ICC profile so we don't depend on system files.
+        srgb_profile = ImageCms.createProfile("sRGB")
+        icc_bytes = ImageCms.ImageCmsProfile(srgb_profile).tobytes()
+        src = tmp_path / "color.jpg"
+        _make_image(src, (3000, 2000), icc_profile=icc_bytes)
+        result = _preshrink_image_attachments([str(src)], tmp_path, 18)
+        out = Path(result[0])
+        with Image.open(out) as resized:
+            assert resized.info.get("icc_profile"), "ICC profile should be carried over"
 
 
 # ---------------------------------------------------------------------------

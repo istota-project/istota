@@ -66,9 +66,9 @@ _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm
 # Image extensions eligible for pre-shrinking before they reach the vision model
 _IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp", "heic", "heif"})
 
-# Claude vision works best around ~1.15 MP; a 1568-px longest edge keeps us under
-# that ceiling for the typical 4:3 phone aspect and avoids paying for pixels the
-# model downsamples anyway.
+# 1568 px matches Anthropic's vision long-edge limit; sending anything larger
+# just pays tokens for pixels the model downsamples on its end. (Vision also
+# enforces a separate ~1.15 MP area limit, which Claude handles itself.)
 _IMAGE_MAX_EDGE = 1568
 _IMAGE_JPEG_QUALITY = 85
 
@@ -356,10 +356,12 @@ def _preshrink_image_attachments(
 
     Phone photos are typically 12+ MP; that's expensive vision tokens and slow
     inference for content the model auto-downsamples anyway. For each image
-    attachment whose longest edge exceeds ``_IMAGE_MAX_EDGE``, write a resized
-    EXIF-rotated JPEG under ``user_temp_dir/attachments/task_<id>/`` and swap
-    the path in the returned list. Non-images, already-small images, and
-    failures pass through unchanged.
+    attachment we rewrite a JPEG copy under
+    ``user_temp_dir/attachments/task_<id>/`` when either:
+
+    * the longest edge exceeds ``_IMAGE_MAX_EDGE``, or
+    * the EXIF orientation isn't 1 (Tesseract OCR doesn't honor EXIF, so
+      small sideways scans need a physically rotated copy too).
 
     Returns the (possibly rewritten) attachments list, or the original input
     when there's nothing to do or PIL isn't available.
@@ -368,15 +370,22 @@ def _preshrink_image_attachments(
         return attachments
 
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageOps, UnidentifiedImageError
     except ImportError:
         logger.debug("Pillow not available, skipping image pre-shrink")
         return attachments
 
+    # Optional HEIC/HEIF support — iPhone photos arrive in this format.
+    try:
+        import pillow_heif  # type: ignore[import-not-found]
+        pillow_heif.register_heif_opener()
+    except ImportError:
+        pass
+
     out_dir = user_temp_dir / "attachments" / f"task_{task_id}"
     rewritten: list[str] = []
     changed = False
-    for att in attachments:
+    for idx, att in enumerate(attachments):
         ext = Path(att).suffix.lstrip(".").lower()
         if ext not in _IMAGE_EXTENSIONS:
             rewritten.append(att)
@@ -387,24 +396,61 @@ def _preshrink_image_attachments(
             continue
         try:
             with Image.open(src) as img:
-                img = ImageOps.exif_transpose(img)
+                orientation = img.getexif().get(0x0112, 1) or 1
                 w, h = img.size
-                if max(w, h) <= _IMAGE_MAX_EDGE:
+                # Orientations 5-8 swap the axes; project to final dimensions.
+                if orientation in (5, 6, 7, 8):
+                    final_w, final_h = h, w
+                else:
+                    final_w, final_h = w, h
+                needs_shrink = max(final_w, final_h) > _IMAGE_MAX_EDGE
+                needs_rotate = orientation != 1
+                if not needs_shrink and not needs_rotate:
                     rewritten.append(att)
                     continue
-                img.thumbnail((_IMAGE_MAX_EDGE, _IMAGE_MAX_EDGE), Image.Resampling.LANCZOS)
+                icc = img.info.get("icc_profile")
+                # JPEG-only: ask libjpeg to downsample at decode time so a 50 MP
+                # panorama doesn't fully decode into RAM before we thumbnail.
+                if needs_shrink and ext in ("jpg", "jpeg"):
+                    img.draft("RGB", (_IMAGE_MAX_EDGE, _IMAGE_MAX_EDGE))
+                img = ImageOps.exif_transpose(img)
+                if needs_shrink:
+                    img.thumbnail(
+                        (_IMAGE_MAX_EDGE, _IMAGE_MAX_EDGE), Image.Resampling.LANCZOS,
+                    )
+                if img.mode == "RGBA":
+                    # Flatten onto white so transparent screenshots don't end up
+                    # with a black background after JPEG conversion.
+                    flat = Image.new("RGB", img.size, (255, 255, 255))
+                    flat.paste(img, mask=img.split()[3])
+                    rgb = flat
+                elif img.mode not in ("RGB", "L"):
+                    rgb = img.convert("RGB")
+                else:
+                    rgb = img
                 out_dir.mkdir(parents=True, exist_ok=True)
-                out_path = out_dir / (src.stem + ".jpg")
-                rgb = img.convert("RGB") if img.mode not in ("RGB", "L") else img
-                rgb.save(out_path, "JPEG", quality=_IMAGE_JPEG_QUALITY, optimize=True)
+                # Prefix with the attachment index so two paths sharing a stem
+                # (photo.jpg + photo.png, or duplicate IMG_1234.jpg from
+                # different directories) don't overwrite each other.
+                out_path = out_dir / f"{idx:02d}_{src.stem}.jpg"
+                save_kwargs: dict = {
+                    "quality": _IMAGE_JPEG_QUALITY,
+                    "optimize": True,
+                }
+                if icc:
+                    save_kwargs["icc_profile"] = icc
+                rgb.save(out_path, "JPEG", **save_kwargs)
                 logger.info(
                     "Pre-shrunk image %s: %dx%d -> %dx%d (%d bytes)",
                     src.name, w, h, *rgb.size, out_path.stat().st_size,
                 )
                 rewritten.append(str(out_path))
                 changed = True
+        except UnidentifiedImageError:
+            logger.debug("Could not decode %s (unrecognized format)", att)
+            rewritten.append(att)
         except Exception:
-            logger.debug("Pre-shrink failed for %s", att, exc_info=True)
+            logger.warning("Pre-shrink failed for %s", att, exc_info=True)
             rewritten.append(att)
 
     return rewritten if changed else attachments
