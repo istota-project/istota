@@ -290,6 +290,15 @@ class DeveloperConfig:
         "PATCH /repos/*/pulls/*",
         "PATCH /repos/*/issues/*",
     ])
+    # Devbox credential proxy. See src/istota/devbox_proxy.py + the
+    # `devbox-credential-proxy` spec for the design. The proxy injects
+    # tokens server-side for the in-container `git`, `gitlab-api`,
+    # `github-api`, `gh`, and `glab` wrappers — the container never sees
+    # the token.
+    api_timeout_seconds: int = 30
+    devbox_proxy_enabled: bool = True
+    devbox_proxy_socket_dir: str = "/var/run/istota"
+    devbox_proxy_audit_log: str = ""   # empty = journal only; set to a path for file fan-out
 
 
 @dataclass
@@ -1108,6 +1117,10 @@ def load_config(config_path: Path | None = None) -> Config:
             github_username=dev.get("github_username", ""),
             github_default_owner=dev.get("github_default_owner", ""),
             github_reviewer=dev.get("github_reviewer", ""),
+            api_timeout_seconds=dev.get("api_timeout_seconds", 30),
+            devbox_proxy_enabled=dev.get("devbox_proxy_enabled", True),
+            devbox_proxy_socket_dir=dev.get("devbox_proxy_socket_dir", "/var/run/istota"),
+            devbox_proxy_audit_log=dev.get("devbox_proxy_audit_log", ""),
             **extra,
         )
 

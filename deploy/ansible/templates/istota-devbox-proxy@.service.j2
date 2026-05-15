@@ -1,0 +1,36 @@
+# {{ ansible_managed }}
+# Per-user devbox credential proxy. One systemd instance per devbox user;
+# the %i instance specifier is the user_id, which the daemon uses as its
+# audit-log key and the suffix of the socket path it listens on.
+#
+# Tokens are read from the EnvironmentFile and held only in this process's
+# memory — the per-user devbox container never sees them. The socket is
+# bind-mounted into the container at /run/istota-cred.sock via the compose
+# template's volumes entry.
+
+[Unit]
+Description=Istota devbox credential proxy ({{ istota_namespace }}, user %i)
+After=network.target
+# Keep this loose — the unit doesn't require docker to be up; the container
+# will fail to start if the socket file doesn't yet exist, which is the
+# cleaner failure mode.
+
+[Service]
+Type=simple
+User={{ istota_user }}
+Group={{ istota_group }}
+WorkingDirectory={{ istota_home }}
+Environment="ISTOTA_ADMINS_FILE=/etc/{{ istota_namespace }}/admins"
+EnvironmentFile=/etc/{{ istota_namespace }}/secrets.env
+ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.devbox_proxy --user %i --config {{ istota_repo_dir }}/config/config.toml
+Restart=on-failure
+RestartSec=5s
+# Limit blast radius. The proxy needs to read tokens, write to its socket
+# dir, and write to the audit log — nothing else.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

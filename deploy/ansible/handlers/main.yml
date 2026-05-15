@@ -22,6 +22,25 @@
     chdir: "{{ istota_home }}"
   when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
 
+# Per-user devbox credential proxy. Restart every instance after token
+# rotation, code update, or config change. systemd-tmpfiles --create
+# materializes the socket directory after the snippet is templated in.
+- name: "reload systemd-tmpfiles for devbox proxy"
+  command: systemd-tmpfiles --create /etc/tmpfiles.d/{{ istota_namespace }}-devbox-proxy.conf
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: "reload systemd for devbox proxy"
+  systemd:
+    daemon_reload: yes
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: "restart istota-devbox-proxy"
+  systemd:
+    name: "{{ istota_namespace }}-devbox-proxy@{{ item }}.service"
+    state: restarted
+  loop: "{{ istota_devbox_users }}"
+  when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
 - name: "restart istota-web"
   systemd:
     name: "{{ istota_namespace }}-web"

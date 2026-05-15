@@ -2,6 +2,74 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-15: Devbox credential proxy — tokens out of the container
+
+The devbox container has had a problem since it shipped: nothing inside it can talk to GitHub or GitLab. The toolchain is there (git, go, node, python, rust), but no credentials — no git config, no SSH key, no `$GITLAB_TOKEN`. The host-side `developer` skill has all of those, but lacks the heavier toolchain, which gave us a clunky hybrid: create the repo on the host, `devbox cp-in` the worktree, build/test inside, `cp-out`, commit and push from the host.
+
+The obvious fix — bind-mount the host's git credential file or set `GITLAB_TOKEN` in the container's env — makes the devbox a credential silo. Any code running inside can `cat ~/.git-credentials` or `printenv | grep TOKEN` and POST it somewhere. The devbox's egress firewall blocks RFC1918 and cloud metadata but not arbitrary `https://attacker.example/exfil`, and the LLM is the one composing the commands. The pattern the rest of Istota uses for exactly this problem is `skill_proxy.py`: a Unix-socket daemon on the host that injects credentials when an authorized client invokes an action. This change applies the same shape to the devbox.
+
+Worked the spec in `Specs/Active/devbox-credential-proxy.md` strict-TDD through six stages — protocol module, async daemon, edge cases + audit logging, container-side shims, Ansible plumbing, docs + rollout. Approach decisions made along the way (the spec's "open questions" — the spec file has fuller text on the why for each):
+
+- **Per-user daemon, not multiplexed.** The bind mount is already the auth boundary. One Python process per devbox user is cheap; per-user systemd state maps cleanly to per-user observability.
+- **Python for every container-side shim** rather than the spec's bash + socat. JSON framing is materially simpler in Python and the image already has python3. Shared client lib at `docker/devbox/lib/istota_devbox_client.py`; each shim does `sys.path.insert` + `from istota_devbox_client import call, emit_response, ...`. The `socat` apt-install in the spec is dropped.
+- **httpx.MockTransport instead of respx** for unit tests. Same fidelity, no new dep.
+- **`tmp_path` is unusable for AF_UNIX on macOS** (the 104-char path limit). Custom `sock_path` fixture under `/tmp/dvbx_*` keeps tests running on both platforms.
+- **Audit log: key-value text in both journal and file.** Matches the existing scheduler-log style; if structured JSON ever becomes a need we can add a second sink.
+- **Cross-host `git_credential get` emits a `no_token` audit line.** It's the only signal we have that the agent reached for a third-party host (e.g. `bitbucket.org`). Same outcome on the wire (git gets no credential → fails cleanly), audit is the difference.
+- **Daemon starts cleanly with no tokens configured.** Partial-provider setups (only GitLab, only GitHub) are the normal mode; failing fast at startup would be noisier than useful.
+- **CLI-shim subcommand set frozen at the spec's curated list** for now (`gh pr|issue|repo|auth`, `glab mr|issue|repo|auth`). Will revisit after real production usage shows which `gh release create` / `gh issue comment` etc. we actually need.
+
+The hairy moments:
+
+1. The first cut of `handle_connection` did `await reader.readline()` with the default asyncio `limit=65536`. A protocol-cap test (write 16 MiB+ then expect `bad_request`) failed with a `BrokenPipeError` mid-write because the daemon's `readline()` hit `LimitOverrunError` while the client was still draining and closed the socket. Two fixes: bump `start_unix_server(..., limit=MAX_REQUEST_BYTES + 4096)` so the daemon can actually buffer the line before rejecting it at the protocol layer; catch `(asyncio.LimitOverrunError, ValueError)` in `handle_connection` and return the canonical bad_request envelope so the path is well-formed either way. The test client now tolerates a BrokenPipe on write, since the daemon may rightfully close before the 16 MiB drain finishes.
+2. The Dockerfile originally used `COPY docker/devbox/lib/...` paths, which only work with the repo root as build context. The existing devbox compose template uses `context: {{ istota_repo_dir }}/docker/devbox`, so the right form is plain `COPY lib/...` / `COPY scripts/...`. The static-content smoke test in `tests/test_devbox_proxy_shims.py` catches future drift on this exact pattern.
+3. The pre-existing Dockerfile-change-triggers-rebuild task only hashed the Dockerfile itself. With the new lib + scripts + etc tree being COPYed in, an edit to a shim wouldn't trigger an image rebuild. Generalized the stat-then-copy task into a single `find … -exec sha256sum | sha256sum` over the whole `docker/devbox/{Dockerfile,lib,scripts,etc}` tree so any shim edit notifies `restart istota-devbox`.
+4. Systemd-before-compose ordering. Docker refuses to create a container if a bind-mount source doesn't exist, so the proxy must be up — socket file materialized — before the compose first-deploy step runs. Inserted the tmpfiles + unit + per-user `enable+start` block before the "Check whether devbox compose currently has containers running" task in `tasks/main.yml`. Added a synchronous `file:` task for the socket dir so it exists immediately (the tmpfiles handler fires at end-of-play).
+
+**Trust boundary check.** The new attack surface is the daemon's per-user Unix socket, reachable only by processes inside the matching devbox container. The container is the same one we already trust to receive bind-mounted docker socket access (the existing devbox capability) — the proxy doesn't widen that footprint. A compromised container can still cause auth'd writes through the proxy *for the duration of an operation* (e.g. force-push a tampered commit), but it can't exfiltrate the token itself: every request just gets a single response with the credential payload, never the raw token in a queryable form. The proxy doesn't try to prevent abuse of an already-compromised container against an already-authorized operation; the audit log is the after-the-fact signal.
+
+**Key changes:**
+- New `Brain`-shaped per-user daemon at `src/istota/devbox_proxy.py`. Asyncio, `DevboxProxyContext` dataclass, four handlers (`ping`, `git_credential`, `gitlab_api`, `github_api`). 16 MiB request cap inherited from the protocol module.
+- Pure-data protocol at `src/istota/devbox_proxy_protocol.py` — action constants, error codes (`ERR_NO_TOKEN`, `ERR_NOT_ALLOWED`, `ERR_UPSTREAM`, `ERR_BAD_REQUEST`, `ERR_UNKNOWN_ACTION`, `ERR_INTERNAL`), `encode_request`/`encode_response`/`encode_error`/`decode_request`/`decode_response`, `ProtocolError`. Importable from anywhere without dragging in asyncio.
+- Allowlist enforcement via `fnmatch.fnmatchcase` on `"<METHOD> <path>"` with query string stripped — matches the existing shell-glob semantics of the host-side wrapper.
+- Audit logger `istota.devbox_proxy.audit` writes one key-value line per action; `configure_audit_log(path)` attaches an optional FileHandler.
+- Five Python shims under `docker/devbox/scripts/` (`git-credential-istota`, `gitlab-api`, `github-api`, `gh`, `glab`) + shared `docker/devbox/lib/istota_devbox_client.py`. Curated `gh` / `glab` subset routes through the proxy; unrouted subcommands exit 2 pointing at the raw `github-api` / `gitlab-api` wrappers.
+- Baked `/etc/gitconfig` wires `[credential] helper = istota` globally + placeholder `[user]` identity + `[init] defaultBranch = main`.
+- Dockerfile gains a root-owned Layer 5 that COPYs the lib + scripts + gitconfig, chmods them, and exports `GITLAB_API_CMD` / `GITHUB_API_CMD` / `GH_PATH` / `GLAB_PATH` / `ISTOTA_CRED_SOCK` env vars.
+- Four new `DeveloperConfig` fields: `api_timeout_seconds`, `devbox_proxy_enabled`, `devbox_proxy_socket_dir`, `devbox_proxy_audit_log` — wired through the TOML parser with defaults.
+- New Ansible templates: `istota-devbox-proxy@.service.j2` instance unit, `istota-devbox-proxy.tmpfiles.j2` socket-dir snippet. New handlers chain in the right order: tmpfiles reload → daemon-reload → per-user restart. New defaults: `istota_devbox_proxy_enabled` (default true), `istota_devbox_proxy_socket_dir` (default `/var/run/{{ istota_namespace }}`), `istota_devbox_proxy_audit_log`, `istota_developer_api_timeout_seconds`.
+- Existing Dockerfile-checksum task generalized to hash the whole `docker/devbox/{Dockerfile,lib,scripts,etc}` tree so any shim edit triggers an image rebuild.
+- 88 new tests across `tests/test_devbox_proxy_protocol.py` (26), `tests/test_devbox_proxy.py` (44), `tests/test_devbox_proxy_shims.py` (40). Cross-suite total 550+ green.
+
+**Files added:**
+- `src/istota/devbox_proxy.py` - per-user asyncio daemon
+- `src/istota/devbox_proxy_protocol.py` - wire protocol module
+- `docker/devbox/lib/istota_devbox_client.py` - shared in-container client
+- `docker/devbox/scripts/git-credential-istota` - git credential helper
+- `docker/devbox/scripts/gitlab-api` - GitLab REST wrapper
+- `docker/devbox/scripts/github-api` - GitHub REST wrapper
+- `docker/devbox/scripts/gh` - curated GitHub CLI subset
+- `docker/devbox/scripts/glab` - curated GitLab CLI subset
+- `docker/devbox/etc/gitconfig` - baked /etc/gitconfig
+- `deploy/ansible/templates/istota-devbox-proxy@.service.j2` - systemd instance unit
+- `deploy/ansible/templates/istota-devbox-proxy.tmpfiles.j2` - socket-dir tmpfile
+- `tests/test_devbox_proxy_protocol.py`, `tests/test_devbox_proxy.py`, `tests/test_devbox_proxy_shims.py`
+
+**Files modified:**
+- `src/istota/config.py` - 4 new `DeveloperConfig` fields + TOML parser wiring
+- `docker/devbox/Dockerfile` - Layer 5 (root COPYs + chmod) + ENV defaults
+- `deploy/ansible/defaults/main.yml` - proxy defaults + `istota_developer_api_timeout_seconds`
+- `deploy/ansible/templates/config.toml.j2` - 4 new `[developer]` fields rendered
+- `deploy/ansible/templates/docker-compose.devbox.yml.j2` - per-user socket bind-mount
+- `deploy/ansible/tasks/main.yml` - new proxy setup block + generalized image-content checksum + cleanup-when-disabled
+- `deploy/ansible/handlers/main.yml` - tmpfiles reload, daemon-reload, restart per-user
+- `src/istota/skills/devbox/skill.md` - new "What works inside the devbox" section
+- `.claude/rules/skills.md` - Credential-proxy paragraph in the devbox block
+- `tests/test_config.py` - one new `DeveloperConfig` field test
+- `CHANGELOG.md` - `[Unreleased] / Added` entry
+
+**Deploy + end-to-end validation deferred to the operator** — needs a real `ansible-playbook` against the production host plus an agent task that exercises clone → build → commit → push → PR. The on-host smoke test from the spec — `socat -u - UNIX-CONNECT:/var/run/<namespace>/devbox-cred-<user>.sock <<<'{"action":"ping"}'` returning the expected payload — is the right first check after the playbook completes. Spec stays in `Specs/Active/` until that lands.
+
 ## 2026-05-15: Vendor a slim Monarch client; Django CSRF auth, cookie-only credentials
 
 Monarch sync started failing for a user mid-day. The third-party `monarchmoneycommunity` client (1.3.x, pinned to upstream `@main`) talks to `api.monarch.com/graphql` with `Authorization: Token <...>` and nothing else. That stopped working: the API now enforces Django CSRF on every GraphQL request and returns 403 `"CSRF Failed: Referer checking failed - no Referer."` when those headers aren't present. Upstream had no fix, no open issue mentioning the change, and no obvious activity. Pinning to a moving `@main` branch was already a smell — this was the moment to stop tracking it and own the integration.

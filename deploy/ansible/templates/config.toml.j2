@@ -345,6 +345,10 @@ github_api_allowlist = [
     "{{ pattern }}",
 {% endfor %}
 ]
+api_timeout_seconds = {{ istota_developer_api_timeout_seconds }}
+devbox_proxy_enabled = {{ istota_devbox_proxy_enabled | ternary('true', 'false') }}
+devbox_proxy_socket_dir = "{{ istota_devbox_proxy_socket_dir }}"
+devbox_proxy_audit_log = "{{ istota_devbox_proxy_audit_log }}"
 {% endif %}
 
 # User profiles, resources, and briefings live in the DB (user_profiles,
