@@ -1,17 +1,14 @@
 ---
 name: health
 triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2]
-description: Health tracking — body stats, bloodwork panels, biomarker trends, and lab result analysis. Experimental — only available when module_health is enabled.
+description: Health tracking — body stats, bloodwork panels, biomarker trends, and lab result analysis.
 cli: true
-experimental: true
 env: [{"var":"HEALTH_DB_PATH","from":"setup_env"}]
 ---
 
 # Health Skill
 
 Body-stats time series, bloodwork panels, biomarker trends, and lab result tracking. Per-user SQLite at `{workspace}/health/data/health.db`. All values stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
-
-Experimental: the whole subcommand surface is gated on the `module_health` operator feature flag. Calls return `{"status":"error", ...}` when the flag is off.
 
 ## When to use
 

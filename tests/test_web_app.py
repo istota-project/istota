@@ -1025,25 +1025,10 @@ class TestSettingsEndpoints:
         resp = await client.get("/istota/api/settings/modules", cookies=cookies)
         assert resp.status_code == 200
         body = resp.json()
-        # Experimental modules (health) are hidden by default.
-        assert set(body["modules"]) == {"feeds", "money", "location"}
+        assert set(body["modules"]) == {"feeds", "money", "location", "health"}
         # Alice has no disabled_modules in the fixture.
         assert body["disabled"] == []
         assert body["enabled_for_user"]["feeds"] is True
-
-    async def test_modules_endpoint_exposes_experimental_when_enabled(
-        self, tmp_path, client, app,
-    ):
-        from istota.config import ExperimentalConfig
-
-        cfg = self._make_test_config(tmp_path)
-        cfg.experimental = ExperimentalConfig(features=["module_health"])
-        _patch_app(cfg)
-        cookies = await self._login_alice(client, app)
-        resp = await client.get("/istota/api/settings/modules", cookies=cookies)
-        assert resp.status_code == 200
-        body = resp.json()
-        assert "health" in body["modules"]
         assert body["enabled_for_user"]["health"] is True
 
     async def test_services_never_returns_plaintext(self, tmp_path, client, app):
@@ -1524,29 +1509,20 @@ class TestProfileEndpoints:
         assert resp.status_code == 200
         assert mod._config.is_module_enabled("alice", "feeds") is False
 
-    async def test_disabled_modules_rejects_hidden_experimental(self, tmp_path, client, app):
-        # Experimental modules aren't user-visible until the operator
-        # enables their flag. Profile writes that reference one must be
-        # rejected — otherwise non-admin users can persist disabled_modules
-        # entries for a module the operator hasn't sanctioned.
+    async def test_disabled_modules_rejects_unknown(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         cookies = await self._login(client, "alice", "Alice")
         resp = await client.put(
             "/istota/api/settings/profile",
-            json={"disabled_modules": ["health"]},
+            json={"disabled_modules": ["bogus_module"]},
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 400
 
-    async def test_disabled_modules_accepts_experimental_when_flag_on(
-        self, tmp_path, client, app,
-    ):
-        from istota.config import ExperimentalConfig
-
+    async def test_disabled_modules_accepts_health(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
-        cfg.experimental = ExperimentalConfig(features=["module_health"])
         _patch_app(cfg)
         cookies = await self._login(client, "alice", "Alice")
         resp = await client.put(

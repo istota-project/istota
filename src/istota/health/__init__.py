@@ -1,8 +1,7 @@
 """Per-user health module — body stats, bloodwork panels, biomarker trends.
 
-Per-user SQLite at ``{workspace}/health/data/health.db``. Gated behind the
-``module_health`` experimental flag (see ``istota.modules`` /
-``istota.experimental``) until the module stabilises.
+Per-user SQLite at ``{workspace}/health/data/health.db``. On by default;
+per-user opt-out via ``disabled_modules``.
 
 Architecturally mirrors :mod:`istota.feeds`, :mod:`istota.location`, and
 :mod:`istota.money`: a workspace synthesiser, a per-user loader, a SQLite

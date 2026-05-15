@@ -19,10 +19,6 @@ Per-user health DB resolved via ``HEALTH_DB_PATH`` (set by the
 ``ISTOTA_DEFERRED_DIR`` / ``ISTOTA_TASK_ID`` are set (sandbox mode); the
 scheduler applies them post-task. Direct mode is used by the CLI / web
 shell when those env vars aren't set.
-
-The whole subcommand surface is gated on the ``module_health``
-experimental feature; ``main()`` short-circuits with an error envelope
-when the operator has not enabled it.
 """
 
 from __future__ import annotations
@@ -43,9 +39,9 @@ def setup_env(ctx) -> dict[str, str]:
     """Inject ``HEALTH_DB_PATH`` for the per-user health DB.
 
     Self-gates on ``Config.is_module_enabled(user_id, "health")`` — when
-    the experimental flag is off the loader raises ``UserNotFoundError``
-    and we return no env contribution, so the CLI can't reach a DB it
-    isn't supposed to touch.
+    the user has opted out the loader raises ``UserNotFoundError`` and we
+    return no env contribution, so the CLI can't reach a DB it isn't
+    supposed to touch.
     """
     from istota import health as _health  # noqa: PLC0415
 
@@ -70,15 +66,6 @@ def _emit(payload: dict, *, error: bool = False) -> None:
 
 def _fail(msg: str) -> None:
     _emit({"status": "error", "error": msg}, error=True)
-
-
-def _check_experimental() -> None:
-    from istota.experimental import enabled_features_from_env
-
-    if "module_health" not in enabled_features_from_env():
-        _fail(
-            "feature 'module_health' is experimental and not enabled on this instance",
-        )
 
 
 def _db_path() -> str:
@@ -696,7 +683,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    _check_experimental()
     parser = build_parser()
     args = parser.parse_args()
 

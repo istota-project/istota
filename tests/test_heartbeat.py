@@ -323,14 +323,14 @@ class TestCheckShellCommand:
         from istota.config import ExperimentalConfig
         config = Config(
             nextcloud_mount_path=tmp_path,
-            experimental=ExperimentalConfig(features=["module_health", "money_tax"]),
+            experimental=ExperimentalConfig(features=["money_tax", "money_wash_sales"]),
         )
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
             config={
                 "command": "echo flags=[$ISTOTA_EXPERIMENTAL_FEATURES]",
-                "condition": "contains:module_health,money_tax",
+                "condition": "contains:money_tax,money_wash_sales",
             },
         )
         result = _check_shell_command(check, config)

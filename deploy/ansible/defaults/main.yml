@@ -229,7 +229,7 @@ istota_disabled_skills: []
 # ship in the tree but are off by default. Not exposed in the web UI,
 # not toggleable per user. Run `uv run istota experimental list` on the
 # host to see the current registry. See docs/EXPERIMENTAL.md.
-# Example: ["module_health", "money_tax"]
+# Example: ["money_tax", "money_wash_sales"]
 istota_experimental_features: []
 
 # Users configuration (dict of user_id -> user config).
