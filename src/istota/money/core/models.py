@@ -13,10 +13,24 @@ from datetime import date
 
 @dataclass
 class MonarchCredentials:
-    """Credentials for Monarch Money API authentication."""
+    """Credentials for Monarch Money API authentication.
+
+    The current Monarch web API enforces Django CSRF on `/graphql`, which
+    means session cookies plus a matching `X-Csrftoken` header are required
+    on every request. The cookie pair is the only durable credential — paste
+    once from browser DevTools and it lasts months on a trusted-device login.
+
+    Other fields are kept for backward compatibility:
+    - `session_token`: prior `Authorization: Token <...>` flow (status TBD;
+      may still work for some accounts, kept as fallback).
+    - `email` / `password`: programmatic `/auth/login/` flow. Usually
+      blocked by Cloudflare from server IPs but documented for completeness.
+    """
+    session_id: str | None = None
+    csrftoken: str | None = None
+    session_token: str | None = None
     email: str | None = None
     password: str | None = None
-    session_token: str | None = None
 
 
 @dataclass

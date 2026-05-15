@@ -320,6 +320,14 @@ class TestMoneyLoaderEnvFirst:
     resolution.
     """
 
+    _ALL_ENV_VARS = (
+        "MONARCH_SESSION_ID",
+        "MONARCH_CSRFTOKEN",
+        "MONARCH_SESSION_TOKEN",
+        "MONARCH_EMAIL",
+        "MONARCH_PASSWORD",
+    )
+
     def test_env_takes_precedence_over_store(self, tmp_path, monkeypatch):
         from istota.config import Config, UserConfig
         from istota.money._loader import load_user_secrets
@@ -328,6 +336,8 @@ class TestMoneyLoaderEnvFirst:
             db_path=tmp_path / "istota.db",
             users={"alice": UserConfig()},
         )
+        monkeypatch.setenv("MONARCH_SESSION_ID", "env-sid")
+        monkeypatch.setenv("MONARCH_CSRFTOKEN", "env-csrf")
         monkeypatch.setenv("MONARCH_EMAIL", "env@example.com")
         monkeypatch.setenv("MONARCH_PASSWORD", "env-pw")
         monkeypatch.setenv("MONARCH_SESSION_TOKEN", "env-tok")
@@ -339,6 +349,8 @@ class TestMoneyLoaderEnvFirst:
 
         result = load_user_secrets("alice", cfg)
         assert result == {"monarch": {
+            "session_id": "env-sid",
+            "csrftoken": "env-csrf",
             "email": "env@example.com",
             "password": "env-pw",
             "session_token": "env-tok",
@@ -354,16 +366,23 @@ class TestMoneyLoaderEnvFirst:
             db_path=tmp_path / "istota.db",
             users={"alice": UserConfig()},
         )
-        for v in ("MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_SESSION_TOKEN"):
+        for v in self._ALL_ENV_VARS:
             monkeypatch.delenv(v, raising=False)
 
         def fake_get(db, u, s, k):
-            return {"email": "store@x", "password": "store-pw",
-                    "session_token": "store-tok"}.get(k)
+            return {
+                "session_id": "store-sid",
+                "csrftoken": "store-csrf",
+                "email": "store@x",
+                "password": "store-pw",
+                "session_token": "store-tok",
+            }.get(k)
 
         monkeypatch.setattr("istota.secrets_store.get_secret", fake_get)
         result = load_user_secrets("alice", cfg)
         assert result == {"monarch": {
+            "session_id": "store-sid",
+            "csrftoken": "store-csrf",
             "email": "store@x",
             "password": "store-pw",
             "session_token": "store-tok",
@@ -379,17 +398,17 @@ class TestMoneyLoaderEnvFirst:
             db_path=tmp_path / "istota.db",
             users={"alice": UserConfig()},
         )
-        monkeypatch.setenv("MONARCH_SESSION_TOKEN", "env-tok")
-        monkeypatch.delenv("MONARCH_EMAIL", raising=False)
-        monkeypatch.delenv("MONARCH_PASSWORD", raising=False)
+        monkeypatch.setenv("MONARCH_SESSION_ID", "env-sid")
+        for v in ("MONARCH_CSRFTOKEN", "MONARCH_SESSION_TOKEN",
+                  "MONARCH_EMAIL", "MONARCH_PASSWORD"):
+            monkeypatch.delenv(v, raising=False)
 
         def fake_get(db, u, s, k):
-            return {"email": "store@x", "password": "store-pw"}.get(k)
+            return {"csrftoken": "store-csrf"}.get(k)
 
         monkeypatch.setattr("istota.secrets_store.get_secret", fake_get)
         result = load_user_secrets("alice", cfg)
         assert result == {"monarch": {
-            "email": "store@x",
-            "password": "store-pw",
-            "session_token": "env-tok",
+            "session_id": "env-sid",
+            "csrftoken": "store-csrf",
         }}

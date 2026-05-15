@@ -1328,6 +1328,101 @@ async def settings_set_secret(
     return {"ok": True, "service": service, "key": key, "configured": bool(value)}
 
 
+@api_router.post("/money/monarch/login")
+async def money_monarch_login(
+    payload: dict,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Derive Monarch session cookies from email+password and store them.
+
+    Body: ``{"email": "...", "password": "...", "mfa_totp": "..."}``.
+    Only ``email`` and ``password`` are required; ``mfa_totp`` is the
+    *current* 6-digit code (we never store the TOTP secret).
+
+    On success: persists ``session_id`` + ``csrftoken`` to the encrypted
+    secrets table and returns ``{"ok": True}``. The plaintext credentials
+    are never written to disk — they exist only for the duration of the
+    /auth/login/ call.
+
+    Failure modes map to status codes so the UI can render specific
+    messages:
+    - 400: invalid input (missing email/password, etc.)
+    - 401: Monarch rejected the credentials
+    - 412: MFA required and no code supplied
+    - 503: Cloudflare blocked (server IP can't reach login endpoint)
+    """
+    import asyncio
+    from fastapi import HTTPException
+
+    from . import secrets_store
+    from .money._vendor.monarch_client import (
+        MonarchAuthError, MonarchCaptchaRequired, MonarchClient,
+        MonarchClientOutdated, MonarchCloudflareBlocked, MonarchMFARequired,
+    )
+
+    email = (payload.get("email") or "").strip() if isinstance(payload, dict) else ""
+    password = payload.get("password") or "" if isinstance(payload, dict) else ""
+    mfa_totp = (payload.get("mfa_totp") or "").strip() if isinstance(payload, dict) else ""
+    if not (email and password):
+        raise HTTPException(status_code=400, detail="email and password required")
+
+    try:
+        auth = await MonarchClient.login_with_credentials(
+            email=email, password=password, mfa_totp=mfa_totp or None,
+        )
+    except MonarchMFARequired as exc:
+        raise HTTPException(
+            status_code=412, detail=f"MFA required: {exc}",
+        )
+    except MonarchClientOutdated as exc:
+        # 503 because the user can't fix this — the operator needs to bump
+        # CLIENT_VERSION in the source. Surface it loudly.
+        logger.error("monarch_login_client_outdated msg=%s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Monarch client is outdated and login is blocked. "
+                   f"This needs an operator-side fix. {exc}",
+        )
+    except MonarchCaptchaRequired as exc:
+        # Monarch's bot-protection gate is sticky once tripped. There is no
+        # programmatic way through it; the user must use cookie-paste.
+        # 503 + a UI-friendly message so the SvelteKit form can route them
+        # to Option B.
+        logger.warning("monarch_login_captcha user=%s", user["username"])
+        raise HTTPException(status_code=503, detail=str(exc))
+    except MonarchCloudflareBlocked as exc:
+        # 503 because the failure is environmental (server IP), not a
+        # client error the caller can fix by re-trying.
+        raise HTTPException(status_code=503, detail=str(exc))
+    except MonarchAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("monarch_login_unexpected_error")
+        raise HTTPException(status_code=500, detail=f"Unexpected: {exc}")
+
+    try:
+        secrets_store.set_secret(
+            _config.db_path, user["username"], "monarch", "session_id",
+            auth.session_id,
+        )
+        secrets_store.set_secret(
+            _config.db_path, user["username"], "monarch", "csrftoken",
+            auth.csrftoken,
+        )
+    except secrets_store.SecretKeyMissingError:
+        raise HTTPException(
+            status_code=503,
+            detail="ISTOTA_SECRET_KEY is not set; cannot store secrets.",
+        )
+
+    logger.info(
+        "monarch_login_ok user=%s sid_len=%d csrf_len=%d",
+        user["username"], len(auth.session_id), len(auth.csrftoken),
+    )
+    return {"ok": True}
+
+
 @api_router.delete("/settings/secrets/{service}/{key}")
 async def settings_delete_secret(
     service: str,

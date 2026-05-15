@@ -734,6 +734,66 @@ def sync_monarch(ctx, dry_run, ledger):
     _output(_run_monarch_sync(ctx, dry_run, ledger))
 
 
+@cli.command("debug-monarch")
+@pass_ctx
+def debug_monarch(ctx):
+    """Health-check Monarch credentials.
+
+    Calls the cheapest possible GraphQL query (``me { id email }``) so
+    operators / heartbeats can quickly tell whether the stored cookies
+    still authenticate. Output is a JSON envelope:
+
+    - ``{"status":"ok", "auth_ok":true, "who":{...}}`` on success
+    - ``{"status":"error", "auth_ok":false, "error":"..."}`` on rejection
+      or missing creds.
+    """
+    import asyncio
+
+    from istota.money import config_store
+    from istota.money._vendor.monarch_client import (
+        MonarchAuthError, MonarchClient, MonarchCookieAuth,
+    )
+    from istota.money.core.transactions import parse_monarch_config
+
+    if ctx.db_path is not None and config_store.has_monarch_data(ctx.db_path):
+        config = config_store.load_monarch(ctx.db_path, secrets=ctx.secrets)
+    elif ctx.monarch_config_path and ctx.monarch_config_path.exists():
+        config = parse_monarch_config(
+            ctx.monarch_config_path, secrets=ctx.secrets,
+        )
+    else:
+        _output({
+            "status": "error", "auth_ok": False,
+            "error": "No monarch config available",
+        })
+        return
+
+    creds = config.credentials
+    if not (creds.session_id and creds.csrftoken):
+        _output({
+            "status": "error", "auth_ok": False,
+            "error": "Missing session_id and/or csrftoken cookies. "
+                     "Set them via the money settings page.",
+        })
+        return
+
+    async def _probe() -> dict:
+        client = MonarchClient(MonarchCookieAuth(
+            session_id=creds.session_id, csrftoken=creds.csrftoken,
+        ))
+        return await client.whoami()
+
+    try:
+        who = asyncio.run(_probe())
+    except MonarchAuthError as exc:
+        _output({"status": "error", "auth_ok": False, "error": str(exc)})
+        return
+    except Exception as exc:  # noqa: BLE001
+        _output({"status": "error", "auth_ok": False, "error": str(exc)})
+        return
+    _output({"status": "ok", "auth_ok": True, "who": who})
+
+
 # =============================================================================
 # Invoice commands
 # =============================================================================
