@@ -63,6 +63,15 @@ from .brain.claude_code import (  # noqa: E402  (kept after module docstring)
 # Audio extensions eligible for pre-transcription (matches whisper skill file_types)
 _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"})
 
+# Image extensions eligible for pre-shrinking before they reach the vision model
+_IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp", "heic", "heif"})
+
+# Claude vision works best around ~1.15 MP; a 1568-px longest edge keeps us under
+# that ceiling for the typical 4:3 phone aspect and avoids paying for pixels the
+# model downsamples anyway.
+_IMAGE_MAX_EDGE = 1568
+_IMAGE_JPEG_QUALITY = 85
+
 
 # Patterns that indicate leaked tool-call XML in model output.
 # These are Claude Code's internal framing and should never appear in user-facing text.
@@ -336,6 +345,69 @@ def _pre_transcribe_attachments(
     transcribed_text = " ".join(transcribed_parts)
     filenames = ", ".join(Path(p).name for p in audio_paths)
     return f"Transcribed voice message: {transcribed_text}\n\n(Original audio: {filenames})"
+
+
+def _preshrink_image_attachments(
+    attachments: list[str] | None,
+    user_temp_dir: Path,
+    task_id: int,
+) -> list[str] | None:
+    """Downscale oversized image attachments before they reach the vision model.
+
+    Phone photos are typically 12+ MP; that's expensive vision tokens and slow
+    inference for content the model auto-downsamples anyway. For each image
+    attachment whose longest edge exceeds ``_IMAGE_MAX_EDGE``, write a resized
+    EXIF-rotated JPEG under ``user_temp_dir/attachments/task_<id>/`` and swap
+    the path in the returned list. Non-images, already-small images, and
+    failures pass through unchanged.
+
+    Returns the (possibly rewritten) attachments list, or the original input
+    when there's nothing to do or PIL isn't available.
+    """
+    if not attachments:
+        return attachments
+
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        logger.debug("Pillow not available, skipping image pre-shrink")
+        return attachments
+
+    out_dir = user_temp_dir / "attachments" / f"task_{task_id}"
+    rewritten: list[str] = []
+    changed = False
+    for att in attachments:
+        ext = Path(att).suffix.lstrip(".").lower()
+        if ext not in _IMAGE_EXTENSIONS:
+            rewritten.append(att)
+            continue
+        src = Path(att)
+        if not src.is_file():
+            rewritten.append(att)
+            continue
+        try:
+            with Image.open(src) as img:
+                img = ImageOps.exif_transpose(img)
+                w, h = img.size
+                if max(w, h) <= _IMAGE_MAX_EDGE:
+                    rewritten.append(att)
+                    continue
+                img.thumbnail((_IMAGE_MAX_EDGE, _IMAGE_MAX_EDGE), Image.Resampling.LANCZOS)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_path = out_dir / (src.stem + ".jpg")
+                rgb = img.convert("RGB") if img.mode not in ("RGB", "L") else img
+                rgb.save(out_path, "JPEG", quality=_IMAGE_JPEG_QUALITY, optimize=True)
+                logger.info(
+                    "Pre-shrunk image %s: %dx%d -> %dx%d (%d bytes)",
+                    src.name, w, h, *rgb.size, out_path.stat().st_size,
+                )
+                rewritten.append(str(out_path))
+                changed = True
+        except Exception:
+            logger.debug("Pre-shrink failed for %s", att, exc_info=True)
+            rewritten.append(att)
+
+    return rewritten if changed else attachments
 
 
 def get_user_temp_dir(config: Config, user_id: str) -> Path:
@@ -1913,6 +1985,15 @@ def execute_task(
     if enriched_prompt != task.prompt:
         logger.info("Pre-transcribed audio for task %s, enriched prompt for skill selection", task.id)
         task.prompt = enriched_prompt
+
+    # Pre-shrink oversized image attachments — vision tokens scale with pixels
+    # and phone photos are 12+ MP. EXIF rotation is applied in the same pass so
+    # the model and any downstream OCR see a correctly-oriented image.
+    shrunken = _preshrink_image_attachments(
+        task.attachments, get_user_temp_dir(config, task.user_id), task.id,
+    )
+    if shrunken is not task.attachments:
+        task.attachments = shrunken
 
     # Select and load relevant skills
     from .skills._loader import (

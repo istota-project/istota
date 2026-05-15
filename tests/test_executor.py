@@ -22,6 +22,8 @@ from istota.executor import (
     load_persona,
     load_emissaries,
     _pre_transcribe_attachments,
+    _preshrink_image_attachments,
+    _IMAGE_MAX_EDGE,
     _detect_notification_reply,
     _apply_recency_window_talk,
     _apply_recency_window_db,
@@ -2048,6 +2050,105 @@ class TestPreTranscribeAttachments:
     def test_all_audio_extensions_recognized(self):
         for ext in ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]:
             assert ext in _AUDIO_EXTENSIONS
+
+
+# ---------------------------------------------------------------------------
+# TestPreshrinkImageAttachments
+# ---------------------------------------------------------------------------
+
+
+def _make_image(path: Path, size: tuple[int, int], exif_orientation: int | None = None):
+    """Helper: write a JPEG of given pixel size, optionally with an EXIF rotation tag."""
+    from PIL import Image
+    img = Image.new("RGB", size, color=(200, 50, 50))
+    kwargs: dict = {"quality": 90}
+    if exif_orientation is not None:
+        exif = img.getexif()
+        exif[0x0112] = exif_orientation  # Orientation tag
+        kwargs["exif"] = exif.tobytes()
+    img.save(path, "JPEG", **kwargs)
+
+
+class TestPreshrinkImageAttachments:
+    def test_no_attachments_passthrough(self, tmp_path):
+        assert _preshrink_image_attachments(None, tmp_path, 1) is None
+        assert _preshrink_image_attachments([], tmp_path, 1) == []
+
+    def test_non_image_passthrough(self, tmp_path):
+        result = _preshrink_image_attachments(
+            ["/tmp/voice.mp3", "/tmp/doc.pdf"], tmp_path, 1,
+        )
+        assert result == ["/tmp/voice.mp3", "/tmp/doc.pdf"]
+
+    def test_small_image_passthrough(self, tmp_path):
+        src = tmp_path / "small.jpg"
+        _make_image(src, (800, 600))
+        result = _preshrink_image_attachments([str(src)], tmp_path, 7)
+        assert result == [str(src)]
+        # No output directory created for a no-op
+        assert not (tmp_path / "attachments" / "task_7").exists()
+
+    def test_large_image_resized(self, tmp_path):
+        from PIL import Image
+        src = tmp_path / "big.jpg"
+        _make_image(src, (4032, 3024))
+        result = _preshrink_image_attachments([str(src)], tmp_path, 42)
+        assert len(result) == 1
+        out = Path(result[0])
+        assert out != src
+        assert out.parent == tmp_path / "attachments" / "task_42"
+        assert out.suffix == ".jpg"
+        with Image.open(out) as resized:
+            assert max(resized.size) == _IMAGE_MAX_EDGE
+            # Aspect ratio is preserved (4:3 → 1568x1176)
+            assert resized.size == (_IMAGE_MAX_EDGE, _IMAGE_MAX_EDGE * 3 // 4)
+
+    def test_exif_rotation_applied(self, tmp_path):
+        """Orientation=6 (CW 90°) — a 4000x3000 landscape becomes a 3000x4000 portrait
+        after transpose; longest edge stays the long side after resize."""
+        from PIL import Image
+        src = tmp_path / "rotated.jpg"
+        _make_image(src, (4000, 3000), exif_orientation=6)
+        result = _preshrink_image_attachments([str(src)], tmp_path, 9)
+        out = Path(result[0])
+        with Image.open(out) as resized:
+            w, h = resized.size
+            # After EXIF transpose the image is portrait (taller than wide)
+            assert h > w
+            assert max(w, h) == _IMAGE_MAX_EDGE
+            # Output should not carry over a leftover orientation tag
+            exif = resized.getexif()
+            assert exif.get(0x0112, 1) == 1
+
+    def test_missing_file_passthrough(self, tmp_path):
+        result = _preshrink_image_attachments(
+            ["/tmp/does_not_exist.jpg"], tmp_path, 1,
+        )
+        assert result == ["/tmp/does_not_exist.jpg"]
+
+    def test_corrupt_image_passthrough(self, tmp_path):
+        src = tmp_path / "corrupt.jpg"
+        src.write_bytes(b"not actually a jpeg")
+        result = _preshrink_image_attachments([str(src)], tmp_path, 1)
+        assert result == [str(src)]
+
+    def test_mixed_attachments(self, tmp_path):
+        big = tmp_path / "photo.jpg"
+        _make_image(big, (3000, 2000))
+        result = _preshrink_image_attachments(
+            ["/tmp/voice.mp3", str(big), "/tmp/note.txt"], tmp_path, 11,
+        )
+        assert result[0] == "/tmp/voice.mp3"
+        assert result[2] == "/tmp/note.txt"
+        assert result[1] != str(big)
+        assert Path(result[1]).exists()
+
+    def test_pil_missing_passthrough(self, tmp_path):
+        with patch.dict("sys.modules", {"PIL": None}):
+            result = _preshrink_image_attachments(
+                ["/tmp/photo.jpg"], tmp_path, 1,
+            )
+            assert result == ["/tmp/photo.jpg"]
 
 
 # ---------------------------------------------------------------------------
