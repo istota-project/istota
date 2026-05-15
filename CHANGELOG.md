@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-15
+
 ### Added
 - **Devbox credential proxy.** Per-user host-side asyncio daemon (`src/istota/devbox_proxy.py` + `devbox_proxy_protocol.py`) that lets the devbox container do git over HTTPS and call the GitLab/GitHub REST APIs without ever holding a token. The daemon listens on `/var/run/{namespace}/devbox-cred-<user>.sock`, bind-mounted into each container at `/run/istota-cred.sock`; the proxy clients inside the image (`git-credential-istota`, `gitlab-api`, `github-api`, `gh`, `glab` — `docker/devbox/scripts/*` with shared helper at `docker/devbox/lib/istota_devbox_client.py`) frame single-line JSON requests. The daemon injects `PRIVATE-TOKEN` / `Authorization: token …` headers and `username=x-access-token` git credentials server-side; tokens never appear in container env, filesystem, or memory beyond the brief moment git uses them mid-handshake. Endpoint allowlist enforcement reuses `developer.{gitlab,github}_api_allowlist`; cross-host `git_credential get` (e.g. `bitbucket.org`) returns `no_token` so git fails cleanly. Audit logger `istota.devbox_proxy.audit` emits one key-value journal line per action (`user=, action=, result=, dur_ms=, method=, endpoint=, status=`) with an optional file fan-out via `developer.devbox_proxy_audit_log`. `gh` / `glab` shims cover the curated subset the agent uses (`pr|mr create|view|list|close`, `issue create|view|list`, `repo view`, `auth status`) — anything else exits 2 pointing at the raw `github-api` / `gitlab-api` wrappers. Defaults on when devbox is on; toggle via `[developer] devbox_proxy_enabled` / Ansible's `istota_devbox_proxy_enabled`. Bundled `/etc/gitconfig` wires `[credential] helper = istota` globally so existing `git push` flows work unchanged. Systemd instance template `{namespace}-devbox-proxy@<user>.service` brought up before compose so the bind-mount target exists at container creation; existing devbox-image rebuild trigger was generalized to hash the whole `docker/devbox/{Dockerfile,lib,scripts,etc}` tree.
 - **Vendored Monarch Money client.** Replaced the third-party `monarchmoneycommunity` package with a slim aiohttp client at `src/istota/money/_vendor/monarch_client.py`. Talks to `api.monarch.com` using the cookie-based auth model the API now requires (Django CSRF on `/graphql` — session cookies + `X-Csrftoken` + `Origin` + `Referer` on every request). Six distinct exception types map to specific HTTP statuses in the new web route so the UI can render targeted error messages: `MonarchAuthError` (401), `MonarchAPIError` (5xx / malformed), `MonarchMFARequired` (412), `MonarchClientOutdated` (503 — operator bumps `CLIENT_VERSION`), `MonarchCaptchaRequired` (503 — sticky bot-protection, must use cookie-paste), `MonarchCloudflareBlocked` (503 — server IP blocked).
@@ -538,7 +540,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.11.1...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.12.0...main
+[0.12.0]: https://gitlab.com/cynium/istota/-/releases/v0.12.0
 [0.11.1]: https://gitlab.com/cynium/istota/-/releases/v0.11.1
 [0.11.0]: https://gitlab.com/cynium/istota/-/releases/v0.11.0
 [0.10.0]: https://gitlab.com/cynium/istota/-/releases/v0.10.0
