@@ -91,7 +91,7 @@ def build_prompt(
 | Email | `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM` | `config.email.*` (`SMTP_FROM` is plus-addressed: `bot+user_id@domain`) |
 | Email | `IMAP_HOST/PORT/USER/PASSWORD` | `config.email.*` |
 | Karakeep | `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY` | From resource config `extra` |
-| Monarch | `MONARCH_SESSION_TOKEN` | From resource config `extra` |
+| Monarch | `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN` | From the encrypted `secrets` table (cookie-pair auth). The legacy `MONARCH_EMAIL` / `MONARCH_PASSWORD` / `MONARCH_SESSION_TOKEN` were removed when the API switched to Django CSRF auth on `/graphql` — the cookie pair is the only credential. |
 | Money | `MONEY_CONFIG`, `MONEY_USER` | From the user's `money` resource (in-process; `MONEY_USER` defaults to istota user_id) |
 | Feeds | `FEEDS_USER` | From the user's `feeds` resource (in-process; defaults to istota user_id) |
 | Location | `LOCATION_DB_PATH` | `istota.location.resolve_for_user(user_id, config).db_path` via the location skill's `setup_env` hook. Per-user `{workspace}/location/data/location.db`. Skill subcommands needing the framework geocode caches (`reverse_geocode`, `day_summary`) open a second conn to `ISTOTA_DB_PATH`. |
@@ -183,7 +183,7 @@ remains in the source as a dead helper but is no longer called.
 | `build_clean_env(config)` | Minimal env for Claude subprocess (PATH, HOME, PYTHONUNBUFFERED + passthrough vars) |
 | `build_stripped_env()` | os.environ minus credential vars (PASSWORD/TOKEN/SECRET/API_KEY/NC_PASS/PRIVATE_KEY/APP_PASSWORD). For heartbeat/cron commands. Always-on. |
 | `build_allowed_tools(is_admin, skill_names)` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash"]`. All Bash allowed — clean env is the boundary. |
-| `_PROXY_CREDENTIAL_VARS` | Frozenset of specific env vars stripped when proxy enabled (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, MONARCH_SESSION_TOKEN, GOOGLE_WORKSPACE_CLI_TOKEN) |
+| `_PROXY_CREDENTIAL_VARS` | Frozenset of specific env vars stripped when proxy enabled (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, MONARCH_SESSION_ID, MONARCH_CSRFTOKEN, GOOGLE_WORKSPACE_CLI_TOKEN) |
 | `_CREDENTIAL_SKILL_MAP` | Maps each credential env var to the set of skills that need it (scopes proxy responses) |
 | `_authorized_skills_from_credentials(skill_index, credential_env)` | Returns skills authorized for credential access this task — any skill in `_CREDENTIAL_SKILL_MAP` is authorized if at least one of its mapped credentials is present in `credential_env`. Includes doc-only skills (notably `developer`) whose creds are consumed via `credential-fetch` lookups from helper scripts the executor writes (git credential helper, gitlab-api wrapper). Decoupled from skill selection: a keyword miss in Pass 1 / Pass 2 doesn't lock out a skill the user has clearly configured. Threat model is unchanged because `credential_env` only contains creds the user's resources / instance config supplied. |
 

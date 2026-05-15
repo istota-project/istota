@@ -2,6 +2,66 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-15: Vendor a slim Monarch client; Django CSRF auth, cookie-only credentials
+
+Monarch sync started failing for a user mid-day. The third-party `monarchmoneycommunity` client (1.3.x, pinned to upstream `@main`) talks to `api.monarch.com/graphql` with `Authorization: Token <...>` and nothing else. That stopped working: the API now enforces Django CSRF on every GraphQL request and returns 403 `"CSRF Failed: Referer checking failed - no Referer."` when those headers aren't present. Upstream had no fix, no open issue mentioning the change, and no obvious activity. Pinning to a moving `@main` branch was already a smell — this was the moment to stop tracking it and own the integration.
+
+The first hour was a probe loop, not a coding loop. Before writing any new code I needed to know what the API actually requires *today*, because the Reddit thread that surfaced the issue was LLM-generated and listed seven required headers that turned out to be a mix of "needed", "tolerated", and "wrong". I wrote two small probes against the live `/graphql` with the user's browser cookies pasted in:
+
+- **Probe 1 (auth combinations)** — tried six header sets ranging from "cookies only" to "the full Reddit recipe". Result: cookies + `X-Csrftoken` + `Origin` + `Referer` is the minimum. The `monarch-client` / `monarch-client-version` headers some forks send are tolerated but ignored. (Important caveat below: that's true on `/graphql`, not on `/auth/login/`.)
+- **Probe 2 (cookie subsets)** — confirmed that only `session_id` and `csrftoken` are required for ongoing API calls. The Cloudflare cookies (`__cf_bm`, `cf_clearance`) and the analytics cookies (`ajs_*`) are needed only at login time. This makes the cookie-paste workflow durable: the user pastes two values once and they last weeks-to-months on a trusted-device login.
+
+That gave me the request shape with confidence. I vendored a slim aiohttp client at `src/istota/money/_vendor/monarch_client.py`, ~150 lines for the operations we actually use (`whoami` + `get_transactions` + later `login_with_credentials`). The third-party package and its `gql` / `graphql-core` / `oathtool` transitive deps came out of `pyproject.toml`; `aiohttp` moved from "transitive" to a declared dep of the `money` extra so the vendor stays buildable on its own.
+
+**Five distinct exception types instead of one.** Earlier the wrapper at `monarch_api.py` raised generic exceptions and the executor had no idea what kind of failure it was looking at. The new client raises:
+
+- `MonarchAuthError` — 401 / 404 / generic 4xx (Monarch returns 404 for "Invalid email and password combination", which surprised me; the test pins this).
+- `MonarchAPIError` — 5xx, malformed JSON, GraphQL `errors` array.
+- `MonarchMFARequired` — distinguished from generic 403 by parsing the `REQUIRES_MFA` error code in the body.
+- `MonarchClientOutdated` — fires on 403 with `"Please update to the latest version of the app to continue login."`. The fix is operator-side: bump `CLIENT_VERSION` in the vendored client. Distinct from auth failures so the operator knows it's their problem, not the user's.
+- `MonarchCloudflareBlocked` — Cloudflare's challenge HTML pattern. Tells the caller to fall back to the cookie-paste workflow.
+
+A sixth one came out of the live login probe later: `MonarchCaptchaRequired`. More on that below.
+
+**Live verification, then implementation, in that order.** I called the new client against the real API as soon as `whoami()` worked — `get_transactions()` returned real data, end-to-end, before any of the wider plumbing changed. That made the rest of the work confident: schema changes, settings UI, web routes, env loader, all knew the contract was right.
+
+**Programmatic login was the part that didn't survive contact with reality.** The plan was: store cookies as the durable credential, *and* offer an "email + password → derive cookies" flow on the settings page so users wouldn't have to learn DevTools. Implemented `MonarchClient.login_with_credentials(email, password, mfa_totp=...)` that POSTs to `/auth/login/`, captures cookies via `aiohttp.CookieJar(unsafe=True)`, and returns the `(session_id, csrftoken)` pair. Wired it through a new `/api/money/monarch/login` route and a SvelteKit form with `<details>` panels for "Option A: Login with email and password" and "Option B: Paste cookies from your browser".
+
+Live-tested. Got 403 `"Please update to the latest version of the app to continue login."`. Hadn't sent the `monarch-client` / `monarch-client-version` headers because the GraphQL probes had shown they were ignored. Turns out `/auth/login/` *does* validate them. Quick curl loop with several plausible version strings (`2025.5.1`, `2025.10.0`, `2025.11.0`, etc.) showed that Monarch loosely validates the version field — anything reasonable-looking is accepted. Picked `2025.10.0`, made `CLIENT_VERSION` a module-level constant so it's the one place to bump if Monarch ever does start strictly checking.
+
+Re-tested with the headers present. Got back `429 {"detail":"CAPTCHA is required to proceed.","error_code":"CAPTCHA_REQUIRED"}`. That's Monarch's own bot-protection gate, separate from Cloudflare. Added the sixth exception type (`MonarchCaptchaRequired`), classified it as 503 in the web route with a message that explicitly routes the user to Option B. The CAPTCHA gate is sticky once tripped — there's no programmatic path through it for that (account, IP) pair. So for this user, the cookie-paste workflow is the only thing that works. For other users on other IPs, Option A may still work; the UI degrades gracefully when it doesn't.
+
+This is exactly the right architecture in retrospect. Programmatic login is a convenience that works sometimes; cookie-paste is the credential of record that always works. The error types and HTTP statuses make the failure mode visible in the UI ("Login blocked by Cloudflare — use Option B") rather than dumping a generic auth failure.
+
+**Then the user pointed at the settings UI screenshot.** The `ServiceCard` at the bottom was still rendering five fields — `session_id`, `csrftoken`, plus three "(legacy)" ones — because I'd kept `email`, `password`, and `session_token` in `MonarchCredentials` and `secret_schema.py` for back-compat. Dead weight that nothing read. Did a hard removal: schema down to two fields, `MonarchCredentials` down to two fields, `_loader.py` env vars down to two, both `parse_monarch_config` paths trimmed to two, `_IMPORT_MAP` for the retired `[[resources]]` types emptied, and the help-text "legacy fields are kept for backward compatibility" sentence dropped from the SvelteKit page.
+
+Test churn from the hard removal: roughly two dozen tests across nine files that used `monarch/email` or `session_token` as generic test data needed updating. Easy mechanical work. Three tests had real semantic dependencies on the legacy fields and got rewritten — `tests/test_secrets_store.py::TestImport` switched to karakeep as the representative service since it still has fields to migrate; the manifest test asserts the cookie-only env set; the workspace migration test now exercises the cookie keys round-tripping through `parse_monarch_config`. Live `debug-monarch` re-verified end-to-end after the removal.
+
+**`debug-monarch` subcommand.** Tiny addition that earned its place: `python -m istota.money.cli debug-monarch` runs `whoami()` and prints `{"status":"ok","auth_ok":true,"who":{...}}` or an error envelope. Useful for heartbeat checks and for the debugging-the-debugger moment when an operator wants to know "are these cookies still good?" without spawning a full sync.
+
+**`monarch-client-version` is a known liability.** I picked `2025.10.0` because it worked when I tested it. Monarch could start strictly validating tomorrow. The plan if that happens: open browser DevTools on `app.monarch.com`, copy whatever `monarch-client-version` value the live web app sends, bump the constant. The exception type (`MonarchClientOutdated`) makes the failure mode immediately legible. Not putting it in config because it's not user-tunable — it's "the protocol version we know how to speak", which belongs in source.
+
+**Files added:**
+- `src/istota/money/_vendor/__init__.py`, `src/istota/money/_vendor/monarch_client.py` — vendored slim client (~250 lines).
+- `tests/money/test_monarch_client.py` — 22 tests pinning request shape, all six error paths, the `debug-monarch` CLI envelope, and the `monarch_api.py` wrapper.
+- `scripts/probe_monarch_login.py` — operator-facing probe for the live `/auth/login/` flow. Takes `MM_EMAIL` / `MM_PASSWORD` / optional `MM_MFA_TOTP` from env, prints structured output, exits non-zero on failure. Useful next time something breaks.
+
+**Files modified:**
+- `pyproject.toml` — dropped `monarchmoneycommunity` git dep, added `aiohttp>=3.10` to the `money` extra.
+- `src/istota/money/core/importers/monarch_api.py` — rewritten against the vendored client, defensive logging on every error path.
+- `src/istota/money/core/models.py` — `MonarchCredentials` reduced to `(session_id, csrftoken)`.
+- `src/istota/money/_loader.py`, `src/istota/money/config_store.py`, `src/istota/money/core/transactions.py` — credential plumbing trimmed to the cookie pair.
+- `src/istota/money/cli.py` — new `debug-monarch` command.
+- `src/istota/skills/money/__init__.py` — facade dispatch for `debug-monarch`.
+- `src/istota/skills/money/skill.md` — env block trimmed to `MONARCH_SESSION_ID` + `MONARCH_CSRFTOKEN`.
+- `src/istota/secret_schema.py` — monarch service exposes only the cookie pair.
+- `src/istota/secrets_store.py` — `_IMPORT_MAP` for retired `money` / `monarch` resource types emptied (no fields to migrate post-cookie-auth).
+- `src/istota/web_app.py` — new `POST /api/money/monarch/login` route, distinct HTTP status per exception type (401/412/503).
+- `web/src/lib/api.ts` — `monarchLogin()` client.
+- `web/src/routes/money/settings/+page.svelte` — Option A login form + Option B cookie-paste instructions, error-kind classifier in the form's response handler.
+- `web/vite-mock-api.ts` — schema match.
+- ~9 test files updated for the new credential shape.
+
 ## 2026-05-14: Stop fighting Docker's iptables on the devbox bridge
 
 The freshly-deployed devbox container could resolve DNS but couldn't reach anything outbound — every TCP/UDP/ICMP packet to the public internet timed out. The deployment host had been running fine all week; the breakage appeared the moment Ansible brought the devbox up alongside the existing browser bridge.
