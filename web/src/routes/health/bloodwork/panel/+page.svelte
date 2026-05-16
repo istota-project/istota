@@ -197,7 +197,7 @@
 
 <div class="page">
 	{#if loading}
-		<div class="empty">Loading…</div>
+		<div class="loading">Loading…</div>
 	{:else if error && !panel}
 		<div class="msg error">{error}</div>
 	{:else if panel}
