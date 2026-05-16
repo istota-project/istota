@@ -30,6 +30,8 @@ from istota.health.models import (
     BiomarkerRef,
     Diagnosis,
     Encounter,
+    Immunization,
+    ImmunizationRef,
     Panel,
     Stat,
 )
@@ -164,6 +166,51 @@ CREATE INDEX IF NOT EXISTS idx_diagnoses_status ON diagnoses(status);
 CREATE INDEX IF NOT EXISTS idx_diagnoses_name ON diagnoses(name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_diagnoses_dedup
     ON diagnoses(dedup_key) WHERE dedup_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS immunizations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    product_name TEXT,
+    date_given TEXT NOT NULL,
+    manufacturer TEXT,
+    dose_label TEXT,
+    lot_number TEXT,
+    route TEXT,
+    site TEXT,
+    administered_by TEXT,
+    facility TEXT,
+    encounter_id INTEGER REFERENCES encounters(id) ON DELETE SET NULL,
+    cvx_code TEXT,
+    notes TEXT,
+    source TEXT NOT NULL DEFAULT 'manual',
+    dedup_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_immunizations_name ON immunizations(name);
+CREATE INDEX IF NOT EXISTS idx_immunizations_date ON immunizations(date_given);
+CREATE INDEX IF NOT EXISTS idx_immunizations_encounter ON immunizations(encounter_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_immunizations_dedup
+    ON immunizations(dedup_key) WHERE dedup_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS immunization_refs (
+    name TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    schedule TEXT NOT NULL,
+    interval_days INTEGER,
+    primary_series_doses INTEGER,
+    aliases TEXT,
+    description TEXT,
+    typical_age_range TEXT
+);
+
+CREATE TABLE IF NOT EXISTS immunization_explainers (
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (name, status)
+);
 """
 
 
@@ -1307,3 +1354,295 @@ def encounters_for_diagnosis(
     if not row:
         return []
     return [_row_to_encounter(row)]
+
+
+# -- immunizations -----------------------------------------------------------
+
+
+_IMMUNIZATION_UPDATE_FIELDS = (
+    "name", "product_name", "date_given", "manufacturer", "dose_label",
+    "lot_number", "route", "site", "administered_by", "facility",
+    "encounter_id", "cvx_code", "notes",
+)
+
+
+def _row_to_immunization(row: sqlite3.Row) -> Immunization:
+    return Immunization(
+        id=row["id"],
+        name=row["name"],
+        product_name=row["product_name"],
+        date_given=row["date_given"],
+        manufacturer=row["manufacturer"],
+        dose_label=row["dose_label"],
+        lot_number=row["lot_number"],
+        route=row["route"],
+        site=row["site"],
+        administered_by=row["administered_by"],
+        facility=row["facility"],
+        encounter_id=row["encounter_id"],
+        cvx_code=row["cvx_code"],
+        notes=row["notes"],
+        source=row["source"],
+        created_at=row["created_at"],
+    )
+
+
+def insert_immunization(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    date_given: str,
+    product_name: str | None = None,
+    manufacturer: str | None = None,
+    dose_label: str | None = None,
+    lot_number: str | None = None,
+    route: str | None = None,
+    site: str | None = None,
+    administered_by: str | None = None,
+    facility: str | None = None,
+    encounter_id: int | None = None,
+    cvx_code: str | None = None,
+    notes: str | None = None,
+    source: str = "manual",
+    dedup_key: str | None = None,
+) -> int:
+    if dedup_key is not None:
+        row = conn.execute(
+            "SELECT id FROM immunizations WHERE dedup_key = ?", (dedup_key,),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+    cur = conn.execute(
+        """
+        INSERT INTO immunizations(
+            name, product_name, date_given, manufacturer, dose_label,
+            lot_number, route, site, administered_by, facility,
+            encounter_id, cvx_code, notes, source, dedup_key
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            name, product_name, date_given, manufacturer, dose_label,
+            lot_number, route, site, administered_by, facility,
+            encounter_id, cvx_code, notes, source, dedup_key,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def get_immunization(
+    conn: sqlite3.Connection, immunization_id: int,
+) -> Immunization | None:
+    row = conn.execute(
+        "SELECT * FROM immunizations WHERE id = ?", (immunization_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return _row_to_immunization(row)
+
+
+def list_immunizations(
+    conn: sqlite3.Connection,
+    *,
+    name: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[Immunization]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if name:
+        clauses.append("name = ?")
+        params.append(name)
+    if since:
+        clauses.append("date_given >= ?")
+        params.append(since)
+    if until:
+        clauses.append("date_given <= ?")
+        params.append(until)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM immunizations {where} "
+        f"ORDER BY date_given DESC, id DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    return [_row_to_immunization(r) for r in rows]
+
+
+def update_immunization(
+    conn: sqlite3.Connection, immunization_id: int, **kwargs: Any,
+) -> int:
+    fields: list[str] = []
+    params: list[Any] = []
+    for k in _IMMUNIZATION_UPDATE_FIELDS:
+        if k not in kwargs:
+            continue
+        v = kwargs[k]
+        # name and date_given are NOT NULL; explicit None is a no-op.
+        if k in ("name", "date_given") and v is None:
+            continue
+        fields.append(f"{k} = ?")
+        params.append(v)
+    if not fields:
+        return 0
+    params.append(immunization_id)
+    cur = conn.execute(
+        f"UPDATE immunizations SET {', '.join(fields)} WHERE id = ?", params,
+    )
+    return cur.rowcount
+
+
+def delete_immunization(
+    conn: sqlite3.Connection, immunization_id: int,
+) -> int:
+    cur = conn.execute(
+        "DELETE FROM immunizations WHERE id = ?", (immunization_id,),
+    )
+    return cur.rowcount
+
+
+def immunizations_for_encounter(
+    conn: sqlite3.Connection, encounter_id: int,
+) -> list[Immunization]:
+    rows = conn.execute(
+        "SELECT * FROM immunizations WHERE encounter_id = ? "
+        "ORDER BY date_given DESC, id DESC",
+        (encounter_id,),
+    ).fetchall()
+    return [_row_to_immunization(r) for r in rows]
+
+
+# -- immunization_refs -------------------------------------------------------
+
+
+def _row_to_immunization_ref(row: sqlite3.Row) -> ImmunizationRef:
+    aliases_raw = row["aliases"] or ""
+    try:
+        aliases = json.loads(aliases_raw) if aliases_raw else []
+    except (ValueError, TypeError):
+        aliases = []
+    return ImmunizationRef(
+        name=row["name"],
+        display_name=row["display_name"],
+        category=row["category"],
+        schedule=row["schedule"],
+        interval_days=row["interval_days"],
+        primary_series_doses=row["primary_series_doses"],
+        aliases=list(aliases),
+        description=row["description"],
+        typical_age_range=row["typical_age_range"],
+    )
+
+
+def upsert_immunization_ref(conn: sqlite3.Connection, ref: dict) -> None:
+    aliases_json = json.dumps(ref.get("aliases") or [])
+    conn.execute(
+        """
+        INSERT INTO immunization_refs(
+            name, display_name, category, schedule, interval_days,
+            primary_series_doses, aliases, description, typical_age_range
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            display_name = excluded.display_name,
+            category = excluded.category,
+            schedule = excluded.schedule,
+            interval_days = excluded.interval_days,
+            primary_series_doses = excluded.primary_series_doses,
+            aliases = excluded.aliases,
+            description = excluded.description,
+            typical_age_range = excluded.typical_age_range
+        """,
+        (
+            ref["name"], ref["display_name"], ref["category"], ref["schedule"],
+            ref.get("interval_days"), ref.get("primary_series_doses"),
+            aliases_json, ref.get("description"), ref.get("typical_age_range"),
+        ),
+    )
+
+
+def list_immunization_refs(
+    conn: sqlite3.Connection,
+) -> list[ImmunizationRef]:
+    rows = conn.execute(
+        "SELECT * FROM immunization_refs "
+        "ORDER BY category, display_name COLLATE NOCASE",
+    ).fetchall()
+    return [_row_to_immunization_ref(r) for r in rows]
+
+
+def get_immunization_ref(
+    conn: sqlite3.Connection, name: str,
+) -> ImmunizationRef | None:
+    row = conn.execute(
+        "SELECT * FROM immunization_refs WHERE name = ?", (name,),
+    ).fetchone()
+    if not row:
+        return None
+    return _row_to_immunization_ref(row)
+
+
+def find_immunization_ref_by_alias(
+    conn: sqlite3.Connection, candidate: str,
+) -> ImmunizationRef | None:
+    """Match by canonical name first, then by any alias (case-insensitive)."""
+    direct = get_immunization_ref(conn, candidate)
+    if direct:
+        return direct
+    needle = candidate.strip().lower()
+    if not needle:
+        return None
+    for ref in list_immunization_refs(conn):
+        if ref.name.lower() == needle:
+            return ref
+        for a in ref.aliases:
+            if a.lower() == needle:
+                return ref
+    return None
+
+
+# -- immunization_explainers -------------------------------------------------
+
+
+def get_immunization_explainer(
+    conn: sqlite3.Connection, name: str, status: str,
+) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT name, status, payload, created_at
+        FROM immunization_explainers WHERE name = ? AND status = ?
+        """,
+        (name, status),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (ValueError, TypeError):
+        payload = {}
+    return {
+        "name": row["name"],
+        "status": row["status"],
+        "payload": payload,
+        "created_at": row["created_at"],
+    }
+
+
+def save_immunization_explainer(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    status: str,
+    payload: dict,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO immunization_explainers(name, status, payload)
+        VALUES (?, ?, ?)
+        ON CONFLICT(name, status) DO UPDATE SET
+            payload = excluded.payload,
+            created_at = datetime('now')
+        """,
+        (name, status, json.dumps(payload or {})),
+    )

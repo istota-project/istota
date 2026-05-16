@@ -1,0 +1,211 @@
+[
+  {
+    "name": "Influenza",
+    "display_name": "Influenza (flu)",
+    "category": "routine",
+    "schedule": "annual",
+    "interval_days": 365,
+    "primary_series_doses": 1,
+    "aliases": ["flu", "INFS", "Fluzone", "Fluzone Quadrivalent", "Fluzone Trivalent", "Flulaval", "Flulaval Quadrivalent", "Flucelvax", "Flucelvax Quadrivalent", "Fluarix", "Afluria", "Fluad", "FluMist", "influenza"],
+    "typical_age_range": "≥6 months",
+    "description": "Seasonal flu vaccine that protects against the influenza strains predicted to circulate that year. Recommended annually for everyone aged 6 months and older; older adults and people with chronic conditions are typically offered higher-dose or adjuvanted formulations. Protection wanes over the course of a season, so timing the dose before flu activity rises matters more than the exact month."
+  },
+  {
+    "name": "COVID-19",
+    "display_name": "COVID-19",
+    "category": "routine",
+    "schedule": "annual",
+    "interval_days": 365,
+    "primary_series_doses": 1,
+    "aliases": ["covid", "covid-19", "sars-cov-2", "Comirnaty", "Spikevax", "Janssen", "Janssen/J&J", "J&J", "Johnson & Johnson", "Novavax", "Pfizer", "Moderna", "Pfizer-BioNTech", "COVID-19 PF"],
+    "typical_age_range": "≥6 months",
+    "description": "mRNA, protein-subunit, or viral-vector vaccine against SARS-CoV-2. Current guidance is an annual updated dose for most adults; immunocompromised people, older adults, and pregnant people are often offered additional doses. The dominant circulating variant changes each season, so the formulation is updated yearly."
+  },
+  {
+    "name": "Tdap",
+    "display_name": "Tdap (tetanus, diphtheria, pertussis)",
+    "category": "booster",
+    "schedule": "every_10y",
+    "interval_days": 3650,
+    "primary_series_doses": 1,
+    "aliases": ["tetanus", "diphtheria", "pertussis", "Tdap", "Boostrix", "Adacel", "tetanus diphtheria pertussis", "whooping cough"],
+    "typical_age_range": "≥11 years",
+    "description": "Combination booster against tetanus, diphtheria, and pertussis (whooping cough). Adults need a Tdap once and then a Td or Tdap booster every 10 years; one Tdap dose is also recommended during each pregnancy to pass antibodies to the newborn. After a deep wound a clinician may shorten the interval if more than 5 years have passed."
+  },
+  {
+    "name": "Td",
+    "display_name": "Td (tetanus, diphtheria)",
+    "category": "booster",
+    "schedule": "every_10y",
+    "interval_days": 3650,
+    "primary_series_doses": 1,
+    "aliases": ["Td", "tetanus diphtheria", "tetanus booster"],
+    "typical_age_range": "adults",
+    "description": "Tetanus and diphtheria booster, given every 10 years in adults who don't need the pertussis component. Either Td or Tdap can be used for routine adult boosters; current US practice often favors Tdap so pertussis coverage carries forward."
+  },
+  {
+    "name": "MMR",
+    "display_name": "MMR (measles, mumps, rubella)",
+    "category": "routine",
+    "schedule": "lifetime_after_series",
+    "interval_days": null,
+    "primary_series_doses": 2,
+    "aliases": ["MMR", "measles", "mumps", "rubella", "M-M-R II", "MMRV"],
+    "typical_age_range": "adults born after 1957 without documented immunity",
+    "description": "Live-attenuated vaccine that protects against measles, mumps, and rubella. Two doses give long-lasting immunity. Adults born after 1957 who lack documentation of vaccination or laboratory immunity typically need one or two doses; healthcare workers, college students, and international travelers are higher-priority groups."
+  },
+  {
+    "name": "Varicella",
+    "display_name": "Varicella (chickenpox)",
+    "category": "routine",
+    "schedule": "lifetime_after_series",
+    "interval_days": null,
+    "primary_series_doses": 2,
+    "aliases": ["varicella", "chickenpox", "Varivax", "VAR"],
+    "typical_age_range": "adults without prior infection or vaccination",
+    "description": "Live-attenuated vaccine against varicella-zoster virus. Two doses are recommended for adults who don't have evidence of prior infection or vaccination. Childhood varicella infection is generally accepted as immunity; serology can confirm if records are unclear."
+  },
+  {
+    "name": "HPV",
+    "display_name": "HPV (human papillomavirus)",
+    "category": "routine",
+    "schedule": "series_then_booster",
+    "interval_days": null,
+    "primary_series_doses": 3,
+    "aliases": ["HPV", "Gardasil", "Gardasil 9", "human papillomavirus", "Cervarix"],
+    "typical_age_range": "ages 9–45",
+    "description": "Protects against the HPV strains most associated with cervical, anal, oropharyngeal, and other cancers, plus genital warts. Two doses suffice if the series is started before age 15; three doses are standard for older starters. Approved through age 45 for catch-up; the personal benefit drops with age but isn't zero."
+  },
+  {
+    "name": "Hepatitis A",
+    "display_name": "Hepatitis A",
+    "category": "routine",
+    "schedule": "lifetime_after_series",
+    "interval_days": null,
+    "primary_series_doses": 2,
+    "aliases": ["hep a", "HAV", "Havrix", "Vaqta", "hepatitis a"],
+    "typical_age_range": "adults at risk or with no prior immunity",
+    "description": "Two-dose inactivated vaccine giving long-lasting protection against hepatitis A virus. Recommended for travelers to endemic regions, people with chronic liver disease, men who have sex with men, people who use injection drugs, and others at occupational or behavioral risk. Routinely given to all US children since the 2000s."
+  },
+  {
+    "name": "Hepatitis B",
+    "display_name": "Hepatitis B",
+    "category": "routine",
+    "schedule": "lifetime_after_series",
+    "interval_days": null,
+    "primary_series_doses": 3,
+    "aliases": ["hep b", "HBV", "Engerix-B", "Recombivax HB", "Heplisav-B", "hepatitis b"],
+    "typical_age_range": "all adults 19–59; older adults at risk",
+    "description": "Recombinant vaccine against hepatitis B virus, given as a three-dose series (or two doses for Heplisav-B in adults). Universal adult vaccination is now recommended through age 59, and for any older adult with risk factors. Post-vaccine surface antibody testing is sometimes done for healthcare workers and other high-risk groups."
+  },
+  {
+    "name": "Pneumococcal",
+    "display_name": "Pneumococcal",
+    "category": "risk_based",
+    "schedule": "risk_based",
+    "interval_days": null,
+    "primary_series_doses": 1,
+    "aliases": ["pneumonia", "pneumococcal", "PCV15", "PCV20", "PPSV23", "Prevnar", "Prevnar 13", "Prevnar 20", "Pneumovax", "Pneumovax 23"],
+    "typical_age_range": "adults ≥50 or with risk conditions",
+    "description": "Protects against Streptococcus pneumoniae, which causes pneumonia, bacteremia, and meningitis. Current US recommendations cover all adults 50 and older, plus younger adults with conditions like chronic lung or heart disease, diabetes, immune compromise, or a cochlear implant. The PCV20 or PCV15-plus-PPSV23 schedule replaces the older PCV13-first approach."
+  },
+  {
+    "name": "Shingles",
+    "display_name": "Shingles (zoster)",
+    "category": "risk_based",
+    "schedule": "lifetime_after_series",
+    "interval_days": null,
+    "primary_series_doses": 2,
+    "aliases": ["shingles", "herpes zoster", "Shingrix", "zoster", "RZV"],
+    "typical_age_range": "adults ≥50 (or ≥19 if immunocompromised)",
+    "description": "Recombinant zoster vaccine (Shingrix), given as a two-dose series 2–6 months apart. Recommended for adults 50 and older, and from age 19 in people with immune-compromising conditions or treatments. Highly effective at preventing both shingles and postherpetic neuralgia; reactogenicity (sore arm, fatigue) for a day or two after each dose is common."
+  },
+  {
+    "name": "Meningococcal",
+    "display_name": "Meningococcal",
+    "category": "risk_based",
+    "schedule": "risk_based",
+    "interval_days": null,
+    "primary_series_doses": 1,
+    "aliases": ["meningococcal", "MenACWY", "MenB", "Menveo", "Menactra", "MenQuadfi", "Bexsero", "Trumenba", "meningitis"],
+    "typical_age_range": "adolescents, college students, risk-based for adults",
+    "description": "Two distinct families of vaccines: MenACWY against serogroups A, C, W, Y (routine for adolescents, college first-years living in dorms, military, travelers to the meningitis belt, asplenia or complement deficiency); and MenB against serogroup B (shared clinical decision-making for ages 16–23, risk-based otherwise). Boosters depend on risk category."
+  },
+  {
+    "name": "Polio",
+    "display_name": "Polio (IPV)",
+    "category": "routine",
+    "schedule": "lifetime_after_series",
+    "interval_days": null,
+    "primary_series_doses": 3,
+    "aliases": ["polio", "IPV", "inactivated polio", "poliovirus"],
+    "typical_age_range": "adults previously unvaccinated; one booster on travel risk",
+    "description": "Inactivated poliovirus vaccine. Most adults completed the series in childhood; unvaccinated adults need a three-dose primary series. Adults who completed the series may receive a one-time booster when traveling to areas with ongoing transmission or after a known exposure."
+  },
+  {
+    "name": "Typhoid",
+    "display_name": "Typhoid",
+    "category": "travel",
+    "schedule": "travel_pre_trip",
+    "interval_days": 730,
+    "primary_series_doses": 1,
+    "aliases": ["typhoid", "Typhim Vi", "TYDvi", "Vivotif", "ViCPs", "Ty21a", "typhoid ViCPs"],
+    "typical_age_range": "travelers to endemic regions",
+    "description": "Either an injected Vi capsular polysaccharide vaccine (single dose, every two years) or an oral live-attenuated Ty21a (four-capsule course, every five years). Recommended for travelers to South Asia and other regions where typhoid fever is endemic, especially when visiting friends and relatives or eating outside major hotels."
+  },
+  {
+    "name": "Yellow Fever",
+    "display_name": "Yellow Fever",
+    "category": "travel",
+    "schedule": "lifetime_after_series",
+    "interval_days": null,
+    "primary_series_doses": 1,
+    "aliases": ["yellow fever", "YF-Vax", "Stamaril"],
+    "typical_age_range": "travelers to endemic Africa and South America",
+    "description": "Live-attenuated vaccine required for entry to several countries and recommended for travel to endemic parts of sub-Saharan Africa and tropical South America. WHO now considers a single dose to confer lifelong immunity; some countries still expect a booster every 10 years for entry purposes. Only administered at designated yellow fever vaccination centers."
+  },
+  {
+    "name": "Rabies",
+    "display_name": "Rabies",
+    "category": "travel",
+    "schedule": "series_then_booster",
+    "interval_days": null,
+    "primary_series_doses": 3,
+    "aliases": ["rabies", "Imovax", "RabAvert", "pre-exposure rabies"],
+    "typical_age_range": "travelers at risk, animal handlers, lab workers",
+    "description": "Pre-exposure prophylaxis is two doses (recent updated schedule) or three doses (older schedule), given to people with occupational exposure (vets, lab workers, bat handlers) or travelers to areas with limited access to post-exposure care. Pre-exposure doses don't eliminate the need for post-exposure treatment after a bite but simplify it considerably."
+  },
+  {
+    "name": "Japanese Encephalitis",
+    "display_name": "Japanese Encephalitis",
+    "category": "travel",
+    "schedule": "series_then_booster",
+    "interval_days": null,
+    "primary_series_doses": 2,
+    "aliases": ["japanese encephalitis", "JE", "Ixiaro", "JE-Vax"],
+    "typical_age_range": "travelers to rural Asia in transmission season",
+    "description": "Two-dose inactivated vaccine for travelers spending extended time in rural agricultural areas of Asia during transmission season, or shorter trips with high-risk activities. A booster is offered after one year if continued exposure is expected."
+  },
+  {
+    "name": "Cholera",
+    "display_name": "Cholera",
+    "category": "travel",
+    "schedule": "travel_pre_trip",
+    "interval_days": 180,
+    "primary_series_doses": 1,
+    "aliases": ["cholera", "Vaxchora"],
+    "typical_age_range": "travelers to areas with active outbreaks",
+    "description": "Single-dose oral live-attenuated vaccine (Vaxchora) for travelers to areas of active cholera transmission. Protective effect is best within the first 3–6 months after the dose; re-dosing is needed for repeat travel."
+  },
+  {
+    "name": "Tick-borne Encephalitis",
+    "display_name": "Tick-borne Encephalitis",
+    "category": "travel",
+    "schedule": "series_then_booster",
+    "interval_days": null,
+    "primary_series_doses": 3,
+    "aliases": ["tick-borne encephalitis", "TBE", "TicoVac", "FSME-Immun", "Encepur"],
+    "typical_age_range": "travelers / residents in endemic central and eastern Europe and parts of Asia",
+    "description": "Three-dose inactivated vaccine against tick-borne encephalitis virus, with boosters every 3–5 years. Recommended for residents and travelers in forested areas of central and eastern Europe, the Baltics, and parts of Asia during the tick season."
+  }
+]

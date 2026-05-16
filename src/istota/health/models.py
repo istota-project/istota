@@ -154,3 +154,36 @@ class BiomarkerRef:
     ref_range_high_f: float | None
     aliases: list[str]
     description: str | None
+
+
+@dataclass
+class Immunization:
+    id: int
+    name: str
+    product_name: str | None
+    date_given: str
+    manufacturer: str | None
+    dose_label: str | None
+    lot_number: str | None
+    route: str | None
+    site: str | None
+    administered_by: str | None
+    facility: str | None
+    encounter_id: int | None
+    cvx_code: str | None
+    notes: str | None
+    source: str
+    created_at: str = ""
+
+
+@dataclass
+class ImmunizationRef:
+    name: str
+    display_name: str
+    category: str
+    schedule: str
+    interval_days: int | None
+    primary_series_doses: int | None
+    aliases: list[str]
+    description: str | None
+    typical_age_range: str | None
