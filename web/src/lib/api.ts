@@ -1034,4 +1034,63 @@ export async function getHealthDashboard(): Promise<HealthDashboard> {
 	return healthFetch('/dashboard');
 }
 
+// ---- Garmin --------------------------------------------------------------
+
+export interface GarminStatus {
+	connected: boolean;
+	email: string | null;
+	last_sync: string | null;
+	error: string | null;
+}
+
+export interface GarminConnectResponse {
+	status: 'ok' | 'mfa_required' | 'error';
+	prompt?: string;
+	error?: string;
+}
+
+export interface GarminSyncResponse {
+	inserted: number;
+	skipped: number;
+	errored: number;
+	days_processed: number;
+	errors: string[];
+	auth_error: boolean;
+}
+
+export async function getGarminStatus(): Promise<GarminStatus> {
+	return healthFetch('/garmin/status');
+}
+
+export async function connectGarmin(
+	email: string,
+	password: string,
+): Promise<GarminConnectResponse> {
+	return healthFetch('/garmin/connect', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ email, password }),
+	});
+}
+
+export async function submitGarminMfa(code: string): Promise<GarminConnectResponse> {
+	return healthFetch('/garmin/mfa', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ code }),
+	});
+}
+
+export async function disconnectGarmin(): Promise<{ status: string }> {
+	return healthFetch('/garmin/disconnect', { method: 'POST' });
+}
+
+export async function syncGarmin(days_back = 7): Promise<GarminSyncResponse> {
+	return healthFetch('/garmin/sync', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ days_back }),
+	});
+}
+
 export { AuthError };
