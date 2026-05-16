@@ -42,8 +42,6 @@
 			loading = false;
 		}
 
-		// Fetch the explainer separately — it's allowed to fail without
-		// blocking the rest of the page.
 		if (entry) {
 			explainerLoading = true;
 			try {
@@ -103,14 +101,17 @@
 {:else if error}
 	<div class="msg error">{error}</div>
 {:else if !ref}
-	<div class="empty">Unknown vaccine "{name}". It may not be in the canonical reference list.</div>
+	<div class="empty">
+		Unknown vaccine "{name}". It may not be in the canonical reference list.
+	</div>
 {:else}
-	<section class="coverage-card">
+	<section class="card coverage-card">
 		{#if entry}
-			<div class="status">
+			<div class="status-row">
 				<span class="badge status-{entry.status}">{statusLabel(entry.status)}</span>
+				<span class="muted small">{ref.category} · {ref.schedule}</span>
 			</div>
-			<div class="grid">
+			<dl class="grid-stats">
 				<div>
 					<dt>Last given</dt>
 					<dd>{formatDate(entry.last_given)}</dd>
@@ -123,11 +124,13 @@
 					<dt>Next due</dt>
 					<dd>{formatDate(entry.next_due)}</dd>
 				</div>
-				<div>
-					<dt>Category / schedule</dt>
-					<dd>{ref.category} · {ref.schedule}</dd>
-				</div>
-			</div>
+				{#if entry.days_until_due !== null}
+					<div>
+						<dt>{entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}</dt>
+						<dd>{Math.abs(entry.days_until_due)}</dd>
+					</div>
+				{/if}
+			</dl>
 		{/if}
 		{#if ref.description}
 			<p class="description">{ref.description}</p>
@@ -138,14 +141,14 @@
 	</section>
 
 	{#if explainerLoading}
-		<section class="explainer placeholder">
+		<section class="card explainer placeholder">
 			<h2>About this vaccine</h2>
 			<p class="muted">Loading…</p>
 		</section>
 	{:else if explainer && explainer.source !== 'skipped'}
-		<section class="explainer">
+		<section class="card explainer">
 			<h2>About this vaccine</h2>
-			<p>{explainer.summary}</p>
+			<p class="summary">{explainer.summary}</p>
 			{#if explainer.why_it_matters.length > 0}
 				<h3>Why it matters</h3>
 				<ul>
@@ -163,7 +166,7 @@
 				</ul>
 			{/if}
 			{#if explainer.disclaimer}
-				<p class="muted small disclaimer">{explainer.disclaimer}</p>
+				<p class="disclaimer">{explainer.disclaimer}</p>
 			{/if}
 		</section>
 	{/if}
@@ -173,34 +176,36 @@
 		{#if history.length === 0}
 			<div class="empty small">No doses recorded yet.</div>
 		{:else}
-			<table>
-				<thead>
-					<tr>
-						<th>Date</th>
-						<th>Product</th>
-						<th>Dose label</th>
-						<th>Facility</th>
-						<th>Notes</th>
-						<th></th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each history as i (i.id)}
+			<div class="table-scroll">
+				<table class="grid">
+					<thead>
 						<tr>
-							<td>{formatDate(i.date_given)}</td>
-							<td>{i.product_name || '—'}</td>
-							<td>{i.dose_label || '—'}</td>
-							<td>{i.facility || '—'}</td>
-							<td class="notes">{i.notes || '—'}</td>
-							<td>
-								<a class="btn small" href="{base}/health/immunizations/detail?id={i.id}">
-									Edit
-								</a>
-							</td>
+							<th>Date</th>
+							<th>Product</th>
+							<th>Dose label</th>
+							<th>Facility</th>
+							<th>Notes</th>
+							<th class="row-actions"></th>
 						</tr>
-					{/each}
-				</tbody>
-			</table>
+					</thead>
+					<tbody>
+						{#each history as i (i.id)}
+							<tr>
+								<td>{formatDate(i.date_given)}</td>
+								<td>{i.product_name || '—'}</td>
+								<td>{i.dose_label || '—'}</td>
+								<td>{i.facility || '—'}</td>
+								<td class="notes">{i.notes || '—'}</td>
+								<td class="row-actions">
+									<a class="btn small" href="{base}/health/immunizations/detail?id={i.id}">
+										Edit
+									</a>
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
 		{/if}
 	</section>
 {/if}
@@ -208,158 +213,214 @@
 <style>
 	.header {
 		display: flex;
-		align-items: center;
 		justify-content: space-between;
+		align-items: center;
 		margin-bottom: 1rem;
 	}
-	.header h1 {
-		font-size: 1.5rem;
+	h1 {
+		font-size: var(--text-lg, 1.05rem);
+		font-weight: 500;
 		margin: 0;
 	}
 	.btn {
-		display: inline-flex;
-		padding: 0.4rem 0.75rem;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 6px;
-		background: var(--surface, #fff);
-		color: inherit;
+		padding: 0.4rem 0.85rem;
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-pill);
+		color: var(--text-primary);
 		text-decoration: none;
-		font-size: 0.875rem;
+		font: inherit;
+		font-size: var(--text-sm);
+		cursor: pointer;
+		line-height: 1.2;
 	}
+	.btn:hover:not(:disabled) { background: var(--surface-raised); }
 	.btn.small {
-		padding: 0.25rem 0.5rem;
-		font-size: 0.8rem;
+		padding: 0.2rem 0.55rem;
+		font-size: var(--text-xs);
 	}
-	.coverage-card {
-		border: 1px solid var(--border, #ddd);
-		border-radius: 8px;
-		padding: 1rem;
-		margin-bottom: 1.25rem;
-		background: var(--surface, #fff);
+
+	.card {
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-card);
+		padding: 0.85rem 1rem;
+		margin-bottom: 1rem;
 	}
-	.status {
+	.coverage-card .status-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
 		margin-bottom: 0.5rem;
 	}
-	.badge {
-		display: inline-block;
-		padding: 0.2rem 0.5rem;
-		border-radius: 4px;
-		font-size: 0.75rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.02em;
-	}
-	.badge.status-overdue,
-	.badge.status-expired {
-		background: #fde6e6;
-		color: #a22;
-	}
-	.badge.status-due_soon {
-		background: #fff1d6;
-		color: #8a5a00;
-	}
-	.badge.status-series_incomplete {
-		background: #fbe6f4;
-		color: #8a0668;
-	}
-	.badge.status-up_to_date {
-		background: #dff5e8;
-		color: #186b3a;
-	}
-	.badge.status-never_recorded,
-	.badge.status-recorded,
-	.badge.status-risk_based {
-		background: #eee;
-		color: #555;
-	}
-	.grid {
+	.grid-stats {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-		gap: 0.75rem;
-		margin: 0.75rem 0;
+		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+		gap: 0.75rem 1rem;
+		margin: 0;
 	}
 	dt {
-		color: var(--muted, #666);
-		font-size: 0.75rem;
+		font-size: var(--text-xs);
+		color: var(--text-dim);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 		margin-bottom: 0.15rem;
 	}
 	dd {
 		margin: 0;
-		font-size: 0.95rem;
+		font-size: var(--text-sm);
+		color: var(--text-primary);
 	}
 	.description {
 		margin: 0.75rem 0 0;
+		font-size: var(--text-sm);
+		color: var(--text-secondary);
+		line-height: 1.55;
+		max-width: 75ch;
 	}
 	.muted {
-		color: var(--muted, #666);
+		color: var(--text-muted);
 	}
 	.small {
-		font-size: 0.85rem;
+		font-size: var(--text-xs);
 	}
-	.explainer {
-		border: 1px solid var(--border, #ddd);
-		border-left: 3px solid var(--accent, #2a6df4);
-		border-radius: 8px;
-		padding: 1rem;
-		margin-bottom: 1.25rem;
-		background: var(--surface, #fff);
-	}
-	.explainer.placeholder {
-		border-left-color: var(--border, #ddd);
-	}
+
 	.explainer h2 {
-		font-size: 1.05rem;
 		margin: 0 0 0.5rem;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--text-dim);
+		font-weight: 500;
 	}
 	.explainer h3 {
-		font-size: 0.9rem;
-		margin: 0.75rem 0 0.25rem;
-		color: var(--muted, #666);
+		margin: 0.85rem 0 0.35rem;
+		font-size: var(--text-xs);
+		font-weight: 500;
+		color: var(--text-dim);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+	.explainer .summary {
+		margin: 0;
+		font-size: var(--text-sm);
+		color: var(--text-secondary);
+		line-height: 1.55;
+		max-width: 75ch;
 	}
 	.explainer ul {
 		margin: 0;
-		padding-left: 1.25rem;
+		padding-left: 1.1rem;
+		font-size: var(--text-sm);
+		color: var(--text-secondary);
+		line-height: 1.55;
 	}
 	.explainer li {
-		margin: 0.25rem 0;
+		margin: 0.2rem 0;
 	}
-	.disclaimer {
-		margin-top: 0.75rem;
+	.explainer .disclaimer {
+		margin: 0.85rem 0 0;
+		font-size: var(--text-xs);
+		color: var(--text-dim);
 		font-style: italic;
 	}
-	.history h2 {
-		font-size: 1.05rem;
-		margin: 0 0 0.5rem;
+	.explainer.placeholder {
+		opacity: 0.7;
 	}
-	table {
+
+	.history h2 {
+		margin: 0 0 0.5rem;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--text-dim);
+		font-weight: 500;
+	}
+	.table-scroll {
+		width: 100%;
+		overflow-x: auto;
+	}
+	table.grid {
 		width: 100%;
 		border-collapse: collapse;
-		font-size: 0.875rem;
+		font-size: var(--text-sm);
 	}
-	th,
-	td {
+	table.grid th,
+	table.grid td {
 		text-align: left;
 		padding: 0.4rem 0.5rem;
-		border-bottom: 1px solid var(--border, #eee);
+		border-bottom: 1px solid var(--border-subtle);
+		vertical-align: middle;
+	}
+	table.grid th {
+		color: var(--text-dim);
+		font-weight: 500;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 	}
 	td.notes {
-		max-width: 280px;
+		max-width: 260px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		color: var(--text-muted);
 	}
+	td.row-actions,
+	th.row-actions {
+		text-align: right;
+		white-space: nowrap;
+	}
+
+	.badge {
+		display: inline-flex;
+		align-items: center;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		padding: 0.1rem 0.5rem;
+		border-radius: var(--radius-pill);
+		font-weight: 500;
+	}
+	.badge.status-overdue,
+	.badge.status-expired {
+		background: hsla(0, 60%, 55%, 0.28);
+		color: #ff9d96;
+	}
+	.badge.status-due_soon {
+		background: hsla(35, 60%, 60%, 0.22);
+		color: #e6b96b;
+	}
+	.badge.status-series_incomplete {
+		background: hsla(280, 45%, 65%, 0.22);
+		color: #d0aeec;
+	}
+	.badge.status-up_to_date {
+		background: hsla(145, 40%, 55%, 0.22);
+		color: #9bd6a6;
+	}
+	.badge.status-never_recorded,
+	.badge.status-recorded,
+	.badge.status-risk_based {
+		background: hsla(220, 8%, 60%, 0.18);
+		color: var(--text-muted);
+	}
+
 	.empty {
-		padding: 2rem;
-		text-align: center;
-		color: var(--muted, #666);
+		color: var(--text-dim);
+		padding: 2rem 0;
 	}
 	.empty.small {
-		padding: 1rem;
-		font-size: 0.875rem;
+		padding: 0.75rem 0;
+		font-size: var(--text-sm);
+	}
+	.msg {
+		font-size: var(--text-sm);
+		padding: 0.4rem 0.6rem;
+		border-radius: 0.3rem;
 	}
 	.msg.error {
-		color: var(--danger, #c0392b);
-		font-size: 0.85rem;
-		margin: 0.5rem 0;
+		background: rgba(204, 102, 102, 0.1);
+		color: #e88;
 	}
 </style>
