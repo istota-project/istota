@@ -2660,6 +2660,11 @@ def _sync_cron_files(conn, app_config: Config) -> None:
     except Exception as e:
         logger.error("Error syncing feeds module jobs: %s", e)
 
+    try:
+        _sync_health_module_jobs(conn, app_config)
+    except Exception as e:
+        logger.error("Error syncing health module jobs: %s", e)
+
 
 def _sync_module_jobs(
     conn,
@@ -2872,6 +2877,58 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
         jobs_for_user=jobs_for_user,
         user_not_found_exc=UserNotFoundError,
         on_first_seed=_queue_initial_poll,
+    )
+
+
+def _sync_health_module_jobs(conn, app_config: Config) -> None:
+    """Seed/refresh ``_module.health.*`` scheduled jobs for users with the
+    health module enabled and a Garmin connection. ``jobs_for_user``
+    returns an empty list for users without stored Garmin tokens, so
+    those users have their stale ``_module.health.*`` rows removed.
+
+    On first seed (a freshly-inserted job row) we also queue a one-shot
+    30-day backfill task so the user sees their history populate without
+    waiting up to 6h for the first scheduled tick.
+    """
+    try:
+        from istota.health import UserNotFoundError, resolve_for_user
+        from istota.health.jobs import (
+            GARMIN_SYNC_JOB,
+            MODULE_PREFIX,
+            jobs_for_user,
+        )
+    except ImportError:
+        return
+
+    backfill_name = GARMIN_SYNC_JOB.name
+
+    def _queue_initial_backfill(conn, user_id: str, j: dict) -> None:
+        if j["name"] != backfill_name:
+            return
+        task_id = db.create_task(
+            conn,
+            prompt="",
+            user_id=user_id,
+            source_type="scheduled",
+            priority=5,
+            skip_log_channel=True,
+            skill="health",
+            skill_args=json.dumps(["garmin-sync", "--days-back", "30"]),
+            queue="background",
+        )
+        logger.info(
+            "Queued initial Garmin backfill for user %s as task %d",
+            user_id, task_id,
+        )
+
+    _sync_module_jobs(
+        conn, app_config,
+        module_name="health",
+        module_prefix=MODULE_PREFIX,
+        resolve_for_user=resolve_for_user,
+        jobs_for_user=jobs_for_user,
+        user_not_found_exc=UserNotFoundError,
+        on_first_seed=_queue_initial_backfill,
     )
 
 
