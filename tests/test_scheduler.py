@@ -4083,6 +4083,19 @@ class TestWarnUnconsumedDeferredFiles:
         # No exception, no warnings.
         assert not any("Unrecognized deferred file" in r.message for r in caplog.records)
 
+    def test_no_warning_for_known_artifact_suffixes(self, tmp_path, caplog):
+        # health_op_failures.json is written by _process_deferred_health_ops
+        # when an op fails mid-batch; it stays on disk so an operator can
+        # recover the lost rows. It must not trip the "unrecognized" warning.
+        from istota.scheduler import _warn_unconsumed_deferred_files
+        task = self._task(123)
+        (tmp_path / "task_123_health_op_failures.json").write_text("[]")
+        with caplog.at_level("WARNING"):
+            _warn_unconsumed_deferred_files(task, tmp_path)
+        assert not any(
+            "Unrecognized deferred file" in r.message for r in caplog.records
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestPurgeDeferredFilesForRetry — ISSUE-074

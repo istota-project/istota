@@ -14,7 +14,7 @@ import mimetypes
 import re
 import shutil
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import (
@@ -1932,8 +1932,18 @@ async def api_immunization_extract(
 
         with health_db.connect(ctx.db_path) as conn:
             refs = health_db.list_immunization_refs(conn)
+        # Process-scoped tmp — uploads are transient (no source file is
+        # persisted for immunizations) so they must not land in the
+        # uploads_dir alongside confirmed panel sources where a crash
+        # between write and unlink would leak them.
+        tmp_dir = (
+            Path(config.temp_dir)
+            if config is not None and getattr(config, "temp_dir", None)
+            else Path(tempfile.gettempdir())
+        )
+        tmp_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
-            dir=ctx.uploads_dir, suffix=suffix or ".bin", delete=False,
+            dir=tmp_dir, suffix=suffix or ".bin", delete=False,
         ) as tmp:
             tmp.write(raw)
             tmp_path = Path(tmp.name)
@@ -1955,6 +1965,20 @@ async def api_immunization_bulk(
     rows = body.get("rows") if isinstance(body, dict) else None
     if not isinstance(rows, list):
         return JSONResponse({"error": "rows must be a list"}, status_code=400)
+    # Optional client-supplied idempotency key. If the frontend generates
+    # an import_id and reuses it on retry, double-submits collapse via the
+    # dedup_key partial unique index. Absent → fresh server-side UUID
+    # (still gives every row a stable dedup_key for future replay safety,
+    # but won't dedupe across separate requests).
+    client_import_id = body.get("import_id") if isinstance(body, dict) else None
+    if client_import_id is not None and (
+        not isinstance(client_import_id, str) or not client_import_id.strip()
+    ):
+        return JSONResponse(
+            {"error": "import_id must be a non-empty string"},
+            status_code=400,
+        )
+    today = date.today()
     # Validate every row before writing — partial bulk inserts are a worse
     # UX than a clean "fix this row and resubmit" error.
     for i, r in enumerate(rows):
@@ -1970,11 +1994,33 @@ async def api_immunization_bulk(
             return JSONResponse(
                 {"error": f"row {i} missing date_given"}, status_code=400,
             )
+        try:
+            d = date.fromisoformat(r["date_given"].strip())
+        except ValueError:
+            return JSONResponse(
+                {"error": f"row {i} date_given must be ISO YYYY-MM-DD"},
+                status_code=400,
+            )
+        if d > today:
+            return JSONResponse(
+                {"error": f"row {i} date_given is in the future"},
+                status_code=400,
+            )
+
+    # Use the client-supplied import_id as the dedup prefix when present,
+    # otherwise mint a per-request one. With a client-supplied id, a
+    # double-submit / retry from the same import session collapses against
+    # the dedup_key partial unique index. Without one, every row still
+    # gets a stable dedup_key (matching the skill CLI pattern at
+    # skills/health/__init__.py:1175) for future replay safety.
+    prefix = (
+        client_import_id.strip() if client_import_id else uuid.uuid4().hex
+    )
 
     def _insert_all():
         ids: list[int] = []
         with health_db.connect(ctx.db_path) as conn:
-            for r in rows:
+            for i, r in enumerate(rows):
                 iid = health_db.insert_immunization(
                     conn,
                     name=r["name"].strip(),
@@ -1990,6 +2036,7 @@ async def api_immunization_bulk(
                     cvx_code=r.get("cvx_code") or None,
                     notes=r.get("notes") or None,
                     source=r.get("source") or "import",
+                    dedup_key=f"{prefix}:{i}",
                 )
                 ids.append(iid)
             conn.commit()
