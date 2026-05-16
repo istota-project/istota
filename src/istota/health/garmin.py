@@ -93,9 +93,34 @@ class GarminAdapter(Protocol):
     def load_tokens(self, tokens: dict[str, Any]) -> None:
         """Restore session state from a previously serialised blob."""
 
-    # Sync engine uses these — implemented in stage 2. Stubbed here so the
-    # Protocol is complete.
     def get_user_profile(self) -> dict[str, Any] | None: ...
+
+    # Daily-summary fetchers used by the sync engine. Each takes an ISO
+    # date (YYYY-MM-DD) and returns a JSON-shaped dict, or None when the
+    # API has no data for that day (device wasn't worn, etc.). Adapters
+    # should swallow per-endpoint exceptions and let the engine decide
+    # how to attribute the failure; auth errors must propagate.
+    def get_sleep_data(self, date: str) -> dict[str, Any] | None: ...
+
+    def get_stress_data(self, date: str) -> dict[str, Any] | None: ...
+
+    def get_body_battery(self, date: str) -> list[dict[str, Any]] | dict[str, Any] | None: ...
+
+    def get_steps_data(self, date: str) -> dict[str, Any] | None: ...
+
+    def get_spo2_data(self, date: str) -> dict[str, Any] | None: ...
+
+    def get_hrv_data(self, date: str) -> dict[str, Any] | None: ...
+
+    def get_vo2_max(self, date: str) -> dict[str, Any] | float | None: ...
+
+    def get_respiration_data(self, date: str) -> dict[str, Any] | None: ...
+
+    def get_resting_heart_rate(self, date: str) -> dict[str, Any] | None: ...
+
+    def get_user_summary(self, date: str) -> dict[str, Any] | None: ...
+
+    def get_body_composition(self, date: str) -> dict[str, Any] | None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -210,18 +235,98 @@ class _RealGarminAdapter:
         self._client = client
 
     def get_user_profile(self) -> dict[str, Any] | None:
+        return self._call_optional("get_user_profile")
+
+    # -- Daily summaries -----------------------------------------------------
+    #
+    # Each wrapper is one-line: pass the date through to the SDK method,
+    # return whatever it gives back. Per-endpoint exceptions short-circuit
+    # to None so a missing-data day doesn't kill the whole sync run; auth
+    # errors are detected by the caller (sync engine) based on status
+    # patterns rather than re-raised here.
+
+    def get_sleep_data(self, date: str) -> dict[str, Any] | None:
+        return self._call_optional("get_sleep_data", date)
+
+    def get_stress_data(self, date: str) -> dict[str, Any] | None:
+        return self._call_optional("get_stress_data", date)
+
+    def get_body_battery(self, date: str):
+        return self._call_optional("get_body_battery", date)
+
+    def get_steps_data(self, date: str) -> dict[str, Any] | None:
+        # Some SDK versions name this ``get_steps_data``, others ``get_daily_steps``.
+        for name in ("get_steps_data", "get_daily_steps"):
+            if hasattr(self._client, name):
+                return self._call_optional(name, date)
+        return None
+
+    def get_spo2_data(self, date: str) -> dict[str, Any] | None:
+        return self._call_optional("get_spo2_data", date)
+
+    def get_hrv_data(self, date: str) -> dict[str, Any] | None:
+        return self._call_optional("get_hrv_data", date)
+
+    def get_vo2_max(self, date: str):
+        for name in ("get_max_metrics", "get_vo2_max"):
+            if hasattr(self._client, name):
+                return self._call_optional(name, date)
+        return None
+
+    def get_respiration_data(self, date: str) -> dict[str, Any] | None:
+        return self._call_optional("get_respiration_data", date)
+
+    def get_resting_heart_rate(self, date: str) -> dict[str, Any] | None:
+        for name in ("get_rhr_day", "get_resting_heart_rate"):
+            if hasattr(self._client, name):
+                return self._call_optional(name, date)
+        return None
+
+    def get_user_summary(self, date: str) -> dict[str, Any] | None:
+        for name in ("get_user_summary", "get_stats"):
+            if hasattr(self._client, name):
+                return self._call_optional(name, date)
+        return None
+
+    def get_body_composition(self, date: str) -> dict[str, Any] | None:
+        return self._call_optional("get_body_composition", date)
+
+    def _call_optional(self, method: str, *args: Any) -> Any:
         if self._client is None:
             return None
+        fn = getattr(self._client, method, None)
+        if fn is None:
+            return None
         try:
-            return self._client.get_user_profile()
+            return fn(*args)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("garmin get_user_profile failed: %s", exc)
+            # Propagate auth errors; the sync engine will mark the
+            # connection broken. Everything else is best-effort.
+            if _looks_like_auth_error(exc):
+                raise GarminAuthError(f"Garmin auth error during {method}: {exc}") from exc
+            logger.warning("garmin %s failed: %s", method, exc)
             return None
 
 
 def _looks_like_mfa(msg: str) -> bool:
     lo = msg.lower()
     return "mfa" in lo or "two-factor" in lo or "totp" in lo
+
+
+def _looks_like_auth_error(exc: BaseException) -> bool:
+    """Heuristic check for the Garmin SDK's auth-failure exception classes
+    and HTTP-status strings.
+
+    We can't import the SDK's exception types here without forcing
+    install, so we match by name + message. False negatives just
+    misattribute a single endpoint failure; false positives over-trigger
+    a re-auth prompt — both are recoverable.
+    """
+    cls = type(exc).__name__.lower()
+    if "auth" in cls or "login" in cls:
+        return True
+    msg = str(exc).lower()
+    return "401" in msg or "403" in msg or "unauthor" in msg or "forbidden" in msg
 
 
 # ---------------------------------------------------------------------------

@@ -542,6 +542,69 @@ def cmd_summary(args: argparse.Namespace) -> None:
     })
 
 
+def cmd_garmin_status(args: argparse.Namespace) -> None:
+    from istota.health import garmin as gm
+
+    conn = _connect()
+    try:
+        status = gm.get_status(conn)
+    finally:
+        conn.close()
+    _emit({"status": "ok", "garmin": status})
+
+
+def cmd_garmin_sync(args: argparse.Namespace) -> None:
+    """Run a Garmin sync. Direct mode only — sync writes to multiple stats
+    rows and is not part of the deferred-op set; the scheduled job and
+    web `/garmin/sync` endpoint cover the unsandboxed surfaces."""
+    from istota.health import garmin_sync
+    from istota.health._loader import resolve_for_user
+
+    user_id = os.environ.get("ISTOTA_USER_ID", "")
+    if not user_id:
+        _fail("ISTOTA_USER_ID not set")
+
+    # Resolve the per-user context. The CLI may be invoked outside the
+    # sandbox (operator / scheduled job), so we can call the host-side
+    # loader here without config wiring.
+    try:
+        # Lazy: try to import the config from a known path; if not
+        # available, fall back to assembling a minimal context from
+        # HEALTH_DB_PATH (used by the in-sandbox CLI surface).
+        from istota.health.models import HealthContext
+        from pathlib import Path as _P
+        db = _P(_db_path())
+        ctx = HealthContext(
+            user_id=user_id,
+            workspace_root=db.parent.parent,
+            data_dir=db.parent.parent,
+            db_path=db,
+            uploads_dir=db.parent.parent / "uploads",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _fail(f"failed to build health context: {exc}")
+
+    res = garmin_sync.sync_garmin(ctx, days_back=args.days_back)
+    payload = res.to_dict()
+    payload["status"] = "ok" if not res.auth_error else "error"
+    if res.auth_error:
+        payload["error"] = "token_expired"
+    _emit(payload, error=res.auth_error)
+
+
+def cmd_garmin_disconnect(args: argparse.Namespace) -> None:
+    from istota.health import garmin as gm
+
+    user_id = os.environ.get("ISTOTA_USER_ID", "")
+    conn = _connect()
+    try:
+        gm.disconnect(conn, user_id=user_id)
+        conn.commit()
+    finally:
+        conn.close()
+    _emit({"status": "ok"})
+
+
 def cmd_settings(args: argparse.Namespace) -> None:
     from istota.health import db as health_db
 
@@ -679,6 +742,11 @@ def build_parser() -> argparse.ArgumentParser:
     set_p.add_argument("key", help="dob | height | sex | display.weight | display.height | display.temp")
     set_p.add_argument("value")
 
+    sub.add_parser("garmin-status", help="Show Garmin Connect link status")
+    g_sync = sub.add_parser("garmin-sync", help="Manually trigger a Garmin daily-summary sync")
+    g_sync.add_argument("--days-back", dest="days_back", type=int, default=7)
+    sub.add_parser("garmin-disconnect", help="Remove stored Garmin tokens")
+
     return parser
 
 
@@ -701,6 +769,9 @@ def main() -> None:
         "summary": cmd_summary,
         "settings": cmd_settings,
         "set": cmd_set,
+        "garmin-status": cmd_garmin_status,
+        "garmin-sync": cmd_garmin_sync,
+        "garmin-disconnect": cmd_garmin_disconnect,
     }
 
     fn = commands.get(args.command)
