@@ -1254,7 +1254,37 @@ async def api_dashboard(ctx: HealthContext = Depends(get_user_context)):
             ],
         }
 
-    return await asyncio.to_thread(_query)
+    payload = await asyncio.to_thread(_query)
+
+    from istota.health.immunizations import (
+        compute_coverage,
+        STATUS_DUE_SOON,
+        STATUS_OVERDUE,
+    )
+
+    def _imm_summary():
+        with health_db.connect(ctx.db_path) as conn:
+            refs = health_db.list_immunization_refs(conn)
+            rows = health_db.list_immunizations(conn, limit=5000)
+        coverage = compute_coverage(refs, rows)
+        overdue = sum(1 for c in coverage if c.status == STATUS_OVERDUE)
+        due_soon = sum(1 for c in coverage if c.status == STATUS_DUE_SOON)
+        # Latest single dose across all rows.
+        last_given = None
+        if rows:
+            most_recent = max(rows, key=lambda r: r.date_given or "")
+            last_given = {
+                "name": most_recent.name,
+                "date_given": most_recent.date_given,
+            }
+        return {
+            "overdue_count": overdue,
+            "due_soon_count": due_soon,
+            "last_given": last_given,
+        }
+
+    payload["immunizations"] = await asyncio.to_thread(_imm_summary)
+    return payload
 
 
 # ---- Encounters -----------------------------------------------------------
@@ -1604,12 +1634,453 @@ async def api_history_summary(
         return active, chronic, recent_encounters, recent_procedures
 
     active, chronic, recent, procedures = await asyncio.to_thread(_query)
+    # Immunizations: include up-to-date routine entries (compact list) and
+    # any overdue / series_incomplete actions.
+    def _imm_query():
+        from istota.health.immunizations import (
+            compute_coverage,
+            STATUS_UP_TO_DATE,
+            STATUS_OVERDUE,
+            STATUS_SERIES_INCOMPLETE,
+            STATUS_EXPIRED,
+        )
+
+        with health_db.connect(ctx.db_path) as conn:
+            refs = health_db.list_immunization_refs(conn)
+            rows = health_db.list_immunizations(conn, limit=2000)
+        cov = compute_coverage(refs, rows)
+        up_to_date = [
+            c for c in cov
+            if c.status == STATUS_UP_TO_DATE and c.category in {"routine", "booster"}
+        ]
+        action_needed = [
+            c for c in cov
+            if c.status in {STATUS_OVERDUE, STATUS_SERIES_INCOMPLETE, STATUS_EXPIRED}
+        ]
+        return up_to_date, action_needed
+
+    imm_up, imm_action = await asyncio.to_thread(_imm_query)
     return {
         "active_diagnoses": [_diagnosis_to_dict(d) for d in active],
         "chronic_diagnoses": [_diagnosis_to_dict(d) for d in chronic],
         "recent_encounters": [_encounter_to_dict(e) for e in recent],
         "recent_procedures": [_encounter_to_dict(e) for e in procedures],
+        "immunizations": {
+            "up_to_date": [_coverage_to_dict(c) for c in imm_up],
+            "action_needed": [_coverage_to_dict(c) for c in imm_action],
+        },
     }
+
+
+# ---- Immunizations --------------------------------------------------------
+
+
+_IMMUNIZATION_UPDATE_FIELDS = {
+    "name", "product_name", "date_given", "manufacturer", "dose_label",
+    "lot_number", "route", "site", "administered_by", "facility",
+    "encounter_id", "cvx_code", "notes",
+}
+
+
+def _immunization_to_dict(i) -> dict:
+    return {
+        "id": i.id,
+        "name": i.name,
+        "product_name": i.product_name,
+        "date_given": i.date_given,
+        "manufacturer": i.manufacturer,
+        "dose_label": i.dose_label,
+        "lot_number": i.lot_number,
+        "route": i.route,
+        "site": i.site,
+        "administered_by": i.administered_by,
+        "facility": i.facility,
+        "encounter_id": i.encounter_id,
+        "cvx_code": i.cvx_code,
+        "notes": i.notes,
+        "source": i.source,
+        "created_at": i.created_at,
+    }
+
+
+def _immunization_ref_to_dict(r) -> dict:
+    return {
+        "name": r.name,
+        "display_name": r.display_name,
+        "category": r.category,
+        "schedule": r.schedule,
+        "interval_days": r.interval_days,
+        "primary_series_doses": r.primary_series_doses,
+        "aliases": r.aliases,
+        "description": r.description,
+        "typical_age_range": r.typical_age_range,
+    }
+
+
+def _coverage_to_dict(c) -> dict:
+    return {
+        "name": c.name,
+        "display_name": c.display_name,
+        "category": c.category,
+        "status": c.status,
+        "last_given": c.last_given,
+        "dose_count": c.dose_count,
+        "next_due": c.next_due,
+        "is_overdue": c.is_overdue,
+        "days_until_due": c.days_until_due,
+    }
+
+
+@router.get("/immunizations")
+async def api_list_immunizations(
+    ctx: HealthContext = Depends(get_user_context),
+    name: str = Query(default=""),
+    since: str = Query(default=""),
+    until: str = Query(default=""),
+    limit: int = Query(default=200, le=2000, ge=1),
+    offset: int = Query(default=0, ge=0),
+):
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            return health_db.list_immunizations(
+                conn,
+                name=name or None,
+                since=since or None,
+                until=until or None,
+                limit=limit,
+                offset=offset,
+            )
+
+    rows = await asyncio.to_thread(_query)
+    return {"immunizations": [_immunization_to_dict(r) for r in rows]}
+
+
+@router.post("/immunizations")
+async def api_create_immunization(
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    date_given = body.get("date_given")
+    if not isinstance(date_given, str) or not date_given.strip():
+        return JSONResponse(
+            {"error": "date_given is required"}, status_code=400,
+        )
+    encounter_id = body.get("encounter_id")
+    if encounter_id is not None:
+        try:
+            encounter_id = int(encounter_id)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "encounter_id must be an integer"}, status_code=400,
+            )
+
+    def _insert():
+        with health_db.connect(ctx.db_path) as conn:
+            if encounter_id is not None and health_db.get_encounter(
+                conn, encounter_id,
+            ) is None:
+                return None
+            iid = health_db.insert_immunization(
+                conn,
+                name=name.strip(),
+                date_given=date_given.strip(),
+                product_name=body.get("product_name") or None,
+                manufacturer=body.get("manufacturer") or None,
+                dose_label=body.get("dose_label") or None,
+                lot_number=body.get("lot_number") or None,
+                route=body.get("route") or None,
+                site=body.get("site") or None,
+                administered_by=body.get("administered_by") or None,
+                facility=body.get("facility") or None,
+                encounter_id=encounter_id,
+                cvx_code=body.get("cvx_code") or None,
+                notes=body.get("notes") or None,
+                source=body.get("source") or "manual",
+            )
+            conn.commit()
+        return iid
+
+    iid = await asyncio.to_thread(_insert)
+    if iid is None:
+        return JSONResponse({"error": "encounter not found"}, status_code=400)
+    return {"status": "ok", "id": iid}
+
+
+@router.get("/immunizations/refs")
+async def api_immunization_refs(
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            return health_db.list_immunization_refs(conn)
+
+    refs = await asyncio.to_thread(_query)
+    return {"refs": [_immunization_ref_to_dict(r) for r in refs]}
+
+
+@router.get("/immunizations/coverage")
+async def api_immunization_coverage(
+    ctx: HealthContext = Depends(get_user_context),
+):
+    from istota.health.immunizations import compute_coverage
+
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            refs = health_db.list_immunization_refs(conn)
+            rows = health_db.list_immunizations(conn, limit=5000)
+        coverage = compute_coverage(refs, rows)
+        # "Other" bucket — names that don't match any ref.
+        canonical_names = {r.name for r in refs}
+        other_names: dict[str, list] = {}
+        for row in rows:
+            if row.name in canonical_names:
+                continue
+            other_names.setdefault(row.name, []).append(row)
+        other = []
+        for n, group in other_names.items():
+            other.append({
+                "name": n,
+                "display_name": n,
+                "category": "other",
+                "status": "recorded",
+                "last_given": max((r.date_given for r in group), default=None),
+                "dose_count": len(group),
+                "next_due": None,
+                "is_overdue": False,
+                "days_until_due": None,
+            })
+        return coverage, other
+
+    coverage, other = await asyncio.to_thread(_query)
+    return {
+        "coverage": [_coverage_to_dict(c) for c in coverage],
+        "other": other,
+    }
+
+
+@router.post("/immunizations/parse")
+async def api_immunization_parse(
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    text = body.get("text") if isinstance(body, dict) else None
+    if not isinstance(text, str):
+        return JSONResponse({"error": "text is required"}, status_code=400)
+
+    from istota.health.parser import parse_paste
+
+    def _parse():
+        with health_db.connect(ctx.db_path) as conn:
+            refs = health_db.list_immunization_refs(conn)
+        return parse_paste(text, refs)
+
+    rows = await asyncio.to_thread(_parse)
+    return {
+        "rows": [
+            {
+                "name": r.name,
+                "product_name": r.product_name,
+                "date_given": r.date_given,
+                "source_line": r.source_line,
+                "confidence": r.confidence,
+                "notes": r.notes,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/immunizations/bulk")
+async def api_immunization_bulk(
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    rows = body.get("rows") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        return JSONResponse({"error": "rows must be a list"}, status_code=400)
+    # Validate every row before writing — partial bulk inserts are a worse
+    # UX than a clean "fix this row and resubmit" error.
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            return JSONResponse(
+                {"error": f"row {i} must be an object"}, status_code=400,
+            )
+        if not isinstance(r.get("name"), str) or not r["name"].strip():
+            return JSONResponse(
+                {"error": f"row {i} missing name"}, status_code=400,
+            )
+        if not isinstance(r.get("date_given"), str) or not r["date_given"].strip():
+            return JSONResponse(
+                {"error": f"row {i} missing date_given"}, status_code=400,
+            )
+
+    def _insert_all():
+        ids: list[int] = []
+        with health_db.connect(ctx.db_path) as conn:
+            for r in rows:
+                iid = health_db.insert_immunization(
+                    conn,
+                    name=r["name"].strip(),
+                    date_given=r["date_given"].strip(),
+                    product_name=r.get("product_name") or None,
+                    manufacturer=r.get("manufacturer") or None,
+                    dose_label=r.get("dose_label") or None,
+                    lot_number=r.get("lot_number") or None,
+                    route=r.get("route") or None,
+                    site=r.get("site") or None,
+                    administered_by=r.get("administered_by") or None,
+                    facility=r.get("facility") or None,
+                    cvx_code=r.get("cvx_code") or None,
+                    notes=r.get("notes") or None,
+                    source=r.get("source") or "import",
+                )
+                ids.append(iid)
+            conn.commit()
+        return ids
+
+    ids = await asyncio.to_thread(_insert_all)
+    return {"status": "ok", "ids": ids, "count": len(ids)}
+
+
+@router.get("/immunizations/{immunization_id}")
+async def api_get_immunization(
+    immunization_id: int,
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            row = health_db.get_immunization(conn, immunization_id)
+            encounter = None
+            if row and row.encounter_id is not None:
+                encounter = health_db.get_encounter(conn, row.encounter_id)
+        return row, encounter
+
+    row, encounter = await asyncio.to_thread(_query)
+    if not row:
+        raise HTTPException(404, "immunization not found")
+    return {
+        "immunization": _immunization_to_dict(row),
+        "encounter": _encounter_to_dict(encounter) if encounter else None,
+    }
+
+
+@router.put("/immunizations/{immunization_id}")
+async def api_update_immunization(
+    immunization_id: int,
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    kwargs = {k: v for k, v in body.items() if k in _IMMUNIZATION_UPDATE_FIELDS}
+
+    def _update():
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_db.update_immunization(conn, immunization_id, **kwargs)
+            conn.commit()
+        return n
+
+    n = await asyncio.to_thread(_update)
+    if not n:
+        def _check():
+            with health_db.connect(ctx.db_path) as conn:
+                return health_db.get_immunization(conn, immunization_id)
+        existing = await asyncio.to_thread(_check)
+        if existing is None:
+            raise HTTPException(404, "immunization not found")
+    return {"status": "ok"}
+
+
+@router.delete("/immunizations/{immunization_id}")
+async def api_delete_immunization(
+    immunization_id: int,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _delete():
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_db.delete_immunization(conn, immunization_id)
+            conn.commit()
+        return n
+
+    n = await asyncio.to_thread(_delete)
+    if not n:
+        raise HTTPException(404, "immunization not found")
+    return {"status": "ok"}
+
+
+@router.get("/immunizations/{name}/explainer")
+async def api_immunization_explainer(
+    name: str,
+    request: Request,
+    ctx: HealthContext = Depends(get_user_context),
+):
+    """Cached, brain-generated educational primer for a vaccine name.
+
+    Status is derived from current coverage. Routine + booster vaccines
+    with an actionable status (overdue / never_recorded / series_incomplete /
+    expired) get a real explainer; everything else gets the standard
+    fallback payload so the UI never breaks.
+    """
+    from istota.health.immunization_explainer import (
+        EXPLAINABLE_STATUSES, get_or_generate,
+    )
+    from istota.health.immunizations import compute_coverage
+
+    config = getattr(request.app.state, "istota_config", None)
+
+    def _resolve():
+        with health_db.connect(ctx.db_path) as conn:
+            ref = health_db.find_immunization_ref_by_alias(conn, name)
+            if ref is None:
+                return None
+            refs = health_db.list_immunization_refs(conn)
+            rows = health_db.list_immunizations(conn, limit=5000)
+        coverage = compute_coverage(refs, rows)
+        entry = next((c for c in coverage if c.name == ref.name), None)
+        status = entry.status if entry else "never_recorded"
+        if status not in EXPLAINABLE_STATUSES or ref.category not in {
+            "routine", "booster",
+        }:
+            # Defensive fallback for vaccines that don't auto-prompt
+            # (travel + risk_based, up_to_date routines, etc.).
+            return {
+                "name": ref.name,
+                "display_name": ref.display_name,
+                "status": status,
+                "summary": "",
+                "why_it_matters": [],
+                "considerations": [],
+                "disclaimer": "",
+                "source": "skipped",
+                "generated_at": None,
+            }
+        return get_or_generate(
+            ctx,
+            name=ref.name,
+            display_name=ref.display_name,
+            status=status,
+            category=ref.category,
+            schedule=ref.schedule,
+            typical_age_range=ref.typical_age_range,
+            config=config,
+        )
+
+    result = await asyncio.to_thread(_resolve)
+    if result is None:
+        raise HTTPException(404, "vaccine not found")
+    return result
 
 
 # ---- Garmin ---------------------------------------------------------------
