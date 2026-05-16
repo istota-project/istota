@@ -11,6 +11,35 @@ interface MockReq {
 type MockHandler = (req: MockReq) => unknown | undefined;
 
 const __mockDir = dirname(fileURLToPath(import.meta.url));
+const IMMUNIZATION_REFS: Array<{
+	name: string;
+	display_name: string;
+	category: string;
+	schedule: string;
+	interval_days: number | null;
+	primary_series_doses: number | null;
+	aliases: string[];
+	description: string | null;
+	typical_age_range: string | null;
+}> = (() => {
+	try {
+		const path = resolve(__mockDir, '../src/istota/health/data/immunization_refs.json');
+		const raw = JSON.parse(readFileSync(path, 'utf-8')) as any[];
+		return raw.map((r) => ({
+			name: r.name,
+			display_name: r.display_name,
+			category: r.category,
+			schedule: r.schedule,
+			interval_days: r.interval_days ?? null,
+			primary_series_doses: r.primary_series_doses ?? null,
+			aliases: r.aliases ?? [],
+			description: r.description ?? null,
+			typical_age_range: r.typical_age_range ?? null,
+		}));
+	} catch {
+		return [];
+	}
+})();
 const BIOMARKER_REFS: Array<{
 	name: string;
 	display_name: string;
@@ -1211,6 +1240,33 @@ const handlers: MockHandler[] = [
 			},
 		];
 
+		interface Immunization {
+			id: number;
+			name: string;
+			product_name: string | null;
+			date_given: string;
+			manufacturer: string | null;
+			dose_label: string | null;
+			lot_number: string | null;
+			route: string | null;
+			site: string | null;
+			administered_by: string | null;
+			facility: string | null;
+			encounter_id: number | null;
+			cvx_code: string | null;
+			notes: string | null;
+			source: string;
+			created_at: string;
+		}
+		let nextImmunizationId = 1;
+		const immunizations: Immunization[] = [
+			{ id: nextImmunizationId++, name: 'Influenza', product_name: 'Fluzone Trivalent', date_given: '2025-11-28', manufacturer: 'Sanofi', dose_label: 'Annual 2025-26', lot_number: null, route: 'IM', site: 'left deltoid', administered_by: null, facility: 'CVS Pharmacy', encounter_id: null, cvx_code: null, notes: null, source: 'manual', created_at: new Date().toISOString() },
+			{ id: nextImmunizationId++, name: 'Influenza', product_name: 'Fluzone Quadrivalent', date_given: '2023-10-23', manufacturer: 'Sanofi', dose_label: null, lot_number: null, route: 'IM', site: null, administered_by: null, facility: 'CVS Pharmacy', encounter_id: null, cvx_code: null, notes: null, source: 'manual', created_at: new Date().toISOString() },
+			{ id: nextImmunizationId++, name: 'Tdap', product_name: 'Boostrix', date_given: '2016-12-01', manufacturer: 'GSK', dose_label: null, lot_number: null, route: 'IM', site: null, administered_by: null, facility: null, encounter_id: null, cvx_code: null, notes: null, source: 'manual', created_at: new Date().toISOString() },
+			{ id: nextImmunizationId++, name: 'COVID-19', product_name: 'Janssen/J&J', date_given: '2021-03-17', manufacturer: 'Janssen', dose_label: null, lot_number: null, route: 'IM', site: null, administered_by: null, facility: null, encounter_id: null, cvx_code: null, notes: 'External Administration', source: 'manual', created_at: new Date().toISOString() },
+			{ id: nextImmunizationId++, name: 'Typhoid', product_name: 'Typhim Vi', date_given: '2023-10-23', manufacturer: 'Sanofi', dose_label: null, lot_number: null, route: 'IM', site: null, administered_by: null, facility: null, encounter_id: null, cvx_code: null, notes: null, source: 'manual', created_at: new Date().toISOString() },
+		];
+
 		let nextStatId = 1;
 		const stats: Stat[] = [];
 		// Weight — daily-ish, 2 years of history with a slow downward drift
@@ -2273,6 +2329,298 @@ const handlers: MockHandler[] = [
 					recent_encounters: recentEncounters,
 				};
 			}
+
+
+				// ---- Immunizations ---------------------------------------------
+				function _parseDateUS(raw: string): string | null {
+					const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+					if (iso) return raw;
+					const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+					if (!m) return null;
+					let [, mo, dy, yr] = m;
+					if (yr.length === 2) yr = parseInt(yr, 10) < 70 ? `20${yr}` : `19${yr}`;
+					const d = new Date(`${yr}-${mo.padStart(2,'0')}-${dy.padStart(2,'0')}T00:00:00Z`);
+					if (isNaN(d.getTime())) return null;
+					return d.toISOString().slice(0, 10);
+				}
+
+				function _resolveFamily(product: string): { name: string; ref?: typeof IMMUNIZATION_REFS[number] } {
+					const p = product.toLowerCase();
+					const candidates: Array<{ alias: string; ref: typeof IMMUNIZATION_REFS[number] }> = [];
+					for (const r of IMMUNIZATION_REFS) {
+						candidates.push({ alias: r.name.toLowerCase(), ref: r });
+						for (const a of r.aliases || []) candidates.push({ alias: a.toLowerCase(), ref: r });
+					}
+					candidates.sort((a, b) => b.alias.length - a.alias.length);
+					for (const c of candidates) {
+						const idx = p.indexOf(c.alias);
+						if (idx === -1) continue;
+						const before = idx > 0 ? p[idx - 1] : ' ';
+						const after = idx + c.alias.length < p.length ? p[idx + c.alias.length] : ' ';
+						if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) {
+							return { name: c.ref.name, ref: c.ref };
+						}
+					}
+					return { name: 'Unknown' };
+				}
+
+				function _parsePaste(text: string) {
+					const out: any[] = [];
+					for (const rawLine of text.split('\n')) {
+						const line = rawLine.trim();
+						if (!line) continue;
+						let product: string | null = null;
+						let date: string | null = null;
+						let confidence: string = 'low';
+						let m = line.match(/^(.+?)\s*\(\s*Given\s+(\d{1,2}\/\d{1,2}\/\d{2,4})\s*\)\s*$/i);
+						if (m) {
+							product = m[1].trim();
+							date = _parseDateUS(m[2]);
+							confidence = date ? 'high' : 'medium';
+						} else {
+							m = line.match(/^(.+?)\s+(\d{4}-\d{2}-\d{2})\s*$/);
+							if (m) {
+								product = m[1].trim();
+								date = _parseDateUS(m[2]);
+								confidence = date ? 'high' : 'medium';
+							} else {
+								product = line;
+								confidence = 'manual';
+							}
+						}
+						const resolved = _resolveFamily(product || '');
+						out.push({
+							name: resolved.name,
+							product_name: product || null,
+							date_given: date,
+							source_line: line,
+							confidence,
+							notes: resolved.name === 'Unknown' ? line : null,
+						});
+					}
+					return out;
+				}
+
+				function _computeCoverage() {
+					const today = new Date();
+					const todayMs = today.getTime();
+					const out = IMMUNIZATION_REFS.map((ref) => {
+						const matching = immunizations.filter((r) => r.name === ref.name);
+						const dates = matching.map((r) => r.date_given).filter(Boolean).sort();
+						const lastGiven = dates.length ? dates[dates.length - 1] : null;
+						const doseCount = matching.length;
+						let status = 'never_recorded';
+						let nextDue: string | null = null;
+						let isOverdue = false;
+						let daysUntilDue: number | null = null;
+						const lastDate = lastGiven ? new Date(lastGiven + 'T00:00:00Z') : null;
+						if (ref.schedule === 'risk_based') {
+							status = doseCount === 0 ? 'risk_based' : 'up_to_date';
+						} else if (ref.schedule === 'annual' || ref.schedule === 'every_10y') {
+							if (!lastDate) {
+								status = 'never_recorded';
+							} else {
+								const interval = ref.interval_days ?? (ref.schedule === 'annual' ? 365 : 3650);
+								const due = new Date(lastDate.getTime() + interval * 86400 * 1000);
+								nextDue = due.toISOString().slice(0, 10);
+								const delta = Math.floor((due.getTime() - todayMs) / 86400 / 1000);
+								daysUntilDue = delta;
+								if (delta < 0) { status = 'overdue'; isOverdue = true; }
+								else if (delta <= 30) status = 'due_soon';
+								else status = 'up_to_date';
+							}
+						} else if (ref.schedule === 'lifetime_after_series' || ref.schedule === 'series_then_booster') {
+							const required = ref.primary_series_doses ?? 1;
+							if (doseCount === 0) status = 'series_incomplete';
+							else if (doseCount >= required) status = 'up_to_date';
+							else status = 'series_incomplete';
+						} else if (ref.schedule === 'travel_pre_trip') {
+							if (!lastDate) status = 'never_recorded';
+							else {
+								const interval = ref.interval_days ?? 365;
+								const due = new Date(lastDate.getTime() + interval * 86400 * 1000);
+								nextDue = due.toISOString().slice(0, 10);
+								const delta = Math.floor((due.getTime() - todayMs) / 86400 / 1000);
+								daysUntilDue = delta;
+								if (delta < 0) { status = 'expired'; isOverdue = true; }
+								else status = 'up_to_date';
+							}
+						} else {
+							status = doseCount > 0 ? 'up_to_date' : 'never_recorded';
+						}
+						return {
+							name: ref.name,
+							display_name: ref.display_name,
+							category: ref.category,
+							status,
+							last_given: lastGiven,
+							dose_count: doseCount,
+							next_due: nextDue,
+							is_overdue: isOverdue,
+							days_until_due: daysUntilDue,
+						};
+					});
+					const canonical = new Set(IMMUNIZATION_REFS.map((r) => r.name));
+					const otherMap = new Map<string, any[]>();
+					for (const r of immunizations) {
+						if (canonical.has(r.name)) continue;
+						if (!otherMap.has(r.name)) otherMap.set(r.name, []);
+						otherMap.get(r.name)!.push(r);
+					}
+					const other = [];
+					for (const [name, group] of otherMap) {
+						other.push({
+							name, display_name: name, category: 'other',
+							status: 'recorded',
+							last_given: group.map((r) => r.date_given).sort().pop() || null,
+							dose_count: group.length,
+							next_due: null, is_overdue: false, days_until_due: null,
+						});
+					}
+					return { coverage: out, other };
+				}
+
+				if (url === '/istota/api/health/immunizations/refs' && method === 'GET') {
+					return { refs: IMMUNIZATION_REFS };
+				}
+				if (url === '/istota/api/health/immunizations/coverage' && method === 'GET') {
+					return _computeCoverage();
+				}
+				if (url === '/istota/api/health/immunizations/parse' && method === 'POST') {
+					if (!body || typeof body.text !== 'string') return { error: 'text is required' };
+					return { rows: _parsePaste(body.text) };
+				}
+				if (url === '/istota/api/health/immunizations/bulk' && method === 'POST') {
+					if (!body || !Array.isArray(body.rows)) return { error: 'rows must be a list' };
+					const ids: number[] = [];
+					for (let i = 0; i < body.rows.length; i++) {
+						const r = body.rows[i];
+						if (!r.name || !r.date_given) return { error: `row ${i} missing fields` };
+						const imm: Immunization = {
+							id: nextImmunizationId++,
+							name: String(r.name),
+							product_name: r.product_name || null,
+							date_given: String(r.date_given),
+							manufacturer: r.manufacturer || null,
+							dose_label: r.dose_label || null,
+							lot_number: r.lot_number || null,
+							route: r.route || null,
+							site: r.site || null,
+							administered_by: r.administered_by || null,
+							facility: r.facility || null,
+							encounter_id: r.encounter_id ?? null,
+							cvx_code: r.cvx_code || null,
+							notes: r.notes || null,
+							source: r.source || 'import',
+							created_at: new Date().toISOString(),
+						};
+						immunizations.push(imm);
+						ids.push(imm.id);
+					}
+					return { status: 'ok', ids, count: ids.length };
+				}
+				const immExplainerMatch = url.match(/^\/istota\/api\/health\/immunizations\/([^/?]+)\/explainer$/);
+				if (immExplainerMatch && method === 'GET') {
+					const target = decodeURIComponent(immExplainerMatch[1]);
+					const ref = IMMUNIZATION_REFS.find((r) => r.name === target)
+						|| IMMUNIZATION_REFS.find((r) => (r.aliases || []).some((a) => a.toLowerCase() === target.toLowerCase()));
+					if (!ref) return { error: 'vaccine not found' };
+					const cov = _computeCoverage().coverage.find((c) => c.name === ref.name);
+					const status = cov?.status || 'never_recorded';
+					const explainable = ['overdue', 'never_recorded', 'series_incomplete', 'expired'].includes(status);
+					if (!explainable || !['routine', 'booster'].includes(ref.category)) {
+						return {
+							name: ref.name, display_name: ref.display_name, status,
+							summary: '', why_it_matters: [], considerations: [],
+							disclaimer: '', source: 'skipped', generated_at: null,
+						};
+					}
+					return {
+						name: ref.name,
+						display_name: ref.display_name,
+						status,
+						summary: `${ref.display_name} is a vaccine for which your current coverage shows as ${status.replace('_', ' ')}. Records can lag, and what's recommended depends on your personal medical history.`,
+						why_it_matters: [
+							'Vaccines provide protection against infections that can have serious complications.',
+							'Coverage gaps often reflect missing records rather than missed doses — verify before scheduling.',
+							'Risk varies by age, occupation, travel plans, and underlying conditions.',
+						],
+						considerations: [
+							'Discuss whether you are due with your clinician at your next visit.',
+							'Pull records from past providers or your state immunization registry if available.',
+							'Review contraindications and timing with your provider before booking.',
+						],
+						disclaimer: 'Educational information only — not medical advice or diagnosis. Discuss vaccination decisions with your clinician.',
+						source: 'fallback', generated_at: null,
+					};
+				}
+				if (url.startsWith('/istota/api/health/immunizations') && method === 'GET') {
+					const idMatch = url.match(/^\/istota\/api\/health\/immunizations\/(\d+)$/);
+					if (idMatch) {
+						const id = Number(idMatch[1]);
+						const row = immunizations.find((x) => x.id === id);
+						if (!row) return { error: 'immunization not found' };
+						const enc = row.encounter_id ? encounters.find((e) => e.id === row.encounter_id) || null : null;
+						return { immunization: row, encounter: enc };
+					}
+					const u = new URL(url, 'http://x');
+					const filterName = u.searchParams.get('name');
+					const since = u.searchParams.get('since');
+					const until = u.searchParams.get('until');
+					let rows = [...immunizations];
+					if (filterName) rows = rows.filter((r) => r.name === filterName);
+					if (since) rows = rows.filter((r) => r.date_given >= since);
+					if (until) rows = rows.filter((r) => r.date_given <= until);
+					rows.sort((a, b) => b.date_given.localeCompare(a.date_given) || b.id - a.id);
+					return { immunizations: rows };
+				}
+				if (url === '/istota/api/health/immunizations' && method === 'POST') {
+					if (!body || !body.name || !body.date_given) {
+						return { error: 'name and date_given required' };
+					}
+					const imm: Immunization = {
+						id: nextImmunizationId++,
+						name: String(body.name),
+						product_name: body.product_name || null,
+						date_given: String(body.date_given),
+						manufacturer: body.manufacturer || null,
+						dose_label: body.dose_label || null,
+						lot_number: body.lot_number || null,
+						route: body.route || null,
+						site: body.site || null,
+						administered_by: body.administered_by || null,
+						facility: body.facility || null,
+						encounter_id: body.encounter_id ?? null,
+						cvx_code: body.cvx_code || null,
+						notes: body.notes || null,
+						source: body.source || 'manual',
+						created_at: new Date().toISOString(),
+					};
+					immunizations.push(imm);
+					return { status: 'ok', id: imm.id };
+				}
+				const immUpdMatch = url.match(/^\/istota\/api\/health\/immunizations\/(\d+)$/);
+				if (immUpdMatch && method === 'PUT') {
+					const id = Number(immUpdMatch[1]);
+					const imm = immunizations.find((x) => x.id === id);
+					if (!imm) return { error: 'immunization not found' };
+					const allowed = [
+						'name', 'product_name', 'date_given', 'manufacturer', 'dose_label',
+						'lot_number', 'route', 'site', 'administered_by', 'facility',
+						'encounter_id', 'cvx_code', 'notes',
+					];
+					for (const k of allowed) {
+						if (body && k in body) (imm as any)[k] = body[k];
+					}
+					return { status: 'ok' };
+				}
+				if (immUpdMatch && method === 'DELETE') {
+					const id = Number(immUpdMatch[1]);
+					const idx = immunizations.findIndex((x) => x.id === id);
+					if (idx < 0) return { error: 'immunization not found' };
+					immunizations.splice(idx, 1);
+					return { status: 'ok' };
+				}
 
 			return undefined;
 		};

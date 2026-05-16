@@ -37,6 +37,10 @@
 					active={isActive('/health/history')}
 				>History</NavLink>
 				<NavLink
+					href="{base}/health/immunizations"
+					active={isActive('/health/immunizations')}
+				>Immunizations</NavLink>
+				<NavLink
 					href="{base}/health/bloodwork"
 					active={isActive('/health/bloodwork')}
 				>Bloodwork</NavLink>
