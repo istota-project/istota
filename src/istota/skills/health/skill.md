@@ -1,6 +1,6 @@
 ---
 name: health
-triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin, encounter, doctor, doctor visit, procedure, screening, hospitalization, diagnosis, diagnosed, condition, medical history, icd10, chronic]
+triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin, encounter, doctor, doctor visit, procedure, screening, hospitalization, diagnosis, diagnosed, condition, medical history, icd10, chronic, immunization, immunizations, vaccine, vaccines, vaccinated, vaccination, shot, booster, flu shot, tdap, mmr, shingles, hpv, covid shot, travel vaccine, mychart vaccines]
 description: Health tracking — body stats, bloodwork panels, biomarker trends, lab analysis, and Garmin daily summaries.
 cli: true
 env: [{"var":"HEALTH_DB_PATH","from":"setup_env"}]
@@ -80,6 +80,26 @@ istota-skill health delete-diagnosis 7
 
 istota-skill health history-summary                       # new-doctor packet
 
+# Immunizations
+istota-skill health immunizations [--name Influenza] [--since 2020-01-01]
+istota-skill health immunization 12                       # show one record
+istota-skill health add-immunization --name Influenza --date 2025-11-28 \
+    --product-name "Fluzone trivalent" --manufacturer Sanofi \
+    --site "left deltoid" --route IM --facility "CVS Pharmacy" \
+    --notes "Annual 2025-26"
+istota-skill health update-immunization 12 --lot-number ABC123
+istota-skill health delete-immunization 12
+
+istota-skill health vaccine-refs                          # bundled canonical list
+istota-skill health coverage                              # status per ref
+istota-skill health coverage --due-soon                   # filter
+istota-skill health coverage --overdue
+
+istota-skill health import-immunizations --paste @clipboard.txt --dry-run
+istota-skill health import-immunizations --paste @clipboard.txt --confirm
+
+istota-skill health explain-immunization Influenza        # educational primer
+
 # Garmin (initial connect happens in the web UI — health settings page)
 istota-skill health garmin-status
 istota-skill health garmin-sync --days-back 7
@@ -139,6 +159,13 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 | "What are my active conditions?" | `diagnoses --status active` |
 | "When was my last eye exam?" | `encounters --since … --type screening` and filter |
 | "Give me a summary for my new doctor" | `history-summary` |
+| "Got my flu shot today" | `add-immunization --name Influenza --date 2026-05-16` |
+| "Tdap booster 2 weeks ago at the pharmacy" | `add-immunization --name Tdap --date 2026-05-02 --facility "pharmacy"` |
+| "Here's my MyChart vaccine list: …" | `import-immunizations --paste @inline --dry-run` then `--confirm` after the user reviews the parsed rows |
+| "Am I due for anything?" | `coverage --due-soon` and `coverage --overdue` |
+| "When was my last tetanus?" | `immunizations --name Tdap --limit 1` |
+| "What's the deal with Shingrix?" | `explain-immunization Shingles` |
+| "Show me everything I've had" | `immunizations --limit 500` |
 | "Sync my Garmin data" | `garmin-sync --days-back 7` |
 | "Is my Garmin connected?" | `garmin-status` |
 | "How did I sleep last night?" | `latest` — read `sleep_duration_min` / `sleep_score` from Garmin rows |
