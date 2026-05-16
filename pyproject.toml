@@ -71,6 +71,13 @@ feeds = [
     "bleach>=6.0.0",
     "click>=8.0",
 ]
+garmin = [
+    # Native DI OAuth + token persistence; replaced the broken SSO flow
+    # in v0.3.x. Pulls in curl_cffi for TLS-fingerprint matching.
+    # Requires Python 3.12+ — istota itself still supports 3.11, so the
+    # marker keeps 3.11 environments resolvable without the extra.
+    "garminconnect>=0.3.3; python_version >= '3.12'",
+]
 docs = [
     "mkdocs>=1.6.0",
     "mkdocs-material>=9.5.0",
@@ -86,6 +93,7 @@ all = [
     "istota[web]",
     "istota[money]",
     "istota[feeds]",
+    "istota[garmin]",
 ]
 
 [project.scripts]
