@@ -14,12 +14,14 @@ never touches them.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
-from istota.health import db as health_db
 from istota.health import garmin as health_garmin
-from istota.health._migrate import ensure_initialised
 from istota.health.models import HealthContext
+
+
+logger = logging.getLogger(__name__)
 
 
 MODULE_PREFIX = "_module.health."
@@ -46,19 +48,21 @@ GARMIN_SYNC_JOB = ModuleJob(
 def jobs_for_user(health_ctx: HealthContext | None, user_id: str) -> list[dict]:
     """Render module job definitions for a user.
 
-    Returns an empty list when the user has no Garmin tokens, so the
-    scheduler's idempotent sync pass cleans up any stale row.
+    Returns an empty list when the user has no Garmin tokens (per the
+    framework's encrypted ``secrets`` table) so the scheduler's
+    idempotent sync pass cleans up any stale row.
     """
-    if health_ctx is None:
+    if health_ctx is None or health_ctx.framework_db_path is None:
         return []
-    # Inspect the user's health DB to decide whether to seed Garmin sync.
     try:
-        ensure_initialised(health_ctx)
-        with health_db.connect(health_ctx.db_path) as conn:
-            tokens = health_garmin.load_tokens(conn)
-    except Exception:
-        # If the DB isn't readable yet (fresh user, race during init),
-        # don't seed — the next pass will pick it up.
+        tokens = health_garmin.load_tokens(health_ctx.framework_db_path, user_id)
+    except Exception as exc:  # noqa: BLE001
+        # L7: log instead of silently swallowing. A SQLite lock,
+        # corrupted DB, or missing ISTOTA_SECRET_KEY all degrade to "no
+        # Garmin sync for this user this tick" — operators need a signal.
+        logger.warning(
+            "health jobs_for_user probe failed for user=%s: %s", user_id, exc,
+        )
         return []
     if not tokens:
         return []

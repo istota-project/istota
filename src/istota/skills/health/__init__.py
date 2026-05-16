@@ -542,49 +542,56 @@ def cmd_summary(args: argparse.Namespace) -> None:
     })
 
 
+def _framework_db_path_or_fail() -> Path:
+    db = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db:
+        _fail("ISTOTA_DB_PATH not set — Garmin commands need the framework DB")
+    return Path(db)
+
+
 def cmd_garmin_status(args: argparse.Namespace) -> None:
     from istota.health import garmin as gm
-
-    conn = _connect()
-    try:
-        status = gm.get_status(conn)
-    finally:
-        conn.close()
-    _emit({"status": "ok", "garmin": status})
-
-
-def cmd_garmin_sync(args: argparse.Namespace) -> None:
-    """Run a Garmin sync. Direct mode only — sync writes to multiple stats
-    rows and is not part of the deferred-op set; the scheduled job and
-    web `/garmin/sync` endpoint cover the unsandboxed surfaces."""
-    from istota.health import garmin_sync
-    from istota.health._loader import resolve_for_user
 
     user_id = os.environ.get("ISTOTA_USER_ID", "")
     if not user_id:
         _fail("ISTOTA_USER_ID not set")
+    status = gm.get_status(_framework_db_path_or_fail(), user_id)
+    _emit({"status": "ok", "garmin": status})
 
-    # Resolve the per-user context. The CLI may be invoked outside the
-    # sandbox (operator / scheduled job), so we can call the host-side
-    # loader here without config wiring.
-    try:
-        # Lazy: try to import the config from a known path; if not
-        # available, fall back to assembling a minimal context from
-        # HEALTH_DB_PATH (used by the in-sandbox CLI surface).
-        from istota.health.models import HealthContext
-        from pathlib import Path as _P
-        db = _P(_db_path())
-        ctx = HealthContext(
-            user_id=user_id,
-            workspace_root=db.parent.parent,
-            data_dir=db.parent.parent,
-            db_path=db,
-            uploads_dir=db.parent.parent / "uploads",
-        )
-    except Exception as exc:  # noqa: BLE001
-        _fail(f"failed to build health context: {exc}")
 
-    res = garmin_sync.sync_garmin(ctx, days_back=args.days_back)
+def cmd_garmin_sync(args: argparse.Namespace) -> None:
+    """Run a Garmin sync. Direct mode only — sync writes to multiple
+    stats rows in the per-user health DB and refreshes the encrypted
+    OAuth blob in the framework secrets table. The scheduled job and
+    web `/garmin/sync` endpoint share the same engine.
+    """
+    from istota.health import garmin_sync as gs
+    from istota.health.models import HealthContext
+
+    user_id = os.environ.get("ISTOTA_USER_ID", "")
+    if not user_id:
+        _fail("ISTOTA_USER_ID not set")
+    framework_db = _framework_db_path_or_fail()
+
+    # Build the HealthContext from HEALTH_DB_PATH. The canonical layout
+    # (workspace.py) is `{workspace}/health/data/health.db` — three
+    # parents up from the db file is the workspace root (H3).
+    health_db_path = Path(_db_path())
+    workspace_root = health_db_path.parent.parent.parent
+    data_dir = health_db_path.parent.parent
+    uploads_dir = data_dir / "uploads"
+    ctx = HealthContext(
+        user_id=user_id,
+        workspace_root=workspace_root,
+        data_dir=data_dir,
+        db_path=health_db_path,
+        uploads_dir=uploads_dir,
+    )
+
+    user_tz = os.environ.get("ISTOTA_USER_TZ") or None
+    res = gs.sync_garmin(
+        ctx, framework_db, days_back=args.days_back, user_tz=user_tz,
+    )
     payload = res.to_dict()
     payload["status"] = "ok" if not res.auth_error else "error"
     if res.auth_error:
@@ -596,12 +603,9 @@ def cmd_garmin_disconnect(args: argparse.Namespace) -> None:
     from istota.health import garmin as gm
 
     user_id = os.environ.get("ISTOTA_USER_ID", "")
-    conn = _connect()
-    try:
-        gm.disconnect(conn, user_id=user_id)
-        conn.commit()
-    finally:
-        conn.close()
+    if not user_id:
+        _fail("ISTOTA_USER_ID not set")
+    gm.disconnect(_framework_db_path_or_fail(), user_id=user_id)
     _emit({"status": "ok"})
 
 

@@ -41,10 +41,17 @@
 		}
 	}
 
-	async function startConnect() {
-		busy = true;
+	// L3: clear stale banners on the next user-initiated action so the
+	// green "Sync complete" message doesn't linger forever and the
+	// previous red error doesn't bleed into the new attempt.
+	function resetBanners() {
 		error = '';
 		info = '';
+	}
+
+	async function startConnect() {
+		busy = true;
+		resetBanners();
 		try {
 			const resp = await connectGarmin(emailInput, passwordInput);
 			if (resp.status === 'mfa_required') {
@@ -66,7 +73,7 @@
 
 	async function submitMfa() {
 		busy = true;
-		error = '';
+		resetBanners();
 		try {
 			const resp = await submitGarminMfa(mfaCodeInput);
 			if (resp.status === 'ok') {
@@ -87,8 +94,7 @@
 
 	async function syncNow() {
 		busy = true;
-		error = '';
-		info = '';
+		resetBanners();
 		try {
 			const r = await syncGarmin(7);
 			if (r.auth_error) {
@@ -107,7 +113,7 @@
 
 	async function doDisconnect() {
 		busy = true;
-		error = '';
+		resetBanners();
 		try {
 			await disconnectGarmin();
 			emailInput = '';
@@ -152,14 +158,14 @@
 			</div>
 		</div>
 		{#if status.error}
-			<p class="error">
+			<div class="banner error">
 				{status.error === 'token_expired'
 					? 'Token expired — please reconnect.'
 					: status.error}
-			</p>
+			</div>
 		{/if}
 		<div class="actions">
-			<Button onclick={syncNow} disabled={busy}>
+			<Button variant="primary" onclick={syncNow} disabled={busy}>
 				{busy ? 'Syncing…' : 'Sync now'}
 			</Button>
 			<Button variant="ghost" onclick={doDisconnect} disabled={busy}>
@@ -203,10 +209,10 @@
 	{/if}
 
 	{#if error}
-		<p class="error">{error}</p>
+		<div class="banner error">{error}</div>
 	{/if}
 	{#if info}
-		<p class="info">{info}</p>
+		<div class="banner info">{info}</div>
 	{/if}
 </SettingsCard>
 
@@ -231,13 +237,5 @@
 	}
 	.muted {
 		color: var(--text-muted);
-	}
-	.error {
-		color: var(--color-danger, #c44);
-		margin-top: 0.5rem;
-	}
-	.info {
-		color: var(--color-success, #4a4);
-		margin-top: 0.5rem;
 	}
 </style>

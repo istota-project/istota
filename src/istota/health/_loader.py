@@ -53,7 +53,12 @@ def resolve_for_user(
         user_id, istota_config.bot_dir_name,
     ).lstrip("/")
 
-    return synthesize_health_context(user_id, workspace)
+    framework_db = getattr(istota_config, "db_path", None)
+    ctx = synthesize_health_context(user_id, workspace)
+    if framework_db:
+        from dataclasses import replace
+        ctx = replace(ctx, framework_db_path=Path(framework_db))
+    return ctx
 
 
 def list_users(

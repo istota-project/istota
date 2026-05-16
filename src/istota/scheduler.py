@@ -1048,7 +1048,7 @@ def _execute_skill_task(
     Skill-tasks are not arbitrary shell, so they are not admin-gated.
     """
     from .executor import build_clean_env, get_user_temp_dir
-    from .skills._env import EnvContext, build_skill_env
+    from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
     from .skills._loader import load_skill_index
 
     skill_name = task.skill or ""
@@ -1105,6 +1105,19 @@ def _execute_skill_task(
     # split: skill-tasks run a trusted CLI, not an LLM, so credentials
     # flow directly. ``build_skill_env`` warns on real value conflicts.
     env.update(build_skill_env(list(skill_index), skill_index, ctx))
+
+    # Run setup_env hooks (C1). Without this, declarative env specs
+    # marked ``from: "setup_env"`` (notably ``HEALTH_DB_PATH``) resolve
+    # to None in build_skill_env — the health skill's scheduled
+    # Garmin sync would fail every cron tick with "HEALTH_DB_PATH not
+    # set". Hooks self-gate, so dispatching the full skill_index is
+    # safe.
+    env.update(dispatch_setup_env_hooks(list(skill_index), skill_index, ctx))
+
+    # Per-user timezone (used by sync engines like Garmin that need to
+    # compute the user's "yesterday" in their local TZ rather than UTC).
+    if user_cfg and getattr(user_cfg, "timezone", None):
+        env["ISTOTA_USER_TZ"] = user_cfg.timezone
 
     cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
     try:
@@ -2905,6 +2918,18 @@ def _sync_health_module_jobs(conn, app_config: Config) -> None:
     def _queue_initial_backfill(conn, user_id: str, j: dict) -> None:
         if j["name"] != backfill_name:
             return
+        # Resolve the freshly-inserted job row's id so the backfill task
+        # is linked back to it via ``scheduled_job_id`` (M2). Without
+        # this the failure-tracking path doesn't fire on the backfill,
+        # so a permanently-broken Garmin connection would silently fail
+        # the initial 30-day pull and never show up in the operator's
+        # auto-disable counter.
+        row = conn.execute(
+            "SELECT id FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+            (user_id, j["name"]),
+        ).fetchone()
+        scheduled_job_id = row[0] if row else None
+
         task_id = db.create_task(
             conn,
             prompt="",
@@ -2915,10 +2940,11 @@ def _sync_health_module_jobs(conn, app_config: Config) -> None:
             skill="health",
             skill_args=json.dumps(["garmin-sync", "--days-back", "30"]),
             queue="background",
+            scheduled_job_id=scheduled_job_id,
         )
         logger.info(
-            "Queued initial Garmin backfill for user %s as task %d",
-            user_id, task_id,
+            "Queued initial Garmin backfill for user %s as task %d (job_id=%s)",
+            user_id, task_id, scheduled_job_id,
         )
 
     _sync_module_jobs(
