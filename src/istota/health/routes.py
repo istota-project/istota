@@ -2118,22 +2118,16 @@ async def api_delete_immunization(
 @router.get("/immunizations/{name}/explainer")
 async def api_immunization_explainer(
     name: str,
-    request: Request,
     ctx: HealthContext = Depends(get_user_context),
 ):
-    """Cached, brain-generated educational primer for a vaccine name.
+    """Educational primer for a vaccine, served from bundled JSON.
 
-    Status is derived from current coverage. Routine + booster vaccines
-    with an actionable status (overdue / never_recorded / series_incomplete /
-    expired) get a real explainer; everything else gets the standard
-    fallback payload so the UI never breaks.
+    Status is derived from current coverage but no longer gates the
+    response — the curated content is shown for every vaccine in the
+    canonical refs that has an entry.
     """
-    from istota.health.immunization_explainer import (
-        EXPLAINABLE_STATUSES, get_or_generate,
-    )
+    from istota.health.immunization_explainer import get_explainer
     from istota.health.immunizations import compute_coverage
-
-    config = getattr(request.app.state, "istota_config", None)
 
     def _resolve():
         with health_db.connect(ctx.db_path) as conn:
@@ -2145,31 +2139,10 @@ async def api_immunization_explainer(
         coverage = compute_coverage(refs, rows)
         entry = next((c for c in coverage if c.name == ref.name), None)
         status = entry.status if entry else "never_recorded"
-        if status not in EXPLAINABLE_STATUSES or ref.category not in {
-            "routine", "booster",
-        }:
-            # Defensive fallback for vaccines that don't auto-prompt
-            # (travel + risk_based, up_to_date routines, etc.).
-            return {
-                "name": ref.name,
-                "display_name": ref.display_name,
-                "status": status,
-                "summary": "",
-                "why_it_matters": [],
-                "considerations": [],
-                "disclaimer": "",
-                "source": "skipped",
-                "generated_at": None,
-            }
-        return get_or_generate(
-            ctx,
+        return get_explainer(
             name=ref.name,
             display_name=ref.display_name,
             status=status,
-            category=ref.category,
-            schedule=ref.schedule,
-            typical_age_range=ref.typical_age_range,
-            config=config,
         )
 
     result = await asyncio.to_thread(_resolve)

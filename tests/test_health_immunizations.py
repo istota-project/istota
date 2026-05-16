@@ -72,9 +72,7 @@ class TestSchema:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
-        assert {
-            "immunizations", "immunization_refs", "immunization_explainers",
-        } <= tables
+        assert {"immunizations", "immunization_refs"} <= tables
 
 
 class TestImmunizationCrud:

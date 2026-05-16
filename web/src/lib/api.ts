@@ -1211,9 +1211,8 @@ export interface ImmunizationExplainer {
 	status: ImmunizationStatus;
 	summary: string;
 	why_it_matters: string[];
-	considerations: string[];
 	disclaimer: string;
-	source: 'cache' | 'generated' | 'fallback' | 'skipped';
+	source: 'static' | 'fallback';
 	generated_at: string | null;
 }
 

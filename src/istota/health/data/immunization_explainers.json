@@ -1,0 +1,210 @@
+[
+  {
+    "name": "Influenza",
+    "summary": "Seasonal influenza is a respiratory virus that mutates rapidly, which is why the vaccine is reformulated and given annually. Most healthy adults recover in a week or two, but flu causes tens of thousands of hospitalizations and thousands of deaths per year in the US alone, concentrated in older adults, pregnant people, infants, and people with chronic heart, lung, kidney, liver, or metabolic disease. The vaccine reduces the likelihood of infection and — more reliably — the severity of illness, hospitalization, and death if you do get infected. Effectiveness varies year to year (typically 40–60%) depending on how well the vaccine strains match the circulating strains. Egg-allergy is no longer a contraindication for any modern flu vaccine. People 65 and older are usually offered higher-dose (Fluzone High-Dose) or adjuvanted (Fluad) formulations that produce a stronger immune response; people with severe immunocompromise should ask whether a high-dose product is appropriate for them too. Pregnancy is a recommended indication, not a contraindication — the inactivated vaccine is safe in any trimester and passes protective antibodies to the newborn for the first 6 months of life when infants can't yet be vaccinated.",
+    "why_it_matters": [
+      "Flu vaccination during pregnancy is one of the few ways to protect infants under 6 months, who are at high hospitalization risk but too young to be vaccinated directly.",
+      "Older adults account for the majority of flu deaths; higher-dose and adjuvanted formulations are designed for this group specifically.",
+      "Even when the vaccine doesn't prevent infection, it consistently reduces ICU admission and death in adults with chronic conditions.",
+      "Optimal timing is September–October in the Northern Hemisphere — protection wanes over the season, but a January dose is still worthwhile if you missed the earlier window.",
+      "The live nasal vaccine (FluMist) is not recommended for pregnant people, immunocompromised people, or adults over 50."
+    ]
+  },
+  {
+    "name": "COVID-19",
+    "summary": "Current COVID-19 vaccines target the most recently circulating SARS-CoV-2 variants and are reformulated annually, similar to flu. The dominant clinical benefit in 2024–2026 is reduced risk of severe disease, hospitalization, and long COVID — protection against any infection is real but modest and short-lived (months, not years). Updated annual doses are recommended for everyone 6 months and older. Older adults (65+) and moderately-to-severely immunocompromised people are typically offered an additional dose 4–6 months after the first annual one, because their initial response wanes faster. Pregnancy is again a recommended indication: maternal vaccination cuts the infant's hospitalization risk in the first 6 months substantially. The mRNA vaccines (Pfizer/Comirnaty, Moderna/Spikevax) carry a small excess risk of myocarditis, mostly in males 12–39 and mostly after the second dose of a primary series; the absolute risk is much lower than the cardiac risk from a COVID infection itself, and almost all cases resolve. Novavax (protein subunit) is an mRNA-free alternative for people who prefer it. Long COVID risk is meaningfully reduced — by roughly 25–50% per dose received before infection — even in people who get infected anyway.",
+    "why_it_matters": [
+      "Annual updated boosters substantially reduce hospitalization and death in adults 65+, where most ongoing COVID mortality is concentrated.",
+      "Maternal vaccination during pregnancy lowers severe COVID risk in both parent and newborn — a key reason vaccination is recommended in any trimester.",
+      "Pre-infection vaccination measurably lowers long COVID risk, even when it doesn't prevent the acute infection.",
+      "Immunocompromised people often need an extra dose because their initial response is weaker and wanes faster.",
+      "If mRNA vaccines are a concern (myocarditis history, personal preference), Novavax is available and uses a more traditional protein-subunit approach."
+    ]
+  },
+  {
+    "name": "Tdap",
+    "summary": "Tdap protects against tetanus (a soil-bacterium toxin that causes lockjaw and respiratory failure), diphtheria (an airway-obstructing throat infection that is rare in vaccinated populations), and pertussis (whooping cough). Pertussis is the main driver of the every-10-year schedule: immunity wanes over time, and adults with mild pertussis are the principal source of infection for unvaccinated infants, in whom pertussis can be fatal. Every pregnancy is a recommended Tdap indication — given between 27 and 36 weeks, the dose generates antibodies that cross the placenta and protect the newborn through their most vulnerable months. After a contaminated wound, clinicians may give a booster if more than 5 years have passed since your last dose, even though the routine interval is 10 years. After a clean minor wound, the 10-year rule applies. Adults who never completed a childhood primary series need three doses (Tdap, then Td or Tdap at 1 month, then again at 6–12 months) rather than a single booster.",
+    "why_it_matters": [
+      "The 10-year schedule is driven by pertussis, not tetanus — tetanus immunity from a complete series lasts much longer, but pertussis immunity wanes within a decade.",
+      "Tdap during every pregnancy protects newborns during the months before they can be vaccinated themselves; pertussis kills more infants under 3 months than any other vaccine-preventable disease.",
+      "Wound management uses a shortened 5-year interval for dirty wounds (puncture, contamination with soil/saliva, burns, frostbite) — if it's been longer, ask for a booster at the time of care.",
+      "Tetanus spores are everywhere in soil and there is no herd immunity for tetanus — your protection depends entirely on your personal vaccine status.",
+      "Adults caring for or in contact with newborns (parents, grandparents, daycare workers) are specifically advised to be current to reduce infant exposure."
+    ]
+  },
+  {
+    "name": "Td",
+    "summary": "Td is tetanus + diphtheria without the pertussis component. It exists as a cheaper alternative to Tdap for routine 10-year boosters in adults who have already had at least one Tdap as an adult. Current US practice often favors Tdap regardless, because pertussis immunity wanes and there is no downside to refreshing it. If your provider offers Td and you have not had a Tdap as an adult — or you're around infants — ask for Tdap instead. After a contaminated wound, either Td or Tdap is acceptable if more than 5 years have passed since your last dose. Td and Tdap are interchangeable for the every-10-year schedule; the difference is purely whether pertussis is included.",
+    "why_it_matters": [
+      "If you have never had an adult Tdap dose, ask for Tdap instead of Td at your next booster to add pertussis coverage.",
+      "Td is fine for routine boosters once you've had at least one adult Tdap.",
+      "Wound management protocol is identical between Td and Tdap — both reset the 10-year clock and both qualify after a dirty wound.",
+      "Tetanus has no herd-immunity effect — your personal booster status is the only thing standing between you and a soil-acquired infection."
+    ]
+  },
+  {
+    "name": "MMR",
+    "summary": "MMR is a live-attenuated vaccine against measles, mumps, and rubella, given as two doses for durable immunity. Two doses are about 97% effective against measles and 88% against mumps; one dose alone is closer to 93% and 78% respectively. Measles is one of the most contagious diseases known — a single case can infect 90% of unvaccinated close contacts — and routinely causes pneumonia, encephalitis, and a rare delayed fatal complication called SSPE years later. Rubella in pregnancy causes severe birth defects (congenital rubella syndrome), which is the historical reason for universal vaccination. Adults born before 1957 are usually assumed immune from natural exposure. Adults born between 1957 and 1989 may have received only one dose of an earlier formulation and should have a second dose if they're healthcare workers, college students, international travelers, or close contacts of immunocompromised people. Because MMR is a live vaccine, it is contraindicated during pregnancy and in people with significant immunocompromise (advanced HIV, active chemotherapy, high-dose steroids); pregnant people should be vaccinated postpartum if non-immune. Mild rash and fever 7–14 days after vaccination are common and reflect the vaccine virus replicating; they're not contagious.",
+    "why_it_matters": [
+      "Measles is more contagious than COVID, flu, or chickenpox — pockets of low vaccination produce outbreaks, and personal protection depends on the full 2-dose series.",
+      "Rubella protection matters most for people who could become pregnant, since rubella in early pregnancy causes severe birth defects — check immunity before conception if records are unclear.",
+      "Adults born 1957–1989 may have received only one (less effective) dose and should consider a second dose for travel or high-exposure work.",
+      "Live vaccine — contraindicated in pregnancy and significant immunocompromise; if you're due and planning pregnancy, get vaccinated and wait at least 4 weeks before conceiving.",
+      "Documented immunity (records or a positive antibody titer) is generally needed for healthcare jobs, school enrollment, and some international travel."
+    ]
+  },
+  {
+    "name": "Varicella",
+    "summary": "The varicella vaccine protects against chickenpox, given as two doses 4–8 weeks apart in adults without prior infection or vaccination. Childhood chickenpox is generally mild but in adults it is significantly more severe: hospitalization rates are roughly 10x higher and adult primary infection can cause varicella pneumonia, which is occasionally fatal. People without documented immunity who work in healthcare, are around immunocompromised people, plan international travel, or could become pregnant should get vaccinated. If you remember having chickenpox as a child, that is generally accepted as evidence of immunity; if records are unclear, a varicella IgG antibody test can confirm. Like MMR, varicella is a live-attenuated vaccine — contraindicated in pregnancy and significant immunocompromise; defer pregnancy by at least 4 weeks after vaccination. After natural varicella or vaccination, the virus stays dormant in nerve roots and can reactivate decades later as shingles — the shingles vaccine (Shingrix) is a separate question addressed at age 50.",
+    "why_it_matters": [
+      "Adult primary chickenpox is much more severe than childhood disease — pneumonia, hospitalization, and death are all more common.",
+      "If you cannot recall having chickenpox and have no vaccination records, an IgG antibody test is the cheapest way to settle it before getting two doses.",
+      "Live vaccine — avoid pregnancy for at least 4 weeks after each dose, and do not give to people with significant immunocompromise.",
+      "Important for healthcare workers, teachers, childcare workers, and anyone living with an immunocompromised household member.",
+      "Vaccination does not prevent later shingles — that is a separate vaccine (Shingrix) addressed at age 50."
+    ]
+  },
+  {
+    "name": "HPV",
+    "summary": "The HPV vaccine (Gardasil 9 in current US use) protects against the strains of human papillomavirus that cause the majority of cervical, anal, vulvar, vaginal, penile, and oropharyngeal cancers, plus genital warts. Two doses are sufficient when the series is started before age 15; three doses are standard for older starters. It is most effective when given before any HPV exposure, which is why the recommended age is 11–12. The vaccine is approved through age 45 for catch-up vaccination; benefit decreases with age (because most adults have already been exposed to some HPV strains) but is not zero — the vaccine still protects against strains you haven't yet encountered. HPV-driven oropharyngeal cancers are increasingly common in men, which is one reason vaccination is now recommended for all genders, not just for cervical cancer prevention. The vaccine does not treat existing HPV infection or HPV-related lesions; cervical cancer screening (Pap and HPV co-testing) is still needed on the usual schedule even after vaccination, because Gardasil 9 covers the most common cancer-causing strains but not all of them.",
+    "why_it_matters": [
+      "Earlier is dramatically better — efficacy approaches 100% when given before HPV exposure; catch-up vaccination after age 26 has diminishing but non-zero benefit.",
+      "HPV vaccination prevents cancers in multiple body sites (cervix, anus, throat, vulva, vagina, penis); the throat-cancer benefit is increasingly important for men.",
+      "Cervical cancer screening is still required after vaccination — the vaccine prevents the most common cancer-causing strains but not all of them.",
+      "The 2-dose schedule (start before age 15) takes advantage of stronger adolescent immune responses; 3 doses are needed for older starters.",
+      "Vaccination of unaffected partners after a new HPV diagnosis can still be worthwhile because most people are only exposed to one or two of the many vaccine-covered strains."
+    ]
+  },
+  {
+    "name": "Hepatitis A",
+    "summary": "Hepatitis A is a foodborne and waterborne liver infection that is rarely fatal in healthy adults but can cause weeks to months of significant illness, occasionally with acute liver failure requiring transplant. The two-dose vaccine (6 months apart) gives essentially lifelong protection. US-born adults under 30 likely had it as a routine childhood vaccination starting in 2006; older adults usually need to opt in. Specific indications include international travel outside western Europe / Australia / New Zealand / Japan, chronic liver disease (where acute hepatitis A causes much more severe disease), men who have sex with men, people who use drugs (injection or non-injection), people experiencing homelessness, and food-service or childcare workers in outbreak settings. Outbreaks in the US have shifted from food-borne (restaurants, frozen berries) toward person-to-person spread in unhoused and drug-using populations over the past decade. Post-exposure: a single dose within 14 days of exposure provides effective prophylaxis. The vaccine is inactivated and safe in pregnancy.",
+    "why_it_matters": [
+      "Chronic liver disease (hepatitis B, hepatitis C, cirrhosis, fatty liver) makes acute hepatitis A much more dangerous — vaccination is strongly recommended in this group.",
+      "International travel is the most common adult indication; risk is high in most of Africa, Asia, South and Central America, and parts of eastern Europe.",
+      "Post-exposure vaccination within 14 days is effective — useful after a known restaurant exposure or close contact with a case.",
+      "The vaccine is inactivated, safe in pregnancy and in most immunocompromise, with very few contraindications.",
+      "Two doses 6 months apart confer protection for at least 25 years and likely lifelong; boosters are not currently recommended."
+    ]
+  },
+  {
+    "name": "Hepatitis B",
+    "summary": "Hepatitis B is a bloodborne virus that can cause both acute hepatitis and lifelong chronic infection, which substantially raises the risk of cirrhosis and liver cancer decades later. The recombinant vaccine is given as a three-dose series (or two doses for the newer Heplisav-B), with seroconversion rates above 90% in healthy adults. Universal adult vaccination is now recommended through age 59, and for any older adult with risk factors (chronic liver disease, kidney disease on dialysis, HIV, multiple sexual partners, men who have sex with men, injection drug use, healthcare or public-safety occupation with blood exposure, household contact of someone with chronic hepatitis B, travel to endemic regions, diabetes in adults under 60). Post-vaccine antibody (anti-HBs) testing is routine for healthcare workers and dialysis patients but optional for most other adults. The vaccine response is weaker in older adults, people with kidney disease, immunocompromise, and obesity; non-responders may need a repeat series or the higher-immunogenicity Heplisav-B. The vaccine is inactivated and safe in pregnancy.",
+    "why_it_matters": [
+      "Chronic hepatitis B is the leading cause of liver cancer worldwide — vaccination dramatically reduces lifetime liver cancer risk in exposed populations.",
+      "Universal adult vaccination through age 59 is now recommended regardless of risk; older adults with diabetes, liver disease, or kidney disease are still strongly indicated.",
+      "Healthcare workers and dialysis patients should have post-vaccine anti-HBs testing; non-responders need a repeat series.",
+      "Heplisav-B is a 2-dose alternative for adults that produces stronger responses, useful when the standard 3-dose series has failed.",
+      "Safe in pregnancy and in most immunocompromised states; the vaccine is inactivated."
+    ]
+  },
+  {
+    "name": "Pneumococcal",
+    "summary": "Streptococcus pneumoniae causes pneumonia, bloodstream infections, and meningitis; risk and severity climb sharply with age and with several specific medical conditions. Current US guidance recommends vaccination for all adults 50 and older (a 2024 change from the previous threshold of 65) and for younger adults with chronic heart, lung, liver, or kidney disease; diabetes; smoking; alcohol use disorder; cochlear implants; CSF leaks; HIV or other immunocompromise; functional or anatomic asplenia (including sickle cell disease); or a hematologic malignancy. The available products are PCV15, PCV20, PCV21, and the older polysaccharide PPSV23. The current preferred approach is a single dose of PCV20 or PCV21, which covers more strains and avoids the older two-step PCV13-then-PPSV23 sequence. People who already received earlier products can usually complete a simplified schedule; ask a clinician to reconcile prior doses. Pneumococcal vaccine is inactivated and safe in pregnancy when otherwise indicated. Immunocompromised people often need it before age 50 and may benefit from boosters in some scenarios.",
+    "why_it_matters": [
+      "Vaccine guidance shifted in 2024 to lower the universal-recommendation age from 65 to 50 — many adults who passed an annual physical before that change are not yet vaccinated.",
+      "Specific medical conditions (chronic lung disease, diabetes, immunocompromise, asplenia, cochlear implant, CSF leak) are indications well before age 50.",
+      "Current single-dose PCV20 or PCV21 has largely replaced the older two-step PCV13 + PPSV23 schedule; if you started the older series, ask a clinician to finish appropriately.",
+      "Risk of invasive pneumococcal disease rises sharply with age — by 65, hospitalization risk from pneumococcal pneumonia is roughly 5–10x that of healthy younger adults.",
+      "Smokers (current or recent former) are at substantially elevated risk and are a specific indication regardless of age."
+    ]
+  },
+  {
+    "name": "Shingles",
+    "summary": "Shingles is the reactivation of latent varicella-zoster virus that has been sleeping in nerve roots since childhood chickenpox or varicella vaccination. The rash is painful, usually unilateral, and can be followed by postherpetic neuralgia — nerve pain that may last months to years and is sometimes severely disabling, particularly in older adults. Roughly 1 in 3 unvaccinated adults will develop shingles in their lifetime, with risk climbing steeply after age 60. The current vaccine is Shingrix (recombinant zoster vaccine, RZV), a two-dose series given 2–6 months apart. It is over 90% effective at preventing both shingles and postherpetic neuralgia, with durability of at least 7 years and likely longer. Shingrix is recommended for everyone 50 and older, and from age 19 in people with immunocompromising conditions or treatments (HIV, cancer therapy, autoimmune drugs, transplant recipients). Reactogenicity is notable — arm pain, fatigue, headache, and low-grade fever for 1–3 days after each dose are common and not a reason to skip the second dose. The older live vaccine (Zostavax) is no longer used; if you received it, you should still get the full two-dose Shingrix series. Shingrix is not contraindicated in pregnancy but is generally deferred until postpartum because there's limited safety data.",
+    "why_it_matters": [
+      "Postherpetic neuralgia is the main reason to get vaccinated — the rash itself heals in a few weeks but the nerve pain can last years and is often unresponsive to standard analgesics.",
+      "Recommended starting at age 50, lowered to age 19 for immunocompromised people; both groups benefit substantially.",
+      "Reactogenicity (arm pain, fatigue, fever for 1–3 days) is common but is not a reason to skip the second dose, which is essential for durable protection.",
+      "If you received the older Zostavax (live vaccine), you still need the full two-dose Shingrix series — Shingrix is significantly more effective.",
+      "Two doses are required — protection from a single dose alone is markedly lower and short-lived."
+    ]
+  },
+  {
+    "name": "Meningococcal",
+    "summary": "Meningococcal disease — meningitis and bloodstream infection caused by Neisseria meningitidis — is rare but devastating, with 10–15% mortality even with optimal treatment and serious long-term sequelae (limb amputation, hearing loss, neurologic damage) in many survivors. There are two distinct vaccine families because the bacterium has multiple serogroups that do not cross-protect: MenACWY covers serogroups A, C, W, and Y; MenB covers serogroup B. MenACWY is routine for adolescents at age 11–12 with a booster at 16. Adults need MenACWY if they have functional or anatomic asplenia, complement deficiency (including treatment with eculizumab or ravulizumab), HIV, work as a microbiologist with isolates of N. meningitidis, travel to the African meningitis belt or to the Hajj pilgrimage (Saudi Arabia requires proof of vaccination), or are first-year college students living in residence halls. MenB is recommended for ages 16–23 under shared clinical decision-making (a discussion about personal preference rather than a routine recommendation) and is required for the same high-risk medical groups as MenACWY. Both vaccines are inactivated and safe in pregnancy when otherwise indicated. The new MenABCWY combination vaccine (Penbraya) can be used when both vaccines are needed at the same visit.",
+    "why_it_matters": [
+      "First-year college students living in dorms are at elevated risk for meningococcal disease — MenACWY is required at most US universities and MenB is often recommended.",
+      "Travel to the African meningitis belt (sub-Saharan Africa from Senegal to Ethiopia) or to the Hajj in Saudi Arabia requires MenACWY; Saudi Arabia checks documentation at entry.",
+      "People on complement-inhibitor drugs (eculizumab, ravulizumab) for paroxysmal nocturnal hemoglobinuria or atypical HUS are at hundreds-of-times-elevated risk and need both MenACWY and MenB.",
+      "Asplenia (surgical removal or functional, including sickle cell disease) is a strong indication for both vaccine families with periodic boosters.",
+      "MenB protection is shorter-lived than MenACWY; boosters may be needed in continuing high-risk groups."
+    ]
+  },
+  {
+    "name": "Polio",
+    "summary": "Polio is a paralytic viral disease that has been eliminated from most of the world but is not eradicated — wild poliovirus circulates in Afghanistan and Pakistan, and vaccine-derived poliovirus circulates in pockets of low vaccination coverage including, occasionally, in high-income countries (a New York case in 2022 led to wastewater detection across the state). Most US adults completed the inactivated polio vaccine (IPV) series in childhood — three doses give lifelong immunity in over 99% of recipients. Adults who never completed the series need three doses (0, 1–2 months, 6–12 months). Adults who completed the series may receive a one-time IPV booster when traveling to a country with documented poliovirus circulation, working in healthcare or laboratory settings with potential poliovirus exposure, or after a known exposure. IPV is inactivated and safe in pregnancy and immunocompromise. The oral live polio vaccine (OPV) is no longer used in the US but is still used in mass-immunization campaigns globally; very rarely (about 1 case per 2.7 million doses) OPV can mutate back to neurovirulence, which is why high-income countries have switched entirely to IPV.",
+    "why_it_matters": [
+      "Travel to Afghanistan or Pakistan (wild poliovirus) or to countries with documented vaccine-derived poliovirus outbreaks (varies year to year) is an indication for a one-time adult booster.",
+      "Adults who never completed the childhood series need a three-dose IPV series, not a single booster.",
+      "Vaccine-derived poliovirus has been detected in US wastewater (notably New York in 2022), reflecting ongoing low-coverage risk; check records if you grew up outside the US.",
+      "IPV is inactivated — safe in pregnancy and in immunocompromised people.",
+      "Healthcare and laboratory workers handling potential poliovirus specimens are a specific occupational indication for a booster."
+    ]
+  },
+  {
+    "name": "Typhoid",
+    "summary": "Typhoid fever is a systemic Salmonella infection (Salmonella Typhi) acquired through contaminated food and water, with a several-week course of high fever, abdominal pain, and occasionally intestinal perforation or sepsis. It is rare in high-income countries and concentrated in South Asia, parts of sub-Saharan Africa, and pockets of Southeast Asia and Latin America. Travelers to South Asia in particular — especially people visiting friends and relatives, staying in private homes, eating outside major hotels, or spending more than a few weeks in the region — face meaningful exposure. Two vaccine formulations are available: an injected Vi capsular polysaccharide vaccine (single dose, protective for about 2 years) and an oral live-attenuated Ty21a (four capsules taken every other day, protective for about 5 years; must be kept refrigerated and taken on an empty stomach with antibiotics avoided around the doses). The oral live vaccine is contraindicated in pregnancy and immunocompromise; the injected vaccine is fine in both. Typhoid vaccines are roughly 50–80% effective — food and water hygiene remain important even after vaccination.",
+    "why_it_matters": [
+      "South Asia (India, Pakistan, Bangladesh, Nepal) accounts for the majority of travel-acquired typhoid in US travelers; visiting friends and relatives is especially high risk because food is rarely from tourist sources.",
+      "Antibiotic-resistant (extensively drug-resistant, XDR) Salmonella Typhi has spread from Pakistan since 2016, making prevention more important and treatment harder.",
+      "The oral Ty21a vaccine is live — contraindicated in pregnancy, immunocompromise, and people on antibiotics around the dose dates.",
+      "Vaccine efficacy is only 50–80%, so food and water precautions (bottled water, peeled fruit, hot food) remain important.",
+      "Single-dose injection is usually preferred for travelers who can't manage the 4-day refrigerated oral schedule reliably."
+    ]
+  },
+  {
+    "name": "Yellow Fever",
+    "summary": "Yellow fever is a mosquito-borne flavivirus infection endemic to sub-Saharan Africa and tropical South America, with a roughly 30–60% case-fatality rate in symptomatic disease — one of the highest of any travel-acquired infection. The single-dose live-attenuated vaccine (YF-Vax in the US, Stamaril elsewhere) confers protection that the WHO now considers lifelong, though some destination countries still expect a booster every 10 years for entry. The vaccine is only administered at designated yellow fever vaccination centers, which issue the International Certificate of Vaccination or Prophylaxis (the 'yellow card') that some countries check at the border. Important contraindications and precautions: severe allergy to egg or chicken protein, thymus disorders (including history of thymectomy or thymoma), and significant immunocompromise (advanced HIV with CD4 < 200, transplant recipients, biologic immunosuppression) are absolute contraindications because the live virus can cause severe vaccine-associated viscerotropic or neurotropic disease. Age over 60 is a precaution — vaccine-associated severe adverse events are more common in older first-time recipients (roughly 1 per 50,000 in over-60s versus 1 per 200,000 overall), and the risk-benefit calculus depends on actual destination risk. Pregnancy and breastfeeding are precautions; vaccinate only if travel cannot be deferred. Plan to receive the vaccine at least 10 days before travel.",
+    "why_it_matters": [
+      "Mortality from symptomatic yellow fever is among the highest of any preventable travel disease; vaccination is the only effective prevention.",
+      "First-time vaccination over age 60 carries a higher rate of serious vaccine-associated events — discuss whether your itinerary actually requires it.",
+      "Live vaccine — contraindicated in significant immunocompromise, thymus disorders, and severe egg allergy; precautions in pregnancy and breastfeeding.",
+      "Some destination countries (and transit countries) require the International Certificate of Vaccination at entry — check requirements before booking.",
+      "Schedule the dose at least 10 days before travel for the certificate to be valid and for protection to develop."
+    ]
+  },
+  {
+    "name": "Rabies",
+    "summary": "Rabies is essentially universally fatal once symptoms begin, which is why both pre-exposure prophylaxis (for high-risk people) and post-exposure prophylaxis (after a possible exposure) are aggressively pursued. Pre-exposure prophylaxis with the inactivated vaccine is recommended for veterinarians, animal control workers, wildlife rehabilitators, rabies laboratory workers, bat researchers, cavers, and travelers to countries with high rabies prevalence (most of Asia, Africa, Latin America) who will have limited access to post-exposure care. The current US schedule is two intramuscular doses 7 days apart; the older 3-dose schedule (days 0, 7, 21–28) is still used in some settings. Pre-exposure vaccination does not eliminate the need for treatment after an exposure — you still need two booster doses after a bite — but it removes the need for rabies immune globulin (which is expensive, often unavailable abroad, and must be given within days of exposure). Post-exposure care for an unvaccinated person is four doses of vaccine plus immune globulin. Bat exposures are particularly important: bites can be small enough to miss, and any direct contact with a bat (or waking to a bat in a closed bedroom) typically warrants post-exposure prophylaxis. Domestic dog bites in the US rarely require treatment if the dog is observed for 10 days; bites from stray or wild mammals usually do.",
+    "why_it_matters": [
+      "Rabies is essentially 100% fatal once symptoms begin — prevention before or immediately after exposure is the only option.",
+      "Pre-exposure vaccination simplifies post-exposure care (no immune globulin needed) — important for travel to regions where immune globulin is unavailable.",
+      "Bat exposures often need post-exposure prophylaxis even without an obvious bite, including waking up to a bat in a sleeping area.",
+      "Veterinarians, wildlife rehabilitators, lab workers, cavers, and adventure travelers in high-prevalence regions are typical pre-exposure indications.",
+      "The vaccine series should be started before travel — the full pre-exposure series cannot be compressed into a few days."
+    ]
+  },
+  {
+    "name": "Japanese Encephalitis",
+    "summary": "Japanese encephalitis is a mosquito-borne flavivirus that causes severe brain inflammation, with a roughly 20–30% case fatality rate and long-term neurologic sequelae in about half of survivors. It is rare in travelers — typical risk is well under 1 per million for short-stay urban travelers — but rises substantially for travelers spending a month or more in rural agricultural areas of Asia (especially during transmission seasons in rice-growing regions), or for any traveler with extended outdoor exposure in endemic areas. The inactivated vaccine (Ixiaro in the US) is given as two doses 28 days apart (an accelerated 7-day schedule is approved for ages 18–65 when time is short). A booster is recommended after one year if continued exposure is expected. Endemic regions include China, India, Nepal, much of Southeast Asia (Thailand, Vietnam, Cambodia, Laos, Myanmar, Indonesia, Philippines, Malaysia), South Korea, Japan, parts of Pacific island nations, and increasingly Australia (eastern states had outbreaks in 2022). Risk peaks in the warm wet season in tropical zones and in summer/fall in temperate zones. The vaccine is inactivated and safe in pregnancy when travel cannot be deferred.",
+    "why_it_matters": [
+      "Risk is concentrated in rural agricultural travel, extended stays (>1 month), and warm-season exposure in endemic regions — short urban itineraries usually don't need it.",
+      "Mortality and long-term neurologic disability are high among the small number of cases that occur, which is what makes vaccination worthwhile despite low incidence.",
+      "Australia had a substantial outbreak in 2022 — endemicity is shifting and may not match older travel-medicine references.",
+      "Two doses 28 days apart — plan ahead; an accelerated 7-day schedule exists for adults under 65 when time is short.",
+      "Inactivated vaccine, safe in pregnancy when travel cannot be deferred."
+    ]
+  },
+  {
+    "name": "Cholera",
+    "summary": "Cholera is a severe watery diarrhea caused by Vibrio cholerae, typically acquired from contaminated water or undercooked seafood, with rapid dehydration that can be fatal within hours if untreated. It is endemic in parts of South Asia, sub-Saharan Africa, and Haiti, and outbreaks recur in conflict and disaster zones with disrupted water and sanitation. The single-dose oral live-attenuated vaccine (Vaxchora) is recommended for travelers to areas with active cholera transmission, particularly aid workers, health workers, and travelers who will be in close contact with affected populations rather than tourist environments. Most general tourist travel does not require cholera vaccination; risk for short-stay travelers staying in tourist accommodations and following standard food and water precautions is very low. Protection is best within the first 3–6 months after the dose; re-dosing is needed for repeat travel. Because it's a live oral vaccine, it can interfere with oral typhoid vaccine (separate by 8 days) and oral antibiotics (avoid antibiotics for 14 days before through 10 days after). Pregnancy and immunocompromise are precautions; data are limited. Food and water hygiene remain the primary defense.",
+    "why_it_matters": [
+      "Most tourist travel does not require cholera vaccination — it is targeted at aid workers, health workers, and travelers going into outbreak settings.",
+      "Live oral vaccine — separate from oral typhoid vaccine by 8 days; avoid antibiotics from 14 days before through 10 days after.",
+      "Single-dose protection lasts only 3–6 months at peak; not a long-term measure.",
+      "Food and water precautions remain the primary defense — the vaccine reduces but does not eliminate risk.",
+      "Endemic regions include parts of South Asia, sub-Saharan Africa, Haiti, and any current outbreak zone in a conflict or disaster setting."
+    ]
+  },
+  {
+    "name": "Tick-borne Encephalitis",
+    "summary": "Tick-borne encephalitis (TBE) is a flavivirus transmitted by Ixodes ticks in forested areas of central and eastern Europe, the Baltics, Scandinavia, and parts of northern Asia from Russia through northern China and Japan. About a third of infections are asymptomatic, a third cause a flu-like illness, and a third progress to neurologic disease (meningitis, encephalitis, myelitis), with long-term neurologic sequelae in up to half of severe cases. The inactivated vaccine (TicoVac in the US, FSME-Immun and Encepur elsewhere) was first approved in the US in 2021 and is recommended for travelers and residents with extended outdoor exposure (hiking, camping, working) in endemic regions during the tick-active season, typically April through November. The standard schedule is three doses (0, 1–3 months, 5–12 months) with boosters every 3–5 years for continuing exposure; an accelerated schedule exists. A short urban tourist trip generally does not require vaccination; an extended hiking trip through the Bavarian Forest, the Baltics, or rural Russia in summer probably does. The vaccine is inactivated and safe in pregnancy when travel cannot be deferred. Standard tick precautions (DEET or permethrin, full clothing, tick checks) remain important — TBE vaccination doesn't prevent other tick-borne infections like Lyme disease, which shares the same vector.",
+    "why_it_matters": [
+      "Long-term neurologic sequelae are common after severe cases — up to half of people with the neurologic form have persistent deficits.",
+      "Indication is extended outdoor activity in endemic regions during tick season (April–November), not short urban travel.",
+      "TBE vaccine doesn't prevent Lyme disease — ticks in the same regions carry both, so standard tick precautions still matter.",
+      "The standard 3-dose schedule takes nearly a year to complete; an accelerated schedule exists when travel cannot wait.",
+      "Boosters every 3–5 years are needed for continuing exposure; one-time travelers may not need them."
+    ]
+  }
+]

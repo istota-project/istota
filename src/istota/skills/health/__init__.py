@@ -1200,15 +1200,8 @@ def cmd_import_immunizations(args: argparse.Namespace) -> None:
 
 def cmd_explain_immunization(args: argparse.Namespace) -> None:
     from istota.health import db as health_db
-    from istota.health.immunization_explainer import (
-        EXPLAINABLE_STATUSES, get_or_generate,
-    )
+    from istota.health.immunization_explainer import get_explainer
     from istota.health.immunizations import compute_coverage
-
-    # Skill CLI runs without the FastAPI app context — config is unavailable
-    # so the brain call will fall through to the fallback. The Talk path
-    # uses the web/API explainer instead.
-    config = None
 
     conn = _connect()
     try:
@@ -1222,42 +1215,11 @@ def cmd_explain_immunization(args: argparse.Namespace) -> None:
     coverage = compute_coverage(refs, rows)
     entry = next((c for c in coverage if c.name == ref.name), None)
     status = entry.status if entry else "never_recorded"
-    if status not in EXPLAINABLE_STATUSES or ref.category not in {
-        "routine", "booster",
-    }:
-        _emit({
-            "name": ref.name,
-            "display_name": ref.display_name,
-            "status": status,
-            "source": "skipped",
-            "summary": "",
-            "why_it_matters": [],
-            "considerations": [],
-        })
-        return
-
-    # Build a minimal context to call get_or_generate.
-    from istota.health.models import HealthContext
-
-    db_path = Path(_db_path())
-    ctx = HealthContext(
-        user_id=os.environ.get("ISTOTA_USER_ID", ""),
-        workspace_root=db_path.parent.parent,
-        data_dir=db_path.parent,
-        db_path=db_path,
-        uploads_dir=db_path.parent / "uploads",
-    )
-    result = get_or_generate(
-        ctx,
+    _emit(get_explainer(
         name=ref.name,
         display_name=ref.display_name,
         status=status,
-        category=ref.category,
-        schedule=ref.schedule,
-        typical_age_range=ref.typical_age_range,
-        config=config,
-    )
-    _emit(result)
+    ))
 
 
 def cmd_settings(args: argparse.Namespace) -> None:
