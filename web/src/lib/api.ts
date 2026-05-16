@@ -1141,6 +1141,143 @@ export async function getHistorySummary(): Promise<HistorySummary> {
 	return healthFetch('/history/summary');
 }
 
+// ---- Immunizations -------------------------------------------------------
+
+export interface Immunization {
+	id: number;
+	name: string;
+	product_name: string | null;
+	date_given: string;
+	manufacturer: string | null;
+	dose_label: string | null;
+	lot_number: string | null;
+	route: string | null;
+	site: string | null;
+	administered_by: string | null;
+	facility: string | null;
+	encounter_id: number | null;
+	cvx_code: string | null;
+	notes: string | null;
+	source: string;
+	created_at?: string;
+}
+
+export interface ImmunizationRef {
+	name: string;
+	display_name: string;
+	category: 'routine' | 'booster' | 'risk_based' | 'travel';
+	schedule: string;
+	interval_days: number | null;
+	primary_series_doses: number | null;
+	aliases: string[];
+	description: string | null;
+	typical_age_range: string | null;
+}
+
+export type ImmunizationStatus =
+	| 'up_to_date'
+	| 'due_soon'
+	| 'overdue'
+	| 'series_incomplete'
+	| 'never_recorded'
+	| 'expired'
+	| 'risk_based'
+	| 'recorded'; // "Other" bucket
+
+export interface CoverageEntry {
+	name: string;
+	display_name: string;
+	category: string;
+	status: ImmunizationStatus;
+	last_given: string | null;
+	dose_count: number;
+	next_due: string | null;
+	is_overdue: boolean;
+	days_until_due: number | null;
+}
+
+export interface ParsedImmunization {
+	name: string;
+	product_name: string | null;
+	date_given: string | null;
+	source_line: string;
+	confidence: 'high' | 'medium' | 'low' | 'manual';
+	notes: string | null;
+}
+
+export interface ImmunizationExplainer {
+	name: string;
+	display_name: string;
+	status: ImmunizationStatus;
+	summary: string;
+	why_it_matters: string[];
+	considerations: string[];
+	disclaimer: string;
+	source: 'cache' | 'generated' | 'fallback' | 'skipped';
+	generated_at: string | null;
+}
+
+export async function listImmunizations(params: { name?: string; since?: string; until?: string; limit?: number; offset?: number } = {}): Promise<{ immunizations: Immunization[] }> {
+	const q = new URLSearchParams();
+	for (const [k, v] of Object.entries(params)) {
+		if (v !== undefined && v !== '') q.set(k, String(v));
+	}
+	const suffix = q.toString() ? `?${q.toString()}` : '';
+	return healthFetch(`/immunizations${suffix}`);
+}
+
+export async function createImmunization(body: Partial<Immunization> & { name: string; date_given: string }): Promise<{ status: string; id: number }> {
+	return healthFetch('/immunizations', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function getImmunization(id: number): Promise<{ immunization: Immunization; encounter: Encounter | null }> {
+	return healthFetch(`/immunizations/${id}`);
+}
+
+export async function updateImmunization(id: number, body: Partial<Immunization>): Promise<{ status: string }> {
+	return healthFetch(`/immunizations/${id}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function deleteImmunization(id: number): Promise<{ status: string }> {
+	return healthFetch(`/immunizations/${id}`, { method: 'DELETE' });
+}
+
+export async function listImmunizationRefs(): Promise<{ refs: ImmunizationRef[] }> {
+	return healthFetch('/immunizations/refs');
+}
+
+export async function getImmunizationCoverage(): Promise<{ coverage: CoverageEntry[]; other: CoverageEntry[] }> {
+	return healthFetch('/immunizations/coverage');
+}
+
+export async function parseImmunizations(text: string): Promise<{ rows: ParsedImmunization[] }> {
+	return healthFetch('/immunizations/parse', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ text }),
+	});
+}
+
+export async function bulkInsertImmunizations(rows: ParsedImmunization[]): Promise<{ status: string; ids: number[]; count: number }> {
+	return healthFetch('/immunizations/bulk', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ rows }),
+	});
+}
+
+export async function getImmunizationExplainer(name: string): Promise<ImmunizationExplainer> {
+	return healthFetch(`/immunizations/${encodeURIComponent(name)}/explainer`);
+}
+
 // ---- Garmin --------------------------------------------------------------
 
 export interface GarminStatus {
