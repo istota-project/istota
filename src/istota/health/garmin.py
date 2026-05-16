@@ -186,12 +186,16 @@ def _build_adapter() -> GarminAdapter:
 
 
 class _RealGarminAdapter:
-    """Real adapter that wraps ``garminconnect.Garmin``.
+    """Real adapter wrapping ``garminconnect.Garmin``.
 
-    The garminconnect library serialises its OAuth state to a dict via its
-    own ``garth``-derived session helpers; the exact shape is opaque to
-    this module — we round-trip it as a JSON blob and let the SDK
-    deserialise on the other side.
+    The ``garminconnect`` library exposes session persistence on the
+    inner ``client`` object: ``client.dumps() -> str`` returns the full
+    token store (DI access token + refresh token + JWT + cookies as a
+    base64-wrapped JSON blob); ``Garmin().login(tokenstore=<str>)``
+    rehydrates a fresh client from that blob. The MFA flow uses
+    ``return_on_mfa=True`` so ``login()`` returns ``(mfa_status, _)``
+    rather than prompting via stdin; ``resume_login(mfa_status, code)``
+    completes the handshake.
     """
 
     def __init__(self) -> None:
@@ -203,25 +207,40 @@ class _RealGarminAdapter:
             ) from exc
         self._sdk = garminconnect
         self._client: Any | None = None
+        # MFA state captured at login() time; consumed by resume_mfa().
+        self._mfa_state: Any = None
 
     def login(self, email: str, password: str) -> ConnectResult:
         try:
             client = self._sdk.Garmin(email=email, password=password)
-            result = client.login()
-        except Exception as exc:  # noqa: BLE001 — surface to caller verbatim
-            msg = str(exc)
-            if _looks_like_mfa(msg):
-                # Some library versions raise from login() when MFA is
-                # required; the partial session is still on ``client``.
-                self._client = client
-                return ConnectResult(status="mfa_required", prompt="Enter Garmin MFA code")
-            raise GarminAuthError(f"Garmin login failed: {msg}") from exc
+            client.return_on_mfa = True
+            mfa_status, _ = client.login()
+        except Exception as exc:  # noqa: BLE001
+            raise GarminAuthError(f"Garmin login failed: {exc}") from exc
 
         self._client = client
-        # Some library versions return a tuple ``(client_state, needs_mfa)``
-        # from login(); others a plain success. Handle both.
-        if isinstance(result, tuple) and len(result) >= 2 and result[1]:
-            return ConnectResult(status="mfa_required", prompt="Enter Garmin MFA code")
+        if mfa_status:
+            # MFA required. ``mfa_status`` is the opaque client_state
+            # the SDK threads into resume_login.
+            self._mfa_state = mfa_status
+            return ConnectResult(
+                status="mfa_required",
+                prompt="Enter Garmin MFA code",
+            )
+
+        # Fully authenticated. Issue a trivial API call to surface any
+        # latent "Not authenticated" failure mode immediately — the
+        # rate-limited mobile-login fallback returns a 200 from the
+        # SSO step but leaves the session unusable; catching it here
+        # means the operator never sees a "connected" UI for an
+        # unusable session.
+        try:
+            client.client.connectapi("/userprofile-service/socialProfile")
+        except Exception as exc:  # noqa: BLE001
+            raise GarminAuthError(
+                f"Garmin login completed but session is unusable: {exc}",
+            ) from exc
+
         return ConnectResult(
             status="ok",
             tokens=self.serialize_tokens(),
@@ -229,40 +248,39 @@ class _RealGarminAdapter:
         )
 
     def resume_mfa(self, code: str) -> ConnectResult:
-        if self._client is None:
+        if self._client is None or self._mfa_state is None:
             raise GarminAuthError("no pending Garmin auth — restart connect")
         try:
-            self._client.resume_login(code)
+            self._client.resume_login(self._mfa_state, code)
         except Exception as exc:  # noqa: BLE001
             raise GarminAuthError(f"MFA verification failed: {exc}") from exc
+        self._mfa_state = None
         return ConnectResult(status="ok", tokens=self.serialize_tokens())
 
     def serialize_tokens(self) -> dict[str, Any]:
         if self._client is None:
             raise GarminAuthError("not connected")
-        # The garminconnect Garmin object exposes its garth session, which
-        # has a dump() helper that returns the OAuth1+OAuth2 state. Newer
-        # versions expose ``garth_client.dumps()``. Try both.
-        client = self._client
-        garth = getattr(client, "garth", None)
-        if garth is not None and hasattr(garth, "dumps"):
-            return {"garth": garth.dumps()}
-        # Fallback shape: pull the inner attributes directly. Tests cover
-        # both shapes via the fake adapter.
-        return {
-            "oauth1_token": getattr(client, "oauth1_token", None),
-            "oauth2_token": getattr(client, "oauth2_token", None),
-        }
+        return {"tokenstore": self._client.client.dumps()}
 
     def load_tokens(self, tokens: dict[str, Any]) -> None:
+        tokenstore = tokens.get("tokenstore") if isinstance(tokens, dict) else None
+        if not isinstance(tokenstore, str) or not tokenstore:
+            raise GarminAuthError(
+                "stored Garmin tokens are missing the 'tokenstore' string — "
+                "the stored blob predates the current adapter and must be "
+                "re-created via /garmin/connect",
+            )
         client = self._sdk.Garmin()
-        garth = getattr(client, "garth", None)
-        if garth is not None and "garth" in tokens and hasattr(garth, "loads"):
-            garth.loads(tokens["garth"])
-        else:
-            for k, v in tokens.items():
-                if hasattr(client, k):
-                    setattr(client, k, v)
+        try:
+            # Passing the tokenstore string forwards to the SDK's
+            # rehydrate path. Anything > 512 chars is treated as the
+            # blob itself; shorter values are interpreted as a path on
+            # disk, so the length floor matters.
+            client.login(tokenstore=tokenstore)
+        except Exception as exc:  # noqa: BLE001
+            raise GarminAuthError(
+                f"Garmin token rehydrate failed: {exc}",
+            ) from exc
         self._client = client
 
     def get_user_profile(self) -> dict[str, Any] | None:
@@ -359,11 +377,6 @@ class _RealGarminAdapter:
         # Two attempts exhausted on transient — log and give up.
         logger.warning("garmin %s failed after retry: %s", method, last_exc)
         return None
-
-
-def _looks_like_mfa(msg: str) -> bool:
-    lo = msg.lower()
-    return "mfa" in lo or "two-factor" in lo or "totp" in lo
 
 
 def _looks_like_auth_error(exc: BaseException) -> bool:
