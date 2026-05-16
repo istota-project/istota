@@ -1897,6 +1897,54 @@ async def api_immunization_parse(
     }
 
 
+@router.post("/immunizations/extract")
+async def api_immunization_extract(
+    request: Request,
+    file: UploadFile = FastAPIFile(...),
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    """OCR/vision extraction for an immunization-list screenshot or PDF.
+
+    The file is processed transiently — unlike lab panels, immunization
+    rows don't carry a stored source file. Returns the same ``rows``
+    shape as ``/parse`` so the review-and-confirm UI is identical for
+    both paths.
+    """
+    raw = await file.read()
+    if not raw:
+        return JSONResponse({"error": "empty upload"}, status_code=400)
+    mime = (
+        file.content_type
+        or mimetypes.guess_type(file.filename or "")[0]
+        or "application/octet-stream"
+    )
+    suffix = Path(file.filename or "").suffix or (
+        mimetypes.guess_extension(mime) or ""
+    )
+
+    config = getattr(request.app.state, "istota_config", None)
+
+    def _run():
+        import tempfile
+
+        from istota.health.immunization_ocr import extract_from_file
+
+        with health_db.connect(ctx.db_path) as conn:
+            refs = health_db.list_immunization_refs(conn)
+        with tempfile.NamedTemporaryFile(
+            dir=ctx.uploads_dir, suffix=suffix or ".bin", delete=False,
+        ) as tmp:
+            tmp.write(raw)
+            tmp_path = Path(tmp.name)
+        try:
+            return extract_from_file(tmp_path, mime, refs, config=config)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    return await asyncio.to_thread(_run)
+
+
 @router.post("/immunizations/bulk")
 async def api_immunization_bulk(
     request: Request,

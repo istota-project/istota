@@ -157,7 +157,7 @@
 		<button class="btn" type="button" onclick={() => (formOpen = !formOpen)}>
 			{formOpen ? 'Cancel' : '+ Log dose'}
 		</button>
-		<a class="btn" href="{base}/health/immunizations/paste">Import from paste</a>
+		<a class="btn" href="{base}/health/immunizations/import">Import</a>
 	</div>
 </div>
 
