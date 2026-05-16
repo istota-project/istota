@@ -86,7 +86,10 @@
 	<div class="actions">
 		<a class="btn" href="{base}/health/immunizations">Back</a>
 		{#if immunization}
-			<a class="btn" href="{base}/health/immunizations/vaccine?name={encodeURIComponent(immunization.name)}">
+			<a
+				class="btn"
+				href="{base}/health/immunizations/vaccine?name={encodeURIComponent(immunization.name)}"
+			>
 				View all {immunization.name}
 			</a>
 			<button class="btn danger" type="button" onclick={remove}>Delete</button>
@@ -99,7 +102,7 @@
 {:else if error}
 	<div class="msg error">{error}</div>
 {:else if immunization}
-	<form class="form" onsubmit={save}>
+	<form class="card form" onsubmit={save}>
 		<div class="row">
 			<label>
 				<span>Vaccine name</span>
@@ -174,7 +177,8 @@
 					type="text"
 					value={immunization.administered_by ?? ''}
 					oninput={(e) =>
-						(immunization!.administered_by = (e.currentTarget as HTMLInputElement).value || null)}
+						(immunization!.administered_by =
+							(e.currentTarget as HTMLInputElement).value || null)}
 				/>
 			</label>
 			<label>
@@ -205,7 +209,7 @@
 					(immunization!.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
 			></textarea>
 		</label>
-		<div class="meta muted">
+		<div class="meta">
 			Source: {immunization.source}
 			{#if immunization.created_at}
 				· Created: {immunization.created_at}
@@ -224,10 +228,10 @@
 	{#if encounter}
 		<section class="linked">
 			<h2>Linked encounter</h2>
-			<a class="card" href="{base}/health/history/encounter?id={encounter.id}">
+			<a class="card linked-card" href="{base}/health/history/encounter?id={encounter.id}">
 				<div class="card-head">
-					<span class="badge">{encounter.encounter_type}</span>
-					<span>{encounter.encounter_date}</span>
+					<span class="badge type-other">{encounter.encounter_type}</span>
+					<span class="date">{encounter.encounter_date}</span>
 				</div>
 				{#if encounter.provider || encounter.facility}
 					<div class="muted">
@@ -244,13 +248,15 @@
 <style>
 	.header {
 		display: flex;
-		align-items: center;
 		justify-content: space-between;
+		align-items: center;
 		gap: 1rem;
 		margin-bottom: 1rem;
+		flex-wrap: wrap;
 	}
-	.header h1 {
-		font-size: 1.5rem;
+	h1 {
+		font-size: var(--text-lg, 1.05rem);
+		font-weight: 500;
 		margin: 0;
 	}
 	.actions {
@@ -259,116 +265,130 @@
 		flex-wrap: wrap;
 	}
 	.btn {
-		display: inline-flex;
-		align-items: center;
-		padding: 0.4rem 0.75rem;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 6px;
-		background: var(--surface, #fff);
-		color: inherit;
+		padding: 0.4rem 0.85rem;
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-pill);
+		color: var(--text-primary);
 		text-decoration: none;
-		font-size: 0.875rem;
+		font: inherit;
+		font-size: var(--text-sm);
 		cursor: pointer;
+		line-height: 1.2;
 	}
-	.btn.primary {
-		background: var(--accent, #2a6df4);
-		color: #fff;
-		border-color: var(--accent, #2a6df4);
+	.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+	.btn:hover:not(:disabled) { background: var(--surface-raised); }
+	.btn.primary { border-color: #7aa3d8; color: #7aa3d8; }
+	.btn.danger { color: var(--text-muted); }
+	.btn.danger:hover:not(:disabled) { color: #e88; }
+
+	.card {
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-card);
+		padding: 0.85rem 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.65rem;
 	}
-	.btn.danger {
-		color: var(--danger, #c0392b);
-	}
-	.form {
-		border: 1px solid var(--border, #ddd);
-		border-radius: 8px;
-		padding: 1rem;
-		background: var(--surface, #fff);
-	}
-	.row {
+	.form .row {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-		gap: 0.75rem;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.65rem;
 	}
 	label {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
-		font-size: 0.85rem;
+		gap: 0.2rem;
+		font-size: var(--text-sm);
+		min-width: 0;
 	}
 	label.full {
-		display: block;
-		margin-top: 0.75rem;
+		grid-column: 1 / -1;
 	}
-	label span {
-		color: var(--muted, #666);
-		font-size: 0.75rem;
+	label > span {
+		color: var(--text-muted);
+		font-size: var(--text-xs);
 	}
 	input,
 	select,
 	textarea {
-		padding: 0.4rem 0.5rem;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 4px;
-		background: var(--surface, #fff);
-		color: inherit;
+		padding: 0.3rem 0.5rem;
+		background: var(--surface-raised);
+		border: 1px solid var(--border-default);
+		border-radius: 0.3rem;
+		color: var(--text-primary);
 		font: inherit;
+		font-size: var(--text-sm);
+		box-sizing: border-box;
 	}
 	textarea {
 		resize: vertical;
-		min-height: 3em;
+		font-family: inherit;
 	}
 	.form-actions {
-		margin-top: 0.75rem;
 		display: flex;
 		justify-content: flex-end;
 	}
 	.meta {
-		margin-top: 0.5rem;
-		font-size: 0.8rem;
+		font-size: var(--text-xs);
+		color: var(--text-dim);
 	}
-	.muted {
-		color: var(--muted, #666);
+	.msg {
+		font-size: var(--text-sm);
+		padding: 0.4rem 0.6rem;
+		border-radius: 0.3rem;
 	}
 	.msg.error {
-		color: var(--danger, #c0392b);
-		font-size: 0.85rem;
-		margin: 0.5rem 0;
+		background: rgba(204, 102, 102, 0.1);
+		color: #e88;
 	}
 	.empty {
-		padding: 2rem;
-		text-align: center;
-		color: var(--muted, #666);
+		color: var(--text-dim);
+		padding: 2rem 0;
 	}
+
 	.linked {
-		margin-top: 1.5rem;
+		margin-top: 1.25rem;
 	}
 	.linked h2 {
-		font-size: 1.05rem;
 		margin: 0 0 0.5rem;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--text-dim);
+		font-weight: 500;
 	}
-	.card {
+	.linked-card {
 		display: block;
-		padding: 0.75rem;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 6px;
-		background: var(--surface, #fff);
-		color: inherit;
 		text-decoration: none;
+		color: var(--text-primary);
 	}
+	.linked-card:hover { border-color: #555; }
 	.card-head {
 		display: flex;
-		gap: 0.5rem;
-		align-items: baseline;
-		margin-bottom: 0.25rem;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 0.35rem;
 	}
 	.badge {
-		display: inline-block;
-		padding: 0.1rem 0.4rem;
-		border-radius: 3px;
-		font-size: 0.7rem;
-		background: #eee;
-		color: #555;
-		font-weight: 600;
+		display: inline-flex;
+		align-items: center;
+		font-size: var(--text-xs);
 		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		padding: 0.1rem 0.5rem;
+		border-radius: var(--radius-pill);
+		font-weight: 500;
+		background: hsla(220, 8%, 60%, 0.18);
+		color: var(--text-muted);
+	}
+	.date {
+		font-size: var(--text-xs);
+		color: var(--text-dim);
+	}
+	.muted {
+		font-size: var(--text-xs);
+		color: var(--text-muted);
 	}
 </style>

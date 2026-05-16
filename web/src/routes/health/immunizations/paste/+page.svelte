@@ -43,7 +43,7 @@
 		error = '';
 		const missing = parsed.filter((r) => !r.date_given);
 		if (missing.length > 0) {
-			error = `${missing.length} row(s) need a date before import. Edit them or remove them first.`;
+			error = `${missing.length} row(s) need a date before import. Edit or remove them first.`;
 			return;
 		}
 		importing = true;
@@ -69,7 +69,7 @@
 	<a class="btn" href="{base}/health/immunizations">Back</a>
 </div>
 
-<p class="muted">
+<p class="hint">
 	Paste a MyChart / EHR vaccine list below. The parser recognises lines like
 	<code>"Influenza (Given 11/28/2025)"</code> and resolves the vaccine family
 	against canonical aliases. Review the table, fix anything tagged
@@ -99,170 +99,204 @@
 {/if}
 
 {#if parsed.length > 0}
-	<table>
-		<thead>
-			<tr>
-				<th>Vaccine</th>
-				<th>Date</th>
-				<th>Product</th>
-				<th>Confidence</th>
-				<th>Source line</th>
-				<th></th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each parsed as row, i (i)}
-				<tr class:warn={row.name === 'Unknown' || !row.date_given}>
-					<td>
-						<select bind:value={row.name}>
-							<option value="Unknown">Unknown — leave as note</option>
-							{#each refs as r (r.name)}
-								<option value={r.name}>{r.display_name}</option>
-							{/each}
-						</select>
-					</td>
-					<td>
-						<input type="date" bind:value={row.date_given} />
-					</td>
-					<td>
-						<input
-							type="text"
-							value={row.product_name || ''}
-							oninput={(e) =>
-								(row.product_name = (e.currentTarget as HTMLInputElement).value || null)}
-						/>
-					</td>
-					<td>
-						<span class="conf conf-{row.confidence}">{row.confidence}</span>
-					</td>
-					<td class="src">{row.source_line}</td>
-					<td>
-						<button class="btn small" type="button" onclick={() => removeRow(i)}>
-							Remove
-						</button>
-					</td>
+	<div class="table-scroll">
+		<table class="grid">
+			<thead>
+				<tr>
+					<th>Vaccine</th>
+					<th>Date</th>
+					<th>Product</th>
+					<th>Confidence</th>
+					<th>Source line</th>
+					<th class="row-actions"></th>
 				</tr>
-			{/each}
-		</tbody>
-	</table>
+			</thead>
+			<tbody>
+				{#each parsed as row, i (i)}
+					<tr class:warn={row.name === 'Unknown' || !row.date_given}>
+						<td>
+							<select bind:value={row.name}>
+								<option value="Unknown">Unknown — leave as note</option>
+								{#each refs as r (r.name)}
+									<option value={r.name}>{r.display_name}</option>
+								{/each}
+							</select>
+						</td>
+						<td>
+							<input type="date" bind:value={row.date_given} />
+						</td>
+						<td>
+							<input
+								type="text"
+								value={row.product_name || ''}
+								oninput={(e) =>
+									(row.product_name = (e.currentTarget as HTMLInputElement).value || null)}
+							/>
+						</td>
+						<td>
+							<span class="badge conf-{row.confidence}">{row.confidence}</span>
+						</td>
+						<td class="src">{row.source_line}</td>
+						<td class="row-actions">
+							<button class="btn small" type="button" onclick={() => removeRow(i)}>
+								Remove
+							</button>
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	</div>
 {/if}
 
 <style>
 	.header {
 		display: flex;
-		align-items: center;
 		justify-content: space-between;
+		align-items: center;
 		margin-bottom: 0.75rem;
 	}
-	.header h1 {
+	h1 {
+		font-size: var(--text-lg, 1.05rem);
+		font-weight: 500;
 		margin: 0;
-		font-size: 1.5rem;
+	}
+	.hint {
+		margin: 0 0 0.75rem;
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+		max-width: 70ch;
+	}
+	.hint code {
+		background: var(--surface-raised);
+		padding: 0 0.3rem;
+		border-radius: 0.2rem;
+		font-size: 0.85em;
 	}
 	.btn {
-		display: inline-flex;
-		align-items: center;
-		padding: 0.4rem 0.75rem;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 6px;
-		background: var(--surface, #fff);
-		color: inherit;
+		padding: 0.4rem 0.85rem;
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-pill);
+		color: var(--text-primary);
 		text-decoration: none;
-		font-size: 0.875rem;
+		font: inherit;
+		font-size: var(--text-sm);
 		cursor: pointer;
+		line-height: 1.2;
 	}
-	.btn.primary {
-		background: var(--accent, #2a6df4);
-		color: #fff;
-		border-color: var(--accent, #2a6df4);
-	}
+	.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+	.btn:hover:not(:disabled) { background: var(--surface-raised); }
+	.btn.primary { border-color: #7aa3d8; color: #7aa3d8; }
 	.btn.small {
-		padding: 0.25rem 0.5rem;
-		font-size: 0.8rem;
+		padding: 0.2rem 0.55rem;
+		font-size: var(--text-xs);
 	}
-	.muted {
-		color: var(--muted, #666);
-		font-size: 0.9rem;
-	}
-	code {
-		font-size: 0.85em;
-		background: var(--surface, #f4f4f4);
-		padding: 0 0.25rem;
-		border-radius: 3px;
-	}
+
 	.paste {
 		width: 100%;
-		font-family: var(--font-mono, monospace);
-		font-size: 0.875rem;
-		padding: 0.5rem;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 6px;
-		background: var(--surface, #fff);
+		padding: 0.5rem 0.65rem;
+		background: var(--surface-raised);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-card);
+		color: var(--text-primary);
+		font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+		font-size: var(--text-sm);
 		box-sizing: border-box;
+		resize: vertical;
 	}
 	.actions {
 		display: flex;
 		gap: 0.5rem;
 		margin: 0.75rem 0;
 	}
-	.msg.error {
-		color: var(--danger, #c0392b);
-		margin: 0.5rem 0;
-		font-size: 0.85rem;
+	.msg {
+		font-size: var(--text-sm);
+		padding: 0.4rem 0.6rem;
+		border-radius: 0.3rem;
+		margin-bottom: 0.75rem;
 	}
-	table {
+	.msg.error {
+		background: rgba(204, 102, 102, 0.1);
+		color: #e88;
+	}
+
+	.table-scroll {
 		width: 100%;
-		border-collapse: collapse;
-		font-size: 0.875rem;
+		overflow-x: auto;
 		margin-top: 1rem;
 	}
-	th,
-	td {
+	table.grid {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: var(--text-sm);
+	}
+	table.grid th,
+	table.grid td {
 		text-align: left;
 		padding: 0.4rem 0.5rem;
-		border-bottom: 1px solid var(--border, #eee);
+		border-bottom: 1px solid var(--border-subtle);
+		vertical-align: middle;
 	}
-	tr.warn {
-		background: rgba(240, 160, 32, 0.08);
+	table.grid th {
+		color: var(--text-dim);
+		font-weight: 500;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 	}
-	.conf {
-		display: inline-block;
-		padding: 0.1rem 0.4rem;
-		border-radius: 3px;
-		font-size: 0.75rem;
-		font-weight: 600;
+	tr.warn td {
+		background: hsla(35, 60%, 60%, 0.08);
 	}
-	.conf-high {
-		background: #dff5e8;
-		color: #186b3a;
-	}
-	.conf-medium {
-		background: #fff1d6;
-		color: #8a5a00;
-	}
-	.conf-low {
-		background: #fde6e6;
-		color: #a22;
-	}
-	.conf-manual {
-		background: #eee;
-		color: #555;
+	td.row-actions,
+	th.row-actions {
+		text-align: right;
+		white-space: nowrap;
 	}
 	td.src {
-		max-width: 280px;
+		max-width: 260px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-family: var(--font-mono, monospace);
-		font-size: 0.8rem;
-		color: var(--muted, #666);
+		font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+		font-size: 0.78rem;
+		color: var(--text-dim);
 	}
 	input,
 	select {
 		padding: 0.25rem 0.4rem;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 4px;
-		background: var(--surface, #fff);
-		color: inherit;
+		background: var(--surface-base);
+		border: 1px solid var(--border-default);
+		border-radius: 0.3rem;
+		color: var(--text-primary);
 		font: inherit;
+		font-size: var(--text-sm);
+	}
+
+	.badge {
+		display: inline-flex;
+		align-items: center;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		padding: 0.1rem 0.5rem;
+		border-radius: var(--radius-pill);
+		font-weight: 500;
+	}
+	.badge.conf-high {
+		background: hsla(145, 40%, 55%, 0.22);
+		color: #9bd6a6;
+	}
+	.badge.conf-medium {
+		background: hsla(35, 60%, 60%, 0.22);
+		color: #e6b96b;
+	}
+	.badge.conf-low {
+		background: hsla(0, 60%, 55%, 0.28);
+		color: #ff9d96;
+	}
+	.badge.conf-manual {
+		background: hsla(220, 8%, 60%, 0.18);
+		color: var(--text-muted);
 	}
 </style>

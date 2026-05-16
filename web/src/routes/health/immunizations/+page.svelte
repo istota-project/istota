@@ -21,7 +21,6 @@
 	let refs: ImmunizationRef[] = $state([]);
 	let nameFilter = $state('');
 
-	// Quick-log form
 	let formOpen = $state(false);
 	let formName = $state('Influenza');
 	let formDate = $state(new Date().toISOString().slice(0, 10));
@@ -40,10 +39,7 @@
 		try {
 			const [cov, hist, refResp] = await Promise.all([
 				getImmunizationCoverage(),
-				listImmunizations({
-					name: nameFilter || undefined,
-					limit: 500,
-				}),
+				listImmunizations({ name: nameFilter || undefined, limit: 500 }),
 				listImmunizationRefs(),
 			]);
 			coverage = cov.coverage;
@@ -125,9 +121,6 @@
 		return m[s] ?? s;
 	}
 
-	// Sort: action-needed first (overdue, due_soon, expired), then
-	// series_incomplete, then up_to_date, then never_recorded, then
-	// risk_based (collapsed below).
 	const statusOrder: Record<ImmunizationStatus, number> = {
 		overdue: 0,
 		expired: 0,
@@ -153,7 +146,6 @@
 	const riskBased = $derived(
 		coverage.filter((c) => c.category === 'risk_based'),
 	);
-
 	let riskOpen = $state(false);
 
 	onMount(load);
@@ -238,79 +230,86 @@
 {:else}
 	<section class="coverage">
 		<h2>Coverage</h2>
-		<div class="cards">
+		<ul class="cards">
 			{#each visibleCoverage as c (c.name)}
-				<a class="card status-{c.status}" href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}">
-					<div class="card-head">
+				<li>
+					<a
+						class="card"
+						href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
+					>
 						<span class="name">{c.display_name}</span>
 						<span class="badge status-{c.status}">{statusLabel(c.status)}</span>
-					</div>
-					<div class="card-body">
-						<div class="muted">
-							{#if c.last_given}
-								Last: {formatDate(c.last_given)}
-								{#if c.dose_count > 1} · {c.dose_count} doses{/if}
-							{:else}
-								No record
-							{/if}
-						</div>
-						{#if c.next_due}
+						<div class="card-body">
 							<div class="muted">
-								Next due: {formatDate(c.next_due)}
-								{#if c.days_until_due !== null}
-									{#if c.days_until_due < 0}
-										({-c.days_until_due}d overdue)
-									{:else}
-										(in {c.days_until_due}d)
-									{/if}
+								{#if c.last_given}
+									Last: {formatDate(c.last_given)}{#if c.dose_count > 1} · {c.dose_count} doses{/if}
+								{:else}
+									No record
 								{/if}
 							</div>
-						{/if}
-					</div>
-				</a>
+							{#if c.next_due}
+								<div class="muted">
+									Next due: {formatDate(c.next_due)}
+									{#if c.days_until_due !== null}
+										{#if c.days_until_due < 0}
+											({-c.days_until_due}d overdue)
+										{:else}
+											(in {c.days_until_due}d)
+										{/if}
+									{/if}
+								</div>
+							{/if}
+						</div>
+					</a>
+				</li>
 			{/each}
-		</div>
+		</ul>
 
 		{#if riskBased.length > 0}
 			<details class="risk-based" bind:open={riskOpen}>
 				<summary>Risk-based vaccines ({riskBased.length})</summary>
-				<div class="cards">
+				<ul class="cards">
 					{#each riskBased as c (c.name)}
-						<a class="card status-{c.status}" href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}">
-							<div class="card-head">
+						<li>
+							<a
+								class="card"
+								href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
+							>
 								<span class="name">{c.display_name}</span>
 								<span class="badge status-{c.status}">{statusLabel(c.status)}</span>
-							</div>
-							<div class="card-body">
-								<div class="muted">
-									{#if c.last_given}
-										Last: {formatDate(c.last_given)}
-									{:else}
-										Not recorded
-									{/if}
+								<div class="card-body">
+									<div class="muted">
+										{#if c.last_given}
+											Last: {formatDate(c.last_given)}
+										{:else}
+											Not recorded
+										{/if}
+									</div>
 								</div>
-							</div>
-						</a>
+							</a>
+						</li>
 					{/each}
-				</div>
+				</ul>
 			</details>
 		{/if}
 
 		{#if other.length > 0}
 			<h3>Other recorded</h3>
-			<div class="cards">
+			<ul class="cards">
 				{#each other as c (c.name)}
-					<div class="card status-recorded">
-						<div class="card-head">
+					<li>
+						<div class="card">
 							<span class="name">{c.display_name}</span>
-							<span class="badge status-recorded">{c.dose_count} dose{c.dose_count > 1 ? 's' : ''}</span>
+							<span class="badge status-recorded">
+								{c.dose_count} dose{c.dose_count > 1 ? 's' : ''}
+							</span>
+							<div class="card-body">
+								<div class="muted">Last: {formatDate(c.last_given)}</div>
+							</div>
 						</div>
-						<div class="card-body">
-							<div class="muted">Last: {formatDate(c.last_given)}</div>
-						</div>
-					</div>
+					</li>
 				{/each}
-			</div>
+			</ul>
 		{/if}
 	</section>
 
@@ -319,6 +318,7 @@
 			<h2>History</h2>
 			<input
 				type="text"
+				class="filter-input"
 				placeholder="Filter by vaccine name"
 				bind:value={nameFilter}
 				onchange={load}
@@ -327,39 +327,52 @@
 		{#if history.length === 0}
 			<div class="empty small">No immunizations recorded yet.</div>
 		{:else}
-			<table>
-				<thead>
-					<tr>
-						<th>Date</th>
-						<th>Vaccine</th>
-						<th>Product</th>
-						<th>Dose label</th>
-						<th>Facility</th>
-						<th>Notes</th>
-						<th></th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each history as i (i.id)}
+			<div class="table-scroll">
+				<table class="grid">
+					<thead>
 						<tr>
-							<td>{formatDate(i.date_given)}</td>
-							<td>
-								<a href="{base}/health/immunizations/vaccine?name={encodeURIComponent(i.name)}">
-									{i.name}
-								</a>
-							</td>
-							<td>{i.product_name || '—'}</td>
-							<td>{i.dose_label || '—'}</td>
-							<td>{i.facility || '—'}</td>
-							<td class="notes">{i.notes || '—'}</td>
-							<td class="actions">
-								<a class="btn small" href="{base}/health/immunizations/detail?id={i.id}">Edit</a>
-								<button class="btn small danger" type="button" onclick={() => deleteRow(i.id)}>Delete</button>
-							</td>
+							<th>Date</th>
+							<th>Vaccine</th>
+							<th>Product</th>
+							<th>Dose label</th>
+							<th>Facility</th>
+							<th>Notes</th>
+							<th class="row-actions"></th>
 						</tr>
-					{/each}
-				</tbody>
-			</table>
+					</thead>
+					<tbody>
+						{#each history as i (i.id)}
+							<tr>
+								<td>{formatDate(i.date_given)}</td>
+								<td>
+									<a
+										class="link"
+										href="{base}/health/immunizations/vaccine?name={encodeURIComponent(i.name)}"
+									>
+										{i.name}
+									</a>
+								</td>
+								<td>{i.product_name || '—'}</td>
+								<td>{i.dose_label || '—'}</td>
+								<td>{i.facility || '—'}</td>
+								<td class="notes">{i.notes || '—'}</td>
+								<td class="row-actions">
+									<a class="btn small" href="{base}/health/immunizations/detail?id={i.id}">
+										Edit
+									</a>
+									<button
+										class="btn small danger"
+										type="button"
+										onclick={() => deleteRow(i.id)}
+									>
+										Delete
+									</button>
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
 		{/if}
 	</section>
 {/if}
@@ -367,254 +380,298 @@
 <style>
 	.header {
 		display: flex;
-		align-items: center;
 		justify-content: space-between;
-		gap: 1rem;
+		align-items: center;
 		margin-bottom: 1rem;
 	}
-	.header h1 {
-		font-size: 1.5rem;
+	h1 {
+		font-size: var(--text-lg, 1.05rem);
+		font-weight: 500;
 		margin: 0;
 	}
 	.actions {
 		display: flex;
 		gap: 0.5rem;
+		align-items: center;
 	}
 	.btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		padding: 0.4rem 0.75rem;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 6px;
-		background: var(--surface, #fff);
-		color: var(--text, #222);
+		padding: 0.4rem 0.85rem;
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-pill);
+		color: var(--text-primary);
 		text-decoration: none;
-		font-size: 0.875rem;
+		font: inherit;
+		font-size: var(--text-sm);
 		cursor: pointer;
+		line-height: 1.2;
 	}
-	.btn.primary {
-		background: var(--accent, #2a6df4);
-		color: #fff;
-		border-color: var(--accent, #2a6df4);
-	}
+	.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+	.btn:hover:not(:disabled) { background: var(--surface-raised); }
+	.btn.primary { border-color: #7aa3d8; color: #7aa3d8; }
 	.btn.small {
-		padding: 0.25rem 0.5rem;
-		font-size: 0.8rem;
+		padding: 0.2rem 0.55rem;
+		font-size: var(--text-xs);
 	}
-	.btn.danger {
-		color: var(--danger, #c0392b);
-	}
+	.btn.danger { color: var(--text-muted); }
+	.btn.danger:hover:not(:disabled) { color: #e88; }
+
 	.quick-form {
-		border: 1px solid var(--border, #ddd);
-		border-radius: 8px;
-		padding: 1rem;
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-card);
+		padding: 0.85rem 1rem;
 		margin-bottom: 1rem;
-		background: var(--surface, #fff);
-	}
-	.row {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-		gap: 0.75rem;
-	}
-	label {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
-		font-size: 0.85rem;
+		gap: 0.65rem;
 	}
-	label.full {
-		display: block;
-		margin-top: 0.75rem;
+	.quick-form .row {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+		gap: 0.65rem;
 	}
-	label span {
-		color: var(--muted, #666);
-		font-size: 0.75rem;
+	.quick-form label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		font-size: var(--text-sm);
+		min-width: 0;
 	}
-	input,
-	select,
-	textarea {
-		padding: 0.4rem 0.5rem;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 4px;
-		background: var(--surface, #fff);
-		color: var(--text, #222);
+	.quick-form label.full {
+		grid-column: 1 / -1;
+		margin-top: 0.25rem;
+	}
+	.quick-form label > span {
+		color: var(--text-muted);
+		font-size: var(--text-xs);
+	}
+	.quick-form input,
+	.quick-form select,
+	.quick-form textarea {
+		padding: 0.3rem 0.5rem;
+		background: var(--surface-raised);
+		border: 1px solid var(--border-default);
+		border-radius: 0.3rem;
+		color: var(--text-primary);
 		font: inherit;
+		font-size: var(--text-sm);
+		box-sizing: border-box;
+		min-width: 0;
 	}
-	textarea {
+	.quick-form textarea {
 		resize: vertical;
-		min-height: 3em;
+		font-family: inherit;
 	}
-	.advanced {
-		margin-top: 0.75rem;
-	}
-	.advanced summary {
+	.quick-form details.advanced > summary {
+		color: var(--text-muted);
+		font-size: var(--text-sm);
 		cursor: pointer;
-		color: var(--muted, #666);
-		font-size: 0.85rem;
+		user-select: none;
 	}
 	.form-actions {
-		margin-top: 0.75rem;
 		display: flex;
 		justify-content: flex-end;
 	}
-	.msg.error {
-		color: var(--danger, #c0392b);
-		font-size: 0.85rem;
-		margin: 0.5rem 0;
-	}
-	.empty {
-		padding: 2rem;
-		text-align: center;
-		color: var(--muted, #666);
-	}
-	.empty.small {
-		padding: 1rem;
-		font-size: 0.875rem;
-	}
+
 	.coverage {
-		margin-bottom: 1.5rem;
+		margin-bottom: 1.25rem;
 	}
 	.coverage h2,
 	.history h2 {
-		font-size: 1.1rem;
-		margin: 0 0 0.75rem;
+		margin: 0 0 0.5rem;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--text-dim);
+		font-weight: 500;
 	}
 	.coverage h3 {
-		font-size: 0.95rem;
-		margin: 1rem 0 0.5rem;
-		color: var(--muted, #666);
+		margin: 0.85rem 0 0.4rem;
+		font-size: var(--text-xs);
+		font-weight: 500;
+		color: var(--text-dim);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 	}
 	.cards {
+		list-style: none;
+		margin: 0;
+		padding: 0;
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
 		gap: 0.5rem;
+		grid-auto-rows: 1fr;
+	}
+	.cards > li {
+		display: flex;
 	}
 	.card {
-		border: 1px solid var(--border, #ddd);
-		border-left: 3px solid var(--border, #ddd);
-		border-radius: 6px;
-		padding: 0.75rem;
-		background: var(--surface, #fff);
-		color: inherit;
-		text-decoration: none;
-		display: block;
-	}
-	.card-head {
 		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
-		margin-bottom: 0.5rem;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 0.4rem;
+		width: 100%;
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-card);
+		padding: 0.7rem 0.9rem;
+		text-decoration: none;
+		color: var(--text-primary);
 	}
-	.name {
-		font-weight: 600;
-		font-size: 0.95rem;
+	.card:hover { border-color: #555; }
+	.card .name {
+		font-weight: 500;
+		font-size: var(--text-sm);
+		line-height: 1.35;
+	}
+	.card-body {
+		margin-top: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
 	}
 	.muted {
-		color: var(--muted, #666);
-		font-size: 0.8rem;
+		font-size: var(--text-xs);
+		color: var(--text-muted);
 	}
+
+	/* Badges — match history page palette: HSLA on the dark surface so the
+	   intensity stays consistent across status colours. */
 	.badge {
-		display: inline-block;
-		padding: 0.1rem 0.4rem;
-		border-radius: 4px;
-		font-size: 0.7rem;
-		font-weight: 600;
+		display: inline-flex;
+		align-items: center;
+		font-size: var(--text-xs);
 		text-transform: uppercase;
-		letter-spacing: 0.02em;
-		background: #eee;
-		color: #555;
+		letter-spacing: 0.04em;
+		padding: 0.1rem 0.5rem;
+		border-radius: var(--radius-pill);
+		font-weight: 500;
 		white-space: nowrap;
-	}
-	.card.status-overdue,
-	.card.status-expired {
-		border-left-color: #d44;
 	}
 	.badge.status-overdue,
 	.badge.status-expired {
-		background: #fde6e6;
-		color: #a22;
-	}
-	.card.status-due_soon {
-		border-left-color: #f0a020;
+		background: hsla(0, 60%, 55%, 0.28);
+		color: #ff9d96;
 	}
 	.badge.status-due_soon {
-		background: #fff1d6;
-		color: #8a5a00;
-	}
-	.card.status-series_incomplete {
-		border-left-color: #d0a;
+		background: hsla(35, 60%, 60%, 0.22);
+		color: #e6b96b;
 	}
 	.badge.status-series_incomplete {
-		background: #fbe6f4;
-		color: #8a0668;
-	}
-	.card.status-up_to_date {
-		border-left-color: #2a8;
+		background: hsla(280, 45%, 65%, 0.22);
+		color: #d0aeec;
 	}
 	.badge.status-up_to_date {
-		background: #dff5e8;
-		color: #186b3a;
-	}
-	.card.status-never_recorded,
-	.card.status-recorded {
-		border-left-color: #aaa;
+		background: hsla(145, 40%, 55%, 0.22);
+		color: #9bd6a6;
 	}
 	.badge.status-never_recorded,
-	.badge.status-recorded {
-		background: #eee;
-		color: #555;
-	}
-	.card.status-risk_based {
-		border-left-color: #888;
-	}
+	.badge.status-recorded,
 	.badge.status-risk_based {
-		background: #eee;
-		color: #555;
+		background: hsla(220, 8%, 60%, 0.18);
+		color: var(--text-muted);
 	}
+
 	.risk-based {
-		margin-top: 1rem;
+		margin-top: 0.75rem;
 	}
-	.risk-based summary {
+	.risk-based > summary {
 		cursor: pointer;
-		font-size: 0.9rem;
-		padding: 0.25rem 0;
-		color: var(--muted, #666);
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+		padding: 0.35rem 0;
+		user-select: none;
 	}
-	.risk-based[open] summary {
+	.risk-based[open] > summary {
 		margin-bottom: 0.5rem;
 	}
+
 	.history-head {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
-		gap: 1rem;
+		gap: 0.75rem;
 		margin-bottom: 0.5rem;
 	}
-	.history-head input {
+	.filter-input {
+		padding: 0.3rem 0.5rem;
+		background: var(--surface-raised);
+		border: 1px solid var(--border-default);
+		border-radius: 0.3rem;
+		color: var(--text-primary);
+		font: inherit;
+		font-size: var(--text-sm);
 		max-width: 240px;
 	}
-	table {
+
+	.table-scroll {
+		width: 100%;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+	table.grid {
 		width: 100%;
 		border-collapse: collapse;
-		font-size: 0.875rem;
+		font-size: var(--text-sm);
 	}
-	th,
-	td {
+	table.grid th,
+	table.grid td {
 		text-align: left;
 		padding: 0.4rem 0.5rem;
-		border-bottom: 1px solid var(--border, #eee);
+		border-bottom: 1px solid var(--border-subtle);
+		vertical-align: middle;
 	}
-	td.actions {
-		display: flex;
-		gap: 0.25rem;
-		justify-content: flex-end;
+	table.grid th {
+		color: var(--text-dim);
+		font-weight: 500;
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 	}
 	td.notes {
-		max-width: 300px;
+		max-width: 260px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		color: var(--text-muted);
+	}
+	td.row-actions,
+	th.row-actions {
+		text-align: right;
+		white-space: nowrap;
+	}
+	td.row-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.25rem;
+	}
+	a.link {
+		color: var(--text-primary);
+		text-decoration: none;
+		border-bottom: 1px dotted var(--border-default);
+	}
+	a.link:hover {
+		color: var(--accent-hover);
+		border-bottom-color: var(--text-muted);
+	}
+
+	.empty {
+		color: var(--text-dim);
+		padding: 2rem 0;
+	}
+	.empty.small {
+		padding: 0.75rem 0;
+		font-size: var(--text-sm);
+	}
+	.msg {
+		font-size: var(--text-sm);
+		padding: 0.4rem 0.6rem;
+		border-radius: 0.3rem;
+		margin-bottom: 0.75rem;
+	}
+	.msg.error {
+		background: rgba(204, 102, 102, 0.1);
+		color: #e88;
 	}
 </style>
