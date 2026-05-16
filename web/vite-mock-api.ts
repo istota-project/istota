@@ -2490,6 +2490,43 @@ const handlers: MockHandler[] = [
 					if (!body || typeof body.text !== 'string') return { error: 'text is required' };
 					return { rows: _parsePaste(body.text) };
 				}
+				if (url === '/istota/api/health/immunizations/extract' && method === 'POST') {
+					// Dev fixture: mock the LLM extraction so the review UI is
+					// reachable in offline development. The real backend route
+					// runs OCR / vision against the uploaded file.
+					return {
+						mode: 'vision',
+						rows: [
+							{
+								name: 'Influenza',
+								product_name: 'Fluzone Quadrivalent',
+								date_given: '2025-11-12',
+								source_line: '',
+								confidence: 'high',
+								notes: null,
+							},
+							{
+								name: 'COVID-19',
+								product_name: 'Comirnaty',
+								date_given: '2024-10-04',
+								source_line: '',
+								confidence: 'high',
+								notes: null,
+							},
+							{
+								name: 'Unknown',
+								product_name: 'Adacel — pertussis booster',
+								date_given: null,
+								source_line: '',
+								confidence: 'manual',
+								notes: 'Date not visible in source — please add manually',
+							},
+						],
+						warnings: [
+							'Mock extraction (dev mode) — the real LLM runs against the uploaded file.',
+						],
+					};
+				}
 				if (url === '/istota/api/health/immunizations/bulk' && method === 'POST') {
 					if (!body || !Array.isArray(body.rows)) return { error: 'rows must be a list' };
 					const ids: number[] = [];

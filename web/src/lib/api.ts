@@ -1266,6 +1266,16 @@ export async function parseImmunizations(text: string): Promise<{ rows: ParsedIm
 	});
 }
 
+export async function extractImmunizations(file: File): Promise<{
+	rows: ParsedImmunization[];
+	mode: 'text' | 'vision';
+	warnings: string[];
+}> {
+	const form = new FormData();
+	form.append('file', file);
+	return healthFetch('/immunizations/extract', { method: 'POST', body: form });
+}
+
 export async function bulkInsertImmunizations(rows: ParsedImmunization[]): Promise<{ status: string; ids: number[]; count: number }> {
 	return healthFetch('/immunizations/bulk', {
 		method: 'POST',

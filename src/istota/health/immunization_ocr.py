@@ -1,0 +1,311 @@
+"""Image / PDF → immunization rows pipeline.
+
+Same overall shape as :mod:`istota.health.ocr` but tailored to vaccine
+lists rather than lab panels:
+
+* PDF — try ``pdftotext`` / ``pypdf`` first (most MyChart-style exports
+  are text-native); fall through to a vision-mode brain call when the
+  text path produces nothing usable.
+* Image — vision-mode brain call (Tesseract is too unreliable on the
+  styled lists that vendor portals render).
+
+The output shape mirrors :func:`istota.health.parser.parse_paste` so
+the web UI and the ``/bulk`` route can consume both code paths the
+same way.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+from istota.health.models import ImmunizationRef
+
+
+logger = logging.getLogger(__name__)
+
+
+# Long enough that "Page 1 of 2\n" alone doesn't trigger text mode.
+_TEXT_NATIVE_MIN_CHARS = 60
+
+
+def _pdftotext(path: Path) -> str | None:
+    if not shutil.which("pdftotext"):
+        return None
+    try:
+        out = subprocess.run(
+            ["pdftotext", "-layout", str(path), "-"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout or None
+
+
+def _pypdf_extract(path: Path) -> str | None:
+    try:
+        from pypdf import PdfReader  # noqa: PLC0415
+    except ImportError:
+        return None
+    try:
+        reader = PdfReader(str(path))
+        chunks = []
+        for page in reader.pages:
+            try:
+                chunks.append(page.extract_text() or "")
+            except Exception:  # noqa: BLE001
+                continue
+        return "\n".join(chunks) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _build_refs_block(refs: list[ImmunizationRef]) -> str:
+    lines = []
+    for r in refs:
+        aliases = ", ".join(r.aliases) if r.aliases else ""
+        suffix = f" — also: {aliases}" if aliases else ""
+        lines.append(f"- {r.name}{suffix}")
+    return "\n".join(lines)
+
+
+_FIELD_RULES = """For each immunization, return an object:
+
+  {
+    "name": canonical vaccine family name (match the list below where possible; use "Unknown" otherwise),
+    "product_name": brand or product description as printed (e.g. "Fluzone Quadrivalent", "Janssen/J&J"),
+    "date_given": ISO date YYYY-MM-DD,
+    "notes": any extra qualifier the source printed (e.g. "External Administration"),
+    "confidence": "high" if the date is unambiguous, "medium" if you inferred any field, "low" if you guessed
+  }
+
+Return JSON only — no prose, no fences. The top-level shape is:
+
+  {"immunizations": [ ... ]}
+
+Empty source → {"immunizations": []}.
+
+Rules:
+- Always include every row visible in the source, even if the family doesn't match the canonical list (set name="Unknown" and put the printed text in product_name).
+- US dates (M/D/YYYY) and ISO dates both occur; output ISO.
+- Two-digit years: 00–69 → 20YY, 70–99 → 19YY.
+- Don't fabricate dates. If a row has no date, return date_given=null.
+"""
+
+
+def _build_text_prompt(text: str, refs: list[ImmunizationRef]) -> str:
+    refs_str = _build_refs_block(refs)
+    return f"""Extract immunization records from the text below.
+
+{_FIELD_RULES}
+Canonical vaccine families (match the user's printed text to one of these
+when you can; case-insensitive):
+
+{refs_str}
+
+Source text (between <text> markers):
+
+<text>
+{text}
+</text>
+"""
+
+
+def _build_vision_prompt(image_path: Path, refs: list[ImmunizationRef]) -> str:
+    refs_str = _build_refs_block(refs)
+    return f"""Read the immunization list at the following absolute path and
+extract its rows:
+
+{image_path}
+
+{_FIELD_RULES}
+Canonical vaccine families (match the user's printed text to one of these
+when you can; case-insensitive):
+
+{refs_str}
+"""
+
+
+_FENCE_RE = re.compile(r"```(?:[a-zA-Z]+)?\s*\n(.*?)\n```", re.DOTALL)
+
+
+def _candidate_blocks(raw: str) -> list[str]:
+    candidates: list[str] = []
+    candidates.extend(m.group(1).strip() for m in _FENCE_RE.finditer(raw))
+    candidates.append(raw.strip())
+    obj = re.search(r"\{.*\}", raw, re.DOTALL)
+    if obj:
+        candidates.append(obj.group(0))
+    arr = re.search(r"\[.*\]", raw, re.DOTALL)
+    if arr:
+        candidates.append(arr.group(0))
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _coerce_str(v) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() in ("null", "none", "n/a", "unknown"):
+        return None
+    return s
+
+
+def _normalise_date(raw) -> str | None:
+    if not raw:
+        return None
+    s = str(raw).strip()
+    iso = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", s)
+    if iso:
+        return s
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", s)
+    if not m:
+        return None
+    month, day, year = m.groups()
+    if len(year) == 2:
+        y = int(year)
+        year = f"20{year}" if y < 70 else f"19{year}"
+    try:
+        from datetime import date as _date
+        return _date(int(year), int(month), int(day)).isoformat()
+    except ValueError:
+        return None
+
+
+def _parse_llm_response(raw: str) -> list[dict]:
+    """Return ``[{name, product_name, date_given, notes, confidence}]``."""
+    for candidate in _candidate_blocks(raw):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and "immunizations" in parsed:
+            items = parsed["immunizations"]
+        elif isinstance(parsed, list):
+            items = parsed
+        else:
+            continue
+        if not isinstance(items, list):
+            continue
+        out: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = _coerce_str(item.get("name")) or "Unknown"
+            date_given = _normalise_date(item.get("date_given"))
+            confidence = _coerce_str(item.get("confidence")) or (
+                "high" if date_given else "manual"
+            )
+            out.append({
+                "name": name,
+                "product_name": _coerce_str(item.get("product_name")),
+                "date_given": date_given,
+                "source_line": _coerce_str(item.get("source_line")) or "",
+                "confidence": confidence,
+                "notes": _coerce_str(item.get("notes")),
+            })
+        if out:
+            return out
+    return []
+
+
+def _call_brain(prompt: str, config, *, allow_read: bool = False) -> str | None:
+    try:
+        from istota.brain import BrainRequest, make_brain  # noqa: PLC0415
+    except ImportError as e:
+        logger.warning("health_imm_ocr_brain_import_failed error=%s", e)
+        return None
+    if config is None:
+        return None
+    try:
+        brain = make_brain(config.brain)
+        model = brain.resolve_model_name("general")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("health_imm_ocr_brain_init_failed error=%s", e)
+        return None
+    req = BrainRequest(
+        prompt=prompt,
+        allowed_tools=["Read"] if allow_read else [],
+        cwd=Path(getattr(config, "temp_dir", None) or "/tmp"),
+        env=dict(os.environ),
+        timeout_seconds=180,
+        model=model,
+        streaming=False,
+    )
+    try:
+        result = brain.execute(req)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("health_imm_ocr_brain_failed error=%s", e)
+        return None
+    if not result.success:
+        logger.warning(
+            "health_imm_ocr_brain_unsuccessful stop_reason=%s",
+            getattr(result, "stop_reason", "?"),
+        )
+        return None
+    return result.result_text or ""
+
+
+def extract_from_file(
+    source_path: Path,
+    mime: str,
+    refs: list[ImmunizationRef],
+    *,
+    config=None,
+) -> dict:
+    """Run text → fallback-vision extraction against an uploaded file.
+
+    Returns ``{"rows": [...], "mode": "text"|"vision", "warnings": [...]}``.
+    The ``rows`` shape matches :func:`istota.health.parser.parse_paste`
+    output so the frontend can review either source through the same UI.
+    """
+    text = ""
+    mode = "vision"
+    mime_low = (mime or "").lower()
+    if mime_low == "application/pdf" or source_path.suffix.lower() == ".pdf":
+        text = _pdftotext(source_path) or _pypdf_extract(source_path) or ""
+        if len(text.strip()) >= _TEXT_NATIVE_MIN_CHARS:
+            mode = "text"
+
+    if mode == "text":
+        prompt = _build_text_prompt(text, refs)
+        response = _call_brain(prompt, config)
+    else:
+        prompt = _build_vision_prompt(source_path, refs)
+        response = _call_brain(prompt, config, allow_read=True)
+
+    if not response:
+        return {
+            "rows": [],
+            "mode": mode,
+            "warnings": [
+                "The LLM extraction step is unavailable on this instance. "
+                "Paste the list as text or add rows manually.",
+            ],
+        }
+
+    rows = _parse_llm_response(response)
+    warnings: list[str] = []
+    if not rows:
+        warnings.append(
+            "Couldn't parse any immunizations from the source. "
+            "Try a clearer screenshot or paste the list as text.",
+        )
+    unknown = sum(1 for r in rows if r["name"] == "Unknown")
+    if unknown:
+        warnings.append(
+            f"{unknown} row(s) didn't match a canonical vaccine family — "
+            "review and pick one before importing.",
+        )
+    return {"rows": rows, "mode": mode, "warnings": warnings}

@@ -198,6 +198,92 @@ class TestRefsAndCoverageRoutes:
         assert "Custom Trial Vaccine" in other_names
 
 
+class TestExtractRoute:
+    def test_extract_returns_fallback_when_brain_unavailable(self, client):
+        # No app.state.istota_config → brain unavailable → fallback empty rows
+        # with a warning, but still a 200.
+        files = {"file": ("vaccines.png", b"\x89PNG\r\n\x1a\nfake", "image/png")}
+        resp = client.post(
+            "/istota/api/health/immunizations/extract",
+            files=files,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "rows" in body
+        assert "warnings" in body
+        assert any("unavailable" in w.lower() for w in body["warnings"])
+
+    def test_extract_rejects_empty_upload(self, client):
+        files = {"file": ("vaccines.png", b"", "image/png")}
+        resp = client.post(
+            "/istota/api/health/immunizations/extract",
+            files=files,
+        )
+        assert resp.status_code == 400
+
+
+class TestExtractParser:
+    """LLM response parsing (the brain-call path) — tested in isolation."""
+
+    def test_parse_object_envelope(self):
+        from istota.health.immunization_ocr import _parse_llm_response
+
+        raw = (
+            '{"immunizations": ['
+            '{"name": "Influenza", "product_name": "Fluzone", '
+            '"date_given": "2025-11-28", "confidence": "high"}'
+            ']}'
+        )
+        out = _parse_llm_response(raw)
+        assert len(out) == 1
+        assert out[0]["name"] == "Influenza"
+        assert out[0]["date_given"] == "2025-11-28"
+        assert out[0]["confidence"] == "high"
+
+    def test_parse_bare_array(self):
+        from istota.health.immunization_ocr import _parse_llm_response
+
+        raw = '[{"name": "Tdap", "date_given": "12/1/2016"}]'
+        out = _parse_llm_response(raw)
+        assert out[0]["name"] == "Tdap"
+        # US date normalised to ISO.
+        assert out[0]["date_given"] == "2016-12-01"
+
+    def test_parse_strips_code_fences(self):
+        from istota.health.immunization_ocr import _parse_llm_response
+
+        raw = (
+            "Sure, here you go:\n"
+            "```json\n"
+            '{"immunizations": [{"name": "MMR", "date_given": "1990-01-01"}]}\n'
+            "```"
+        )
+        out = _parse_llm_response(raw)
+        assert out[0]["name"] == "MMR"
+
+    def test_parse_handles_two_digit_year(self):
+        from istota.health.immunization_ocr import _parse_llm_response
+
+        raw = '[{"name": "Tdap", "date_given": "12/1/85"}]'
+        out = _parse_llm_response(raw)
+        assert out[0]["date_given"] == "1985-12-01"
+
+    def test_parse_marks_no_date_as_manual(self):
+        from istota.health.immunization_ocr import _parse_llm_response
+
+        raw = '[{"name": "Influenza", "date_given": null}]'
+        out = _parse_llm_response(raw)
+        assert out[0]["date_given"] is None
+        assert out[0]["confidence"] == "manual"
+
+    def test_parse_unknown_name_defaults(self):
+        from istota.health.immunization_ocr import _parse_llm_response
+
+        raw = '[{"date_given": "2024-01-01"}]'
+        out = _parse_llm_response(raw)
+        assert out[0]["name"] == "Unknown"
+
+
 class TestParseAndBulkRoutes:
     def test_parse_endpoint(self, client):
         text = "Tdap (Given 12/1/2016)\n"
