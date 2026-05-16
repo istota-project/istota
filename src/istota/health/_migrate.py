@@ -31,6 +31,9 @@ _SEED_SENTINEL_KEY = "biomarker_refs_seeded_at"
 _SEED_HASH_KEY = "biomarker_refs_hash"
 _RECANON_HASH_KEY = "biomarker_recanonicalize_hash"
 
+_IMM_SEED_HASH_KEY = "immunization_refs_hash"
+_IMM_SEED_SENTINEL_KEY = "immunization_refs_seeded_at"
+
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -153,12 +156,79 @@ def recanonicalize_biomarker_names(ctx: HealthContext) -> int:
     return fixed
 
 
+def _read_bundled_immunization_refs() -> list[dict] | None:
+    """Read the package-shipped ``immunization_refs.json``."""
+    try:
+        resource = files("istota.health").joinpath("data/immunization_refs.json")
+    except (ModuleNotFoundError, FileNotFoundError):
+        return None
+    try:
+        with as_file(resource) as concrete:
+            if not concrete.is_file():
+                return None
+            text = concrete.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.warning("health_immunization_refs_unparseable error=%s", e)
+        return None
+    if not isinstance(data, list):
+        return None
+    return data
+
+
+def seed_immunization_refs(ctx: HealthContext) -> int | None:
+    """Seed (or re-seed) the ``immunization_refs`` table from the bundled JSON.
+
+    Re-runs whenever the bundled file's content hash differs from the
+    last-applied hash recorded in ``schema_meta``. Mirrors
+    :func:`seed_biomarker_refs`.
+    """
+    health_db.init_db(ctx.db_path)
+    refs = _read_bundled_immunization_refs()
+    if not refs:
+        return None
+    new_hash = _refs_hash(refs)
+    with health_db.connect(ctx.db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = ?",
+            (_IMM_SEED_HASH_KEY,),
+        ).fetchone()
+        if row and row["value"] == new_hash:
+            return None
+        for ref in refs:
+            try:
+                health_db.upsert_immunization_ref(conn, ref)
+            except (KeyError, sqlite3.Error) as e:
+                logger.warning(
+                    "health_immunization_ref_skip name=%s error=%s",
+                    ref.get("name", "?"), e,
+                )
+                continue
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+            (_IMM_SEED_HASH_KEY, new_hash),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+            (_IMM_SEED_SENTINEL_KEY, _iso_now()),
+        )
+        conn.commit()
+    logger.info(
+        "health_immunization_refs_seeded count=%d hash=%s", len(refs), new_hash,
+    )
+    return len(refs)
+
+
 def ensure_initialised(ctx: HealthContext) -> None:
     """Wire up the health workspace: dirs + schema + seed + recanonicalize."""
     ctx.ensure_dirs()
     health_db.init_db(ctx.db_path)
     seed_biomarker_refs(ctx)
     recanonicalize_biomarker_names(ctx)
+    seed_immunization_refs(ctx)
     _backfill_content_hashes(ctx)
 
 
