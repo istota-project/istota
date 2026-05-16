@@ -48,6 +48,14 @@ _KNOWN_DEFERRED_SUFFIXES = (
     "health_ops",
 )
 
+# Operator-facing recovery artifacts. Written by deferred-op handlers when
+# an op fails mid-batch; preserved so an operator can recover the lost rows.
+# Recognized by ``_warn_unconsumed_deferred_files`` but NOT purged on retry
+# (the operator inspects them after the task settles).
+_KNOWN_ARTIFACT_SUFFIXES = (
+    "health_op_failures",
+)
+
 
 def _load_deferred_json(
     user_temp_dir: Path,
@@ -867,6 +875,9 @@ def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
     known_filenames = {
         f"task_{task.id}_{suffix}.json" for suffix in _KNOWN_DEFERRED_SUFFIXES
     }
+    known_filenames.update(
+        f"task_{task.id}_{suffix}.json" for suffix in _KNOWN_ARTIFACT_SUFFIXES
+    )
     # Static task-scoped files written by the executor itself.
     known_filenames.add(f"task_{task.id}_prompt.txt")
     known_filenames.add(f"task_{task.id}_result.txt")

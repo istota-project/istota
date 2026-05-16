@@ -166,8 +166,13 @@ def _normalise_date(raw) -> str | None:
     if not raw:
         return None
     s = str(raw).strip()
+    from datetime import date as _date
     iso = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", s)
     if iso:
+        try:
+            _date.fromisoformat(s)
+        except ValueError:
+            return None
         return s
     m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", s)
     if not m:
@@ -177,14 +182,29 @@ def _normalise_date(raw) -> str | None:
         y = int(year)
         year = f"20{year}" if y < 70 else f"19{year}"
     try:
-        from datetime import date as _date
         return _date(int(year), int(month), int(day)).isoformat()
     except ValueError:
         return None
 
 
-def _parse_llm_response(raw: str) -> list[dict]:
-    """Return ``[{name, product_name, date_given, notes, confidence}]``."""
+def _is_future(iso_date: str | None) -> bool:
+    if not iso_date:
+        return False
+    from datetime import date as _date
+    try:
+        return _date.fromisoformat(iso_date) > _date.today()
+    except ValueError:
+        return False
+
+
+def _parse_llm_response(raw: str) -> tuple[list[dict], int]:
+    """Return ``(rows, dropped_future)``.
+
+    ``dropped_future`` counts rows the model emitted with a future
+    date_given — likely OCR errors or hallucinations (analog of the
+    bloodwork pipeline's >10× canonical-range guard). Those rows are
+    discarded rather than allowed through to the bulk endpoint.
+    """
     for candidate in _candidate_blocks(raw):
         try:
             parsed = json.loads(candidate)
@@ -199,11 +219,15 @@ def _parse_llm_response(raw: str) -> list[dict]:
         if not isinstance(items, list):
             continue
         out: list[dict] = []
+        dropped_future = 0
         for item in items:
             if not isinstance(item, dict):
                 continue
             name = _coerce_str(item.get("name")) or "Unknown"
             date_given = _normalise_date(item.get("date_given"))
+            if _is_future(date_given):
+                dropped_future += 1
+                continue
             confidence = _coerce_str(item.get("confidence")) or (
                 "high" if date_given else "manual"
             )
@@ -215,9 +239,9 @@ def _parse_llm_response(raw: str) -> list[dict]:
                 "confidence": confidence,
                 "notes": _coerce_str(item.get("notes")),
             })
-        if out:
-            return out
-    return []
+        if out or dropped_future:
+            return out, dropped_future
+    return [], 0
 
 
 def _call_brain(prompt: str, config, *, allow_read: bool = False) -> str | None:
@@ -295,12 +319,18 @@ def extract_from_file(
             ],
         }
 
-    rows = _parse_llm_response(response)
+    rows, dropped_future = _parse_llm_response(response)
     warnings: list[str] = []
-    if not rows:
+    if not rows and not dropped_future:
         warnings.append(
             "Couldn't parse any immunizations from the source. "
             "Try a clearer screenshot or paste the list as text.",
+        )
+    if dropped_future:
+        warnings.append(
+            f"{dropped_future} row(s) had a future date and were dropped — "
+            "likely OCR error or hallucination. Re-upload a clearer image "
+            "or add those rows manually.",
         )
     unknown = sum(1 for r in rows if r["name"] == "Unknown")
     if unknown:

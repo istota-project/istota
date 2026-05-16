@@ -234,20 +234,21 @@ class TestExtractParser:
             '"date_given": "2025-11-28", "confidence": "high"}'
             ']}'
         )
-        out = _parse_llm_response(raw)
-        assert len(out) == 1
-        assert out[0]["name"] == "Influenza"
-        assert out[0]["date_given"] == "2025-11-28"
-        assert out[0]["confidence"] == "high"
+        rows, dropped = _parse_llm_response(raw)
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Influenza"
+        assert rows[0]["date_given"] == "2025-11-28"
+        assert rows[0]["confidence"] == "high"
+        assert dropped == 0
 
     def test_parse_bare_array(self):
         from istota.health.immunization_ocr import _parse_llm_response
 
         raw = '[{"name": "Tdap", "date_given": "12/1/2016"}]'
-        out = _parse_llm_response(raw)
-        assert out[0]["name"] == "Tdap"
+        rows, _ = _parse_llm_response(raw)
+        assert rows[0]["name"] == "Tdap"
         # US date normalised to ISO.
-        assert out[0]["date_given"] == "2016-12-01"
+        assert rows[0]["date_given"] == "2016-12-01"
 
     def test_parse_strips_code_fences(self):
         from istota.health.immunization_ocr import _parse_llm_response
@@ -258,30 +259,50 @@ class TestExtractParser:
             '{"immunizations": [{"name": "MMR", "date_given": "1990-01-01"}]}\n'
             "```"
         )
-        out = _parse_llm_response(raw)
-        assert out[0]["name"] == "MMR"
+        rows, _ = _parse_llm_response(raw)
+        assert rows[0]["name"] == "MMR"
 
     def test_parse_handles_two_digit_year(self):
         from istota.health.immunization_ocr import _parse_llm_response
 
         raw = '[{"name": "Tdap", "date_given": "12/1/85"}]'
-        out = _parse_llm_response(raw)
-        assert out[0]["date_given"] == "1985-12-01"
+        rows, _ = _parse_llm_response(raw)
+        assert rows[0]["date_given"] == "1985-12-01"
 
     def test_parse_marks_no_date_as_manual(self):
         from istota.health.immunization_ocr import _parse_llm_response
 
         raw = '[{"name": "Influenza", "date_given": null}]'
-        out = _parse_llm_response(raw)
-        assert out[0]["date_given"] is None
-        assert out[0]["confidence"] == "manual"
+        rows, _ = _parse_llm_response(raw)
+        assert rows[0]["date_given"] is None
+        assert rows[0]["confidence"] == "manual"
 
     def test_parse_unknown_name_defaults(self):
         from istota.health.immunization_ocr import _parse_llm_response
 
         raw = '[{"date_given": "2024-01-01"}]'
-        out = _parse_llm_response(raw)
-        assert out[0]["name"] == "Unknown"
+        rows, _ = _parse_llm_response(raw)
+        assert rows[0]["name"] == "Unknown"
+
+    def test_parse_drops_future_dated_rows(self):
+        from istota.health.immunization_ocr import _parse_llm_response
+
+        raw = (
+            '[{"name": "Influenza", "date_given": "2099-04-01"},'
+            ' {"name": "Tdap", "date_given": "2020-01-15"}]'
+        )
+        rows, dropped = _parse_llm_response(raw)
+        assert dropped == 1
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Tdap"
+
+    def test_parse_drops_malformed_iso_dates(self):
+        from istota.health.immunization_ocr import _parse_llm_response
+
+        # Month 13 — passes the regex but fromisoformat rejects it.
+        raw = '[{"name": "Influenza", "date_given": "2024-13-01"}]'
+        rows, _ = _parse_llm_response(raw)
+        assert rows[0]["date_given"] is None
 
 
 class TestParseAndBulkRoutes:
@@ -322,6 +343,117 @@ class TestParseAndBulkRoutes:
             json={"rows": [{"name": "Influenza"}]},
         )
         assert resp.status_code == 400
+
+    def test_bulk_rejects_malformed_date(self, client):
+        resp = client.post(
+            "/istota/api/health/immunizations/bulk",
+            json={"rows": [{"name": "Influenza", "date_given": "yesterday"}]},
+        )
+        assert resp.status_code == 400
+        assert "ISO" in resp.json()["error"]
+
+    def test_bulk_rejects_future_date(self, client):
+        resp = client.post(
+            "/istota/api/health/immunizations/bulk",
+            json={"rows": [{"name": "Influenza", "date_given": "2099-04-01"}]},
+        )
+        assert resp.status_code == 400
+        assert "future" in resp.json()["error"]
+
+    def test_bulk_with_import_id_dedupes_replays(self, client):
+        """A client that supplies the same ``import_id`` on retry must not
+        cause duplicate rows. This is the actual double-click / network-
+        retry guarantee — fresh per-request UUIDs alone don't provide it.
+        """
+        rows = [
+            {"name": "Influenza", "date_given": "2025-11-28"},
+            {"name": "Tdap", "date_given": "2016-12-01"},
+        ]
+        payload = {"rows": rows, "import_id": "session-abc-123"}
+        first = client.post(
+            "/istota/api/health/immunizations/bulk", json=payload,
+        )
+        second = client.post(
+            "/istota/api/health/immunizations/bulk", json=payload,
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["ids"] == second.json()["ids"]
+        listing = client.get(
+            "/istota/api/health/immunizations",
+        ).json()["immunizations"]
+        # Two unique imports, not four.
+        names = sorted(r["name"] for r in listing)
+        assert names == ["Influenza", "Tdap"]
+
+    def test_bulk_without_import_id_still_assigns_dedup_keys(
+        self, client, ctx,
+    ):
+        """Even without a client import_id, every inserted row must carry
+        a dedup_key — matches the skill CLI invariant and is what makes
+        any future server-side replay mechanism safe.
+        """
+        client.post(
+            "/istota/api/health/immunizations/bulk",
+            json={"rows": [
+                {"name": "MMR", "date_given": "1990-01-01"},
+            ]},
+        )
+        with health_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT dedup_key FROM immunizations WHERE name = 'MMR'",
+            ).fetchone()
+        assert row is not None
+        assert row["dedup_key"] is not None
+        assert ":" in row["dedup_key"]  # prefix:index shape
+
+    def test_bulk_rejects_empty_import_id(self, client):
+        resp = client.post(
+            "/istota/api/health/immunizations/bulk",
+            json={
+                "rows": [{"name": "MMR", "date_given": "1990-01-01"}],
+                "import_id": "",
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_extract_uses_temp_dir_not_uploads_dir(
+        self, client, ctx, tmp_path, monkeypatch,
+    ):
+        """The /extract route must not leak transient uploads into the
+        persistent uploads_dir on a crashed worker — verified by stubbing
+        ``extract_from_file`` to capture the path the route hands it and
+        asserting it's outside ``ctx.uploads_dir``.
+        """
+        captured: dict[str, Path] = {}
+
+        def _fake_extract(path, mime, refs, *, config=None):
+            captured["path"] = Path(path)
+            return {"rows": [], "mode": "vision", "warnings": []}
+
+        import istota.health.immunization_ocr as ocr_mod
+        monkeypatch.setattr(ocr_mod, "extract_from_file", _fake_extract)
+
+        # Configure a writable temp_dir on the test app state so the route
+        # picks it up instead of falling back to gettempdir().
+        configured_tmp = tmp_path / "scheduler-tmp"
+        configured_tmp.mkdir()
+
+        class _Cfg:
+            temp_dir = str(configured_tmp)
+            brain = None
+
+        client.app.state.istota_config = _Cfg()
+
+        files = {"file": ("vax.png", b"\x89PNG\r\n\x1a\nbytes", "image/png")}
+        resp = client.post(
+            "/istota/api/health/immunizations/extract", files=files,
+        )
+        assert resp.status_code == 200
+        assert "path" in captured, "extract_from_file was not invoked"
+        # Path must NOT be under uploads_dir, and SHOULD be under temp_dir.
+        uploads_parent = Path(ctx.uploads_dir).resolve()
+        assert uploads_parent not in captured["path"].resolve().parents
 
 
 class TestDashboardAndSummary:
