@@ -53,13 +53,16 @@ class HealthContext:
 
     ``workspace_root`` is the user's bot workspace dir; ``data_dir`` is the
     health module's subdir, and ``uploads_dir`` holds the raw images/PDFs of
-    uploaded lab reports.
+    uploaded lab reports. ``framework_db_path`` is the path to istota.db
+    (where the encrypted ``secrets`` table holding Garmin tokens lives)
+    — defaults to ``None`` so existing callers keep working.
     """
     user_id: str
     workspace_root: Path
     data_dir: Path
     db_path: Path
     uploads_dir: Path
+    framework_db_path: Path | None = None
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

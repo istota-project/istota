@@ -1116,6 +1116,22 @@ const handlers: MockHandler[] = [
 			display_units: { weight: 'kg' as 'kg' | 'lb', height: 'cm' as 'cm' | 'ft_in', temp: 'C' as 'C' | 'F' },
 		};
 
+		// Garmin connection state — toggle via the settings card.
+		// Test branches: email "*+mfa*" → MFA flow (code 123456); "*+bad*" → bad creds.
+		const garmin: {
+			connected: boolean;
+			email: string | null;
+			last_sync: string | null;
+			error: string | null;
+			pendingEmail: string | null;
+		} = {
+			connected: false,
+			email: null,
+			last_sync: null,
+			error: null,
+			pendingEmail: null,
+		};
+
 		let nextStatId = 1;
 		const stats: Stat[] = [];
 		// Weight — daily-ish, 2 years of history with a slow downward drift
@@ -1876,6 +1892,84 @@ const handlers: MockHandler[] = [
 					}
 				}
 				return { status: 'ok', settings };
+			}
+
+			// /garmin/* — keep state in this closure so connect/MFA/disconnect/sync
+			// all see consistent connection status across calls.
+			if (url === '/istota/api/health/garmin/status' && method === 'GET') {
+				return {
+					connected: garmin.connected,
+					email: garmin.connected ? garmin.email : null,
+					last_sync: garmin.connected ? garmin.last_sync : null,
+					error: garmin.error,
+				};
+			}
+			if (url === '/istota/api/health/garmin/connect' && method === 'POST') {
+				if (!body || typeof body !== 'object' || !body.email || !body.password) {
+					return { status: 'error', error: 'email and password are required' };
+				}
+				// MFA branch: any email containing "+mfa" triggers the MFA flow.
+				if (typeof body.email === 'string' && body.email.includes('+mfa')) {
+					garmin.pendingEmail = body.email;
+					return { status: 'mfa_required', prompt: 'Enter Garmin MFA code (mock: 123456)' };
+				}
+				// Bad-credentials branch: emails containing "+bad" fail.
+				if (typeof body.email === 'string' && body.email.includes('+bad')) {
+					return { status: 'error', error: 'invalid credentials' };
+				}
+				garmin.connected = true;
+				garmin.email = body.email;
+				garmin.last_sync = null;
+				garmin.error = null;
+				return { status: 'ok' };
+			}
+			if (url === '/istota/api/health/garmin/mfa' && method === 'POST') {
+				if (!body || typeof body !== 'object' || typeof body.code !== 'string') {
+					return { status: 'error', error: 'code is required' };
+				}
+				if (!garmin.pendingEmail) {
+					return { status: 'error', error: 'no pending Garmin auth — restart from /garmin/connect' };
+				}
+				if (body.code !== '123456') {
+					return { status: 'error', error: 'invalid MFA code' };
+				}
+				garmin.connected = true;
+				garmin.email = garmin.pendingEmail;
+				garmin.last_sync = null;
+				garmin.error = null;
+				garmin.pendingEmail = null;
+				return { status: 'ok' };
+			}
+			if (url === '/istota/api/health/garmin/disconnect' && method === 'POST') {
+				garmin.connected = false;
+				garmin.email = null;
+				garmin.last_sync = null;
+				garmin.error = null;
+				garmin.pendingEmail = null;
+				return { status: 'ok' };
+			}
+			if (url === '/istota/api/health/garmin/sync' && method === 'POST') {
+				if (!garmin.connected) {
+					return {
+						inserted: 0, skipped: 0, errored: 0,
+						days_processed: 0,
+						errors: ['no Garmin tokens — connect via /garmin/connect'],
+						auth_error: true,
+					};
+				}
+				const daysBack = Math.max(
+					1, Math.min(90, Number(body?.days_back) || 7),
+				);
+				garmin.last_sync = new Date().toISOString();
+				const inserted = Math.max(0, 5 * daysBack - 2);
+				return {
+					inserted,
+					skipped: 2,
+					errored: 0,
+					days_processed: daysBack,
+					errors: [],
+					auth_error: false,
+				};
 			}
 
 			// /dashboard

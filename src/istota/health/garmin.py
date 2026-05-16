@@ -3,40 +3,61 @@
 Two surfaces:
 
 * **Auth lifecycle** — :func:`connect`, :func:`complete_mfa`, :func:`disconnect`,
-  :func:`get_status`. Tokens live in ``health_settings`` under the key
-  ``garmin_tokens`` (JSON blob). The blob is never returned by any API
-  endpoint — only ``garmin_connected`` / ``garmin_email`` / ``last_sync`` /
-  ``error`` are exposed.
+  :func:`get_status`. Tokens live in the encrypted ``secrets`` table under
+  ``service="garmin"`` (Fernet via ``ISTOTA_SECRET_KEY``). The token blob
+  is never returned by any API endpoint — only ``connected`` /
+  ``email`` / ``last_sync`` / ``error`` are exposed.
 * **Adapter abstraction** — :class:`GarminAdapter` Protocol with a
   production implementation that wraps :mod:`garminconnect`. Tests inject
-  a fake adapter via :data:`_adapter_factory`.
+  a fake adapter via :func:`set_adapter_factory`.
 
-The sync engine (next stage) builds on these primitives.
+The sync engine builds on these primitives.
+
+**Single-worker requirement (C2).** The pending-auth cache (used to
+hold the partially-authenticated SDK client between ``connect`` and
+``complete_mfa``) is process-local. The production deploy runs
+``istota-web`` as a single uvicorn process and the only path that calls
+``connect`` / ``complete_mfa`` is the web service, so today this works.
+Multi-worker fan-out (``uvicorn --workers N``) would break MFA: the
+follow-up call may land on a different worker that doesn't hold the
+pending state. If we ever need workers, move ``_PENDING`` into a DB
+table (Garmin's ``garth`` serialises partial-auth state, so the SDK
+side is portable).
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import sqlite3
+import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from istota.health import db as health_db
+from istota import secrets_store
 
 
 logger = logging.getLogger(__name__)
 
 
-SETTINGS_KEY_TOKENS = "garmin_tokens"
-SETTINGS_KEY_ERROR = "garmin_error"
+# Encrypted-secrets service + key names used by ``secrets_store``.
+SECRET_SERVICE = "garmin"
+SECRET_KEY_BLOB = "oauth_state"        # JSON blob: {"sdk": {...}, "ours": {...}}
+SECRET_KEY_EMAIL = "email"             # display-only; never sent back to SDK
+SECRET_KEY_LAST_SYNC = "last_sync"     # ISO 8601 UTC
+SECRET_KEY_ERROR = "error"             # short error code (e.g. "token_expired")
 
 # How long a partially-authenticated Garmin client stays in the
 # pending-auth cache between ``connect`` (MFA-required) and
-# ``complete_mfa``. Matches the spec.
+# ``complete_mfa``. Process-local; see module docstring.
 PENDING_AUTH_TTL_SEC = 300
+
+# Cap entries so a runaway client (or admin probing other users)
+# can't grow the cache unboundedly.
+PENDING_MAX_ENTRIES = 64
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +72,16 @@ class GarminAuthError(Exception):
 
 class GarminNotInstalled(RuntimeError):
     """Raised when the ``garminconnect`` extra isn't installed."""
+
+
+class GarminRateLimited(Exception):
+    """Raised when Garmin returns HTTP 429. Carries an optional
+    ``retry_after`` (seconds) parsed from the response header so the
+    sync engine can back off compliantly."""
+
+    def __init__(self, retry_after: int | None = None) -> None:
+        super().__init__(f"Garmin rate-limited (retry_after={retry_after})")
+        self.retry_after = retry_after
 
 
 # ---------------------------------------------------------------------------
@@ -292,20 +323,42 @@ class _RealGarminAdapter:
         return self._call_optional("get_body_composition", date)
 
     def _call_optional(self, method: str, *args: Any) -> Any:
+        """Call ``method`` on the SDK client with retry-once on transient
+        failures and Retry-After honoring on 429.
+
+        Auth errors propagate. Rate-limit 429s raise
+        :class:`GarminRateLimited` so the sync engine can back off
+        cleanly. Other persistent failures log a warning and return None.
+        """
         if self._client is None:
             return None
         fn = getattr(self._client, method, None)
         if fn is None:
             return None
-        try:
-            return fn(*args)
-        except Exception as exc:  # noqa: BLE001
-            # Propagate auth errors; the sync engine will mark the
-            # connection broken. Everything else is best-effort.
-            if _looks_like_auth_error(exc):
-                raise GarminAuthError(f"Garmin auth error during {method}: {exc}") from exc
-            logger.warning("garmin %s failed: %s", method, exc)
-            return None
+        last_exc: BaseException | None = None
+        for attempt in (1, 2):
+            try:
+                return fn(*args)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if _looks_like_auth_error(exc):
+                    raise GarminAuthError(
+                        f"Garmin auth error during {method}: {exc}"
+                    ) from exc
+                rate_limited, retry_after = _looks_like_rate_limited(exc)
+                if rate_limited:
+                    raise GarminRateLimited(retry_after) from exc
+                if attempt == 1 and _looks_like_transient_network_error(exc):
+                    # Single retry with a short fixed backoff. The spec
+                    # asked for "exponential" but with only two attempts
+                    # the curve is moot.
+                    time.sleep(2)
+                    continue
+                logger.warning("garmin %s failed: %s", method, exc)
+                return None
+        # Two attempts exhausted on transient — log and give up.
+        logger.warning("garmin %s failed after retry: %s", method, last_exc)
+        return None
 
 
 def _looks_like_mfa(msg: str) -> bool:
@@ -314,19 +367,65 @@ def _looks_like_mfa(msg: str) -> bool:
 
 
 def _looks_like_auth_error(exc: BaseException) -> bool:
-    """Heuristic check for the Garmin SDK's auth-failure exception classes
-    and HTTP-status strings.
+    """Heuristic check for SDK auth-failure exceptions.
 
-    We can't import the SDK's exception types here without forcing
-    install, so we match by name + message. False negatives just
-    misattribute a single endpoint failure; false positives over-trigger
-    a re-auth prompt — both are recoverable.
+    We can't import garminconnect's exception classes here without
+    forcing the optional install, so we match by class name first (the
+    SDK ships ``GarminConnectAuthenticationError`` / ``LoginError``) and
+    only fall back to the HTTP-status text for a *narrow* 401 signal.
+    The old heuristic matched ``"403"`` / ``"forbidden"`` anywhere in
+    the message; that triggered on WAF / geo-block / Cloudflare 403s
+    that have no relation to token validity (H4) and on some
+    rate-limit responses whose body mentions "403 Forbidden" as part of
+    a longer string. 401 is the correct signal for "token bad"; 403 is
+    almost always an authorisation or anti-bot decision that re-auth
+    won't fix.
     """
     cls = type(exc).__name__.lower()
-    if "auth" in cls or "login" in cls:
+    if "auth" in cls or "login" in cls or "unauthorized" in cls:
         return True
     msg = str(exc).lower()
-    return "401" in msg or "403" in msg or "unauthor" in msg or "forbidden" in msg
+    # Require a 401 paired with an auth-shaped keyword to avoid false
+    # positives like "401 retries exhausted".
+    if "401" in msg and ("unauthor" in msg or "token" in msg or "expir" in msg):
+        return True
+    return False
+
+
+def _looks_like_rate_limited(exc: BaseException) -> tuple[bool, int | None]:
+    """Detect HTTP 429 responses.
+
+    Returns ``(is_rate_limited, retry_after_seconds | None)``. The
+    Retry-After is parsed out of the exception message when present.
+    Used by the sync engine for compliant backoff behaviour.
+    """
+    msg = str(exc)
+    if "429" not in msg and "rate" not in msg.lower() and "too many" not in msg.lower():
+        return False, None
+    retry_after: int | None = None
+    # Match either "retry-after: 60" / "retry_after=60" / "Retry-After 60".
+    import re
+    m = re.search(r"retry[-_ ]after[:= ]\s*(\d+)", msg, re.IGNORECASE)
+    if m:
+        try:
+            retry_after = int(m.group(1))
+        except ValueError:
+            pass
+    return True, retry_after
+
+
+def _looks_like_transient_network_error(exc: BaseException) -> bool:
+    """Detect retry-once-eligible transient failures (5xx, connection
+    reset, timeout). 4xx errors are intentionally excluded — those are
+    client-side and won't change on retry."""
+    cls = type(exc).__name__.lower()
+    if "timeout" in cls or "connectionerror" in cls or "ssl" in cls:
+        return True
+    msg = str(exc).lower()
+    for needle in ("500", "502", "503", "504", "timeout", "connection reset"):
+        if needle in msg:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +458,11 @@ def _stash_pending(user_id: str, adapter: GarminAdapter, email: str) -> None:
     now = time.monotonic()
     with _PENDING_LOCK:
         _gc_pending(now)
+        # Hard cap (L2) — drop the oldest entries first so a runaway
+        # caller can't blow the cache up unboundedly.
+        if len(_PENDING) >= PENDING_MAX_ENTRIES:
+            for old_uid in sorted(_PENDING, key=lambda u: _PENDING[u].created_at)[:max(1, len(_PENDING) - PENDING_MAX_ENTRIES + 1)]:
+                _PENDING.pop(old_uid, None)
         _PENDING[user_id] = _PendingAuth(adapter=adapter, email=email, created_at=now)
 
 
@@ -379,47 +483,103 @@ def clear_pending(user_id: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Token persistence helpers (DB I/O)
+# Encrypted-storage helpers (Fernet via secrets_store)
 # ---------------------------------------------------------------------------
+#
+# The token blob is JSON-serialised and round-tripped through one secret
+# entry (service="garmin", key="oauth_state"). It carries the SDK's
+# session state inside a ``sdk`` sub-key so we never collide with our
+# own presentation fields — fixes the previous flat-merge that risked
+# overwriting an SDK-internal ``email`` key (M3).
+#
+# Display-only fields (``email``, ``last_sync``, ``error``) live in
+# their own secret keys so they can be written / cleared independently
+# of the OAuth blob — fixes the read-modify-write race in
+# ``update_last_sync`` (H2).
+
+
+def _validate_db_path(db_path: Path | None) -> Path:
+    if db_path is None:
+        raise GarminAuthError(
+            "framework db_path unavailable; cannot read/write Garmin tokens"
+        )
+    return Path(db_path)
 
 
 def store_tokens(
-    conn: sqlite3.Connection, tokens: dict[str, Any], *, email: str | None = None,
+    db_path: Path, user_id: str, tokens: dict[str, Any],
+    *, email: str | None = None,
 ) -> None:
-    """Upsert the Garmin token blob and clear any prior error."""
-    blob = dict(tokens)
-    if email is not None:
-        blob["email"] = email
-    blob["last_sync"] = blob.get("last_sync")  # preserved if caller set it
-    health_db.set_setting(conn, SETTINGS_KEY_TOKENS, blob)
-    health_db.delete_setting(conn, SETTINGS_KEY_ERROR)
+    """Encrypt and persist the Garmin OAuth blob.
 
-
-def load_tokens(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    settings = health_db.get_settings(conn)
-    blob = settings.get(SETTINGS_KEY_TOKENS)
-    return blob if isinstance(blob, dict) else None
-
-
-def clear_tokens(conn: sqlite3.Connection) -> None:
-    health_db.delete_setting(conn, SETTINGS_KEY_TOKENS)
-    health_db.delete_setting(conn, SETTINGS_KEY_ERROR)
-
-
-def mark_token_error(conn: sqlite3.Connection, reason: str) -> None:
-    """Record a non-retryable token error (token_expired, revoked, …).
-
-    Surfaced via :func:`get_status` so the UI can prompt re-auth.
+    ``tokens`` is the adapter's serialised session — opaque to this
+    module. ``email`` is stored separately for display.
     """
-    health_db.set_setting(conn, SETTINGS_KEY_ERROR, reason)
+    db_path = _validate_db_path(db_path)
+    blob = {"sdk": dict(tokens)}
+    secrets_store.set_secret(
+        db_path, user_id, SECRET_SERVICE, SECRET_KEY_BLOB,
+        json.dumps(blob),
+    )
+    if email is not None:
+        secrets_store.set_secret(
+            db_path, user_id, SECRET_SERVICE, SECRET_KEY_EMAIL, email,
+        )
+    # Any prior error becomes stale on a successful (re)connect.
+    secrets_store.delete_secret(db_path, user_id, SECRET_SERVICE, SECRET_KEY_ERROR)
 
 
-def update_last_sync(conn: sqlite3.Connection, *, when: datetime | None = None) -> None:
-    blob = load_tokens(conn)
-    if not blob:
-        return
-    blob["last_sync"] = (when or datetime.now(timezone.utc)).isoformat()
-    health_db.set_setting(conn, SETTINGS_KEY_TOKENS, blob)
+def load_tokens(db_path: Path, user_id: str) -> dict[str, Any] | None:
+    """Decrypt and return the raw SDK token state, or None if absent.
+
+    Returns the inner ``sdk`` blob ready to hand to ``adapter.load_tokens``.
+    Display-only keys are not mixed in.
+    """
+    db_path = _validate_db_path(db_path)
+    raw = secrets_store.get_secret(db_path, user_id, SECRET_SERVICE, SECRET_KEY_BLOB)
+    if not raw:
+        return None
+    try:
+        wrapper = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(wrapper, dict):
+        return None
+    sdk = wrapper.get("sdk")
+    return sdk if isinstance(sdk, dict) else None
+
+
+def clear_tokens(db_path: Path, user_id: str) -> None:
+    """Wipe the token blob, last_sync, and any error flag. Email is
+    preserved as a courtesy so the UI can pre-fill the form."""
+    db_path = _validate_db_path(db_path)
+    for key in (SECRET_KEY_BLOB, SECRET_KEY_LAST_SYNC, SECRET_KEY_ERROR):
+        secrets_store.delete_secret(db_path, user_id, SECRET_SERVICE, key)
+
+
+def mark_token_error(db_path: Path, user_id: str, reason: str) -> None:
+    """Record a non-retryable token error.
+
+    Also wipes the OAuth blob — the previous behaviour left a stale blob
+    on disk while reporting connected=true + error, which the UI rendered
+    as "Connected" with a red banner forever (H6). Clearing the blob
+    flips ``connected`` to false and forces the user to re-auth.
+    """
+    db_path = _validate_db_path(db_path)
+    secrets_store.set_secret(
+        db_path, user_id, SECRET_SERVICE, SECRET_KEY_ERROR, reason,
+    )
+    secrets_store.delete_secret(db_path, user_id, SECRET_SERVICE, SECRET_KEY_BLOB)
+
+
+def update_last_sync(
+    db_path: Path, user_id: str, *, when: datetime | None = None,
+) -> None:
+    db_path = _validate_db_path(db_path)
+    iso = (when or datetime.now(timezone.utc)).isoformat()
+    secrets_store.set_secret(
+        db_path, user_id, SECRET_SERVICE, SECRET_KEY_LAST_SYNC, iso,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -427,36 +587,27 @@ def update_last_sync(conn: sqlite3.Connection, *, when: datetime | None = None) 
 # ---------------------------------------------------------------------------
 
 
-def get_status(conn: sqlite3.Connection) -> dict[str, Any]:
+def get_status(db_path: Path, user_id: str) -> dict[str, Any]:
     """Return the public-facing connection status.
 
-    The token blob is **never** included. Only the fields that the
-    settings UI and dashboard render: connected flag, email, last sync,
-    error string.
+    The token blob is **never** included. Only the fields the settings
+    UI and dashboard render: connected flag, email, last sync, error
+    string. ``connected`` is False when the OAuth blob has been cleared
+    (no tokens, expired, or revoked).
     """
-    blob = load_tokens(conn)
-    error = health_db.get_settings(conn).get(SETTINGS_KEY_ERROR)
-    if not blob:
-        return {
-            "connected": False,
-            "email": None,
-            "last_sync": None,
-            "error": error if isinstance(error, str) else None,
-        }
+    db_path = _validate_db_path(db_path)
+    svc = secrets_store.get_service_secrets(db_path, user_id, SECRET_SERVICE)
+    has_blob = bool(svc.get(SECRET_KEY_BLOB))
     return {
-        "connected": True,
-        "email": blob.get("email"),
-        "last_sync": blob.get("last_sync"),
-        "error": error if isinstance(error, str) else None,
+        "connected": has_blob,
+        "email": svc.get(SECRET_KEY_EMAIL) or None,
+        "last_sync": svc.get(SECRET_KEY_LAST_SYNC) or None,
+        "error": svc.get(SECRET_KEY_ERROR) or None,
     }
 
 
 def connect(
-    conn: sqlite3.Connection,
-    *,
-    user_id: str,
-    email: str,
-    password: str,
+    db_path: Path, *, user_id: str, email: str, password: str,
 ) -> dict[str, Any]:
     """Start a Garmin OAuth flow.
 
@@ -471,9 +622,17 @@ def connect(
     """
     if not email or not password:
         raise GarminAuthError("email and password are required")
+    db_path = _validate_db_path(db_path)
 
     adapter = _build_adapter()
-    result = adapter.login(email, password)
+    try:
+        result = adapter.login(email, password)
+    except GarminAuthError:
+        # try/finally would have been simpler than mirroring the cleanup
+        # in every branch (L1) — drop any stale pending entry on a fresh
+        # auth attempt that failed outright.
+        clear_pending(user_id)
+        raise
 
     if result.status == "mfa_required":
         _stash_pending(user_id, adapter, email)
@@ -483,18 +642,21 @@ def connect(
         }
 
     if result.status != "ok" or not result.tokens:
+        clear_pending(user_id)
         raise GarminAuthError("unexpected Garmin login result")
 
-    store_tokens(conn, result.tokens, email=result.email or email)
-    conn.commit()
-    clear_pending(user_id)
+    try:
+        store_tokens(db_path, user_id, result.tokens, email=result.email or email)
+    finally:
+        clear_pending(user_id)
     return {"status": "ok"}
 
 
 def complete_mfa(
-    conn: sqlite3.Connection, *, user_id: str, code: str,
+    db_path: Path, *, user_id: str, code: str,
 ) -> dict[str, Any]:
     """Complete the MFA step started by :func:`connect`."""
+    db_path = _validate_db_path(db_path)
     pending = _take_pending(user_id)
     if pending is None:
         raise GarminAuthError(
@@ -503,14 +665,12 @@ def complete_mfa(
     result = pending.adapter.resume_mfa(code)
     if result.status != "ok" or not result.tokens:
         raise GarminAuthError("MFA verification did not return tokens")
-    store_tokens(conn, result.tokens, email=pending.email)
-    conn.commit()
+    store_tokens(db_path, user_id, result.tokens, email=pending.email)
     return {"status": "ok"}
 
 
-def disconnect(conn: sqlite3.Connection, *, user_id: str) -> dict[str, Any]:
+def disconnect(db_path: Path, *, user_id: str) -> dict[str, Any]:
     """Remove stored tokens and any pending auth for this user."""
-    clear_tokens(conn)
-    conn.commit()
+    clear_tokens(_validate_db_path(db_path), user_id)
     clear_pending(user_id)
     return {"status": "ok"}

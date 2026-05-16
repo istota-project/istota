@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS stats (
 );
 CREATE INDEX IF NOT EXISTS idx_stats_metric_date ON stats(metric, measured_at);
 CREATE INDEX IF NOT EXISTS idx_stats_measured ON stats(measured_at);
+-- Defence against the overlapping-sync double-insert race (H7). Source-
+-- tagged rows (garmin, apple_health, etc.) must dedupe on
+-- (metric, measured_at, source); manual entries are excluded because a
+-- user may legitimately log two readings at the same wall-clock time.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stats_source_unique
+    ON stats(metric, measured_at, source)
+    WHERE source != 'manual';
 
 CREATE TABLE IF NOT EXISTS panels (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

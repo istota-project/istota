@@ -1184,11 +1184,33 @@ def _user_id_from_request(request: Request) -> str:
     return user["username"]
 
 
+def _framework_db_path(request: Request) -> Path:
+    """Framework istota.db path — where the encrypted ``secrets`` table
+    (and therefore Garmin tokens) lives."""
+    cfg = getattr(request.app.state, "istota_config", None)
+    db_path = getattr(cfg, "db_path", None) if cfg else None
+    if not db_path:
+        raise HTTPException(503, "framework db_path unavailable")
+    return Path(db_path)
+
+
+def _user_tz(request: Request, user_id: str) -> str | None:
+    cfg = getattr(request.app.state, "istota_config", None)
+    if cfg is None:
+        return None
+    uc = cfg.get_user(user_id) if hasattr(cfg, "get_user") else None
+    return getattr(uc, "timezone", None) if uc else None
+
+
 @router.get("/garmin/status")
-async def api_garmin_status(ctx: HealthContext = Depends(get_user_context)):
+async def api_garmin_status(
+    request: Request, ctx: HealthContext = Depends(get_user_context),
+):
+    user_id = _user_id_from_request(request)
+    db_path = _framework_db_path(request)
+
     def _query():
-        with health_db.connect(ctx.db_path) as conn:
-            return health_garmin.get_status(conn)
+        return health_garmin.get_status(db_path, user_id)
     return await asyncio.to_thread(_query)
 
 
@@ -1208,12 +1230,12 @@ async def api_garmin_connect(
             {"error": "email and password are required"}, status_code=400,
         )
     user_id = _user_id_from_request(request)
+    db_path = _framework_db_path(request)
 
     def _do():
-        with health_db.connect(ctx.db_path) as conn:
-            return health_garmin.connect(
-                conn, user_id=user_id, email=email, password=password,
-            )
+        return health_garmin.connect(
+            db_path, user_id=user_id, email=email, password=password,
+        )
 
     try:
         return await asyncio.to_thread(_do)
@@ -1233,12 +1255,12 @@ async def api_garmin_mfa(
     if not isinstance(body, dict) or not isinstance(body.get("code"), str):
         return JSONResponse({"error": "code is required"}, status_code=400)
     user_id = _user_id_from_request(request)
+    db_path = _framework_db_path(request)
 
     def _do():
-        with health_db.connect(ctx.db_path) as conn:
-            return health_garmin.complete_mfa(
-                conn, user_id=user_id, code=body["code"],
-            )
+        return health_garmin.complete_mfa(
+            db_path, user_id=user_id, code=body["code"],
+        )
 
     try:
         return await asyncio.to_thread(_do)
@@ -1253,10 +1275,10 @@ async def api_garmin_disconnect(
     ctx: HealthContext = Depends(get_user_context),
 ):
     user_id = _user_id_from_request(request)
+    db_path = _framework_db_path(request)
 
     def _do():
-        with health_db.connect(ctx.db_path) as conn:
-            return health_garmin.disconnect(conn, user_id=user_id)
+        return health_garmin.disconnect(db_path, user_id=user_id)
 
     return await asyncio.to_thread(_do)
 
@@ -1277,8 +1299,13 @@ async def api_garmin_sync(
         days_back = max(1, min(90, int(days_back)))
     except (TypeError, ValueError):
         days_back = 7
+    user_id = _user_id_from_request(request)
+    db_path = _framework_db_path(request)
+    user_tz = _user_tz(request, user_id)
 
     def _do():
-        return health_garmin_sync.sync_garmin(ctx, days_back=days_back).to_dict()
+        return health_garmin_sync.sync_garmin(
+            ctx, db_path, days_back=days_back, user_tz=user_tz,
+        ).to_dict()
 
     return await asyncio.to_thread(_do)
