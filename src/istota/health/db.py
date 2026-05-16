@@ -28,6 +28,8 @@ from typing import Any, Iterable, Iterator, Mapping
 from istota.health.models import (
     Biomarker,
     BiomarkerRef,
+    Diagnosis,
+    Encounter,
     Panel,
     Stat,
 )
@@ -36,7 +38,7 @@ from istota.health.models import (
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA_SQL = """
@@ -127,6 +129,41 @@ CREATE TABLE IF NOT EXISTS biomarker_refs (
     aliases TEXT,
     description TEXT
 );
+
+CREATE TABLE IF NOT EXISTS encounters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    encounter_date TEXT NOT NULL,
+    encounter_type TEXT NOT NULL,
+    provider TEXT,
+    facility TEXT,
+    specialty TEXT,
+    reason TEXT,
+    notes TEXT,
+    dedup_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_encounters_date ON encounters(encounter_date);
+CREATE INDEX IF NOT EXISTS idx_encounters_type ON encounters(encounter_type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_encounters_dedup
+    ON encounters(dedup_key) WHERE dedup_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS diagnoses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    icd10 TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    date_diagnosed TEXT,
+    date_resolved TEXT,
+    encounter_id INTEGER REFERENCES encounters(id) ON DELETE SET NULL,
+    severity TEXT,
+    notes TEXT,
+    dedup_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_diagnoses_status ON diagnoses(status);
+CREATE INDEX IF NOT EXISTS idx_diagnoses_name ON diagnoses(name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_diagnoses_dedup
+    ON diagnoses(dedup_key) WHERE dedup_key IS NOT NULL;
 """
 
 
@@ -142,6 +179,8 @@ def init_db(db_path: Path) -> None:
             conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA_SQL)
         _migrate_add_content_hash(conn)
+        _migrate_add_panel_encounter_fk(conn)
+        _migrate_add_history_dedup_keys(conn)
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
             (str(SCHEMA_VERSION),),
@@ -171,6 +210,42 @@ def _migrate_add_content_hash(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_panels_content_hash "
         "ON panels(content_hash)",
+    )
+
+
+def _migrate_add_history_dedup_keys(conn: sqlite3.Connection) -> None:
+    """Add ``dedup_key`` to encounters / diagnoses on older DBs. Idempotent.
+
+    Used by the deferred-op replayer so retry-after-partial-success doesn't
+    double-insert. NULL on legacy rows; only fresh insert ops carry one.
+    """
+    for table in ("encounters", "diagnoses"):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if "dedup_key" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN dedup_key TEXT")
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_dedup "
+            f"ON {table}(dedup_key) WHERE dedup_key IS NOT NULL",
+        )
+
+
+def _migrate_add_panel_encounter_fk(conn: sqlite3.Connection) -> None:
+    """Add ``panels.encounter_id`` on older DBs. Idempotent.
+
+    The reference is declared in the ALTER (SQLite stores the constraint
+    in the column definition); the ON DELETE SET NULL fires when
+    ``PRAGMA foreign_keys = ON`` is set on the connection — which
+    :func:`connect` does.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(panels)")}
+    if "encounter_id" not in cols:
+        conn.execute(
+            "ALTER TABLE panels ADD COLUMN encounter_id INTEGER "
+            "REFERENCES encounters(id) ON DELETE SET NULL",
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_panels_encounter "
+        "ON panels(encounter_id)",
     )
 
 
@@ -316,6 +391,10 @@ def _row_to_panel(row: sqlite3.Row) -> Panel:
         content_hash = row["content_hash"]
     except (IndexError, KeyError):
         content_hash = None
+    try:
+        encounter_id = row["encounter_id"]
+    except (IndexError, KeyError):
+        encounter_id = None
     return Panel(
         id=row["id"],
         drawn_at=row["drawn_at"],
@@ -328,6 +407,7 @@ def _row_to_panel(row: sqlite3.Row) -> Panel:
         notes=row["notes"],
         created_at=row["created_at"],
         content_hash=content_hash,
+        encounter_id=encounter_id,
     )
 
 
@@ -426,18 +506,19 @@ def insert_panel(
     ocr_text: str | None = None,
     draft: bool = False,
     notes: str | None = None,
+    encounter_id: int | None = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO panels(
             drawn_at, lab_name, panel_type, source_file, source_mime,
-            ocr_text, draft, notes
+            ocr_text, draft, notes, encounter_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             drawn_at, lab_name, panel_type, source_file, source_mime,
-            ocr_text, 1 if draft else 0, notes,
+            ocr_text, 1 if draft else 0, notes, encounter_id,
         ),
     )
     return int(cur.lastrowid)
@@ -514,6 +595,9 @@ def find_panel_collision(
     return _row_to_panel(row)
 
 
+_UNSET: Any = object()
+
+
 def update_panel(
     conn: sqlite3.Connection,
     panel_id: int,
@@ -523,6 +607,7 @@ def update_panel(
     panel_type: str | None = None,
     notes: str | None = None,
     draft: bool | None = None,
+    encounter_id: Any = _UNSET,
 ) -> int:
     fields: list[str] = []
     params: list[Any] = []
@@ -541,6 +626,9 @@ def update_panel(
     if draft is not None:
         fields.append("draft = ?")
         params.append(1 if draft else 0)
+    if encounter_id is not _UNSET:
+        fields.append("encounter_id = ?")
+        params.append(encounter_id)
     if not fields:
         return 0
     params.append(panel_id)
@@ -918,3 +1006,304 @@ def save_biomarker_explainer(
             json.dumps(mitigations or []),
         ),
     )
+
+
+# -- encounters --------------------------------------------------------------
+
+
+_ENCOUNTER_UPDATE_FIELDS = (
+    "encounter_date", "encounter_type", "provider", "facility",
+    "specialty", "reason", "notes",
+)
+
+
+def _row_to_encounter(row: sqlite3.Row) -> Encounter:
+    return Encounter(
+        id=row["id"],
+        encounter_date=row["encounter_date"],
+        encounter_type=row["encounter_type"],
+        provider=row["provider"],
+        facility=row["facility"],
+        specialty=row["specialty"],
+        reason=row["reason"],
+        notes=row["notes"],
+        created_at=row["created_at"],
+    )
+
+
+def insert_encounter(
+    conn: sqlite3.Connection,
+    *,
+    encounter_date: str,
+    encounter_type: str,
+    provider: str | None = None,
+    facility: str | None = None,
+    specialty: str | None = None,
+    reason: str | None = None,
+    notes: str | None = None,
+    dedup_key: str | None = None,
+) -> int:
+    # If a dedup_key is supplied and already exists, return the existing id
+    # rather than insert a duplicate — used by the deferred-op replayer to
+    # make retry-after-partial-success idempotent.
+    if dedup_key is not None:
+        row = conn.execute(
+            "SELECT id FROM encounters WHERE dedup_key = ?", (dedup_key,),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+    cur = conn.execute(
+        """
+        INSERT INTO encounters(
+            encounter_date, encounter_type, provider, facility,
+            specialty, reason, notes, dedup_key
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            encounter_date, encounter_type, provider, facility,
+            specialty, reason, notes, dedup_key,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def get_encounter(conn: sqlite3.Connection, encounter_id: int) -> Encounter | None:
+    row = conn.execute(
+        "SELECT * FROM encounters WHERE id = ?", (encounter_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return _row_to_encounter(row)
+
+
+def list_encounters(
+    conn: sqlite3.Connection,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+    encounter_type: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[Encounter]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if since:
+        clauses.append("encounter_date >= ?")
+        params.append(since)
+    if until:
+        clauses.append("encounter_date <= ?")
+        params.append(until)
+    if encounter_type:
+        clauses.append("encounter_type = ?")
+        params.append(encounter_type)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM encounters {where} "
+        f"ORDER BY encounter_date DESC, id DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    return [_row_to_encounter(r) for r in rows]
+
+
+def update_encounter(
+    conn: sqlite3.Connection, encounter_id: int, **kwargs: Any,
+) -> int:
+    fields: list[str] = []
+    params: list[Any] = []
+    for k in _ENCOUNTER_UPDATE_FIELDS:
+        if k not in kwargs:
+            continue
+        v = kwargs[k]
+        # ``encounter_date`` and ``encounter_type`` are NOT NULL; the rest
+        # accept explicit None so callers can clear them.
+        if k in ("encounter_date", "encounter_type") and v is None:
+            continue
+        fields.append(f"{k} = ?")
+        params.append(v)
+    if not fields:
+        return 0
+    params.append(encounter_id)
+    cur = conn.execute(
+        f"UPDATE encounters SET {', '.join(fields)} WHERE id = ?", params,
+    )
+    return cur.rowcount
+
+
+def delete_encounter(conn: sqlite3.Connection, encounter_id: int) -> int:
+    cur = conn.execute("DELETE FROM encounters WHERE id = ?", (encounter_id,))
+    return cur.rowcount
+
+
+def panels_for_encounter(
+    conn: sqlite3.Connection, encounter_id: int,
+) -> list[Panel]:
+    rows = conn.execute(
+        "SELECT * FROM panels WHERE encounter_id = ? "
+        "ORDER BY drawn_at DESC, id DESC",
+        (encounter_id,),
+    ).fetchall()
+    return [_row_to_panel(r) for r in rows]
+
+
+# -- diagnoses ---------------------------------------------------------------
+
+
+_DIAGNOSIS_STATUSES = ("active", "resolved", "chronic")
+
+_DIAGNOSIS_UPDATE_FIELDS = (
+    "name", "icd10", "status", "date_diagnosed", "date_resolved",
+    "encounter_id", "severity", "notes",
+)
+
+
+def _row_to_diagnosis(row: sqlite3.Row) -> Diagnosis:
+    return Diagnosis(
+        id=row["id"],
+        name=row["name"],
+        icd10=row["icd10"],
+        status=row["status"],
+        date_diagnosed=row["date_diagnosed"],
+        date_resolved=row["date_resolved"],
+        encounter_id=row["encounter_id"],
+        severity=row["severity"],
+        notes=row["notes"],
+        created_at=row["created_at"],
+    )
+
+
+def insert_diagnosis(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    status: str = "active",
+    icd10: str | None = None,
+    date_diagnosed: str | None = None,
+    date_resolved: str | None = None,
+    encounter_id: int | None = None,
+    severity: str | None = None,
+    notes: str | None = None,
+    dedup_key: str | None = None,
+) -> int:
+    if status not in _DIAGNOSIS_STATUSES:
+        raise ValueError(f"unknown diagnosis status: {status!r}")
+    if dedup_key is not None:
+        row = conn.execute(
+            "SELECT id FROM diagnoses WHERE dedup_key = ?", (dedup_key,),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+    cur = conn.execute(
+        """
+        INSERT INTO diagnoses(
+            name, icd10, status, date_diagnosed, date_resolved,
+            encounter_id, severity, notes, dedup_key
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            name, icd10, status, date_diagnosed, date_resolved,
+            encounter_id, severity, notes, dedup_key,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def get_diagnosis(conn: sqlite3.Connection, diagnosis_id: int) -> Diagnosis | None:
+    row = conn.execute(
+        "SELECT * FROM diagnoses WHERE id = ?", (diagnosis_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return _row_to_diagnosis(row)
+
+
+def list_diagnoses(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[Diagnosis]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status and status != "all":
+        clauses.append("status = ?")
+        params.append(status)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    # Sort: active first (mirrors how UI surfaces them), then chronic,
+    # then resolved, each ordered by most-recent date_diagnosed.
+    rows = conn.execute(
+        f"""
+        SELECT * FROM diagnoses {where}
+        ORDER BY
+            CASE status
+                WHEN 'active' THEN 0
+                WHEN 'chronic' THEN 1
+                WHEN 'resolved' THEN 2
+                ELSE 3
+            END,
+            COALESCE(date_diagnosed, '') DESC,
+            id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (*params, limit, offset),
+    ).fetchall()
+    return [_row_to_diagnosis(r) for r in rows]
+
+
+def update_diagnosis(
+    conn: sqlite3.Connection, diagnosis_id: int, **kwargs: Any,
+) -> int:
+    fields: list[str] = []
+    params: list[Any] = []
+    for k in _DIAGNOSIS_UPDATE_FIELDS:
+        if k not in kwargs:
+            continue
+        v = kwargs[k]
+        # ``status`` and ``name`` must not be cleared to NULL; other fields
+        # accept explicit None to clear.
+        if k in ("name", "status") and v is None:
+            continue
+        if k == "status" and v not in _DIAGNOSIS_STATUSES:
+            raise ValueError(f"unknown diagnosis status: {v!r}")
+        fields.append(f"{k} = ?")
+        params.append(v)
+    if not fields:
+        return 0
+    params.append(diagnosis_id)
+    cur = conn.execute(
+        f"UPDATE diagnoses SET {', '.join(fields)} WHERE id = ?", params,
+    )
+    return cur.rowcount
+
+
+def delete_diagnosis(conn: sqlite3.Connection, diagnosis_id: int) -> int:
+    cur = conn.execute("DELETE FROM diagnoses WHERE id = ?", (diagnosis_id,))
+    return cur.rowcount
+
+
+def diagnoses_for_encounter(
+    conn: sqlite3.Connection, encounter_id: int,
+) -> list[Diagnosis]:
+    rows = conn.execute(
+        "SELECT * FROM diagnoses WHERE encounter_id = ? "
+        "ORDER BY COALESCE(date_diagnosed, '') DESC, id DESC",
+        (encounter_id,),
+    ).fetchall()
+    return [_row_to_diagnosis(r) for r in rows]
+
+
+def encounters_for_diagnosis(
+    conn: sqlite3.Connection, diagnosis_id: int,
+) -> list[Encounter]:
+    """Return the single linked encounter (as a list for consistency)."""
+    row = conn.execute(
+        "SELECT e.* FROM encounters e "
+        "JOIN diagnoses d ON d.encounter_id = e.id "
+        "WHERE d.id = ?",
+        (diagnosis_id,),
+    ).fetchone()
+    if not row:
+        return []
+    return [_row_to_encounter(row)]

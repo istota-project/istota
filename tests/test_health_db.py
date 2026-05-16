@@ -28,6 +28,7 @@ class TestInitDb:
         assert {
             "stats", "panels", "biomarkers", "biomarker_refs",
             "health_settings", "schema_meta",
+            "encounters", "diagnoses",
         } <= tables
 
     def test_idempotent(self, tmp_path):
@@ -333,3 +334,487 @@ class TestSettings:
         assert settings["dob"] == "1985-03-12"
         assert settings["height_cm"] == 178
         assert settings["display_units"]["weight"] == "lb"
+
+
+class TestEncounters:
+    def test_insert_and_get(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn,
+                encounter_date="2026-05-13",
+                encounter_type="procedure",
+                provider="Dr. Smith",
+                facility="Kaiser Sunset",
+                specialty="gastroenterology",
+                reason="Screening colonoscopy",
+                notes="Grade I-II hemorrhoids found.",
+            )
+            conn.commit()
+            enc = health_db.get_encounter(conn, eid)
+        assert enc is not None
+        assert enc.encounter_type == "procedure"
+        assert enc.provider == "Dr. Smith"
+        assert enc.facility == "Kaiser Sunset"
+
+    def test_list_filters(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = health_db.insert_encounter(
+                conn, encounter_date="2026-01-15", encounter_type="visit",
+            )
+            b = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13", encounter_type="procedure",
+            )
+            health_db.insert_encounter(
+                conn, encounter_date="2025-09-01", encounter_type="screening",
+            )
+            conn.commit()
+            recent = health_db.list_encounters(conn, since="2026-01-01")
+            procs = health_db.list_encounters(conn, encounter_type="procedure")
+        assert [e.id for e in recent] == [b, a]
+        assert [e.id for e in procs] == [b]
+
+    def test_update_encounter(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="procedure", notes="initial",
+            )
+            n = health_db.update_encounter(
+                conn, eid, notes="Follow-up in 3 years",
+                facility="Kaiser",
+            )
+            conn.commit()
+        assert n == 1
+        with health_db.connect(ctx.db_path) as conn:
+            enc = health_db.get_encounter(conn, eid)
+        assert enc.notes == "Follow-up in 3 years"
+        assert enc.facility == "Kaiser"
+
+    def test_update_encounter_clears_nullable_fields(self, tmp_path):
+        # Explicit None on nullable fields must actually clear them.
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="procedure",
+                provider="Dr Smith", facility="Kaiser",
+                specialty="GI", reason="screening", notes="initial",
+            )
+            n = health_db.update_encounter(
+                conn, eid, provider=None, facility=None,
+                specialty=None, reason=None, notes=None,
+            )
+            conn.commit()
+        assert n == 1
+        with health_db.connect(ctx.db_path) as conn:
+            enc = health_db.get_encounter(conn, eid)
+        assert enc.provider is None
+        assert enc.facility is None
+        assert enc.specialty is None
+        assert enc.reason is None
+        assert enc.notes is None
+
+    def test_update_encounter_rejects_none_required(self, tmp_path):
+        # encounter_date / encounter_type are NOT NULL; explicit None is a no-op.
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="procedure",
+            )
+            # Only None for required fields → 0 rows changed.
+            n = health_db.update_encounter(
+                conn, eid, encounter_date=None, encounter_type=None,
+            )
+            conn.commit()
+        assert n == 0
+        with health_db.connect(ctx.db_path) as conn:
+            enc = health_db.get_encounter(conn, eid)
+        assert enc.encounter_date == "2026-05-13"
+        assert enc.encounter_type == "procedure"
+
+    def test_delete_clears_panel_fk(self, tmp_path):
+        # SET NULL on encounter delete must propagate to panels.encounter_id.
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="procedure",
+            )
+            pid = health_db.insert_panel(
+                conn, drawn_at="2026-05-13", lab_name="Quest",
+                encounter_id=eid,
+            )
+            conn.commit()
+            health_db.delete_encounter(conn, eid)
+            conn.commit()
+            panel = health_db.get_panel(conn, pid)
+        assert panel is not None
+        assert panel.encounter_id is None
+
+    def test_panels_for_encounter(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="visit",
+            )
+            p1 = health_db.insert_panel(
+                conn, drawn_at="2026-05-13",
+                lab_name="Quest", encounter_id=eid,
+            )
+            health_db.insert_panel(
+                conn, drawn_at="2026-05-13", lab_name="Kaiser",
+            )
+            conn.commit()
+            linked = health_db.panels_for_encounter(conn, eid)
+        assert [p.id for p in linked] == [p1]
+
+
+class TestDiagnoses:
+    def test_insert_and_status_filter(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            active = health_db.insert_diagnosis(
+                conn, name="Internal hemorrhoids",
+                date_diagnosed="2026-05-13", severity="mild",
+                icd10="K64.0",
+            )
+            chronic = health_db.insert_diagnosis(
+                conn, name="Hypertension", status="chronic",
+                date_diagnosed="2020-01-15",
+            )
+            resolved = health_db.insert_diagnosis(
+                conn, name="Strep throat", status="resolved",
+                date_diagnosed="2024-12-01",
+                date_resolved="2024-12-15",
+            )
+            conn.commit()
+            actives = health_db.list_diagnoses(conn, status="active")
+            chronics = health_db.list_diagnoses(conn, status="chronic")
+            all_d = health_db.list_diagnoses(conn, status="all")
+        assert [d.id for d in actives] == [active]
+        assert [d.id for d in chronics] == [chronic]
+        # default ordering: active → chronic → resolved
+        assert [d.id for d in all_d] == [active, chronic, resolved]
+
+    def test_unknown_status_rejected(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            with pytest.raises(ValueError):
+                health_db.insert_diagnosis(conn, name="X", status="bogus")
+
+    def test_update_marks_resolved(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            did = health_db.insert_diagnosis(
+                conn, name="Hemorrhoids", date_diagnosed="2026-05-13",
+            )
+            health_db.update_diagnosis(
+                conn, did, status="resolved", date_resolved="2026-06-15",
+            )
+            conn.commit()
+            d = health_db.get_diagnosis(conn, did)
+        assert d.status == "resolved"
+        assert d.date_resolved == "2026-06-15"
+
+    def test_diagnoses_for_encounter(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="procedure",
+            )
+            d_linked = health_db.insert_diagnosis(
+                conn, name="Hemorrhoids", encounter_id=eid,
+                date_diagnosed="2026-05-13",
+            )
+            health_db.insert_diagnosis(
+                conn, name="Unrelated",
+                date_diagnosed="2024-01-01",
+            )
+            conn.commit()
+            linked = health_db.diagnoses_for_encounter(conn, eid)
+            up = health_db.encounters_for_diagnosis(conn, d_linked)
+        assert [d.id for d in linked] == [d_linked]
+        assert [e.id for e in up] == [eid]
+
+    def test_delete_encounter_sets_diagnosis_fk_null(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="procedure",
+            )
+            did = health_db.insert_diagnosis(
+                conn, name="Hemorrhoids", encounter_id=eid,
+            )
+            conn.commit()
+            health_db.delete_encounter(conn, eid)
+            conn.commit()
+            d = health_db.get_diagnosis(conn, did)
+        assert d.encounter_id is None
+
+
+class TestDeferredEncounterReplay:
+    def test_replay_inserts(self, tmp_path):
+        """The scheduler replays deferred encounter/diagnosis ops."""
+        import json
+        from unittest.mock import MagicMock
+
+        from istota import health as health_pkg
+        from istota import scheduler_deferred
+
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        user_temp = tmp_path / "user_temp"
+        user_temp.mkdir()
+        ops_file = user_temp / "task_55_health_ops.json"
+        ops_file.write_text(json.dumps([
+            {
+                "op": "insert_encounter",
+                "encounter_date": "2026-05-13",
+                "encounter_type": "procedure",
+                "provider": "Dr. Smith",
+            },
+            {
+                "op": "insert_diagnosis",
+                "name": "Hemorrhoids",
+                "encounter_id": 1,
+                "date_diagnosed": "2026-05-13",
+            },
+        ]))
+        fake_resolve = MagicMock(return_value=ctx)
+        original = health_pkg.resolve_for_user
+        health_pkg.resolve_for_user = fake_resolve
+        try:
+            count = scheduler_deferred._process_deferred_health_ops(
+                MagicMock(), MagicMock(id=55, user_id="alice"), user_temp,
+            )
+        finally:
+            health_pkg.resolve_for_user = original
+        assert count == 2
+        with health_db.connect(ctx.db_path) as conn:
+            encs = health_db.list_encounters(conn)
+            diags = health_db.list_diagnoses(conn)
+        assert [e.provider for e in encs] == ["Dr. Smith"]
+        assert [d.name for d in diags] == ["Hemorrhoids"]
+        assert diags[0].encounter_id == encs[0].id
+
+    def test_replay_update_and_delete(self, tmp_path):
+        import json
+        from unittest.mock import MagicMock
+
+        from istota import health as health_pkg
+        from istota import scheduler_deferred
+
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="procedure",
+            )
+            did = health_db.insert_diagnosis(
+                conn, name="Hemorrhoids",
+                date_diagnosed="2026-05-13",
+            )
+            conn.commit()
+        user_temp = tmp_path / "user_temp"
+        user_temp.mkdir()
+        ops_file = user_temp / "task_99_health_ops.json"
+        ops_file.write_text(json.dumps([
+            {
+                "op": "update_diagnosis",
+                "diagnosis_id": did,
+                "status": "resolved",
+                "date_resolved": "2026-06-15",
+            },
+            {
+                "op": "update_encounter",
+                "encounter_id": eid,
+                "notes": "Follow-up in 3 years",
+            },
+            {"op": "delete_encounter", "encounter_id": eid},
+        ]))
+        fake_resolve = MagicMock(return_value=ctx)
+        original = health_pkg.resolve_for_user
+        health_pkg.resolve_for_user = fake_resolve
+        try:
+            count = scheduler_deferred._process_deferred_health_ops(
+                MagicMock(), MagicMock(id=99, user_id="alice"), user_temp,
+            )
+        finally:
+            health_pkg.resolve_for_user = original
+        assert count == 3
+        with health_db.connect(ctx.db_path) as conn:
+            assert health_db.get_encounter(conn, eid) is None
+            d = health_db.get_diagnosis(conn, did)
+        assert d.status == "resolved"
+        assert d.date_resolved == "2026-06-15"
+        # encounter_id should have been NULLed by ON DELETE SET NULL
+        assert d.encounter_id is None
+
+    def test_replay_failure_writes_sidecar(self, tmp_path):
+        """A bad op must surface as an ERROR + a failure sidecar file."""
+        import json
+        from unittest.mock import MagicMock
+
+        from istota import health as health_pkg
+        from istota import scheduler_deferred
+
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        user_temp = tmp_path / "user_temp"
+        user_temp.mkdir()
+        ops_file = user_temp / "task_88_health_ops.json"
+        # Bad op: missing required encounter_date.
+        ops_file.write_text(json.dumps([
+            {"op": "insert_encounter", "encounter_type": "procedure"},
+        ]))
+        fake_resolve = MagicMock(return_value=ctx)
+        original = health_pkg.resolve_for_user
+        health_pkg.resolve_for_user = fake_resolve
+        try:
+            scheduler_deferred._process_deferred_health_ops(
+                MagicMock(), MagicMock(id=88, user_id="alice"), user_temp,
+            )
+        finally:
+            health_pkg.resolve_for_user = original
+        sidecar = user_temp / "task_88_health_op_failures.json"
+        assert sidecar.exists()
+        payload = json.loads(sidecar.read_text())
+        assert len(payload) == 1
+        assert payload[0]["op"]["op"] == "insert_encounter"
+        assert "encounter_date" in payload[0]["error"] or "KeyError" in payload[0]["error"]
+
+    def test_replay_is_idempotent_on_dedup_key(self, tmp_path):
+        """Replaying the same insert op twice must not duplicate the row."""
+        import json
+        from unittest.mock import MagicMock
+
+        from istota import health as health_pkg
+        from istota import scheduler_deferred
+
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        user_temp = tmp_path / "user_temp"
+        user_temp.mkdir()
+        ops_payload = [
+            {
+                "op": "insert_encounter",
+                "dedup_key": "deadbeef",
+                "encounter_date": "2026-05-13",
+                "encounter_type": "procedure",
+                "provider": "Dr. Smith",
+            },
+            {
+                "op": "insert_diagnosis",
+                "dedup_key": "cafef00d",
+                "name": "Hemorrhoids",
+                "date_diagnosed": "2026-05-13",
+            },
+        ]
+        fake_resolve = MagicMock(return_value=ctx)
+        original = health_pkg.resolve_for_user
+        health_pkg.resolve_for_user = fake_resolve
+        try:
+            for _ in range(2):
+                ops_file = user_temp / "task_77_health_ops.json"
+                ops_file.write_text(json.dumps(ops_payload))
+                scheduler_deferred._process_deferred_health_ops(
+                    MagicMock(), MagicMock(id=77, user_id="alice"), user_temp,
+                )
+        finally:
+            health_pkg.resolve_for_user = original
+        with health_db.connect(ctx.db_path) as conn:
+            encs = health_db.list_encounters(conn)
+            diags = health_db.list_diagnoses(conn)
+        assert len(encs) == 1
+        assert len(diags) == 1
+
+
+class TestPanelEncounterMigration:
+    def test_migrates_pre_encounter_db(self, tmp_path):
+        """A panels table created before encounter_id must migrate cleanly."""
+        import sqlite3
+
+        ctx = _ctx(tmp_path)
+        ctx.ensure_dirs()
+        conn = sqlite3.connect(ctx.db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE panels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    drawn_at TEXT NOT NULL,
+                    lab_name TEXT,
+                    panel_type TEXT,
+                    source_file TEXT,
+                    source_mime TEXT,
+                    ocr_text TEXT,
+                    draft INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT,
+                    content_hash TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO panels (drawn_at) VALUES ('2026-05-01T00:00:00+00:00');
+                """,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        health_db.init_db(ctx.db_path)
+        with health_db.connect(ctx.db_path) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(panels)")}
+            assert "encounter_id" in cols
+            row = conn.execute("SELECT encounter_id FROM panels").fetchone()
+            assert row["encounter_id"] is None
+
+    def test_panel_insert_with_encounter_id(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="visit",
+            )
+            pid = health_db.insert_panel(
+                conn, drawn_at="2026-05-13", lab_name="Quest",
+                encounter_id=eid,
+            )
+            conn.commit()
+            panel = health_db.get_panel(conn, pid)
+        assert panel.encounter_id == eid
+
+    def test_update_panel_clears_encounter_id(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-05-13",
+                encounter_type="visit",
+            )
+            pid = health_db.insert_panel(
+                conn, drawn_at="2026-05-13", encounter_id=eid,
+            )
+            conn.commit()
+            health_db.update_panel(conn, pid, encounter_id=None)
+            conn.commit()
+            panel = health_db.get_panel(conn, pid)
+        assert panel.encounter_id is None

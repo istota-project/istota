@@ -1,6 +1,6 @@
 ---
 name: health
-triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin]
+triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin, encounter, doctor, doctor visit, procedure, screening, hospitalization, diagnosis, diagnosed, condition, medical history, icd10, chronic]
 description: Health tracking — body stats, bloodwork panels, biomarker trends, lab analysis, and Garmin daily summaries.
 cli: true
 env: [{"var":"HEALTH_DB_PATH","from":"setup_env"}]
@@ -59,6 +59,27 @@ istota-skill health set sex M
 istota-skill health set display.weight lb
 istota-skill health set display.temp F
 
+# Medical history — encounters and diagnoses
+istota-skill health encounters --since 2025-01-01
+istota-skill health encounter 3
+istota-skill health add-encounter --date 2026-05-13 --type procedure \
+    --provider "Dr. Smith" --facility "Kaiser Sunset" \
+    --specialty gastroenterology --reason "Screening colonoscopy" \
+    --notes "Grade I-II internal hemorrhoids found. No polyps."
+istota-skill health update-encounter 3 --notes "Follow-up in 3 years"
+istota-skill health delete-encounter 3
+
+istota-skill health diagnoses --status active
+istota-skill health diagnosis 7
+istota-skill health add-diagnosis "Internal hemorrhoids" \
+    --date-diagnosed 2026-05-13 --encounter-id 3 \
+    --severity mild --icd10 K64.0
+istota-skill health resolve-diagnosis 7 --date 2026-06-15
+istota-skill health update-diagnosis 7 --status chronic
+istota-skill health delete-diagnosis 7
+
+istota-skill health history-summary                       # new-doctor packet
+
 # Garmin (initial connect happens in the web UI — health settings page)
 istota-skill health garmin-status
 istota-skill health garmin-sync --days-back 7
@@ -112,6 +133,12 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 | "Show me my bloodwork history" | `panels` |
 | "Any biomarkers out of range?" | `summary` — surface entries from `alerts` |
 | "Here are my lab results" (+ image) | OCR via `transcribe`/`whisper`, then `add-panel` + `add-biomarker` per row |
+| "I saw the GI doctor today, colonoscopy was clean" | `add-encounter --date 2026-05-15 --type procedure --specialty gastroenterology --reason "Colonoscopy" --notes "Clean, no findings"` |
+| "Diagnosed with X today" | `add-diagnosis "X" --status active --date-diagnosed 2026-05-15` (plus `add-encounter` if visit details given) |
+| "The hemorrhoids cleared up" | `resolve-diagnosis <id> --date 2026-05-15` |
+| "What are my active conditions?" | `diagnoses --status active` |
+| "When was my last eye exam?" | `encounters --since … --type screening` and filter |
+| "Give me a summary for my new doctor" | `history-summary` |
 | "Sync my Garmin data" | `garmin-sync --days-back 7` |
 | "Is my Garmin connected?" | `garmin-status` |
 | "How did I sleep last night?" | `latest` — read `sleep_duration_min` / `sleep_score` from Garmin rows |
@@ -126,5 +153,5 @@ Health data is the most sensitive data in the system. The health DB is the singl
 - Never write measurements, biomarker values, medication doses, lab dates, or current symptoms to USER.md, the knowledge graph, dated memories, or KV. Those stores are not scoped for clinical data and surface in unrelated prompt contexts.
 - Don't include biomarker values in news / briefings / log channels.
 - When another skill or response needs a current value, call `istota-skill health latest` or `health trend NAME` at the moment of use rather than caching the number.
-- Stable identity-level medical facts (allergies, named chronic conditions) stay in the knowledge graph via the `memory` skill — see its classification rules.
+- Stable identity-level medical facts (allergies, named chronic conditions) stay in the knowledge graph via the `memory` skill — see its classification rules. The detailed encounter/diagnosis registry stays in the health DB; only the identity-level fact (`has_condition: hypertension`) belongs in the KG.
 - Source files for uploaded labs are only served through the auth-gated `/panels/{id}/source` route, never via static file serving.

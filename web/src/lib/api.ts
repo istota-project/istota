@@ -744,6 +744,7 @@ export interface HealthPanel {
 	draft: boolean;
 	notes: string | null;
 	has_source: boolean;
+	encounter_id: number | null;
 }
 
 export interface Biomarker {
@@ -817,6 +818,40 @@ export interface HealthDashboard {
 	recent_panels: HealthPanel[];
 	alerts: (Biomarker & { panel_id: number; drawn_at: string; lab_name: string | null })[];
 	settings: HealthSettings;
+	active_diagnoses_count?: number;
+	recent_encounters?: Encounter[];
+}
+
+export interface Encounter {
+	id: number;
+	encounter_date: string;
+	encounter_type: string;
+	provider: string | null;
+	facility: string | null;
+	specialty: string | null;
+	reason: string | null;
+	notes: string | null;
+	created_at?: string;
+}
+
+export interface Diagnosis {
+	id: number;
+	name: string;
+	icd10: string | null;
+	status: 'active' | 'resolved' | 'chronic';
+	date_diagnosed: string | null;
+	date_resolved: string | null;
+	encounter_id: number | null;
+	severity: 'mild' | 'moderate' | 'severe' | null;
+	notes: string | null;
+	created_at?: string;
+}
+
+export interface HistorySummary {
+	active_diagnoses: Diagnosis[];
+	chronic_diagnoses: Diagnosis[];
+	recent_encounters: Encounter[];
+	recent_procedures: Encounter[];
 }
 
 async function healthFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -881,7 +916,7 @@ export async function getHealthPanel(id: number): Promise<{ panel: HealthPanel; 
 	return healthFetch(`/panels/${id}`);
 }
 
-export async function createHealthPanel(body: { drawn_at: string; lab_name?: string; panel_type?: string; notes?: string }): Promise<{ status: string; id: number; collision?: { existing_id: number; drawn_at: string; lab_name: string | null } }> {
+export async function createHealthPanel(body: { drawn_at: string; lab_name?: string; panel_type?: string; notes?: string; encounter_id?: number | null }): Promise<{ status: string; id: number; collision?: { existing_id: number; drawn_at: string; lab_name: string | null } }> {
 	return healthFetch('/panels', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
@@ -889,7 +924,7 @@ export async function createHealthPanel(body: { drawn_at: string; lab_name?: str
 	});
 }
 
-export async function updateHealthPanel(id: number, body: Partial<{ drawn_at: string; lab_name: string; panel_type: string; notes: string; draft: boolean }>): Promise<{ status: string }> {
+export async function updateHealthPanel(id: number, body: Partial<{ drawn_at: string; lab_name: string; panel_type: string; notes: string; draft: boolean; encounter_id: number | null }>): Promise<{ status: string }> {
 	return healthFetch(`/panels/${id}`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json' },
@@ -1032,6 +1067,78 @@ export async function putHealthSettings(body: Partial<HealthSettings>): Promise<
 
 export async function getHealthDashboard(): Promise<HealthDashboard> {
 	return healthFetch('/dashboard');
+}
+
+// ---- Encounters / diagnoses / history ------------------------------------
+
+export async function listEncounters(params: { since?: string; until?: string; type?: string; limit?: number; offset?: number } = {}): Promise<{ encounters: Encounter[] }> {
+	const q = new URLSearchParams();
+	for (const [k, v] of Object.entries(params)) {
+		if (v !== undefined && v !== '') q.set(k, String(v));
+	}
+	const suffix = q.toString() ? `?${q.toString()}` : '';
+	return healthFetch(`/encounters${suffix}`);
+}
+
+export async function createEncounter(body: Partial<Encounter> & { encounter_date: string; encounter_type: string }): Promise<{ status: string; id: number }> {
+	return healthFetch('/encounters', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function getEncounter(id: number): Promise<{ encounter: Encounter; diagnoses: Diagnosis[]; panels: HealthPanel[] }> {
+	return healthFetch(`/encounters/${id}`);
+}
+
+export async function updateEncounter(id: number, body: Partial<Encounter>): Promise<{ status: string }> {
+	return healthFetch(`/encounters/${id}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function deleteEncounter(id: number): Promise<{ status: string }> {
+	return healthFetch(`/encounters/${id}`, { method: 'DELETE' });
+}
+
+export async function listDiagnoses(params: { status?: string; limit?: number; offset?: number } = {}): Promise<{ diagnoses: Diagnosis[] }> {
+	const q = new URLSearchParams();
+	for (const [k, v] of Object.entries(params)) {
+		if (v !== undefined && v !== '') q.set(k, String(v));
+	}
+	const suffix = q.toString() ? `?${q.toString()}` : '';
+	return healthFetch(`/diagnoses${suffix}`);
+}
+
+export async function createDiagnosis(body: Partial<Diagnosis> & { name: string }): Promise<{ status: string; id: number }> {
+	return healthFetch('/diagnoses', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function getDiagnosis(id: number): Promise<{ diagnosis: Diagnosis; encounter: Encounter | null }> {
+	return healthFetch(`/diagnoses/${id}`);
+}
+
+export async function updateDiagnosis(id: number, body: Partial<Diagnosis>): Promise<{ status: string }> {
+	return healthFetch(`/diagnoses/${id}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export async function deleteDiagnosis(id: number): Promise<{ status: string }> {
+	return healthFetch(`/diagnoses/${id}`, { method: 'DELETE' });
+}
+
+export async function getHistorySummary(): Promise<HistorySummary> {
+	return healthFetch('/history/summary');
 }
 
 // ---- Garmin --------------------------------------------------------------

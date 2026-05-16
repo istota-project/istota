@@ -462,3 +462,262 @@ class TestBloodworkMatrix:
         other = next((c for c in m["categories"] if c["name"] == "Other"), None)
         assert other is not None
         assert other["markers"][0]["name"] == "MyUnusualMarker"
+
+
+class TestEncountersRoutes:
+    def test_create_list_and_get(self, client):
+        resp = client.post(
+            "/istota/api/health/encounters",
+            json={
+                "encounter_date": "2026-05-13",
+                "encounter_type": "procedure",
+                "provider": "Dr. Smith",
+                "facility": "Kaiser",
+                "specialty": "gastroenterology",
+                "reason": "Screening colonoscopy",
+                "notes": "Grade I-II hemorrhoids",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        eid = resp.json()["id"]
+
+        listing = client.get("/istota/api/health/encounters").json()
+        assert len(listing["encounters"]) == 1
+        assert listing["encounters"][0]["provider"] == "Dr. Smith"
+
+        detail = client.get(f"/istota/api/health/encounters/{eid}").json()
+        assert detail["encounter"]["specialty"] == "gastroenterology"
+        assert detail["diagnoses"] == []
+        assert detail["panels"] == []
+
+    def test_filter_by_type(self, client):
+        client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-01-01", "encounter_type": "visit"},
+        )
+        client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-13", "encounter_type": "procedure"},
+        )
+        listing = client.get(
+            "/istota/api/health/encounters", params={"type": "procedure"},
+        ).json()
+        assert [e["encounter_type"] for e in listing["encounters"]] == ["procedure"]
+
+    def test_missing_fields(self, client):
+        resp = client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_type": "visit"},
+        )
+        assert resp.status_code == 400
+
+    def test_update(self, client):
+        eid = client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-13", "encounter_type": "visit"},
+        ).json()["id"]
+        resp = client.put(
+            f"/istota/api/health/encounters/{eid}",
+            json={"notes": "Follow-up in 3 years"},
+        )
+        assert resp.status_code == 200
+        detail = client.get(f"/istota/api/health/encounters/{eid}").json()
+        assert detail["encounter"]["notes"] == "Follow-up in 3 years"
+
+    def test_delete(self, client):
+        eid = client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-13", "encounter_type": "visit"},
+        ).json()["id"]
+        resp = client.delete(f"/istota/api/health/encounters/{eid}")
+        assert resp.status_code == 200
+        miss = client.get(f"/istota/api/health/encounters/{eid}")
+        assert miss.status_code == 404
+
+    def test_get_includes_linked_panels_and_diagnoses(self, client):
+        eid = client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-13", "encounter_type": "procedure"},
+        ).json()["id"]
+        pid = client.post(
+            "/istota/api/health/panels",
+            json={
+                "drawn_at": "2026-05-13", "lab_name": "Quest",
+                "encounter_id": eid,
+            },
+        ).json()["id"]
+        did = client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Hemorrhoids", "encounter_id": eid},
+        ).json()["id"]
+        detail = client.get(f"/istota/api/health/encounters/{eid}").json()
+        assert [d["id"] for d in detail["diagnoses"]] == [did]
+        assert [p["id"] for p in detail["panels"]] == [pid]
+
+
+class TestDiagnosesRoutes:
+    def test_create_and_filter(self, client):
+        client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Internal hemorrhoids", "date_diagnosed": "2026-05-13"},
+        )
+        client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Hypertension", "status": "chronic"},
+        )
+        client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Strep", "status": "resolved",
+                  "date_resolved": "2024-12-15"},
+        )
+        actives = client.get(
+            "/istota/api/health/diagnoses", params={"status": "active"},
+        ).json()
+        assert [d["name"] for d in actives["diagnoses"]] == ["Internal hemorrhoids"]
+        all_d = client.get(
+            "/istota/api/health/diagnoses", params={"status": "all"},
+        ).json()
+        # default ordering: active → chronic → resolved
+        names = [d["name"] for d in all_d["diagnoses"]]
+        assert names == ["Internal hemorrhoids", "Hypertension", "Strep"]
+
+    def test_unknown_status_rejected(self, client):
+        resp = client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "X", "status": "bogus"},
+        )
+        assert resp.status_code == 400
+
+    def test_resolve(self, client):
+        did = client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Hemorrhoids", "date_diagnosed": "2026-05-13"},
+        ).json()["id"]
+        resp = client.put(
+            f"/istota/api/health/diagnoses/{did}",
+            json={"status": "resolved", "date_resolved": "2026-06-15"},
+        )
+        assert resp.status_code == 200
+        detail = client.get(f"/istota/api/health/diagnoses/{did}").json()
+        assert detail["diagnosis"]["status"] == "resolved"
+        assert detail["diagnosis"]["date_resolved"] == "2026-06-15"
+
+    def test_linked_encounter(self, client):
+        eid = client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-13", "encounter_type": "procedure"},
+        ).json()["id"]
+        did = client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Hemorrhoids", "encounter_id": eid},
+        ).json()["id"]
+        detail = client.get(f"/istota/api/health/diagnoses/{did}").json()
+        assert detail["encounter"]["id"] == eid
+
+    def test_create_rejects_missing_encounter(self, client):
+        resp = client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Hemorrhoids", "encounter_id": 9999},
+        )
+        assert resp.status_code == 400
+
+    def test_delete(self, client):
+        did = client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Hemorrhoids"},
+        ).json()["id"]
+        resp = client.delete(f"/istota/api/health/diagnoses/{did}")
+        assert resp.status_code == 200
+
+
+class TestHistorySummary:
+    def test_summary(self, client):
+        eid = client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-13", "encounter_type": "procedure"},
+        ).json()["id"]
+        client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-01", "encounter_type": "visit"},
+        )
+        client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Hypertension", "status": "chronic"},
+        )
+        client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Hemorrhoids", "encounter_id": eid},
+        )
+        client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Old thing", "status": "resolved"},
+        )
+        summary = client.get("/istota/api/health/history/summary").json()
+        assert [d["name"] for d in summary["active_diagnoses"]] == ["Hemorrhoids"]
+        assert [d["name"] for d in summary["chronic_diagnoses"]] == ["Hypertension"]
+        assert len(summary["recent_encounters"]) == 2
+        assert [e["encounter_type"] for e in summary["recent_procedures"]] == [
+            "procedure",
+        ]
+
+
+class TestPanelEncounterLink:
+    def test_create_panel_with_encounter(self, client):
+        eid = client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-13", "encounter_type": "visit"},
+        ).json()["id"]
+        pid = client.post(
+            "/istota/api/health/panels",
+            json={"drawn_at": "2026-05-13", "lab_name": "Quest",
+                  "encounter_id": eid},
+        ).json()["id"]
+        panel = client.get(f"/istota/api/health/panels/{pid}").json()
+        assert panel["panel"]["encounter_id"] == eid
+
+    def test_create_panel_rejects_missing_encounter(self, client):
+        resp = client.post(
+            "/istota/api/health/panels",
+            json={"drawn_at": "2026-05-13", "encounter_id": 9999},
+        )
+        assert resp.status_code == 400
+
+    def test_put_panel_clears_encounter(self, client):
+        eid = client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-13", "encounter_type": "visit"},
+        ).json()["id"]
+        pid = client.post(
+            "/istota/api/health/panels",
+            json={"drawn_at": "2026-05-13", "encounter_id": eid},
+        ).json()["id"]
+        resp = client.put(
+            f"/istota/api/health/panels/{pid}", json={"encounter_id": None},
+        )
+        assert resp.status_code == 200
+        panel = client.get(f"/istota/api/health/panels/{pid}").json()
+        assert panel["panel"]["encounter_id"] is None
+
+
+class TestDashboardHistory:
+    def test_dashboard_includes_history(self, client):
+        client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Hypertension", "status": "chronic"},
+        )
+        client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Active thing", "status": "active"},
+        )
+        client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Old", "status": "resolved"},
+        )
+        client.post(
+            "/istota/api/health/encounters",
+            json={"encounter_date": "2026-05-13", "encounter_type": "visit",
+                  "provider": "Dr. Smith"},
+        )
+        d = client.get("/istota/api/health/dashboard").json()
+        assert d["active_diagnoses_count"] == 2  # active + chronic, not resolved
+        assert d["recent_encounters"][0]["provider"] == "Dr. Smith"

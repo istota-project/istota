@@ -155,3 +155,148 @@ class TestDeferredMode:
         assert ops[0]["op"] == "insert_stat"
         assert ops[0]["metric"] == "weight"
         assert ops[0]["value"] == 82.5
+
+
+class TestEncountersCli:
+    def test_add_list_and_show(self, ready):
+        _db, env = ready
+        out = _run(
+            [
+                "add-encounter", "--date", "2026-05-13", "--type", "procedure",
+                "--provider", "Dr. Smith", "--specialty", "gastroenterology",
+                "--notes", "Clean colonoscopy",
+            ],
+            env,
+        )
+        eid = out["id"]
+        listing = _run(["encounters"], env)
+        assert listing["encounters"][0]["provider"] == "Dr. Smith"
+        detail = _run(["encounter", str(eid)], env)
+        assert detail["encounter"]["specialty"] == "gastroenterology"
+        assert detail["diagnoses"] == []
+
+    def test_filter_by_type(self, ready):
+        _db, env = ready
+        _run(["add-encounter", "--date", "2026-01-01", "--type", "visit"], env)
+        _run(
+            ["add-encounter", "--date", "2026-05-13", "--type", "procedure"],
+            env,
+        )
+        listing = _run(["encounters", "--type", "procedure"], env)
+        assert [e["encounter_type"] for e in listing["encounters"]] == [
+            "procedure",
+        ]
+
+    def test_update_encounter(self, ready):
+        _db, env = ready
+        eid = _run(
+            ["add-encounter", "--date", "2026-05-13", "--type", "visit"], env,
+        )["id"]
+        _run(
+            ["update-encounter", str(eid), "--notes", "Follow-up in 3 years"],
+            env,
+        )
+        detail = _run(["encounter", str(eid)], env)
+        assert detail["encounter"]["notes"] == "Follow-up in 3 years"
+
+    def test_delete_encounter(self, ready):
+        _db, env = ready
+        eid = _run(
+            ["add-encounter", "--date", "2026-05-13", "--type", "visit"], env,
+        )["id"]
+        _run(["delete-encounter", str(eid)], env)
+        listing = _run(["encounters"], env)
+        assert listing["encounters"] == []
+
+    def test_deferred_writes(self, ready, tmp_path):
+        _db, env = ready
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = {
+            **env,
+            "ISTOTA_DEFERRED_DIR": str(deferred),
+            "ISTOTA_TASK_ID": "11",
+        }
+        out = _run(
+            ["add-encounter", "--date", "2026-05-13", "--type", "procedure",
+             "--provider", "Dr. Smith"],
+            env,
+        )
+        assert out["deferred"] is True
+        ops = json.loads(
+            (deferred / "task_11_health_ops.json").read_text(),
+        )
+        assert ops[0]["op"] == "insert_encounter"
+        assert ops[0]["provider"] == "Dr. Smith"
+
+
+class TestDiagnosesCli:
+    def test_add_list_filter(self, ready):
+        _db, env = ready
+        _run(
+            [
+                "add-diagnosis", "Internal hemorrhoids",
+                "--date-diagnosed", "2026-05-13", "--icd10", "K64.0",
+                "--severity", "mild",
+            ],
+            env,
+        )
+        _run(
+            ["add-diagnosis", "Hypertension", "--status", "chronic"],
+            env,
+        )
+        actives = _run(["diagnoses", "--status", "active"], env)
+        assert [d["name"] for d in actives["diagnoses"]] == [
+            "Internal hemorrhoids",
+        ]
+
+    def test_resolve_shorthand(self, ready):
+        _db, env = ready
+        did = _run(
+            ["add-diagnosis", "Hemorrhoids", "--date-diagnosed", "2026-05-13"],
+            env,
+        )["id"]
+        out = _run(
+            ["resolve-diagnosis", str(did), "--date", "2026-06-15"], env,
+        )
+        assert out["date_resolved"] == "2026-06-15"
+        detail = _run(["diagnosis", str(did)], env)
+        assert detail["diagnosis"]["status"] == "resolved"
+        assert detail["diagnosis"]["date_resolved"] == "2026-06-15"
+
+    def test_linked_encounter(self, ready):
+        _db, env = ready
+        eid = _run(
+            ["add-encounter", "--date", "2026-05-13", "--type", "procedure"],
+            env,
+        )["id"]
+        did = _run(
+            ["add-diagnosis", "Hemorrhoids", "--encounter-id", str(eid)],
+            env,
+        )["id"]
+        detail = _run(["diagnosis", str(did)], env)
+        assert detail["encounter"]["id"] == eid
+
+
+class TestHistorySummaryCli:
+    def test_summary(self, ready):
+        _db, env = ready
+        eid = _run(
+            ["add-encounter", "--date", "2026-05-13", "--type", "procedure"],
+            env,
+        )["id"]
+        _run(["add-diagnosis", "Hypertension", "--status", "chronic"], env)
+        _run(
+            ["add-diagnosis", "Hemorrhoids", "--encounter-id", str(eid)],
+            env,
+        )
+        summary = _run(["history-summary"], env)
+        assert [d["name"] for d in summary["active_diagnoses"]] == [
+            "Hemorrhoids",
+        ]
+        assert [d["name"] for d in summary["chronic_diagnoses"]] == [
+            "Hypertension",
+        ]
+        assert [e["encounter_type"] for e in summary["recent_procedures"]] == [
+            "procedure",
+        ]

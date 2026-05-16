@@ -22,6 +22,7 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from . import db
 from .config import Config
@@ -511,6 +512,7 @@ def _process_deferred_health_ops(
     _health.ensure_initialised(ctx)
 
     count = 0
+    failures: list[dict[str, Any]] = []
     with health_db.connect(ctx.db_path) as conn:
         for entry in data:
             if not isinstance(entry, dict):
@@ -529,12 +531,16 @@ def _process_deferred_health_ops(
                     )
                     count += 1
                 elif op == "insert_panel":
+                    enc_id = entry.get("encounter_id")
                     health_db.insert_panel(
                         conn,
                         drawn_at=entry["drawn_at"],
                         lab_name=entry.get("lab_name"),
                         panel_type=entry.get("panel_type"),
                         notes=entry.get("notes"),
+                        encounter_id=(
+                            int(enc_id) if enc_id is not None else None
+                        ),
                     )
                     count += 1
                 elif op == "insert_biomarker":
@@ -611,6 +617,76 @@ def _process_deferred_health_ops(
                         summary.biomarkers_created,
                     )
                     count += 1
+                elif op == "insert_encounter":
+                    health_db.insert_encounter(
+                        conn,
+                        encounter_date=entry["encounter_date"],
+                        encounter_type=entry["encounter_type"],
+                        provider=entry.get("provider"),
+                        facility=entry.get("facility"),
+                        specialty=entry.get("specialty"),
+                        reason=entry.get("reason"),
+                        notes=entry.get("notes"),
+                        dedup_key=entry.get("dedup_key"),
+                    )
+                    count += 1
+                elif op == "update_encounter":
+                    health_db.update_encounter(
+                        conn,
+                        int(entry["encounter_id"]),
+                        **{
+                            k: entry[k] for k in (
+                                "encounter_date", "encounter_type", "provider",
+                                "facility", "specialty", "reason", "notes",
+                            ) if k in entry
+                        },
+                    )
+                    count += 1
+                elif op == "delete_encounter":
+                    health_db.delete_encounter(
+                        conn, int(entry["encounter_id"]),
+                    )
+                    count += 1
+                elif op == "insert_diagnosis":
+                    health_db.insert_diagnosis(
+                        conn,
+                        name=entry["name"],
+                        status=entry.get("status", "active"),
+                        icd10=entry.get("icd10"),
+                        date_diagnosed=entry.get("date_diagnosed"),
+                        date_resolved=entry.get("date_resolved"),
+                        encounter_id=(
+                            int(entry["encounter_id"])
+                            if entry.get("encounter_id") is not None else None
+                        ),
+                        severity=entry.get("severity"),
+                        notes=entry.get("notes"),
+                        dedup_key=entry.get("dedup_key"),
+                    )
+                    count += 1
+                elif op == "update_diagnosis":
+                    update_kwargs = {
+                        k: entry[k] for k in (
+                            "name", "icd10", "status", "date_diagnosed",
+                            "date_resolved", "encounter_id", "severity", "notes",
+                        ) if k in entry
+                    }
+                    if (
+                        "encounter_id" in update_kwargs
+                        and update_kwargs["encounter_id"] is not None
+                    ):
+                        update_kwargs["encounter_id"] = int(
+                            update_kwargs["encounter_id"],
+                        )
+                    health_db.update_diagnosis(
+                        conn, int(entry["diagnosis_id"]), **update_kwargs,
+                    )
+                    count += 1
+                elif op == "delete_diagnosis":
+                    health_db.delete_diagnosis(
+                        conn, int(entry["diagnosis_id"]),
+                    )
+                    count += 1
                 elif op == "set_setting":
                     key = entry["key"]
                     value = entry.get("value")
@@ -633,13 +709,43 @@ def _process_deferred_health_ops(
                     continue
                 conn.commit()
             except (KeyError, ValueError, sqlite3.Error) as e:
-                logger.warning(
-                    "Failed to process health op for task %d: %s",
+                # Log at ERROR so operators see silent op losses (health
+                # records are non-idempotent — "silently lost" is a sharp
+                # failure mode). Also persist the failing entry to a
+                # sidecar file so the user/operator can recover it.
+                logger.error(
+                    "Failed to process health op %r for task %d: %s",
+                    entry.get("op") if isinstance(entry, dict) else entry,
                     task.id, e,
                 )
+                failures.append({
+                    "op": entry if isinstance(entry, dict) else {"raw": entry},
+                    "error": f"{type(e).__name__}: {e}",
+                })
 
     if count:
         logger.info("Processed %d deferred health ops for task %d", count, task.id)
+    if failures:
+        failure_path = (
+            user_temp_dir / f"task_{task.id}_health_op_failures.json"
+        )
+        try:
+            existing: list[Any] = []
+            if failure_path.exists():
+                try:
+                    existing = json.loads(failure_path.read_text())
+                    if not isinstance(existing, list):
+                        existing = []
+                except (OSError, json.JSONDecodeError):
+                    existing = []
+            failure_path.write_text(
+                json.dumps(existing + failures, indent=2),
+            )
+        except OSError as e:
+            logger.error(
+                "Failed to write health op failure sidecar for task %d: %s",
+                task.id, e,
+            )
     path.unlink(missing_ok=True)
     return count
 

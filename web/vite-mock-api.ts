@@ -1107,6 +1107,7 @@ const handlers: MockHandler[] = [
 			panel_type: string | null; source_file: string | null;
 			source_mime: string | null; ocr_text: string | null;
 			draft: boolean; notes: string | null;
+			encounter_id: number | null;
 		}
 
 		const settings = {
@@ -1131,6 +1132,84 @@ const handlers: MockHandler[] = [
 			error: null,
 			pendingEmail: null,
 		};
+
+		// Encounters / diagnoses — kept in-closure so they survive across
+		// requests in dev mode.
+		interface Encounter {
+			id: number;
+			encounter_date: string;
+			encounter_type: string;
+			provider: string | null;
+			facility: string | null;
+			specialty: string | null;
+			reason: string | null;
+			notes: string | null;
+			created_at: string;
+		}
+		interface Diagnosis {
+			id: number;
+			name: string;
+			icd10: string | null;
+			status: 'active' | 'resolved' | 'chronic';
+			date_diagnosed: string | null;
+			date_resolved: string | null;
+			encounter_id: number | null;
+			severity: 'mild' | 'moderate' | 'severe' | null;
+			notes: string | null;
+			created_at: string;
+		}
+		let nextEncounterId = 1;
+		let nextDiagnosisId = 1;
+		const encounters: Encounter[] = [
+			{
+				id: nextEncounterId++,
+				encounter_date: '2025-09-15',
+				encounter_type: 'visit',
+				provider: 'Dr. Patel',
+				facility: 'Kaiser Sunset',
+				specialty: 'primary_care',
+				reason: 'Annual physical',
+				notes: 'All clear. Recommended continuing exercise routine.',
+				created_at: new Date().toISOString(),
+			},
+			{
+				id: nextEncounterId++,
+				encounter_date: '2026-03-04',
+				encounter_type: 'procedure',
+				provider: 'Dr. Cohen',
+				facility: 'Kaiser Sunset',
+				specialty: 'gastroenterology',
+				reason: 'Screening colonoscopy',
+				notes: 'Grade I-II internal hemorrhoids found. No polyps. Follow-up in 5 years.',
+				created_at: new Date().toISOString(),
+			},
+		];
+		const diagnoses: Diagnosis[] = [
+			{
+				id: nextDiagnosisId++,
+				name: 'Internal hemorrhoids',
+				icd10: 'K64.0',
+				status: 'active',
+				date_diagnosed: '2026-03-04',
+				date_resolved: null,
+				encounter_id: 2,
+				severity: 'mild',
+				notes: 'Found on screening colonoscopy. No active bleeding.',
+				created_at: new Date().toISOString(),
+			},
+			{
+				id: nextDiagnosisId++,
+				name: 'Seasonal allergies',
+				icd10: 'J30.2',
+				status: 'chronic',
+				date_diagnosed: null,
+				date_resolved: null,
+				encounter_id: null,
+				severity: null,
+				notes: null,
+				created_at: new Date().toISOString(),
+			},
+		];
 
 		let nextStatId = 1;
 		const stats: Stat[] = [];
@@ -1198,15 +1277,15 @@ const handlers: MockHandler[] = [
 
 		// Panels: a multi-year longitudinal record + one draft awaiting review.
 		const panels: Panel[] = [
-			{ id: 1, drawn_at: '2018-01-10', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
-			{ id: 2, drawn_at: '2019-04-04', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
-			{ id: 3, drawn_at: '2021-06-23', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
-			{ id: 4, drawn_at: '2022-05-03', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
-			{ id: 5, drawn_at: '2023-09-01', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
-			{ id: 6, drawn_at: '2024-07-27', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
-			{ id: 7, drawn_at: '2025-11-28', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null },
-			{ id: 8, drawn_at: '2026-04-22', lab_name: 'Quest Diagnostics', panel_type: 'Lipid + Thyroid + Iron + Vitamins', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: 'Pre-surgical workup' },
-			{ id: 9, drawn_at: '2026-05-09', lab_name: 'Quest Diagnostics', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: true, notes: 'Pending review' },
+			{ id: 1, drawn_at: '2018-01-10', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null, encounter_id: null },
+			{ id: 2, drawn_at: '2019-04-04', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null, encounter_id: null },
+			{ id: 3, drawn_at: '2021-06-23', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null, encounter_id: null },
+			{ id: 4, drawn_at: '2022-05-03', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null, encounter_id: null },
+			{ id: 5, drawn_at: '2023-09-01', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null, encounter_id: null },
+			{ id: 6, drawn_at: '2024-07-27', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null, encounter_id: null },
+			{ id: 7, drawn_at: '2025-11-28', lab_name: 'Kaiser, Los Angeles CA', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: null, encounter_id: 1 },
+			{ id: 8, drawn_at: '2026-04-22', lab_name: 'Quest Diagnostics', panel_type: 'Lipid + Thyroid + Iron + Vitamins', source_file: null, source_mime: null, ocr_text: null, draft: false, notes: 'Pre-surgical workup', encounter_id: 2 },
+			{ id: 9, drawn_at: '2026-05-09', lab_name: 'Quest Diagnostics', panel_type: 'CBC + CMP + Lipid', source_file: null, source_mime: null, ocr_text: null, draft: true, notes: 'Pending review', encounter_id: null },
 		];
 
 		const biomarkers: Bio[] = [];
@@ -1389,7 +1468,7 @@ const handlers: MockHandler[] = [
 				id: p.id, drawn_at: p.drawn_at, lab_name: p.lab_name,
 				panel_type: p.panel_type, biomarker_count: own.length,
 				flagged_count: flagged, draft: p.draft, notes: p.notes,
-				has_source: false,
+				has_source: false, encounter_id: p.encounter_id,
 			};
 		};
 
@@ -1458,6 +1537,9 @@ const handlers: MockHandler[] = [
 				return { panels: panels.slice().sort((a, b) => b.drawn_at.localeCompare(a.drawn_at)).map(panelDict) };
 			}
 			if (url === '/istota/api/health/panels' && method === 'POST') {
+				if (body.encounter_id != null && !encounters.find((e) => e.id === body.encounter_id)) {
+					return { error: 'encounter not found' };
+				}
 				const p: Panel = {
 					id: panels.length + 1,
 					drawn_at: body.drawn_at,
@@ -1465,6 +1547,7 @@ const handlers: MockHandler[] = [
 					panel_type: body.panel_type || null,
 					source_file: null, source_mime: null, ocr_text: null,
 					draft: false, notes: body.notes ?? null,
+					encounter_id: body.encounter_id ?? null,
 				};
 				panels.push(p);
 				return { status: 'ok', id: p.id };
@@ -1486,6 +1569,12 @@ const handlers: MockHandler[] = [
 					if (body.lab_name !== undefined) p.lab_name = body.lab_name;
 					if (body.panel_type !== undefined) p.panel_type = body.panel_type;
 					if (body.notes !== undefined) p.notes = body.notes;
+					if (body.encounter_id !== undefined) {
+						if (body.encounter_id !== null && !encounters.find((e) => e.id === body.encounter_id)) {
+							return { error: 'encounter not found' };
+						}
+						p.encounter_id = body.encounter_id;
+					}
 					return { status: 'ok' };
 				}
 				if (method === 'DELETE') {
@@ -1972,6 +2061,175 @@ const handlers: MockHandler[] = [
 				};
 			}
 
+			// /encounters
+			if (url.startsWith('/istota/api/health/encounters') && method === 'GET') {
+				const encMatch = url.match(/^\/istota\/api\/health\/encounters\/(\d+)$/);
+				if (encMatch) {
+					const id = Number(encMatch[1]);
+					const enc = encounters.find((e) => e.id === id);
+					if (!enc) return { error: 'encounter not found' };
+					const linkedDiag = diagnoses.filter((d) => d.encounter_id === id);
+					const linkedPanels = panels
+						.filter((p) => p.encounter_id === id)
+						.slice()
+						.sort((a, b) => b.drawn_at.localeCompare(a.drawn_at))
+						.map(panelDict);
+					return { encounter: enc, diagnoses: linkedDiag, panels: linkedPanels };
+				}
+				const u = new URL(url, 'http://x');
+				const since = u.searchParams.get('since');
+				const until = u.searchParams.get('until');
+				const t = u.searchParams.get('type');
+				let rows = [...encounters];
+				if (since) rows = rows.filter((e) => e.encounter_date >= since);
+				if (until) rows = rows.filter((e) => e.encounter_date <= until);
+				if (t) rows = rows.filter((e) => e.encounter_type === t);
+				rows.sort(
+					(a, b) =>
+						b.encounter_date.localeCompare(a.encounter_date) || b.id - a.id,
+				);
+				return { encounters: rows };
+			}
+			if (url === '/istota/api/health/encounters' && method === 'POST') {
+				if (!body || typeof body !== 'object') return { error: 'bad body' };
+				if (!body.encounter_date || !body.encounter_type) {
+					return { error: 'encounter_date and encounter_type are required' };
+				}
+				const enc: Encounter = {
+					id: nextEncounterId++,
+					encounter_date: body.encounter_date,
+					encounter_type: body.encounter_type,
+					provider: body.provider || null,
+					facility: body.facility || null,
+					specialty: body.specialty || null,
+					reason: body.reason || null,
+					notes: body.notes || null,
+					created_at: new Date().toISOString(),
+				};
+				encounters.push(enc);
+				return { status: 'ok', id: enc.id };
+			}
+			const encUpdMatch = url.match(/^\/istota\/api\/health\/encounters\/(\d+)$/);
+			if (encUpdMatch && method === 'PUT') {
+				const id = Number(encUpdMatch[1]);
+				const enc = encounters.find((e) => e.id === id);
+				if (!enc) return { error: 'encounter not found' };
+				const allowed = ['encounter_date', 'encounter_type', 'provider', 'facility', 'specialty', 'reason', 'notes'];
+				for (const k of allowed) {
+					if (body && k in body && body[k] !== undefined) (enc as any)[k] = body[k];
+				}
+				return { status: 'ok' };
+			}
+			if (encUpdMatch && method === 'DELETE') {
+				const id = Number(encUpdMatch[1]);
+				const idx = encounters.findIndex((e) => e.id === id);
+				if (idx < 0) return { error: 'encounter not found' };
+				encounters.splice(idx, 1);
+				// Mirror ON DELETE SET NULL on diagnoses.encounter_id + panels.encounter_id.
+				for (const d of diagnoses) {
+					if (d.encounter_id === id) d.encounter_id = null;
+				}
+				for (const p of panels) {
+					if (p.encounter_id === id) p.encounter_id = null;
+				}
+				return { status: 'ok' };
+			}
+
+			// /diagnoses
+			if (url.startsWith('/istota/api/health/diagnoses') && method === 'GET') {
+				const diagMatch = url.match(/^\/istota\/api\/health\/diagnoses\/(\d+)$/);
+				if (diagMatch) {
+					const id = Number(diagMatch[1]);
+					const d = diagnoses.find((x) => x.id === id);
+					if (!d) return { error: 'diagnosis not found' };
+					const enc = d.encounter_id
+						? encounters.find((e) => e.id === d.encounter_id) || null
+						: null;
+					return { diagnosis: d, encounter: enc };
+				}
+				const u = new URL(url, 'http://x');
+				const status = u.searchParams.get('status');
+				let rows = [...diagnoses];
+				if (status && status !== 'all') rows = rows.filter((d) => d.status === status);
+				const statusOrder = { active: 0, chronic: 1, resolved: 2 } as const;
+				rows.sort((a, b) => {
+					const sa = statusOrder[a.status] ?? 3;
+					const sb = statusOrder[b.status] ?? 3;
+					if (sa !== sb) return sa - sb;
+					return (b.date_diagnosed || '').localeCompare(a.date_diagnosed || '');
+				});
+				return { diagnoses: rows };
+			}
+			if (url === '/istota/api/health/diagnoses' && method === 'POST') {
+				if (!body || typeof body !== 'object' || !body.name) {
+					return { error: 'name is required' };
+				}
+				const status = body.status || 'active';
+				if (!['active', 'resolved', 'chronic'].includes(status)) {
+					return { error: 'unknown status' };
+				}
+				if (body.encounter_id != null && !encounters.find((e) => e.id === body.encounter_id)) {
+					return { error: 'encounter not found' };
+				}
+				const d: Diagnosis = {
+					id: nextDiagnosisId++,
+					name: String(body.name),
+					icd10: body.icd10 || null,
+					status,
+					date_diagnosed: body.date_diagnosed || null,
+					date_resolved: body.date_resolved || null,
+					encounter_id: body.encounter_id ?? null,
+					severity: body.severity || null,
+					notes: body.notes || null,
+					created_at: new Date().toISOString(),
+				};
+				diagnoses.push(d);
+				return { status: 'ok', id: d.id };
+			}
+			const diagUpdMatch = url.match(/^\/istota\/api\/health\/diagnoses\/(\d+)$/);
+			if (diagUpdMatch && method === 'PUT') {
+				const id = Number(diagUpdMatch[1]);
+				const d = diagnoses.find((x) => x.id === id);
+				if (!d) return { error: 'diagnosis not found' };
+				const allowed = ['name', 'icd10', 'status', 'date_diagnosed', 'date_resolved', 'encounter_id', 'severity', 'notes'];
+				for (const k of allowed) {
+					if (body && k in body) (d as any)[k] = body[k];
+				}
+				return { status: 'ok' };
+			}
+			if (diagUpdMatch && method === 'DELETE') {
+				const id = Number(diagUpdMatch[1]);
+				const idx = diagnoses.findIndex((x) => x.id === id);
+				if (idx < 0) return { error: 'diagnosis not found' };
+				diagnoses.splice(idx, 1);
+				return { status: 'ok' };
+			}
+
+			// /history/summary
+			if (url === '/istota/api/health/history/summary' && method === 'GET') {
+				const oneYearAgo = new Date(Date.now() - 365 * 86400 * 1000)
+					.toISOString()
+					.slice(0, 10);
+				const fiveYearsAgo = new Date(Date.now() - 5 * 365 * 86400 * 1000)
+					.toISOString()
+					.slice(0, 10);
+				const active = diagnoses.filter((d) => d.status === 'active');
+				const chronic = diagnoses.filter((d) => d.status === 'chronic');
+				const recent = encounters
+					.filter((e) => e.encounter_date >= oneYearAgo)
+					.sort((a, b) => b.encounter_date.localeCompare(a.encounter_date));
+				const procs = encounters
+					.filter((e) => e.encounter_type === 'procedure' && e.encounter_date >= fiveYearsAgo)
+					.sort((a, b) => b.encounter_date.localeCompare(a.encounter_date))
+					.slice(0, 5);
+				return {
+					active_diagnoses: active,
+					chronic_diagnoses: chronic,
+					recent_encounters: recent,
+					recent_procedures: procs,
+				};
+			}
+
 			// /dashboard
 			if (url === '/istota/api/health/dashboard' && method === 'GET') {
 				const latest = latestByMetric();
@@ -1996,12 +2254,23 @@ const handlers: MockHandler[] = [
 					weight && settings.height_cm
 						? Math.round((weight.value / Math.pow(settings.height_cm / 100, 2)) * 100) / 100
 						: null;
+				const activeDiagCount =
+					diagnoses.filter((d) => d.status === 'active').length +
+					diagnoses.filter((d) => d.status === 'chronic').length;
+				const recentEncounters = [...encounters]
+					.sort(
+						(a, b) =>
+							b.encounter_date.localeCompare(a.encounter_date) || b.id - a.id,
+					)
+					.slice(0, 3);
 				return {
 					latest_stats: latest,
 					bmi,
 					recent_panels: recent,
 					alerts: flagged.slice(0, 20),
 					settings,
+					active_diagnoses_count: activeDiagCount,
+					recent_encounters: recentEncounters,
 				};
 			}
 

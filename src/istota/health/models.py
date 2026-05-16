@@ -96,6 +96,7 @@ class Panel:
     notes: str | None
     created_at: str = ""
     content_hash: str | None = None
+    encounter_id: int | None = None
 
 
 @dataclass
@@ -109,6 +110,33 @@ class Biomarker:
     ref_range_low: float | None
     ref_range_high: float | None
     flag: str | None
+    created_at: str = ""
+
+
+@dataclass
+class Encounter:
+    id: int
+    encounter_date: str
+    encounter_type: str
+    provider: str | None
+    facility: str | None
+    specialty: str | None
+    reason: str | None
+    notes: str | None
+    created_at: str = ""
+
+
+@dataclass
+class Diagnosis:
+    id: int
+    name: str
+    icd10: str | None
+    status: str
+    date_diagnosed: str | None
+    date_resolved: str | None
+    encounter_id: int | None
+    severity: str | None
+    notes: str | None
     created_at: str = ""
 
 
