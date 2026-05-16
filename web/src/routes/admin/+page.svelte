@@ -203,7 +203,7 @@
 	</header>
 
 	{#if loading && !stats}
-		<div class="placeholder">Loading…</div>
+		<div class="loading">Loading…</div>
 	{:else if error}
 		<div class="banner error">{error}</div>
 	{:else if stats}
