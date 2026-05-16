@@ -345,7 +345,7 @@
 </div>
 
 {#if loading}
-	<div class="empty">Loading…</div>
+	<div class="loading">Loading…</div>
 {:else if error}
 	<div class="msg error">{error}</div>
 {:else if metricsToShow().length === 0 && !hasBp()}
