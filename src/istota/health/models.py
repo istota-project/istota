@@ -24,6 +24,26 @@ STAT_METRICS: dict[str, str] = {
     "body_temp": "°C",
     "respiratory_rate": "brpm",
     "blood_oxygen": "%",
+    # Garmin-sourced daily summaries (source='garmin' on the row).
+    # Keys mirror the spec's daily-summary contract; values stay in
+    # canonical units so the existing dashboard / display layer renders
+    # them without special casing.
+    "sleep_duration_min": "min",
+    "sleep_score": "score",
+    "sleep_deep_min": "min",
+    "sleep_light_min": "min",
+    "sleep_rem_min": "min",
+    "sleep_awake_min": "min",
+    "stress_avg": "score",
+    "stress_max": "score",
+    "body_battery_high": "score",
+    "body_battery_low": "score",
+    "steps": "steps",
+    "active_calories": "kcal",
+    "spo2_avg": "%",
+    "hrv_status": "ms",
+    "vo2_max": "ml/kg/min",
+    "respiration_avg": "brpm",
 }
 
 

@@ -250,6 +250,27 @@ def list_stats(
     return [_row_to_stat(r) for r in rows]
 
 
+def stat_exists_for_source(
+    conn: sqlite3.Connection,
+    *,
+    metric: str,
+    measured_at: str,
+    source: str,
+) -> bool:
+    """Has a row with this (metric, measured_at, source) already been written?
+
+    Used by source-tagged sync engines (e.g. Garmin daily summaries) to
+    dedup before insert. No unique constraint exists on these columns —
+    the check is application-layer.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM stats "
+        "WHERE metric = ? AND measured_at = ? AND source = ? LIMIT 1",
+        (metric, measured_at, source),
+    ).fetchone()
+    return row is not None
+
+
 def latest_stats(conn: sqlite3.Connection) -> dict[str, Stat]:
     """Latest stat per metric. Maps metric → :class:`Stat`."""
     rows = conn.execute(

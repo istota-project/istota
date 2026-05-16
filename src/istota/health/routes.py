@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from istota.health import db as health_db
 from istota.health import garmin as health_garmin
+from istota.health import garmin_sync as health_garmin_sync
 from istota.health._loader import UserNotFoundError, resolve_for_user
 from istota.health._migrate import ensure_initialised
 from istota.health.models import HealthContext
@@ -1256,5 +1257,28 @@ async def api_garmin_disconnect(
     def _do():
         with health_db.connect(ctx.db_path) as conn:
             return health_garmin.disconnect(conn, user_id=user_id)
+
+    return await asyncio.to_thread(_do)
+
+
+@router.post("/garmin/sync")
+async def api_garmin_sync(
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body: dict = {}
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        body = {}
+    days_back = body.get("days_back", 7) if isinstance(body, dict) else 7
+    try:
+        days_back = max(1, min(90, int(days_back)))
+    except (TypeError, ValueError):
+        days_back = 7
+
+    def _do():
+        return health_garmin_sync.sync_garmin(ctx, days_back=days_back).to_dict()
 
     return await asyncio.to_thread(_do)
