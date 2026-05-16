@@ -204,13 +204,6 @@ CREATE TABLE IF NOT EXISTS immunization_refs (
     typical_age_range TEXT
 );
 
-CREATE TABLE IF NOT EXISTS immunization_explainers (
-    name TEXT NOT NULL,
-    status TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (name, status)
-);
 """
 
 
@@ -1602,47 +1595,3 @@ def find_immunization_ref_by_alias(
     return None
 
 
-# -- immunization_explainers -------------------------------------------------
-
-
-def get_immunization_explainer(
-    conn: sqlite3.Connection, name: str, status: str,
-) -> dict | None:
-    row = conn.execute(
-        """
-        SELECT name, status, payload, created_at
-        FROM immunization_explainers WHERE name = ? AND status = ?
-        """,
-        (name, status),
-    ).fetchone()
-    if not row:
-        return None
-    try:
-        payload = json.loads(row["payload"] or "{}")
-    except (ValueError, TypeError):
-        payload = {}
-    return {
-        "name": row["name"],
-        "status": row["status"],
-        "payload": payload,
-        "created_at": row["created_at"],
-    }
-
-
-def save_immunization_explainer(
-    conn: sqlite3.Connection,
-    *,
-    name: str,
-    status: str,
-    payload: dict,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO immunization_explainers(name, status, payload)
-        VALUES (?, ?, ?)
-        ON CONFLICT(name, status) DO UPDATE SET
-            payload = excluded.payload,
-            created_at = datetime('now')
-        """,
-        (name, status, json.dumps(payload or {})),
-    )

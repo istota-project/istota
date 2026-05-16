@@ -203,28 +203,30 @@ class TestImportImmunizations:
 
 
 class TestExplainImmunization:
-    def test_skipped_for_up_to_date(self, ready):
+    def test_static_for_up_to_date(self, ready):
         _, env = ready
         _run([
             "add-immunization", "--name", "Influenza",
             "--date", "2026-05-01",
         ], env)
         out = _run(["explain-immunization", "Influenza"], env)
-        # Recently dosed Influenza → up_to_date → skipped explainer.
-        assert out["source"] == "skipped"
+        # Curated content shows regardless of coverage status now.
+        assert out["source"] == "static"
+        assert out["summary"]
 
-    def test_fallback_when_brain_unavailable(self, ready):
+    def test_static_payload_for_eligible_vaccine(self, ready):
         _, env = ready
         _run([
             "add-immunization", "--name", "Tdap",
             "--date", "2005-01-01",
         ], env)
         out = _run(["explain-immunization", "Tdap"], env)
-        # Overdue Tdap → eligible → no brain in CLI → fallback.
-        assert out["source"] == "fallback"
+        # Overdue Tdap → eligible → served from bundled static JSON.
+        assert out["source"] == "static"
         assert out["status"] == "overdue"
+        assert out["summary"]
         assert out["why_it_matters"]
-        assert out["considerations"]
+        assert "considerations" not in out
 
     def test_unknown_vaccine_fails(self, ready):
         _, env = ready

@@ -478,33 +478,35 @@ class TestDashboardAndSummary:
 
 
 class TestExplainerRoute:
-    def test_explainer_skipped_for_up_to_date(self, client):
-        # No special status → not overdue / series_incomplete / etc.
-        # An up_to_date or risk_based vaccine returns source="skipped".
+    def test_explainer_returned_for_up_to_date(self, client):
+        # Status no longer gates the explainer — curated content shows
+        # regardless of coverage status.
         client.post("/istota/api/health/immunizations", json={
             "name": "Influenza",
-            "date_given": "2026-05-01",  # very recent, well within window
+            "date_given": "2026-05-01",
         })
         resp = client.get(
             "/istota/api/health/immunizations/Influenza/explainer",
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["source"] == "skipped"
+        assert body["source"] == "static"
+        assert body["summary"]
+        assert body["why_it_matters"]
 
-    def test_explainer_returns_fallback_when_brain_unavailable(self, client):
-        # No config wired in the test app → _call_brain returns None → fallback.
+    def test_explainer_returns_static_for_actionable_status(self, client):
         client.post("/istota/api/health/immunizations", json={
             "name": "Tdap", "date_given": "2005-01-01",
         })
         resp = client.get("/istota/api/health/immunizations/Tdap/explainer")
         assert resp.status_code == 200
         body = resp.json()
-        # Status is overdue → eligible for explainer → falls back since no brain.
-        assert body["source"] == "fallback"
+        assert body["source"] == "static"
         assert body["status"] == "overdue"
+        assert body["summary"]
         assert isinstance(body["why_it_matters"], list)
-        assert isinstance(body["considerations"], list)
+        assert body["why_it_matters"]
+        assert "considerations" not in body
         assert body["disclaimer"]
 
     def test_explainer_unknown_vaccine_404(self, client):
@@ -514,42 +516,26 @@ class TestExplainerRoute:
         assert resp.status_code == 404
 
 
-class TestExplainerParsing:
-    def test_parse_strict_json(self):
-        from istota.health.immunization_explainer import _parse_response
+class TestStaticExplainerData:
+    def test_data_loads(self):
+        from istota.health.immunization_explainer import _load_explainers
 
-        raw = (
-            '{"summary": "x", "why_it_matters": ["a", "b"], '
-            '"considerations": ["c", "d"]}'
-        )
-        out = _parse_response(raw)
-        assert out is not None
-        assert out["summary"] == "x"
-        assert out["why_it_matters"] == ["a", "b"]
-        assert out["considerations"] == ["c", "d"]
+        _load_explainers.cache_clear()
+        data = _load_explainers()
+        assert data, "bundled explainer JSON should not be empty"
+        # Every entry shipped must have non-empty summary + non-empty why bullets.
+        for name, entry in data.items():
+            assert entry["summary"], f"{name} has empty summary"
+            assert entry["why_it_matters"], f"{name} has empty why_it_matters"
 
-    def test_parse_with_code_fences(self):
-        from istota.health.immunization_explainer import _parse_response
+    def test_covers_all_refs(self):
+        """Every vaccine in the canonical refs should have a curated
+        explainer entry — the UI shows the section for all of them now."""
+        from istota.health._migrate import _read_bundled_immunization_refs
+        from istota.health.immunization_explainer import _load_explainers
 
-        raw = (
-            "```json\n"
-            '{"summary": "x", "why_it_matters": ["a"], "considerations": ["c"]}\n'
-            "```"
-        )
-        assert _parse_response(raw) is not None
-
-    def test_parse_rejects_missing_fields(self):
-        from istota.health.immunization_explainer import _parse_response
-
-        assert _parse_response('{"summary": "x"}') is None
-        assert _parse_response('{"why_it_matters": ["a"]}') is None
-        assert _parse_response("not json at all") is None
-
-    def test_parse_rejects_non_list_arrays(self):
-        from istota.health.immunization_explainer import _parse_response
-
-        raw = (
-            '{"summary": "x", "why_it_matters": "a single string", '
-            '"considerations": ["c"]}'
-        )
-        assert _parse_response(raw) is None
+        _load_explainers.cache_clear()
+        refs = _read_bundled_immunization_refs() or []
+        explainers = _load_explainers()
+        missing = [r["name"] for r in refs if r["name"] not in explainers]
+        assert not missing, f"missing static explainer for: {missing}"

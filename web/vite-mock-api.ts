@@ -40,6 +40,25 @@ const IMMUNIZATION_REFS: Array<{
 		return [];
 	}
 })();
+const IMMUNIZATION_EXPLAINERS: Record<string, { summary: string; why_it_matters: string[] }> = (() => {
+	try {
+		const path = resolve(__mockDir, '../src/istota/health/data/immunization_explainers.json');
+		const raw = JSON.parse(readFileSync(path, 'utf-8')) as any[];
+		const out: Record<string, { summary: string; why_it_matters: string[] }> = {};
+		for (const e of raw) {
+			if (!e || typeof e.name !== 'string') continue;
+			out[e.name] = {
+				summary: typeof e.summary === 'string' ? e.summary : '',
+				why_it_matters: Array.isArray(e.why_it_matters)
+					? e.why_it_matters.filter((w: unknown): w is string => typeof w === 'string' && w.trim().length > 0)
+					: [],
+			};
+		}
+		return out;
+	} catch {
+		return {};
+	}
+})();
 const BIOMARKER_REFS: Array<{
 	name: string;
 	display_name: string;
@@ -2564,31 +2583,25 @@ const handlers: MockHandler[] = [
 					if (!ref) return { error: 'vaccine not found' };
 					const cov = _computeCoverage().coverage.find((c) => c.name === ref.name);
 					const status = cov?.status || 'never_recorded';
-					const explainable = ['overdue', 'never_recorded', 'series_incomplete', 'expired'].includes(status);
-					if (!explainable || !['routine', 'booster'].includes(ref.category)) {
+					const disclaimer = 'Educational information only — not medical advice or diagnosis. Discuss vaccination decisions with your clinician.';
+					const data = IMMUNIZATION_EXPLAINERS[ref.name];
+					if (!data) {
 						return {
 							name: ref.name, display_name: ref.display_name, status,
-							summary: '', why_it_matters: [], considerations: [],
-							disclaimer: '', source: 'skipped', generated_at: null,
+							summary: `${ref.display_name} is recommended for many adults; the current coverage indicator shows that records or doses may be incomplete. Confirm your history and the current recommended schedule with a clinician.`,
+							why_it_matters: [],
+							disclaimer, source: 'fallback', generated_at: null,
 						};
 					}
 					return {
 						name: ref.name,
 						display_name: ref.display_name,
 						status,
-						summary: `${ref.display_name} is a vaccine for which your current coverage shows as ${status.replace('_', ' ')}. Records can lag, and what's recommended depends on your personal medical history.`,
-						why_it_matters: [
-							'Vaccines provide protection against infections that can have serious complications.',
-							'Coverage gaps often reflect missing records rather than missed doses — verify before scheduling.',
-							'Risk varies by age, occupation, travel plans, and underlying conditions.',
-						],
-						considerations: [
-							'Discuss whether you are due with your clinician at your next visit.',
-							'Pull records from past providers or your state immunization registry if available.',
-							'Review contraindications and timing with your provider before booking.',
-						],
-						disclaimer: 'Educational information only — not medical advice or diagnosis. Discuss vaccination decisions with your clinician.',
-						source: 'fallback', generated_at: null,
+						summary: data.summary,
+						why_it_matters: data.why_it_matters,
+						disclaimer,
+						source: 'static',
+						generated_at: null,
 					};
 				}
 				if (url.startsWith('/istota/api/health/immunizations') && method === 'GET') {

@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import {
@@ -23,33 +22,40 @@
 	let explainer: ImmunizationExplainer | null = $state(null);
 	let explainerLoading = $state(false);
 
+	let loadToken = 0;
+
 	async function load() {
 		if (!name) return;
+		const token = ++loadToken;
 		loading = true;
 		error = '';
+		explainer = null;
 		try {
 			const [refResp, cov, hist] = await Promise.all([
 				listImmunizationRefs(),
 				getImmunizationCoverage(),
 				listImmunizations({ name, limit: 200 }),
 			]);
+			if (token !== loadToken) return;
 			ref = refResp.refs.find((r) => r.name === name) ?? null;
 			entry = cov.coverage.find((c) => c.name === name) ?? null;
 			history = hist.immunizations;
 		} catch (e) {
+			if (token !== loadToken) return;
 			error = e instanceof Error ? e.message : 'Failed to load';
 		} finally {
-			loading = false;
+			if (token === loadToken) loading = false;
 		}
 
-		if (entry) {
+		if (entry && token === loadToken) {
 			explainerLoading = true;
 			try {
-				explainer = await getImmunizationExplainer(name);
+				const next = await getImmunizationExplainer(name);
+				if (token === loadToken) explainer = next;
 			} catch {
-				explainer = null;
+				// Leave whatever was last successfully loaded in place.
 			} finally {
-				explainerLoading = false;
+				if (token === loadToken) explainerLoading = false;
 			}
 		}
 	}
@@ -83,10 +89,6 @@
 	}
 
 	$effect(() => {
-		if (name) load();
-	});
-
-	onMount(() => {
 		if (name) load();
 	});
 </script>
@@ -145,30 +147,27 @@
 			<h2>About this vaccine</h2>
 			<p class="muted">Loading…</p>
 		</section>
-	{:else if explainer && explainer.source !== 'skipped'}
-		<section class="card explainer">
-			<h2>About this vaccine</h2>
-			<p class="summary">{explainer.summary}</p>
-			{#if explainer.why_it_matters.length > 0}
-				<h3>Why it matters</h3>
-				<ul>
-					{#each explainer.why_it_matters as item (item)}
-						<li>{item}</li>
-					{/each}
-				</ul>
-			{/if}
-			{#if explainer.considerations.length > 0}
-				<h3>Things to consider</h3>
-				<ul>
-					{#each explainer.considerations as item (item)}
-						<li>{item}</li>
-					{/each}
-				</ul>
-			{/if}
-			{#if explainer.disclaimer}
-				<p class="disclaimer">{explainer.disclaimer}</p>
-			{/if}
-		</section>
+	{:else if explainer && explainer.summary}
+		<details class="card explainer">
+			<summary>
+				<span class="label">About this vaccine</span>
+				<span class="chev" aria-hidden="true">›</span>
+			</summary>
+			<div class="content">
+				<p class="summary">{explainer.summary}</p>
+				{#if explainer.why_it_matters.length > 0}
+					<h3>Why it matters</h3>
+					<ul>
+						{#each explainer.why_it_matters as item (item)}
+							<li>{item}</li>
+						{/each}
+					</ul>
+				{/if}
+				{#if explainer.disclaimer}
+					<p class="disclaimer">{explainer.disclaimer}</p>
+				{/if}
+			</div>
+		</details>
 	{/if}
 
 	<section class="history">
@@ -292,6 +291,45 @@
 		letter-spacing: 0.05em;
 		color: var(--text-dim);
 		font-weight: 500;
+	}
+	details.explainer {
+		padding: 0;
+	}
+	details.explainer > summary {
+		list-style: none;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.7rem 1rem;
+		user-select: none;
+	}
+	details.explainer > summary::-webkit-details-marker {
+		display: none;
+	}
+	details.explainer > summary .label {
+		font-size: var(--text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--text-dim);
+		font-weight: 500;
+	}
+	details.explainer > summary .chev {
+		color: var(--text-dim);
+		font-size: 1rem;
+		line-height: 1;
+		transition: transform 0.15s ease;
+	}
+	details.explainer[open] > summary .chev {
+		transform: rotate(90deg);
+	}
+	details.explainer:hover > summary .label,
+	details.explainer:hover > summary .chev {
+		color: var(--text-muted);
+	}
+	details.explainer > .content {
+		padding: 0.6rem 1rem 0.85rem;
 	}
 	.explainer h3 {
 		margin: 0.85rem 0 0.35rem;
