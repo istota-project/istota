@@ -36,6 +36,12 @@
 					<div class="feature-desc">Accounts, transactions, and reports</div>
 				</a>
 			{/if}
+			{#if user.features.health}
+				<a href="{base}/health" class="feature-card">
+					<div class="feature-title">Health</div>
+					<div class="feature-desc">Body stats, bloodwork, and biomarker trends</div>
+				</a>
+			{/if}
 		</div>
 	{/if}
 </div>
