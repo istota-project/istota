@@ -931,6 +931,335 @@ def cmd_history_summary(args: argparse.Namespace) -> None:
     })
 
 
+def _immunization_to_dict(i) -> dict:
+    return {
+        "id": i.id,
+        "name": i.name,
+        "product_name": i.product_name,
+        "date_given": i.date_given,
+        "manufacturer": i.manufacturer,
+        "dose_label": i.dose_label,
+        "lot_number": i.lot_number,
+        "route": i.route,
+        "site": i.site,
+        "administered_by": i.administered_by,
+        "facility": i.facility,
+        "encounter_id": i.encounter_id,
+        "cvx_code": i.cvx_code,
+        "notes": i.notes,
+        "source": i.source,
+        "created_at": i.created_at,
+    }
+
+
+def _coverage_to_dict(c) -> dict:
+    return {
+        "name": c.name,
+        "display_name": c.display_name,
+        "category": c.category,
+        "status": c.status,
+        "last_given": c.last_given,
+        "dose_count": c.dose_count,
+        "next_due": c.next_due,
+        "is_overdue": c.is_overdue,
+        "days_until_due": c.days_until_due,
+    }
+
+
+def cmd_immunizations(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        rows = health_db.list_immunizations(
+            conn,
+            name=args.name,
+            since=args.since,
+            until=args.until,
+            limit=args.limit,
+        )
+    finally:
+        conn.close()
+    _emit({"immunizations": [_immunization_to_dict(r) for r in rows]})
+
+
+def cmd_immunization(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        row = health_db.get_immunization(conn, args.id)
+        if not row:
+            _fail(f"immunization {args.id} not found")
+        encounter = None
+        if row.encounter_id is not None:
+            encounter = health_db.get_encounter(conn, row.encounter_id)
+    finally:
+        conn.close()
+    _emit({
+        "immunization": _immunization_to_dict(row),
+        "encounter": _encounter_to_dict(encounter) if encounter else None,
+    })
+
+
+_IMMUNIZATION_FIELDS = (
+    "product_name", "manufacturer", "dose_label", "lot_number", "route",
+    "site", "administered_by", "facility", "cvx_code", "notes",
+)
+
+
+def cmd_add_immunization(args: argparse.Namespace) -> None:
+    op = {
+        "op": "insert_immunization",
+        "dedup_key": uuid.uuid4().hex,
+        "name": args.name,
+        "date_given": args.date,
+    }
+    for k in _IMMUNIZATION_FIELDS:
+        v = getattr(args, k.replace("-", "_"), None)
+        if v is not None:
+            op[k] = v
+    if getattr(args, "encounter_id", None) is not None:
+        op["encounter_id"] = int(args.encounter_id)
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        kwargs = {k: op[k] for k in op if k not in ("op", "dedup_key")}
+        iid = health_db.insert_immunization(conn, **kwargs)
+        conn.commit()
+    finally:
+        conn.close()
+    _emit({"status": "ok", "id": iid})
+
+
+def cmd_update_immunization(args: argparse.Namespace) -> None:
+    updates: dict = {}
+    for k in ("name", "date_given") + _IMMUNIZATION_FIELDS:
+        attr = k.replace("-", "_")
+        v = getattr(args, attr, None)
+        if v is not None:
+            updates[k] = v
+    if getattr(args, "encounter_id", None) is not None:
+        updates["encounter_id"] = int(args.encounter_id)
+    if not updates:
+        _fail("no fields to update")
+    op = {"op": "update_immunization", "immunization_id": args.id, **updates}
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.update_immunization(conn, args.id, **updates)
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"immunization {args.id} not found")
+    _emit({"status": "ok"})
+
+
+def cmd_delete_immunization(args: argparse.Namespace) -> None:
+    op = {"op": "delete_immunization", "immunization_id": args.id}
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.delete_immunization(conn, args.id)
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"immunization {args.id} not found")
+    _emit({"status": "ok"})
+
+
+def cmd_vaccine_refs(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        refs = health_db.list_immunization_refs(conn)
+    finally:
+        conn.close()
+    _emit({"refs": [
+        {
+            "name": r.name,
+            "display_name": r.display_name,
+            "category": r.category,
+            "schedule": r.schedule,
+            "interval_days": r.interval_days,
+            "primary_series_doses": r.primary_series_doses,
+            "aliases": r.aliases,
+            "description": r.description,
+            "typical_age_range": r.typical_age_range,
+        }
+        for r in refs
+    ]})
+
+
+def cmd_coverage(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+    from istota.health.immunizations import compute_coverage
+
+    conn = _connect()
+    try:
+        refs = health_db.list_immunization_refs(conn)
+        rows = health_db.list_immunizations(conn, limit=5000)
+    finally:
+        conn.close()
+    coverage = compute_coverage(refs, rows)
+    if args.due_soon:
+        coverage = [c for c in coverage if c.status == "due_soon"]
+    if args.overdue:
+        coverage = [c for c in coverage if c.status == "overdue"]
+    _emit({"coverage": [_coverage_to_dict(c) for c in coverage]})
+
+
+def cmd_import_immunizations(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+    from istota.health.parser import parse_paste
+
+    raw = args.paste
+    if raw.startswith("@"):
+        # @path means: read the paste from this file.
+        src = Path(raw[1:])
+        if not src.is_file():
+            _fail(f"paste file not found: {src}")
+        raw = src.read_text(encoding="utf-8")
+
+    conn = _connect()
+    try:
+        refs = health_db.list_immunization_refs(conn)
+    finally:
+        conn.close()
+    parsed = parse_paste(raw, refs)
+    rows = [
+        {
+            "name": r.name,
+            "product_name": r.product_name,
+            "date_given": r.date_given,
+            "source_line": r.source_line,
+            "confidence": r.confidence,
+            "notes": r.notes,
+        }
+        for r in parsed
+    ]
+    if args.dry_run:
+        _emit({"status": "ok", "dry_run": True, "rows": rows})
+        return
+    if not args.confirm:
+        _fail("import requires either --dry-run or --confirm")
+
+    # Reject rows without a date — they need user confirmation in the web
+    # UI before writing.
+    missing_date = [
+        i for i, r in enumerate(rows) if not r["date_given"]
+    ]
+    if missing_date:
+        _fail(
+            f"{len(missing_date)} row(s) missing date_given — "
+            "add --dry-run, fix the source, and retry"
+        )
+
+    op = {
+        "op": "bulk_insert_immunizations",
+        "dedup_key_prefix": uuid.uuid4().hex,
+        "rows": rows,
+    }
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "count": len(rows)})
+        return
+    conn = _connect()
+    try:
+        ids: list[int] = []
+        for i, r in enumerate(rows):
+            iid = health_db.insert_immunization(
+                conn,
+                name=r["name"],
+                date_given=r["date_given"],
+                product_name=r.get("product_name"),
+                notes=r.get("notes"),
+                source="import",
+                dedup_key=f"{op['dedup_key_prefix']}:{i}",
+            )
+            ids.append(iid)
+        conn.commit()
+    finally:
+        conn.close()
+    _emit({"status": "ok", "ids": ids, "count": len(ids)})
+
+
+def cmd_explain_immunization(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+    from istota.health.immunization_explainer import (
+        EXPLAINABLE_STATUSES, get_or_generate,
+    )
+    from istota.health.immunizations import compute_coverage
+
+    # Skill CLI runs without the FastAPI app context — config is unavailable
+    # so the brain call will fall through to the fallback. The Talk path
+    # uses the web/API explainer instead.
+    config = None
+
+    conn = _connect()
+    try:
+        ref = health_db.find_immunization_ref_by_alias(conn, args.name)
+        if ref is None:
+            _fail(f"vaccine {args.name!r} not found in canonical refs")
+        refs = health_db.list_immunization_refs(conn)
+        rows = health_db.list_immunizations(conn, limit=5000)
+    finally:
+        conn.close()
+    coverage = compute_coverage(refs, rows)
+    entry = next((c for c in coverage if c.name == ref.name), None)
+    status = entry.status if entry else "never_recorded"
+    if status not in EXPLAINABLE_STATUSES or ref.category not in {
+        "routine", "booster",
+    }:
+        _emit({
+            "name": ref.name,
+            "display_name": ref.display_name,
+            "status": status,
+            "source": "skipped",
+            "summary": "",
+            "why_it_matters": [],
+            "considerations": [],
+        })
+        return
+
+    # Build a minimal context to call get_or_generate.
+    from istota.health.models import HealthContext
+
+    db_path = Path(_db_path())
+    ctx = HealthContext(
+        user_id=os.environ.get("ISTOTA_USER_ID", ""),
+        workspace_root=db_path.parent.parent,
+        data_dir=db_path.parent,
+        db_path=db_path,
+        uploads_dir=db_path.parent / "uploads",
+    )
+    result = get_or_generate(
+        ctx,
+        name=ref.name,
+        display_name=ref.display_name,
+        status=status,
+        category=ref.category,
+        schedule=ref.schedule,
+        typical_age_range=ref.typical_age_range,
+        config=config,
+    )
+    _emit(result)
+
+
 def cmd_settings(args: argparse.Namespace) -> None:
     from istota.health import db as health_db
 
@@ -1172,6 +1501,80 @@ def build_parser() -> argparse.ArgumentParser:
         help="New-doctor packet: active conditions + recent encounters",
     )
 
+    imms = sub.add_parser("immunizations", help="List immunization records")
+    imms.add_argument("--name", default=None)
+    imms.add_argument("--since", default=None)
+    imms.add_argument("--until", default=None)
+    imms.add_argument("--limit", type=int, default=200)
+
+    imm_one = sub.add_parser("immunization", help="Show a single immunization")
+    imm_one.add_argument("id", type=int)
+
+    add_imm = sub.add_parser("add-immunization", help="Record an immunization")
+    add_imm.add_argument("--name", required=True,
+                         help="Vaccine canonical name (e.g. Influenza, Tdap)")
+    add_imm.add_argument("--date", required=True, help="ISO date YYYY-MM-DD")
+    add_imm.add_argument("--product-name", dest="product_name", default=None)
+    add_imm.add_argument("--manufacturer", default=None)
+    add_imm.add_argument("--dose-label", dest="dose_label", default=None)
+    add_imm.add_argument("--lot-number", dest="lot_number", default=None)
+    add_imm.add_argument("--route", default=None,
+                         help="IM | SC | oral | nasal")
+    add_imm.add_argument("--site", default=None)
+    add_imm.add_argument("--administered-by", dest="administered_by",
+                         default=None)
+    add_imm.add_argument("--facility", default=None)
+    add_imm.add_argument("--encounter-id", dest="encounter_id", default=None)
+    add_imm.add_argument("--cvx-code", dest="cvx_code", default=None)
+    add_imm.add_argument("--notes", default=None)
+
+    upd_imm = sub.add_parser(
+        "update-immunization", help="Update an immunization",
+    )
+    upd_imm.add_argument("id", type=int)
+    upd_imm.add_argument("--name", default=None)
+    upd_imm.add_argument("--date", dest="date_given", default=None)
+    upd_imm.add_argument("--product-name", dest="product_name", default=None)
+    upd_imm.add_argument("--manufacturer", default=None)
+    upd_imm.add_argument("--dose-label", dest="dose_label", default=None)
+    upd_imm.add_argument("--lot-number", dest="lot_number", default=None)
+    upd_imm.add_argument("--route", default=None)
+    upd_imm.add_argument("--site", default=None)
+    upd_imm.add_argument("--administered-by", dest="administered_by",
+                         default=None)
+    upd_imm.add_argument("--facility", default=None)
+    upd_imm.add_argument("--encounter-id", dest="encounter_id", default=None)
+    upd_imm.add_argument("--cvx-code", dest="cvx_code", default=None)
+    upd_imm.add_argument("--notes", default=None)
+
+    del_imm = sub.add_parser(
+        "delete-immunization", help="Delete an immunization",
+    )
+    del_imm.add_argument("id", type=int)
+
+    sub.add_parser("vaccine-refs", help="Bundled canonical vaccine list")
+
+    cov = sub.add_parser(
+        "coverage", help="Coverage status per canonical vaccine",
+    )
+    cov.add_argument("--due-soon", action="store_true", dest="due_soon")
+    cov.add_argument("--overdue", action="store_true")
+
+    imp = sub.add_parser(
+        "import-immunizations",
+        help="Parse an EHR/MyChart paste; --dry-run previews, --confirm writes",
+    )
+    imp.add_argument("--paste", required=True,
+                     help="Multi-line paste; @PATH reads from a file")
+    imp.add_argument("--dry-run", action="store_true", dest="dry_run")
+    imp.add_argument("--confirm", action="store_true")
+
+    expl = sub.add_parser(
+        "explain-immunization",
+        help="Generate a vaccine educational explainer",
+    )
+    expl.add_argument("name", help="Vaccine name (canonical or alias)")
+
     sub.add_parser("garmin-status", help="Show Garmin Connect link status")
     g_sync = sub.add_parser("garmin-sync", help="Manually trigger a Garmin daily-summary sync")
     g_sync.add_argument("--days-back", dest="days_back", type=int, default=7)
@@ -1214,6 +1617,15 @@ def main() -> None:
         "garmin-status": cmd_garmin_status,
         "garmin-sync": cmd_garmin_sync,
         "garmin-disconnect": cmd_garmin_disconnect,
+        "immunizations": cmd_immunizations,
+        "immunization": cmd_immunization,
+        "add-immunization": cmd_add_immunization,
+        "update-immunization": cmd_update_immunization,
+        "delete-immunization": cmd_delete_immunization,
+        "vaccine-refs": cmd_vaccine_refs,
+        "coverage": cmd_coverage,
+        "import-immunizations": cmd_import_immunizations,
+        "explain-immunization": cmd_explain_immunization,
     }
 
     fn = commands.get(args.command)
