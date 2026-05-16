@@ -9,6 +9,23 @@ export const METRIC_LABELS: Record<string, string> = {
 	body_temp: 'Body Temp',
 	respiratory_rate: 'Respiratory Rate',
 	blood_oxygen: 'Blood O₂',
+	// Garmin daily-summary metrics
+	sleep_duration_min: 'Sleep duration',
+	sleep_score: 'Sleep score',
+	sleep_deep_min: 'Deep sleep',
+	sleep_light_min: 'Light sleep',
+	sleep_rem_min: 'REM sleep',
+	sleep_awake_min: 'Awake time',
+	stress_avg: 'Stress (avg)',
+	stress_max: 'Stress (max)',
+	body_battery_high: 'Body battery (high)',
+	body_battery_low: 'Body battery (low)',
+	steps: 'Steps',
+	active_calories: 'Active calories',
+	spo2_avg: 'SpO₂ (daily avg)',
+	hrv_status: 'HRV',
+	vo2_max: 'VO₂ max',
+	respiration_avg: 'Respiration (avg)',
 };
 
 export const METRIC_UNITS: Record<string, string> = {
@@ -20,6 +37,22 @@ export const METRIC_UNITS: Record<string, string> = {
 	body_temp: '°C',
 	respiratory_rate: 'brpm',
 	blood_oxygen: '%',
+	sleep_duration_min: 'min',
+	sleep_score: '',
+	sleep_deep_min: 'min',
+	sleep_light_min: 'min',
+	sleep_rem_min: 'min',
+	sleep_awake_min: 'min',
+	stress_avg: '',
+	stress_max: '',
+	body_battery_high: '',
+	body_battery_low: '',
+	steps: 'steps',
+	active_calories: 'kcal',
+	spo2_avg: '%',
+	hrv_status: 'ms',
+	vo2_max: 'ml/kg/min',
+	respiration_avg: 'brpm',
 };
 
 export function metricLabel(key: string): string {

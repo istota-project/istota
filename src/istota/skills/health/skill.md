@@ -1,7 +1,7 @@
 ---
 name: health
-triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2]
-description: Health tracking — body stats, bloodwork panels, biomarker trends, and lab result analysis.
+triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin]
+description: Health tracking — body stats, bloodwork panels, biomarker trends, lab analysis, and Garmin daily summaries.
 cli: true
 env: [{"var":"HEALTH_DB_PATH","from":"setup_env"}]
 ---
@@ -58,6 +58,11 @@ istota-skill health set height 178                         # cm; accepts "5ft10i
 istota-skill health set sex M
 istota-skill health set display.weight lb
 istota-skill health set display.temp F
+
+# Garmin (initial connect happens in the web UI — health settings page)
+istota-skill health garmin-status
+istota-skill health garmin-sync --days-back 7
+istota-skill health garmin-disconnect
 ```
 
 ## Metric keys
@@ -74,6 +79,17 @@ Canonical names (use these for `log`):
 | `body_temp` | `°C` | `°F` input is converted at log time |
 | `respiratory_rate` | `brpm` | |
 | `blood_oxygen` | `%` | SpO2 |
+| `sleep_duration_min` | `min` | Garmin daily; total sleep time |
+| `sleep_score` | `score` | Garmin daily; 0–100 composite |
+| `sleep_deep_min` / `sleep_light_min` / `sleep_rem_min` / `sleep_awake_min` | `min` | Garmin sleep stages |
+| `stress_avg` / `stress_max` | `score` | Garmin daily 0–100 |
+| `body_battery_high` / `body_battery_low` | `score` | Garmin daily 0–100 |
+| `steps` | `steps` | Garmin daily total |
+| `active_calories` | `kcal` | Garmin (excl. BMR) |
+| `spo2_avg` | `%` | Garmin overnight average |
+| `hrv_status` | `ms` | Garmin RMSSD |
+| `vo2_max` | `ml/kg/min` | Garmin estimate |
+| `respiration_avg` | `brpm` | Garmin waking average |
 
 Height is **not** a stat — it's a single value in `settings` (`health set height …`). BMI is derived on read from latest weight + settings height.
 
@@ -96,6 +112,10 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 | "Show me my bloodwork history" | `panels` |
 | "Any biomarkers out of range?" | `summary` — surface entries from `alerts` |
 | "Here are my lab results" (+ image) | OCR via `transcribe`/`whisper`, then `add-panel` + `add-biomarker` per row |
+| "Sync my Garmin data" | `garmin-sync --days-back 7` |
+| "Is my Garmin connected?" | `garmin-status` |
+| "How did I sleep last night?" | `latest` — read `sleep_duration_min` / `sleep_score` from Garmin rows |
+| "Steps yesterday?" | `stats --metric steps --limit 1` |
 
 When the user uploads a photo or PDF of a lab report through the web UI, the upload pipeline runs the OCR + LLM extraction automatically and the user confirms the extraction in the web UI. From a Talk message with an image attachment, you can transcribe the image and call `add-panel` + `add-biomarker` directly, or recommend they upload via the web UI for the full review-and-edit flow.
 
