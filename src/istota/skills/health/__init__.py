@@ -28,6 +28,7 @@ import json
 import os
 import sqlite3
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -609,6 +610,327 @@ def cmd_garmin_disconnect(args: argparse.Namespace) -> None:
     _emit({"status": "ok"})
 
 
+def _encounter_to_dict(e) -> dict:
+    return {
+        "id": e.id,
+        "encounter_date": e.encounter_date,
+        "encounter_type": e.encounter_type,
+        "provider": e.provider,
+        "facility": e.facility,
+        "specialty": e.specialty,
+        "reason": e.reason,
+        "notes": e.notes,
+    }
+
+
+def _diagnosis_to_dict(d) -> dict:
+    return {
+        "id": d.id,
+        "name": d.name,
+        "icd10": d.icd10,
+        "status": d.status,
+        "date_diagnosed": d.date_diagnosed,
+        "date_resolved": d.date_resolved,
+        "encounter_id": d.encounter_id,
+        "severity": d.severity,
+        "notes": d.notes,
+    }
+
+
+def cmd_encounters(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        rows = health_db.list_encounters(
+            conn,
+            since=args.since,
+            until=args.until,
+            encounter_type=args.type,
+            limit=args.limit,
+        )
+    finally:
+        conn.close()
+    _emit({"encounters": [_encounter_to_dict(e) for e in rows]})
+
+
+def cmd_encounter(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        enc = health_db.get_encounter(conn, args.id)
+        if not enc:
+            _fail(f"encounter {args.id} not found")
+        diagnoses = health_db.diagnoses_for_encounter(conn, args.id)
+        panels = health_db.panels_for_encounter(conn, args.id)
+    finally:
+        conn.close()
+    _emit({
+        "encounter": _encounter_to_dict(enc),
+        "diagnoses": [_diagnosis_to_dict(d) for d in diagnoses],
+        "panels": [
+            {"id": p.id, "drawn_at": p.drawn_at, "lab_name": p.lab_name}
+            for p in panels
+        ],
+    })
+
+
+def cmd_add_encounter(args: argparse.Namespace) -> None:
+    op = {
+        "op": "insert_encounter",
+        # dedup_key makes replay-after-partial-success idempotent.
+        "dedup_key": uuid.uuid4().hex,
+        "encounter_date": args.date,
+        "encounter_type": args.type,
+        "provider": args.provider,
+        "facility": args.facility,
+        "specialty": args.specialty,
+        "reason": args.reason,
+        "notes": args.notes,
+    }
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        eid = health_db.insert_encounter(
+            conn,
+            encounter_date=args.date,
+            encounter_type=args.type,
+            provider=args.provider,
+            facility=args.facility,
+            specialty=args.specialty,
+            reason=args.reason,
+            notes=args.notes,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _emit({"status": "ok", "id": eid})
+
+
+_ENCOUNTER_UPDATE_KEYS = (
+    "encounter_date", "encounter_type", "provider", "facility",
+    "specialty", "reason", "notes",
+)
+
+
+def cmd_update_encounter(args: argparse.Namespace) -> None:
+    updates = {
+        k: getattr(args, k) for k in _ENCOUNTER_UPDATE_KEYS
+        if getattr(args, k, None) is not None
+    }
+    if not updates:
+        _fail("no fields to update")
+    op = {"op": "update_encounter", "encounter_id": args.id, **updates}
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.update_encounter(conn, args.id, **updates)
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"encounter {args.id} not found")
+    _emit({"status": "ok"})
+
+
+def cmd_delete_encounter(args: argparse.Namespace) -> None:
+    op = {"op": "delete_encounter", "encounter_id": args.id}
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.delete_encounter(conn, args.id)
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"encounter {args.id} not found")
+    _emit({"status": "ok"})
+
+
+def cmd_diagnoses(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        rows = health_db.list_diagnoses(
+            conn, status=args.status, limit=args.limit,
+        )
+    finally:
+        conn.close()
+    _emit({"diagnoses": [_diagnosis_to_dict(d) for d in rows]})
+
+
+def cmd_diagnosis(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        d = health_db.get_diagnosis(conn, args.id)
+        if not d:
+            _fail(f"diagnosis {args.id} not found")
+        linked = health_db.encounters_for_diagnosis(conn, args.id)
+    finally:
+        conn.close()
+    _emit({
+        "diagnosis": _diagnosis_to_dict(d),
+        "encounter": _encounter_to_dict(linked[0]) if linked else None,
+    })
+
+
+def cmd_add_diagnosis(args: argparse.Namespace) -> None:
+    op = {
+        "op": "insert_diagnosis",
+        "dedup_key": uuid.uuid4().hex,
+        "name": args.name,
+        "status": args.status,
+        "icd10": args.icd10,
+        "date_diagnosed": args.date_diagnosed,
+        "date_resolved": args.date_resolved,
+        "encounter_id": args.encounter_id,
+        "severity": args.severity,
+        "notes": args.notes,
+    }
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        did = health_db.insert_diagnosis(
+            conn,
+            name=args.name,
+            status=args.status,
+            icd10=args.icd10,
+            date_diagnosed=args.date_diagnosed,
+            date_resolved=args.date_resolved,
+            encounter_id=args.encounter_id,
+            severity=args.severity,
+            notes=args.notes,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _emit({"status": "ok", "id": did})
+
+
+_DIAGNOSIS_UPDATE_KEYS = (
+    "name", "icd10", "status", "date_diagnosed", "date_resolved",
+    "encounter_id", "severity", "notes",
+)
+
+
+def cmd_update_diagnosis(args: argparse.Namespace) -> None:
+    updates = {
+        k: getattr(args, k) for k in _DIAGNOSIS_UPDATE_KEYS
+        if getattr(args, k, None) is not None
+    }
+    if not updates:
+        _fail("no fields to update")
+    op = {"op": "update_diagnosis", "diagnosis_id": args.id, **updates}
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.update_diagnosis(conn, args.id, **updates)
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"diagnosis {args.id} not found")
+    _emit({"status": "ok"})
+
+
+def cmd_resolve_diagnosis(args: argparse.Namespace) -> None:
+    """Shorthand for ``update-diagnosis --status resolved --date-resolved …``."""
+    from datetime import date as _date
+
+    resolved_date = args.date or _date.today().isoformat()
+    op = {
+        "op": "update_diagnosis",
+        "diagnosis_id": args.id,
+        "status": "resolved",
+        "date_resolved": resolved_date,
+    }
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.update_diagnosis(
+            conn, args.id,
+            status="resolved", date_resolved=resolved_date,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"diagnosis {args.id} not found")
+    _emit({"status": "ok", "id": args.id, "date_resolved": resolved_date})
+
+
+def cmd_delete_diagnosis(args: argparse.Namespace) -> None:
+    op = {"op": "delete_diagnosis", "diagnosis_id": args.id}
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.delete_diagnosis(conn, args.id)
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"diagnosis {args.id} not found")
+    _emit({"status": "ok"})
+
+
+def cmd_history_summary(args: argparse.Namespace) -> None:
+    from datetime import date as _date, timedelta as _td
+
+    from istota.health import db as health_db
+
+    one_year_ago = (_date.today() - _td(days=365)).isoformat()
+    conn = _connect()
+    try:
+        active = health_db.list_diagnoses(conn, status="active", limit=500)
+        chronic = health_db.list_diagnoses(conn, status="chronic", limit=500)
+        recent = health_db.list_encounters(
+            conn, since=one_year_ago, limit=500,
+        )
+        procedures = health_db.list_encounters(
+            conn, encounter_type="procedure", limit=5,
+        )
+    finally:
+        conn.close()
+    _emit({
+        "active_diagnoses": [_diagnosis_to_dict(d) for d in active],
+        "chronic_diagnoses": [_diagnosis_to_dict(d) for d in chronic],
+        "recent_encounters": [_encounter_to_dict(e) for e in recent],
+        "recent_procedures": [_encounter_to_dict(e) for e in procedures],
+    })
+
+
 def cmd_settings(args: argparse.Namespace) -> None:
     from istota.health import db as health_db
 
@@ -746,6 +1068,110 @@ def build_parser() -> argparse.ArgumentParser:
     set_p.add_argument("key", help="dob | height | sex | display.weight | display.height | display.temp")
     set_p.add_argument("value")
 
+    # -- encounters & diagnoses --------------------------------------------
+    encs = sub.add_parser("encounters", help="List medical encounters")
+    encs.add_argument("--since")
+    encs.add_argument("--until")
+    encs.add_argument("--type")
+    encs.add_argument("--limit", type=int, default=50)
+
+    enc_show = sub.add_parser(
+        "encounter", help="Show a single encounter with linked diagnoses/panels",
+    )
+    enc_show.add_argument("id", type=int)
+
+    add_enc = sub.add_parser("add-encounter", help="Record a medical encounter")
+    add_enc.add_argument("--date", dest="date", required=True)
+    add_enc.add_argument(
+        "--type", dest="type", required=True,
+        help="visit | procedure | screening | hospitalization | er | "
+             "telehealth | imaging | dental | other",
+    )
+    add_enc.add_argument("--provider")
+    add_enc.add_argument("--facility")
+    add_enc.add_argument("--specialty")
+    add_enc.add_argument("--reason")
+    add_enc.add_argument("--notes")
+
+    upd_enc = sub.add_parser("update-encounter", help="Update an encounter")
+    upd_enc.add_argument("id", type=int)
+    upd_enc.add_argument(
+        "--date", dest="encounter_date",
+        help="New encounter date (YYYY-MM-DD)",
+    )
+    upd_enc.add_argument("--type", dest="encounter_type")
+    upd_enc.add_argument("--provider")
+    upd_enc.add_argument("--facility")
+    upd_enc.add_argument("--specialty")
+    upd_enc.add_argument("--reason")
+    upd_enc.add_argument("--notes")
+
+    del_enc = sub.add_parser("delete-encounter", help="Delete an encounter")
+    del_enc.add_argument("id", type=int)
+
+    diags = sub.add_parser("diagnoses", help="List diagnoses")
+    diags.add_argument(
+        "--status",
+        choices=["active", "resolved", "chronic", "all"],
+        default=None,
+    )
+    diags.add_argument("--limit", type=int, default=100)
+
+    diag_show = sub.add_parser(
+        "diagnosis", help="Show a single diagnosis with linked encounter",
+    )
+    diag_show.add_argument("id", type=int)
+
+    add_diag = sub.add_parser("add-diagnosis", help="Record a diagnosis")
+    add_diag.add_argument("name")
+    add_diag.add_argument(
+        "--status", choices=["active", "resolved", "chronic"], default="active",
+    )
+    add_diag.add_argument("--icd10")
+    add_diag.add_argument("--date-diagnosed", dest="date_diagnosed")
+    add_diag.add_argument("--date-resolved", dest="date_resolved")
+    add_diag.add_argument(
+        "--encounter-id", dest="encounter_id", type=int, default=None,
+    )
+    add_diag.add_argument(
+        "--severity", choices=["mild", "moderate", "severe"], default=None,
+    )
+    add_diag.add_argument("--notes")
+
+    upd_diag = sub.add_parser("update-diagnosis", help="Update a diagnosis")
+    upd_diag.add_argument("id", type=int)
+    upd_diag.add_argument("--name")
+    upd_diag.add_argument("--icd10")
+    upd_diag.add_argument(
+        "--status", choices=["active", "resolved", "chronic"], default=None,
+    )
+    upd_diag.add_argument("--date-diagnosed", dest="date_diagnosed")
+    upd_diag.add_argument("--date-resolved", dest="date_resolved")
+    upd_diag.add_argument(
+        "--encounter-id", dest="encounter_id", type=int, default=None,
+    )
+    upd_diag.add_argument(
+        "--severity", choices=["mild", "moderate", "severe"], default=None,
+    )
+    upd_diag.add_argument("--notes")
+
+    res_diag = sub.add_parser(
+        "resolve-diagnosis",
+        help="Mark a diagnosis resolved (shorthand for update-diagnosis)",
+    )
+    res_diag.add_argument("id", type=int)
+    res_diag.add_argument(
+        "--date", help="Resolution date (default: today)",
+    )
+
+    del_diag = sub.add_parser("delete-diagnosis", help="Delete a diagnosis")
+    del_diag.add_argument("id", type=int)
+
+    sub.add_parser(
+        "history-summary",
+        help="New-doctor packet: active conditions + recent encounters",
+    )
+
     sub.add_parser("garmin-status", help="Show Garmin Connect link status")
     g_sync = sub.add_parser("garmin-sync", help="Manually trigger a Garmin daily-summary sync")
     g_sync.add_argument("--days-back", dest="days_back", type=int, default=7)
@@ -773,6 +1199,18 @@ def main() -> None:
         "summary": cmd_summary,
         "settings": cmd_settings,
         "set": cmd_set,
+        "encounters": cmd_encounters,
+        "encounter": cmd_encounter,
+        "add-encounter": cmd_add_encounter,
+        "update-encounter": cmd_update_encounter,
+        "delete-encounter": cmd_delete_encounter,
+        "diagnoses": cmd_diagnoses,
+        "diagnosis": cmd_diagnosis,
+        "add-diagnosis": cmd_add_diagnosis,
+        "update-diagnosis": cmd_update_diagnosis,
+        "resolve-diagnosis": cmd_resolve_diagnosis,
+        "delete-diagnosis": cmd_delete_diagnosis,
+        "history-summary": cmd_history_summary,
         "garmin-status": cmd_garmin_status,
         "garmin-sync": cmd_garmin_sync,
         "garmin-disconnect": cmd_garmin_disconnect,

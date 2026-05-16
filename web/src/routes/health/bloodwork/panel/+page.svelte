@@ -7,9 +7,11 @@
 		deleteHealthPanel,
 		getHealthPanel,
 		healthPanelSourceUrl,
+		listEncounters,
 		saveHealthBiomarkers,
 		updateHealthPanel,
 		type Biomarker,
+		type Encounter,
 		type HealthPanel,
 	} from '$lib/api';
 
@@ -33,6 +35,12 @@
 	let editDrawnAt = $state('');
 	let editLabName = $state('');
 	let editPanelType = $state('');
+	// `''` means "no link"; numeric string is an encounter id. <select> binds
+	// to strings, so we round-trip through string for clean change detection.
+	let editEncounterId = $state('');
+
+	let encounters: Encounter[] = $state([]);
+	let encountersLoaded = $state(false);
 
 	function startEditing() {
 		if (!panel) return;
@@ -40,8 +48,34 @@
 		editDrawnAt = (panel.drawn_at || '').slice(0, 10);
 		editLabName = panel.lab_name || '';
 		editPanelType = panel.panel_type || '';
+		editEncounterId = panel.encounter_id == null ? '' : String(panel.encounter_id);
 		editing = true;
+		loadEncounters();
 	}
+
+	async function loadEncounters() {
+		if (encountersLoaded) return;
+		try {
+			const resp = await listEncounters({ limit: 200 });
+			encounters = resp.encounters;
+			encountersLoaded = true;
+		} catch {
+			// Non-fatal; the select will just be empty.
+		}
+	}
+
+	function encounterLabel(e: Encounter): string {
+		const parts = [e.encounter_date, e.encounter_type];
+		if (e.provider) parts.push(e.provider);
+		else if (e.facility) parts.push(e.facility);
+		return parts.join(' · ');
+	}
+
+	const linkedEncounter: Encounter | null = $derived.by(() => {
+		const p = panel;
+		if (!p || p.encounter_id == null) return null;
+		return encounters.find((e) => e.id === p.encounter_id) ?? null;
+	});
 
 	async function load() {
 		loading = true;
@@ -51,6 +85,9 @@
 			panel = resp.panel;
 			biomarkers = [...resp.biomarkers];
 			source = resp.source;
+			// Fetch encounters in the background so the read-mode label can
+			// resolve. Cheap; the list is small.
+			void loadEncounters();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load panel';
 		} finally {
@@ -67,7 +104,7 @@
 			// Only send header fields that actually changed; the API treats
 			// an explicit empty string as "set to null", which we want for
 			// the user clearing lab/panel_type but not as an accidental wipe.
-			const headerPatch: Record<string, string> = {};
+			const headerPatch: Record<string, unknown> = {};
 			if (editDrawnAt && editDrawnAt !== (panel.drawn_at || '').slice(0, 10)) {
 				headerPatch.drawn_at = editDrawnAt;
 			}
@@ -76,6 +113,10 @@
 			}
 			if (editPanelType !== (panel.panel_type || '')) {
 				headerPatch.panel_type = editPanelType;
+			}
+			const newEncounterId = editEncounterId === '' ? null : Number(editEncounterId);
+			if (newEncounterId !== (panel.encounter_id ?? null)) {
+				headerPatch.encounter_id = newEncounterId;
 			}
 			if (Object.keys(headerPatch).length > 0) {
 				await updateHealthPanel(id, headerPatch);
@@ -177,6 +218,15 @@
 							<span>Panel type</span>
 							<input type="text" bind:value={editPanelType} placeholder="CBC, CMP, Lipid, …" />
 						</label>
+						<label class="full-row">
+							<span>Linked encounter</span>
+							<select bind:value={editEncounterId}>
+								<option value="">— Not linked —</option>
+								{#each encounters as e (e.id)}
+									<option value={String(e.id)}>{encounterLabel(e)}</option>
+								{/each}
+							</select>
+						</label>
 					</div>
 				{:else}
 					<h1>
@@ -184,6 +234,14 @@
 						<span class="lab">· {panel.lab_name || 'Unknown lab'}</span>
 						{#if panel.panel_type}<span class="type">· {panel.panel_type}</span>{/if}
 					</h1>
+					{#if panel.encounter_id != null}
+						<div class="encounter-link">
+							<span class="encounter-label">Linked to encounter:</span>
+							<a href="{base}/health/history/encounter?id={panel.encounter_id}">
+								{linkedEncounter ? encounterLabel(linkedEncounter) : `#${panel.encounter_id}`}
+							</a>
+						</div>
+					{/if}
 				{/if}
 				{#if panel.draft}<span class="badge draft">DRAFT — review and confirm</span>{/if}
 			</div>
@@ -346,7 +404,8 @@
 		color: var(--text-muted);
 		font-size: var(--text-xs);
 	}
-	.header-edit input {
+	.header-edit input,
+	.header-edit select {
 		background: var(--surface-raised);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
@@ -355,6 +414,23 @@
 		font-size: var(--text-sm);
 		padding: 0.3rem 0.5rem;
 		min-width: 0;
+	}
+	.header-edit .full-row {
+		grid-column: 1 / -1;
+	}
+	.encounter-link {
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+	}
+	.encounter-label {
+		color: var(--text-dim);
+	}
+	.encounter-link a {
+		color: #7aa3d8;
+		text-decoration: none;
+	}
+	.encounter-link a:hover {
+		text-decoration: underline;
 	}
 	.badge {
 		font-size: var(--text-xs);

@@ -33,6 +33,10 @@
 					active={isExactActive('/health') || isActive('/health/stats')}
 				>Stats</NavLink>
 				<NavLink
+					href="{base}/health/history"
+					active={isActive('/health/history')}
+				>History</NavLink>
+				<NavLink
 					href="{base}/health/bloodwork"
 					active={isActive('/health/bloodwork')}
 				>Bloodwork</NavLink>

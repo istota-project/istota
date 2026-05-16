@@ -118,7 +118,45 @@ def _panel_to_dict(p, *, biomarker_count: int = 0, flagged_count: int = 0) -> di
         "draft": p.draft,
         "notes": p.notes,
         "has_source": bool(p.source_file),
+        "encounter_id": p.encounter_id,
     }
+
+
+def _encounter_to_dict(e) -> dict:
+    return {
+        "id": e.id,
+        "encounter_date": e.encounter_date,
+        "encounter_type": e.encounter_type,
+        "provider": e.provider,
+        "facility": e.facility,
+        "specialty": e.specialty,
+        "reason": e.reason,
+        "notes": e.notes,
+        "created_at": e.created_at,
+    }
+
+
+def _diagnosis_to_dict(d) -> dict:
+    return {
+        "id": d.id,
+        "name": d.name,
+        "icd10": d.icd10,
+        "status": d.status,
+        "date_diagnosed": d.date_diagnosed,
+        "date_resolved": d.date_resolved,
+        "encounter_id": d.encounter_id,
+        "severity": d.severity,
+        "notes": d.notes,
+        "created_at": d.created_at,
+    }
+
+
+_ENCOUNTER_TYPES = {
+    "visit", "procedure", "screening", "hospitalization", "er",
+    "telehealth", "imaging", "dental", "other",
+}
+
+_DIAGNOSIS_STATUSES = {"active", "resolved", "chronic"}
 
 
 def _biomarker_to_dict(b) -> dict:
@@ -343,9 +381,21 @@ async def api_create_panel(
     lab_name = body.get("lab_name") or None
     panel_type = body.get("panel_type") or None
     notes = body.get("notes")
+    encounter_id = body.get("encounter_id")
+    if encounter_id is not None:
+        try:
+            encounter_id = int(encounter_id)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "encounter_id must be an integer"}, status_code=400,
+            )
 
     def _insert():
         with health_db.connect(ctx.db_path) as conn:
+            if encounter_id is not None and health_db.get_encounter(
+                conn, encounter_id,
+            ) is None:
+                return None, "encounter not found"
             collision = health_db.find_panel_collision(
                 conn, drawn_at=drawn_at, lab_name=lab_name,
             )
@@ -355,11 +405,14 @@ async def api_create_panel(
                 lab_name=lab_name,
                 panel_type=panel_type,
                 notes=notes,
+                encounter_id=encounter_id,
             )
             conn.commit()
         return pid, collision
 
     pid, collision = await asyncio.to_thread(_insert)
+    if pid is None and isinstance(collision, str):
+        return JSONResponse({"error": collision}, status_code=400)
     payload = {"status": "ok", "id": pid}
     if collision is not None:
         payload["collision"] = {
@@ -417,22 +470,41 @@ async def api_update_panel(
         return JSONResponse(
             {"error": "draft must be a boolean"}, status_code=400,
         )
+    has_encounter_id = "encounter_id" in body
+    encounter_id = body.get("encounter_id")
+    if has_encounter_id and encounter_id is not None:
+        try:
+            encounter_id = int(encounter_id)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "encounter_id must be an integer or null"},
+                status_code=400,
+            )
 
     def _update():
         with health_db.connect(ctx.db_path) as conn:
-            n = health_db.update_panel(
-                conn,
-                panel_id,
-                drawn_at=drawn_at,
-                lab_name=lab_name,
-                panel_type=panel_type,
-                notes=notes,
-                draft=draft,
-            )
+            if (
+                has_encounter_id
+                and encounter_id is not None
+                and health_db.get_encounter(conn, encounter_id) is None
+            ):
+                return "encounter_not_found"
+            kwargs: dict = {
+                "drawn_at": drawn_at,
+                "lab_name": lab_name,
+                "panel_type": panel_type,
+                "notes": notes,
+                "draft": draft,
+            }
+            if has_encounter_id:
+                kwargs["encounter_id"] = encounter_id
+            n = health_db.update_panel(conn, panel_id, **kwargs)
             conn.commit()
         return n
 
     n = await asyncio.to_thread(_update)
+    if n == "encounter_not_found":
+        return JSONResponse({"error": "encounter not found"}, status_code=400)
     if not n:
         raise HTTPException(404, "panel not found")
     return {"status": "ok"}
@@ -1145,6 +1217,13 @@ async def api_dashboard(ctx: HealthContext = Depends(get_user_context)):
                 ))
             alerts_rows = health_db.flagged_biomarkers_latest(conn, limit=20)
             settings = health_db.get_settings(conn)
+            active_diag = health_db.list_diagnoses(
+                conn, status="active", limit=500,
+            )
+            chronic_diag = health_db.list_diagnoses(
+                conn, status="chronic", limit=500,
+            )
+            recent_encounters = health_db.list_encounters(conn, limit=3)
         # BMI is derived from latest weight + settings height.
         bmi: float | None = None
         weight = latest.get("weight")
@@ -1169,9 +1248,368 @@ async def api_dashboard(ctx: HealthContext = Depends(get_user_context)):
             "recent_panels": panel_dicts,
             "alerts": alerts,
             "settings": _settings_with_defaults(settings),
+            "active_diagnoses_count": len(active_diag) + len(chronic_diag),
+            "recent_encounters": [
+                _encounter_to_dict(e) for e in recent_encounters
+            ],
         }
 
     return await asyncio.to_thread(_query)
+
+
+# ---- Encounters -----------------------------------------------------------
+
+
+@router.get("/encounters")
+async def api_list_encounters(
+    ctx: HealthContext = Depends(get_user_context),
+    since: str = Query(default=""),
+    until: str = Query(default=""),
+    type: str = Query(default=""),
+    limit: int = Query(default=50, le=500, ge=1),
+    offset: int = Query(default=0, ge=0),
+):
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            return health_db.list_encounters(
+                conn,
+                since=since or None,
+                until=until or None,
+                encounter_type=type or None,
+                limit=limit,
+                offset=offset,
+            )
+
+    encounters = await asyncio.to_thread(_query)
+    return {"encounters": [_encounter_to_dict(e) for e in encounters]}
+
+
+@router.post("/encounters")
+async def api_create_encounter(
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    encounter_date = body.get("encounter_date")
+    encounter_type = body.get("encounter_type")
+    if not isinstance(encounter_date, str) or not encounter_date.strip():
+        return JSONResponse(
+            {"error": "encounter_date is required"}, status_code=400,
+        )
+    if not isinstance(encounter_type, str) or not encounter_type.strip():
+        return JSONResponse(
+            {"error": "encounter_type is required"}, status_code=400,
+        )
+
+    def _insert():
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn,
+                encounter_date=encounter_date.strip(),
+                encounter_type=encounter_type.strip(),
+                provider=body.get("provider") or None,
+                facility=body.get("facility") or None,
+                specialty=body.get("specialty") or None,
+                reason=body.get("reason") or None,
+                notes=body.get("notes") or None,
+            )
+            conn.commit()
+        return eid
+
+    eid = await asyncio.to_thread(_insert)
+    return {"status": "ok", "id": eid}
+
+
+@router.get("/encounters/{encounter_id}")
+async def api_get_encounter(
+    encounter_id: int,
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            enc = health_db.get_encounter(conn, encounter_id)
+            if not enc:
+                return None
+            diagnoses = health_db.diagnoses_for_encounter(conn, encounter_id)
+            panels = health_db.panels_for_encounter(conn, encounter_id)
+            panel_dicts = []
+            for p in panels:
+                total, flagged = health_db.panel_counts(conn, p.id)
+                panel_dicts.append(_panel_to_dict(
+                    p, biomarker_count=total, flagged_count=flagged,
+                ))
+            return enc, diagnoses, panel_dicts
+
+    result = await asyncio.to_thread(_query)
+    if result is None:
+        raise HTTPException(404, "encounter not found")
+    enc, diagnoses, panel_dicts = result
+    return {
+        "encounter": _encounter_to_dict(enc),
+        "diagnoses": [_diagnosis_to_dict(d) for d in diagnoses],
+        "panels": panel_dicts,
+    }
+
+
+@router.put("/encounters/{encounter_id}")
+async def api_update_encounter(
+    encounter_id: int,
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    allowed = {
+        "encounter_date", "encounter_type", "provider", "facility",
+        "specialty", "reason", "notes",
+    }
+    kwargs = {k: v for k, v in body.items() if k in allowed}
+
+    def _update():
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_db.update_encounter(conn, encounter_id, **kwargs)
+            conn.commit()
+        return n
+
+    n = await asyncio.to_thread(_update)
+    if not n:
+        # 0 rows could mean "no fields" or "not found"; distinguish.
+        def _check():
+            with health_db.connect(ctx.db_path) as conn:
+                return health_db.get_encounter(conn, encounter_id)
+        existing = await asyncio.to_thread(_check)
+        if existing is None:
+            raise HTTPException(404, "encounter not found")
+    return {"status": "ok"}
+
+
+@router.delete("/encounters/{encounter_id}")
+async def api_delete_encounter(
+    encounter_id: int,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _delete():
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_db.delete_encounter(conn, encounter_id)
+            conn.commit()
+        return n
+
+    n = await asyncio.to_thread(_delete)
+    if not n:
+        raise HTTPException(404, "encounter not found")
+    return {"status": "ok"}
+
+
+# ---- Diagnoses ------------------------------------------------------------
+
+
+@router.get("/diagnoses")
+async def api_list_diagnoses(
+    ctx: HealthContext = Depends(get_user_context),
+    status: str = Query(default=""),
+    limit: int = Query(default=100, le=500, ge=1),
+    offset: int = Query(default=0, ge=0),
+):
+    if status and status not in _DIAGNOSIS_STATUSES and status != "all":
+        return JSONResponse(
+            {"error": "unknown status"}, status_code=400,
+        )
+
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            return health_db.list_diagnoses(
+                conn,
+                status=status or None,
+                limit=limit,
+                offset=offset,
+            )
+
+    diagnoses = await asyncio.to_thread(_query)
+    return {"diagnoses": [_diagnosis_to_dict(d) for d in diagnoses]}
+
+
+@router.post("/diagnoses")
+async def api_create_diagnosis(
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    status = body.get("status", "active")
+    if status not in _DIAGNOSIS_STATUSES:
+        return JSONResponse({"error": "unknown status"}, status_code=400)
+    encounter_id = body.get("encounter_id")
+    if encounter_id is not None:
+        try:
+            encounter_id = int(encounter_id)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "encounter_id must be an integer"}, status_code=400,
+            )
+
+    def _insert():
+        with health_db.connect(ctx.db_path) as conn:
+            if encounter_id is not None and health_db.get_encounter(
+                conn, encounter_id,
+            ) is None:
+                return None
+            did = health_db.insert_diagnosis(
+                conn,
+                name=name.strip(),
+                status=status,
+                icd10=body.get("icd10") or None,
+                date_diagnosed=body.get("date_diagnosed") or None,
+                date_resolved=body.get("date_resolved") or None,
+                encounter_id=encounter_id,
+                severity=body.get("severity") or None,
+                notes=body.get("notes") or None,
+            )
+            conn.commit()
+        return did
+
+    did = await asyncio.to_thread(_insert)
+    if did is None:
+        return JSONResponse({"error": "encounter not found"}, status_code=400)
+    return {"status": "ok", "id": did}
+
+
+@router.get("/diagnoses/{diagnosis_id}")
+async def api_get_diagnosis(
+    diagnosis_id: int,
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            d = health_db.get_diagnosis(conn, diagnosis_id)
+            if not d:
+                return None
+            linked_encs = health_db.encounters_for_diagnosis(conn, diagnosis_id)
+        return d, linked_encs
+
+    result = await asyncio.to_thread(_query)
+    if result is None:
+        raise HTTPException(404, "diagnosis not found")
+    d, linked_encs = result
+    return {
+        "diagnosis": _diagnosis_to_dict(d),
+        "encounter": _encounter_to_dict(linked_encs[0]) if linked_encs else None,
+    }
+
+
+@router.put("/diagnoses/{diagnosis_id}")
+async def api_update_diagnosis(
+    diagnosis_id: int,
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    if "status" in body and body["status"] not in _DIAGNOSIS_STATUSES:
+        return JSONResponse({"error": "unknown status"}, status_code=400)
+    allowed = {
+        "name", "icd10", "status", "date_diagnosed", "date_resolved",
+        "encounter_id", "severity", "notes",
+    }
+    kwargs = {k: v for k, v in body.items() if k in allowed}
+    if "encounter_id" in kwargs and kwargs["encounter_id"] is not None:
+        try:
+            kwargs["encounter_id"] = int(kwargs["encounter_id"])
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "encounter_id must be an integer or null"},
+                status_code=400,
+            )
+
+    def _update():
+        with health_db.connect(ctx.db_path) as conn:
+            if (
+                "encounter_id" in kwargs
+                and kwargs["encounter_id"] is not None
+                and health_db.get_encounter(conn, kwargs["encounter_id"]) is None
+            ):
+                return "encounter_not_found"
+            n = health_db.update_diagnosis(conn, diagnosis_id, **kwargs)
+            conn.commit()
+        return n
+
+    n = await asyncio.to_thread(_update)
+    if n == "encounter_not_found":
+        return JSONResponse({"error": "encounter not found"}, status_code=400)
+    if not n:
+        def _check():
+            with health_db.connect(ctx.db_path) as conn:
+                return health_db.get_diagnosis(conn, diagnosis_id)
+        existing = await asyncio.to_thread(_check)
+        if existing is None:
+            raise HTTPException(404, "diagnosis not found")
+    return {"status": "ok"}
+
+
+@router.delete("/diagnoses/{diagnosis_id}")
+async def api_delete_diagnosis(
+    diagnosis_id: int,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _delete():
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_db.delete_diagnosis(conn, diagnosis_id)
+            conn.commit()
+        return n
+
+    n = await asyncio.to_thread(_delete)
+    if not n:
+        raise HTTPException(404, "diagnosis not found")
+    return {"status": "ok"}
+
+
+# ---- History summary ------------------------------------------------------
+
+
+@router.get("/history/summary")
+async def api_history_summary(
+    ctx: HealthContext = Depends(get_user_context),
+):
+    """New-doctor packet: active conditions, chronic conditions,
+    recent encounters (last 12 months), and last 5 procedures in the last
+    5 years (older procedures aren't clinically useful for a packet)."""
+    from datetime import timedelta
+
+    today = datetime.now(timezone.utc).date()
+    one_year_ago = (today - timedelta(days=365)).isoformat()
+    five_years_ago = (today - timedelta(days=365 * 5)).isoformat()
+
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            active = health_db.list_diagnoses(conn, status="active", limit=500)
+            chronic = health_db.list_diagnoses(conn, status="chronic", limit=500)
+            recent_encounters = health_db.list_encounters(
+                conn, since=one_year_ago, limit=500,
+            )
+            recent_procedures = health_db.list_encounters(
+                conn,
+                encounter_type="procedure",
+                since=five_years_ago,
+                limit=5,
+            )
+        return active, chronic, recent_encounters, recent_procedures
+
+    active, chronic, recent, procedures = await asyncio.to_thread(_query)
+    return {
+        "active_diagnoses": [_diagnosis_to_dict(d) for d in active],
+        "chronic_diagnoses": [_diagnosis_to_dict(d) for d in chronic],
+        "recent_encounters": [_encounter_to_dict(e) for e in recent],
+        "recent_procedures": [_encounter_to_dict(e) for e in procedures],
+    }
 
 
 # ---- Garmin ---------------------------------------------------------------
