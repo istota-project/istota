@@ -1351,6 +1351,160 @@ async def api_create_encounter(
     return {"status": "ok", "id": eid}
 
 
+@router.post("/encounters/extract")
+async def api_encounter_extract(
+    request: Request,
+    file: UploadFile = FastAPIFile(...),
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    """OCR/vision extraction for a doctor's-visit document.
+
+    Source files are processed transiently (no persisted source — encounters
+    are stand-alone metadata rows). Returns rows in the review-and-confirm
+    shape consumed by ``/encounters/bulk``.
+    """
+    raw = await file.read()
+    if not raw:
+        return JSONResponse({"error": "empty upload"}, status_code=400)
+    mime = (
+        file.content_type
+        or mimetypes.guess_type(file.filename or "")[0]
+        or "application/octet-stream"
+    )
+    suffix = Path(file.filename or "").suffix or (
+        mimetypes.guess_extension(mime) or ""
+    )
+
+    config = getattr(request.app.state, "istota_config", None)
+
+    def _run():
+        import tempfile
+
+        from istota.health.encounter_ocr import extract_from_file
+
+        tmp_dir = (
+            Path(config.temp_dir)
+            if config is not None and getattr(config, "temp_dir", None)
+            else Path(tempfile.gettempdir())
+        )
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=tmp_dir, suffix=suffix or ".bin", delete=False,
+        ) as tmp:
+            tmp.write(raw)
+            tmp_path = Path(tmp.name)
+        try:
+            return extract_from_file(tmp_path, mime, config=config)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    return await asyncio.to_thread(_run)
+
+
+@router.post("/encounters/bulk")
+async def api_encounter_bulk(
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    rows = body.get("rows") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        return JSONResponse({"error": "rows must be a list"}, status_code=400)
+    client_import_id = body.get("import_id") if isinstance(body, dict) else None
+    if client_import_id is not None and (
+        not isinstance(client_import_id, str) or not client_import_id.strip()
+    ):
+        return JSONResponse(
+            {"error": "import_id must be a non-empty string"},
+            status_code=400,
+        )
+    today = date.today()
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            return JSONResponse(
+                {"error": f"row {i} must be an object"}, status_code=400,
+            )
+        d_raw = r.get("encounter_date")
+        if not isinstance(d_raw, str) or not d_raw.strip():
+            return JSONResponse(
+                {"error": f"row {i} missing encounter_date"}, status_code=400,
+            )
+        try:
+            d = date.fromisoformat(d_raw.strip())
+        except ValueError:
+            return JSONResponse(
+                {"error": f"row {i} encounter_date must be ISO YYYY-MM-DD"},
+                status_code=400,
+            )
+        if d > today:
+            return JSONResponse(
+                {"error": f"row {i} encounter_date is in the future"},
+                status_code=400,
+            )
+        t = r.get("encounter_type")
+        if not isinstance(t, str) or not t.strip():
+            return JSONResponse(
+                {"error": f"row {i} missing encounter_type"}, status_code=400,
+            )
+
+    prefix = (
+        client_import_id.strip() if client_import_id else uuid.uuid4().hex
+    )
+
+    def _insert_all():
+        encounter_ids: list[int] = []
+        diagnosis_ids: list[int] = []
+        with health_db.connect(ctx.db_path) as conn:
+            for i, r in enumerate(rows):
+                eid = health_db.insert_encounter(
+                    conn,
+                    encounter_date=r["encounter_date"].strip(),
+                    encounter_type=r["encounter_type"].strip(),
+                    provider=(r.get("provider") or None),
+                    facility=(r.get("facility") or None),
+                    specialty=(r.get("specialty") or None),
+                    reason=(r.get("reason") or None),
+                    notes=(r.get("notes") or None),
+                    dedup_key=f"{prefix}:{i}",
+                )
+                encounter_ids.append(eid)
+                for j, d in enumerate(r.get("diagnoses") or []):
+                    if not isinstance(d, dict):
+                        continue
+                    name = d.get("name")
+                    if not isinstance(name, str) or not name.strip():
+                        continue
+                    status = d.get("status") or "active"
+                    if status not in ("active", "resolved", "chronic"):
+                        status = "active"
+                    severity = d.get("severity") or None
+                    if severity not in ("mild", "moderate", "severe", None):
+                        severity = None
+                    did = health_db.insert_diagnosis(
+                        conn,
+                        name=name.strip(),
+                        status=status,
+                        icd10=(d.get("icd10") or None),
+                        date_diagnosed=r["encounter_date"].strip(),
+                        encounter_id=eid,
+                        severity=severity,
+                        dedup_key=f"{prefix}:{i}:dx:{j}",
+                    )
+                    diagnosis_ids.append(did)
+            conn.commit()
+        return encounter_ids, diagnosis_ids
+
+    encounter_ids, diagnosis_ids = await asyncio.to_thread(_insert_all)
+    return {
+        "status": "ok",
+        "ids": encounter_ids,
+        "count": len(encounter_ids),
+        "diagnosis_ids": diagnosis_ids,
+    }
+
+
 @router.get("/encounters/{encounter_id}")
 async def api_get_encounter(
     encounter_id: int,

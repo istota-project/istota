@@ -2137,6 +2137,79 @@ const handlers: MockHandler[] = [
 			}
 
 			// /encounters
+			if (url === '/istota/api/health/encounters/extract' && method === 'POST') {
+				// Dev fixture: pretend the LLM extracted a single visit from the
+				// uploaded paperwork. Real backend route runs OCR + brain call.
+				return {
+					mode: 'vision',
+					rows: [
+						{
+							encounter_date: '2026-04-14',
+							encounter_type: 'visit',
+							provider: 'Dr. Jane Smith, MD',
+							facility: 'Kaiser Permanente — Sunset',
+							specialty: 'primary care',
+							reason: 'Annual physical',
+							notes:
+								'BP and labs normal. Recommended continuing current exercise routine; follow up in 12 months unless symptomatic.',
+							diagnoses: [
+								{
+									name: 'Essential hypertension, well controlled',
+									icd10: 'I10',
+									status: 'chronic',
+									severity: 'mild',
+								},
+							],
+							confidence: 'high',
+						},
+					],
+					warnings: [
+						'Mock extraction (dev mode) — the real LLM runs against the uploaded file.',
+					],
+				};
+			}
+			if (url === '/istota/api/health/encounters/bulk' && method === 'POST') {
+				if (!body || !Array.isArray(body.rows)) return { error: 'rows must be a list' };
+				const encIds: number[] = [];
+				const diagIds: number[] = [];
+				for (let i = 0; i < body.rows.length; i++) {
+					const r = body.rows[i];
+					if (!r.encounter_date || !r.encounter_type) {
+						return { error: `row ${i} missing fields` };
+					}
+					const enc: Encounter = {
+						id: nextEncounterId++,
+						encounter_date: String(r.encounter_date),
+						encounter_type: String(r.encounter_type),
+						provider: r.provider || null,
+						facility: r.facility || null,
+						specialty: r.specialty || null,
+						reason: r.reason || null,
+						notes: r.notes || null,
+						created_at: new Date().toISOString(),
+					};
+					encounters.push(enc);
+					encIds.push(enc.id);
+					for (const d of r.diagnoses || []) {
+						if (!d || !d.name) continue;
+						const dx: Diagnosis = {
+							id: nextDiagnosisId++,
+							name: String(d.name),
+							icd10: d.icd10 || null,
+							status: (d.status as Diagnosis['status']) || 'active',
+							date_diagnosed: enc.encounter_date,
+							date_resolved: null,
+							encounter_id: enc.id,
+							severity: (d.severity as Diagnosis['severity']) || null,
+							notes: null,
+							created_at: new Date().toISOString(),
+						};
+						diagnoses.push(dx);
+						diagIds.push(dx.id);
+					}
+				}
+				return { status: 'ok', ids: encIds, count: encIds.length, diagnosis_ids: diagIds };
+			}
 			if (url.startsWith('/istota/api/health/encounters') && method === 'GET') {
 				const encMatch = url.match(/^\/istota\/api\/health\/encounters\/(\d+)$/);
 				if (encMatch) {

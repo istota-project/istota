@@ -156,6 +156,7 @@
 		<button class="btn" type="button" onclick={() => (formOpen = !formOpen)}>
 			{formOpen ? 'Cancel' : '+ Add encounter'}
 		</button>
+		<a class="btn" href="{base}/health/history/import">Import</a>
 		<a class="btn" href="{base}/health/history/diagnoses">Conditions</a>
 	</div>
 </div>
