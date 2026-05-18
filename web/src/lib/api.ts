@@ -1104,6 +1104,45 @@ export async function deleteEncounter(id: number): Promise<{ status: string }> {
 	return healthFetch(`/encounters/${id}`, { method: 'DELETE' });
 }
 
+export interface ParsedDiagnosis {
+	name: string;
+	icd10: string | null;
+	status: 'active' | 'resolved' | 'chronic';
+	severity: 'mild' | 'moderate' | 'severe' | null;
+}
+
+export interface ParsedEncounter {
+	encounter_date: string | null;
+	encounter_type: string;
+	provider: string | null;
+	facility: string | null;
+	specialty: string | null;
+	reason: string | null;
+	notes: string | null;
+	diagnoses: ParsedDiagnosis[];
+	confidence: 'high' | 'medium' | 'low' | 'manual';
+}
+
+export async function extractEncounters(file: File): Promise<{
+	rows: ParsedEncounter[];
+	mode: 'text' | 'vision';
+	warnings: string[];
+}> {
+	const form = new FormData();
+	form.append('file', file);
+	return healthFetch('/encounters/extract', { method: 'POST', body: form });
+}
+
+export async function bulkInsertEncounters(
+	rows: ParsedEncounter[],
+): Promise<{ status: string; ids: number[]; count: number; diagnosis_ids: number[] }> {
+	return healthFetch('/encounters/bulk', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ rows }),
+	});
+}
+
 export async function listDiagnoses(params: { status?: string; limit?: number; offset?: number } = {}): Promise<{ diagnoses: Diagnosis[] }> {
 	const q = new URLSearchParams();
 	for (const [k, v] of Object.entries(params)) {
