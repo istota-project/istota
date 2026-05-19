@@ -215,4 +215,4 @@ Skills with missing dependencies are automatically excluded from prompt selectio
 [MIT](LICENSE)
 
 ***
-© 2026 [Stefan Kubicki](https://kubicki.org) • A [CYNIUM](https://cynium.com) Lamplight Release
+© 2026 [Stefan Kubicki](https://kubicki.org) • A [CYNIUM Lamplight](https://lamplight.cynium.com) Release

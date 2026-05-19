@@ -460,6 +460,143 @@ class TestCheckShellCommand:
         assert result.healthy is True
         assert str(config.db_path) in result.details["value"]
 
+    def test_setup_env_hooks_dispatched(self, tmp_path):
+        """ISSUE-097-shaped regression: heartbeat shell-commands must run
+        ``dispatch_setup_env_hooks`` so vars declared ``from: "setup_env"``
+        (``LOCATION_DB_PATH``, ``HEALTH_DB_PATH``) reach the subprocess.
+        Without this, ``shell-command`` checks that shell out to
+        ``istota-skill location …`` / ``istota-skill health …`` would fail
+        silently — the skill CLI prints a JSON error envelope while exiting 0,
+        which the no-condition path used to treat as healthy."""
+        from unittest.mock import patch
+        config = Config(
+            db_path=tmp_path / "istota.db",
+            nextcloud_mount_path=tmp_path,
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "temp").mkdir(exist_ok=True)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={
+                "command": "echo loc=[$LOCATION_DB_PATH]:health=[$HEALTH_DB_PATH]",
+            },
+        )
+        with patch(
+            "istota.skills._env.dispatch_setup_env_hooks",
+            return_value={
+                "LOCATION_DB_PATH": "/srv/data/alice/location.db",
+                "HEALTH_DB_PATH": "/srv/data/alice/health.db",
+            },
+        ):
+            result = _check_shell_command(check, config, user_id="alice")
+        assert result.healthy is True
+        assert "loc=[/srv/data/alice/location.db]" in result.details["value"]
+        assert "health=[/srv/data/alice/health.db]" in result.details["value"]
+
+    def test_setup_env_hooks_skipped_without_user_id(self, tmp_path):
+        """No user_id means we can't resolve per-user paths — fall back
+        cleanly without invoking the hook dispatcher."""
+        from unittest.mock import patch
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test", type="shell-command", config={"command": "echo ok"},
+        )
+        with patch(
+            "istota.heartbeat._build_heartbeat_skill_env",
+        ) as mock_build:
+            result = _check_shell_command(check, config)
+        mock_build.assert_not_called()
+        assert result.healthy is True
+
+    def test_skill_env_failure_does_not_break_check(self, tmp_path):
+        """If hook dispatch raises, the heartbeat should still run the
+        command — better degraded than silently dead. The warning surfaces
+        the resolution failure to logs."""
+        from unittest.mock import patch
+        config = Config(
+            db_path=tmp_path / "istota.db",
+            nextcloud_mount_path=tmp_path,
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "temp").mkdir(exist_ok=True)
+        check = HeartbeatCheck(
+            name="test", type="shell-command", config={"command": "echo ok"},
+        )
+        with patch(
+            "istota.heartbeat._build_heartbeat_skill_env",
+            side_effect=RuntimeError("kaboom"),
+        ):
+            result = _check_shell_command(check, config, user_id="alice")
+        assert result.healthy is True
+        assert "ok" in result.details["value"]
+
+    def test_json_error_envelope_marks_unhealthy(self, tmp_path):
+        """ISSUE-097-shaped silent-rot: istota-skill CLIs emit
+        ``{"status":"error","error":"…"}`` to stdout while exiting 0 when
+        they catch their own errors. The no-condition path used to treat
+        that as healthy — masking exactly the failure mode the setup_env
+        hook fix is supposed to eliminate."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={
+                "command": (
+                    """printf '{"status":"error","error":"LOCATION_DB_PATH not set"}'"""
+                ),
+            },
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is False
+        assert "LOCATION_DB_PATH not set" in result.message
+
+    def test_json_error_envelope_without_error_field(self, tmp_path):
+        """Fallback message when the envelope omits ``error``."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": """printf '{"status":"error"}'"""},
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is False
+        assert "status=error" in result.message
+
+    def test_json_ok_envelope_stays_healthy(self, tmp_path):
+        """Positive envelope is the normal success shape — don't flag it."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": """printf '{"status":"ok","count":3}'"""},
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is True
+
+    def test_malformed_json_stdout_unaffected(self, tmp_path):
+        """Output starting with ``{`` but not valid JSON shouldn't break
+        the envelope check — treat as opaque success."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": "echo '{not really json'"},
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is True
+
+    def test_non_json_stdout_unaffected(self, tmp_path):
+        """Plain-text heartbeats (the original shape) keep working."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": "echo 'all systems nominal: status error none here'"},
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is True
+
 
 # ---------------------------------------------------------------------------
 # TestRunCheckAdminGate

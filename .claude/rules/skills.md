@@ -225,9 +225,11 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Note**: In-process facade — imports the vendored `money` package and invokes its Click CLI via `CliRunner`. No subprocess, no HTTP. `lots` and `wash-sales` are `@requires_feature`-gated (`money_tax` / `money_wash_sales`); gated-off calls return the standard error envelope.
 
 ### `health/` - Body Stats, Bloodwork, Biomarker Trends
-**Subcommands**: `log`, `stats`, `latest`, `panels`, `panel`, `add-panel`, `add-biomarker`, `trend`, `upload`, `summary`, `settings`, `set`
+**Subcommands**: `log`, `stats`, `latest`, `panels`, `panel`, `add-panel`, `add-biomarker`, `trend`, `upload`, `summary`, `settings`, `set`, plus `garmin-status` / `garmin-sync` / `garmin-disconnect`.
 **Env vars**: `HEALTH_DB_PATH` (injected via `setup_env` hook from `istota.health.resolve_for_user(user_id, config).db_path`); the OCR/explainer paths additionally use the active brain for structured extraction.
 **Note**: Standard module — on by default; per-user opt-out via `disabled_modules`. All values stored metric. Writes flow through deferred ops (`task_<id>_health_ops.json`) under sandbox; `scheduler_deferred._process_deferred_health_ops` replays them post-task. The web UI ships pre-written explainer payloads in the mock API for development.
+
+**`garmin-sync` direct/delegated routing.** Garmin OAuth tokens live in the encrypted secrets table; the engine decrypts and re-encrypts rotated tokens mid-run. Subprocess callers don't have `ISTOTA_SECRET_KEY` by design, so `cmd_garmin_sync` checks `secrets_store.secret_key_available()` and dispatches: **direct** (operator shell with the EnvironmentFile sourced) runs the engine inline; **delegated** (sandboxed LLM Bash, hand-written CRON `command:` rows, dev shells without the env file) enqueues a `skill="health"` task with `max_attempts=1` and polls every 0.5s up to 60s, then surfaces the engine's JSON payload. The scheduler's `_run_garmin_sync_inprocess` short-circuit (see scheduler.md) makes the delegated path execute on the daemon thread where the key lives. Sandboxed callers see `sqlite3.OperationalError` on the enqueue (bwrap mounts the DB read-only) → fail-loud with `/garmin/sync` hint. Project note `Skill proxy execution model and the master-key boundary.md` covers why this isn't auto-injected via the skill proxy.
 
 ### Module-skill facade exit-code contract
 

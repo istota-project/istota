@@ -1,5 +1,6 @@
 """Heartbeat monitoring system for periodic health checks."""
 
+import json
 import logging
 import os
 import re
@@ -228,6 +229,54 @@ def _check_file_watch(check: HeartbeatCheck, config: "Config") -> CheckResult:
     return CheckResult(healthy=True, message=f"File OK: {file_path}")
 
 
+def _build_heartbeat_skill_env(
+    config: "Config", user_id: str,
+) -> dict[str, str]:
+    """Resolve skill-manifest env vars + setup_env hooks for a heartbeat
+    shell-command. Mirrors what ``scheduler._execute_command_task`` does
+    for command-type scheduled jobs (ISSUE-097) — without it, a heartbeat
+    invoking ``istota-skill location current`` / ``istota-skill health …``
+    would emit a JSON error envelope that the returncode-0 path silently
+    treats as healthy.
+
+    CalDAV discovery is intentionally skipped (``discovered_calendars=[]``)
+    so heartbeats don't issue a PROPFIND on every tick. Heartbeats are not
+    the right place to invoke calendar-skill CLIs anyway; the gate
+    correctly drops CALDAV_* from the env.
+    """
+    from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
+    from .skills._loader import load_skill_index
+
+    skill_index = load_skill_index(config.skills_dir, config.bundled_skills_dir)
+    try:
+        with db.get_db(config.db_path) as conn:
+            user_resources = db.get_user_resources(conn, user_id)
+    except Exception:
+        user_resources = []
+
+    user_temp_dir = config.temp_dir / user_id
+    user_temp_dir.mkdir(parents=True, exist_ok=True)
+
+    fake_task = db.Task(
+        id=0, status="running", source_type="heartbeat",
+        user_id=user_id, prompt="", conversation_token="",
+    )
+    ctx = EnvContext(
+        config=config,
+        task=fake_task,
+        user_resources=user_resources,
+        user_config=config.get_user(user_id),
+        user_temp_dir=user_temp_dir,
+        is_admin=config.is_admin(user_id),
+        discovered_calendars=[],
+    )
+
+    env: dict[str, str] = {}
+    env.update(build_skill_env(list(skill_index), skill_index, ctx))
+    env.update(dispatch_setup_env_hooks(list(skill_index), skill_index, ctx))
+    return env
+
+
 def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str | None = None) -> CheckResult:
     """
     Run a shell command and evaluate the condition.
@@ -262,6 +311,20 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
         if user_id:
             env["ISTOTA_USER_ID"] = user_id
         env["ISTOTA_EXPERIMENTAL_FEATURES"] = ",".join(config.experimental.features)
+        # Skill-manifest env + setup_env hooks. Without these, heartbeat
+        # shell-commands that invoke `istota-skill location current` /
+        # `istota-skill health …` etc. see LOCATION_DB_PATH / HEALTH_DB_PATH
+        # unset and emit a JSON error envelope — which the returncode-0
+        # branch below would silently treat as healthy. ISSUE-097 fixed the
+        # same shape for the scheduler command-task path.
+        if user_id:
+            try:
+                env.update(_build_heartbeat_skill_env(config, user_id))
+            except Exception as e:
+                logger.warning(
+                    "heartbeat skill-env resolution failed for user=%s: %s",
+                    user_id, e,
+                )
         result = subprocess.run(
             command,
             shell=True,
@@ -277,8 +340,26 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
         return CheckResult(healthy=False, message=f"Command error: {e}")
 
     if not condition:
-        # No condition: healthy if exit code is 0
+        # No condition: healthy if exit code is 0. But: istota-skill CLIs
+        # (feeds, money, health, location, …) emit
+        # ``{"status":"error","error":"…"}`` on stdout and exit 0 when they
+        # catch their own errors — so a heartbeat like
+        # ``istota-skill location current`` whose setup_env hook didn't fire
+        # would look healthy without this check. Same defense-in-depth that
+        # ``scheduler._execute_command_task`` applies for command-tasks.
         healthy = result.returncode == 0
+        if healthy and value.startswith("{"):
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict) and parsed.get("status") == "error":
+                err_msg = parsed.get("error") or "skill reported status=error"
+                return CheckResult(
+                    healthy=False,
+                    message=f"Command returned error envelope: {err_msg}",
+                    details={"value": value, "returncode": result.returncode},
+                )
         return CheckResult(
             healthy=healthy,
             message="Command succeeded" if healthy else f"Command failed (exit {result.returncode})",

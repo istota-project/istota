@@ -2464,6 +2464,53 @@ class TestExecuteCommandTask:
         assert "caldav=[]" in result
         assert "nc=[https://nc.example.com]" in result
 
+    def test_setup_env_hooks_dispatched(self, db_path, tmp_path):
+        """ISSUE-097 regression: ``_execute_command_task`` must run
+        ``dispatch_setup_env_hooks`` so vars declared ``from: "setup_env"``
+        (``LOCATION_DB_PATH``, ``HEALTH_DB_PATH``) reach the subprocess.
+        Before the fix, the hook only ran on the skill-task path, so
+        command-type cron jobs (``gym-check-sync``) failed silently when
+        the daemon env didn't happen to carry the var."""
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"alice"}
+        task = self._make_task(
+            user_id="alice",
+            command="echo loc=[$LOCATION_DB_PATH]:health=[$HEALTH_DB_PATH]",
+        )
+        with patch(
+            "istota.skills._env.dispatch_setup_env_hooks",
+            return_value={
+                "LOCATION_DB_PATH": "/srv/data/alice/location.db",
+                "HEALTH_DB_PATH": "/srv/data/alice/health.db",
+            },
+        ):
+            success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "loc=[/srv/data/alice/location.db]" in result
+        assert "health=[/srv/data/alice/health.db]" in result
+
+    def test_setup_env_hook_value_wins_over_daemon_ambient(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        """ISSUE-097: per-user hook value is authoritative. If a stale
+        ``LOCATION_DB_PATH`` is inherited from systemd EnvironmentFile,
+        the hook's per-user computation must overwrite it — otherwise
+        every user's command-task would read user-X's location DB."""
+        monkeypatch.setenv("LOCATION_DB_PATH", "/wrong/from/systemd.db")
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"alice"}
+        task = self._make_task(
+            user_id="alice",
+            command="echo loc=[$LOCATION_DB_PATH]",
+        )
+        with patch(
+            "istota.skills._env.dispatch_setup_env_hooks",
+            return_value={"LOCATION_DB_PATH": "/srv/data/alice/location.db"},
+        ):
+            success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "loc=[/srv/data/alice/location.db]" in result
+
     def test_master_key_never_in_command_env(self, db_path, tmp_path, monkeypatch):
         """Phase 4 acceptance — the operator command-task path must not
         propagate ``ISTOTA_SECRET_KEY`` to the subprocess. Phase 1.4
@@ -2688,6 +2735,149 @@ class TestExecuteSkillTask:
         env = captured["env"]
         assert "CALDAV_URL" not in env
         assert "CALDAV_PASSWORD" not in env
+
+
+class TestGarminSyncInProcess:
+    """``_module.health.garmin_sync`` must run in the daemon thread, not in
+    a subprocess. The subprocess env strips ``ISTOTA_SECRET_KEY``, which
+    the garmin engine needs to decrypt the OAuth blob and to persist
+    rotated tokens / the error flag / last_sync mid-run."""
+
+    def _make_config(self, db_path, tmp_path, *, timezone="UTC"):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        temp = tmp_path / "temp"
+        temp.mkdir(exist_ok=True)
+        return Config(
+            db_path=db_path,
+            nextcloud_mount_path=mount,
+            temp_dir=temp,
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+            users={"alice": UserConfig(timezone=timezone)},
+        )
+
+    def _task(self, args):
+        return db.Task(
+            id=42, status="running", source_type="scheduled",
+            user_id="alice", prompt="",
+            skill="health", skill_args=json.dumps(args),
+        )
+
+    def _fake_sync_result(self, **overrides):
+        from istota.health.garmin_sync import SyncResult
+        res = SyncResult(inserted=3, skipped=1, days_processed=2)
+        for k, v in overrides.items():
+            setattr(res, k, v)
+        return res
+
+    def test_dispatches_in_process_not_subprocess(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path, timezone="Pacific/Auckland")
+        task = self._task(["garmin-sync", "--days-back", "3"])
+        captured = {}
+
+        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz):
+            captured["ctx_user_id"] = ctx.user_id
+            captured["framework_db_path"] = framework_db_path
+            captured["days_back"] = days_back
+            captured["user_tz"] = user_tz
+            return self._fake_sync_result()
+
+        fake_ctx = MagicMock(user_id="alice")
+        with patch(
+            "istota.scheduler.subprocess.run",
+            side_effect=AssertionError("must not subprocess"),
+        ), patch(
+            "istota.health.resolve_for_user", return_value=fake_ctx,
+        ), patch(
+            "istota.health.garmin_sync.sync_garmin", side_effect=_fake_sync,
+        ):
+            success, result = _execute_skill_task(task, config)
+
+        assert success is True
+        assert captured["ctx_user_id"] == "alice"
+        assert captured["framework_db_path"] == Path(db_path)
+        assert captured["days_back"] == 3
+        assert captured["user_tz"] == "Pacific/Auckland"
+        payload = json.loads(result)
+        assert payload["status"] == "ok"
+        assert payload["inserted"] == 3
+
+    def test_default_days_back_when_arg_missing(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(["garmin-sync"])
+        captured = {}
+
+        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz):
+            captured["days_back"] = days_back
+            return self._fake_sync_result()
+
+        with patch(
+            "istota.health.resolve_for_user", return_value=MagicMock(user_id="alice"),
+        ), patch(
+            "istota.health.garmin_sync.sync_garmin", side_effect=_fake_sync,
+        ):
+            success, _ = _execute_skill_task(task, config)
+        assert success is True
+        assert captured["days_back"] == 2
+
+    def test_auth_error_returns_failure(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(["garmin-sync", "--days-back", "2"])
+
+        with patch(
+            "istota.health.resolve_for_user", return_value=MagicMock(user_id="alice"),
+        ), patch(
+            "istota.health.garmin_sync.sync_garmin",
+            return_value=self._fake_sync_result(auth_error=True, inserted=0),
+        ):
+            success, result = _execute_skill_task(task, config)
+        assert success is False
+        payload = json.loads(result)
+        assert payload["status"] == "error"
+        assert payload["error"] == "token_expired"
+
+    def test_user_not_found_returns_failure(self, db_path, tmp_path):
+        from istota.health._loader import UserNotFoundError
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(["garmin-sync"])
+
+        with patch(
+            "istota.health.resolve_for_user",
+            side_effect=UserNotFoundError("health module disabled for 'alice'"),
+        ), patch(
+            "istota.health.garmin_sync.sync_garmin",
+        ) as mock_sync:
+            success, result = _execute_skill_task(task, config)
+        mock_sync.assert_not_called()
+        assert success is False
+        assert "garmin sync" in result
+        assert "alice" in result
+
+    def test_non_garmin_health_args_uses_subprocess(self, db_path, tmp_path):
+        """Sanity: only the ``garmin-sync`` subcommand is dispatched in
+        process. Any other ``health`` invocation must still take the
+        subprocess path."""
+        config = self._make_config(db_path, tmp_path)
+        task = db.Task(
+            id=1, status="running", source_type="scheduled",
+            user_id="alice", prompt="",
+            skill="health", skill_args=json.dumps(["stats"]),
+        )
+
+        def _fake_run(cmd, **kwargs):
+            return MagicMock(returncode=0, stdout='{"status":"ok"}', stderr="")
+
+        with patch(
+            "istota.scheduler.subprocess.run", side_effect=_fake_run,
+        ) as mock_run, patch(
+            "istota.scheduler.discover_calendars_for_task", return_value=[],
+        ), patch(
+            "istota.health.garmin_sync.sync_garmin",
+        ) as mock_sync:
+            success, _ = _execute_skill_task(task, config)
+        mock_sync.assert_not_called()
+        mock_run.assert_called_once()
+        assert success is True
 
 
 class TestPurgeObsoleteSkillJobs:

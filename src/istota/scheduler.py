@@ -1035,6 +1035,60 @@ def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
     conn.commit()
 
 
+def _run_garmin_sync_inprocess(
+    task: db.Task, config: Config, skill_args: list[str],
+) -> tuple[bool, str]:
+    """Run ``health garmin-sync`` in the daemon thread.
+
+    The garmin engine reads + writes encrypted secrets (oauth blob,
+    rotated SDK tokens, error flag, last_sync). The subprocess path
+    strips ``ISTOTA_SECRET_KEY`` by design, so the engine can neither
+    decrypt the stored tokens nor persist mid-run refreshes from there.
+    The web ``/garmin/sync`` endpoint already runs the same engine
+    in-process; this is the cron-driven equivalent.
+    """
+    from istota.health import garmin_sync as gs
+    from istota.health import resolve_for_user
+    from istota.health._loader import UserNotFoundError
+
+    days_back = 2
+    tail = skill_args[1:]
+    for i, arg in enumerate(tail):
+        if arg == "--days-back" and i + 1 < len(tail):
+            try:
+                days_back = max(1, int(tail[i + 1]))
+            except (TypeError, ValueError):
+                pass
+            break
+
+    if config.db_path is None:
+        return False, "garmin sync: framework db_path unavailable"
+
+    try:
+        ctx = resolve_for_user(task.user_id, config)
+    except UserNotFoundError as exc:
+        return False, f"garmin sync: {exc}"
+
+    user_cfg = config.get_user(task.user_id)
+    user_tz = user_cfg.timezone if user_cfg and user_cfg.timezone else None
+
+    try:
+        res = gs.sync_garmin(
+            ctx, Path(config.db_path),
+            days_back=days_back, user_tz=user_tz,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("garmin sync (in-process) raised for user=%s", task.user_id)
+        return False, f"garmin sync: {exc}"
+
+    payload = res.to_dict()
+    payload["status"] = "error" if res.auth_error else "ok"
+    if res.auth_error:
+        payload["error"] = "token_expired"
+    result_text = json.dumps(payload)
+    return (not res.auth_error), result_text
+
+
 def _execute_skill_task(
     task: db.Task, config: Config,
 ) -> tuple[bool, str]:
@@ -1066,6 +1120,16 @@ def _execute_skill_task(
     )
     if skill_name not in skill_index:
         return False, f"unknown skill: {skill_name}"
+
+    # In-process dispatch for skill-tasks that need read/write access to
+    # the encrypted secrets store. The subprocess path strips
+    # ``ISTOTA_SECRET_KEY`` by design (executor.build_clean_env), so
+    # any skill that reaches into ``secrets_store`` directly — and the
+    # garmin sync engine reads + writes multiple entries (oauth blob,
+    # rotated tokens, error flag, last_sync) — cannot run there. Mirrors
+    # the in-process call the web ``/garmin/sync`` endpoint already makes.
+    if skill_name == "health" and skill_args[:1] == ["garmin-sync"]:
+        return _run_garmin_sync_inprocess(task, config, skill_args)
 
     timeout = config.scheduler.task_timeout_minutes * 60
     user_temp_dir = get_user_temp_dir(config, task.user_id)
@@ -1174,7 +1238,7 @@ def _execute_command_task(
     timeout = config.scheduler.task_timeout_minutes * 60
 
     from .executor import build_stripped_env, get_user_temp_dir
-    from .skills._env import EnvContext, build_skill_env
+    from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
     from .skills._loader import load_skill_index
     env = build_stripped_env()
     env["ISTOTA_TASK_ID"] = str(task.id)
@@ -1216,6 +1280,15 @@ def _execute_command_task(
     for k, v in build_skill_env(list(skill_index), skill_index, ctx).items():
         if k not in env:
             env[k] = v
+    # Run setup_env hooks. Without this, declarative env specs marked
+    # ``from: "setup_env"`` (notably ``LOCATION_DB_PATH``, ``HEALTH_DB_PATH``)
+    # resolve to None in build_skill_env — operator-defined CRON.md
+    # command rows that shell out to skill CLIs needing those vars would
+    # fail silently. Mirrors the _execute_skill_task path. Hook values
+    # win over the daemon's ambient env because they are computed
+    # per-user; a stray LOCATION_DB_PATH inherited from systemd would
+    # point at the wrong user's DB.
+    env.update(dispatch_setup_env_hooks(list(skill_index), skill_index, ctx))
     try:
         proc = subprocess.run(
             task.command,
