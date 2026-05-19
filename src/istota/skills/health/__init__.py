@@ -560,11 +560,42 @@ def cmd_garmin_status(args: argparse.Namespace) -> None:
     _emit({"status": "ok", "garmin": status})
 
 
+_GARMIN_SYNC_DELEGATED_POLL_TIMEOUT_S = 60.0
+_GARMIN_SYNC_DELEGATED_POLL_INTERVAL_S = 0.5
+
+
 def cmd_garmin_sync(args: argparse.Namespace) -> None:
-    """Run a Garmin sync. Direct mode only — sync writes to multiple
-    stats rows in the per-user health DB and refreshes the encrypted
-    OAuth blob in the framework secrets table. The scheduled job and
-    web `/garmin/sync` endpoint share the same engine.
+    """Run a Garmin sync.
+
+    Two execution modes depending on whether the master key is reachable:
+
+    1. **Direct** — ``ISTOTA_SECRET_KEY`` is in env (operator shell that
+       sourced the daemon's ``EnvironmentFile``). The CLI process can
+       decrypt + re-encrypt the OAuth blob itself, so the engine runs
+       inline. This is the path the web ``/garmin/sync`` endpoint and the
+       cron short-circuit already use.
+
+    2. **Delegated** — master key isn't present (LLM Bash call, hand-
+       written CRON ``command:`` row, dev shell without the env file
+       sourced). The CLI can't run the engine here without `ISTOTA_SECRET_KEY`
+       (Fernet-at-rest blast-radius — see ``Skill proxy execution model
+       and the master-key boundary`` in project notes), so it enqueues a
+       ``skill="health"`` task and polls. The scheduler routes that
+       through ``_run_garmin_sync_inprocess``, which runs in the daemon
+       process where the key naturally lives.
+    """
+    from istota import secrets_store
+
+    if secrets_store.secret_key_available():
+        _cmd_garmin_sync_direct(args)
+    else:
+        _cmd_garmin_sync_delegated(args)
+
+
+def _cmd_garmin_sync_direct(args: argparse.Namespace) -> None:
+    """Run the sync engine in this process. Requires ``ISTOTA_SECRET_KEY``
+    so the engine can decrypt the stored OAuth blob and persist rotated
+    tokens / error flags mid-run.
     """
     from istota.health import garmin_sync as gs
     from istota.health.models import HealthContext
@@ -598,6 +629,93 @@ def cmd_garmin_sync(args: argparse.Namespace) -> None:
     if res.auth_error:
         payload["error"] = "token_expired"
     _emit(payload, error=res.auth_error)
+
+
+def _cmd_garmin_sync_delegated(args: argparse.Namespace) -> None:
+    """Enqueue a Garmin sync task and poll until the scheduler runs it.
+
+    The scheduler short-circuits ``skill="health"`` +
+    ``skill_args[0]=="garmin-sync"`` into ``_run_garmin_sync_inprocess``
+    (ISSUE-098 fix), which runs in the daemon process where the master
+    key is in scope.
+    """
+    import time
+    from istota import db as _db
+
+    user_id = os.environ.get("ISTOTA_USER_ID", "")
+    if not user_id:
+        _fail("ISTOTA_USER_ID not set")
+
+    db_path_str = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path_str:
+        _fail(
+            "Garmin sync needs either ISTOTA_SECRET_KEY (direct mode) or "
+            "ISTOTA_DB_PATH (delegate to scheduler). Neither is set. Use "
+            "the web UI /garmin/sync endpoint instead.",
+        )
+    db_path = Path(db_path_str)
+
+    skill_args = ["garmin-sync", "--days-back", str(args.days_back)]
+
+    try:
+        with _db.get_db(db_path) as conn:
+            task_id = _db.create_task(
+                conn,
+                user_id=user_id,
+                source_type="cli",
+                skill="health",
+                skill_args=json.dumps(skill_args),
+            )
+            # One-shot. Standard retry backoff (1/4/16 min) would only
+            # fire after the CLI poll already timed out — leaving the
+            # user thinking the sync failed while a later attempt
+            # silently writes data.
+            conn.execute(
+                "UPDATE tasks SET max_attempts = 1 WHERE id = ?",
+                (task_id,),
+            )
+    except sqlite3.OperationalError as exc:
+        # bwrap mounts the DB read-only inside the sandbox; an LLM Bash
+        # call hits EROFS here. No way to enqueue from inside — the LLM
+        # should fall back to telling the user about /garmin/sync or
+        # waiting for the scheduled job.
+        _fail(
+            f"Cannot enqueue Garmin sync task ({exc}). Sandboxed callers "
+            "should use the web UI /garmin/sync endpoint instead.",
+        )
+
+    deadline = time.monotonic() + _GARMIN_SYNC_DELEGATED_POLL_TIMEOUT_S
+    final = None
+    while time.monotonic() < deadline:
+        time.sleep(_GARMIN_SYNC_DELEGATED_POLL_INTERVAL_S)
+        with _db.get_db(db_path) as conn:
+            task = _db.get_task(conn, task_id)
+        if task is None:
+            _fail(f"Garmin sync task {task_id} disappeared from the DB")
+        if task.status in ("completed", "failed", "cancelled"):
+            final = task
+            break
+
+    if final is None:
+        _fail(
+            f"Garmin sync task {task_id} did not finish within "
+            f"{_GARMIN_SYNC_DELEGATED_POLL_TIMEOUT_S:.0f}s — the scheduler "
+            "may not be running.",
+        )
+
+    if final.status == "cancelled":
+        _fail(f"Garmin sync task {task_id} was cancelled")
+    if final.status == "failed":
+        _fail(final.error or f"Garmin sync task {task_id} failed")
+
+    # The scheduler stored the in-process engine's JSON payload (already
+    # shaped by _run_garmin_sync_inprocess: status, optional error,
+    # inserted/skipped/days_processed) in task.result. Pass it through.
+    try:
+        payload = json.loads(final.result or "{}")
+    except (json.JSONDecodeError, ValueError):
+        payload = {"status": "ok", "result": final.result}
+    _emit(payload)
 
 
 def cmd_garmin_disconnect(args: argparse.Namespace) -> None:

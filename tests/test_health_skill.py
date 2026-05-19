@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from istota import db
 from istota.health._migrate import ensure_initialised
 from istota.health.workspace import synthesize_health_context
 
@@ -300,3 +304,240 @@ class TestHistorySummaryCli:
         assert [e["encounter_type"] for e in summary["recent_procedures"]] == [
             "procedure",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Garmin sync routing: direct vs delegated
+# ---------------------------------------------------------------------------
+
+
+def _garmin_args(days_back: int = 7) -> argparse.Namespace:
+    return argparse.Namespace(days_back=days_back)
+
+
+class TestGarminSyncRouting:
+    """``cmd_garmin_sync`` picks direct mode (engine runs inline) when
+    ``ISTOTA_SECRET_KEY`` is available, and delegated mode (enqueue
+    skill-task + poll) otherwise. The delegated path exists because the
+    Fernet master key is intentionally not propagated to subprocesses —
+    instead, the scheduler's in-daemon short-circuit
+    (``_run_garmin_sync_inprocess``) does the work. See
+    ``Skill proxy execution model and the master-key boundary`` in
+    project notes."""
+
+    def test_direct_mode_when_key_available(self, monkeypatch):
+        from istota.skills.health import cmd_garmin_sync
+
+        with patch(
+            "istota.secrets_store.secret_key_available", return_value=True,
+        ), patch(
+            "istota.skills.health._cmd_garmin_sync_direct",
+        ) as direct, patch(
+            "istota.skills.health._cmd_garmin_sync_delegated",
+        ) as delegated:
+            cmd_garmin_sync(_garmin_args())
+        direct.assert_called_once()
+        delegated.assert_not_called()
+
+    def test_delegated_mode_when_key_missing(self, monkeypatch):
+        from istota.skills.health import cmd_garmin_sync
+
+        with patch(
+            "istota.secrets_store.secret_key_available", return_value=False,
+        ), patch(
+            "istota.skills.health._cmd_garmin_sync_direct",
+        ) as direct, patch(
+            "istota.skills.health._cmd_garmin_sync_delegated",
+        ) as delegated:
+            cmd_garmin_sync(_garmin_args())
+        delegated.assert_called_once()
+        direct.assert_not_called()
+
+
+class TestGarminSyncDelegated:
+    """The delegated path enqueues a ``skill="health"`` task, sets
+    ``max_attempts=1``, polls until the scheduler transitions it to a
+    terminal state, then surfaces the engine's JSON payload."""
+
+    def _env(self, monkeypatch, db_path: Path, **overrides):
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        for k, v in overrides.items():
+            if v is None:
+                monkeypatch.delenv(k, raising=False)
+            else:
+                monkeypatch.setenv(k, v)
+
+    def _patch_poll(self, transition_after_calls: int = 1):
+        """Patch ``time.sleep`` to no-op and ``time.monotonic`` to advance
+        in fixed steps so the polling loop terminates quickly. Returns a
+        counter ref so the test can react to poll iterations."""
+        counter = {"n": 0}
+
+        def fake_sleep(_):
+            counter["n"] += 1
+
+        monotonic_state = {"t": 0.0}
+
+        def fake_monotonic():
+            monotonic_state["t"] += 0.1
+            return monotonic_state["t"]
+
+        return counter, patch("time.sleep", side_effect=fake_sleep), patch(
+            "time.monotonic", side_effect=fake_monotonic,
+        )
+
+    def test_success_path_emits_payload(self, db_path, monkeypatch, capsys):
+        from istota.skills.health import _cmd_garmin_sync_delegated
+        self._env(monkeypatch, db_path)
+
+        def fake_get_task(conn, task_id):
+            return db.Task(
+                id=task_id, status="completed",
+                source_type="cli", user_id="alice", prompt="",
+                result='{"status":"ok","inserted":5,"days_processed":3,"auth_error":false}',
+            )
+
+        counter, sleep_patch, monotonic_patch = self._patch_poll()
+        with sleep_patch, monotonic_patch, patch(
+            "istota.db.get_task", side_effect=fake_get_task,
+        ):
+            _cmd_garmin_sync_delegated(_garmin_args())
+
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["inserted"] == 5
+        assert payload["days_processed"] == 3
+
+        # Confirm the task was actually inserted with the right args + max_attempts=1.
+        with db.get_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT skill, skill_args, max_attempts, source_type, user_id "
+                "FROM tasks ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        assert row["skill"] == "health"
+        assert json.loads(row["skill_args"]) == ["garmin-sync", "--days-back", "7"]
+        assert row["max_attempts"] == 1
+        assert row["source_type"] == "cli"
+        assert row["user_id"] == "alice"
+
+    def test_failed_task_surfaces_error(self, db_path, monkeypatch, capsys):
+        from istota.skills.health import _cmd_garmin_sync_delegated
+        self._env(monkeypatch, db_path)
+
+        def fake_get_task(conn, task_id):
+            return db.Task(
+                id=task_id, status="failed",
+                source_type="cli", user_id="alice", prompt="",
+                error="garmin sync: token_expired",
+            )
+
+        counter, sleep_patch, monotonic_patch = self._patch_poll()
+        with sleep_patch, monotonic_patch, patch(
+            "istota.db.get_task", side_effect=fake_get_task,
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                _cmd_garmin_sync_delegated(_garmin_args())
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert payload["status"] == "error"
+        assert "token_expired" in payload["error"]
+
+    def test_cancelled_task_surfaces_error(self, db_path, monkeypatch, capsys):
+        from istota.skills.health import _cmd_garmin_sync_delegated
+        self._env(monkeypatch, db_path)
+
+        def fake_get_task(conn, task_id):
+            return db.Task(
+                id=task_id, status="cancelled",
+                source_type="cli", user_id="alice", prompt="",
+            )
+
+        counter, sleep_patch, monotonic_patch = self._patch_poll()
+        with sleep_patch, monotonic_patch, patch(
+            "istota.db.get_task", side_effect=fake_get_task,
+        ):
+            with pytest.raises(SystemExit):
+                _cmd_garmin_sync_delegated(_garmin_args())
+        out = capsys.readouterr().out
+        assert "cancelled" in json.loads(out)["error"]
+
+    def test_timeout_when_task_stuck_pending(self, db_path, monkeypatch, capsys):
+        """If the scheduler isn't running (or is overloaded), the CLI
+        gives up after ``_GARMIN_SYNC_DELEGATED_POLL_TIMEOUT_S`` and
+        surfaces a clear scheduler-may-not-be-running message rather
+        than hanging forever."""
+        from istota.skills.health import _cmd_garmin_sync_delegated
+        self._env(monkeypatch, db_path)
+
+        def fake_get_task(conn, task_id):
+            return db.Task(
+                id=task_id, status="pending",
+                source_type="cli", user_id="alice", prompt="",
+            )
+
+        # Force monotonic to jump past the timeout on the very first call
+        # after start, so the loop exits without sleeping in real time.
+        monotonic_state = {"calls": 0}
+
+        def fake_monotonic():
+            monotonic_state["calls"] += 1
+            return 1000.0 if monotonic_state["calls"] >= 2 else 0.0
+
+        with patch("time.sleep"), patch(
+            "time.monotonic", side_effect=fake_monotonic,
+        ), patch("istota.db.get_task", side_effect=fake_get_task):
+            with pytest.raises(SystemExit):
+                _cmd_garmin_sync_delegated(_garmin_args())
+        out = capsys.readouterr().out
+        assert "scheduler may not be running" in json.loads(out)["error"]
+
+    def test_missing_user_id_fails_loud(self, db_path, monkeypatch, capsys):
+        from istota.skills.health import _cmd_garmin_sync_delegated
+        monkeypatch.delenv("ISTOTA_USER_ID", raising=False)
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+
+        with pytest.raises(SystemExit):
+            _cmd_garmin_sync_delegated(_garmin_args())
+        out = capsys.readouterr().out
+        assert "ISTOTA_USER_ID" in json.loads(out)["error"]
+
+    def test_missing_db_path_fails_with_web_ui_hint(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """No master key AND no DB to enqueue against — there's nothing
+        the CLI can do. Tell the operator about /garmin/sync explicitly
+        so the failure mode is recoverable."""
+        from istota.skills.health import _cmd_garmin_sync_delegated
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+
+        with pytest.raises(SystemExit):
+            _cmd_garmin_sync_delegated(_garmin_args())
+        out = capsys.readouterr().out
+        err = json.loads(out)["error"]
+        assert "ISTOTA_SECRET_KEY" in err
+        assert "/garmin/sync" in err
+
+    def test_readonly_db_falls_through_with_web_ui_hint(
+        self, db_path, monkeypatch, capsys,
+    ):
+        """Sandboxed callers (LLM Bash through bwrap) see EROFS when they
+        try to enqueue — the DB is mounted read-only inside the sandbox.
+        The CLI must surface this as a "use the web UI" message, not
+        crash with a stack trace."""
+        from istota.skills.health import _cmd_garmin_sync_delegated
+        self._env(monkeypatch, db_path)
+
+        with patch(
+            "istota.db.get_db",
+            side_effect=sqlite3.OperationalError("attempt to write a readonly database"),
+        ):
+            with pytest.raises(SystemExit):
+                _cmd_garmin_sync_delegated(_garmin_args())
+        out = capsys.readouterr().out
+        err = json.loads(out)["error"]
+        assert "readonly" in err.lower() or "Sandboxed" in err
+        assert "/garmin/sync" in err
