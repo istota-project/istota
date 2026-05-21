@@ -149,6 +149,7 @@
 	const GAP_SPEED_MAX_MS = 140;            // ~500 km/h — above any ground transport (Shinkansen ~300), below any flight
 	const FLIGHT_DIST_MIN_M = 300_000;       // 300 km — a single un-sampled edge of this length is flight-shaped even when airport dwell drags the implied speed below cruise
 	const FLIGHT_DIST_SPEED_MS = 28;         // ~100 km/h — paired with FLIGHT_DIST_MIN_M, keeps slow-and-long edges (overnight ferries, very long parked stretches) in the sparse bucket
+	const FLIGHT_ENDPOINT_REST_MS = 5;       // ~18 km/h — below this, OS-reported endpoint speed counts as "at rest"; tolerates walk-to-gate noise
 	const PLACE_CROSSING_DIST_M = 200;       // boundary-skip threshold
 
 	// 'flight' = implied speed too fast for any ground transport (clear teleport).
@@ -157,6 +158,14 @@
 	// instead of continuous tracking. Rendering uses this to draw flights as
 	// curved arcs and sparse ground gaps as quiet straight dashes.
 	type GapKind = 'flight' | 'sparse' | null;
+
+	// True when the OS-reported instantaneous speed says the user was clearly
+	// moving when this ping was sampled. Null speed (Overland didn't report)
+	// is treated as at-rest so we degrade to the pre-OS-speed behaviour for
+	// users / configs that don't carry the field.
+	function endpointInMotion(p: LocationPing): boolean {
+		return p.speed != null && p.speed > FLIGHT_ENDPOINT_REST_MS;
+	}
 
 	function gapKind(a: LocationPing, b: LocationPing, dist: number, timeDeltaS: number): GapKind {
 		if (timeDeltaS <= 0) return null;
@@ -167,8 +176,14 @@
 		// Long jump with airport dwell on either side: a 700 km gap at 35 m/s
 		// (driving + airport) is still a flight in user terms. The speed floor
 		// keeps very-slow long edges (parked-overnight + moved-far-next-day)
-		// in the sparse bucket where they belong.
-		if (dist > FLIGHT_DIST_MIN_M && speed > FLIGHT_DIST_SPEED_MS) return 'flight';
+		// in the sparse bucket. The endpoint-at-rest check handles the
+		// flight-vs-rail-with-signal-loss ambiguity: a flight ends at airport
+		// gates where the user is stationary; a high-speed-rail signal gap
+		// leaves the user mid-journey at both boundaries, still in motion.
+		// Trust the rule only when neither endpoint reports motion.
+		if (dist > FLIGHT_DIST_MIN_M && speed > FLIGHT_DIST_SPEED_MS) {
+			if (!endpointInMotion(a) && !endpointInMotion(b)) return 'flight';
+		}
 		if (timeDeltaS >= DWELL_MIN_DURATION_S) return 'sparse';
 		const placeA = a.place ?? null;
 		const placeB = b.place ?? null;
@@ -244,6 +259,16 @@
 			const run = pings.slice(i, j);
 			if (!isDwellRun(run)) {
 				for (const p of run) kept.push(p);
+			} else {
+				// Preserve the first and last ping of every dwell run. Drops
+				// the middle (no visual loss — they all sit inside a 50 m
+				// cluster) but leaves anchors so the surrounding edges carry
+				// the dwell's at-rest OS-speed signal. Without this, a
+				// multi-leg flight loses its airport gate anchors and the
+				// gap edge connects the Uber pings on either side, defeating
+				// gapKind's endpoint-rest check.
+				kept.push(run[0]);
+				if (run.length > 1) kept.push(run[run.length - 1]);
 			}
 			i = j;
 		}
@@ -347,7 +372,11 @@
 			const aTs = new Date(a.timestamp).getTime() / 1000;
 			const bTs = new Date(b.timestamp).getTime() / 1000;
 			const dt = bTs - aTs;
-			const dist = approxDistanceM(a.lon, a.lat, b.lon, b.lat);
+			// Haversine here, not equirectangular: approxDistanceM is fine for
+			// city-scale edges but wraps wrong across the anti-meridian and
+			// over-estimates by ~17% on transcontinental jumps, throwing off
+			// gapKind's speed/distance thresholds for long flights.
+			const dist = haversineM(a.lon, a.lat, b.lon, b.lat);
 			const speedMs = dt > 0 ? dist / dt : 0;
 			edges.push({
 				a: [a.lon, a.lat],
