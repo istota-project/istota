@@ -521,26 +521,32 @@ const mockDiscover: { clusters: MockCluster[] } = {
 const today = new Date().toISOString().slice(0, 10);
 const mockPings = (() => {
 	const pings: any[] = [];
+	// Berlin morning, continuous tracking: 60 pings 1 min apart, 08:00-08:59.
+	// Tight spacing keeps each edge under the dwell-gap threshold so this
+	// stretch renders as the solid speed-coloured activity line.
 	const berlinLat = 52.5200;
 	const berlinLon = 13.4050;
-	// Morning in Berlin: 20 pings between 08:00 and 11:48.
-	for (let i = 0; i < 20; i++) {
+	for (let i = 0; i < 60; i++) {
 		const t = new Date();
-		t.setHours(8 + Math.floor(i / 5), (i % 5) * 12, 0, 0);
+		t.setHours(8, i, 0, 0);
+		const stationary = i < 15;
 		pings.push({
 			timestamp: t.toISOString(),
-			lat: berlinLat + Math.sin(i / 6) * 0.01 + i * 0.0002,
-			lon: berlinLon + Math.cos(i / 6) * 0.01 + i * 0.0003,
+			lat: berlinLat + Math.sin(i / 18) * 0.004 + i * 0.00012,
+			lon: berlinLon + Math.cos(i / 18) * 0.004 + i * 0.00018,
 			horizontal_accuracy: 15,
-			activity_type: i < 10 ? 'stationary' : 'walking',
-			speed: i < 10 ? 0 : 1.2,
-			place: i < 10 ? 'Home' : null,
-			place_id: i < 10 ? 1 : null,
+			activity_type: stationary ? 'stationary' : i < 35 ? 'walking' : 'in_vehicle',
+			speed: stationary ? 0 : i < 35 ? 1.2 : 8.5,
+			place: stationary ? 'Home' : null,
+			place_id: stationary ? 1 : null,
 		});
 	}
-	// ~11h transatlantic flight gap: next ping is in LA at 23:00 local-ish.
+	// ~14h transatlantic flight gap: next ping is in LA at 23:00 UTC.
 	// Berlin → LAX is ~9,300 km; the implied speed easily exceeds the gap
-	// threshold so this edge renders as a dashed connector.
+	// threshold so this edge renders as the coral great-circle arc.
+	// LA pings are 6 min apart, matching Overland's significant-location-change
+	// mode, so each LA→LA edge crosses the dwell threshold and renders as the
+	// muted sparse-sample dash.
 	const laxLat = 33.9425;
 	const laxLon = -118.4081;
 	for (let i = 0; i < 30; i++) {
