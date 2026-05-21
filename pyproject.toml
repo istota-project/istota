@@ -1,6 +1,6 @@
 [project]
 name = "istota"
-version = "0.12.0"
+version = "0.13.0"
 description = "Personal AI agent integrated with Nextcloud"
 license = "MIT"
 readme = "README.md"
