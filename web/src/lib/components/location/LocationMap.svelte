@@ -526,18 +526,18 @@
 			},
 		});
 
-		// Long-jump / teleport connectors (faint dashed grey)
+		// Long-jump / teleport connectors (dashed faded coral)
 		map.addLayer({
 			id: 'path-gap',
 			type: 'line',
 			source: 'path',
 			filter: ['==', ['get', 'segment_type'], 'gap'],
-			layout: { visibility: 'visible' },
+			layout: { visibility: 'visible', 'line-cap': 'round' },
 			paint: {
-				'line-color': '#555',
-				'line-width': 1,
-				'line-opacity': 0.3,
-				'line-dasharray': [4, 4],
+				'line-color': '#e88a8a',
+				'line-width': 2.5,
+				'line-opacity': 0.45,
+				'line-dasharray': [2, 2],
 			},
 		});
 
