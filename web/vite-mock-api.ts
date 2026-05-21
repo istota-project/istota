@@ -521,20 +521,40 @@ const mockDiscover: { clusters: MockCluster[] } = {
 const today = new Date().toISOString().slice(0, 10);
 const mockPings = (() => {
 	const pings: any[] = [];
-	const startLat = 52.5200;
-	const startLon = 13.4050;
-	for (let i = 0; i < 50; i++) {
+	const berlinLat = 52.5200;
+	const berlinLon = 13.4050;
+	// Morning in Berlin: 20 pings between 08:00 and 11:48.
+	for (let i = 0; i < 20; i++) {
 		const t = new Date();
 		t.setHours(8 + Math.floor(i / 5), (i % 5) * 12, 0, 0);
 		pings.push({
-			recorded_at: t.toISOString(),
-			lat: startLat + Math.sin(i / 6) * 0.01 + i * 0.0002,
-			lon: startLon + Math.cos(i / 6) * 0.01 + i * 0.0003,
+			timestamp: t.toISOString(),
+			lat: berlinLat + Math.sin(i / 6) * 0.01 + i * 0.0002,
+			lon: berlinLon + Math.cos(i / 6) * 0.01 + i * 0.0003,
 			horizontal_accuracy: 15,
-			activity_type: i < 10 ? 'stationary' : i < 30 ? 'walking' : 'in_vehicle',
-			speed: i < 10 ? 0 : i < 30 ? 1.2 : 8.5,
+			activity_type: i < 10 ? 'stationary' : 'walking',
+			speed: i < 10 ? 0 : 1.2,
 			place: i < 10 ? 'Home' : null,
 			place_id: i < 10 ? 1 : null,
+		});
+	}
+	// ~11h transatlantic flight gap: next ping is in LA at 23:00 local-ish.
+	// Berlin → LAX is ~9,300 km; the implied speed easily exceeds the gap
+	// threshold so this edge renders as a dashed connector.
+	const laxLat = 33.9425;
+	const laxLon = -118.4081;
+	for (let i = 0; i < 30; i++) {
+		const t = new Date();
+		t.setHours(23 + Math.floor(i / 10), (i % 10) * 6, 0, 0);
+		pings.push({
+			timestamp: t.toISOString(),
+			lat: laxLat + Math.sin(i / 6) * 0.008 + i * 0.0003,
+			lon: laxLon + Math.cos(i / 6) * 0.008 + i * 0.0004,
+			horizontal_accuracy: 18,
+			activity_type: i < 5 ? 'stationary' : i < 20 ? 'in_vehicle' : 'walking',
+			speed: i < 5 ? 0 : i < 20 ? 12.5 : 1.4,
+			place: null,
+			place_id: null,
 		});
 	}
 	return { pings, count: pings.length };
