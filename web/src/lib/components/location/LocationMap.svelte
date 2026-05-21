@@ -147,6 +147,8 @@
 	//     away. Without this, such edges render as solid coloured straight
 	//     lines cutting across blocks.
 	const GAP_SPEED_MAX_MS = 140;            // ~500 km/h — above any ground transport (Shinkansen ~300), below any flight
+	const FLIGHT_DIST_MIN_M = 300_000;       // 300 km — a single un-sampled edge of this length is flight-shaped even when airport dwell drags the implied speed below cruise
+	const FLIGHT_DIST_SPEED_MS = 28;         // ~100 km/h — paired with FLIGHT_DIST_MIN_M, keeps slow-and-long edges (overnight ferries, very long parked stretches) in the sparse bucket
 	const PLACE_CROSSING_DIST_M = 200;       // boundary-skip threshold
 
 	// 'flight' = implied speed too fast for any ground transport (clear teleport).
@@ -158,7 +160,15 @@
 
 	function gapKind(a: LocationPing, b: LocationPing, dist: number, timeDeltaS: number): GapKind {
 		if (timeDeltaS <= 0) return null;
-		if (dist / timeDeltaS > GAP_SPEED_MAX_MS) return 'flight';
+		const speed = dist / timeDeltaS;
+		// Unambiguous teleport — fast enough that no ground transport could
+		// have covered the edge even at cruise speed.
+		if (speed > GAP_SPEED_MAX_MS) return 'flight';
+		// Long jump with airport dwell on either side: a 700 km gap at 35 m/s
+		// (driving + airport) is still a flight in user terms. The speed floor
+		// keeps very-slow long edges (parked-overnight + moved-far-next-day)
+		// in the sparse bucket where they belong.
+		if (dist > FLIGHT_DIST_MIN_M && speed > FLIGHT_DIST_SPEED_MS) return 'flight';
 		if (timeDeltaS >= DWELL_MIN_DURATION_S) return 'sparse';
 		const placeA = a.place ?? null;
 		const placeB = b.place ?? null;
