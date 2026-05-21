@@ -149,13 +149,21 @@
 	const GAP_SPEED_MAX_MS = 140;            // ~500 km/h — above any ground transport (Shinkansen ~300), below any flight
 	const PLACE_CROSSING_DIST_M = 200;       // boundary-skip threshold
 
-	function isGap(a: LocationPing, b: LocationPing, dist: number, timeDeltaS: number): boolean {
-		if (timeDeltaS <= 0) return false;
-		if (dist / timeDeltaS > GAP_SPEED_MAX_MS) return true;
-		if (timeDeltaS >= DWELL_MIN_DURATION_S) return true;
+	// 'flight' = implied speed too fast for any ground transport (clear teleport).
+	// 'sparse' = the gap is consistent with ground travel that just wasn't
+	// sampled — typical when Overland is on "significant location change"
+	// instead of continuous tracking. Rendering uses this to draw flights as
+	// curved arcs and sparse ground gaps as quiet straight dashes.
+	type GapKind = 'flight' | 'sparse' | null;
+
+	function gapKind(a: LocationPing, b: LocationPing, dist: number, timeDeltaS: number): GapKind {
+		if (timeDeltaS <= 0) return null;
+		if (dist / timeDeltaS > GAP_SPEED_MAX_MS) return 'flight';
+		if (timeDeltaS >= DWELL_MIN_DURATION_S) return 'sparse';
 		const placeA = a.place ?? null;
 		const placeB = b.place ?? null;
-		return placeA !== placeB && dist > PLACE_CROSSING_DIST_M;
+		if (placeA !== placeB && dist > PLACE_CROSSING_DIST_M) return 'sparse';
+		return null;
 	}
 
 	// Dwell detection on consecutive stationary pings: a real dwell is a long run
@@ -189,7 +197,7 @@
 		speedKmh: number;
 		speedMs: number;
 		dt: number;
-		gap: boolean;
+		gap: GapKind;
 	}
 
 	function isDwellRun(run: LocationPing[]): boolean {
@@ -295,7 +303,7 @@
 	// A single ping whose `place` differs from both neighbours is GPS noise
 	// (bounce-back into a geofence on departure, drive-by past a saved place,
 	// stray cell/Wi-Fi fix). Null its place so the place-crossing gap rule in
-	// isGap doesn't fire — but keep the ping in the time series so its
+	// gapKind doesn't fire — but keep the ping in the time series so its
 	// timestamp prevents a dwell-duration false-positive gap (ISSUE-066).
 	// Real visits always produce 2+ consecutive pings at the same place; a
 	// lone ping never does. The coords may be ~100m off (cached cell/Wi-Fi
@@ -337,7 +345,7 @@
 				speedKmh: Math.min(speedMs * 3.6, MAX_DISPLAY_KMH),
 				speedMs,
 				dt,
-				gap: isGap(a, b, dist, dt),
+				gap: gapKind(a, b, dist, dt),
 			});
 		}
 		return edges;
@@ -348,14 +356,21 @@
 		if (edges.length === 0) return { type: 'FeatureCollection', features: [] };
 
 		const features: GeoJSON.Feature[] = edges.map(e => {
-			if (e.gap) {
+			if (e.gap === 'flight') {
 				return {
 					type: 'Feature',
-					properties: { segment_type: 'gap' },
+					properties: { segment_type: 'flight-gap' },
 					geometry: {
 						type: 'LineString',
 						coordinates: greatCircleArc(e.a[0], e.a[1], e.b[0], e.b[1]),
 					},
+				};
+			}
+			if (e.gap === 'sparse') {
+				return {
+					type: 'Feature',
+					properties: { segment_type: 'sparse-gap' },
+					geometry: { type: 'LineString', coordinates: [e.a, e.b] },
 				};
 			}
 			return {
@@ -526,12 +541,33 @@
 			},
 		});
 
-		// Long-jump / teleport connectors (dashed faded coral)
+		// Sparse-sampling connectors — Overland's significant-location-change
+		// mode (and any time the phone misses pings for a few minutes) produces
+		// big spatial gaps that are still ground travel. Quiet neutral dash so
+		// they read as "we didn't see this leg" rather than "this leg was a
+		// teleport." Straight 2-point line — no arc, since it's local.
 		map.addLayer({
-			id: 'path-gap',
+			id: 'path-gap-sparse',
 			type: 'line',
 			source: 'path',
-			filter: ['==', ['get', 'segment_type'], 'gap'],
+			filter: ['==', ['get', 'segment_type'], 'sparse-gap'],
+			layout: { visibility: 'visible', 'line-cap': 'round' },
+			paint: {
+				'line-color': '#7a8794',
+				'line-width': 2,
+				'line-opacity': 0.4,
+				'line-dasharray': [2, 3],
+			},
+		});
+
+		// Flight connectors — implied speed above any ground transport. Faded
+		// coral great-circle arc so a transatlantic hop bows over the pole
+		// instead of slicing a Mercator straight line.
+		map.addLayer({
+			id: 'path-gap-flight',
+			type: 'line',
+			source: 'path',
+			filter: ['==', ['get', 'segment_type'], 'flight-gap'],
 			layout: { visibility: 'visible', 'line-cap': 'round' },
 			paint: {
 				'line-color': '#e88a8a',
@@ -769,7 +805,8 @@
 		if (!map || !mapLoaded) return;
 		map.setLayoutProperty('path-line', 'visibility', showPath ? 'visible' : 'none');
 		map.setLayoutProperty('path-transit', 'visibility', showPath ? 'visible' : 'none');
-		map.setLayoutProperty('path-gap', 'visibility', showPath ? 'visible' : 'none');
+		map.setLayoutProperty('path-gap-sparse', 'visibility', showPath ? 'visible' : 'none');
+		map.setLayoutProperty('path-gap-flight', 'visibility', showPath ? 'visible' : 'none');
 		map.setLayoutProperty('stationary-points', 'visibility', showPath ? 'visible' : 'none');
 		map.setLayoutProperty('heat', 'visibility', showHeat ? 'visible' : 'none');
 	}
