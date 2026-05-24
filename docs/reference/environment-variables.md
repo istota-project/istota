@@ -73,6 +73,15 @@ Every service-integration env var is declared in the consuming skill's `skill.md
 | `MONEY_USER` | task `user_id` | override via `user_key` on the resource |
 | `MONEY_SECRETS_FILE` | escape hatch | optional, for direct `money` CLI use; the skill reads creds in-process |
 
+## Module setup_env hooks
+
+Some module env vars are resolved at runtime by Python hooks rather than static config lookups. These are declared `from: "setup_env"` in the skill manifest and dispatched by `dispatch_setup_env_hooks` in the scheduler, command-task, skill-task, and heartbeat paths.
+
+| Variable | Source | Notes |
+|---|---|---|
+| `HEALTH_DB_PATH` | `istota.health.resolve_for_user(user_id, config).db_path` | per-user; no-op when health module is disabled |
+| `LOCATION_DB_PATH` | `istota.location.resolve_for_user(user_id, config).db_path` | per-user; no-op when location module is disabled |
+
 ## Google Workspace
 
 | Variable | Source |

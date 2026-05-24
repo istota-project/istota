@@ -75,6 +75,14 @@ Requires OAuth connection via the [web dashboard](../features/google-workspace.m
 |---|---|---|
 | `location` | location, gps, where, place, tracking | yes -- current, history, places, learn, etc. |
 
+## Health
+
+| Skill | Keywords | CLI |
+|---|---|---|
+| `health` | health, weight, bloodwork, labs, biomarker, panel, blood pressure | yes -- log, stats, latest, panels, add-panel, add-biomarker, trend, upload, import-csv, export-csv, summary, settings, set, encounters, add-encounter, diagnoses, add-diagnosis, history-summary, immunizations, add-immunization, vaccine-refs, coverage, garmin-status, garmin-sync, garmin-disconnect |
+
+Requires the `health` module to be enabled (on by default).
+
 ## Monitoring
 
 | Skill | Keywords | CLI |
