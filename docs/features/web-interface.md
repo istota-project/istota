@@ -132,6 +132,8 @@ Users not in the config are rejected with a 403 even if they have a valid Nextcl
 
 **Money**: accounting dashboard with ledger queries, transaction management, invoicing, and work log tracking. Backed by the in-process `money` module (no external service). Requires a `money` resource.
 
+**Health**: body stats grid with sparklines, bloodwork matrix (dates × markers with flag-colored cells, CSV import/export), panel detail with inline edit and source preview, per-marker trend charts with out-of-range zones and LLM explainer, medical history timeline with encounters and diagnoses, immunization tracking with coverage status strip, vaccine drill-down pages with clinical explainers, Garmin Connect integration on the settings page. Requires the `health` module to be enabled (on by default).
+
 **Location**: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover clusters, create/edit/delete, visit stats). Requires GPS tracking to be enabled.
 
 ## API routes
@@ -149,6 +151,7 @@ Users not in the config are rejected with a 403 even if they have a valid Nextcl
 | `/istota/api/feeds` | Native feeds module (per-user SQLite) |
 | `/istota/money/api/*` | Money module (ledger, transactions, invoicing) |
 | `/istota/api/location/*` | Places CRUD, pings, trips |
+| `/istota/api/health/*` | Stats, panels, biomarkers, encounters, diagnoses, immunizations, Garmin, settings |
 
 The SvelteKit build is served as static files for all other `/istota/*` paths.
 
