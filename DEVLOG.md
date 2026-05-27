@@ -2,6 +2,49 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-05-27: caldav DAVClient leak in scheduler — ISSUE-101 root cause
+
+The whisper skill had been failing for ~13 days with `{"status":"error","error":"No model fits in available memory (0.1 GB with 0.3 GB headroom)"}`. Filed as ISSUE-101 with a memory-pre-check hypothesis: `psutil.virtual_memory().available` was reporting 0.1–0.3 GB on the 8 GB deployment host and rejecting even the `tiny` model. The original investigation blamed "memory pressure from new services since mid-May" (devbox containers, browser sidecar, etc.) without identifying the source. That guess was wrong.
+
+**Investigation.** Sshed in, found the scheduler at 5.2 GB RSS, 6234 threads, 6249 open fds. `ss -tnp` showed **6208 of those fds were CLOSE-WAIT sockets to the Nextcloud host** — the upstream had sent FIN and the local process had never called close(). Restarted the scheduler immediately to free RAM (whisper unblocked); the leak rate measured ~1.5/min after restart matched a 3-day projection back to the 6234 figure. Wrote a local repro test with a synthetic long-poll TCP server cancelling httpx requests mid-flight — passed cleanly even under stress, so the initial async-httpx-cancellation hypothesis was a dead end. Switched approach: `pipx install py-spy` and `py-spy dump --pid $SCHED` against the running daemon. Nearly every leaked thread was parked at `urllib3/connectionpool.py:idle_conn_watch_task` — the background watchdog each `HTTPConnectionPool` spawns on first connection. `caldav.DAVClient` wraps a `requests.Session` whose `HTTPAdapter` owns those pools.
+
+**Root cause.** `executor.discover_calendars_for_task` constructed a fresh `DAVClient` per task without ever calling `client.close()`. Every task that issued a CalDAV request (most of them — the function is called twice per task in scheduler delivery + once during prompt build) leaked one watchdog thread and one open socket. The "1 thread + 1 socket per task" pattern lined up exactly with the production count. Whisper's pre-check was reporting the truth — there really was no RAM — but the cause was several layers removed.
+
+**Fix.** Wrap every `DAVClient` construction site in `with`/try-finally so the urllib3 pools are closed on exit:
+- `executor.discover_calendars_for_task` — the leak hotpath in the long-running daemon.
+- `cli.cmd_calendar_discover`, `cli.cmd_calendar_test` — CLI commands; OS reclaims on exit but keeps the pattern consistent.
+- `skills/briefing/_fetch_calendar_events` — runs in the briefing-generation hot path.
+- `skills/location/cmd_attendance` — CLI subprocess; same as above.
+- `skills/calendar/cmd_{list,create,delete,update}` — every skill CLI entry point.
+
+The scheduler still has the leaky code in production — Ansible deploy is the next step. Until then the leak will keep accumulating at ~1.5/min and require a periodic restart.
+
+**Independent fix in the same change: whisper pre-check uses `available + cached + buffers`.** `psutil.virtual_memory().available` is the kernel's conservative estimate that excludes reclaimable page cache; under allocation pressure Linux happily evicts cache to satisfy a large allocation. Even with the leak fixed, the old gate would still misbehave any time the page cache was warm — switching to `available + cached + buffers` matches actual loadable capacity.
+
+**Regression tests.** `tests/test_caldav_client_leak.py` (new) spins up a stub CalDAV HTTP server, calls `discover_calendars_for_task` 10×, and asserts the `idle_conn_watch_task` thread count delta is 0. Pre-fix: `Leaked 10 ... threads after 10 ... calls` — exactly the 1:1 ratio observed in prod. Post-fix: passes. `tests/test_talk_leak.py` (new, integration-marked) is the companion repro for the async-httpx side under the FIRST_COMPLETED+cancel pattern; passes today and confirms that path is not a leak source — useful to keep as a regression guard. One existing briefing test (`TestFetchCalendarEvents::test_morning_fetches_today`) needed its mock-assertion updated to use `mock_client.return_value.__enter__.return_value` since the wrapped call now sees the entered context. Full suite: 5110 passed, 7 skipped.
+
+**Diagnosis tooling note.** `py-spy dump --pid <SCHED>` on the live daemon was the breakthrough — Python thread stacks made the leak source immediately obvious where socket counts and memory profiling did not. Worth keeping in the diagnostic toolkit for future "what is the daemon doing" investigations.
+
+**Key changes:**
+- `discover_calendars_for_task` wraps `DAVClient` in `with` — stops the urllib3 watchdog leak.
+- Every other `get_caldav_client` call site converted to `with`/try-finally for consistency.
+- `whisper/models.py:get_available_memory_gb` returns `available + cached + buffers` instead of `available` — matches Linux's actual loadable capacity.
+- New `tests/test_caldav_client_leak.py` regression test (stub CalDAV server + thread-count assert).
+- New `tests/test_talk_leak.py` integration test for the async-httpx side.
+- `tests/test_briefing.py::test_morning_fetches_today` mock-assertion updated for the new `with` wrapping.
+- `ISSUE-101` marked closed in `_ISSUES.md` with the real diagnosis on top of the original report.
+
+**Files added/modified:**
+- `src/istota/executor.py` — `discover_calendars_for_task` now uses `with get_caldav_client(...) as client:`.
+- `src/istota/cli.py` — `cmd_calendar_discover` and `cmd_calendar_test` reindented inside `with`.
+- `src/istota/skills/briefing/__init__.py` — `_fetch_calendar_events` uses `with`.
+- `src/istota/skills/location/__init__.py` — `cmd_attendance` uses try/finally + `client.close()` (control flow has multiple `sys.exit` branches).
+- `src/istota/skills/calendar/__init__.py` — `cmd_list`/`cmd_create`/`cmd_delete`/`cmd_update` each wrap `_get_client_from_env()` in `with`.
+- `src/istota/skills/whisper/models.py` — `get_available_memory_gb` switched from `available` to `available + cached + buffers`.
+- `tests/test_caldav_client_leak.py` — new regression test.
+- `tests/test_talk_leak.py` — new integration test.
+- `tests/test_briefing.py` — mock-assertion updated for context-manager wrapping.
+
 ## 2026-05-19: setup_env hook propagation gaps + Garmin sync subprocess fix
 
 Three related bugs surfaced after the encrypted-secrets refactor landed: cron-driven Garmin sync had been silently failing for three days, gym-check-sync started failing the day before with `LOCATION_DB_PATH not set`, and Mulder/Scully review of the fix turned up a third instance of the same shape in the heartbeat path. All three sit on the same underlying split: env vars declared `from: "setup_env"` in skill manifests (`LOCATION_DB_PATH`, `HEALTH_DB_PATH`) need a Python hook to run on the daemon side; ambient daemon env happens to carry them too on healthy boxes, so the gap doesn't show until something disturbs that ambient state.

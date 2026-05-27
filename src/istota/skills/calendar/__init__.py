@@ -501,48 +501,48 @@ def _get_date_range(args) -> tuple[datetime, datetime, str]:
 
 def cmd_list(args) -> dict:
     """List calendar events."""
-    client = _get_client_from_env()
     start, end, label = _get_date_range(args)
 
-    # If no calendar specified, list from all user calendars
-    if not args.calendar:
-        all_events = []
-        calendars = list_calendars(client)
-        for name, url in calendars:
-            try:
-                events = get_events(client, url, start, end)
-                for e in events:
-                    all_events.append({
-                        "calendar": name,
-                        **_event_to_dict(e),
-                    })
-            except Exception:
-                continue  # Skip calendars we can't read
+    # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
+    # leak unless close() is called.
+    with _get_client_from_env() as client:
+        # If no calendar specified, list from all user calendars
+        if not args.calendar:
+            all_events = []
+            calendars = list_calendars(client)
+            for name, url in calendars:
+                try:
+                    events = get_events(client, url, start, end)
+                    for e in events:
+                        all_events.append({
+                            "calendar": name,
+                            **_event_to_dict(e),
+                        })
+                except Exception:
+                    continue  # Skip calendars we can't read
 
-        all_events.sort(key=lambda e: e["start"])
+            all_events.sort(key=lambda e: e["start"])
+            return {
+                "status": "ok",
+                "date": label,
+                "event_count": len(all_events),
+                "events": all_events,
+            }
+
+        # Single calendar specified
+        events = get_events(client, args.calendar, start, end)
+
         return {
             "status": "ok",
+            "calendar": args.calendar,
             "date": label,
-            "event_count": len(all_events),
-            "events": all_events,
+            "event_count": len(events),
+            "events": [_event_to_dict(e) for e in events],
         }
-
-    # Single calendar specified
-    events = get_events(client, args.calendar, start, end)
-
-    return {
-        "status": "ok",
-        "calendar": args.calendar,
-        "date": label,
-        "event_count": len(events),
-        "events": [_event_to_dict(e) for e in events],
-    }
 
 
 def cmd_create(args) -> dict:
     """Create a calendar event."""
-    client = _get_client_from_env()
-
     start = _parse_datetime(args.start)
     end = _parse_datetime(args.end)
 
@@ -551,15 +551,17 @@ def cmd_create(args) -> dict:
         start = start.replace(tzinfo=tz)
         end = end.replace(tzinfo=tz)
 
-    uid = create_event(
-        client,
-        args.calendar,
-        summary=args.summary,
-        start=start,
-        end=end,
-        location=args.location,
-        description=args.description,
-    )
+    # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
+    with _get_client_from_env() as client:
+        uid = create_event(
+            client,
+            args.calendar,
+            summary=args.summary,
+            start=start,
+            end=end,
+            location=args.location,
+            description=args.description,
+        )
 
     return {
         "status": "ok",
@@ -572,9 +574,9 @@ def cmd_create(args) -> dict:
 
 def cmd_delete(args) -> dict:
     """Delete a calendar event."""
-    client = _get_client_from_env()
-
-    deleted = delete_event(client, args.calendar, args.uid)
+    # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
+    with _get_client_from_env() as client:
+        deleted = delete_event(client, args.calendar, args.uid)
 
     if deleted:
         return {"status": "ok", "uid": args.uid, "deleted": True}
@@ -584,8 +586,6 @@ def cmd_delete(args) -> dict:
 
 def cmd_update(args) -> dict:
     """Update a calendar event."""
-    client = _get_client_from_env()
-
     kwargs: dict = {}
     if args.summary is not None:
         kwargs["summary"] = args.summary
@@ -614,7 +614,9 @@ def cmd_update(args) -> dict:
     if not kwargs:
         return {"status": "error", "error": "No fields to update. Provide at least one of --summary, --start, --end, --location, --description, --clear-location, --clear-description."}
 
-    updated = update_event(client, args.calendar, args.uid, **kwargs)
+    # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
+    with _get_client_from_env() as client:
+        updated = update_event(client, args.calendar, args.uid, **kwargs)
 
     if updated:
         return {"status": "ok", "uid": args.uid, "updated_fields": list(kwargs.keys())}

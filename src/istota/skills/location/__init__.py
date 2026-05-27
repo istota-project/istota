@@ -464,23 +464,28 @@ def cmd_attendance(args):
         framework_conn.close()
         sys.exit(1)
 
+    # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
+    # leak unless close() is called. Use try/finally because the function
+    # already branches into sys.exit on errors.
     client = get_caldav_client(caldav_url, caldav_user, caldav_pass)
-
     try:
-        calendars = list_calendars(client)
-    except Exception as e:
-        print(json.dumps({"status": "error", "error": f"Failed to list calendars: {e}"}))
-        conn.close()
-        framework_conn.close()
-        sys.exit(1)
-
-    all_events: list[CalendarEvent] = []
-    for cal_name, cal_url in calendars:
         try:
-            events = get_events(client, cal_url, day_start, day_end)
-            all_events.extend(events)
-        except Exception:
-            continue
+            calendars = list_calendars(client)
+        except Exception as e:
+            print(json.dumps({"status": "error", "error": f"Failed to list calendars: {e}"}))
+            conn.close()
+            framework_conn.close()
+            sys.exit(1)
+
+        all_events: list[CalendarEvent] = []
+        for cal_name, cal_url in calendars:
+            try:
+                events = get_events(client, cal_url, day_start, day_end)
+                all_events.extend(events)
+            except Exception:
+                continue
+    finally:
+        client.close()
 
     filtered = []
     for ev in all_events:

@@ -819,36 +819,38 @@ def _fetch_calendar_events(
             format_event_for_display,
         )
 
-        client = get_caldav_client(
+        # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
+        # leak unless close() is called.
+        with get_caldav_client(
             config.caldav_url, config.caldav_username, config.caldav_password,
-        )
-        calendars = get_calendars_for_user(client, user_id)
-        if not calendars:
-            return None
+        ) as client:
+            calendars = get_calendars_for_user(client, user_id)
+            if not calendars:
+                return None
 
-        day_label = "Today" if is_morning else "Tomorrow"
-        fetch_fn = get_today_events if is_morning else get_tomorrow_events
+            day_label = "Today" if is_morning else "Tomorrow"
+            fetch_fn = get_today_events if is_morning else get_tomorrow_events
 
-        all_events = []
-        for cal_name, cal_url, _writable in calendars:
-            try:
-                events = fetch_fn(client, cal_url, tz=user_timezone)
-                for event in events:
-                    all_events.append((cal_name, event))
-            except Exception as e:
-                logger.warning("Failed to fetch events from calendar %s: %s", cal_name, e)
+            all_events = []
+            for cal_name, cal_url, _writable in calendars:
+                try:
+                    events = fetch_fn(client, cal_url, tz=user_timezone)
+                    for event in events:
+                        all_events.append((cal_name, event))
+                except Exception as e:
+                    logger.warning("Failed to fetch events from calendar %s: %s", cal_name, e)
 
-        # Sort all events by start time
-        all_events.sort(key=lambda x: x[1].start)
+            # Sort all events by start time
+            all_events.sort(key=lambda x: x[1].start)
 
-        if not all_events:
-            return f"## {day_label}'s Calendar (pre-fetched)\nNo events scheduled."
+            if not all_events:
+                return f"## {day_label}'s Calendar (pre-fetched)\nNo events scheduled."
 
-        lines = [f"## {day_label}'s Calendar (pre-fetched)"]
-        for cal_name, event in all_events:
-            lines.append(f"- {format_event_for_display(event)} [{cal_name}]")
+            lines = [f"## {day_label}'s Calendar (pre-fetched)"]
+            for cal_name, event in all_events:
+                lines.append(f"- {format_event_for_display(event)} [{cal_name}]")
 
-        return "\n".join(lines)
+            return "\n".join(lines)
     except Exception as e:
         logger.warning("Calendar pre-fetch failed: %s", e)
         return None

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **CalDAV `DAVClient` leak in the scheduler exhausted host memory and broke whisper transcription** (ISSUE-101). Every task constructed a fresh `caldav.DAVClient` without closing it; the underlying urllib3 pool spawned a daemon watchdog thread and held an open socket retained for the daemon's lifetime. Over three days the scheduler accumulated 6234 watchdog threads and 6214 CLOSE-WAIT sockets, eating ~5 GB on an 8 GB host. Whisper's memory pre-check was reporting the truth — the cause was several layers away. Fix wraps `DAVClient` in `with`/try-finally at every construction site.
+- **Whisper memory pre-check rejected loadable models on busy hosts.** `get_available_memory_gb` now returns `available + cached + buffers` instead of `available`. The kernel reclaims page cache under allocation pressure, so the real loadable capacity is meaningfully larger than `psutil`'s conservative estimate — the old gate misfired any time the page cache was warm.
+
 ## [0.13.0] - 2026-05-21
 
 ### Added
