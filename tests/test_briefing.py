@@ -684,7 +684,13 @@ class TestFetchCalendarEvents:
         assert result is not None
         assert "Today" in result
         assert "Standup" in result
-        mock_today.assert_called_once_with(mock_client.return_value, "https://cal/personal", tz="America/New_York")
+        # The briefing path uses `with get_caldav_client(...) as client:` so
+        # the calendar-event call receives the context-manager-entered client.
+        mock_today.assert_called_once_with(
+            mock_client.return_value.__enter__.return_value,
+            "https://cal/personal",
+            tz="America/New_York",
+        )
 
     @patch("istota.skills.calendar.get_caldav_client")
     @patch("istota.skills.calendar.get_calendars_for_user")

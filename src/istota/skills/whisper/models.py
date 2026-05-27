@@ -36,10 +36,22 @@ def _get_headroom_gb(override: float | None = None) -> float:
 
 
 def get_available_memory_gb() -> float:
-    """Return available system memory in GB."""
+    """Estimate memory we can actually allocate for a model, in GB.
+
+    ``psutil.virtual_memory().available`` is the kernel's conservative
+    estimate of memory available *without evicting page cache*. Under
+    real allocation pressure Linux will happily evict cached pages to
+    satisfy a large allocation, so the true loadable capacity is
+    ``available + cached + buffers``. ISSUE-101 saw the scheduler eat
+    memory until ``available`` dropped to ~0.2 GB on an 8 GB host even
+    though several GB of cache were sitting there ready to be reclaimed
+    — that wrongly disqualified even the ``tiny`` whisper model.
+    """
     import psutil
 
-    return psutil.virtual_memory().available / (1024**3)
+    vm = psutil.virtual_memory()
+    reclaimable = getattr(vm, "cached", 0) + getattr(vm, "buffers", 0)
+    return (vm.available + reclaimable) / (1024**3)
 
 
 def _get_max_model() -> str:

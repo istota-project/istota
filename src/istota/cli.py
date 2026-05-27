@@ -849,26 +849,26 @@ def cmd_calendar_discover(args):
         sys.exit(1)
 
     try:
-        client = get_caldav_client(
+        with get_caldav_client(
             config.caldav_url,
             config.caldav_username,
             config.caldav_password,
-        )
-        calendars = list_calendars(client)
+        ) as client:
+            calendars = list_calendars(client)
 
-        if not calendars:
-            print("No calendars found")
-            return
+            if not calendars:
+                print("No calendars found")
+                return
 
-        print(f"Found {len(calendars)} calendar(s):\n")
-        for name, url in calendars:
-            # Determine if owned or shared based on URL path
-            is_owned = f"/calendars/{config.caldav_username}/" in url
-            ownership = "owned" if is_owned else "shared"
-            print(f"  {name}")
-            print(f"    URL: {url}")
-            print(f"    Type: {ownership}")
-            print()
+            print(f"Found {len(calendars)} calendar(s):\n")
+            for name, url in calendars:
+                # Determine if owned or shared based on URL path
+                is_owned = f"/calendars/{config.caldav_username}/" in url
+                ownership = "owned" if is_owned else "shared"
+                print(f"  {name}")
+                print(f"    URL: {url}")
+                print(f"    Type: {ownership}")
+                print()
 
     except Exception as e:
         print(f"Error connecting to CalDAV server: {e}", file=sys.stderr)
@@ -888,61 +888,60 @@ def cmd_calendar_test(args):
     calendar_url = args.url
 
     try:
-        client = get_caldav_client(
+        with get_caldav_client(
             config.caldav_url,
             config.caldav_username,
             config.caldav_password,
-        )
-
-        # Test read access
-        print(f"Testing read access to: {calendar_url}")
-        try:
-            events = get_today_events(client, calendar_url)
-            print(f"  Read access: OK ({len(events)} event(s) today)")
-            for event in events[:3]:  # Show up to 3 events
-                print(f"    - {format_event_for_display(event)}")
-            if len(events) > 3:
-                print(f"    ... and {len(events) - 3} more")
-        except Exception as e:
-            print(f"  Read access: FAILED - {e}", file=sys.stderr)
-            sys.exit(1)
-
-        # Test write access if requested
-        if args.test_write:
-            print("\nTesting write access...")
+        ) as client:
+            # Test read access
+            print(f"Testing read access to: {calendar_url}")
             try:
-                # Create a test event
-                now = datetime.now()
-                test_start = now + timedelta(days=30)  # 30 days in future
-                test_end = test_start + timedelta(hours=1)
-
-                uid = create_event(
-                    client,
-                    calendar_url,
-                    summary="[Istota Test Event - DELETE ME]",
-                    start=test_start,
-                    end=test_end,
-                    description="This is a test event created by istota calendar test --test-write. It should be automatically deleted.",
-                )
-                print(f"  Create event: OK (UID: {uid})")
-
-                # Delete the test event
-                deleted = delete_event(client, calendar_url, uid)
-                if deleted:
-                    print("  Delete event: OK")
-                else:
-                    print("  Delete event: FAILED - event not found after creation", file=sys.stderr)
-                    sys.exit(1)
-
-                print("\n  Write access: OK")
-
+                events = get_today_events(client, calendar_url)
+                print(f"  Read access: OK ({len(events)} event(s) today)")
+                for event in events[:3]:  # Show up to 3 events
+                    print(f"    - {format_event_for_display(event)}")
+                if len(events) > 3:
+                    print(f"    ... and {len(events) - 3} more")
             except Exception as e:
-                error_msg = str(e).lower()
-                if "authorization" in error_msg or "forbidden" in error_msg or "403" in error_msg:
-                    print(f"  Write access: DENIED (read-only calendar)")
-                else:
-                    print(f"  Write access: FAILED - {e}", file=sys.stderr)
+                print(f"  Read access: FAILED - {e}", file=sys.stderr)
                 sys.exit(1)
+
+            # Test write access if requested
+            if args.test_write:
+                print("\nTesting write access...")
+                try:
+                    # Create a test event
+                    now = datetime.now()
+                    test_start = now + timedelta(days=30)  # 30 days in future
+                    test_end = test_start + timedelta(hours=1)
+
+                    uid = create_event(
+                        client,
+                        calendar_url,
+                        summary="[Istota Test Event - DELETE ME]",
+                        start=test_start,
+                        end=test_end,
+                        description="This is a test event created by istota calendar test --test-write. It should be automatically deleted.",
+                    )
+                    print(f"  Create event: OK (UID: {uid})")
+
+                    # Delete the test event
+                    deleted = delete_event(client, calendar_url, uid)
+                    if deleted:
+                        print("  Delete event: OK")
+                    else:
+                        print("  Delete event: FAILED - event not found after creation", file=sys.stderr)
+                        sys.exit(1)
+
+                    print("\n  Write access: OK")
+
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "authorization" in error_msg or "forbidden" in error_msg or "403" in error_msg:
+                        print(f"  Write access: DENIED (read-only calendar)")
+                    else:
+                        print(f"  Write access: FAILED - {e}", file=sys.stderr)
+                    sys.exit(1)
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
