@@ -72,9 +72,10 @@
 		background: var(--surface-raised);
 	}
 
-	/* Full-width variant: matches the text inputs in settings forms so the
-	   dropdown lines up with neighbouring fields and goes full-width on mobile
-	   (the field container is fluid; max-width caps it on desktop). */
+	/* Full-width variant: matches the settings text inputs exactly — width:100%
+	   capped at the same 24rem (border-box). On screens narrower than 24rem the
+	   width:100% already shrinks it to fill the container, same as the inputs,
+	   so no mobile-specific override is needed. */
 	:global(.ui-select-trigger--full) {
 		display: flex;
 		justify-content: space-between;
@@ -88,13 +89,6 @@
 	}
 	:global(.ui-select-trigger--full .ui-select-label) {
 		max-width: none;
-	}
-	/* Match the settings text inputs: go full-width below the mobile breakpoint
-	   (settings.css drops their max-width at the same 768px). */
-	@media (max-width: 768px) {
-		:global(.ui-select-trigger--full) {
-			max-width: none;
-		}
 	}
 	:global(.ui-select-trigger:disabled) {
 		opacity: 0.5;
