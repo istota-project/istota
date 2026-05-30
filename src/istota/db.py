@@ -277,18 +277,6 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass  # Column already dropped or never existed.
 
-    # User profiles: explicit "follow Nextcloud timezone" toggle (ISSUE-102).
-    # 1 (default) = the scheduler keeps syncing the user's timezone from the
-    # Nextcloud profile on each restart; 0 = Nextcloud only seeded the initial
-    # value and the user's Istota-UI choice is pinned until they re-enable it.
-    try:
-        conn.execute(
-            "ALTER TABLE user_profiles ADD COLUMN "
-            "timezone_follow_nextcloud INTEGER NOT NULL DEFAULT 1"
-        )
-    except sqlite3.OperationalError:
-        pass
-
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError
     # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id

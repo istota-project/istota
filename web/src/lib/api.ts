@@ -605,7 +605,6 @@ export interface UserProfile {
 	user_id: string;
 	display_name: string;
 	timezone: string;
-	timezone_follow_nextcloud: boolean;
 	email_addresses: string[];
 	trusted_email_senders: string[];
 	log_channel: string;

@@ -790,7 +790,6 @@ const handlers: MockHandler[] = [
 			user_id: user.username,
 			display_name: user.display_name,
 			timezone: 'UTC',
-			timezone_follow_nextcloud: true,
 			email_addresses: ['user@example.com'],
 			trusted_email_senders: [],
 			log_channel: '',
@@ -814,14 +813,8 @@ const handlers: MockHandler[] = [
 			{ type: 'overland', label: 'Location (Overland GPS)', needs_path: false, permissions: ['read'] },
 			{ type: 'karakeep', label: 'Karakeep bookmarks', needs_path: false, permissions: ['read'] },
 		];
-		// Simulated Nextcloud-side timezone (ISSUE-102): when the user follows
-		// Nextcloud, the GET reflects this value, mirroring sync_user_timezone.
-		const mockNextcloudTimezone = 'Europe/Berlin';
 		return ({ url, method, body }: { url: string; method: string; body?: unknown }) => {
 			if (url === '/istota/api/settings/profile' && method === 'GET') {
-				if (mockProfile.timezone_follow_nextcloud) {
-					mockProfile.timezone = mockNextcloudTimezone;
-				}
 				return { profile: mockProfile };
 			}
 			if (url === '/istota/api/settings/profile' && method === 'PUT') {
