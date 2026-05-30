@@ -178,6 +178,7 @@ max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 =
 disabled_skills: list[str] = []           # per-user skills to exclude
 trusted_email_senders: list[str] = []     # patterns for trusted senders (email gate)
 disabled_modules: list[str] = []          # modules to opt out of (default-on otherwise)
+timezone_follow_nextcloud: bool = True    # ISSUE-102: re-sync tz from Nextcloud on restart (False = pin Istota value)
 ```
 
 ### `MemorySearchConfig`

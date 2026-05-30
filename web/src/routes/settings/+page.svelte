@@ -153,6 +153,7 @@
 			const patch: Partial<UserProfile> = {
 				display_name: profile.display_name,
 				timezone: profile.timezone,
+				timezone_follow_nextcloud: profile.timezone_follow_nextcloud,
 				email_addresses: profile.email_addresses,
 				trusted_email_senders: profile.trusted_email_senders,
 				disabled_skills: profile.disabled_skills,
@@ -372,7 +373,15 @@
 				<input type="text" bind:value={profile.display_name} />
 			</SettingsField>
 			<SettingsField label="Timezone (IANA)">
-				<input type="text" placeholder="UTC" bind:value={profile.timezone} />
+				<input
+						type="text"
+						placeholder="UTC"
+						bind:value={profile.timezone}
+						disabled={profile.timezone_follow_nextcloud}
+					/>
+				</SettingsField>
+				<SettingsField label="Use my Nextcloud timezone" checkbox>
+					<input type="checkbox" bind:checked={profile.timezone_follow_nextcloud} />
 			</SettingsField>
 			<SettingsField label="Email addresses (comma-separated)">
 				<input
