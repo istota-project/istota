@@ -398,7 +398,10 @@
 					}}
 				/>
 			</SettingsField>
-			<SettingsField label="Timezone (IANA)">
+			<SettingsField
+				label="Timezone (IANA)"
+				hint="Setting a timezone here overrides your Nextcloud timezone and is kept across restarts."
+			>
 				<Select
 					value={profile.timezone || 'UTC'}
 					options={timezoneOptions}
