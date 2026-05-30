@@ -744,8 +744,6 @@ def cmd_user_ensure(args):
         updates["display_name"] = args.display_name
     if args.tz is not None:
         updates["timezone"] = args.tz
-    if getattr(args, "timezone_follow_nextcloud", None) is not None:
-        updates["timezone_follow_nextcloud"] = args.timezone_follow_nextcloud
     if args.email is not None:
         updates["email_addresses"] = list(args.email)
     if args.trusted_sender is not None:
@@ -1247,18 +1245,6 @@ def main():
     user_ensure_parser.add_argument("--name", required=True, help="User ID (Nextcloud username)")
     user_ensure_parser.add_argument("--display-name", help="Display name shown in prompts")
     user_ensure_parser.add_argument("--tz", "--timezone", dest="tz", help="IANA timezone (e.g. America/Los_Angeles)")
-    tz_follow_group = user_ensure_parser.add_mutually_exclusive_group()
-    tz_follow_group.add_argument(
-        "--follow-nc-timezone", dest="timezone_follow_nextcloud",
-        action="store_const", const=True,
-        help="Keep re-syncing this user's timezone from Nextcloud on restart (default)",
-    )
-    tz_follow_group.add_argument(
-        "--no-follow-nc-timezone", dest="timezone_follow_nextcloud",
-        action="store_const", const=False,
-        help="Pin the timezone to the Istota value; don't let Nextcloud overwrite it",
-    )
-    user_ensure_parser.set_defaults(timezone_follow_nextcloud=None)
     user_ensure_parser.add_argument(
         "--email", action="append", help="User email address (repeatable; replaces existing list when passed)"
     )

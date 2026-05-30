@@ -524,7 +524,6 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     disabled_skills TEXT NOT NULL DEFAULT '[]',          -- JSON array
     trusted_email_senders TEXT NOT NULL DEFAULT '[]',    -- JSON array (patterns)
     disabled_modules TEXT NOT NULL DEFAULT '[]',         -- JSON array (default-on otherwise)
-    timezone_follow_nextcloud INTEGER NOT NULL DEFAULT 1, -- 1 = keep syncing tz from Nextcloud on restart; 0 = Istota UI value is pinned
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

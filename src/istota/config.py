@@ -234,7 +234,6 @@ class UserConfig:
     display_name: str = ""  # friendly name for prompts
     email_addresses: list[str] = field(default_factory=list)  # for email-to-user mapping
     timezone: str = "UTC"  # user's timezone for briefing scheduling
-    timezone_follow_nextcloud: bool = True  # ISSUE-102: re-sync tz from Nextcloud on restart (False = pinned to Istota UI value)
     briefings: list[BriefingConfig] = field(default_factory=list)
     resources: list[ResourceConfig] = field(default_factory=list)
     log_channel: str = ""  # Talk room token for verbose task execution logs
@@ -762,7 +761,6 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         display_name=user_data.get("display_name", user_id),
         email_addresses=user_data.get("email_addresses", []),
         timezone=user_data.get("timezone", "UTC"),
-        timezone_follow_nextcloud=user_data.get("timezone_follow_nextcloud", True),
         briefings=briefings,
         resources=resources,
         log_channel=user_data.get("log_channel", ""),

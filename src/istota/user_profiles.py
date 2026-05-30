@@ -51,10 +51,6 @@ class UserProfile:
     disabled_skills: list[str] = field(default_factory=list)
     trusted_email_senders: list[str] = field(default_factory=list)
     disabled_modules: list[str] = field(default_factory=list)
-    # ISSUE-102: when True (default) the scheduler re-syncs ``timezone`` from
-    # the Nextcloud profile on every restart; when False, Nextcloud only
-    # seeded the initial value and the user's Istota-UI choice is pinned.
-    timezone_follow_nextcloud: bool = True
 
 
 _PROFILE_COLUMNS = (
@@ -63,7 +59,6 @@ _PROFILE_COLUMNS = (
     "site_enabled", "max_foreground_workers", "max_background_workers",
     "disabled_skills", "trusted_email_senders",
     "disabled_modules",
-    "timezone_follow_nextcloud",
 )
 
 
@@ -100,18 +95,7 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         disabled_skills=_parse_json_list(row["disabled_skills"]),
         trusted_email_senders=_parse_json_list(row["trusted_email_senders"]),
         disabled_modules=_parse_json_list(row["disabled_modules"]),
-        timezone_follow_nextcloud=_row_bool(row, "timezone_follow_nextcloud", True),
     )
-
-
-def _row_bool(row: sqlite3.Row, key: str, default: bool) -> bool:
-    """Read a boolean-ish column, tolerating legacy rows missing it."""
-    try:
-        if key in row.keys():
-            return bool(row[key])
-    except Exception:  # pragma: no cover - defensive
-        pass
-    return default
 
 
 def _parse_json_list(value: str | None) -> list[str]:
@@ -214,7 +198,6 @@ def ensure_profile(
         trusted_email_senders=list(_attr(seed_from, "trusted_email_senders") or []),
         disabled_skills=list(_attr(seed_from, "disabled_skills") or []),
         disabled_modules=list(_attr(seed_from, "disabled_modules") or []),
-        timezone_follow_nextcloud=_attr_bool(seed_from, "timezone_follow_nextcloud", True),
     )
     _insert(db_path, profile)
     logger.info("ensured user_profile user=%s (new row)", user_id)
@@ -253,12 +236,6 @@ def _attr(obj: "object | None", name: str) -> "object | None":
     if obj is None:
         return None
     return getattr(obj, name, None)
-
-
-def _attr_bool(obj: "object | None", name: str, default: bool) -> bool:
-    """Best-effort boolean attribute read; ``default`` when the attr is absent."""
-    value = _attr(obj, name)
-    return default if value is None else bool(value)
 
 
 def upsert_profile(db_path: Path, profile: UserProfile) -> None:
@@ -319,7 +296,7 @@ def update_profile_with_status(
             if list(current or []) != list(value or []):
                 same = False
                 break
-        elif col in {"site_enabled", "timezone_follow_nextcloud"}:
+        elif col == "site_enabled":
             if bool(current) != bool(value):
                 same = False
                 break
@@ -364,7 +341,7 @@ def update_profile(
     for col, value in fields.items():
         if col in {"email_addresses", "disabled_skills", "trusted_email_senders", "disabled_modules"}:
             value = json.dumps(list(value or []))
-        elif col in {"site_enabled", "timezone_follow_nextcloud"}:
+        elif col == "site_enabled":
             value = 1 if value else 0
         elif col in {"max_foreground_workers", "max_background_workers"}:
             value = int(value or 0)
@@ -419,7 +396,6 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         json.dumps(list(profile.disabled_skills)),
         json.dumps(list(profile.trusted_email_senders)),
         json.dumps(list(profile.disabled_modules)),
-        1 if profile.timezone_follow_nextcloud else 0,
     )
     cols_sql = ", ".join(insert_cols)
     if replace:
@@ -479,7 +455,6 @@ def import_from_user_configs(
             disabled_skills=list(getattr(user_config, "disabled_skills", []) or []),
             trusted_email_senders=list(getattr(user_config, "trusted_email_senders", []) or []),
             disabled_modules=list(getattr(user_config, "disabled_modules", []) or []),
-            timezone_follow_nextcloud=bool(getattr(user_config, "timezone_follow_nextcloud", True)),
         )
         try:
             _insert(db_path, profile, replace=False)
@@ -511,7 +486,6 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
 
     setattr(user_config, "display_name", profile.display_name or getattr(user_config, "display_name", "") or profile.user_id)
     setattr(user_config, "timezone", profile.timezone or "UTC")
-    setattr(user_config, "timezone_follow_nextcloud", bool(profile.timezone_follow_nextcloud))
     for attr in (
         "log_channel", "alerts_channel",
         "site_enabled", "max_foreground_workers", "max_background_workers",
