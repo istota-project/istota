@@ -121,3 +121,25 @@ def _persist_followed_timezone(config: Config, user_id: str, tz: str) -> None:
         logger.info("Synced timezone for %s from Nextcloud: %s", user_id, tz)
     except Exception as e:  # noqa: BLE001 - best-effort
         logger.debug("Could not persist followed timezone for %s: %s", user_id, e)
+
+
+def sync_user_timezone(config: Config, user_id: str) -> str | None:
+    """Fetch the live Nextcloud timezone for one user and persist it.
+
+    Returns the Nextcloud timezone (also written back to the
+    ``user_profiles`` row when it differs), or None when Nextcloud is
+    unconfigured/unreachable or reports no timezone. Used by the web
+    settings GET so a "follow Nextcloud" user sees the value actually in
+    effect rather than the DB cache that only refreshes on scheduler
+    restart. Best-effort — never raises.
+    """
+    if not config.nextcloud.url:
+        return None
+    try:
+        tz = fetch_user_timezone(config, user_id)
+    except Exception as e:  # noqa: BLE001 - best-effort
+        logger.debug("Live Nextcloud timezone fetch failed for %s: %s", user_id, e)
+        return None
+    if tz:
+        _persist_followed_timezone(config, user_id, tz)
+    return tz

@@ -139,6 +139,41 @@ class TestHydration:
         assert prof is not None
         assert prof.timezone == "Europe/Berlin"
 
+    def test_sync_user_timezone_fetches_and_persists(self, db_path: Path, monkeypatch):
+        user_profiles.upsert_profile(
+            db_path,
+            user_profiles.UserProfile(
+                user_id="alice", timezone="UTC", timezone_follow_nextcloud=True
+            ),
+        )
+        config = _make_config(db_path, "alice", follow=True, tz="UTC")
+
+        from istota import nextcloud_api
+
+        monkeypatch.setattr(
+            nextcloud_api, "fetch_user_timezone", lambda *a, **k: "Europe/Berlin"
+        )
+        result = nextcloud_api.sync_user_timezone(config, "alice")
+        assert result == "Europe/Berlin"
+        prof = user_profiles.get_profile(db_path, "alice")
+        assert prof is not None and prof.timezone == "Europe/Berlin"
+
+    def test_sync_user_timezone_noop_without_nextcloud_url(self, db_path: Path, monkeypatch):
+        config = _make_config(db_path, "alice", follow=True, tz="UTC")
+        config.nextcloud.url = ""
+
+        from istota import nextcloud_api
+
+        called = {"n": 0}
+
+        def _tz(*a, **k):
+            called["n"] += 1
+            return "Europe/Berlin"
+
+        monkeypatch.setattr(nextcloud_api, "fetch_user_timezone", _tz)
+        assert nextcloud_api.sync_user_timezone(config, "alice") is None
+        assert called["n"] == 0
+
     def test_follow_on_seeds_new_user_without_row(self, db_path: Path, monkeypatch):
         # No DB row yet — hydrate should still set the in-memory tz (seed path);
         # persistence is a no-op (the row is created later by the importer).
