@@ -14,6 +14,8 @@
 		placeholder?: string;
 		disabled?: boolean;
 		ariaLabel?: string;
+		/** Render as a full-width control matching text inputs (settings forms). */
+		fullWidth?: boolean;
 	}
 
 	let {
@@ -23,13 +25,17 @@
 		placeholder = 'Select…',
 		disabled = false,
 		ariaLabel,
+		fullWidth = false,
 	}: Props = $props();
 
 	const selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? placeholder);
 </script>
 
 <BitsSelect.Root type="single" bind:value {onValueChange} {disabled}>
-	<BitsSelect.Trigger class="ui-select-trigger" aria-label={ariaLabel}>
+	<BitsSelect.Trigger
+		class={fullWidth ? 'ui-select-trigger ui-select-trigger--full' : 'ui-select-trigger'}
+		aria-label={ariaLabel}
+	>
 		<span class="ui-select-label">{selectedLabel}</span>
 		<ChevronDown size={12} />
 	</BitsSelect.Trigger>
@@ -64,6 +70,30 @@
 	}
 	:global(.ui-select-trigger:hover) {
 		background: var(--surface-raised);
+	}
+
+	/* Full-width variant: matches the text inputs in settings forms so the
+	   dropdown lines up with neighbouring fields and goes full-width on mobile
+	   (the field container is fluid; max-width caps it on desktop). */
+	:global(.ui-select-trigger--full) {
+		display: flex;
+		justify-content: space-between;
+		width: 100%;
+		max-width: 24rem;
+		background: var(--surface-base);
+		border-radius: 0.3rem;
+		padding: 0.3rem 0.5rem;
+		font-size: var(--text-sm);
+	}
+	:global(.ui-select-trigger--full .ui-select-label) {
+		max-width: none;
+	}
+	/* Match the settings text inputs: go full-width below the mobile breakpoint
+	   (settings.css drops their max-width at the same 768px). */
+	@media (max-width: 768px) {
+		:global(.ui-select-trigger--full) {
+			max-width: none;
+		}
 	}
 	:global(.ui-select-trigger:disabled) {
 		opacity: 0.5;
