@@ -80,6 +80,7 @@
 		justify-content: space-between;
 		width: 100%;
 		max-width: 24rem;
+		box-sizing: border-box;
 		background: var(--surface-base);
 		border-radius: 0.3rem;
 		padding: 0.3rem 0.5rem;
