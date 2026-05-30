@@ -171,7 +171,9 @@ class TestHydrateUserConfigs:
 
     @patch("istota.nextcloud_api.fetch_user_timezone")
     @patch("istota.nextcloud_api.fetch_user_info")
-    def test_nc_timezone_overrides_config(self, mock_info, mock_tz):
+    def test_nc_timezone_does_not_override_user_set(self, mock_info, mock_tz):
+        # Seed-only (ISSUE-102): a timezone the user set in the Istota UI
+        # (any non-default value) wins over Nextcloud and survives restarts.
         mock_info.return_value = None
         mock_tz.return_value = "Europe/Berlin"
         config = Config(
@@ -179,7 +181,7 @@ class TestHydrateUserConfigs:
             users={"alice": UserConfig(timezone="America/New_York")},
         )
         hydrate_user_configs(config)
-        assert config.users["alice"].timezone == "Europe/Berlin"
+        assert config.users["alice"].timezone == "America/New_York"
 
     @patch("istota.nextcloud_api.fetch_user_timezone")
     @patch("istota.nextcloud_api.fetch_user_info")
