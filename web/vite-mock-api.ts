@@ -790,6 +790,7 @@ const handlers: MockHandler[] = [
 			user_id: user.username,
 			display_name: user.display_name,
 			timezone: 'UTC',
+			timezone_follow_nextcloud: true,
 			email_addresses: ['user@example.com'],
 			trusted_email_senders: [],
 			log_channel: '',
