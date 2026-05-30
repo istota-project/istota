@@ -386,16 +386,6 @@
 			<SettingsField label="Display name">
 				<input type="text" bind:value={profile.display_name} />
 			</SettingsField>
-			<SettingsField label="Timezone (IANA)">
-				<Select
-					value={profile.timezone || 'UTC'}
-					options={timezoneOptions}
-					ariaLabel="Timezone"
-					onValueChange={(v) => {
-						if (profile) profile.timezone = v;
-					}}
-				/>
-			</SettingsField>
 			<SettingsField label="Email addresses (comma-separated)">
 				<input
 					type="text"
@@ -405,6 +395,17 @@
 							profile.email_addresses = parseListInput(
 								(e.currentTarget as HTMLInputElement).value,
 							);
+					}}
+				/>
+			</SettingsField>
+			<SettingsField label="Timezone (IANA)">
+				<Select
+					value={profile.timezone || 'UTC'}
+					options={timezoneOptions}
+					ariaLabel="Timezone"
+					fullWidth
+					onValueChange={(v) => {
+						if (profile) profile.timezone = v;
 					}}
 				/>
 			</SettingsField>
