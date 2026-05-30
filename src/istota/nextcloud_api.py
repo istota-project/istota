@@ -46,7 +46,9 @@ def hydrate_user_configs(config: Config) -> None:
     Override logic:
     - display_name: always uses Nextcloud's value (canonical source)
     - email: API email appended to email_addresses if not already present (case-insensitive)
-    - timezone: always uses Nextcloud's value (canonical source)
+    - timezone: seed-only (ISSUE-102). Nextcloud fills in the timezone only
+      when the user has not set one in the Istota UI; an explicit Istota value
+      wins over Nextcloud and survives restarts.
 
     Graceful degradation: API failures are silently logged and skipped.
     """
@@ -72,8 +74,15 @@ def hydrate_user_configs(config: Config) -> None:
                     user_config.email_addresses.append(api_email)
                     logger.info("Hydrated email for %s: %s", user_id, api_email)
 
-        # Fetch timezone from Nextcloud preferences — always use if available
-        tz = fetch_user_timezone(config, user_id)
-        if tz:
-            user_config.timezone = tz
-            logger.debug("Set timezone for %s: %s", user_id, tz)
+        # Timezone is seed-only (ISSUE-102): Nextcloud fills it in only when the
+        # user hasn't set one in the Istota UI. A timezone the user picked in the
+        # web UI is stored in user_profiles.timezone and overlaid onto
+        # user_config.timezone by _apply_user_profiles before this runs, so any
+        # non-default value here is the user's explicit choice and must survive
+        # restarts — we never overwrite it from Nextcloud.
+        current_tz = (user_config.timezone or "").strip()
+        if current_tz in ("", "UTC"):
+            tz = fetch_user_timezone(config, user_id)
+            if tz:
+                user_config.timezone = tz
+                logger.debug("Seeded timezone for %s from Nextcloud: %s", user_id, tz)
