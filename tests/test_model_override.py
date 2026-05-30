@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from istota import db
-from istota.config import Config, SecurityConfig, UserConfig
+from istota.config import Config, SchedulerConfig, SecurityConfig, UserConfig
 from istota.cron_loader import (
     CronJob,
     generate_cron_md,
@@ -194,7 +194,10 @@ class TestSchedulerPropagatesModel:
         from zoneinfo import ZoneInfo
 
         user = UserConfig(timezone="UTC")
-        config = Config(db_path=db_path, users={"alice": user})
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
 
         yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
         with db.get_db(db_path) as conn:
@@ -426,7 +429,10 @@ class TestSchedulerPropagatesEffort:
         from zoneinfo import ZoneInfo
 
         user = UserConfig(timezone="UTC")
-        config = Config(db_path=db_path, users={"alice": user})
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
         yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
         with db.get_db(db_path) as conn:
             conn.execute(

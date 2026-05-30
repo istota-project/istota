@@ -173,6 +173,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `stale_pending_fail_hours` | 2 | Ancient task auto-fail |
 | `task_retention_days` | 7 | Task cleanup |
 | `scheduled_job_max_consecutive_failures` | 5 | Auto-disable threshold |
+| `cron_max_staleness_minutes` | 60 | Insertion-time staleness gate for `check_scheduled_jobs` + `check_briefings`. When `now - next_run > N`, skip the queue insert and bump `last_run_at` to now so the schedule resumes from the next future fire. Suppresses thundering-herd catch-up after a long outage. 0 = legacy unconditional catch-up. |
 | `max_subtasks_per_task` | 10 | Deferred subtasks created per parent task |
 | `max_subtask_depth` | 3 | Subtask chain depth cap (0 = unlimited) |
 | `max_subtask_prompt_chars` | 8000 | Skip deferred subtasks with prompts over this size (0 = unlimited) |
