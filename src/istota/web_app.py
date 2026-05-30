@@ -1538,6 +1538,17 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
             _config.db_path, user["username"],
             display_name=user.get("display_name") or user["username"],
         )
+    # When the user follows Nextcloud (ISSUE-102), show the live Nextcloud
+    # timezone instead of the DB cache, which otherwise only refreshes on
+    # scheduler restart. sync_user_timezone also writes it back so the cache
+    # stays consistent. Best-effort: on any failure the stored value stands.
+    if profile.timezone_follow_nextcloud:
+        from . import nextcloud_api
+        nc_tz = nextcloud_api.sync_user_timezone(_config, user["username"])
+        if nc_tz and nc_tz != profile.timezone:
+            refreshed = user_profiles.get_profile(_config.db_path, user["username"])
+            if refreshed is not None:
+                profile = refreshed
     return {"profile": {
         "user_id": profile.user_id,
         "display_name": profile.display_name,
