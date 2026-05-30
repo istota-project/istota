@@ -137,6 +137,12 @@ class SchedulerConfig:
     user_max_foreground_workers: int = 2  # global per-user fg worker default
     user_max_background_workers: int = 1  # global per-user bg worker default
     scheduled_job_max_consecutive_failures: int = 5  # auto-disable after N failures (0 = never)
+    # Insertion-time staleness gate for cron-driven tasks. When the daemon
+    # comes back from a long outage, jobs and briefings whose computed
+    # next_run is older than this threshold are skipped (last_run_at bumped
+    # to now so the schedule resumes cleanly) instead of all firing on the
+    # first tick. 0 = unlimited (legacy unconditional catch-up).
+    cron_max_staleness_minutes: int = 60
     max_subtasks_per_task: int = 10  # cap deferred subtask creations per task (prompt-injection blast radius)
     max_subtask_depth: int = 3  # reject deferred subtask creation when parent chain is this deep (0 = unlimited)
     max_subtask_prompt_chars: int = 8000  # skip deferred subtasks whose prompt exceeds this (0 = unlimited)
@@ -930,6 +936,7 @@ def load_config(config_path: Path | None = None) -> Config:
             temp_file_retention_days=sched.get("temp_file_retention_days", 7),
             worker_idle_timeout=sched.get("worker_idle_timeout", 30),
             scheduled_job_max_consecutive_failures=sched.get("scheduled_job_max_consecutive_failures", 5),
+            cron_max_staleness_minutes=sched.get("cron_max_staleness_minutes", 60),
             max_foreground_workers=sched.get("max_foreground_workers", 5),
             max_background_workers=sched.get("max_background_workers", 3),
             user_max_foreground_workers=sched.get("user_max_foreground_workers", 2),

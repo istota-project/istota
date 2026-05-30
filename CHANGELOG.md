@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Insertion-time staleness gate for cron-driven tasks.** When the daemon comes back from a long outage, `check_scheduled_jobs` and `check_briefings` no longer fire every missed instance on the first tick. Computed `next_run` more than `cron_max_staleness_minutes` (default 60) behind now is skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. Set the threshold to 0 to restore the prior unconditional catch-up.
+
 ### Fixed
 - **CalDAV `DAVClient` leak in the scheduler exhausted host memory and broke whisper transcription** (ISSUE-101). Every task constructed a fresh `caldav.DAVClient` without closing it; the underlying urllib3 pool spawned a daemon watchdog thread and held an open socket retained for the daemon's lifetime. Over three days the scheduler accumulated 6234 watchdog threads and 6214 CLOSE-WAIT sockets, eating ~5 GB on an 8 GB host. Whisper's memory pre-check was reporting the truth — the cause was several layers away. Fix wraps `DAVClient` in `with`/try-finally at every construction site.
 - **Whisper memory pre-check rejected loadable models on busy hosts.** `get_available_memory_gb` now returns `available + cached + buffers` instead of `available`. The kernel reclaims page cache under allocation pressure, so the real loadable capacity is meaningfully larger than `psutil`'s conservative estimate — the old gate misfired any time the page cache was warm.

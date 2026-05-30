@@ -72,6 +72,31 @@ def _now(tz=None):
     return datetime.now(tz)
 
 
+def _is_stale_fire(
+    name: str,
+    next_run: datetime,
+    now_naive: datetime,
+    threshold_minutes: int,
+) -> bool:
+    """Return True if `next_run` is more than `threshold_minutes` behind `now_naive`.
+
+    Suppresses thundering-herd catch-up after a long daemon outage. Callers
+    bump `last_run_at` to "now" when this returns True so croniter resumes
+    cleanly from the next future fire-time instead of looping on the same
+    stale next_run. 0 disables the gate (legacy unconditional catch-up).
+    """
+    if threshold_minutes <= 0:
+        return False
+    staleness_min = (now_naive - next_run).total_seconds() / 60
+    if staleness_min <= threshold_minutes:
+        return False
+    logger.warning(
+        "Skipping stale fire of '%s' (missed by %.1f min, threshold %d min)",
+        name, staleness_min, threshold_minutes,
+    )
+    return True
+
+
 # Graceful shutdown flag
 _shutdown_requested = False
 
@@ -2268,6 +2293,14 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
                     next_run = cron.get_next(datetime)
                     should_run = now_naive >= next_run
 
+                if should_run and _is_stale_fire(
+                    f"briefing {user_id}/{briefing.name}",
+                    next_run, now_naive,
+                    app_config.scheduler.cron_max_staleness_minutes,
+                ):
+                    db.set_briefing_last_run(conn, user_id, briefing.name)
+                    continue
+
                 if should_run:
                     due_briefings.append((user_id, user_tz_str, briefing))
 
@@ -3106,6 +3139,14 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     "Job '%s' (never run): base=%s next_run=%s now=%s should_run=%s",
                     job.name, base, next_run, now_naive, should_run,
                 )
+
+            if should_run and _is_stale_fire(
+                f"job {job.user_id}/{job.name}",
+                next_run, now_naive,
+                app_config.scheduler.cron_max_staleness_minutes,
+            ):
+                db.set_scheduled_job_last_run(conn, job.id)
+                continue
 
             if should_run:
                 task_id = db.create_task(

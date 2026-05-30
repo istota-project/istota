@@ -669,7 +669,10 @@ class TestCheckBriefings:
             timezone="UTC",
             briefings=[briefing],
         )
-        config = Config(db_path=db_path, users={"alice": user})
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
 
         # Set last run to yesterday
         with db.get_db(db_path) as conn:
@@ -725,7 +728,10 @@ class TestCheckBriefings:
             components={},
         )
         user = UserConfig(timezone="UTC", briefings=[briefing])
-        config = Config(db_path=db_path, users={"alice": user})
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
 
         result = check_briefings(db_path, config)
         assert len(result) == 1
@@ -771,7 +777,10 @@ class TestCheckBriefings:
             components={"calendar": True},
         )
         user = UserConfig(timezone="UTC", briefings=[briefing])
-        config = Config(db_path=db_path, users={"alice": user})
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
 
         # Set last run to yesterday so cron evaluates as due
         with db.get_db(db_path) as conn:
@@ -779,6 +788,91 @@ class TestCheckBriefings:
             conn.execute(
                 "INSERT INTO briefing_state (user_id, briefing_name, last_run_at) VALUES (?, ?, ?)",
                 ("alice", "morning", yesterday),
+            )
+
+        result = check_briefings(db_path, config)
+        assert len(result) == 1
+
+
+class TestCheckBriefingsStaleGate:
+    """Insertion-time staleness gate: long-outage catch-ups are skipped."""
+
+    @patch("istota.scheduler.build_briefing_prompt", return_value="x")
+    @patch("istota.scheduler._now")
+    def test_stale_briefing_skipped_and_last_run_bumped(self, mock_now, mock_build, db_path):
+        # 6 AM daily briefing. last_run yesterday; "now" is 11 AM (5h stale).
+        mock_now.return_value = datetime(2026, 6, 15, 11, 0, 0, tzinfo=ZoneInfo("UTC"))
+
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *", conversation_token="room1", components={},
+        )
+        user = UserConfig(timezone="UTC", briefings=[briefing])
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=60),
+        )
+
+        last_run = "2026-06-14 06:00:00"
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO briefing_state (user_id, briefing_name, last_run_at) VALUES (?, ?, ?)",
+                ("alice", "morning", last_run),
+            )
+
+        result = check_briefings(db_path, config)
+
+        assert result == []
+        mock_build.assert_not_called()
+        with db.get_db(db_path) as conn:
+            bumped = conn.execute(
+                "SELECT last_run_at FROM briefing_state WHERE user_id=? AND briefing_name=?",
+                ("alice", "morning"),
+            ).fetchone()[0]
+        # Set to SQLite `now` by set_briefing_last_run — the ancient stale
+        # last_run was overwritten so the same next_run won't fire again.
+        assert bumped != last_run
+
+    @patch("istota.scheduler.build_briefing_prompt", return_value="x")
+    @patch("istota.scheduler._now")
+    def test_within_threshold_fires(self, mock_now, mock_build, db_path):
+        # 6 AM daily briefing. "now" is 6:05 AM — 5 min stale, under 60.
+        mock_now.return_value = datetime(2026, 6, 15, 6, 5, 0, tzinfo=ZoneInfo("UTC"))
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *", conversation_token="room1", components={},
+        )
+        user = UserConfig(timezone="UTC", briefings=[briefing])
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=60),
+        )
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO briefing_state (user_id, briefing_name, last_run_at) VALUES (?, ?, ?)",
+                ("alice", "morning", "2026-06-14 06:00:00"),
+            )
+
+        result = check_briefings(db_path, config)
+        assert len(result) == 1
+
+    @patch("istota.scheduler.build_briefing_prompt", return_value="x")
+    @patch("istota.scheduler._now")
+    def test_threshold_zero_preserves_legacy_catchup(self, mock_now, mock_build, db_path):
+        # Same 5h-stale scenario as the first test, but with the gate disabled.
+        mock_now.return_value = datetime(2026, 6, 15, 11, 0, 0, tzinfo=ZoneInfo("UTC"))
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *", conversation_token="room1", components={},
+        )
+        user = UserConfig(timezone="UTC", briefings=[briefing])
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO briefing_state (user_id, briefing_name, last_run_at) VALUES (?, ?, ?)",
+                ("alice", "morning", "2026-06-14 06:00:00"),
             )
 
         result = check_briefings(db_path, config)
@@ -802,7 +896,10 @@ class TestCheckScheduledJobs:
     def test_job_triggers(self, mock_sync, db_path):
         """A job whose cron has passed since last_run should trigger."""
         user = UserConfig(timezone="UTC")
-        config = Config(db_path=db_path, users={"alice": user})
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
 
         yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
         with db.get_db(db_path) as conn:
@@ -842,7 +939,10 @@ class TestCheckScheduledJobs:
     def test_first_run_uses_created_at(self, mock_sync, db_path):
         """When last_run_at is NULL, created_at is used as base for cron evaluation."""
         user = UserConfig(timezone="UTC")
-        config = Config(db_path=db_path, users={"alice": user})
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
 
         # Created yesterday, cron every minute -- should be due
         yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
@@ -862,7 +962,10 @@ class TestCheckScheduledJobs:
     def test_skip_log_channel_flows_to_task(self, mock_sync, db_path):
         """skip_log_channel on a scheduled job should propagate to the created task."""
         user = UserConfig(timezone="UTC")
-        config = Config(db_path=db_path, users={"alice": user})
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
 
         yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
         with db.get_db(db_path) as conn:
@@ -892,6 +995,121 @@ class TestCheckScheduledJobs:
             with db.get_db(db_path) as conn:
                 check_scheduled_jobs(conn, config)
             mock_sync.assert_called_once_with(conn, config)
+
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_stale_job_skipped_and_last_run_bumped(self, mock_now, mock_sync, db_path):
+        """Catch-up suppression: stale fires are skipped, last_run_at bumped to now."""
+        mock_now.return_value = datetime(2026, 6, 15, 14, 0, 0, tzinfo=ZoneInfo("UTC"))
+        user = UserConfig(timezone="UTC")
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=60),
+        )
+
+        last_run = "2026-06-14 00:00:00"  # 14h before "now"
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, conversation_token, enabled, last_run_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "daily", "0 0 * * *", "Run", "room1", 1, last_run, last_run),
+            )
+
+        with db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+
+        assert result == []
+        with db.get_db(db_path) as conn:
+            bumped = conn.execute(
+                "SELECT last_run_at FROM scheduled_jobs WHERE user_id=? AND name=?",
+                ("alice", "daily"),
+            ).fetchone()[0]
+        # Set to SQLite `now` by set_scheduled_job_last_run.
+        assert bumped != last_run
+
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_job_within_threshold_fires(self, mock_now, mock_sync, db_path):
+        """A job missed by less than the threshold still fires (short blip case)."""
+        # 0 0 * * * job. "now" 30 min past midnight — under the 60-min default.
+        mock_now.return_value = datetime(2026, 6, 15, 0, 30, 0, tzinfo=ZoneInfo("UTC"))
+        user = UserConfig(timezone="UTC")
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=60),
+        )
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, conversation_token, enabled, last_run_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "daily", "0 0 * * *", "Run", "room1", 1,
+                 "2026-06-14 00:00:00", "2026-06-14 00:00:00"),
+            )
+
+        with db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+
+        assert len(result) == 1
+
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_threshold_zero_preserves_legacy_catchup(self, mock_now, mock_sync, db_path):
+        """cron_max_staleness_minutes=0 disables the gate (legacy unconditional catch-up)."""
+        mock_now.return_value = datetime(2026, 6, 15, 14, 0, 0, tzinfo=ZoneInfo("UTC"))
+        user = UserConfig(timezone="UTC")
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, conversation_token, enabled, last_run_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "daily", "0 0 * * *", "Run", "room1", 1,
+                 "2026-06-14 00:00:00", "2026-06-14 00:00:00"),
+            )
+
+        with db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+
+        assert len(result) == 1  # would have been skipped under default
+
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_never_run_job_with_ancient_created_at_is_gated(self, mock_now, mock_sync, db_path):
+        """First-run branch (last_run_at NULL) also honors the staleness gate."""
+        mock_now.return_value = datetime(2026, 6, 15, 12, 0, 0, tzinfo=ZoneInfo("UTC"))
+        user = UserConfig(timezone="UTC")
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=60),
+        )
+
+        # created a week ago, every-minute cron — next_run would be ancient
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, conversation_token, enabled, last_run_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "every-min", "* * * * *", "Run", "room1", 1,
+                 None, "2026-06-08 00:00:00"),
+            )
+
+        with db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+
+        assert result == []
+        with db.get_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT last_run_at FROM scheduled_jobs WHERE user_id=? AND name=?",
+                ("alice", "every-min"),
+            ).fetchone()
+        assert row[0] is not None  # bumped from NULL to now
 
     @patch("istota.scheduler._sync_cron_files")
     @patch("istota.scheduler._now")
