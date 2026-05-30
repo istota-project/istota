@@ -19,7 +19,7 @@
 		type UserBriefingRow,
 		type BriefingRoomOption,
 	} from '$lib/api';
-	import { Button, Modal } from '$lib/components/ui';
+	import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
 	import {
 		ServiceCard,
 		SettingsLayout,
@@ -33,6 +33,21 @@
 	let error = $state('');
 	let info = $state('');
 	let oauthBusy = $state(false);
+
+	// Full IANA timezone list from the browser (no hardcoded list / extra dep).
+	// Older engines may not implement supportedValuesOf — fall back to UTC.
+	const timezoneOptions: SelectOption[] = (() => {
+		let zones: string[];
+		try {
+			zones = (Intl as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.(
+				'timeZone',
+			) ?? ['UTC'];
+		} catch {
+			zones = ['UTC'];
+		}
+		if (!zones.includes('UTC')) zones = ['UTC', ...zones];
+		return zones.map((z) => ({ value: z, label: z }));
+	})();
 
 	let profile: UserProfile | null = $state(null);
 	let profileSaving = $state(false);
@@ -372,7 +387,14 @@
 				<input type="text" bind:value={profile.display_name} />
 			</SettingsField>
 			<SettingsField label="Timezone (IANA)">
-				<input type="text" placeholder="UTC" bind:value={profile.timezone} />
+				<Select
+					value={profile.timezone || 'UTC'}
+					options={timezoneOptions}
+					ariaLabel="Timezone"
+					onValueChange={(v) => {
+						if (profile) profile.timezone = v;
+					}}
+				/>
 			</SettingsField>
 			<SettingsField label="Email addresses (comma-separated)">
 				<input
