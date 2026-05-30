@@ -1455,6 +1455,7 @@ async def settings_delete_secret(
 _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "display_name":           {"type": "str"},
     "timezone":               {"type": "str"},
+    "timezone_follow_nextcloud": {"type": "bool"},
     "log_channel":            {"type": "str"},
     "alerts_channel":         {"type": "str"},
     "email_addresses":        {"type": "list[str]"},
@@ -1541,6 +1542,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "user_id": profile.user_id,
         "display_name": profile.display_name,
         "timezone": profile.timezone,
+        "timezone_follow_nextcloud": profile.timezone_follow_nextcloud,
         "email_addresses": profile.email_addresses,
         "trusted_email_senders": profile.trusted_email_senders,
         "log_channel": profile.log_channel,
