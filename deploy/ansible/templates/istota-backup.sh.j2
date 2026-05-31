@@ -15,7 +15,7 @@ RCLONE_BACKUP_PATH="{{ istota_backup_rclone_remote_path }}"
 
 # Module DBs live per-user at {mount}/Users/<user>/<bot_dir>/<module>/data/<module>.db
 # and need WAL-aware backups too — rclone file-copy is not WAL-safe.
-MODULE_NAMES=(feeds money location)
+MODULE_NAMES=(feeds money location health)
 
 TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
 DAY_OF_WEEK=$(date +%u)
