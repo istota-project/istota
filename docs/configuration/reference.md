@@ -131,6 +131,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `email_retention_days` | `7` | Delete old IMAP emails (0 = disable) |
 | `talk_cache_max_per_conversation` | `200` | Max cached Talk messages |
 | `scheduled_job_max_consecutive_failures` | `5` | Auto-disable threshold |
+| `cron_max_staleness_minutes` | `60` | Skip cron-driven catch-up fires older than this (jobs + briefings). After a long daemon outage, fires missed by more than N minutes are skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. 0 = legacy unconditional catch-up. |
 | `log_channel_show_skills` | `true` | Include selected skills in log channel messages |
 
 ## `[security]`
