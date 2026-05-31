@@ -525,6 +525,11 @@ class TestNetworkProxyBwrapIntegration:
         assert "HTTP_PROXY=" in shell_cmd
         assert "NO_PROXY=" in shell_cmd
         assert "net-bridge" in shell_cmd
+        # The backgrounded bridge must not share the prompt pipe on stdin.
+        assert "net-bridge" in shell_cmd and "</dev/null &" in shell_cmd
+        # No blind `sleep` gating claude's start — it eats stdin-deadline margin
+        # for no benefit (the bridge binds before any network call is made).
+        assert "sleep" not in shell_cmd
         # Original cmd should follow as positional args
         assert "claude" in after_sep
         assert "-p" in after_sep

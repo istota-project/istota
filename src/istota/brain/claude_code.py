@@ -395,20 +395,35 @@ class ClaudeCodeBrain:
             env=req.env,
         )
 
-        # Notify caller of PID (used for !stop) BEFORE stdin write so a stop
-        # signal arriving in the stdin-write window finds a recorded PID.
+        # Feed the prompt to stdin on a dedicated thread, started immediately
+        # after spawn. The `claude` CLI aborts its stdin read after ~3s
+        # ("no stdin data received in 3s, proceeding without it") and then
+        # runs with an *empty* prompt — so prompt delivery must not be gated
+        # behind anything slow. A synchronous write here would sit behind the
+        # on_pid DB write below (which can block on the SQLite write lock under
+        # daemon load); if that gap exceeds the CLI's stdin deadline the task
+        # fails with "produced no output". Threading also avoids a deadlock
+        # when the prompt exceeds the OS pipe buffer (~64KB) before any reader
+        # has drained it. Mirrors subprocess.run(input=...)'s feeder thread,
+        # which is why the non-streaming path was never affected.
+        def _write_stdin() -> None:
+            try:
+                process.stdin.write(req.prompt)
+                process.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass  # process may have exited / closed stdin early
+
+        stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
+        stdin_thread.start()
+
+        # Notify caller of PID (used for !stop). The stdin write is already in
+        # flight on its own thread, so a slow DB write here no longer delays
+        # prompt delivery.
         if req.on_pid is not None:
             try:
                 req.on_pid(process.pid)
             except Exception:
                 logger.debug("on_pid callback raised", exc_info=True)
-
-        # Write prompt to stdin and close to signal EOF
-        try:
-            process.stdin.write(req.prompt)
-            process.stdin.close()
-        except BrokenPipeError:
-            pass  # process may have exited early
 
         def _read_stderr() -> None:
             for line in process.stderr:
@@ -469,6 +484,7 @@ class ClaudeCodeBrain:
 
             process.wait()
             stderr_thread.join(timeout=5)
+            stdin_thread.join(timeout=5)
         finally:
             timer.cancel()
 

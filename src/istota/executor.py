@@ -1046,16 +1046,24 @@ def build_bwrap_cmd(
     args.append("--")
 
     if net_proxy_sock:
-        # Wrap the command in a shell that starts the TCP-to-Unix bridge
-        # as a background process, waits for it to bind, then execs the
-        # original command with HTTPS_PROXY pointed at the bridge.
-        # "$@" preserves the original argv from cmd.
+        # Wrap the command in a shell that starts the TCP-to-Unix bridge as a
+        # background process, then execs the original command with HTTPS_PROXY
+        # pointed at the bridge. "$@" preserves the original argv from cmd.
+        #
+        # The bridge's stdin is redirected from /dev/null so it cannot share
+        # (and accidentally consume) the prompt that the brain pipes to the
+        # exec'd command's stdin — the read end is otherwise inherited by both.
+        #
+        # No `sleep` before exec: the bridge only needs to be listening before
+        # the command opens a *network* connection, which happens well after
+        # the command starts and reads its stdin prompt; the bridge's bind()
+        # /listen() completes within a few ms of Python startup. On the rare
+        # cold-start race the command's own connection retry recovers.
         from .network_proxy import BRIDGE_PORT
         bridge_path = str(user_temp_dir.resolve() / ".developer" / "net-bridge")
         sock_path = str(net_proxy_sock)
         shell_cmd = (
-            f"python3 {bridge_path} {sock_path} {BRIDGE_PORT} & "
-            f"sleep 0.2; "
+            f"python3 {bridge_path} {sock_path} {BRIDGE_PORT} </dev/null & "
             f"exec env "
             f"HTTPS_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
             f"HTTP_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
