@@ -652,6 +652,42 @@ class Config:
             return True
         return module not in (uc.disabled_modules or [])
 
+    def resolve_user_timezone(
+        self,
+        user_id: str,
+        *,
+        conn: "sqlite3.Connection | None" = None,
+    ) -> str:
+        """Return the user's timezone string (IANA name), never empty.
+
+        Prefers the live ``user_profiles`` DB row over the in-memory
+        ``UserConfig`` so web-UI timezone edits take effect on the next task
+        without a scheduler restart (ISSUE-099). Falls back to the in-memory
+        config, then to ``"UTC"``. Mirrors ``is_module_enabled``'s DB-read
+        pattern, including the optional ``conn`` for hot loops that already
+        hold a framework-DB connection (avoids per-call FD churn on the
+        FUSE-backed mount).
+
+        Does NOT validate the zone name — callers that need a ``tzinfo`` wrap
+        the result in ``ZoneInfo`` and own the invalid-name fallback, so this
+        helper stays usable by code that only needs the string.
+        """
+        tz_str = ""
+        if self.db_path is not None and Path(self.db_path).exists():
+            try:
+                from . import user_profiles as _up
+                profile = _up.get_profile(Path(self.db_path), user_id, conn=conn)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("resolve_user_timezone DB read failed: %s", e)
+                profile = None
+            if profile is not None:
+                tz_str = profile.timezone or ""
+
+        if not tz_str:
+            uc = self.users.get(user_id)
+            tz_str = (uc.timezone if uc else "") or "UTC"
+        return tz_str
+
     def is_admin(self, user_id: str) -> bool:
         """Check if user has admin privileges.
 

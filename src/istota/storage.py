@@ -1018,8 +1018,13 @@ def read_dated_memories(
     # filenames the sleep cycle writes (which are user-local YYYY-MM-DD).
     # Falling back to UTC matches the historical behavior for callers
     # without a configured user timezone.
-    user_cfg = config.users.get(user_id) if hasattr(config, "users") else None
-    tz_name = user_cfg.timezone if user_cfg and user_cfg.timezone else "UTC"
+    # Live DB timezone so the cutoff matches the user-local filenames the
+    # sleep cycle writes, even after a web-UI tz change (ISSUE-099).
+    tz_name = (
+        config.resolve_user_timezone(user_id)
+        if hasattr(config, "resolve_user_timezone")
+        else "UTC"
+    )
     try:
         user_tz = ZoneInfo(tz_name)
     except Exception:

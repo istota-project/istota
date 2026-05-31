@@ -610,9 +610,9 @@ def process_user_sleep_cycle(
 
     # Build extraction prompt — date_str follows the user's timezone so
     # filenames and bullet timestamps match the user's calendar day, not the
-    # server's. Falls back to UTC for unknown tz strings.
-    user_cfg = config.users.get(user_id)
-    tz_name = user_cfg.timezone if user_cfg and user_cfg.timezone else "UTC"
+    # server's. Falls back to UTC for unknown tz strings. Live DB value so a
+    # web-UI tz change is honored without a daemon restart (ISSUE-099).
+    tz_name = config.resolve_user_timezone(user_id)
     try:
         user_tz = ZoneInfo(tz_name)
     except Exception:
@@ -1171,8 +1171,8 @@ def cleanup_old_memory_files(
 
     # Cutoff in the user's timezone — filenames are user-local
     # YYYY-MM-DD, so a server-tz cutoff can be off by a day either way.
-    user_cfg = config.users.get(user_id)
-    tz_name = user_cfg.timezone if user_cfg and user_cfg.timezone else "UTC"
+    # Live DB value so it tracks a web-UI tz change (ISSUE-099).
+    tz_name = config.resolve_user_timezone(user_id)
     try:
         user_tz = ZoneInfo(tz_name)
     except Exception:
@@ -1208,9 +1208,10 @@ def check_sleep_cycles(conn: "db.sqlite3.Connection", config: Config) -> list[st
     processed = []
 
     for user_id, user_config in config.users.items():
-        # Evaluate cron in user's timezone
+        # Evaluate cron in the user's timezone — live DB value so a web-UI
+        # change moves the sleep-cycle schedule without a restart (ISSUE-099).
         try:
-            user_tz = ZoneInfo(user_config.timezone)
+            user_tz = ZoneInfo(config.resolve_user_timezone(user_id))
         except Exception:
             user_tz = ZoneInfo("UTC")
 

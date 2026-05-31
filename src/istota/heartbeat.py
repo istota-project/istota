@@ -847,7 +847,9 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
 
         settings, checks = result
         checked_users.append(user_id)
-        user_tz = user_config.timezone
+        # Live DB timezone (reusing conn) so quiet-hours track travel without
+        # a daemon restart (ISSUE-099).
+        user_tz = config.resolve_user_timezone(user_id, conn=conn)
 
         for check in checks:
             # Skip if per-check interval hasn't elapsed

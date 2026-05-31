@@ -1094,8 +1094,9 @@ def _run_garmin_sync_inprocess(
     except UserNotFoundError as exc:
         return False, f"garmin sync: {exc}"
 
-    user_cfg = config.get_user(task.user_id)
-    user_tz = user_cfg.timezone if user_cfg and user_cfg.timezone else None
+    # Live DB timezone so the "yesterday" window tracks travel (ISSUE-099);
+    # "UTC" is the engine's effective default, same as the old None.
+    user_tz = config.resolve_user_timezone(task.user_id)
 
     try:
         res = gs.sync_garmin(
@@ -1205,8 +1206,9 @@ def _execute_skill_task(
 
     # Per-user timezone (used by sync engines like Garmin that need to
     # compute the user's "yesterday" in their local TZ rather than UTC).
-    if user_cfg and getattr(user_cfg, "timezone", None):
-        env["ISTOTA_USER_TZ"] = user_cfg.timezone
+    # Resolved from the live user_profiles DB row so it tracks travel
+    # without a daemon restart (ISSUE-099).
+    env["ISTOTA_USER_TZ"] = config.resolve_user_timezone(task.user_id)
 
     cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
     try:
@@ -2256,7 +2258,10 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
             if not briefings:
                 continue
 
-            user_tz_str = user_config.timezone
+            # Resolve from the live user_profiles DB row (reusing conn) so a
+            # web-UI timezone change moves the briefing schedule without a
+            # daemon restart (ISSUE-099).
+            user_tz_str = app_config.resolve_user_timezone(user_id, conn=conn)
 
             try:
                 user_tz = ZoneInfo(user_tz_str)
@@ -2380,7 +2385,9 @@ def check_briefing_triggers(db_path, config: Config) -> list[int]:
                 trigger_file.unlink()
                 continue
 
-            user_tz_str = user_config.timezone
+            # Live DB timezone so a web-UI change is honored without restart
+            # (ISSUE-099); the briefing-trigger path holds no conn here.
+            user_tz_str = config.resolve_user_timezone(user_id)
 
             # Build and queue the briefing task
             prompt = build_briefing_prompt(briefing, user_id, config, user_tz_str)
@@ -3091,9 +3098,9 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
         jobs_by_user.setdefault(job.user_id, []).append(job)
 
     for user_id, user_jobs in jobs_by_user.items():
-        # Look up timezone from config; fall back to UTC
-        user_config = app_config.users.get(user_id)
-        user_tz_str = user_config.timezone if user_config else "UTC"
+        # Live DB timezone (reusing conn) so a web-UI change moves the job
+        # schedule without a daemon restart (ISSUE-099); falls back to UTC.
+        user_tz_str = app_config.resolve_user_timezone(user_id, conn=conn)
         try:
             user_tz = ZoneInfo(user_tz_str)
         except Exception:

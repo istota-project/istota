@@ -39,30 +39,21 @@ from .skills.calendar import get_caldav_client, get_calendars_for_user
 logger = logging.getLogger("istota.executor")
 
 
-def _resolve_user_tz(config: Config, user_id: str) -> tuple[ZoneInfo, str]:
+def _resolve_user_tz(
+    config: Config,
+    user_id: str,
+    *,
+    conn: "sqlite3.Connection | None" = None,
+) -> tuple[ZoneInfo, str]:
     """Return (ZoneInfo, tz_str) for a user, falling back to UTC.
 
-    Reads the timezone from the ``user_profiles`` DB row when a DB is
-    configured so that web-UI timezone edits take effect on the next task
-    without a scheduler restart (ISSUE-099). Falls back to the in-memory
-    ``UserConfig`` for DB-less contexts (init / tests) or unseeded rows.
-    Mirrors the DB-read pattern in ``Config.is_module_enabled``.
+    Delegates the DB-vs-in-memory timezone resolution to
+    ``Config.resolve_user_timezone`` (so web-UI edits take effect without a
+    scheduler restart — ISSUE-099) and wraps the result in a ``ZoneInfo``,
+    falling back to UTC if the resolved name is not a valid zone. Pass
+    ``conn`` to reuse an existing framework-DB connection on the hot path.
     """
-    tz_str = ""
-    if config.db_path is not None and Path(config.db_path).exists():
-        try:
-            from . import user_profiles as _up
-            profile = _up.get_profile(Path(config.db_path), user_id)
-        except Exception as e:  # pragma: no cover - defensive
-            logger.debug("_resolve_user_tz DB read failed: %s", e)
-            profile = None
-        if profile is not None:
-            tz_str = profile.timezone or ""
-
-    if not tz_str:
-        user_config = config.get_user(user_id)
-        tz_str = (user_config.timezone if user_config else "") or "UTC"
-
+    tz_str = config.resolve_user_timezone(user_id, conn=conn)
     try:
         return ZoneInfo(tz_str), tz_str
     except Exception:
@@ -1714,8 +1705,13 @@ def build_prompt(
     cli_skills_text: str | None = None,
     confirmation_context: str | None = None,
     knowledge_facts: str | None = None,
+    conn: "db.sqlite3.Connection | None" = None,
 ) -> str:
-    """Build the full prompt for Claude Code execution."""
+    """Build the full prompt for Claude Code execution.
+
+    Pass ``conn`` to let the per-task timezone lookup reuse an existing
+    framework-DB connection instead of opening a throwaway one.
+    """
     # Group resources by type
     resources_by_type: dict[str, list[db.UserResource]] = {}
     for r in user_resources:
@@ -1931,7 +1927,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     cli_skills_section = cli_skills_text or ""
 
     # Compute user's local time
-    user_tz, user_tz_str = _resolve_user_tz(config, task.user_id)
+    user_tz, user_tz_str = _resolve_user_tz(config, task.user_id, conn=conn)
     user_now = datetime.now(user_tz)
     user_time_str = user_now.strftime("%A, %B %-d, %Y at %-I:%M %p") + f" ({user_tz_str})"
     user_date_str = user_now.strftime("%Y-%m-%d") + f" ({user_tz_str})"
@@ -2251,7 +2247,7 @@ def execute_task(
         )
     else:
         # Resolve user TZ once for context formatting (mirrors prompt header).
-        _ctx_user_tz, _ = _resolve_user_tz(config, task.user_id)
+        _ctx_user_tz, _ = _resolve_user_tz(config, task.user_id, conn=conn)
 
         # Try Talk API-based context for Talk tasks, fall back to DB on failure
         _used_talk_api = False
@@ -2398,6 +2394,7 @@ def execute_task(
         cli_skills_text=cli_skills_text,
         confirmation_context=_confirmation_context,
         knowledge_facts=knowledge_facts_text,
+        conn=conn,
     )
 
     # Log prompt size breakdown

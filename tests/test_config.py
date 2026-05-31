@@ -423,6 +423,57 @@ class TestConfigMethods:
         assert cfg.use_mount is True
 
 
+class TestResolveUserTimezone:
+    """`Config.resolve_user_timezone` is the single source of truth for a
+    user's timezone, preferring the live ``user_profiles`` DB row over the
+    in-memory ``UserConfig`` so web-UI edits take effect without a scheduler
+    restart (ISSUE-099). Every timezone reader (prompt header, briefings,
+    scheduled jobs, Garmin sync, subprocess env) routes through it.
+    """
+
+    def _make_config(self, tmp_path, *, user_tz="America/Los_Angeles"):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            users={"alice": UserConfig(timezone=user_tz)},
+        )
+
+    def test_db_row_wins_over_stale_in_memory_config(self, tmp_path):
+        from istota import user_profiles
+        cfg = self._make_config(tmp_path, user_tz="America/Los_Angeles")
+        user_profiles.ensure_profile(cfg.db_path, "alice", timezone="Europe/Warsaw")
+        assert cfg.resolve_user_timezone("alice") == "Europe/Warsaw"
+
+    def test_falls_back_to_in_memory_when_no_db_row(self, tmp_path):
+        cfg = self._make_config(tmp_path, user_tz="America/New_York")
+        assert cfg.resolve_user_timezone("alice") == "America/New_York"
+
+    def test_unknown_user_returns_utc(self, tmp_path):
+        cfg = self._make_config(tmp_path)
+        assert cfg.resolve_user_timezone("nobody") == "UTC"
+
+    def test_no_db_path_uses_in_memory(self, tmp_path):
+        cfg = Config(db_path=None, users={"alice": UserConfig(timezone="Asia/Tokyo")})
+        assert cfg.resolve_user_timezone("alice") == "Asia/Tokyo"
+
+    def test_does_not_validate_zone_name(self, tmp_path):
+        # The Config helper returns the raw string; ZoneInfo validation is
+        # the caller's job (so callers control the invalid-zone fallback).
+        from istota import user_profiles
+        cfg = self._make_config(tmp_path)
+        user_profiles.ensure_profile(cfg.db_path, "alice", timezone="Not/AZone")
+        assert cfg.resolve_user_timezone("alice") == "Not/AZone"
+
+    def test_accepts_reused_connection(self, tmp_path):
+        from istota import db, user_profiles
+        cfg = self._make_config(tmp_path, user_tz="America/Los_Angeles")
+        user_profiles.ensure_profile(cfg.db_path, "alice", timezone="Europe/Warsaw")
+        with db.get_db(cfg.db_path) as conn:
+            assert cfg.resolve_user_timezone("alice", conn=conn) == "Europe/Warsaw"
+
+
 class TestTrustedEmailSenders:
     def test_own_email_always_trusted(self):
         cfg = Config(users={

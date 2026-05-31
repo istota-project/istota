@@ -486,7 +486,8 @@ def _get_location_config(username: str) -> tuple[str, str, str] | None:
         return None
     # Lazy init so /location/* endpoints work even before a ping arrives.
     _location.init_db(loc_ctx.db_path)
-    return str(loc_ctx.db_path), username, uc.timezone
+    # Live DB timezone so a just-saved web-UI change is reflected (ISSUE-099).
+    return str(loc_ctx.db_path), username, _config.resolve_user_timezone(username)
 
 
 def _resolve_tz(client_tz: str, fallback: str) -> str:
