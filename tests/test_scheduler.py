@@ -917,6 +917,47 @@ class TestCheckScheduledJobs:
             assert len(result) == 1
 
     @patch("istota.scheduler._sync_cron_files")
+    def test_resolves_timezone_from_live_db_not_stale_config(self, mock_sync, db_path):
+        """Cron fire times must use the live user_profiles timezone, not the
+        in-memory UserConfig built at startup (ISSUE-099). Proves the wiring:
+        check_scheduled_jobs calls Config.resolve_user_timezone for the job's
+        user, reusing the open connection, and gets the DB value.
+        """
+        from istota import user_profiles
+        # In-memory config is stale (UTC); the user changed tz in the web UI.
+        config = Config(
+            db_path=db_path, users={"alice": UserConfig(timezone="UTC")},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
+        user_profiles.ensure_profile(db_path, "alice", timezone="America/New_York")
+
+        yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, conversation_token, enabled, last_run_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "daily-check", "0 0 * * *", "Run daily check", "room1", 1, yesterday, yesterday),
+            )
+
+        seen: dict[str, tuple[str, bool]] = {}
+        real = Config.resolve_user_timezone
+
+        def spy(self, uid, *, conn=None):
+            tz = real(self, uid, conn=conn)
+            seen[uid] = (tz, conn is not None)
+            return tz
+
+        with patch.object(Config, "resolve_user_timezone", spy):
+            with db.get_db(db_path) as conn:
+                check_scheduled_jobs(conn, config)
+
+        assert "alice" in seen, "scheduled-job tz was not resolved via the DB-aware helper"
+        tz_str, conn_reused = seen["alice"]
+        assert tz_str == "America/New_York", "cron eval used the stale in-memory UTC, not the live DB tz"
+        assert conn_reused is True, "hot scheduler loop should reuse the open conn, not open a fresh one"
+
+    @patch("istota.scheduler._sync_cron_files")
     def test_job_not_yet_due(self, mock_sync, db_path):
         """A job that just ran should not trigger again."""
         user = UserConfig(timezone="UTC")

@@ -759,11 +759,10 @@ async def cmd_export(config, conn, user_id, conversation_token, args, client):
     validate_conversation_token(conversation_token)
     export_path = export_dir / f"{conversation_token}{ext}"
 
-    # Resolve user timezone
+    # Resolve user timezone — live DB value so it tracks travel (ISSUE-099).
     from zoneinfo import ZoneInfo
 
-    user_config = config.get_user(user_id)
-    tz_str = user_config.timezone if user_config else "UTC"
+    tz_str = config.resolve_user_timezone(user_id)
     try:
         tz = ZoneInfo(tz_str)
     except Exception:
