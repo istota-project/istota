@@ -467,8 +467,8 @@ class Config:
     namespace: str = "istota"  # Install namespace (drives /etc/{namespace}/, /srv/app/{namespace}/, etc.)
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt
-    model: str = ""  # Claude model to use; pin to a version like "claude-opus-4-7" rather than "opus" so updates don't silently switch us. Empty = CLI default
-    effort: str = ""  # Effort level: low, medium, high, xhigh, max. Empty = model default. Supported on Opus 4.7, Opus 4.6, Sonnet 4.6
+    model: str = ""  # Model ID or alias; pin to a versioned ID (e.g. "claude-opus-4-8") rather than a floating alias so upgrades are explicit. Empty = brain default
+    effort: str = ""  # Effort level: low, medium, high, xhigh, max. Empty = model default. Support varies by model
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
     max_knowledge_facts: int = 50  # cap knowledge graph facts per prompt (0 = unlimited)
     db_path: Path = field(default_factory=lambda: Path("data/istota.db"))

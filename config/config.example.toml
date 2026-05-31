@@ -29,18 +29,18 @@ bot_name = "Istota"
 #   effort = "high"
 # =============================================================================
 
-# Claude model. Accepts:
-#   - canonical IDs    "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"
-#   - provider aliases "opus", "opus-high", "opus-46-high", "sonnet", "haiku"
+# Model to use. Accepts:
+#   - canonical IDs    "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6"
+#   - provider aliases "opus", "opus-high", "opus-47-high", "sonnet", "haiku"
 #   - role aliases     "smart", "general", "fast", or any custom role from
 #                      [models.roles] below
 # Bare aliases ("opus", "sonnet") float to the current latest version each
-# release; canonical IDs are immutable.
+# release; canonical IDs are immutable. Pin to a versioned ID for stability.
 # Empty or omitted = brain default.
-# model = "claude-opus-4-7"
+# model = "claude-opus-4-8"
 
-# Effort level (Opus 4.7, Opus 4.6, Sonnet 4.6 only): low, medium, high, xhigh, max.
-# Opus 4.7 supports all five and defaults to xhigh. Other models top out at high (or max).
+# Effort level: low, medium, high, xhigh, max. Support varies by model.
+# Opus 4.8 defaults to high on all surfaces. Other models may differ.
 # Read independently of `model` — see footgun above.
 # Empty or omitted = model default.
 # effort = "high"
@@ -305,7 +305,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # the active brain at runtime. Defaults (in code, brain.claude_code.DEFAULT_ROLE_TARGETS):
 #   fast    → claude-haiku-4-5    (used by: context triage, skill classification)
 #   general → claude-sonnet-4-6   (used by: sleep cycle extraction + USER.md curation)
-#   smart   → claude-opus-4-7     (NOT used by internal code — exists for `!model smart`
+#   smart   → claude-opus-4-8     (NOT used by internal code — exists for `!model smart`
 #                                  from Talk and for any future code path that wants
 #                                  "the best model")
 #
@@ -319,7 +319,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 #
 # Example (uncomment to use):
 # [models.roles]
-# smart = "opus-46-high"   # rebind user-facing "smart" alias to Opus 4.6
+# smart = "opus-47-high"   # rebind user-facing "smart" alias to Opus 4.7
 # deep  = "opus-max"       # define a custom role for "deep thinking" tasks
 # fast  = "haiku"          # explicit (matches default; cosmetic)
 
