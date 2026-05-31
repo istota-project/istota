@@ -1157,6 +1157,152 @@ const handlers: MockHandler[] = [
 		};
 	},
 
+	// Money module mock — transactions + invoices with stateful action
+	// handlers so the row-expand UX and the kebab actions (edit txn, mark
+	// paid/pending, download PDF) are exercisable end-to-end without a backend.
+	(() => {
+		const PREFIX = '/istota/money/api';
+		const today = () => new Date().toISOString().slice(0, 10);
+
+		interface Txn {
+			date: string; flag: string; payee: string; narration: string;
+			account: string; position: string;
+		}
+		const transactions: Txn[] = [
+			{ date: '2026-05-28', flag: '*', payee: 'Whole Foods', narration: 'Groceries', account: 'Expenses:Food', position: '-82.14 USD' },
+			{ date: '2026-05-28', flag: '*', payee: 'Acme Corp', narration: 'May salary', account: 'Income:Salary', position: '5200.00 USD' },
+			{ date: '2026-05-26', flag: '*', payee: 'Shell', narration: 'Fuel', account: 'Expenses:Auto', position: '-54.30 USD' },
+			{ date: '2026-05-24', flag: '*', payee: 'Netflix', narration: 'Subscription', account: 'Expenses:Subscriptions', position: '-15.99 USD' },
+			{ date: '2026-05-22', flag: '*', payee: 'Transfer', narration: 'To savings', account: 'Assets:Savings', position: '500.00 USD' },
+			{ date: '2026-05-20', flag: '*', payee: 'Cafe Luna', narration: 'Coffee', account: 'Expenses:Food', position: '-6.75 USD' },
+		];
+
+		interface Invoice {
+			invoice_number: string; client: string; client_key: string;
+			date: string; total: number; status: string; paid_date?: string;
+		}
+		const invoices: Invoice[] = [
+			{ invoice_number: 'INV-000042', client: 'Globex', client_key: 'globex', date: '2026-05-15', total: 4500, status: 'outstanding' },
+			{ invoice_number: 'INV-000041', client: 'Initech', client_key: 'initech', date: '2026-04-30', total: 1800, status: 'paid', paid_date: '2026-05-10' },
+			{ invoice_number: 'INV-000040', client: 'Globex', client_key: 'globex', date: '2026-04-15', total: 3200, status: 'outstanding' },
+			{ invoice_number: 'INV-000039', client: 'Hooli', client_key: 'hooli', date: '2026-03-31', total: 950, status: 'draft' },
+		];
+
+		const invoiceItems: Record<string, Array<{ description: string; detail: string; quantity: number; rate: number; discount: number; amount: number }>> = {
+			'INV-000042': [
+				{ description: 'Consulting', detail: 'May engagement', quantity: 30, rate: 150, discount: 0, amount: 4500 },
+			],
+			'INV-000041': [
+				{ description: 'Design', detail: 'Brand refresh', quantity: 1.5, rate: 1200, discount: 0, amount: 1800 },
+			],
+			'INV-000040': [
+				{ description: 'Consulting', detail: 'April engagement', quantity: 20, rate: 150, discount: 0, amount: 3000 },
+				{ description: 'Support', detail: 'Retainer', quantity: 1, rate: 200, discount: 0, amount: 200 },
+			],
+			'INV-000039': [
+				{ description: 'Consulting', detail: 'Scoping', quantity: 6, rate: 150, discount: 0, amount: 900 },
+				{ description: 'Travel', detail: 'Reimbursement', quantity: 1, rate: 50, discount: 0, amount: 50 },
+			],
+		};
+
+		return ({ url, method, body }: { url: string; method: string; body?: any }) => {
+			if (!url.startsWith(PREFIX)) return undefined;
+			const parsed = new URL(url, 'http://mock');
+			const path = parsed.pathname.slice(PREFIX.length); // e.g. /transactions
+			const q = parsed.searchParams;
+
+			// --- Invoice action routes (must precede the broad /invoices match) ---
+			const action = path.match(/^\/invoices\/([^/]+)\/(mark-paid|mark-pending|pdf)$/);
+			if (action) {
+				const number = decodeURIComponent(action[1]);
+				const verb = action[2];
+				const inv = invoices.find((i) => i.invoice_number === number);
+				if (verb === 'pdf') {
+					return { status: 'ok', note: 'PDF download only works against the real backend' };
+				}
+				if (!inv) return { status: 'error', error: 'invoice not found' };
+				if (verb === 'mark-paid') {
+					inv.status = 'paid';
+					inv.paid_date = (body && body.paid_date) || today();
+					return { status: 'ok', invoice_number: number, paid_date: inv.paid_date, count: 1 };
+				}
+				inv.status = 'outstanding';
+				delete inv.paid_date;
+				return { status: 'ok', invoice_number: number, count: 1 };
+			}
+
+			if (path === '/transactions/update' && method === 'POST') {
+				const t = transactions.find(
+					(x) => x.date === body?.date && x.payee === body?.payee &&
+						x.narration === body?.narration && x.account === body?.account &&
+						x.position === body?.position,
+				);
+				if (t) {
+					if (body.new_payee !== undefined) t.payee = body.new_payee;
+					if (body.new_narration !== undefined) t.narration = body.new_narration;
+					if (body.new_date !== undefined && body.new_date) t.date = body.new_date;
+					if (body.new_account !== undefined) t.account = body.new_account;
+					if (body.new_position !== undefined) t.position = body.new_position;
+				}
+				return { status: 'ok' };
+			}
+
+			if (path === '/transactions' && method === 'GET') {
+				let rows = transactions;
+				const account = q.get('account');
+				if (account) rows = rows.filter((t) => t.account === account);
+				const filter = q.get('filter');
+				if (filter) {
+					const f = filter.toLowerCase();
+					rows = rows.filter(
+						(t) => t.payee.toLowerCase().includes(f) || t.narration.toLowerCase().includes(f),
+					);
+				}
+				const perPage = Number(q.get('per_page') || 100);
+				const page = Number(q.get('page') || 1);
+				const start = (page - 1) * perPage;
+				return {
+					status: 'ok',
+					transactions: rows.slice(start, start + perPage),
+					total: rows.length,
+					page,
+					per_page: perPage,
+				};
+			}
+
+			if (path === '/postings' && method === 'GET') {
+				const account = q.get('account') || '';
+				const position = q.get('position') || '';
+				return {
+					status: 'ok',
+					postings: [
+						{ account, position },
+						{ account: 'Assets:Checking', position: '' },
+					],
+				};
+			}
+
+			if (path === '/invoices' && method === 'GET') {
+				const showAll = q.get('show_all') === 'true';
+				const list = showAll ? invoices : invoices.filter((i) => i.status !== 'paid');
+				const outstanding = invoices.filter((i) => i.status === 'outstanding');
+				return {
+					status: 'ok',
+					invoice_count: invoices.length,
+					outstanding_count: outstanding.length,
+					invoices: list,
+				};
+			}
+
+			if (path === '/invoice-details' && method === 'GET') {
+				const number = q.get('invoice_number') || '';
+				return { status: 'ok', invoice_number: number, items: invoiceItems[number] || [] };
+			}
+
+			return undefined;
+		};
+	})(),
+
 	// Health module mock — populated with a realistic shape so the UI is
 	// browsable end-to-end without a backend.
 	(() => {

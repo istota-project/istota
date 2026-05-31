@@ -6,12 +6,21 @@ Display indices (1-based) are assigned across all loaded entries, sorted by date
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import os
+import time
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
 import tomli
 
 from istota.money.core.models import WorkEntry
+
+
+class WorkStoreLocked(RuntimeError):
+    """Raised when the work-entry write lock can't be acquired in time."""
 
 
 def _work_dir(data_dir: Path) -> Path:
@@ -22,6 +31,45 @@ def _work_dir(data_dir: Path) -> Path:
 
 def _year_file(work_dir: Path, year: int) -> Path:
     return work_dir / f"{year}.toml"
+
+
+@contextmanager
+def _work_lock(data_dir: Path, *, timeout_seconds: float = 10.0):
+    """Serialize read-modify-write cycles on the work-entry store.
+
+    The web process (mark-paid / mark-pending) and the scheduler/CLI
+    (invoice generate, invoice paid, add) both rewrite these yearly TOML
+    files. Without a lock, two concurrent load→modify→save cycles are
+    last-writer-wins on the whole file and one mutation is silently lost.
+
+    Holds an exclusive flock on ``{work_dir}/.work.lock`` (a sibling anchor
+    file, never the data files themselves) for the duration of the context.
+    Readers don't take the lock; atomic per-file writes (see ``_save_year``)
+    keep each file individually consistent for them. Linux + macOS only.
+    """
+    lock_path = _work_dir(data_dir) / ".work.lock"
+    fd = open(lock_path, "a+")
+    try:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            try:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise WorkStoreLocked(str(lock_path)) from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        fd.close()
 
 
 def _parse_date(s: str) -> date:
@@ -89,7 +137,17 @@ def _save_year(path: Path, entries: list[WorkEntry]) -> None:
         return
     entries.sort(key=lambda e: e.date)
     blocks = [_serialize_entry(e) for e in entries]
-    path.write_text("\n\n".join(blocks) + "\n")
+    text = "\n\n".join(blocks) + "\n"
+    # Atomic write: a crash (or a half-written FUSE/rclone flush) mid-write
+    # must not leave a truncated or partial year file. Write to a temp file
+    # in the same dir, then os.replace (atomic rename on the same fs).
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def _load_all(data_dir: Path) -> list[WorkEntry]:
@@ -148,10 +206,11 @@ def add_work_entry(
         qty=qty, amount=amount, discount=discount,
         description=description, entity=entity, invoice=invoice,
     )
-    entries = _load_all(data_dir)
-    entries.append(new_entry)
-    entries.sort(key=lambda e: e.date)
-    _save_entries(data_dir, entries)
+    with _work_lock(data_dir):
+        entries = _load_all(data_dir)
+        entries.append(new_entry)
+        entries.sort(key=lambda e: e.date)
+        _save_entries(data_dir, entries)
     for i, e in enumerate(entries, 1):
         if e is new_entry:
             return i
@@ -182,34 +241,36 @@ def update_work_entry(data_dir: Path, index: int, **fields) -> bool:
     """Update fields on entry at 1-based display index. Only if uninvoiced."""
     if not fields:
         return False
-    entries = load_work_entries(data_dir)
-    if index < 1 or index > len(entries):
-        return False
-    entry = entries[index - 1]
-    if entry.invoice:
-        return False
-    for key, value in fields.items():
-        if key == "date" and isinstance(value, str):
-            value = _parse_date(value)
-        if key == "client" and isinstance(value, str):
-            value = value.lower()
-        if hasattr(entry, key):
-            setattr(entry, key, value)
-    _save_entries(data_dir, entries)
-    return True
+    with _work_lock(data_dir):
+        entries = load_work_entries(data_dir)
+        if index < 1 or index > len(entries):
+            return False
+        entry = entries[index - 1]
+        if entry.invoice:
+            return False
+        for key, value in fields.items():
+            if key == "date" and isinstance(value, str):
+                value = _parse_date(value)
+            if key == "client" and isinstance(value, str):
+                value = value.lower()
+            if hasattr(entry, key):
+                setattr(entry, key, value)
+        _save_entries(data_dir, entries)
+        return True
 
 
 def remove_work_entry(data_dir: Path, index: int) -> bool:
     """Remove entry at 1-based display index. Only if uninvoiced."""
-    entries = load_work_entries(data_dir)
-    if index < 1 or index > len(entries):
-        return False
-    entry = entries[index - 1]
-    if entry.invoice:
-        return False
-    entries.pop(index - 1)
-    _save_entries(data_dir, entries)
-    return True
+    with _work_lock(data_dir):
+        entries = load_work_entries(data_dir)
+        if index < 1 or index > len(entries):
+            return False
+        entry = entries[index - 1]
+        if entry.invoice:
+            return False
+        entries.pop(index - 1)
+        _save_entries(data_dir, entries)
+        return True
 
 
 def get_uninvoiced_entries(
@@ -241,19 +302,20 @@ def assign_invoice_number(
     """Stamp invoice number on entries at given display indices. Returns count."""
     if not indices:
         return 0
-    entries = load_work_entries(data_dir)
-    count = 0
-    for idx in indices:
-        if idx < 1 or idx > len(entries):
-            continue
-        entry = entries[idx - 1]
-        if entry.invoice:
-            continue
-        entry.invoice = invoice_number
-        count += 1
-    if count:
-        _save_entries(data_dir, entries)
-    return count
+    with _work_lock(data_dir):
+        entries = load_work_entries(data_dir)
+        count = 0
+        for idx in indices:
+            if idx < 1 or idx > len(entries):
+                continue
+            entry = entries[idx - 1]
+            if entry.invoice:
+                continue
+            entry.invoice = invoice_number
+            count += 1
+        if count:
+            _save_entries(data_dir, entries)
+        return count
 
 
 def record_invoice_payment(
@@ -264,15 +326,35 @@ def record_invoice_payment(
     """Set paid_date on all entries for an invoice. Returns count."""
     if isinstance(paid_date, str):
         paid_date = _parse_date(paid_date)
-    entries = load_work_entries(data_dir)
-    count = 0
-    for entry in entries:
-        if entry.invoice == invoice_number and entry.paid_date is None:
-            entry.paid_date = paid_date
-            count += 1
-    if count:
-        _save_entries(data_dir, entries)
-    return count
+    with _work_lock(data_dir):
+        entries = load_work_entries(data_dir)
+        count = 0
+        for entry in entries:
+            if entry.invoice == invoice_number and entry.paid_date is None:
+                entry.paid_date = paid_date
+                count += 1
+        if count:
+            _save_entries(data_dir, entries)
+        return count
+
+
+def clear_invoice_payment(data_dir: Path, invoice_number: str) -> int:
+    """Clear paid_date on all entries for an invoice, keeping the invoice number.
+
+    The inverse of :func:`record_invoice_payment` — marks a paid invoice
+    pending again without un-invoicing it (unlike :func:`void_invoice`).
+    Returns the number of entries modified.
+    """
+    with _work_lock(data_dir):
+        entries = load_work_entries(data_dir)
+        count = 0
+        for entry in entries:
+            if entry.invoice == invoice_number and entry.paid_date is not None:
+                entry.paid_date = None
+                count += 1
+        if count:
+            _save_entries(data_dir, entries)
+        return count
 
 
 def get_entries_for_invoice(data_dir: Path, invoice_number: str) -> list[WorkEntry]:
@@ -285,16 +367,17 @@ def void_invoice(data_dir: Path, invoice_number: str) -> int:
 
     Returns the number of entries modified.
     """
-    entries = load_work_entries(data_dir)
-    count = 0
-    for entry in entries:
-        if entry.invoice == invoice_number:
-            entry.invoice = ""
-            entry.paid_date = None
-            count += 1
-    if count:
-        _save_entries(data_dir, entries)
-    return count
+    with _work_lock(data_dir):
+        entries = load_work_entries(data_dir)
+        count = 0
+        for entry in entries:
+            if entry.invoice == invoice_number:
+                entry.invoice = ""
+                entry.paid_date = None
+                count += 1
+        if count:
+            _save_entries(data_dir, entries)
+        return count
 
 
 def get_invoice_numbers(data_dir: Path) -> list[str]:

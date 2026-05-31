@@ -17,6 +17,7 @@ from istota.money.core.invoicing import (
     build_line_items,
     compute_income_lines,
     create_income_posting,
+    find_invoice_pdf,
     format_invoice_number,
     generate_invoice,
     generate_invoice_html,
@@ -173,6 +174,41 @@ class TestGroupEntriesByBundle:
         client = ClientConfig(key="a", name="A", separate=["expenses"])
         groups = group_entries_by_bundle(entries, client)
         assert len(groups) == 2
+
+
+class TestFindInvoicePdf:
+    def _make_pdf(self, output_dir: Path, year: str, filename: str) -> Path:
+        year_dir = output_dir / year
+        year_dir.mkdir(parents=True, exist_ok=True)
+        pdf = year_dir / filename
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        return pdf
+
+    def test_finds_pdf_by_zero_padded_number(self, tmp_path):
+        out = tmp_path / "generated"
+        expected = self._make_pdf(out, "2026", "Invoice-000007-04_15_2026.pdf")
+        found = find_invoice_pdf(out, "INV-000007")
+        assert found == expected
+
+    def test_finds_pdf_with_short_number(self, tmp_path):
+        out = tmp_path / "generated"
+        expected = self._make_pdf(out, "2026", "Invoice-000007-04_15_2026.pdf")
+        # The stored invoice number may not be zero-padded the same way.
+        found = find_invoice_pdf(out, "INV-7")
+        assert found == expected
+
+    def test_returns_none_when_missing(self, tmp_path):
+        out = tmp_path / "generated"
+        out.mkdir()
+        assert find_invoice_pdf(out, "INV-000099") is None
+
+    def test_returns_none_when_dir_absent(self, tmp_path):
+        assert find_invoice_pdf(tmp_path / "nope", "INV-000007") is None
+
+    def test_returns_none_for_unparseable_number(self, tmp_path):
+        out = tmp_path / "generated"
+        self._make_pdf(out, "2026", "Invoice-000007-04_15_2026.pdf")
+        assert find_invoice_pdf(out, "garbage") is None
 
 
 class TestFormatInvoiceNumber:

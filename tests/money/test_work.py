@@ -5,8 +5,12 @@ from datetime import date
 import pytest
 
 from istota.money.work import (
+    WorkStoreLocked,
+    _work_dir,
+    _work_lock,
     add_work_entry,
     assign_invoice_number,
+    clear_invoice_payment,
     get_entries_for_invoice,
     get_invoice_numbers,
     get_uninvoiced_entries,
@@ -222,6 +226,50 @@ class TestInvoiceAssignment:
         assert count == 0
 
 
+class TestClearInvoicePayment:
+    def test_clear_payment_keeps_invoice_number(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        add_work_entry(data_dir, "2026-03-02", "acme", "dev", qty=4)
+        assign_invoice_number(data_dir, [1, 2], "INV-000001")
+        record_invoice_payment(data_dir, "INV-000001", "2026-04-15")
+
+        count = clear_invoice_payment(data_dir, "INV-000001")
+        assert count == 2
+
+        # paid_date cleared, but the invoice number stays put
+        entries = get_entries_for_invoice(data_dir, "INV-000001")
+        assert len(entries) == 2
+        assert all(e.paid_date is None for e in entries)
+        assert all(e.invoice == "INV-000001" for e in entries)
+
+    def test_clear_payment_when_already_unpaid(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assign_invoice_number(data_dir, [1], "INV-000001")
+        count = clear_invoice_payment(data_dir, "INV-000001")
+        assert count == 0
+        # Still invoiced, just never paid.
+        assert get_entries_for_invoice(data_dir, "INV-000001")[0].invoice == "INV-000001"
+
+    def test_clear_payment_nonexistent_invoice(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        count = clear_invoice_payment(data_dir, "INV-999999")
+        assert count == 0
+
+    def test_clear_payment_does_not_affect_other_invoices(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        add_work_entry(data_dir, "2026-03-02", "acme", "dev", qty=4)
+        assign_invoice_number(data_dir, [1], "INV-000001")
+        assign_invoice_number(data_dir, [2], "INV-000002")
+        record_invoice_payment(data_dir, "INV-000001", "2026-04-15")
+        record_invoice_payment(data_dir, "INV-000002", "2026-04-16")
+
+        clear_invoice_payment(data_dir, "INV-000001")
+
+        entries = load_work_entries(data_dir)
+        assert entries[0].paid_date is None
+        assert entries[1].paid_date == date(2026, 4, 16)
+
+
 class TestVoidInvoice:
     def test_void_clears_invoice_and_paid_date(self, data_dir):
         add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
@@ -286,6 +334,41 @@ class TestVoidInvoice:
         assert "INV-000001" in get_invoice_numbers(data_dir)
         void_invoice(data_dir, "INV-000001")
         assert "INV-000001" not in get_invoice_numbers(data_dir)
+
+
+class TestConcurrencySafety:
+    def test_work_lock_is_exclusive(self, data_dir):
+        # flock is per-open-file-description and mutually exclusive across
+        # fds even within one process, so a nested non-blocking acquire times
+        # out — proving two writers can't interleave.
+        with _work_lock(data_dir):
+            with pytest.raises(WorkStoreLocked):
+                with _work_lock(data_dir, timeout_seconds=0.2):
+                    pass
+
+    def test_lock_released_after_context(self, data_dir):
+        with _work_lock(data_dir):
+            pass
+        # Re-acquire immediately; should not raise.
+        with _work_lock(data_dir, timeout_seconds=0.2):
+            pass
+
+    def test_save_leaves_no_temp_files(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assign_invoice_number(data_dir, [1], "INV-000001")
+        record_invoice_payment(data_dir, "INV-000001", "2026-04-15")
+        wd = _work_dir(data_dir)
+        leftovers = [p.name for p in wd.iterdir() if p.name.endswith(".tmp")]
+        assert leftovers == []
+
+    def test_lock_file_not_parsed_as_year(self, data_dir):
+        # The .work.lock anchor lives in the work dir; it must never be
+        # mistaken for a {year}.toml data file.
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        with _work_lock(data_dir):
+            pass
+        entries = load_work_entries(data_dir)
+        assert len(entries) == 1
 
 
 class TestClientCaseNormalization:

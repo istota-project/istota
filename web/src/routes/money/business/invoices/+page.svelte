@@ -1,6 +1,15 @@
 <script lang="ts">
-	import { getInvoices, getInvoiceDetails, type InvoiceRow, type InvoiceDetailItem } from '$lib/money/api';
+	import {
+		getInvoices,
+		getInvoiceDetails,
+		markInvoicePaid,
+		markInvoicePending,
+		invoicePdfUrl,
+		type InvoiceRow,
+		type InvoiceDetailItem,
+	} from '$lib/money/api';
 	import { selectedLedger } from '$lib/money/stores/ledger';
+	import { KebabMenu, type KebabItem } from '$lib/components/ui';
 
 	let invoices: InvoiceRow[] = $state([]);
 	let loading = $state(true);
@@ -8,6 +17,48 @@
 	let invoiceCount = $state(0);
 	let outstandingCount = $state(0);
 	let sortAsc = $state(false);
+	// Invoice number currently running an action (disables its menu items).
+	let busyInvoice = $state('');
+
+	async function handleMarkPaid(inv: InvoiceRow) {
+		busyInvoice = inv.invoice_number;
+		try {
+			await markInvoicePaid(inv.invoice_number);
+			await load();
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to mark invoice paid';
+		} finally {
+			busyInvoice = '';
+		}
+	}
+
+	async function handleMarkPending(inv: InvoiceRow) {
+		busyInvoice = inv.invoice_number;
+		try {
+			await markInvoicePending(inv.invoice_number);
+			await load();
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to mark invoice pending';
+		} finally {
+			busyInvoice = '';
+		}
+	}
+
+	function handleDownloadPdf(inv: InvoiceRow) {
+		window.open(invoicePdfUrl(inv.invoice_number), '_blank');
+	}
+
+	function menuItems(inv: InvoiceRow): KebabItem[] {
+		const busy = busyInvoice === inv.invoice_number;
+		const items: KebabItem[] = [];
+		if (inv.status === 'paid') {
+			items.push({ label: 'Mark pending', onSelect: () => handleMarkPending(inv), disabled: busy });
+		} else {
+			items.push({ label: 'Mark paid', onSelect: () => handleMarkPaid(inv), disabled: busy });
+		}
+		items.push({ label: 'Download PDF', onSelect: () => handleDownloadPdf(inv) });
+		return items;
+	}
 
 	let expandedKeys = $state(new Set<string>());
 	let detailsCache = $state(new Map<string, InvoiceDetailItem[]>());
@@ -140,7 +191,20 @@
 			{#each sorted as inv (inv.invoice_number)}
 				{@const key = inv.invoice_number}
 				{@const isExpanded = expandedKeys.has(key)}
-				<div class="inv-row" class:expanded={isExpanded}>
+				<div
+					class="inv-row"
+					class:expanded={isExpanded}
+					role="button"
+					tabindex="0"
+					aria-expanded={isExpanded}
+					onclick={() => toggleExpand(inv)}
+					onkeydown={(e) => {
+						if (e.key === 'Enter' || e.key === ' ') {
+							e.preventDefault();
+							toggleExpand(inv);
+						}
+					}}
+				>
 					<span class="inv-number">{inv.invoice_number}</span>
 					<span class="inv-client">{inv.client}</span>
 					<span class="inv-date">{formatDate(inv.date)}</span>
@@ -151,12 +215,7 @@
 						class:status-draft={inv.status === 'draft'}
 					>{displayStatus(inv.status)}</span>
 					<span class="inv-amount">${formatAmount(inv.total)}</span>
-					<button
-						class="inv-expand"
-						onclick={() => toggleExpand(inv)}
-						type="button"
-						title={isExpanded ? 'Collapse' : 'Show line items'}
-					>&#8943;</button>
+					<KebabMenu items={menuItems(inv)} />
 				</div>
 				{#if isExpanded}
 					<div class="inv-details">
@@ -250,6 +309,14 @@
 		font-size: var(--text-sm);
 		border-radius: 0.25rem;
 		transition: background var(--transition-fast);
+		cursor: pointer;
+		text-align: left;
+		width: 100%;
+	}
+
+	.inv-row:focus-visible {
+		outline: 1px solid var(--border-default);
+		outline-offset: -1px;
 	}
 
 	.inv-row:hover {
@@ -342,22 +409,6 @@
 		flex-shrink: 0;
 		min-width: 5.5rem;
 		color: var(--text-primary);
-	}
-
-	.inv-expand {
-		background: none;
-		border: none;
-		color: var(--text-dim);
-		font-size: var(--text-sm);
-		cursor: pointer;
-		padding: 0 0.15rem;
-		flex-shrink: 0;
-		line-height: 1;
-		letter-spacing: 0.1em;
-	}
-
-	.inv-expand:hover {
-		color: var(--text-muted);
 	}
 
 	.inv-details {

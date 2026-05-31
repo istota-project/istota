@@ -622,18 +622,31 @@ def compute_income_lines(
     return income_lines
 
 
-def delete_invoice_pdf(invoice_output_dir: Path, invoice_number: str) -> bool:
-    """Find and delete the PDF file for an invoice. Returns True if a file was deleted."""
+def find_invoice_pdf(invoice_output_dir: Path, invoice_number: str) -> Path | None:
+    """Locate the generated PDF for an invoice. Returns the path or None.
+
+    Mirrors :func:`delete_invoice_pdf`'s lookup: parses the numeric part of
+    the ``INV-<n>`` invoice number and globs ``Invoice-<n:06d>-*.pdf`` across
+    the year subdirectories of ``invoice_output_dir``.
+    """
     match = re.match(r"INV-(\d+)", invoice_number)
     if not match:
-        return False
+        return None
     num = int(match.group(1))
     if not invoice_output_dir.exists():
-        return False
+        return None
     pattern = f"Invoice-{num:06d}-*.pdf"
-    for year_dir in invoice_output_dir.iterdir():
+    for year_dir in sorted(invoice_output_dir.iterdir()):
         if year_dir.is_dir():
-            for pdf in year_dir.glob(pattern):
-                pdf.unlink()
-                return True
-    return False
+            for pdf in sorted(year_dir.glob(pattern)):
+                return pdf
+    return None
+
+
+def delete_invoice_pdf(invoice_output_dir: Path, invoice_number: str) -> bool:
+    """Find and delete the PDF file for an invoice. Returns True if a file was deleted."""
+    pdf = find_invoice_pdf(invoice_output_dir, invoice_number)
+    if pdf is None:
+        return False
+    pdf.unlink()
+    return True
