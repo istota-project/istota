@@ -7,6 +7,7 @@ import pytest
 
 from istota.executor import (
     _compose_full_result,
+    _resolve_user_tz,
     _is_automated_task,
     _is_terse,
     _last_substantial_region,
@@ -381,6 +382,69 @@ class TestBuildPromptSkillsChangelog:
         changelog_pos = prompt.index("What's New in Skills")
         skills_pos = prompt.index("Skills Reference")
         assert changelog_pos < skills_pos
+
+
+# ---------------------------------------------------------------------------
+# TestResolveUserTz (ISSUE-099)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveUserTz:
+    """`_resolve_user_tz` must reflect live web-UI timezone edits.
+
+    The web UI writes timezone to the ``user_profiles`` DB row, but the
+    scheduler's in-memory ``Config`` is only built once at startup. Reading
+    the timezone from the DB (with the in-memory ``UserConfig`` as fallback)
+    means a travelling user's timezone change takes effect on the next task
+    without a daemon restart. Mirrors the ``Config.is_module_enabled`` pattern.
+    """
+
+    def _make_config(self, tmp_path, *, user_tz="America/Los_Angeles"):
+        db_path = tmp_path / "test.db"
+        _db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            temp_dir=tmp_path / "temp",
+            users={"alice": UserConfig(timezone=user_tz)},
+        )
+
+    def test_db_profile_wins_over_stale_in_memory_config(self, tmp_path):
+        from istota import user_profiles
+        config = self._make_config(tmp_path, user_tz="America/Los_Angeles")
+        # Simulate a web-UI timezone change written to the DB after startup.
+        user_profiles.ensure_profile(config.db_path, "alice", timezone="Europe/Warsaw")
+
+        tz, tz_str = _resolve_user_tz(config, "alice")
+        assert tz_str == "Europe/Warsaw"
+        assert tz.key == "Europe/Warsaw"
+
+    def test_falls_back_to_in_memory_config_when_no_db_row(self, tmp_path):
+        config = self._make_config(tmp_path, user_tz="America/New_York")
+        # No user_profiles row written.
+        tz, tz_str = _resolve_user_tz(config, "alice")
+        assert tz_str == "America/New_York"
+
+    def test_falls_back_to_utc_for_unknown_user(self, tmp_path):
+        config = self._make_config(tmp_path)
+        tz, tz_str = _resolve_user_tz(config, "nobody")
+        assert tz_str == "UTC"
+
+    def test_invalid_db_timezone_falls_back_to_utc(self, tmp_path):
+        from istota import user_profiles
+        config = self._make_config(tmp_path)
+        user_profiles.ensure_profile(config.db_path, "alice", timezone="Not/AZone")
+        tz, tz_str = _resolve_user_tz(config, "alice")
+        assert tz_str == "UTC"
+
+    def test_no_db_path_uses_in_memory_config(self, tmp_path):
+        # DB-less contexts (init/tests) must still resolve via UserConfig.
+        config = Config(
+            db_path=None,
+            temp_dir=tmp_path / "temp",
+            users={"alice": UserConfig(timezone="Asia/Tokyo")},
+        )
+        tz, tz_str = _resolve_user_tz(config, "alice")
+        assert tz_str == "Asia/Tokyo"
 
 
 # ---------------------------------------------------------------------------
