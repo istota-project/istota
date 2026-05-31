@@ -23,6 +23,7 @@ from istota.brain.claude_code import (
     MODEL_ALIASES,
     OPUS,
     OPUS_46,
+    OPUS_47,
     SONNET,
     ClaudeCodeBrain,
 )
@@ -43,7 +44,7 @@ def brain():
 
 class TestCanonicalIds:
     def test_constants_are_versioned(self):
-        for ident in (OPUS, OPUS_46, SONNET, HAIKU):
+        for ident in (OPUS, OPUS_47, OPUS_46, SONNET, HAIKU):
             assert ident.startswith("claude-")
             # Must contain a version digit so a model release can't silently
             # re-route us via a floating tag like "opus".
@@ -69,6 +70,7 @@ class TestBrainResolveModelName:
         assert brain.resolve_model_name("opus") == OPUS
         assert brain.resolve_model_name("opus-high") == OPUS
         assert brain.resolve_model_name("haiku") == HAIKU
+        assert brain.resolve_model_name("opus-47") == OPUS_47
         assert brain.resolve_model_name("opus-46") == OPUS_46
 
     def test_canonical_id_passes_through(self, brain):
@@ -93,6 +95,7 @@ class TestBrainResolveAlias:
     def test_provider_alias_carries_effort(self, brain):
         assert brain.resolve_alias("opus-high") == (OPUS, "high")
         assert brain.resolve_alias("opus-xhigh") == (OPUS, "xhigh")
+        assert brain.resolve_alias("opus-47-high") == (OPUS_47, "high")
         assert brain.resolve_alias("opus-46-high") == (OPUS_46, "high")
 
     def test_unknown_returns_none(self, brain):
@@ -159,6 +162,7 @@ class TestBrainListAliases:
         names = [a for a, *_ in flat]
         assert "smart" in names
         assert "opus" in names
+        assert "opus-47" in names
         assert "opus-46" in names
         assert "default" in names
 
