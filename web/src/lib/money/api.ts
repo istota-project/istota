@@ -274,6 +274,71 @@ export async function getInvoiceDetails(invoice_number: string): Promise<Invoice
 	return apiFetch<InvoiceDetailsResponse>(`/invoice-details?${params.toString()}`);
 }
 
+export interface InvoiceActionResponse {
+	status: string;
+	invoice_number: string;
+	count: number;
+	paid_date?: string;
+}
+
+/** Mark an invoice paid (sets paid_date; does not post a ledger payment). */
+export async function markInvoicePaid(
+	invoice_number: string,
+	opts?: { paid_date?: string },
+): Promise<InvoiceActionResponse> {
+	return apiFetch<InvoiceActionResponse>(
+		`/invoices/${encodeURIComponent(invoice_number)}/mark-paid`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ paid_date: opts?.paid_date }),
+		},
+	);
+}
+
+/** Un-pay an invoice (clears paid_date, keeps the invoice number). */
+export async function markInvoicePending(invoice_number: string): Promise<InvoiceActionResponse> {
+	return apiFetch<InvoiceActionResponse>(
+		`/invoices/${encodeURIComponent(invoice_number)}/mark-pending`,
+		{ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+	);
+}
+
+/** URL for the generated invoice PDF — open in a new tab / download. */
+export function invoicePdfUrl(invoice_number: string): string {
+	return `${base}/money/api/invoices/${encodeURIComponent(invoice_number)}/pdf`;
+}
+
+export interface TransactionUpdate {
+	// Identifies the existing posting (the same key fields the list renders).
+	date: string;
+	payee: string;
+	narration: string;
+	account: string;
+	position: string;
+	// New values.
+	new_payee?: string;
+	new_narration?: string;
+	new_account?: string;
+	new_position?: string;
+	new_date?: string;
+	ledger?: string;
+}
+
+/**
+ * Edit a transaction. NOTE: there is no production backend for this yet —
+ * beancount is append-only and no edit route exists. This is wired against
+ * the mock API only so the UX can be tested; in prod it returns 404 until a
+ * follow-up adds the ledger-rewrite backend. Callers must handle the error.
+ */
+export async function updateTransaction(payload: TransactionUpdate): Promise<{ status: string }> {
+	return apiFetch<{ status: string }>(`/transactions/update`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload),
+	});
+}
+
 export async function getLedgers(): Promise<string[]> {
 	const resp = await apiFetch<{ ledgers: string[] }>('/ledgers');
 	return resp.ledgers;

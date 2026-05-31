@@ -9,11 +9,15 @@ fed by the istota config attached to ``request.app.state.istota_config``.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from istota.money._loader import UserNotFoundError, resolve_for_user
 from istota.money.cli import UserContext
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +484,107 @@ async def api_invoice_details(
             "amount": round(item.amount, 2),
         } for item in items],
     }
+
+
+@router.post("/invoices/{invoice_number}/mark-paid")
+async def api_invoice_mark_paid(
+    invoice_number: str,
+    request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Record payment for an invoice (sets paid_date on its work entries).
+
+    Web-level toggle only — sets paid_date, does not post a bank payment
+    transaction to the ledger (the CLI's ``invoice paid --bank`` path is
+    separate and unchanged).
+    """
+    from datetime import date
+
+    from istota.money.work import (
+        get_entries_for_invoice,
+        record_invoice_payment,
+    )
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return JSONResponse({"status": "error", "error": "no data dir"}, status_code=404)
+
+    if not get_entries_for_invoice(data_dir, invoice_number):
+        return JSONResponse({"status": "error", "error": "invoice not found"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    paid_date = (body or {}).get("paid_date") or date.today().isoformat()
+
+    count = record_invoice_payment(data_dir, invoice_number, paid_date)
+    return {
+        "status": "ok",
+        "invoice_number": invoice_number,
+        "paid_date": paid_date,
+        "count": count,
+    }
+
+
+@router.post("/invoices/{invoice_number}/mark-pending")
+async def api_invoice_mark_pending(
+    invoice_number: str,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Un-pay an invoice (clears paid_date, keeps the invoice number)."""
+    from istota.money.work import clear_invoice_payment, get_entries_for_invoice
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return JSONResponse({"status": "error", "error": "no data dir"}, status_code=404)
+
+    if not get_entries_for_invoice(data_dir, invoice_number):
+        return JSONResponse({"status": "error", "error": "invoice not found"}, status_code=404)
+
+    count = clear_invoice_payment(data_dir, invoice_number)
+    return {"status": "ok", "invoice_number": invoice_number, "count": count}
+
+
+@router.get("/invoices/{invoice_number}/pdf")
+async def api_invoice_pdf(
+    invoice_number: str,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    """Stream the generated PDF for an invoice, or 404 if not on disk."""
+    from istota.money.core.invoicing import find_invoice_pdf
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return JSONResponse({"status": "error", "error": "no data dir"}, status_code=404)
+
+    # Prefer the invoicing config's output dir; fall back to the conventional
+    # location. config.invoice_output defaults to "invoices/generated".
+    invoice_output_dir = data_dir / "invoices" / "generated"
+    try:
+        config = _load_invoicing_config(user_ctx)
+        if config is not None and getattr(config, "invoice_output", None):
+            invoice_output_dir = data_dir / config.invoice_output
+    except Exception:
+        # Fall back to the default location, but make the miss visible — a
+        # custom invoice_output we couldn't read would otherwise 404 silently.
+        logger.warning(
+            "invoice pdf: could not load invoicing config for %s, using default output dir",
+            invoice_number,
+            exc_info=True,
+        )
+
+    pdf = find_invoice_pdf(invoice_output_dir, invoice_number)
+    if pdf is None:
+        return JSONResponse({"status": "error", "error": "pdf not found"}, status_code=404)
+
+    return FileResponse(
+        path=str(pdf),
+        media_type="application/pdf",
+        filename=pdf.name,
+    )
 
 
 @router.get("/tax/estimate")

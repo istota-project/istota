@@ -1,8 +1,17 @@
 <script lang="ts">
-	import { getTransactions, getPostings, type TransactionRow, type PostingRow } from '$lib/money/api';
+	import {
+		getTransactions,
+		getPostings,
+		getAccounts,
+		updateTransaction,
+		type TransactionRow,
+		type PostingRow,
+	} from '$lib/money/api';
 	import { selectedAccount, selectedYear, filterText } from '$lib/money/stores/transactions';
 	import { selectedLedger } from '$lib/money/stores/ledger';
 	import { displayBalance } from '$lib/money/utils/accounts';
+	import { KebabMenu } from '$lib/components/ui';
+	import TransactionForm from '$lib/components/money/TransactionForm.svelte';
 
 	let transactions: TransactionRow[] = $state([]);
 	let loading = $state(true);
@@ -10,6 +19,57 @@
 	let total = $state(0);
 	let currentPage = $state(1);
 	let perPage = 100;
+
+	// Account names for the edit form's dropdown.
+	let accountNames: string[] = $state([]);
+
+	// Edit-transaction modal state.
+	let editingTxn: TransactionRow | null = $state(null);
+	let editError = $state('');
+	let editSaving = $state(false);
+
+	function openEdit(txn: TransactionRow) {
+		editError = '';
+		editingTxn = txn;
+	}
+
+	async function handleEditSave(data: {
+		payee: string;
+		narration: string;
+		date: string;
+		account: string;
+		position: string;
+	}) {
+		if (!editingTxn) return;
+		editSaving = true;
+		editError = '';
+		const original = editingTxn;
+		try {
+			await updateTransaction({
+				ledger: $selectedLedger || undefined,
+				date: original.date,
+				payee: original.payee,
+				narration: original.narration,
+				account: original.account,
+				position: original.position,
+				new_payee: data.payee,
+				new_narration: data.narration,
+				new_date: data.date,
+				new_account: data.account,
+				new_position: data.position,
+			});
+			editingTxn = null;
+			await load(currentOpts(currentPage));
+		} catch (e) {
+			// No production backend yet — surface the error, keep the modal open.
+			editError =
+				e instanceof Error
+					? `${e.message} (editing transactions isn't supported on this server yet)`
+					: 'Failed to save transaction';
+		} finally {
+			editSaving = false;
+		}
+	}
 
 	// Track expanded transactions and their postings
 	let expandedKeys = $state(new Set<string>());
@@ -104,6 +164,18 @@
 		load(opts);
 	});
 
+	// Keep an account-name list for the edit form's dropdown.
+	$effect(() => {
+		const ledger = $selectedLedger;
+		getAccounts({ ledger: ledger || undefined })
+			.then((resp) => {
+				accountNames = resp.accounts.map((a) => a.account);
+			})
+			.catch(() => {
+				accountNames = [];
+			});
+	});
+
 	function prevPage() {
 		if (currentPage > 1) {
 			currentPage--;
@@ -179,7 +251,20 @@
 				{#each group.rows as txn, i (group.date + '-' + i)}
 					{@const key = txnKey(txn)}
 					{@const isExpanded = expandedKeys.has(key)}
-					<div class="txn-row" class:expanded={isExpanded}>
+					<div
+						class="txn-row"
+						class:expanded={isExpanded}
+						role="button"
+						tabindex="0"
+						aria-expanded={isExpanded}
+						onclick={() => toggleExpand(txn)}
+						onkeydown={(e) => {
+							if (e.key === 'Enter' || e.key === ' ') {
+								e.preventDefault();
+								toggleExpand(txn);
+							}
+						}}
+					>
 						<div class="txn-main">
 							{#if txn.payee}
 								<span class="txn-payee">{txn.payee}</span>
@@ -190,16 +275,11 @@
 						</div>
 						<button
 							class="txn-account"
-							onclick={() => selectedAccount.set(txn.account)}
+							onclick={(e) => { e.stopPropagation(); selectedAccount.set(txn.account); }}
 							type="button"
 						>{shortAccount(txn.account)}</button>
 						<span class="txn-amount" class:income={txn.account.startsWith('Income:')} class:expense={txn.account.startsWith('Expenses:')}>{displayBalance(txn.position, txn.account)}</span>
-						<button
-							class="txn-expand"
-							onclick={() => toggleExpand(txn)}
-							type="button"
-							title={isExpanded ? 'Collapse' : 'Show all postings'}
-						>&#8943;</button>
+						<KebabMenu items={[{ label: 'Edit transaction', onSelect: () => openEdit(txn) }]} />
 					</div>
 					{#if isExpanded}
 						<div class="postings">
@@ -232,6 +312,17 @@
 		{/if}
 	{/if}
 </div>
+
+{#if editingTxn}
+	<TransactionForm
+		txn={editingTxn}
+		accounts={accountNames}
+		error={editError}
+		saving={editSaving}
+		onSave={handleEditSave}
+		onCancel={() => (editingTxn = null)}
+	/>
+{/if}
 
 <style>
 	.txn-content {
@@ -290,6 +381,14 @@
 		font-size: var(--text-sm);
 		border-radius: 0.25rem;
 		transition: background var(--transition-fast);
+		cursor: pointer;
+		text-align: left;
+		width: 100%;
+	}
+
+	.txn-row:focus-visible {
+		outline: 1px solid var(--border-default);
+		outline-offset: -1px;
 	}
 
 	.txn-row:hover {
@@ -348,22 +447,6 @@
 
 	.txn-amount.income { color: #4adbc0; }
 	.txn-amount.expense { color: #d46ab5; }
-
-	.txn-expand {
-		background: none;
-		border: none;
-		color: var(--text-dim);
-		font-size: var(--text-sm);
-		cursor: pointer;
-		padding: 0 0.15rem;
-		flex-shrink: 0;
-		line-height: 1;
-		letter-spacing: 0.1em;
-	}
-
-	.txn-expand:hover {
-		color: var(--text-muted);
-	}
 
 	.postings {
 		padding: 0.15rem 0.75rem 0.4rem 2.5rem;
