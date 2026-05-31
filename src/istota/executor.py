@@ -40,9 +40,29 @@ logger = logging.getLogger("istota.executor")
 
 
 def _resolve_user_tz(config: Config, user_id: str) -> tuple[ZoneInfo, str]:
-    """Return (ZoneInfo, tz_str) for a user, falling back to UTC."""
-    user_config = config.get_user(user_id)
-    tz_str = user_config.timezone if user_config else "UTC"
+    """Return (ZoneInfo, tz_str) for a user, falling back to UTC.
+
+    Reads the timezone from the ``user_profiles`` DB row when a DB is
+    configured so that web-UI timezone edits take effect on the next task
+    without a scheduler restart (ISSUE-099). Falls back to the in-memory
+    ``UserConfig`` for DB-less contexts (init / tests) or unseeded rows.
+    Mirrors the DB-read pattern in ``Config.is_module_enabled``.
+    """
+    tz_str = ""
+    if config.db_path is not None and Path(config.db_path).exists():
+        try:
+            from . import user_profiles as _up
+            profile = _up.get_profile(Path(config.db_path), user_id)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("_resolve_user_tz DB read failed: %s", e)
+            profile = None
+        if profile is not None:
+            tz_str = profile.timezone or ""
+
+    if not tz_str:
+        user_config = config.get_user(user_id)
+        tz_str = (user_config.timezone if user_config else "") or "UTC"
+
     try:
         return ZoneInfo(tz_str), tz_str
     except Exception:
