@@ -695,6 +695,74 @@ class TestStreamingExecution:
         assert result == "Cancelled by user"
 
 
+class TestStreamingStdinDelivery:
+    """Regression: the prompt must be written to the subprocess stdin
+    concurrently with the on_pid callback, never gated behind it.
+
+    The `claude` CLI aborts its stdin read after ~3s and then runs with an
+    empty prompt. The on_pid callback is `db.update_task_pid()`, a SQLite
+    write that can block on the write lock under daemon load. If prompt
+    delivery waits for that callback to return, a slow DB write pushes the
+    write past the CLI's stdin deadline and the task fails with "produced no
+    output". Delivery therefore happens on its own thread, started before
+    on_pid is invoked.
+    """
+
+    def _result_stream(self):
+        return iter([
+            json.dumps({"type": "system", "subtype": "init", "cwd": "/tmp"}) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": "ok"}) + "\n",
+        ])
+
+    def test_prompt_delivered_while_on_pid_blocks(self, tmp_path):
+        from istota.brain.claude_code import ClaudeCodeBrain
+        from istota.brain._types import BrainRequest
+
+        stdin_written = threading.Event()
+        observed = {}
+        written = []
+
+        def record_write(data):
+            written.append(data)
+            stdin_written.set()
+            return len(data)
+
+        def slow_on_pid(_pid):
+            # Stand in for a contended db.update_task_pid() write. The prompt
+            # must already be (or become) delivered by the writer thread while
+            # we sit here — it must NOT depend on this callback returning.
+            observed["delivered_during_on_pid"] = stdin_written.wait(timeout=5)
+
+        mock_process = MagicMock()
+        mock_process.stdout = self._result_stream()
+        mock_process.stderr = iter([])
+        mock_process.returncode = 0
+        mock_process.wait.return_value = 0
+        mock_process.pid = 4242
+        mock_process.stdin.write.side_effect = record_write
+
+        req = BrainRequest(
+            prompt="THE-PROMPT-PAYLOAD",
+            allowed_tools=[],
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=30,
+            streaming=True,
+            on_progress=lambda _e: None,
+            on_pid=slow_on_pid,
+        )
+
+        with patch("istota.brain.claude_code.subprocess.Popen", return_value=mock_process):
+            result = ClaudeCodeBrain().execute(req)
+
+        assert result.success is True
+        # The decisive assertion: the write landed while on_pid was still
+        # blocked. With a synchronous write-after-on_pid this is False.
+        assert observed["delivered_during_on_pid"] is True
+        assert "".join(written) == "THE-PROMPT-PAYLOAD"
+        mock_process.stdin.close.assert_called_once()
+
+
 class TestDryRun:
     def test_dry_run_returns_prompt(self, tmp_path):
         """Dry run returns prompt without invoking subprocess."""
