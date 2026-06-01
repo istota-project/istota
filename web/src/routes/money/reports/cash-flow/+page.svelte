@@ -214,7 +214,7 @@
 						padding: 10,
 						callbacks: {
 							label: (ctx) => {
-								const val = ctx.parsed.y;
+								const val = ctx.parsed.y ?? 0;
 								const abs = Math.abs(val);
 								const formatted = abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 								const currency = months[0]?.currency || '';

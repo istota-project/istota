@@ -6,7 +6,7 @@
 	} from '$lib/money/api';
 	import { selectedLedger } from '$lib/money/stores/ledger';
 
-	let data: TaxEstimateResponse | null = $state(null);
+	let data = $state<TaxEstimateResponse | null>(null);
 	let loading = $state(true);
 	let error = $state('');
 
@@ -476,6 +476,7 @@
 		outline: none;
 		min-width: 0;
 		-moz-appearance: textfield;
+		appearance: textfield;
 	}
 
 	.input-field input::-webkit-outer-spin-button,
