@@ -40,6 +40,8 @@ export interface TransactionRow {
 	narration: string;
 	account: string;
 	position: string;
+	/** Stable transaction id (beancount `id:` metadata). Empty for un-backfilled legacy rows. */
+	id?: string;
 }
 
 export interface TransactionsResponse {
@@ -310,12 +312,11 @@ export function invoicePdfUrl(invoice_number: string): string {
 }
 
 export interface TransactionUpdate {
-	// Identifies the existing posting (the same key fields the list renders).
-	date: string;
-	payee: string;
-	narration: string;
-	account: string;
-	position: string;
+	// Stable id of the transaction to edit.
+	id: string;
+	// Identifies which posting (leg) to edit when an account repeats.
+	old_account?: string;
+	old_position?: string;
 	// New values.
 	new_payee?: string;
 	new_narration?: string;
@@ -326,10 +327,9 @@ export interface TransactionUpdate {
 }
 
 /**
- * Edit a transaction. NOTE: there is no production backend for this yet —
- * beancount is append-only and no edit route exists. This is wired against
- * the mock API only so the UX can be tested; in prod it returns 404 until a
- * follow-up adds the ledger-rewrite backend. Callers must handle the error.
+ * Edit a transaction, located by its stable `id:` metadata. The backend
+ * rewrites the directive in place and re-validates with `bean-check`; an edit
+ * that unbalances the entry is rolled back and surfaced as a 422 error.
  */
 export async function updateTransaction(payload: TransactionUpdate): Promise<{ status: string }> {
 	return apiFetch<{ status: string }>(`/transactions/update`, {

@@ -16,6 +16,7 @@ from pathlib import Path
 import tomli
 
 from .dedup import compute_transaction_hash, parse_ledger_transactions
+from .ids import new_txn_id
 from .models import (
     MonarchConfig,
     MonarchCredentials,
@@ -259,12 +260,22 @@ def format_beancount_transaction(
     contra_account: str,
     amount: float,
     currency: str = "USD",
+    metadata: dict[str, str] | None = None,
 ) -> str:
-    """Format a single beancount transaction."""
+    """Format a single beancount transaction.
+
+    ``metadata`` renders as indented ``key: "value"`` lines between the
+    header and the postings (e.g. ``{"id": ...}`` / ``{"monarch-id": ...}``).
+    """
     payee = payee.replace('"', '\\"')
     narration = narration.replace('"', '\\"')
 
     lines = [f'{txn_date.isoformat()} * "{payee}" "{narration}"']
+
+    if metadata:
+        for key, value in metadata.items():
+            escaped = str(value).replace('"', '\\"')
+            lines.append(f'  {key}: "{escaped}"')
 
     if amount < 0:
         lines.append(f'  {posting_account}  {abs(amount):.2f} {currency}')
@@ -307,10 +318,12 @@ def format_recategorization_entry(
             posting_account=posted_account,
             contra_account=contra_account,
             amount=-amount,
+            metadata={"id": new_txn_id()},
         )
 
     merchant = merchant.replace('"', '\\"')
     lines = [f'{txn_date.isoformat()} * "{merchant}" "Recategorized: business tag removed in Monarch"']
+    lines.append(f'  id: "{new_txn_id()}"')
     lines.append(f'  {recategorize_account}  {abs(amount):.2f} {currency}')
     lines.append(f'  {posted_account}  -{abs(amount):.2f} {currency}')
     return "\n".join(lines)
@@ -333,6 +346,7 @@ def format_category_change_entry(
     """
     merchant = merchant.replace('"', '\\"')
     lines = [f'{txn_date.isoformat()} * "{merchant}" "Recategorized in Monarch"']
+    lines.append(f'  id: "{new_txn_id()}"')
     if old_account.startswith("Income:") or new_account.startswith("Income:"):
         lines.append(f'  {old_account}  {abs(amount):.2f} {currency}')
         lines.append(f'  {new_account}  -{abs(amount):.2f} {currency}')
@@ -526,6 +540,41 @@ def _ledger_has_posting(ledger_path: Path, synced_txn, expected_account: str) ->
     return False
 
 
+def _load_ledger_monarch_index(ledger_path: Path) -> dict[str, dict]:
+    """Map ``monarch-id`` → ``{edited, posted_account}`` for ledger entries.
+
+    Used by the sync reconciler to (a) skip auto-recategorizing entries the
+    user edited by hand — those carrying an ``edited:`` metadata line — and
+    (b) read the entry's current category account so the DB can be reconciled
+    to the manual choice. Matching by the stamped ``monarch-id`` is exact,
+    unlike the ``(date, payee)`` text scan in ``_ledger_has_posting``.
+    """
+    if not ledger_path.exists():
+        return {}
+    try:
+        from beancount.core.data import Transaction
+        from beancount.loader import load_file
+
+        entries, _errors, _ = load_file(str(ledger_path))
+    except Exception:
+        return {}
+
+    index: dict[str, dict] = {}
+    for e in entries:
+        if not isinstance(e, Transaction):
+            continue
+        mid = e.meta.get("monarch-id")
+        if not mid:
+            continue
+        posted = None
+        for p in e.postings:
+            if p.account.startswith(("Expenses:", "Income:")):
+                posted = p.account
+                break
+        index[mid] = {"edited": bool(e.meta.get("edited")), "posted_account": posted}
+    return index
+
+
 def sync_monarch(
     ledger_path: Path,
     config: MonarchConfig,
@@ -634,6 +683,10 @@ def sync_monarch(
         contra_account = map_monarch_account(account_name, config)
         posting_account = map_monarch_category_with_config(category, config)
 
+        entry_metadata = {"id": new_txn_id()}
+        if txn_id:
+            entry_metadata["monarch-id"] = txn_id
+
         entry = format_beancount_transaction(
             txn_date=txn_date,
             payee=merchant,
@@ -641,6 +694,7 @@ def sync_monarch(
             posting_account=posting_account,
             contra_account=contra_account,
             amount=amount,
+            metadata=entry_metadata,
         )
         entries.append(entry)
 
@@ -663,9 +717,15 @@ def sync_monarch(
     category_change_entries = []
     category_change_updates = []
     phantom_skipped: list[str] = []  # ISSUE-071: stale DB tracking, ledger already updated
+    edited_respected: list[str] = []  # entries the user edited by hand — left alone
 
     if db_conn is not None:
         active_synced = get_active_monarch_synced_transactions(db_conn, profile=profile)
+
+        # Index ledger entries by monarch-id so we can honor manual edits.
+        ledger_monarch_index = (
+            _load_ledger_monarch_index(ledger_path) if active_synced else {}
+        )
 
         if active_synced:
             for synced_txn in active_synced:
@@ -712,6 +772,24 @@ def sync_monarch(
                     new_posted_account = map_monarch_category_with_config(current_category, config)
 
                     if new_posted_account != synced_txn.posted_account:
+                        # Respect manual edits: a ledger entry carrying an
+                        # ``edited:`` marker is hands-off. Don't fight the
+                        # user's category choice — skip the correction and
+                        # reconcile the DB to the entry's actual category so we
+                        # don't re-detect a "change" on every future sync.
+                        ledger_entry = ledger_monarch_index.get(
+                            synced_txn.monarch_transaction_id
+                        )
+                        if ledger_entry and ledger_entry["edited"]:
+                            edited_respected.append(synced_txn.monarch_transaction_id)
+                            actual = ledger_entry["posted_account"]
+                            if actual and actual != synced_txn.posted_account:
+                                category_change_updates.append({
+                                    "monarch_transaction_id": synced_txn.monarch_transaction_id,
+                                    "posted_account": actual,
+                                })
+                            continue
+
                         # ISSUE-071: the DB tracking record may be stale if a
                         # human or the bot edited the original posting in the
                         # ledger directly. If the ledger no longer contains
@@ -755,8 +833,11 @@ def sync_monarch(
         "recategorized_count": len(recategorized_entries),
         "recat_skipped_legacy_count": len(recat_skipped_legacy),
         "category_changed_count": len(category_change_entries),
+        "edited_respected_count": len(edited_respected),
         "dry_run": dry_run,
     }
+    if edited_respected:
+        result["edited_respected_ids"] = edited_respected
     if recat_skipped_legacy:
         result["recat_skipped_legacy_ids"] = recat_skipped_legacy
     if phantom_skipped:
@@ -940,6 +1021,7 @@ def add_transaction(
     narration_escaped = narration.replace('"', '\\"')
 
     txn = f'{txn_date} * "{payee_escaped}" "{narration_escaped}"\n'
+    txn += f'  id: "{new_txn_id()}"\n'
     txn += f'  {debit}  {amount:.2f} {currency}\n'
     txn += f'  {credit}\n'
 

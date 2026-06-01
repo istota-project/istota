@@ -220,9 +220,9 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Note**: CLI wrapper around the standalone `gws` binary. Credentials injected via skill proxy. OAuth tokens stored in `google_oauth_tokens` DB table, refreshed automatically. Scopes configurable via `[google_workspace]` config section (default: read-only).
 
 ### `money/` - Accounting (in-process)
-**Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `add-transaction`, `sync-monarch`, `debug-monarch`, `import-csv`, `invoice` (sub: `generate`, `list`, `paid`, `create`, `void`), `work` (sub: `list`, `add`, `update`, `remove`)
+**Subcommands**: `list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `debug-monarch`, `import-csv`, `invoice` (sub: `generate`, `list`, `paid`, `create`, `void`), `work` (sub: `list`, `add`, `update`, `remove`)
 **Env vars**: `MONEY_CONFIG`, `MONEY_USER`
-**Note**: In-process facade — imports the vendored `money` package and invokes its Click CLI via `CliRunner`. No subprocess, no HTTP. `lots` and `wash-sales` are `@requires_feature`-gated (`money_tax` / `money_wash_sales`); gated-off calls return the standard error envelope.
+**Note**: In-process facade — imports the vendored `money` package and invokes its Click CLI via `CliRunner`. No subprocess, no HTTP. `lots` and `wash-sales` are `@requires_feature`-gated (`money_tax` / `money_wash_sales`); gated-off calls return the standard error envelope. Transactions carry a stable `id:` metadata line (backfilled once via `backfill-ids`, auto-run from `ensure_initialised`; stamped by every writer, plus `monarch-id:` on synced entries). `edit-transaction` locates by id and rewrites the directive in place under a ledger flock with `bean-check` + rollback (`core/edit.py`); `edited:`-marked entries are left alone by Monarch sync's reconciler.
 
 ### `health/` - Body Stats, Bloodwork, Biomarker Trends
 **Subcommands**: `log`, `stats`, `latest`, `panels`, `panel`, `add-panel`, `add-biomarker`, `trend`, `upload`, `summary`, `settings`, `set`, plus `garmin-status` / `garmin-sync` / `garmin-disconnect`.

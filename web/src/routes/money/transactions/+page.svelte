@@ -41,17 +41,19 @@
 		position: string;
 	}) {
 		if (!editingTxn) return;
+		const original = editingTxn;
+		if (!original.id) {
+			editError = "This transaction has no stable id yet — run the id backfill first.";
+			return;
+		}
 		editSaving = true;
 		editError = '';
-		const original = editingTxn;
 		try {
 			await updateTransaction({
 				ledger: $selectedLedger || undefined,
-				date: original.date,
-				payee: original.payee,
-				narration: original.narration,
-				account: original.account,
-				position: original.position,
+				id: original.id,
+				old_account: original.account,
+				old_position: original.position,
 				new_payee: data.payee,
 				new_narration: data.narration,
 				new_date: data.date,
@@ -61,11 +63,8 @@
 			editingTxn = null;
 			await load(currentOpts(currentPage));
 		} catch (e) {
-			// No production backend yet — surface the error, keep the modal open.
 			editError =
-				e instanceof Error
-					? `${e.message} (editing transactions isn't supported on this server yet)`
-					: 'Failed to save transaction';
+				e instanceof Error ? e.message : 'Failed to save transaction';
 		} finally {
 			editSaving = false;
 		}
