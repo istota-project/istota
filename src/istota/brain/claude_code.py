@@ -82,13 +82,14 @@ def is_transient_api_error(text: str) -> bool:
 # Brain.resolve_alias / Brain.resolve_model_name.
 #
 # Versioning: bare aliases like ``opus`` always resolve to a *specific*
-# version constant (``OPUS = "claude-opus-4-7"``) so a model release can't
+# version constant (``OPUS = "claude-opus-4-8"``) so a model release can't
 # silently re-route us. Prior versions get first-class constants
-# (``OPUS_46``) only when there's a concrete reason to pin to them
-# (e.g., production stability) — this is not meant to be exhaustive.
+# (``OPUS_47``, ``OPUS_46``) only when there's a concrete reason to pin to
+# them (e.g., production stability) — this is not meant to be exhaustive.
 # ---------------------------------------------------------------------------
 
-OPUS: str = "claude-opus-4-7"
+OPUS: str = "claude-opus-4-8"
+OPUS_47: str = "claude-opus-4-7"
 OPUS_46: str = "claude-opus-4-6"
 SONNET: str = "claude-sonnet-4-6"
 HAIKU: str = "claude-haiku-4-5"
@@ -103,6 +104,8 @@ MODEL_ALIASES: dict[str, tuple[str | None, str | None]] = {
     "opus-high":    (OPUS, "high"),
     "opus-xhigh":   (OPUS, "xhigh"),
     "opus-max":     (OPUS, "max"),
+    "opus-47":      (OPUS_47, None),
+    "opus-47-high": (OPUS_47, "high"),
     "opus-46":      (OPUS_46, None),
     "opus-46-high": (OPUS_46, "high"),
     "sonnet":       (SONNET, None),
@@ -126,7 +129,7 @@ def _resolve_target(target: str) -> str:
 
     Operator wrote e.g. ``smart = "opus-46-high"``: this returns
     ``"claude-opus-4-6"``. Unknown strings pass through unchanged so raw
-    canonical IDs (``"claude-opus-4-7"``) work as override targets too.
+    canonical IDs (``"claude-opus-4-8"``) work as override targets too.
     """
     if not target:
         return target
