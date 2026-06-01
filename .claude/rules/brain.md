@@ -55,8 +55,9 @@ collapses any name to a canonical ID; `Brain.list_aliases` exposes the
 merged table for the `!models` Talk command and the `!help` listing.
 
 ClaudeCodeBrain pins to versioned IDs:
-- `OPUS = "claude-opus-4-7"` (current default Opus)
-- `OPUS_46 = "claude-opus-4-6"` (prior Opus, kept for prod pinning)
+- `OPUS = "claude-opus-4-8"` (current default Opus)
+- `OPUS_47 = "claude-opus-4-7"` (prior Opus, kept for prod pinning; `opus-47` / `opus-47-high` aliases)
+- `OPUS_46 = "claude-opus-4-6"` (older Opus, kept for prod pinning)
 - `SONNET = "claude-sonnet-4-6"`
 - `HAIKU = "claude-haiku-4-5"`
 

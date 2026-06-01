@@ -2,6 +2,73 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-01: Money transaction editing via stable ids + ledger-writer hardening
+
+Beancount has no native transaction identifier, so the money web UI's "Edit transaction" action used to identify a row by a fragile `(date, payee, narration, account, position)` tuple that breaks on the first edit. Solved identity with metadata: every transaction now carries an `id:` line, backfilled onto legacy entries by a one-time reversible migration and stamped by every writer (manual add, Monarch sync, CSV import, invoice posting). `edit_transaction` locates by id and surgically rewrites the header + the single edited posting, re-validates with `bean-check`, and rolls back on imbalance. A Mulder/Scully review of that commit then found four follow-up defects, all fixed TDD-first.
+
+**Key changes:**
+- `id:`/`edited:` metadata + `backfill_ledger_ids` (idempotent, additive, atomic, bean-check-guarded) auto-run once via the workspace init sentinel.
+- Monarch sync reconciler matches by `monarch-id` and skips its category-correction for `edited:`-marked entries.
+- Review follow-ups (ISSUE-104..107): the ledger lock now also covers the Monarch-sync append and manual add (the race the lock claimed to close was still open); rollback restores go through the atomic temp-file write; an ambiguous `id` is refused instead of editing the first match; an amount edit on a posting carrying a `{cost}`/`@ price` annotation is refused rather than silently dropping the lot.
+
+**Files added/modified:**
+- `src/istota/money/core/edit.py`, `core/ids.py`, `core/transactions.py`, `core/importers/__init__.py`, `core/invoicing.py`, `_migrate.py`
+- `src/istota/money/routes.py`, `src/istota/skills/money/__init__.py`, `web/src/routes/money/transactions/+page.svelte`
+- `tests/money/test_edit.py` (+10 review-fix tests), `test_migrate.py`, `test_cli.py`, `test_routes_edit.py`
+
+## 2026-05-31: Timezone resolution centralized — ISSUE-099 / ISSUE-102
+
+A web-UI timezone change wasn't taking effect without a daemon restart. The first fix (ISSUE-099) only updated the prompt header; briefings, scheduled jobs, heartbeat quiet-hours, Garmin sync, the subprocess env, exports, and the sleep-cycle schedule all still read the stale in-memory `UserConfig` — a worse split than the original consistent staleness. A Mulder/Scully review caught the gap. Centralized the DB-vs-in-memory decision in a new `Config.resolve_user_timezone(user_id, conn=None)` (mirrors `is_module_enabled`, with an optional connection to avoid per-call FD churn on the FUSE mount) and re-pointed every reader at it.
+
+**Key changes:**
+- New `Config.resolve_user_timezone`; threaded `conn` through `build_prompt` and the hot scheduler loops.
+- ISSUE-102 design call: the explicit "follow Nextcloud timezone" toggle was tried and reverted in favor of the simpler rule — the Istota UI value wins, Nextcloud is seed-only. Settings gained an IANA-zone dropdown (full-width, mobile-fluid) with a note that the Istota value overrides Nextcloud.
+- 2026-06-01 follow-up: Ansible stopped passing `--tz` on every deploy, which had been doing an unconditional UPDATE and clobbering the web-set value. Timezone is now treated as a user preference, not deployment infra.
+
+**Files added/modified:**
+- `src/istota/config.py`, `executor.py`, `scheduler.py`, `heartbeat.py`, `commands.py`, `storage.py`, `memory/sleep_cycle.py`, `web_app.py`
+- `web/` settings page + mock fixture; `deploy/ansible/` provisioning task + inventory; timezone tests across the affected suites
+
+## 2026-05-31: Default model upgraded to Claude Opus 4.8
+
+Bumped the brain's `OPUS` constant from `claude-opus-4-7` to `claude-opus-4-8`, kept `OPUS_47` as a pinning constant, and added `opus-47` / `opus-47-high` provider aliases. Config comments were made brain-agnostic (model id → brain default, effort support varies by model) ahead of the switchable-brain work.
+
+**Files added/modified:**
+- `src/istota/brain/claude_code.py`, config defaults + comments
+
+## 2026-05-31: Money web UI — row-click detail, kebab menus, work-store hardening
+
+Transaction and invoice lists now expand their detail (postings / line items) when the row itself is clicked; the trailing glyph became a real kebab (⋮) actions menu instead of doubling as the expand toggle. The transaction-edit action shipped mock-only here (no edit backend yet — that landed the next day, see the 06-01 entry). Invoice actions (mark paid / mark pending / download PDF) got real routes.
+
+**Key changes:**
+- Reusable `KebabMenu` + `TransactionForm` modal; stateful vite mock handlers so the UX is testable under the mock API.
+- Invoice mark-paid/pending toggle only `paid_date` (no ledger payment posted/reversed); `find_invoice_pdf` locates the generated PDF for download.
+- Hardened the work-entry store — the web routes are the first user-triggerable writer to those files: temp-file + `os.replace` saves and an exclusive flock around every read-modify-write, so a web mark-paid can't clobber a concurrent scheduler invoice run.
+
+**Files added/modified:**
+- `web/` money routes + components; `src/istota/money/core/work.py`, `core/invoicing.py`, `routes.py`
+
+## 2026-05-31: Streaming prompt delivery race after claude CLI update — ISSUE-103
+
+Every interactive (streaming) task started failing with "produced no output (rc=0)" after the `claude` CLI auto-updated. The new CLI aborts its stdin read after ~3 s and runs with an empty prompt; the brain was writing the prompt only after a PID-recording DB write that can stall under daemon load, so contended tasks lost the race. Background command/skill tasks don't go through the brain, so the daemon looked healthy. Fix delivers the prompt on a dedicated thread started immediately after spawn, and hardens the sandbox net-bridge (stdin from `/dev/null`, dropped a pre-exec sleep).
+
+**Files added/modified:**
+- `src/istota/brain/claude_code.py`, `src/istota/executor.py`, `tests/test_executor_streaming.py`
+
+## 2026-05-31: health.db added to WAL-aware module backups — ISSUE-094
+
+The per-user `health.db` was relying on a non-WAL-safe rclone file copy. Added `health` to the backup template's module list so it gets the same WAL-safe backup loop as feeds/money/location.
+
+**Files added/modified:**
+- `deploy/ansible/` backup template
+
+## 2026-05-30: Insertion-time staleness gate for cron-driven tasks
+
+When the daemon returns from a long outage, `check_scheduled_jobs` and `check_briefings` no longer fire every missed instance on the first tick. A computed `next_run` more than `cron_max_staleness_minutes` (default 60) behind now is skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. Set the threshold to 0 to restore the prior unconditional catch-up.
+
+**Files added/modified:**
+- `src/istota/scheduler.py`, `config.py`, config reference + scheduling guide docs
+
 ## 2026-05-27: caldav DAVClient leak in scheduler — ISSUE-101 root cause
 
 The whisper skill had been failing for ~13 days with `{"status":"error","error":"No model fits in available memory (0.1 GB with 0.3 GB headroom)"}`. Filed as ISSUE-101 with a memory-pre-check hypothesis: `psutil.virtual_memory().available` was reporting 0.1–0.3 GB on the 8 GB deployment host and rejecting even the `tiny` model. The original investigation blamed "memory pressure from new services since mid-May" (devbox containers, browser sidecar, etc.) without identifying the source. That guess was wrong.
