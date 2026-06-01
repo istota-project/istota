@@ -1166,15 +1166,15 @@ const handlers: MockHandler[] = [
 
 		interface Txn {
 			date: string; flag: string; payee: string; narration: string;
-			account: string; position: string;
+			account: string; position: string; id: string;
 		}
 		const transactions: Txn[] = [
-			{ date: '2026-05-28', flag: '*', payee: 'Whole Foods', narration: 'Groceries', account: 'Expenses:Food', position: '-82.14 USD' },
-			{ date: '2026-05-28', flag: '*', payee: 'Acme Corp', narration: 'May salary', account: 'Income:Salary', position: '5200.00 USD' },
-			{ date: '2026-05-26', flag: '*', payee: 'Shell', narration: 'Fuel', account: 'Expenses:Auto', position: '-54.30 USD' },
-			{ date: '2026-05-24', flag: '*', payee: 'Netflix', narration: 'Subscription', account: 'Expenses:Subscriptions', position: '-15.99 USD' },
-			{ date: '2026-05-22', flag: '*', payee: 'Transfer', narration: 'To savings', account: 'Assets:Savings', position: '500.00 USD' },
-			{ date: '2026-05-20', flag: '*', payee: 'Cafe Luna', narration: 'Coffee', account: 'Expenses:Food', position: '-6.75 USD' },
+			{ id: 'mock-1', date: '2026-05-28', flag: '*', payee: 'Whole Foods', narration: 'Groceries', account: 'Expenses:Food', position: '-82.14 USD' },
+			{ id: 'mock-2', date: '2026-05-28', flag: '*', payee: 'Acme Corp', narration: 'May salary', account: 'Income:Salary', position: '5200.00 USD' },
+			{ id: 'mock-3', date: '2026-05-26', flag: '*', payee: 'Shell', narration: 'Fuel', account: 'Expenses:Auto', position: '-54.30 USD' },
+			{ id: 'mock-4', date: '2026-05-24', flag: '*', payee: 'Netflix', narration: 'Subscription', account: 'Expenses:Subscriptions', position: '-15.99 USD' },
+			{ id: 'mock-5', date: '2026-05-22', flag: '*', payee: 'Transfer', narration: 'To savings', account: 'Assets:Savings', position: '500.00 USD' },
+			{ id: 'mock-6', date: '2026-05-20', flag: '*', payee: 'Cafe Luna', narration: 'Coffee', account: 'Expenses:Food', position: '-6.75 USD' },
 		];
 
 		interface Invoice {
@@ -1232,19 +1232,14 @@ const handlers: MockHandler[] = [
 			}
 
 			if (path === '/transactions/update' && method === 'POST') {
-				const t = transactions.find(
-					(x) => x.date === body?.date && x.payee === body?.payee &&
-						x.narration === body?.narration && x.account === body?.account &&
-						x.position === body?.position,
-				);
-				if (t) {
-					if (body.new_payee !== undefined) t.payee = body.new_payee;
-					if (body.new_narration !== undefined) t.narration = body.new_narration;
-					if (body.new_date !== undefined && body.new_date) t.date = body.new_date;
-					if (body.new_account !== undefined) t.account = body.new_account;
-					if (body.new_position !== undefined) t.position = body.new_position;
-				}
-				return { status: 'ok' };
+				const t = transactions.find((x) => x.id === body?.id);
+				if (!t) return { status: 'error', error: `Transaction not found: ${body?.id}` };
+				if (body.new_payee !== undefined) t.payee = body.new_payee;
+				if (body.new_narration !== undefined) t.narration = body.new_narration;
+				if (body.new_date !== undefined && body.new_date) t.date = body.new_date;
+				if (body.new_account !== undefined) t.account = body.new_account;
+				if (body.new_position !== undefined) t.position = body.new_position;
+				return { status: 'ok', id: t.id };
 			}
 
 			if (path === '/transactions' && method === 'GET') {

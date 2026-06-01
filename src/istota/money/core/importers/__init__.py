@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from istota.money.core.dedup import compute_transaction_hash, parse_ledger_transactions
+from istota.money.core.ids import new_txn_id
 from istota.money.core.transactions import (
     format_beancount_transaction,
     map_monarch_category,
@@ -123,6 +124,7 @@ def import_transactions(
             posting_account=posting_account,
             contra_account=contra_account,
             amount=txn.amount,
+            metadata={"id": new_txn_id()},
         )
         entries.append(entry)
         content_hashes.append(content_hash)

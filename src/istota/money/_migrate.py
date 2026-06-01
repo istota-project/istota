@@ -40,6 +40,7 @@ _TOML_FILENAMES = {
     "monarch": ("monarch.toml", "MONARCH.md"),
 }
 
+_IDS_BACKFILLED_SENTINEL_KEY = "money_ids_backfilled_at"
 _DEFAULT_LEDGER_SENTINEL_KEY = "money_default_ledger_seeded_at"
 _DEFAULT_LEDGER_FILENAME = "main.beancount"
 _BUNDLED_LEDGER_LABEL = "<bundled:istota.money:data/main.beancount.tmpl>"
@@ -456,13 +457,78 @@ def seed_default_ledger(ctx: UserContext) -> dict | None:
     }
 
 
+def backfill_transaction_ids(ctx: UserContext) -> dict | None:
+    """Stamp stable ``id:`` metadata onto every legacy transaction, once.
+
+    Editing a transaction requires a stable handle; legacy ledgers predate the
+    ``id:`` convention. This runs the additive backfill (see
+    :func:`istota.money.core.edit.backfill_ledger_ids`) across every configured
+    ledger exactly once per user, gated by a ``money_ids_backfilled_at``
+    sentinel. Idempotent and reversible (each file is backed up + re-validated
+    with ``bean-check``; a failed re-check rolls the file back).
+
+    Skip / abort cases mirror :func:`seed_default_ledger`:
+
+    * ``ISTOTA_MONEY_SKIP_ID_BACKFILL`` set (ops opt-out / test suite) — no-op,
+      no sentinel written.
+    * Sentinel already set — no-op.
+    * A ledger fails to backfill (pre-existing errors / failed re-check) — the
+      sentinel is NOT written, so a later run retries once the ledger is fixed.
+    """
+    if os.environ.get("ISTOTA_MONEY_SKIP_ID_BACKFILL"):
+        return None
+
+    data_dir = Path(ctx.data_dir)
+    db_path = Path(ctx.db_path) if ctx.db_path else (data_dir / "data" / "money.db")
+    config_store.init_db(db_path)
+
+    if config_store.get_meta(db_path, _IDS_BACKFILLED_SENTINEL_KEY):
+        return None
+
+    from istota.money.core.edit import backfill_ledger_ids
+
+    total = 0
+    failures: list[dict] = []
+    for entry in ctx.ledgers:
+        ledger_path = entry["path"]
+        if not Path(ledger_path).exists():
+            continue
+        result = backfill_ledger_ids(ledger_path)
+        if result.get("status") == "ok":
+            total += int(result.get("stamped", 0))
+        else:
+            failures.append({"ledger": entry.get("name"), **result})
+
+    if failures:
+        logger.warning(
+            "money_id_backfill_failed failures=%s — sentinel not set; will retry",
+            failures,
+        )
+        return {"stamped": total, "failures": failures}
+
+    # All ledgers backfilled (or empty) — burn the sentinel.
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+                (_IDS_BACKFILLED_SENTINEL_KEY, _iso_now()),
+            )
+            conn.commit()
+    except sqlite3.Error as exc:
+        logger.warning("money_id_backfill_sentinel_failed error=%s", exc)
+
+    if total:
+        logger.info("money_id_backfill_done stamped=%s", total)
+    return {"stamped": total}
+
+
 def ensure_initialised(ctx: UserContext) -> None:
     """Wire up a money workspace for use.
 
     Creates the data + ledgers dirs (idempotent), initialises the DB schema,
-    runs the legacy migration (no-ops on subsequent runs), and seeds a
-    starter beancount ledger if the workspace is empty. Safe to call from
-    every entry point.
+    runs the legacy migration (no-ops on subsequent runs), seeds a starter
+    beancount ledger if the workspace is empty, and backfills stable
+    transaction ids (once). Safe to call from every entry point.
     """
     data_dir = Path(ctx.data_dir)
     (data_dir / "data").mkdir(parents=True, exist_ok=True)
@@ -475,3 +541,4 @@ def ensure_initialised(ctx: UserContext) -> None:
 
     migrate_legacy_workspace_config(ctx)
     seed_default_ledger(ctx)
+    backfill_transaction_ids(ctx)

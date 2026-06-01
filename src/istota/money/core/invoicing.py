@@ -15,6 +15,7 @@ from pathlib import Path
 
 import tomli
 
+from .ids import new_txn_id
 from .models import (
     ClientConfig,
     CompanyConfig,
@@ -598,6 +599,7 @@ def create_income_posting(
     narration = f"Payment for {invoice_number}"
 
     lines = [f'{payment_date.isoformat()} * "{client_name_escaped}" "{narration}"']
+    lines.append(f'  id: "{new_txn_id()}"')
     lines.append(f"  {bank_account}  {total:.2f} {currency}")
     for account, amount in sorted(income_lines.items()):
         lines.append(f"  {account}  -{amount:.2f} {currency}")

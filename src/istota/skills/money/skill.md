@@ -43,6 +43,14 @@ istota-skill money wash-sales [--year YYYY] [--ledger NAME]
 # Add a transaction
 istota-skill money add-transaction --date 2026-02-01 --payee "Whole Foods" --narration "Groceries" --debit Expenses:Food --credit Assets:Bank:Checking --amount 85.50 [--currency USD] [--ledger NAME]
 
+# Edit a transaction by its stable id (recategorize, fix payee/narration/date/amount).
+# Locate the id from the transaction list; --old-account/--old-position pick the leg to edit.
+# Re-validated with bean-check; rolls back if the edit unbalances the entry.
+istota-skill money edit-transaction --id <id> [--account Expenses:Food:Restaurants] [--old-account Expenses:Food --old-position "85.50 USD"] [--payee NAME] [--narration TEXT] [--date YYYY-MM-DD] [--position "-12.50 USD"] [--ledger NAME]
+
+# Backfill stable ids onto legacy transactions (one-time, idempotent; runs automatically)
+istota-skill money backfill-ids [--ledger NAME]
+
 # Sync from Monarch Money (syncs all configured profiles by default)
 istota-skill money sync-monarch [--dry-run] [--ledger NAME]
 
@@ -55,7 +63,7 @@ istota-skill money run-scheduled [--dry-run] [--skip-monarch]
 
 All output is JSON with `status: ok|error`.
 
-**Concurrency rule:** mutation commands (`add-transaction`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/void/create`) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`) are safe to parallelize.
+**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/void/create`) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`) are safe to parallelize.
 
 ## Adding transactions
 

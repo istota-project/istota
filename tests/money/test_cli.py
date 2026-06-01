@@ -954,3 +954,72 @@ class TestInjectedContext:
         output = json.loads(result.output)
         assert output["status"] == "ok"
         assert output["ledger_count"] == 1
+
+
+class TestBackfillIds:
+    def test_backfill_ids_command(self, runner, tmp_path):
+        ledger = tmp_path / "ledgers" / "main.beancount"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text(
+            "2024-01-01 open Assets:Bank:Checking\n"
+            "2024-01-01 open Expenses:Food\n\n"
+            '2024-02-01 * "Acme" "Coffee"\n'
+            "  Expenses:Food   5.00 USD\n"
+            "  Assets:Bank:Checking\n"
+        )
+        config = tmp_path / "config.toml"
+        config.write_text(
+            f'data_dir = "{tmp_path}"\n\n'
+            f'[[ledgers]]\nname = "default"\npath = "ledgers/main.beancount"\n'
+        )
+        result = runner.invoke(cli, ["-c", str(config), "backfill-ids"])
+        assert result.exit_code == 0
+        output = json.loads(result.output)
+        assert output["status"] == "ok"
+        assert output["stamped"] == 1
+        assert 'id: "' in ledger.read_text()
+
+
+class TestEditTransactionCLI:
+    def test_edit_transaction_command(self, runner, tmp_path):
+        ledger = tmp_path / "ledgers" / "main.beancount"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text(
+            "2024-01-01 open Assets:Bank:Checking\n"
+            "2024-01-01 open Expenses:Food:Coffee\n"
+            "2024-01-01 open Expenses:Food:Restaurants\n\n"
+            '2024-02-01 * "Acme" "Coffee"\n'
+            '  id: "txn-1"\n'
+            "  Expenses:Food:Coffee   5.00 USD\n"
+            "  Assets:Bank:Checking\n"
+        )
+        config = tmp_path / "config.toml"
+        config.write_text(
+            f'data_dir = "{tmp_path}"\n\n'
+            f'[[ledgers]]\nname = "default"\npath = "ledgers/main.beancount"\n'
+        )
+        result = runner.invoke(cli, [
+            "-c", str(config), "edit-transaction", "--id", "txn-1",
+            "--old-account", "Expenses:Food:Coffee", "--old-position", "5.00 USD",
+            "--account", "Expenses:Food:Restaurants",
+        ])
+        assert result.exit_code == 0, result.output
+        output = json.loads(result.output)
+        assert output["status"] == "ok"
+        assert "Expenses:Food:Restaurants" in ledger.read_text()
+
+    def test_edit_transaction_not_found_exits_nonzero(self, runner, tmp_path):
+        ledger = tmp_path / "ledgers" / "main.beancount"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text("2024-01-01 open Assets:Bank:Checking\n")
+        config = tmp_path / "config.toml"
+        config.write_text(
+            f'data_dir = "{tmp_path}"\n\n'
+            f'[[ledgers]]\nname = "default"\npath = "ledgers/main.beancount"\n'
+        )
+        result = runner.invoke(cli, [
+            "-c", str(config), "edit-transaction", "--id", "nope",
+            "--account", "Expenses:X",
+        ])
+        assert result.exit_code == 1
+        assert json.loads(result.output)["status"] == "error"

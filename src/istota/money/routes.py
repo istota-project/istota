@@ -186,7 +186,8 @@ async def api_transactions(
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     bql = (
-        f"SELECT date, flag, payee, narration, account, position, tags"
+        f"SELECT date, flag, payee, narration, account, position, tags,"
+        f" entry_meta('id') as id"
         f"{where} ORDER BY date DESC"
     )
 
@@ -256,6 +257,59 @@ async def api_postings(
         return {"status": "ok", "postings": rows}
     except ValueError as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+@router.post("/transactions/update")
+async def api_transaction_update(
+    request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Edit a transaction in place, located by its stable ``id:`` metadata.
+
+    Body: ``{id, old_account, old_position, new_date?, new_payee?,
+    new_narration?, new_account?, new_position?, ledger?}``. Re-validated with
+    ``bean-check``; an edit that produces an invalid ledger is rolled back and
+    surfaced as a 422.
+    """
+    from istota.money.core.edit import edit_transaction
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    txn_id = (body.get("id") or "").strip()
+    if not txn_id:
+        return JSONResponse(
+            {"status": "error", "error": "missing transaction id"}, status_code=400
+        )
+
+    ledger_path = _resolve_user_ledger(user_ctx, body.get("ledger"))
+    if not ledger_path:
+        return JSONResponse({"status": "error", "error": "ledger not found"}, status_code=404)
+
+    result = edit_transaction(
+        ledger_path,
+        txn_id,
+        old_account=body.get("old_account"),
+        old_position=body.get("old_position"),
+        new_date=body.get("new_date"),
+        new_payee=body.get("new_payee"),
+        new_narration=body.get("new_narration"),
+        new_account=body.get("new_account"),
+        new_position=body.get("new_position"),
+    )
+
+    if result.get("status") == "ok":
+        return result
+    error = (result.get("error") or "").lower()
+    if "not found" in error:
+        return JSONResponse(result, status_code=404)
+    # Validation failure (rolled back) or bad posting selector.
+    return JSONResponse(result, status_code=422)
 
 
 @router.get("/report/{report_type}")

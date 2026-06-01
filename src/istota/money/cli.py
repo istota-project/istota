@@ -604,6 +604,20 @@ def wash_sales(ctx, year, ledger):
 # =============================================================================
 
 
+@cli.command("backfill-ids")
+@click.option("--ledger", "-l", help="Ledger name")
+@pass_ctx
+def backfill_ids(ctx, ledger):
+    """Stamp a stable ``id:`` on every transaction lacking one.
+
+    One-time, idempotent migration that makes transactions editable. Backs up
+    each touched file, validates with ``bean-check``, and rolls back on
+    failure.
+    """
+    from istota.money.core.edit import backfill_ledger_ids
+    _output(backfill_ledger_ids(resolve_ledger(ledger, ctx.ledgers)))
+
+
 @cli.command("add-transaction")
 @click.option("--date", "-d", "txn_date", required=True, help="Transaction date (YYYY-MM-DD)")
 @click.option("--payee", "-p", required=True, help="Payee name")
@@ -625,6 +639,48 @@ def add_transaction(ctx, txn_date, payee, narration, debit, credit, amount, curr
     _output(core_add(
         resolve_ledger(ledger, ctx.ledgers),
         parsed_date, payee, narration, debit, credit, amount, currency,
+    ))
+
+
+@cli.command("edit-transaction")
+@click.option("--id", "txn_id", required=True, help="Stable transaction id")
+@click.option("--old-account", help="Account of the posting to edit (disambiguator)")
+@click.option("--old-position", help="Amount of the posting to edit (disambiguator)")
+@click.option("--date", "-d", "new_date", help="New date (YYYY-MM-DD)")
+@click.option("--payee", "-p", "new_payee", help="New payee")
+@click.option("--narration", "-n", "new_narration", help="New narration")
+@click.option("--account", "-a", "new_account", help="New posting account")
+@click.option("--position", "new_position", help="New posting amount (e.g. '-12.50 USD')")
+@click.option("--ledger", "-l", help="Ledger name")
+@pass_ctx
+def edit_transaction(
+    ctx, txn_id, old_account, old_position,
+    new_date, new_payee, new_narration, new_account, new_position, ledger,
+):
+    """Edit a transaction located by its stable ``id:`` metadata.
+
+    Validates the result with ``bean-check`` and rolls back on failure (e.g.
+    an amount edit that unbalances the entry).
+    """
+    from istota.money.core.edit import edit_transaction as core_edit
+
+    if new_date:
+        try:
+            datetime.strptime(new_date, "%Y-%m-%d")
+        except ValueError:
+            _output({"status": "error", "error": "Invalid date format. Use YYYY-MM-DD"})
+            return
+
+    _output(core_edit(
+        resolve_ledger(ledger, ctx.ledgers),
+        txn_id,
+        old_account=old_account,
+        old_position=old_position,
+        new_date=new_date,
+        new_payee=new_payee,
+        new_narration=new_narration,
+        new_account=new_account,
+        new_position=new_position,
     ))
 
 

@@ -412,3 +412,48 @@ class TestEnsureInitialisedSeedsLedger:
         ) is not None
         # Ledger seed also ran.
         assert (Path(ctx.data_dir) / "ledgers" / "main.beancount").is_file()
+
+
+class TestBackfillTransactionIds:
+    def _ctx_with_ledger(self, workspace: Path) -> UserContext:
+        data_dir = workspace / "money"
+        ledgers_dir = data_dir / "ledgers"
+        ledgers_dir.mkdir(parents=True, exist_ok=True)
+        ledger = ledgers_dir / "main.beancount"
+        ledger.write_text(
+            "2024-01-01 open Assets:Bank:Checking\n"
+            "2024-01-01 open Expenses:Food\n\n"
+            '2024-02-01 * "Acme" "Coffee"\n'
+            "  Expenses:Food   5.00 USD\n"
+            "  Assets:Bank:Checking\n"
+        )
+        return UserContext(
+            data_dir=data_dir,
+            ledgers=[{"name": "main", "path": ledger}],
+            db_path=data_dir / "data" / "money.db",
+        )
+
+    def test_stamps_and_sets_sentinel(self, tmp_path):
+        ctx = self._ctx_with_ledger(tmp_path)
+        config_store.init_db(ctx.db_path)
+
+        result = _migrate.backfill_transaction_ids(ctx)
+        assert result == {"stamped": 1}
+        assert config_store.get_meta(ctx.db_path, _migrate._IDS_BACKFILLED_SENTINEL_KEY)
+
+        # ledger now has the id
+        assert 'id: "' in ctx.ledgers[0]["path"].read_text()
+
+    def test_idempotent_via_sentinel(self, tmp_path):
+        ctx = self._ctx_with_ledger(tmp_path)
+        config_store.init_db(ctx.db_path)
+        _migrate.backfill_transaction_ids(ctx)
+        # second call short-circuits on the sentinel
+        assert _migrate.backfill_transaction_ids(ctx) is None
+
+    def test_skips_when_env_set(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_MONEY_SKIP_ID_BACKFILL", "1")
+        ctx = self._ctx_with_ledger(tmp_path)
+        config_store.init_db(ctx.db_path)
+        assert _migrate.backfill_transaction_ids(ctx) is None
+        assert 'id: "' not in ctx.ledgers[0]["path"].read_text()

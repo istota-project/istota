@@ -152,6 +152,13 @@ def cmd_wash_sales(args):
 # ---------------------------------------------------------------------------
 
 
+def cmd_backfill_ids(args):
+    cli_args = ["backfill-ids"]
+    if args.ledger:
+        cli_args += ["--ledger", args.ledger]
+    _output(_run(cli_args))
+
+
 def cmd_add_transaction(args):
     cli_args = [
         "add-transaction",
@@ -163,6 +170,27 @@ def cmd_add_transaction(args):
         "--amount", str(args.amount),
         "--currency", args.currency,
     ]
+    if args.ledger:
+        cli_args += ["--ledger", args.ledger]
+    _output(_run(cli_args))
+
+
+def cmd_edit_transaction(args):
+    cli_args = ["edit-transaction", "--id", args.id]
+    if args.old_account:
+        cli_args += ["--old-account", args.old_account]
+    if args.old_position:
+        cli_args += ["--old-position", args.old_position]
+    if args.new_date:
+        cli_args += ["--date", args.new_date]
+    if args.new_payee:
+        cli_args += ["--payee", args.new_payee]
+    if args.new_narration:
+        cli_args += ["--narration", args.new_narration]
+    if args.new_account:
+        cli_args += ["--account", args.new_account]
+    if args.new_position:
+        cli_args += ["--position", args.new_position]
     if args.ledger:
         cli_args += ["--ledger", args.ledger]
     _output(_run(cli_args))
@@ -369,6 +397,9 @@ def build_parser():
     p_ws.add_argument("--ledger", "-l", help="Ledger name")
 
     # --- Transaction commands ---
+    p_backfill = sub.add_parser("backfill-ids", help="Stamp stable ids on transactions")
+    p_backfill.add_argument("--ledger", "-l", help="Ledger name")
+
     p_add = sub.add_parser("add-transaction", help="Add a transaction")
     p_add.add_argument("--date", "-d", dest="txn_date", required=True, help="Date (YYYY-MM-DD)")
     p_add.add_argument("--payee", "-p", required=True, help="Payee name")
@@ -378,6 +409,17 @@ def build_parser():
     p_add.add_argument("--amount", "-a", required=True, type=float, help="Amount")
     p_add.add_argument("--currency", default="USD", help="Currency")
     p_add.add_argument("--ledger", "-l", help="Ledger name")
+
+    p_edit = sub.add_parser("edit-transaction", help="Edit a transaction by stable id")
+    p_edit.add_argument("--id", required=True, help="Stable transaction id")
+    p_edit.add_argument("--old-account", dest="old_account", help="Posting account to edit")
+    p_edit.add_argument("--old-position", dest="old_position", help="Posting amount to edit")
+    p_edit.add_argument("--date", "-d", dest="new_date", help="New date (YYYY-MM-DD)")
+    p_edit.add_argument("--payee", "-p", dest="new_payee", help="New payee")
+    p_edit.add_argument("--narration", "-n", dest="new_narration", help="New narration")
+    p_edit.add_argument("--account", "-a", dest="new_account", help="New posting account")
+    p_edit.add_argument("--position", dest="new_position", help="New posting amount")
+    p_edit.add_argument("--ledger", "-l", help="Ledger name")
 
     p_sync = sub.add_parser("sync-monarch", help="Sync from Monarch Money")
     p_sync.add_argument("--dry-run", action="store_true", help="Preview without writing")
@@ -482,7 +524,9 @@ def main(argv=None):
         "report": cmd_report,
         "lots": cmd_lots,
         "wash-sales": cmd_wash_sales,
+        "backfill-ids": cmd_backfill_ids,
         "add-transaction": cmd_add_transaction,
+        "edit-transaction": cmd_edit_transaction,
         "sync-monarch": cmd_sync_monarch,
         "debug-monarch": cmd_debug_monarch,
         "import-csv": cmd_import_csv,
