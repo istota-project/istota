@@ -829,11 +829,16 @@
   when: not istota_web_only
 
 # Write user profile rows into the user_profiles DB table.
-# Profile-shaped fields (display_name, timezone, email_addresses, log/alerts
-# channels, worker overrides, disabled_skills, trusted_email_senders,
-# disabled_modules) are authoritatively stored in the DB. The `user ensure`
-# CLI is idempotent, prints STATE: created|updated|noop per call, and is the
-# only path Ansible uses to provision user profiles.
+# Profile-shaped fields (display_name, email_addresses, log/alerts channels,
+# worker overrides, disabled_skills, trusted_email_senders, disabled_modules)
+# are authoritatively stored in the DB. The `user ensure` CLI is idempotent,
+# prints STATE: created|updated|noop per call, and is the only path Ansible
+# uses to provision user profiles.
+#
+# timezone is deliberately NOT provisioned here (ISSUE-102). It's a user-facing
+# preference owned by the web UI / Nextcloud, seeded into the DB on first login.
+# Passing --tz on every deploy did an unconditional partial UPDATE and clobbered
+# the user's web-set value, so the inventory no longer carries it.
 - name: Ensure user_profiles rows
   command: >
     {{ istota_home }}/.venv/bin/{{ istota_package }}
@@ -841,7 +846,6 @@
     user ensure
     --name {{ user_id }}
     {% if (user_item.value.display_name | default('')) %}--display-name "{{ user_item.value.display_name }}"{% endif %}
-    {% if (user_item.value.timezone | default('')) %}--tz "{{ user_item.value.timezone }}"{% endif %}
     {% for email in user_item.value.email_addresses | default([]) %}--email "{{ email }}" {% endfor %}
     {% for sender in user_item.value.trusted_email_senders | default([]) %}--trusted-sender "{{ sender }}" {% endfor %}
     {% if (user_item.value.log_channel | default('')) %}--log-channel "{{ user_item.value.log_channel }}"{% endif %}

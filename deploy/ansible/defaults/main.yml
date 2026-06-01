@@ -257,7 +257,9 @@ istota_experimental_features: []
 #     display_name: "Alice"
 #     email_addresses:
 #       - "alice@example.com"
-#     timezone: "America/New_York"
+#     # timezone is NOT set here — it's a user preference owned by the web UI /
+#     # Nextcloud (seeded on first login). Setting it in inventory would clobber
+#     # the user's web-set value on every deploy (ISSUE-102).
 #     log_channel: ""               # Talk room token for verbose task execution logs
 #     alerts_channel: ""            # Talk room token for confirmations and security alerts
 #     trusted_email_senders:        # patterns for trusted email senders (plus-address gate)
