@@ -2453,111 +2453,6 @@ def _location_delete_place(db_path: str, place_id: int) -> bool:
         conn.close()
 
 
-def _location_query_trips(db_path: str, tz_name: str, date: str | None) -> dict:
-    """Detect trips: sequences of non-stationary pings between stationary periods."""
-    from zoneinfo import ZoneInfo
-    from .geo import _timestamp_gap_seconds, dedupe_near_duplicate_pings, haversine
-
-    tz = ZoneInfo(tz_name)
-    now = datetime.now(tz)
-    target = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=tz) if date else now.replace(hour=0, minute=0, second=0, microsecond=0)
-    since = target.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    until = (target + timedelta(days=1)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            """
-            SELECT timestamp, lat, lon, activity_type, speed
-            FROM location_pings
-            WHERE timestamp >= ? AND timestamp < ?
-            ORDER BY timestamp ASC
-            """,
-            (since, until),
-        ).fetchall()
-
-        deduped_rows = dedupe_near_duplicate_pings([dict(r) for r in rows])
-
-        trips: list[dict] = []
-        current_trip: list[dict] = []
-
-        stationary_count = 0
-        STATIONARY_THRESHOLD = 3  # consecutive stationary pings to end a trip
-        # Quiet gap (no pings at all) that closes an open trip. The phone
-        # stops reporting when the user goes indoors / parks, so a long gap
-        # between two non-stationary pings signals a real boundary even
-        # without any stationary pings in between. See ISSUE-059.
-        TRIP_GAP_THRESHOLD_SECONDS = 60 * 60
-        prev_ts: str | None = None
-
-        for r in deduped_rows:
-            activity = r["activity_type"] or "stationary"
-            ping = {"timestamp": r["timestamp"], "lat": r["lat"], "lon": r["lon"],
-                    "activity_type": activity, "speed": r["speed"]}
-
-            if (
-                current_trip
-                and prev_ts is not None
-                and (_timestamp_gap_seconds(prev_ts, r["timestamp"]) > TRIP_GAP_THRESHOLD_SECONDS)
-            ):
-                trips.append(_build_trip(current_trip))
-                current_trip = []
-                stationary_count = 0
-
-            if activity == "stationary":
-                stationary_count += 1
-                if stationary_count >= STATIONARY_THRESHOLD and current_trip:
-                    # Close the trip
-                    trips.append(_build_trip(current_trip))
-                    current_trip = []
-            else:
-                stationary_count = 0
-                current_trip.append(ping)
-
-            prev_ts = r["timestamp"]
-
-        # Close any remaining trip
-        if current_trip:
-            trips.append(_build_trip(current_trip))
-
-        return {"date": target.strftime("%Y-%m-%d"), "trips": trips}
-    finally:
-        conn.close()
-
-
-def _build_trip(pings: list[dict]) -> dict:
-    """Build a trip summary from a list of pings."""
-    from .geo import haversine
-
-    distance = 0.0
-    for i in range(1, len(pings)):
-        distance += haversine(pings[i - 1]["lat"], pings[i - 1]["lon"],
-                              pings[i]["lat"], pings[i]["lon"])
-
-    # Dominant activity type
-    activity_counts: dict[str, int] = {}
-    for p in pings:
-        a = p["activity_type"]
-        activity_counts[a] = activity_counts.get(a, 0) + 1
-    dominant = max(activity_counts, key=activity_counts.get) if activity_counts else "unknown"
-
-    max_speed = max((p["speed"] or 0) for p in pings)
-
-    return {
-        "start_time": pings[0]["timestamp"],
-        "end_time": pings[-1]["timestamp"],
-        "start_lat": pings[0]["lat"],
-        "start_lon": pings[0]["lon"],
-        "end_lat": pings[-1]["lat"],
-        "end_lon": pings[-1]["lon"],
-        "distance_m": round(distance),
-        "ping_count": len(pings),
-        "activity_type": dominant,
-        "max_speed": round(max_speed, 1) if max_speed else None,
-    }
-
-
 @api_router.get("/location/settings-info")
 async def api_location_settings_info(user: dict = Depends(_require_api_auth)):
     """Non-secret bits the /location/settings page needs to render.
@@ -2752,20 +2647,6 @@ async def api_location_restore_dismissed(
     if not deleted:
         return JSONResponse({"error": "dismissed cluster not found"}, status_code=404)
     return {"status": "ok"}
-
-
-@api_router.get("/location/trips")
-async def api_location_trips(
-    user: dict = Depends(_require_api_auth),
-    date: str = Query(default=""),
-    tz: str = Query(default=""),
-):
-    loc = _get_location_config(user["username"])
-    if not loc:
-        return JSONResponse({"error": "location not available"}, status_code=404)
-    db_path, _user_id, tz_name = loc
-    effective_tz = _resolve_tz(tz, tz_name)
-    return await asyncio.to_thread(_location_query_trips, db_path, effective_tz, date or None)
 
 
 # ============================================================================

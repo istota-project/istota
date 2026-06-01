@@ -380,24 +380,6 @@ export interface DismissedClustersResponse {
 	dismissed: DismissedCluster[];
 }
 
-export interface Trip {
-	start_time: string;
-	end_time: string;
-	start_lat: number;
-	start_lon: number;
-	end_lat: number;
-	end_lon: number;
-	distance_m: number;
-	ping_count: number;
-	activity_type: string;
-	max_speed: number | null;
-}
-
-export interface TripsResponse {
-	date: string;
-	trips: Trip[];
-}
-
 // Location API
 
 function browserTz(): string {
@@ -478,13 +460,6 @@ export async function dismissCluster(data: { lat: number; lon: number; radius_me
 
 export async function restoreDismissedCluster(id: number): Promise<void> {
 	await apiFetch(`/location/dismissed-clusters/${id}`, { method: 'DELETE' });
-}
-
-export async function getTrips(date?: string): Promise<TripsResponse> {
-	const params: Record<string, string> = {};
-	if (date) params.date = date;
-	const qs = withBrowserTz(params).toString();
-	return apiFetch<TripsResponse>(`/location/trips${qs ? '?' + qs : ''}`);
 }
 
 // ---- Settings (Phase 5) ----

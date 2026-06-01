@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Trip } from '$lib/api';
+	import type { Trip } from '$lib/location-path';
 	import { ACTIVITY_COLORS, ACTIVITY_LABELS } from '$lib/location-constants';
 
 	interface Props {

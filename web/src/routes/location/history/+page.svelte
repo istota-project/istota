@@ -6,17 +6,16 @@
 	import {
 		getLocationPings,
 		getDaySummary,
-		getTrips,
 		discoverPlaces,
 		listDismissedClusters,
 		restoreDismissedCluster,
 		type LocationPing,
 		type DaySummary,
 		type DaySummaryStop,
-		type Trip,
 		type DiscoveredCluster,
 		type DismissedCluster,
 	} from '$lib/api';
+	import { segmentTrips, type Trip } from '$lib/location-path';
 	import {
 		locationPlaces,
 		mapFlyTo,
@@ -36,7 +35,6 @@
 
 	let pings: LocationPing[] = $state([]);
 	let summary: DaySummary | null = $state(null);
-	let trips: Trip[] = $state([]);
 	let loading = $state(false);
 	let error = $state('');
 	let mapComponent: LocationMap | undefined = $state();
@@ -105,6 +103,11 @@
 	const today = localDate();
 	let isSingleDay = $derived(startStr === endStr);
 
+	// Trips are derived from the same filtered-ping pipeline the map draws (same
+	// activity filter too), so each trip is one continuous line between stops.
+	// Only meaningful for a single day; multi-day spans aren't itemised.
+	let trips = $derived<Trip[]>(isSingleDay ? segmentTrips(pings, activeActivityTypes) : []);
+
 	function yesterday(): string {
 		const d = new Date();
 		d.setDate(d.getDate() - 1);
@@ -142,20 +145,17 @@
 		error = '';
 		pings = [];
 		summary = null;
-		trips = [];
 
 		try {
 			if (!startStr || !endStr) return;
 			if (isSingleDay) {
-				const [p, s, t] = await Promise.all([
+				const [p, s] = await Promise.all([
 					getLocationPings({ date: startStr }),
 					getDaySummary(startStr),
-					getTrips(startStr),
 				]);
 				pings = p.pings;
 				summary = s;
-				trips = t.trips;
-				panelOpen = s.stops.length > 0 || t.trips.length > 0;
+				panelOpen = s.stops.length > 0 || trips.length > 0;
 			} else {
 				const p = await getLocationPings({ start: startStr, end: endStr, limit: '50000' });
 				pings = p.pings;
