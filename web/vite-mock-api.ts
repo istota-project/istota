@@ -565,12 +565,6 @@ const mockPings = (() => {
 	}
 	return { pings, count: pings.length };
 })();
-const mockTrips = {
-	date: today,
-	trips: [
-		{ start_lat: 52.5200, start_lon: 13.4050, end_lat: 52.5074, end_lon: 13.3904, start_time: `${today}T08:30:00Z`, end_time: `${today}T09:00:00Z`, distance_km: 4.2, duration_min: 30, mode: 'walking' },
-	],
-};
 const mockDay = {
 	date: today,
 	timezone: 'Europe/Berlin',
@@ -1118,7 +1112,6 @@ const handlers: MockHandler[] = [
 
 	({ url }) => (url.startsWith('/istota/api/location/discover-places') ? mockDiscover : undefined),
 	({ url }) => (url.startsWith('/istota/api/location/pings') ? mockPings : undefined),
-	({ url }) => (url.startsWith('/istota/api/location/trips') ? mockTrips : undefined),
 	({ url }) => (url.startsWith('/istota/api/location/day-summary') ? mockDay : undefined),
 	({ url }) => (url.startsWith('/istota/money/api/ledgers') ? ledgers : undefined),
 	({ url }) => (url.startsWith('/istota/money/api/check') ? checkResp : undefined),
