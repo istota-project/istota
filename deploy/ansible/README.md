@@ -25,7 +25,9 @@ Deploys istota as a systemd service on Debian 13+.
           alice:
             display_name: "Alice"
             email_addresses: ["alice@example.com"]
-            timezone: "America/New_York"
+            # timezone is a web-UI / Nextcloud preference, not an inventory
+            # field — setting it here would overwrite the user's choice on
+            # every deploy (ISSUE-102).
 ```
 
 ## Using this role
