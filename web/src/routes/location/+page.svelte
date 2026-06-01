@@ -4,13 +4,12 @@
 		getLocationCurrent,
 		getLocationPings,
 		getDaySummary,
-		getTrips,
 		type CurrentLocation,
 		type LocationPing,
 		type DaySummary,
 		type DaySummaryStop,
-		type Trip,
 	} from '$lib/api';
+	import { segmentTrips, type Trip } from '$lib/location-path';
 	import {
 		locationPlaces,
 		mapFlyTo,
@@ -28,7 +27,9 @@
 	let current = $state<CurrentLocation | null>(null);
 	let pings: LocationPing[] = $state([]);
 	let summary = $state<DaySummary | null>(null);
-	let trips: Trip[] = $state([]);
+	// Trips are derived from the same filtered-ping pipeline the map draws, so
+	// each trip is one continuous line between stops (no separate backend call).
+	let trips = $derived<Trip[]>(segmentTrips(pings));
 	let loading = $state(true);
 	let error = $state('');
 	let pollInterval: ReturnType<typeof setInterval> | undefined;
@@ -119,16 +120,14 @@
 
 	async function loadData() {
 		try {
-			const [c, p, s, t] = await Promise.all([
+			const [c, p, s] = await Promise.all([
 				getLocationCurrent(),
 				getLocationPings({ date: today }),
 				getDaySummary(today),
-				getTrips(today),
 			]);
 			current = c;
 			pings = p.pings;
 			summary = s;
-			trips = t.trips;
 			if (!current?.last_ping) tryBrowserGeolocation();
 		} catch {
 			error = 'Failed to load location data';
