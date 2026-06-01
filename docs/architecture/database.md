@@ -61,14 +61,16 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `invoice_schedule_state` | Automated invoice generation timing |
 | `invoice_overdue_notified` | Prevents duplicate overdue alerts |
 
-### Feeds
+### Feeds (per-user feeds.db)
 
 | Table | Purpose |
 |---|---|
 | `feed_state` | RSS/Tumblr/Are.na polling state |
 | `feed_items` | Aggregated feed content |
 
-### Location
+### Location (per-user location.db)
+
+Location tables live in per-user `{workspace}/location/data/location.db` files, not in the framework DB. The module package at `src/istota/location/` provides `resolve_for_user(user_id, config)`.
 
 | Table | Purpose |
 |---|---|
@@ -76,6 +78,9 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `places` | Named geofences |
 | `visits` | Detected place visits |
 | `location_state` | Per-user location tracking state |
+| `dismissed_clusters` | Clusters the user chose not to save as places |
+
+The two Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) remain in the framework `istota.db` for cross-user dedup.
 
 ## Key operations
 

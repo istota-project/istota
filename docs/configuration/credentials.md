@@ -60,7 +60,7 @@ Gated by module enablement. Appear on per-module settings pages.
 
 | Module | Service | Keys | Consumed by |
 |---|---|---|---|
-| money | Monarch Money | `email`, `password`, `session_token`\* | `money` skill (transaction sync) |
+| money | Monarch Money | `session_id`\*, `csrftoken`\* | `money` skill (transaction sync via cookie auth) |
 | feeds | Tumblr | `tumblr_api_key`\* | `feeds` skill (Tumblr feed ingestion) |
 | location | Overland | `ingest_token` | `location` skill (GPS ingestion webhook) |
 
@@ -123,7 +123,7 @@ The proxy strips these env vars from the Claude subprocess and injects them serv
 - `GOOGLE_WORKSPACE_CLI_TOKEN`
 - `GITLAB_TOKEN`
 - `GITHUB_TOKEN`
-- `MONARCH_SESSION_TOKEN`
+- `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN`
 - `NTFY_TOKEN`, `NTFY_PASSWORD`
 - `TUMBLR_API_KEY`
 - `ISTOTA_SECRET_KEY` — routed to module-skill subprocesses that need to decrypt per-user secrets, but blocked at the lookup endpoint via `_PROXY_LOOKUP_BLOCKED` so `credential-fetch ISTOTA_SECRET_KEY` from inside Claude is rejected

@@ -74,6 +74,7 @@ nav:
     - features/scheduling.md
     - features/heartbeat.md
     - features/location.md
+    - features/health.md
     - features/google-workspace.md
     - features/web-interface.md
   - Configuration:

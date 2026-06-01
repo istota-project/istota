@@ -59,7 +59,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `enabled` | `true` | Enable conversation context |
 | `lookback_count` | `25` | Messages to consider |
 | `skip_selection_threshold` | `3` | Include all if history <= this |
-| `selection_model` | `"haiku"` | Model for relevance matching |
+| `selection_model` | `"fast"` | Role alias for relevance matching (resolves to Haiku by default) |
 | `selection_timeout` | `30.0` | Timeout for selection |
 | `use_selection` | `true` | Use LLM selection |
 | `always_include_recent` | `5` | Always include this many recent |
@@ -157,8 +157,30 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | Setting | Default | Description |
 |---|---|---|
 | `semantic_routing` | `true` | Enable LLM-based Pass 2 skill selection |
-| `semantic_routing_model` | `"haiku"` | Model for classification |
+| `semantic_routing_model` | `"fast"` | Role alias for classification (resolves to Haiku by default) |
 | `semantic_routing_timeout` | `3.0` | Seconds, falls back to Pass 1 |
+
+## `[models.roles]`
+
+Provider-agnostic role aliases that map to brain-specific model identifiers. Used by `!model <role> <prompt>` in Talk and by internal subsystems (`fast` for triage/classification, `general` for sleep cycle, `smart` is user-facing only).
+
+Defaults (when no override is set):
+
+| Role | Default target |
+|---|---|
+| `fast` | Haiku |
+| `general` | Sonnet |
+| `smart` | Opus |
+
+Override in config to rebind:
+
+```toml
+[models.roles]
+smart = "opus-46-high"    # pin smart to Opus 4.6
+deep  = "opus-max"        # define a custom role
+```
+
+Role aliases never carry effort — `smart = "opus-46-high"` resolves the model to claude-opus-4-6 only; effort tracks the top-level `effort` field (or the per-task override) unless the user types the provider alias directly via `!model opus-46-high <prompt>`. Invalid override targets (neither a known alias nor a canonical `claude-*` ID) are warned at config-load time via `Brain.validate_role_override`.
 
 ## `[brain]`
 

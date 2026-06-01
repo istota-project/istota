@@ -83,6 +83,20 @@ Requires OAuth connection via the [web dashboard](../features/google-workspace.m
 
 Requires the `health` module to be enabled (on by default).
 
+## Infrastructure
+
+| Skill | Keywords | CLI |
+|---|---|---|
+| `devbox` | devbox, install package, pip install, compile, dig, nslookup, traceroute, network diagnostic | yes -- exec, cp-in, cp-out, status, rebuild |
+
+## Specs
+
+| Skill | Keywords | CLI |
+|---|---|---|
+| `spec` | spec, draft spec, design doc, implementation plan | doc-only |
+
+Codifies a spec-driven development workflow. Specs live in `{notes_folder}/Specs/{Drafts,Active,Done}/` by default, or in a named project's folder. Supports drafting, starting, marking done, listing, showing, and editing specs. See the skill body for the full lifecycle and conventions.
+
 ## Monitoring
 
 | Skill | Keywords | CLI |

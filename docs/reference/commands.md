@@ -11,6 +11,8 @@ Commands prefixed with `!` are intercepted in the Talk poller before task creati
 | `!status` | Show running/pending tasks and system stats |
 | `!memory user` | Show USER.md contents |
 | `!memory channel` | Show CHANNEL.md contents |
+| `!memory facts` | Show knowledge graph facts |
+| `!models` | List available model aliases and what they resolve to |
 | `!cron` | List scheduled jobs with status |
 | `!cron enable NAME` | Re-enable a disabled job |
 | `!cron disable NAME` | Disable a job |
@@ -22,6 +24,12 @@ Commands prefixed with `!` are intercepted in the Talk poller before task creati
 | `!search QUERY` | Search conversation history via memory index + Talk API |
 | `!trust [EMAIL]` | List trusted email senders, or add one |
 | `!untrust EMAIL` | Remove a runtime trusted email sender |
+
+## Model override prefix
+
+`!model <alias> <prompt>` is a per-task model override parsed in the Talk poller before task creation. It is not a `!command` — it resolves the alias, sets the model (and optionally effort) on the task row, and passes the remaining text as the prompt. If the alias is unknown, it replies with usage help instead of creating a task.
+
+Aliases include role names (`fast`, `general`, `smart`, plus any operator-defined custom roles from `[models.roles]`), provider aliases (`opus`, `opus-high`, `opus-xhigh`, `opus-max`, `opus-46`, `opus-46-high`, `sonnet`, `sonnet-high`, `haiku`), and `default`. Use `!models` to see the resolved alias table.
 
 ## Export
 
