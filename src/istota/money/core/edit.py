@@ -164,8 +164,10 @@ def backfill_ledger_ids(ledger_path: Path) -> dict:
 
         ok, errors = run_bean_check(ledger_path)
         if not ok:
+            # Restore atomically — a half-written FUSE flush during rollback
+            # would truncate a known-bad file with no backup-of-the-backup.
             for p, original in snapshots.items():
-                p.write_text(original)
+                _atomic_write(p, original)
             return {
                 "status": "error",
                 "error": "Backfill produced an invalid ledger; rolled back",
@@ -296,13 +298,20 @@ def edit_transaction(
         return {"status": "error", "error": f"Ledger not found: {ledger_path}"}
 
     entries, _load_errors, _ = load_file(str(ledger_path))
-    target = None
-    for e in entries:
-        if isinstance(e, Transaction) and e.meta.get("id") == txn_id:
-            target = e
-            break
-    if target is None:
+    matches = [
+        e for e in entries
+        if isinstance(e, Transaction) and e.meta.get("id") == txn_id
+    ]
+    if not matches:
         return {"status": "error", "error": f"Transaction not found: {txn_id}"}
+    if len(matches) > 1:
+        # A duplicated id (crashed/re-run backfill, hand-copied block) would
+        # otherwise let us silently edit the first match. Refuse instead.
+        return {
+            "status": "error",
+            "error": f"Ambiguous id {txn_id!r}: {len(matches)} transactions share it",
+        }
+    target = matches[0]
 
     filename = target.meta.get("filename")
     lineno = target.meta.get("lineno")
@@ -359,6 +368,25 @@ def edit_transaction(
                 continue
             if old_position and _norm_amount(amount) != _norm_amount(old_position):
                 continue
+            # Cost basis ({...}) and price annotations (@ / @@) live in the
+            # amount token. The surgical rewrite re-emits new_position verbatim,
+            # so an amount edit would silently drop the lot — and the entry can
+            # still balance, so bean-check wouldn't catch it. Refuse rather than
+            # corrupt the lot. (Account-only edits keep the original amount and
+            # are fine.) See ISSUE-107.
+            amount_changing = (
+                new_position is not None
+                and _norm_amount(new_position) != _norm_amount(amount)
+            )
+            if amount_changing and ("{" in amount or "@" in amount):
+                return {
+                    "status": "error",
+                    "error": (
+                        f"Posting {old_account!r} carries a cost/price annotation "
+                        f"({amount!r}); editing its amount here would drop the lot. "
+                        "Edit it directly in the ledger file."
+                    ),
+                }
             final_account = new_account or account
             final_amount = new_position if new_position is not None else amount
             rebuilt = indent + final_account
@@ -395,7 +423,7 @@ def edit_transaction(
         _atomic_write(file_path, new_text)
         ok, errors = run_bean_check(ledger_path)
         if not ok:
-            file_path.write_text(original)
+            _atomic_write(file_path, original)
             return {
                 "status": "error",
                 "error": "Edit produced an invalid ledger; rolled back",

@@ -469,6 +469,210 @@ class TestEditTransaction:
         assert "not found" in result["error"].lower()
 
 
+class TestWriterLockCoverage:
+    """ISSUE-104: the contended writers (Monarch sync append, manual add)
+    must take the same ledger lock the editor does, or the race the lock
+    claims to close stays open."""
+
+    def test_append_to_ledger_blocks_on_lock(self, tmp_path):
+        from istota.money.core.edit import _ledger_lock
+        from istota.money.core.transactions import append_to_ledger
+
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("2024-01-01 open Assets:Cash\n")
+        done = threading.Event()
+
+        def worker():
+            append_to_ledger(
+                ledger,
+                ['2024-02-01 * "x" "y"\n  Assets:Cash 1 USD\n  Assets:Cash -1 USD'],
+            )
+            done.set()
+
+        with _ledger_lock(ledger):
+            t = threading.Thread(target=worker)
+            t.start()
+            # While the editor holds the lock the append must not complete.
+            assert not done.wait(timeout=0.5)
+        t.join(timeout=12)
+        assert done.is_set()
+
+    def test_add_transaction_blocks_on_lock(self, tmp_path):
+        from istota.money.core.edit import _ledger_lock
+        from istota.money.core.transactions import add_transaction
+
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            "2024-01-01 open Assets:Cash\n"
+            "2024-01-01 open Expenses:Food\n"
+        )
+        done = threading.Event()
+
+        def worker():
+            add_transaction(
+                ledger, date(2024, 2, 1), "Acme", "Lunch",
+                "Expenses:Food", "Assets:Cash", 10.0,
+            )
+            done.set()
+
+        with _ledger_lock(ledger):
+            t = threading.Thread(target=worker)
+            t.start()
+            assert not done.wait(timeout=0.5)
+        t.join(timeout=12)
+        assert done.is_set()
+
+
+class TestRollbackIsAtomic:
+    """ISSUE-105: the rollback restore must go through _atomic_write, not a
+    bare write_text that can truncate on a FUSE flush."""
+
+    def test_edit_rollback_uses_atomic_write(self, tmp_path, monkeypatch):
+        import istota.money.core.edit as edit_mod
+
+        ledger = _editable_ledger(tmp_path)
+        before = ledger.read_text()
+
+        calls: list[Path] = []
+        real_atomic = edit_mod._atomic_write
+
+        def spy(path, text):
+            calls.append(Path(path))
+            real_atomic(path, text)
+
+        monkeypatch.setattr(edit_mod, "_atomic_write", spy)
+        monkeypatch.setattr(edit_mod, "run_bean_check", lambda p: (False, ["boom"]))
+
+        result = edit_mod.edit_transaction(
+            ledger, "txn-coffee",
+            old_account="Expenses:Food:Coffee", old_position="5.00 USD",
+            new_account="Expenses:Food:Restaurants",
+        )
+        assert result["status"] == "error"
+        # Both the edit write and the rollback restore go through _atomic_write.
+        assert calls.count(ledger) >= 2
+        assert ledger.read_text() == before
+
+    def test_backfill_rollback_uses_atomic_write(self, tmp_path, monkeypatch):
+        import istota.money.core.edit as edit_mod
+
+        ledger = _write_ledger(tmp_path)
+        snapshots = {p: p.read_text() for p in tmp_path.rglob("*.beancount")}
+
+        calls: list[Path] = []
+        real_atomic = edit_mod._atomic_write
+
+        def spy(path, text):
+            calls.append(Path(path))
+            real_atomic(path, text)
+
+        monkeypatch.setattr(edit_mod, "_atomic_write", spy)
+        monkeypatch.setattr(edit_mod, "run_bean_check", lambda p: (False, ["boom"]))
+
+        result = edit_mod.backfill_ledger_ids(ledger)
+        assert result["status"] == "error"
+        # Every touched file restored via _atomic_write (not write_text).
+        for p, original in snapshots.items():
+            assert p.read_text() == original
+        # Each touched file is written twice through _atomic_write: once for
+        # the forward stamp, once for the rollback restore. A bare write_text
+        # restore would show only the single forward call.
+        stamped_files = {p for p in snapshots if "transactions" in str(p)}
+        assert stamped_files, "fixture should have a stamped subdir file"
+        for p in stamped_files:
+            assert calls.count(p) >= 2, f"{p} not restored via _atomic_write"
+
+
+class TestIdUniquenessGuard:
+    """ISSUE-106: a duplicate id must be refused, not silently first-match."""
+
+    def test_ambiguous_id_refused(self, tmp_path):
+        from istota.money.core.edit import edit_transaction
+
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            "2024-01-01 open Assets:Bank:Checking\n"
+            "2024-01-01 open Expenses:Food:Coffee\n"
+            "2024-01-01 open Expenses:Food:Restaurants\n\n"
+            '2024-02-01 * "Acme" "One"\n'
+            '  id: "dup"\n'
+            "  Expenses:Food:Coffee   5.00 USD\n"
+            "  Assets:Bank:Checking\n\n"
+            '2024-02-02 * "Acme" "Two"\n'
+            '  id: "dup"\n'
+            "  Expenses:Food:Coffee   6.00 USD\n"
+            "  Assets:Bank:Checking\n"
+        )
+        before = ledger.read_text()
+        result = edit_transaction(
+            ledger, "dup",
+            old_account="Expenses:Food:Coffee", old_position="5.00 USD",
+            new_account="Expenses:Food:Restaurants",
+        )
+        assert result["status"] == "error"
+        assert "ambiguous" in result["error"].lower()
+        assert ledger.read_text() == before
+
+
+class TestCostBasisGuard:
+    """ISSUE-107: amount edits on a posting with a cost/price annotation must
+    be refused rather than silently dropping the annotation."""
+
+    def _lot_ledger(self, tmp_path: Path) -> Path:
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            "2024-01-01 open Assets:Stocks\n"
+            "2024-01-01 open Assets:Cash\n\n"
+            '2024-02-01 * "Broker" "Buy AAPL"\n'
+            '  id: "buy1"\n'
+            "  Assets:Stocks  10 AAPL {150.00 USD}\n"
+            "  Assets:Cash   -1500.00 USD\n"
+        )
+        return ledger
+
+    def test_amount_edit_on_cost_posting_refused(self, tmp_path):
+        from istota.money.core.edit import edit_transaction
+
+        ledger = self._lot_ledger(tmp_path)
+        before = ledger.read_text()
+        # The web form sends a plain currency amount; without a guard this
+        # silently drops the {cost} lot and STILL balances (1500 USD vs
+        # -1500 USD), so bean-check passes and the corruption is invisible.
+        result = edit_transaction(
+            ledger, "buy1",
+            old_account="Assets:Stocks", old_position="10 AAPL {150.00 USD}",
+            new_position="1500.00 USD",
+        )
+        assert result["status"] == "error"
+        assert ledger.read_text() == before
+
+    def test_account_only_edit_on_cost_posting_allowed(self, tmp_path):
+        from istota.money.core.edit import edit_transaction
+        from istota.money.core.ledger import run_bean_check
+
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            "2024-01-01 open Assets:Stocks\n"
+            "2024-01-01 open Assets:Brokerage\n"
+            "2024-01-01 open Assets:Cash\n\n"
+            '2024-02-01 * "Broker" "Buy AAPL"\n'
+            '  id: "buy1"\n'
+            "  Assets:Stocks  10 AAPL {150.00 USD}\n"
+            "  Assets:Cash   -1500.00 USD\n"
+        )
+        # Renaming the account (no amount change) must still work and keep the lot.
+        result = edit_transaction(
+            ledger, "buy1",
+            old_account="Assets:Stocks", old_position="10 AAPL {150.00 USD}",
+            new_account="Assets:Brokerage",
+        )
+        assert result["status"] == "ok", result
+        text = ledger.read_text()
+        assert "{150.00 USD}" in text
+        ok, errors = run_bean_check(ledger)
+        assert ok, errors
+
+
 class TestSyncRespectsEdits:
     def _setup(self, tmp_path: Path, *, edited: bool):
         import sqlite3

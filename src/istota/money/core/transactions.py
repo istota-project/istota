@@ -382,13 +382,21 @@ def backup_ledger(ledger_path: Path, max_backups: int = 10) -> Path | None:
 
 
 def append_to_ledger(ledger_path: Path, entries: list[str]) -> None:
-    """Append beancount entries to the main ledger file with backup."""
+    """Append beancount entries to the main ledger file with backup.
+
+    Held under the ledger lock so a Monarch sync append can't interleave with
+    a concurrent web edit (ISSUE-104). Import is function-local to avoid the
+    ``edit`` <-> ``transactions`` module import cycle.
+    """
     if not entries:
         return
-    backup_ledger(ledger_path)
-    with open(ledger_path, "a") as f:
-        for entry in entries:
-            f.write(f"\n{entry}\n")
+    from .edit import _ledger_lock
+
+    with _ledger_lock(ledger_path):
+        backup_ledger(ledger_path)
+        with open(ledger_path, "a") as f:
+            for entry in entries:
+                f.write(f"\n{entry}\n")
 
 
 # =============================================================================
@@ -1029,11 +1037,15 @@ def add_transaction(
     txn_dir.mkdir(exist_ok=True)
     txn_file = txn_dir / f"{txn_date.year}.beancount"
 
-    with open(txn_file, "a") as f:
-        f.write(f"\n{txn}")
-
+    from .edit import _ledger_lock
     from .ledger import run_bean_check
-    success, errors = run_bean_check(ledger_path)
+
+    # Held under the lock through the post-write bean-check so the validation
+    # sees a tree no concurrent writer is mutating (ISSUE-104).
+    with _ledger_lock(ledger_path):
+        with open(txn_file, "a") as f:
+            f.write(f"\n{txn}")
+        success, errors = run_bean_check(ledger_path)
     if not success:
         return {
             "status": "error",
