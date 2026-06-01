@@ -21,7 +21,7 @@ src/istota/
 ├── cli.py                # Local CLI (task, resource, briefing, secret, user, run, …)
 ├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── context.py            # Hybrid conversation context selection
-├── db.py                 # SQLite operations (all tables)
+├── db.py                 # SQLite operations (framework tables)
 ├── db_health.py          # `PRAGMA quick_check` + self-healing `REINDEX` for SQLite DBs on the FUSE-backed mount
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
 ├── scheduler.py          # Task processor, briefings, all polling
@@ -47,6 +47,7 @@ src/istota/
 ├── storage.py            # Bot-managed Nextcloud storage
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML
 ├── health/               # Body stats, bloodwork, biomarker trends, encounters, immunizations, Garmin, OCR
+├── location/             # Per-user location.db module (pings, places, visits, state, migration)
 ├── location_logic.py     # Place stats / cluster discovery (shared web ⇄ skill)
 ├── scheduler_deferred.py # Deferred-op replay (subtasks, KG, KV, health_ops, …)
 ├── shared_file_organizer.py

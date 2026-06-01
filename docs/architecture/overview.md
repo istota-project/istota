@@ -77,6 +77,15 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 | `notifications.py` | Unified dispatcher for Talk, email, and ntfy push notifications |
 | `commands.py` | `!command` dispatch, handled synchronously in the talk poller thread |
 
+### Modules (in-tree)
+
+| Package | Purpose |
+|---|---|
+| `feeds/` | Native RSS/Atom/Tumblr/Are.na — poller, per-user SQLite, routes, OPML |
+| `health/` | Body stats, bloodwork panels, biomarker trends, Garmin sync, immunizations, medical history |
+| `location/` (+ `location_logic.py`) | GPS pings, place detection, visit logging, cluster discovery |
+| `money` (vendored) | Beancount ledger, invoicing, transactions, work log |
+
 ### Subsystems
 
 | Module | Purpose |
@@ -90,6 +99,7 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 | `briefing.py` | Builds briefing prompts from pre-fetched components |
 | `briefing_loader.py` | Loads and merges briefing configs from user workspace, per-user TOML, and main config |
 | `invoice_scheduler.py` | Automated invoice generation, reminders, and overdue detection |
+| `devbox_proxy.py` | Per-user host-side credential proxy for the devbox container |
 | `logging_setup.py` | Centralized logging configuration (console, file, rotation) |
 
 ## Browser container

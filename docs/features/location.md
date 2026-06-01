@@ -20,13 +20,10 @@ enabled = true
 webhooks_port = 8765
 ```
 
-Per-user config via `[[resources]]`:
+Per-user ingest tokens are stored as connected services in the encrypted `secrets` table. Provision via the web settings UI at `/istota/location/settings` or CLI:
 
-```toml
-[[resources]]
-type = "overland"
-name = "GPS"
-extra = { ingest_token = "secret-token-here", default_radius = 100 }
+```bash
+istota secret ensure --user alice --service overland --key ingest_token --value secret-token-here
 ```
 
 Install the location extras:
@@ -52,7 +49,11 @@ Places have an optional `notes` text field for free-form annotations.
 
 Place detection uses hysteresis (2 consecutive pings required) to avoid flapping at geofence boundaries. Pings with horizontal accuracy above `accuracy_threshold_m` (default 100 m) are stored but skipped for place matching. A periodic reconciler re-derives closed visits from stored pings so historical visits recover from state-machine drift. Updating a place's location or radius triggers automatic ping reassignment.
 
-## Database tables
+## Database
+
+Location data lives in per-user SQLite files at `{workspace}/location/data/location.db`, not in the framework `istota.db`. The module package at `src/istota/location/` provides `resolve_for_user(user_id, config)` following the same pattern as `feeds` and `money`.
+
+### Tables (per-user location.db)
 
 | Table | Purpose |
 |---|---|
@@ -63,6 +64,8 @@ Place detection uses hysteresis (2 consecutive pings required) to avoid flapping
 | `dismissed_clusters` | Clusters the user chose not to save as places |
 
 Old pings are cleaned after `location_ping_retention_days` (default 365).
+
+The two Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) remain in the framework `istota.db` for cross-user dedup. Skill subcommands and web routes that need reverse geocoding open a second connection via `location.db.with_geocode_conn(framework_db_path)`.
 
 ## Network access
 

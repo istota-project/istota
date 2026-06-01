@@ -93,6 +93,16 @@ istota kv delete KEY                         # Delete key
 istota kv namespaces                         # List namespaces
 ```
 
+The skill proxy client also exposes set operations for membership-tracking patterns (seen IDs, processed hashes). These operate on a JSON-array value and avoid round-tripping large blobs:
+
+```bash
+istota-skill kv set-contains <ns> <key> <member>              # Check membership
+istota-skill kv set-size     <ns> <key>                       # Count members
+istota-skill kv set-members  <ns> <key> [--limit N] [--offset N]  # Paginated slice
+istota-skill kv set-add      <ns> <key> <member> [<member>...]    # Add members (deferred)
+istota-skill kv set-remove   <ns> <key> <member> [<member>...]    # Remove members (deferred)
+```
+
 ### Database
 
 ```bash

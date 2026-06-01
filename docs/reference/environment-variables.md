@@ -64,7 +64,8 @@ Every service-integration env var is declared in the consuming skill's `skill.md
 |---|---|---|
 | `KARAKEEP_BASE_URL` | `secrets` (`karakeep.base_url`) | per-user |
 | `KARAKEEP_API_KEY` | `secrets` (`karakeep.api_key`) | per-user, sensitive |
-| `MONARCH_SESSION_TOKEN` | `secrets` (`monarch.session_token`) | per-user, sensitive |
+| `MONARCH_SESSION_ID` | `secrets` (`monarch.session_id`) | per-user, sensitive |
+| `MONARCH_CSRFTOKEN` | `secrets` (`monarch.csrftoken`) | per-user, sensitive |
 | `FEEDS_USER` | task `user_id` | set by `_execute_skill_task` for the native feeds skill |
 | `TUMBLR_API_KEY` | `secrets` (`feeds.tumblr_api_key`) | per-user, sensitive |
 | `NTFY_TOPIC` / `NTFY_SERVER_URL` / `NTFY_USERNAME` | `secrets` (`ntfy.*`) | per-user (non-credential) |
@@ -121,7 +122,7 @@ When `skill_proxy_enabled = true`, every env var declared with `sensitive: true`
 - `GOOGLE_WORKSPACE_CLI_TOKEN`
 - `GITLAB_TOKEN`
 - `GITHUB_TOKEN`
-- `MONARCH_SESSION_TOKEN`
+- `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN`
 - `NTFY_TOKEN`, `NTFY_PASSWORD`
 - `TUMBLR_API_KEY`
 - `ISTOTA_SECRET_KEY` — routed to module-skill subprocesses, hard-blocked at the lookup endpoint via `_PROXY_LOOKUP_BLOCKED`
