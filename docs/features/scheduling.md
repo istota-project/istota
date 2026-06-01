@@ -65,6 +65,12 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 
 Jobs auto-disable after 5 consecutive failures (`scheduled_job_max_consecutive_failures`). Failures reset on success. Disabled jobs can be re-enabled via `!cron enable <name>` in Talk.
 
+## Catch-up suppression after outages
+
+When the daemon returns from a long outage, it does not fire every missed cron instance at once. If a job or briefing's computed next fire time is more than `cron_max_staleness_minutes` (default 60) behind the current time, the fire is skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. This prevents a thundering herd of stale tasks from flooding the queue after a restart.
+
+Set `cron_max_staleness_minutes = 0` in `[scheduler]` to restore the prior behavior (unconditional catch-up of all missed fires).
+
 ## Context isolation
 
 Scheduled job results are excluded from interactive conversation context. This prevents cron output from cluttering a user's chat history.
