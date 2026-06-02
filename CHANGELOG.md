@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-02
+
 ### Added
 - **Transaction editing in the money web UI, backed by stable transaction ids.** Every beancount transaction now carries an `id:` metadata line — backfilled onto legacy entries by a one-time reversible migration and stamped by every writer — so the kebab-menu "Edit transaction" action rewrites the directive in place (recategorize, fix payee/narration/date/amount), located by id rather than a fragile field tuple. Edits are re-validated with `bean-check` and rolled back if they unbalance the entry. Edited entries are marked so Monarch sync leaves them alone instead of re-applying its own category. New `money edit-transaction` and `money backfill-ids` subcommands expose the same path.
 - **Insertion-time staleness gate for cron-driven tasks.** When the daemon comes back from a long outage, `check_scheduled_jobs` and `check_briefings` no longer fire every missed instance on the first tick. Computed `next_run` more than `cron_max_staleness_minutes` (default 60) behind now is skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. Set the threshold to 0 to restore the prior unconditional catch-up.
@@ -577,7 +579,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.13.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.14.0...main
+[0.14.0]: https://gitlab.com/cynium/istota/-/releases/v0.14.0
 [0.13.0]: https://gitlab.com/cynium/istota/-/releases/v0.13.0
 [0.12.0]: https://gitlab.com/cynium/istota/-/releases/v0.12.0
 [0.11.1]: https://gitlab.com/cynium/istota/-/releases/v0.11.1
