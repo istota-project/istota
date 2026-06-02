@@ -260,7 +260,16 @@ class ClaudeCodeBrain:
         # skip the tool flags entirely so claude's defaults stay out of the
         # equation. The prompt itself is what keeps the call text-only.
         if req.allowed_tools:
-            cmd += ["--allowedTools"] + req.allowed_tools + ["--disallowedTools", "Agent"]
+            # Disallow the harness's built-in multi-agent fan-out tools. Istota
+            # orchestrates work through its own skills, not Claude Code's
+            # Agent/Workflow orchestrators. The harness auto-injects a
+            # "use the Workflow tool" reminder whenever the word "workflow"
+            # appears anywhere in the prompt blob (skill docs, memory, history),
+            # so it fires on essentially every task; disallowing the tool here
+            # neutralizes that nudge at the tool boundary.
+            cmd += ["--allowedTools"] + req.allowed_tools + [
+                "--disallowedTools", "Agent", "Workflow",
+            ]
         if req.model:
             cmd += ["--model", req.model]
         if req.effort:
