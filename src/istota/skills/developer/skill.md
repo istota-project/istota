@@ -4,7 +4,7 @@ triggers: [git, gitlab, github, repo, repository, commit, branch, merge request,
 description: Git repository management, GitLab merge requests, and GitHub pull requests
 env: [{"var":"DEVELOPER_REPOS_DIR","from":"config","config_path":"developer.repos_dir","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_URL","from":"config","config_path":"developer.gitlab_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITHUB_URL","from":"config","config_path":"developer.github_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_DEFAULT_NAMESPACE","from":"config","config_path":"developer.gitlab_default_namespace","when":["developer.enabled","developer.gitlab_default_namespace"]},{"var":"GITLAB_REVIEWER_ID","from":"config","config_path":"developer.gitlab_reviewer_id","when":["developer.enabled","developer.gitlab_reviewer_id"]},{"var":"GITHUB_DEFAULT_OWNER","from":"config","config_path":"developer.github_default_owner","when":["developer.enabled","developer.github_default_owner"]},{"var":"GITHUB_REVIEWER","from":"config","config_path":"developer.github_reviewer","when":["developer.enabled","developer.github_reviewer"]},{"var":"DEVELOPER_AUTHOR_CREDIT","from":"config","config_path":"developer.author_credit","when":["developer.enabled","developer.author_credit"]},{"var":"GITLAB_TOKEN","from":"config","config_path":"developer.gitlab_token","when":["developer.enabled","developer.repos_dir","developer.gitlab_token"],"sensitive":true},{"var":"GITHUB_TOKEN","from":"config","config_path":"developer.github_token","when":["developer.enabled","developer.repos_dir","developer.github_token"],"sensitive":true}]
 ---
-# Developer Skill — Git, GitLab & GitHub Workflows
+# Developer Skill — Git, GitLab & GitHub
 
 Work in git repositories, manage merge requests on GitLab and pull requests on GitHub. Uses bare clones + git worktrees for branch isolation.
 
@@ -82,7 +82,7 @@ git -C "$BARE_DIR" worktree add -b "$BRANCH" "$WORK_DIR" "origin/$DEFAULT_BRANCH
 
 All work happens inside `$WORK_DIR`.
 
-## Development Workflow
+## Development Process
 
 ### 1. Understand Before Changing
 

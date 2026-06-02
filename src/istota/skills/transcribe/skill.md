@@ -67,7 +67,7 @@ Process a handwritten note with preprocessing:
 istota-skill transcribe ocr /tmp/handwritten_note.jpg --preprocess
 ```
 
-## Transcription workflow
+## Transcription procedure
 
 When you receive an image without an explicit request, treat it as a transcription request.
 

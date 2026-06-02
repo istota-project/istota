@@ -8,7 +8,7 @@ companion_skills: [files, notes]
 
 # Spec lifecycle
 
-Specs are markdown files that capture the plan for a feature or change before it is implemented. They live in the user's `notes_folder`, separate from regular notes, so the same workflow applies to every project.
+Specs are markdown files that capture the plan for a feature or change before it is implemented. They live in the user's `notes_folder`, separate from regular notes, so the same process applies to every project.
 
 ## What a spec must be
 

@@ -33,7 +33,7 @@ The brain returns a `BrainResult` carrying `(success, result_text, actions_taken
 `ClaudeCodeBrain`, the default and only Phase 1 brain, builds and invokes:
 
 ```
-claude -p - --allowedTools Read Write Edit Grep Glob Bash --disallowedTools Agent \
+claude -p - --allowedTools Read Write Edit Grep Glob Bash --disallowedTools Agent Workflow \
   --output-format stream-json --verbose
 ```
 

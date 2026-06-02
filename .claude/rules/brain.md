@@ -102,7 +102,7 @@ overrides plug in for free via `_roles.py`.
 ## ClaudeCodeBrain
 Wraps the `claude` CLI subprocess. Owns:
 
-1. **Command construction** — `claude -p - --allowedTools ... --disallowedTools Agent`,
+1. **Command construction** — `claude -p - --allowedTools ... --disallowedTools Agent Workflow`,
    plus optional `--model`, `--effort`, `--system-prompt-file`, and
    (in streaming mode) `--output-format stream-json --verbose`.
 2. **Sandbox wrap** — calls `req.sandbox_wrap(cmd)` if provided so the

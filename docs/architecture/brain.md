@@ -76,7 +76,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 
 Wraps the `claude` CLI subprocess. Owns:
 
-1. **Command construction** — `claude -p - --allowedTools ... --disallowedTools Agent`, plus optional `--model`, `--effort`, `--system-prompt-file`, and (in streaming mode) `--output-format stream-json --verbose`.
+1. **Command construction** — `claude -p - --allowedTools ... --disallowedTools Agent Workflow`, plus optional `--model`, `--effort`, `--system-prompt-file`, and (in streaming mode) `--output-format stream-json --verbose`.
 2. **Sandbox wrap** — calls `req.sandbox_wrap(cmd)` if provided so the executor's bwrap configuration applies.
 3. **Subprocess** — `Popen` (streaming) or `subprocess.run` (simple), prompt via stdin to avoid `E2BIG` on large prompts; stderr drained on a background thread to prevent deadlock.
 4. **Stream parsing** — line-by-line via `make_stream_parser()` from `_events.py`, dispatching `ResultEvent` → final result, `ToolUseEvent` / `TextEvent` → trace + on_progress, `ContextManagementEvent` → `cm_boundary` marker in trace.
