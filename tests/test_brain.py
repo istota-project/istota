@@ -110,3 +110,27 @@ class TestBrainResultDefaults:
         assert result.actions_taken is None
         assert result.execution_trace is None
         assert result.stop_reason == "completed"
+
+
+class TestBuildCommandDisallowedTools:
+    def _req(self, tmp_path, allowed_tools):
+        return BrainRequest(
+            prompt="hi",
+            allowed_tools=allowed_tools,
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=60,
+        )
+
+    def test_agent_and_workflow_disallowed_when_tools_allowed(self, tmp_path):
+        cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, ["Bash"]))
+        assert "--disallowedTools" in cmd
+        flag_idx = cmd.index("--disallowedTools")
+        disallowed = cmd[flag_idx + 1 : flag_idx + 3]
+        assert disallowed == ["Agent", "Workflow"]
+
+    def test_no_disallowed_tools_when_text_only(self, tmp_path):
+        # Empty allowed_tools => text-only invocation, no tool flags at all.
+        cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, []))
+        assert "--allowedTools" not in cmd
+        assert "--disallowedTools" not in cmd
