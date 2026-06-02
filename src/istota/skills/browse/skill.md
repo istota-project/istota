@@ -52,7 +52,7 @@ The `links` array contains every link on the page. The `session_id` is only pres
 
 ## Researching articles from news sites
 
-### Standard workflow (AP News, BBC, Reuters)
+### Standard procedure (AP News, BBC, Reuters)
 
 Sites where article links appear directly in the `links` array:
 
