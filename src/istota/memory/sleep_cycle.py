@@ -119,6 +119,31 @@ def _topics_per_chunk(
         out.append(topic)
     return out
 
+
+def _windows_per_chunk(
+    chunks: list[str], episodic_windows: dict[str, str]
+) -> list[str | None]:
+    """Return per-chunk episode-close dates derived from ref:N markers (ISSUE-109 #2).
+
+    `episodic_windows` maps `ref:N` → the `valid_until` of an episodic fact
+    extracted from that task. A chunk inherits a close date only when *every*
+    `ref:N` it contains is episodic (present in the map); the chunk's window is
+    the latest such date, so it survives until its longest-lived episode ends.
+    Conservative on purpose: a chunk with any ref absent from the map (a
+    durable fact, or a bullet that produced no fact) keeps standing — no
+    window — so we never suppress content we aren't sure is wholly episodic.
+    Chunks with no ref at all also stay standing.
+    """
+    out: list[str | None] = []
+    for chunk in chunks:
+        refs = [f"ref:{m.group(1)}" for m in _REF_PATTERN.finditer(chunk)]
+        if refs and all(r in episodic_windows for r in refs):
+            out.append(max(episodic_windows[r] for r in refs))
+        else:
+            out.append(None)
+    return out
+
+
 # Sleep-cycle Claude calls run unsandboxed, with no tools, no streaming,
 # no skill proxy. The prompt does all the work — model returns text/JSON.
 _SLEEP_CYCLE_TIMEOUT_SECONDS = 120
@@ -676,10 +701,15 @@ def process_user_sleep_cycle(
     memory_file.write_text(memories_text + "\n")
     logger.info("Wrote dated memory file for %s: %s (%d chars)", user_id, memory_file.name, len(memories_text))
 
-    # Insert extracted facts into knowledge graph (non-critical)
+    # Insert extracted facts into knowledge graph (non-critical). While we're
+    # here, record each episodic fact's effective close date keyed by its
+    # source task ref, so the dated-memory chunks it came from can self-suppress
+    # once the episode is over (ISSUE-109 #2). The effective valid_until is read
+    # back from the stored row so lever-1 auto-stamping is reflected too.
+    episodic_windows: dict[str, str] = {}
     if extracted_facts:
         try:
-            from .knowledge_graph import ensure_table, add_fact
+            from .knowledge_graph import ensure_table, add_fact, get_fact
             ensure_table(conn)
             inserted = 0
             for fact in extracted_facts:
@@ -695,6 +725,15 @@ def process_user_sleep_cycle(
                 )
                 if fact_id is not None:
                     inserted += 1
+                    ref = fact.get("source_ref")
+                    stored = get_fact(conn, fact_id)
+                    if ref and stored and stored.valid_until:
+                        key = f"ref:{ref}"
+                        prev = episodic_windows.get(key)
+                        # Keep the latest close date per ref so a task's
+                        # longest-lived episode governs its chunk.
+                        if prev is None or stored.valid_until > prev:
+                            episodic_windows[key] = stored.valid_until
             if inserted:
                 logger.info("Inserted %d knowledge facts for %s", inserted, user_id)
         except Exception as e:
@@ -717,9 +756,14 @@ def process_user_sleep_cycle(
                 _topics_per_chunk(chunks, extracted_topics)
                 if extracted_topics else None
             )
+            valid_until_per_chunk = (
+                _windows_per_chunk(chunks, episodic_windows)
+                if episodic_windows else None
+            )
             _index_file(
                 conn, user_id, str(memory_file), memories_text, "memory_file",
                 topic_per_chunk=topic_per_chunk,
+                valid_until_per_chunk=valid_until_per_chunk,
             )
         except Exception as e:
             logger.debug("Memory search indexing failed for %s: %s", memory_file.name, e)

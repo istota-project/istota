@@ -14,6 +14,7 @@ from istota.memory.sleep_cycle import (
     _parse_structured_extraction,
     _topics_per_chunk,
     _validate_fact,
+    _windows_per_chunk,
     gather_day_data,
     build_memory_extraction_prompt,
     process_user_sleep_cycle,
@@ -1359,6 +1360,34 @@ class TestTopicsPerChunk:
     def test_empty_topics_dict(self):
         chunks = ["- A bullet (ref:1234)"]
         assert _topics_per_chunk(chunks, {}) == [None]
+
+
+class TestWindowsPerChunk:
+    """ISSUE-109 #2 — episodic facts (those carrying a valid_until) propagate
+    their close date to the memory chunk they were extracted from, so the chunk
+    self-suppresses from retrieval once the episode is over. Conservative: a
+    chunk with any non-episodic ref keeps standing (no window)."""
+
+    def test_episodic_ref_assigns_window(self):
+        chunks = ["- booked cat transport for the move (ref:1234)"]
+        assert _windows_per_chunk(chunks, {"ref:1234": "2026-03-01"}) == ["2026-03-01"]
+
+    def test_chunk_without_ref_gets_none(self):
+        assert _windows_per_chunk(["- no ref bullet"], {"ref:1": "2026-01-01"}) == [None]
+
+    def test_mixed_episodic_and_non_episodic_kept(self):
+        # ref:2 isn't in the episodic map (durable or pure narrative) → keep.
+        chunks = ["- episodic move detail (ref:1)\n- durable identity fact (ref:2)"]
+        assert _windows_per_chunk(chunks, {"ref:1": "2026-01-01"}) == [None]
+
+    def test_multiple_episodic_refs_take_latest_close(self):
+        chunks = ["- a (ref:1)\n- b (ref:2)"]
+        assert _windows_per_chunk(
+            chunks, {"ref:1": "2026-01-01", "ref:2": "2026-05-01"}
+        ) == ["2026-05-01"]
+
+    def test_empty_windows_dict(self):
+        assert _windows_per_chunk(["- a (ref:1)"], {}) == [None]
 
 
 class TestUserMemoryObservability:

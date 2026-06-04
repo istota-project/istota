@@ -506,6 +506,7 @@ istota_memory_search_auto_index_conversations: true
 istota_memory_search_auto_index_memory_files: true
 istota_memory_search_auto_recall: false           # BM25 search using task prompt as query
 istota_memory_search_auto_recall_limit: 5          # max results for auto-recall
+istota_memory_search_recency_half_life_days: 180   # recency decay half-life for recall (0 = off)
 
 # Skills routing (LLM-based semantic routing for skill selection)
 istota_skills_semantic_routing: true  # enable Pass 2 LLM classification
