@@ -1,11 +1,15 @@
 """Tests for the temporal knowledge graph module."""
 
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
 from istota.memory.knowledge_graph import (
+    AUTO_EXPIRE_PREDICATES,
+    DEFAULT_EPHEMERAL_TTL_DAYS,
+    EPHEMERAL_PREDICATES,
     KnowledgeFact,
     SINGLE_VALUED_PREDICATES,
     TEMPORARY_PREDICATES,
@@ -331,6 +335,87 @@ class TestTemporaryFacts:
         new = get_fact(conn, id_new)
         assert old.valid_until == "2026-08-01"  # Superseded
         assert new.valid_until is None  # Current
+
+
+class TestEphemeralPredicateSets:
+    """The two-lever sets must stay consistent: everything that auto-expires is
+    ephemeral, and `decided` is ephemeral (demoted) but never auto-expired."""
+
+    def test_auto_expire_is_subset_of_ephemeral(self):
+        assert AUTO_EXPIRE_PREDICATES <= EPHEMERAL_PREDICATES
+
+    def test_decided_demoted_but_not_auto_expired(self):
+        assert "decided" in EPHEMERAL_PREDICATES
+        assert "decided" not in AUTO_EXPIRE_PREDICATES
+
+
+class TestEphemeralAutoExpiry:
+    """ISSUE-109 lever 1: point-in-time ephemeral facts get a default
+    valid_until so they age out of the always-current view automatically."""
+
+    def _expected_expiry(self, base: str) -> str:
+        return (date.fromisoformat(base) + timedelta(days=DEFAULT_EPHEMERAL_TTL_DAYS)).isoformat()
+
+    def test_interested_in_gets_default_valid_until(self, conn):
+        fact_id = add_fact(conn, "user1", "stefan", "interested_in", "twsbi eco")
+        fact = get_fact(conn, fact_id)
+        assert fact.valid_until == self._expected_expiry(date.today().isoformat())
+
+    def test_completed_default_expiry_anchored_on_valid_from(self, conn):
+        """When valid_from (the event date) is given, the TTL counts from it,
+        not from today — a project completed long ago is already historical."""
+        fact_id = add_fact(
+            conn, "user1", "stefan", "completed", "sosf",
+            valid_from="2026-01-01",
+        )
+        fact = get_fact(conn, fact_id)
+        assert fact.valid_until == self._expected_expiry("2026-01-01")
+
+    def test_acquired_and_disposed_and_traveled_all_expire(self, conn):
+        for pred, obj in [
+            ("acquired", "pilot prera"),
+            ("disposed_of", "traveler notebook"),
+            ("traveled_to", "warsaw"),
+        ]:
+            fid = add_fact(conn, "user1", "stefan", pred, obj)
+            assert get_fact(conn, fid).valid_until is not None, pred
+
+    def test_explicit_valid_until_wins(self, conn):
+        """A caller/extractor-supplied valid_until is never overridden."""
+        fact_id = add_fact(
+            conn, "user1", "stefan", "interested_in", "kaweco piston",
+            valid_until="2026-06-05",
+        )
+        fact = get_fact(conn, fact_id)
+        assert fact.valid_until == "2026-06-05"
+
+    def test_decided_not_auto_expired(self, conn):
+        """`decided` is excluded — durable decisions legitimately persist;
+        the extractor sets valid_until case-by-case for short-lived ones."""
+        fact_id = add_fact(conn, "user1", "stefan", "decided", "go remote-first")
+        fact = get_fact(conn, fact_id)
+        assert fact.valid_until is None
+
+    def test_durable_predicate_not_auto_expired(self, conn):
+        fact_id = add_fact(conn, "user1", "stefan", "works_at", "acme")
+        assert get_fact(conn, fact_id).valid_until is None
+
+    def test_temporary_ephemeral_not_auto_expired(self, conn):
+        """Temporary facts have their own lifecycle — skip the default."""
+        fact_id = add_fact(
+            conn, "user1", "stefan", "acquired", "rental car",
+            temporary=True,
+        )
+        assert get_fact(conn, fact_id).valid_until is None
+
+    def test_old_ephemeral_fact_excluded_from_current(self, conn):
+        """An ephemeral fact whose anchored window has closed is not current."""
+        add_fact(
+            conn, "user1", "stefan", "completed", "ancient project",
+            valid_from="2020-01-01",
+        )
+        current = get_current_facts(conn, "user1")
+        assert all(f.object != "ancient project" for f in current)
 
 
 class TestInvalidateFact:
@@ -885,6 +970,39 @@ class TestSelectRelevantFacts:
         non_identity = [f for f in result if f.subject != "stefan"]
         assert len(non_identity) == 1
         assert non_identity[0].subject == "project_new"
+
+    def test_ephemeral_user_fact_not_auto_identity(self):
+        """ISSUE-109 lever 2: a user-subject fact with an ephemeral predicate
+        is NOT force-loaded as identity — it must earn its place via relevance."""
+        facts = [
+            self._make_fact("stefan", "interested_in", "twsbi eco"),
+            self._make_fact("stefan", "decided", "sell traveler notebook"),
+        ]
+        result = select_relevant_facts(facts, "what's the weather today?", "stefan")
+        assert result == []
+
+    def test_ephemeral_user_fact_included_when_relevant(self):
+        """Demoted ephemeral facts still surface when the prompt is about them."""
+        facts = [
+            self._make_fact("stefan", "interested_in", "twsbi eco"),
+        ]
+        result = select_relevant_facts(
+            facts, "should I buy the twsbi pen?", "stefan",
+        )
+        assert len(result) == 1
+        assert result[0].object == "twsbi eco"
+
+    def test_durable_user_facts_still_identity_when_ephemeral_demoted(self):
+        """Durable identity facts stay always-on; only ephemeral ones demote."""
+        facts = [
+            self._make_fact("stefan", "works_at", "acme"),
+            self._make_fact("stefan", "speaks", "polish"),
+            self._make_fact("stefan", "completed", "sosf"),
+            self._make_fact("stefan", "acquired", "pilot prera"),
+        ]
+        result = select_relevant_facts(facts, "unrelated prompt", "stefan")
+        objects = {f.object for f in result}
+        assert objects == {"acme", "polish"}
 
 
 class TestKnowledgeFactsAudit:

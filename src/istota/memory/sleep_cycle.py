@@ -450,10 +450,13 @@ Normalize entity names to lowercase. Object values MUST be under 10 words (max 1
 — put context, reasoning, and detail in MEMORIES, not in fact objects. Long objects break
 fuzzy dedup.
 
-When a `decided` fact is about a one-time action (a cancellation, a purchase, a specific
-short-lived task), set `valid_until` to a date a few weeks out so the decision ages out
-of the current-fact view automatically. Durable decisions (lifestyle, direction, policy)
-have no `valid_until`.
+Time-bound facts should age out of the always-loaded view. For one-off actions and
+passing interests — `interested_in`, `completed`, `acquired`, `disposed_of`, `traveled_to`
+— set `valid_from` to the event date when known; these expire automatically if you give no
+`valid_until`. For a `decided` fact about a one-time action (a cancellation, a purchase, a
+specific short-lived task), set `valid_until` to a date a few weeks out so it ages out.
+Durable facts — lifestyle/direction/policy decisions, identity, relationships — have no
+`valid_until`.
 
 Subject constraints:
 - For user preferences, habits, and decisions, the subject should be "{user_id}"
