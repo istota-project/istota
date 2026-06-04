@@ -50,6 +50,42 @@ TEMPORARY_PREDICATES = frozenset({
     "visiting",
 })
 
+# ISSUE-109 — predicates describing time-bound decisions, interests, and
+# one-off events rather than durable identity attributes.
+#
+# Lever 2 (load gate, select_relevant_facts): user-subject facts with these
+# predicates are NOT auto-loaded as always-on "identity"; they go through the
+# prompt-relevance gate like any third-party fact, so a shopping decision only
+# surfaces when the current task is actually about it.
+EPHEMERAL_PREDICATES = frozenset({
+    "decided",
+    "interested_in",
+    "completed",
+    "acquired",
+    "disposed_of",
+    "traveled_to",
+})
+
+# Lever 1 (write/aging, add_fact): a subset that names a point-in-time event.
+# When the caller supplies no valid_until and the fact isn't temporary, stamp a
+# default expiry so the event ages out of the current-fact view automatically.
+# `decided` is deliberately excluded — durable decisions (lifestyle, direction,
+# policy) legitimately persist, and the extractor prompt sets valid_until
+# case-by-case for the short-lived ones.
+AUTO_EXPIRE_PREDICATES = frozenset({
+    "interested_in",
+    "completed",
+    "acquired",
+    "disposed_of",
+    "traveled_to",
+})
+
+# Default window before an auto-expiring ephemeral fact drops out of the
+# always-current view. Generous on purpose: a genuinely relevant fact still
+# surfaces through the relevance gate within the window; the point is only to
+# stop these crowding every prompt forever.
+DEFAULT_EPHEMERAL_TTL_DAYS = 90
+
 
 @dataclass
 class KnowledgeFact:
@@ -254,6 +290,20 @@ def add_fact(
 
     if predicate in TEMPORARY_PREDICATES:
         temporary = True
+
+    # ISSUE-109 lever 1: point-in-time ephemeral facts age out automatically.
+    # Default an expiry only when the caller gave none and the fact isn't
+    # temporary (temporary facts have their own lifecycle). An explicit
+    # valid_until — from the extractor or the runtime skill — always wins.
+    # Anchor the window on valid_from (the event date) when present so a fact
+    # about a long-past event is born already-historical.
+    if valid_until is None and not temporary and predicate in AUTO_EXPIRE_PREDICATES:
+        anchor = valid_from or date.today().isoformat()
+        try:
+            anchor_date = date.fromisoformat(anchor)
+        except ValueError:
+            anchor_date = date.today()
+        valid_until = (anchor_date + timedelta(days=DEFAULT_EPHEMERAL_TTL_DAYS)).isoformat()
 
     # Check for exact duplicate (same subject+predicate+object, still current)
     today = date.today().isoformat()
@@ -610,9 +660,12 @@ def select_relevant_facts(
 ) -> list[KnowledgeFact]:
     """Filter facts to those relevant to the prompt.
 
-    Always includes facts where the subject matches user_id (identity facts).
-    Remaining facts are included if their subject or object appears as a token
-    in the prompt text.
+    Always includes durable facts where the subject matches user_id (identity
+    facts). User-subject facts whose predicate is in EPHEMERAL_PREDICATES
+    (decisions, interests, one-off events — ISSUE-109) are demoted out of the
+    always-on tier: they're included only if they match the prompt, like any
+    third-party fact. Remaining facts are included if their subject or object
+    appears as a token in the prompt text.
 
     When `max_facts > 0`, identity facts are kept whole — they are anchors and
     truncating them silently is the worst outcome. Up to `max_facts // 2`
@@ -631,11 +684,13 @@ def select_relevant_facts(
     matched: list[KnowledgeFact] = []
 
     for fact in facts:
-        if fact.subject == user_id_lower:
+        if fact.subject == user_id_lower and fact.predicate not in EPHEMERAL_PREDICATES:
             identity.append(fact)
             continue
 
-        # Check if subject or object tokens appear in the prompt
+        # Ephemeral user-subject facts and all third-party facts must earn
+        # their place: included only if subject or object tokens appear in the
+        # prompt.
         subject_tokens = _tokenize(fact.subject)
         object_tokens = _tokenize(fact.object)
 
