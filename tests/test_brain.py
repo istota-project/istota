@@ -122,12 +122,12 @@ class TestBuildCommandDisallowedTools:
             timeout_seconds=60,
         )
 
-    def test_agent_and_workflow_disallowed_when_tools_allowed(self, tmp_path):
+    def test_agent_disallowed_when_tools_allowed(self, tmp_path):
         cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, ["Bash"]))
         assert "--disallowedTools" in cmd
         flag_idx = cmd.index("--disallowedTools")
-        disallowed = cmd[flag_idx + 1 : flag_idx + 3]
-        assert disallowed == ["Agent", "Workflow"]
+        disallowed = cmd[flag_idx + 1 : flag_idx + 2]
+        assert disallowed == ["Agent"]
 
     def test_no_disallowed_tools_when_text_only(self, tmp_path):
         # Empty allowed_tools => text-only invocation, no tool flags at all.
