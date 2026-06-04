@@ -1593,6 +1593,7 @@ def _recall_memories(
                 source_types=source_types,
                 include_user_ids=include_ids or None,
                 exclude_conversation_task_ids=exclude_task_ids or None,
+                recency_half_life_days=config.memory_search.recency_half_life_days,
             )
         else:
             with db.get_db(config.db_path) as temp_conn:
@@ -1602,6 +1603,7 @@ def _recall_memories(
                     source_types=source_types,
                     include_user_ids=include_ids or None,
                     exclude_conversation_task_ids=exclude_task_ids or None,
+                    recency_half_life_days=config.memory_search.recency_half_life_days,
                 )
     except Exception:
         logger.debug("Memory recall search failed", exc_info=True)

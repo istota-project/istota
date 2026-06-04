@@ -9,6 +9,7 @@ import pytest
 
 from istota.memory.search import (
     SearchResult,
+    _apply_recency_decay,
     _content_hash,
     _escape_fts5_query,
     _insert_chunks,
@@ -673,8 +674,10 @@ class TestVecAdaptiveK:
     """Tests for ISSUE-041 — adaptive KNN k in _search_vec."""
 
     def _make_row(self, chunk_id, distance=0.1):
-        # Matches the column order returned by _search_vec's SELECT.
-        return (chunk_id, distance, f"content {chunk_id}", "conversation", str(chunk_id), None)
+        # Matches the column order returned by _search_vec's SELECT
+        # (..., mc.metadata_json, mc.created_at).
+        return (chunk_id, distance, f"content {chunk_id}", "conversation",
+                str(chunk_id), None, "2026-01-01")
 
     def _capture_execute(self, batches):
         """Build a fake conn.execute that yields one batch per call and records k."""
@@ -693,13 +696,16 @@ class TestVecAdaptiveK:
         return conn, call_ks
 
     def test_starts_wider_with_filters(self):
-        """When any post-filter is active, initial k is limit*10 (vs limit*5 without)."""
+        """When any post-filter is active, initial k is limit*10 (vs limit*5 without).
+
+        The episode-window filter (ISSUE-109 #2) is itself a post-filter and is
+        on by default, so the no-filter baseline opts out via include_expired."""
         conn_no, ks_no = self._capture_execute([[self._make_row(i) for i in range(10)]])
         conn_filt, ks_filt = self._capture_execute([[self._make_row(i) for i in range(10)]])
 
         with patch("istota.memory.search.enable_vec_extension", return_value=True), \
              patch("istota.memory.search.embed_text", return_value=[0.0] * 384):
-            _search_vec(conn_no, "alice", "q", limit=10)
+            _search_vec(conn_no, "alice", "q", limit=10, include_expired=True)
             _search_vec(conn_filt, "alice", "q", limit=10, topics=["tech"])
 
         assert ks_no[0] == 50   # limit * 5
@@ -951,3 +957,169 @@ class TestCleanupOldChunks:
         deleted = cleanup_old_chunks(conn, "alice", retention_days=90)
         assert deleted == 0
         assert conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0] == 1
+
+
+class TestRecencyDecayUnit:
+    """ISSUE-109 #1 — time-decay weighting counters the 'frequency != relevance'
+    gravity well: a dense old cluster shouldn't outrank current context on mass."""
+
+    def _r(self, cid, score, created_at):
+        return SearchResult(
+            chunk_id=cid, content="c", score=score,
+            source_type="conversation", source_id=str(cid),
+            created_at=created_at,
+        )
+
+    def test_half_life_zero_is_noop(self):
+        results = [self._r(1, 0.5, "2024-01-01"), self._r(2, 0.4, "2026-06-04")]
+        out = _apply_recency_decay(list(results), half_life_days=0, now="2026-06-04")
+        # Order unchanged, scores untouched.
+        assert [r.chunk_id for r in out] == [1, 2]
+        assert out[0].score == 0.5
+
+    def test_older_chunk_penalized_more(self):
+        now = "2026-06-04"
+        old = (datetime.fromisoformat(now) - timedelta(days=365)).date().isoformat()
+        results = [self._r(1, 0.5, old), self._r(2, 0.5, now)]
+        out = _apply_recency_decay(results, half_life_days=180, now=now)
+        assert out[0].chunk_id == 2  # equal raw score → newer wins
+
+    def test_order_flips_when_ancient_chunk_scores_higher(self):
+        now = "2026-06-04"
+        ancient = (datetime.fromisoformat(now) - timedelta(days=730)).date().isoformat()
+        results = [self._r(1, 0.55, ancient), self._r(2, 0.50, now)]
+        out = _apply_recency_decay(results, half_life_days=180, now=now)
+        assert out[0].chunk_id == 2  # decay overcomes the small raw-score edge
+
+    def test_half_life_halves_score(self):
+        now = "2026-06-04"
+        old = (datetime.fromisoformat(now) - timedelta(days=180)).date().isoformat()
+        out = _apply_recency_decay([self._r(1, 1.0, old)], half_life_days=180, now=now)
+        assert out[0].score == pytest.approx(0.5, abs=1e-6)
+
+    def test_missing_created_at_no_penalty(self):
+        out = _apply_recency_decay([self._r(1, 1.0, "")], half_life_days=180, now="2026-06-04")
+        assert out[0].score == pytest.approx(1.0)
+
+    def test_future_created_at_no_boost(self):
+        """A clock-skewed future timestamp must not inflate score above raw."""
+        out = _apply_recency_decay([self._r(1, 1.0, "2099-01-01")], half_life_days=180, now="2026-06-04")
+        assert out[0].score == pytest.approx(1.0)
+
+
+class TestSearchRecencyDecay:
+    def test_decay_reorders_search_results(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        old = _insert_chunk_with_age(
+            conn, "alice", "conversation", "t_old",
+            "traveling with cats on the flight to warsaw", age_days=300,
+        )
+        new = _insert_chunk_with_age(
+            conn, "alice", "conversation", "t_new",
+            "cats flight question for next week", age_days=2,
+        )
+        now = datetime.now(timezone.utc).date().isoformat()
+        res = search(conn, "alice", "cats flight", recency_half_life_days=30, now=now)
+        assert res, "expected BM25 matches"
+        assert res[0].source_id == "t_new"  # recent dominates after decay
+
+    def test_default_no_decay_preserves_behavior(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunk_with_age(conn, "alice", "conversation", "t1", "cats flight one", age_days=300)
+        _insert_chunk_with_age(conn, "alice", "conversation", "t2", "cats flight two", age_days=2)
+        # No recency_half_life_days passed → no decay; both returned.
+        res = search(conn, "alice", "cats flight")
+        assert {r.source_id for r in res} == {"t1", "t2"}
+
+
+class TestEpisodeWindowFiltering:
+    """ISSUE-109 #2 — a chunk whose episode window has closed is suppressed on
+    the retrieval path (and therefore the always-loaded recall path too)."""
+
+    def test_expired_chunk_excluded(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunks(
+            conn, "alice", "memory_file", "f_move",
+            ["cat transport logistics during the warsaw move"],
+            valid_until="2026-01-01",
+        )
+        _insert_chunks(
+            conn, "alice", "memory_file", "f_vet",
+            ["cat vet appointment notes"],
+        )
+        res = search(conn, "alice", "cat", now="2026-06-04")
+        contents = " ".join(r.content for r in res)
+        assert "vet" in contents
+        assert "transport" not in contents
+
+    def test_include_expired_returns_closed_windows(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunks(
+            conn, "alice", "memory_file", "f_move",
+            ["cat transport logistics during the warsaw move"],
+            valid_until="2026-01-01",
+        )
+        res = search(conn, "alice", "cat", now="2026-06-04", include_expired=True)
+        assert any("transport" in r.content for r in res)
+
+    def test_future_window_kept(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunks(
+            conn, "alice", "memory_file", "f_trip",
+            ["cat sitter booked for the upcoming trip"],
+            valid_until="2026-12-31",
+        )
+        res = search(conn, "alice", "cat", now="2026-06-04")
+        assert any("sitter" in r.content for r in res)
+
+    def test_null_window_always_kept(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunks(conn, "alice", "memory_file", "f", ["cat allergy is lifelong"])
+        res = search(conn, "alice", "cat", now="2026-06-04")
+        assert any("allergy" in r.content for r in res)
+
+
+class TestInsertChunksWindows:
+    def test_scalar_window_persisted(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunks(
+            conn, "alice", "memory_file", "f", ["a chunk"],
+            valid_from="2026-01-01", valid_until="2026-03-01",
+        )
+        row = conn.execute(
+            "SELECT valid_from, valid_until FROM memory_chunks WHERE source_id = 'f'"
+        ).fetchone()
+        assert row["valid_from"] == "2026-01-01"
+        assert row["valid_until"] == "2026-03-01"
+
+    def test_per_chunk_valid_until_overrides_scalar(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        _insert_chunks(
+            conn, "alice", "memory_file", "f", ["first", "second"],
+            valid_from="2026-01-01",
+            valid_until_per_chunk=["2026-02-01", None],
+        )
+        rows = conn.execute(
+            "SELECT content, valid_from, valid_until FROM memory_chunks "
+            "WHERE source_id = 'f' ORDER BY chunk_index"
+        ).fetchall()
+        assert rows[0]["content"] == "first"
+        assert rows[0]["valid_from"] == "2026-01-01"
+        assert rows[0]["valid_until"] == "2026-02-01"
+        assert rows[1]["valid_until"] is None
+
+
+class TestMemoryChunkWindowMigration:
+    def test_run_migrations_adds_window_columns(self, tmp_path):
+        from istota import db
+        conn = sqlite3.connect(str(tmp_path / "old.db"))
+        # Old-schema memory_chunks lacking the window columns.
+        conn.execute(
+            "CREATE TABLE memory_chunks ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, source_type TEXT, "
+            "source_id TEXT, chunk_index INTEGER, content TEXT, content_hash TEXT, "
+            "metadata_json TEXT, created_at TEXT)"
+        )
+        db._run_migrations(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(memory_chunks)")}
+        assert {"valid_from", "valid_until"} <= cols

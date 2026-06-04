@@ -227,6 +227,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     for col, col_type in [
         ("topic", "TEXT"),
         ("entities", "TEXT"),
+        # ISSUE-109 #2 — episode window for retrieval-time suppression of
+        # closed episodic memories.
+        ("valid_from", "TEXT"),
+        ("valid_until", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE memory_chunks ADD COLUMN {col} {col_type}")

@@ -254,6 +254,9 @@ class MemorySearchConfig:
     auto_index_memory_files: bool = True
     auto_recall: bool = False  # BM25 search using task prompt as query
     auto_recall_limit: int = 5  # max results for auto-recall
+    # ISSUE-109 #1 — half-life (days) for recency decay applied to recall
+    # results so a dense old cluster can't dominate on mass. 0 = no decay.
+    recency_half_life_days: float = 180.0
 
 
 @dataclass

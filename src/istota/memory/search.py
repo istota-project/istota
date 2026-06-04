@@ -10,6 +10,7 @@ import re
 import sqlite3
 import struct
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 logger = logging.getLogger("istota.memory_search")
@@ -42,6 +43,7 @@ class SearchResult:
     metadata: dict = field(default_factory=dict)
     bm25_rank: int | None = None
     vec_rank: int | None = None
+    created_at: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +220,9 @@ def _insert_chunks(
     topic: str | None = None,
     entities: list[str] | None = None,
     topic_per_chunk: list[str | None] | None = None,
+    valid_from: str | None = None,
+    valid_until: str | None = None,
+    valid_until_per_chunk: list[str | None] | None = None,
 ) -> int:
     """Insert chunks with embeddings. Returns number of chunks inserted.
 
@@ -225,12 +230,22 @@ def _insert_chunks(
     must have the same length as `chunks`. Entries may be None for chunks
     whose topic could not be determined; NULL-topic chunks are still
     returned in topic-filtered searches by design.
+
+    `valid_from`/`valid_until` set an episode window on every chunk (ISSUE-109
+    #2); a chunk whose `valid_until` has passed is suppressed from recall.
+    `valid_until_per_chunk`, when provided, overrides the scalar `valid_until`
+    per-chunk (same length contract as `topic_per_chunk`); `valid_from` stays
+    scalar.
     """
     if not chunks:
         return 0
     if topic_per_chunk is not None and len(topic_per_chunk) != len(chunks):
         raise ValueError(
             f"topic_per_chunk length {len(topic_per_chunk)} != chunks length {len(chunks)}"
+        )
+    if valid_until_per_chunk is not None and len(valid_until_per_chunk) != len(chunks):
+        raise ValueError(
+            f"valid_until_per_chunk length {len(valid_until_per_chunk)} != chunks length {len(chunks)}"
         )
 
     metadata_json = json.dumps(metadata) if metadata else None
@@ -246,13 +261,18 @@ def _insert_chunks(
     for i, chunk in enumerate(chunks):
         ch = _content_hash(chunk)
         chunk_topic = topic_per_chunk[i] if topic_per_chunk is not None else topic
+        chunk_valid_until = (
+            valid_until_per_chunk[i] if valid_until_per_chunk is not None else valid_until
+        )
         try:
             cursor = conn.execute(
                 "INSERT INTO memory_chunks "
-                "(user_id, source_type, source_id, chunk_index, content, content_hash, metadata_json, topic, entities) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "(user_id, source_type, source_id, chunk_index, content, content_hash, "
+                "metadata_json, topic, entities, valid_from, valid_until) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(user_id, content_hash) DO NOTHING",
-                (user_id, source_type, source_id, i, chunk, ch, metadata_json, chunk_topic, entities_json),
+                (user_id, source_type, source_id, i, chunk, ch, metadata_json,
+                 chunk_topic, entities_json, valid_from, chunk_valid_until),
             )
             if cursor.rowcount > 0:
                 inserted += 1
@@ -382,10 +402,14 @@ def index_conversation(
     metadata: dict | None = None,
     topic: str | None = None,
     entities: list[str] | None = None,
+    valid_until: str | None = None,
 ) -> int:
     """Index a conversation (prompt + result) into memory chunks.
 
     Returns number of chunks inserted.
+
+    `valid_until` sets an episode window on the conversation's chunks
+    (ISSUE-109 #2) — pass it when the exchange is about a time-boxed episode.
     """
     source_id = str(task_id)
 
@@ -401,7 +425,7 @@ def index_conversation(
     meta = metadata or {}
     meta["task_id"] = source_id
     return _insert_chunks(conn, user_id, "conversation", source_id, chunks, meta,
-                          topic=topic, entities=entities)
+                          topic=topic, entities=entities, valid_until=valid_until)
 
 
 def index_file(
@@ -413,6 +437,7 @@ def index_file(
     topic: str | None = None,
     entities: list[str] | None = None,
     topic_per_chunk: list[str | None] | None = None,
+    valid_until_per_chunk: list[str | None] | None = None,
 ) -> int:
     """Index a file's content, replacing any existing chunks for that source.
 
@@ -423,6 +448,11 @@ def index_file(
     that build per-chunk topics should chunk first, then pass the resulting
     aligned list. Used by the sleep cycle to attach per-task topics derived
     from `ref:N` markers to their containing chunks.
+
+    `valid_until_per_chunk` (same length contract) sets a per-chunk episode
+    window (ISSUE-109 #2) so a chunk whose episode has closed self-suppresses
+    from recall. Used by the sleep cycle to propagate episodic facts' close
+    dates to the bullets they were extracted from.
     """
     # Delete existing chunks for this source
     _delete_source_chunks(conn, user_id, source_type, file_path)
@@ -432,6 +462,7 @@ def index_file(
     return _insert_chunks(
         conn, user_id, source_type, file_path, chunks, meta,
         topic=topic, entities=entities, topic_per_chunk=topic_per_chunk,
+        valid_until_per_chunk=valid_until_per_chunk,
     )
 
 
@@ -576,6 +607,8 @@ def _search_bm25(
     since: str | None = None,
     topics: list[str] | None = None,
     entities: list[str] | None = None,
+    now: str | None = None,
+    include_expired: bool = False,
 ) -> list[SearchResult]:
     """Full-text BM25 search via FTS5."""
     escaped = _escape_fts5_query(query)
@@ -584,7 +617,7 @@ def _search_bm25(
 
     sql = (
         "SELECT mc.id, mc.content, mc.source_type, mc.source_id, mc.metadata_json, "
-        "rank AS score "
+        "rank AS score, mc.created_at "
         "FROM memory_chunks_fts fts "
         "JOIN memory_chunks mc ON mc.id = fts.rowid "
         f"WHERE fts.content MATCH ? AND {user_filter}"
@@ -599,6 +632,10 @@ def _search_bm25(
     if since:
         sql += " AND mc.created_at >= ?"
         params.append(since)
+
+    if not include_expired:
+        sql += " AND (mc.valid_until IS NULL OR mc.valid_until > ?)"
+        params.append(now or date.today().isoformat())
 
     if topics:
         placeholders = ",".join("?" for _ in topics)
@@ -627,6 +664,7 @@ def _search_bm25(
                 source_type=row[2],
                 source_id=row[3],
                 metadata=meta,
+                created_at=row[6] or "",
             ))
     except Exception as e:
         logger.debug("BM25 search failed: %s", e)
@@ -647,6 +685,8 @@ def _search_vec(
     since: str | None = None,
     topics: list[str] | None = None,
     entities: list[str] | None = None,
+    now: str | None = None,
+    include_expired: bool = False,
 ) -> list[SearchResult]:
     """Vector similarity search via sqlite-vec with adaptive k.
 
@@ -667,13 +707,14 @@ def _search_vec(
 
     user_filter, user_params = _build_user_filter(user_id, include_user_ids)
 
-    has_post_filter = bool(source_types or since or topics or entities)
+    has_post_filter = bool(source_types or since or topics or entities or not include_expired)
     # Post-filter narrows the pool — start wider so the first pass has room.
     base_multiplier = 10 if has_post_filter else 5
     k = max(limit * base_multiplier, 10)
 
     base_sql = (
-        "SELECT v.chunk_id, v.distance, mc.content, mc.source_type, mc.source_id, mc.metadata_json "
+        "SELECT v.chunk_id, v.distance, mc.content, mc.source_type, mc.source_id, "
+        "mc.metadata_json, mc.created_at "
         "FROM memory_chunks_vec v "
         "JOIN memory_chunks mc ON mc.id = v.chunk_id "
         f"WHERE v.embedding MATCH ? AND k = ? "
@@ -690,6 +731,10 @@ def _search_vec(
     if since:
         filter_sql += " AND mc.created_at >= ?"
         filter_params.append(since)
+
+    if not include_expired:
+        filter_sql += " AND (mc.valid_until IS NULL OR mc.valid_until > ?)"
+        filter_params.append(now or date.today().isoformat())
 
     if topics:
         placeholders = ",".join("?" for _ in topics)
@@ -729,6 +774,7 @@ def _search_vec(
                     source_type=row[3],
                     source_id=row[4],
                     metadata=meta,
+                    created_at=row[6] or "",
                 ))
         except Exception as e:
             logger.debug("Vector search failed: %s", e)
@@ -745,6 +791,48 @@ def _search_vec(
         k *= 2
 
     return results[:limit]
+
+
+def _parse_day(value: str | None) -> date | None:
+    """Parse the date prefix of a timestamp string (``YYYY-MM-DD...``).
+
+    Tolerates the space- and ``T``-separated forms and bare dates; returns
+    None for empty/malformed input so callers can no-op gracefully.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _apply_recency_decay(
+    results: list[SearchResult],
+    half_life_days: float,
+    now: str | None = None,
+) -> list[SearchResult]:
+    """Down-weight results by chunk age and re-sort (ISSUE-109 #1).
+
+    Each score is multiplied by ``0.5 ** (age_days / half_life_days)`` so a
+    chunk one half-life old counts for half its raw relevance. This counters
+    the "frequency != relevance" gravity well where a dense old cluster
+    outranks current context on sheer mass. ``half_life_days <= 0`` is a no-op.
+    Chunks with a missing/malformed or future timestamp get no penalty.
+    """
+    if half_life_days <= 0:
+        return results
+    now_date = _parse_day(now) or date.today()
+    for r in results:
+        chunk_date = _parse_day(r.created_at)
+        if chunk_date is None:
+            continue
+        age_days = (now_date - chunk_date).days
+        if age_days <= 0:
+            continue
+        r.score *= 0.5 ** (age_days / half_life_days)
+    results.sort(key=lambda r: r.score, reverse=True)
+    return results
 
 
 def _rrf_fusion(
@@ -795,6 +883,9 @@ def search(
     topics: list[str] | None = None,
     entities: list[str] | None = None,
     exclude_conversation_task_ids: set[int] | None = None,
+    recency_half_life_days: float = 0.0,
+    now: str | None = None,
+    include_expired: bool = False,
 ) -> list[SearchResult]:
     """Hybrid search: BM25 + vector with RRF fusion.
 
@@ -811,23 +902,40 @@ def search(
             one of these are dropped from the results so recall doesn't duplicate
             the context selection. source_id is stored as a string; ints are
             cast to str for comparison.
+        recency_half_life_days: When > 0, multiply fused scores by a time-decay
+            factor (ISSUE-109 #1) so old dense clusters can't dominate on mass.
+            0 (default) = no decay; callers opt in (the recall path passes the
+            configured value).
+        now: Reference date (``YYYY-MM-DD``) for episode-window suppression and
+            recency decay; defaults to today. Injectable for tests.
+        include_expired: When True, skip the episode-window filter and return
+            chunks whose ``valid_until`` has passed (ISSUE-109 #2). Default False.
     """
     # Fetch more from each source for fusion
     fetch_limit = limit * 3
 
     bm25_results = _search_bm25(conn, user_id, query, fetch_limit, source_types,
-                                 include_user_ids, since=since, topics=topics, entities=entities)
+                                 include_user_ids, since=since, topics=topics, entities=entities,
+                                 now=now, include_expired=include_expired)
     vec_results = _search_vec(conn, user_id, query, fetch_limit, source_types,
-                               include_user_ids, since=since, topics=topics, entities=entities)
+                               include_user_ids, since=since, topics=topics, entities=entities,
+                               now=now, include_expired=include_expired)
 
     if vec_results:
         fused = _rrf_fusion(bm25_results, vec_results, k=rrf_k)
         results = fused
     else:
-        # BM25-only fallback
+        # BM25-only fallback. Convert the raw FTS5 `rank` (negative, lower =
+        # better) into a positive rank-based score (higher = better) so `score`
+        # semantics match the RRF path — required for recency decay to compose
+        # correctly rather than invert the order.
         for rank, r in enumerate(bm25_results, 1):
             r.bm25_rank = rank
+            r.score = 1.0 / (rrf_k + rank)
         results = bm25_results
+
+    if recency_half_life_days and recency_half_life_days > 0:
+        results = _apply_recency_decay(results, recency_half_life_days, now=now)
 
     if exclude_conversation_task_ids:
         excluded = {str(tid) for tid in exclude_conversation_task_ids}

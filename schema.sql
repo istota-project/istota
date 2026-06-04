@@ -303,6 +303,8 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     metadata_json TEXT,
     topic TEXT,                       -- coarse classifier: work, tech, personal, finance, admin, learning, meta
     entities TEXT,                    -- JSON array of entity names (lowercase)
+    valid_from TEXT,                  -- episode window open (ISSUE-109 #2); NULL = standing
+    valid_until TEXT,                 -- episode window close; chunk suppressed from recall once passed
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, content_hash)
 );
@@ -310,6 +312,7 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_user ON memory_chunks(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_source ON memory_chunks(user_id, source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_topic ON memory_chunks(user_id, topic);
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_valid_until ON memory_chunks(user_id, valid_until) WHERE valid_until IS NOT NULL;
 
 -- Per-user skills version fingerprint (for "what's new" detection)
 CREATE TABLE IF NOT EXISTS user_skills_fingerprint (
