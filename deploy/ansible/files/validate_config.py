@@ -52,8 +52,11 @@ def main() -> int:
         return 1
 
     # Allowlist for the [brain] table. Update when BrainConfig grows
-    # legitimate fields (see .claude/rules/brain.md).
-    brain_allowlist = {"kind"}
+    # legitimate fields (see .claude/rules/brain.md). "native" and
+    # "source_type_overrides" are legitimate sub-tables ([brain.native],
+    # [brain.source_type_overrides]); without them the native-brain config
+    # would trip the leaked-keys guard.
+    brain_allowlist = {"kind", "native", "source_type_overrides"}
     brain = raw.get("brain", {})
     leaked = sorted(k for k in brain if k not in brain_allowlist)
     if leaked:
