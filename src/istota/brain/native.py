@@ -224,7 +224,7 @@ class NativeBrain:
                 desc = _describe_tool_use(event.tool_name, event.args)
                 trace.append({"type": "tool", "text": desc})
                 actions.append(desc)
-                self._progress(req, _tool_use_event(event.tool_name, desc))
+                await self._emit_progress(req, _tool_use_event(event.tool_name, desc))
             elif event.type == "turn_end":
                 msg = event.message
                 if isinstance(msg, AssistantMessage):
@@ -240,7 +240,7 @@ class NativeBrain:
                     if text:
                         trace.append({"type": "text", "text": text})
                         last_assistant_text = msg.text
-                        self._progress(req, _text_event(msg.text))
+                        await self._emit_progress(req, _text_event(msg.text))
 
         # --- compaction via prepare_next_turn -----------------------------
         compaction_state = {"summary": None, "details": None}
@@ -480,12 +480,26 @@ class NativeBrain:
         )
 
     @staticmethod
-    def _progress(req: BrainRequest, event) -> None:
-        if req.on_progress is not None and event is not None:
-            try:
-                req.on_progress(event)
-            except Exception:  # noqa: BLE001 — progress is best-effort
-                logger.debug("on_progress callback raised", exc_info=True)
+    async def _emit_progress(req: BrainRequest, event) -> None:
+        """Invoke the sync ``on_progress`` callback off the event loop.
+
+        The scheduler's progress callback edits the Talk message by calling
+        ``asyncio.run()``. ``emit`` runs inside this brain's own
+        ``asyncio.run`` loop, so calling the callback directly would invoke
+        ``asyncio.run()`` from a running loop → ``RuntimeError``, silently
+        dropping every in-progress update (ISSUE-111). Running it in a
+        default-executor thread gives the callback a thread with no running
+        loop, so its ``asyncio.run`` works. We ``await`` it so progress edits
+        stay ordered with the events that produced them — matching
+        ClaudeCodeBrain, which blocks its stream-parse loop on each edit.
+        """
+        if req.on_progress is None or event is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, req.on_progress, event)
+        except Exception:  # noqa: BLE001 — progress is best-effort
+            logger.debug("on_progress callback raised", exc_info=True)
 
 
 def _tool_use_event(tool_name: str, description: str):

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Native brain now streams in-progress updates to Nextcloud Talk again** (ISSUE-111). The native brain runs its agent loop inside its own event loop, but the Talk progress callback edits messages with `asyncio.run()`, which raises when called from a running loop — so every tool-call and partial-text update was silently dropped and the chat sat blank until the final reply. The brain now dispatches the progress callback on a worker thread, restoring the live action trail. Cancellation stays responsive.
+
 ## [0.15.0] - 2026-06-05
 
 ### Added
