@@ -38,6 +38,9 @@ class TestRequestBuilding:
         assert body["model"] == "m"
         assert body["max_tokens"] == 100
         assert body["stream"] is True
+        # Without this, streaming responses carry no usage chunk and the native
+        # brain's cost telemetry stays zero (verified against LM Studio).
+        assert body["stream_options"] == {"include_usage": True}
 
     def test_user_message_text_converted(self):
         body = _provider()._build_chat_completion_request(

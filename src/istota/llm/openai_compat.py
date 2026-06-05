@@ -107,6 +107,10 @@ class OpenAICompatibleProvider:
             "messages": wire,
             "max_tokens": max_tokens,
             "stream": True,
+            # Ask the server for a trailing usage chunk; without this OpenAI-
+            # compatible endpoints (OpenAI, LM Studio, vLLM, OpenRouter) report
+            # no token usage in streaming mode and cost telemetry stays zero.
+            "stream_options": {"include_usage": True},
         }
         if tools:
             body["tools"] = [self._tool_to_wire(t) for t in tools]
