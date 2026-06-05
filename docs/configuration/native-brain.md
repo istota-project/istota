@@ -36,6 +36,47 @@ ISTOTA_BRAIN_NATIVE_API_KEY=sk-...
 - `openai_compat` needs an **explicit** model id (e.g. `claude-sonnet-4-6`). It does not understand role aliases (`smart`) or Claude-CLI short names (`opus`).
 - `claude_code` (both the default brain and `provider = "claude_code"` under native) keeps Claude Code's aliasing — `opus` resolves to the latest Opus.
 
+## Ansible deployment
+
+The role renders the `[brain]` block from inventory variables. The `[brain.native]` and `[brain.source_type_overrides]` tables are only written when `istota_brain_kind` is `native` or `istota_brain_source_type_overrides` is non-empty, so existing deployments stay byte-identical until you opt in. After templating, `files/validate_config.py` parses the rendered config and gates the scheduler restart, so a malformed brain block fails the play instead of the running daemon.
+
+Instance-wide native brain:
+
+```yaml
+istota_brain_kind: "native"
+istota_brain_native_provider: "openai_compat"
+istota_brain_native_model: "claude-sonnet-4-6"
+istota_brain_native_base_url: "https://api.anthropic.com/v1"
+istota_brain_native_prompt_caching: true          # Anthropic/OpenRouter only
+istota_brain_native_api_key: "{{ vault_native_api_key }}"   # → ISTOTA_BRAIN_NATIVE_API_KEY
+```
+
+Gradual rollout (keep the default brain, move background work to native):
+
+```yaml
+istota_brain_kind: "claude_code"
+istota_brain_native_model: "claude-sonnet-4-6"
+istota_brain_native_api_key: "{{ vault_native_api_key }}"
+istota_brain_source_type_overrides:
+  scheduled: native
+  heartbeat: native
+```
+
+The full variable set (all defaulted to the code defaults) is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,base_url,claude_binary,extra_headers,context_window,max_turns,max_tokens,prompt_caching,api_key}` and `istota_brain_source_type_overrides`.
+
+Key handling:
+
+- `istota_brain_native_api_key` is **never** written to `config.toml`. With `istota_use_environment_file: true` (the default) it's rendered into the systemd `EnvironmentFile` as `ISTOTA_BRAIN_NATIVE_API_KEY`; vault it.
+- **Per-user keys** go through the existing `istota_user_secrets` mechanism (the `native_brain` service is in the connected-service schema), and overlay the instance key for that user's tasks:
+
+  ```yaml
+  istota_user_secrets:
+    alice:
+      - { service: native_brain, key: api_key, value: "{{ vault_alice_native_key }}" }
+  ```
+
+- `istota_brain_native_extra_headers` is rendered as a `[brain.native.extra_headers]` sub-table (a TOML inline table would be mis-emitted by the JSON filter), so header names with dots or dashes (`anthropic-beta`) are safe.
+
 ## Gradual rollout: per-source-type routing
 
 Rather than flipping the whole instance at once, route specific task types to the native brain while everything else stays on `claude_code`. This is the recommended rollout path: move low-risk background work first, keep interactive talk/email on the proven backend, watch for regressions, then widen.
@@ -118,7 +159,8 @@ It diffs result text (similarity + unified diff), tool-call sequence, and native
 - **Per-user API keys.** Beyond the instance-wide `[brain.native] api_key` / `ISTOTA_BRAIN_NATIVE_API_KEY`, each user can have their own provider key in the encrypted secrets table: `istota secret ensure -u <user> -s native_brain -k api_key -v <key>` (or the web settings). The per-user key overlays the instance key for that user's tasks (execution and Pass-2 routing).
 - **Prompt caching.** `[brain.native] prompt_caching` (default off) adds `cache_control` breakpoints on the system message and the first user message (the stable composed-prompt prefix). Enable it **only** for endpoints that honor the field — Anthropic and OpenRouter. Leave it off for plain-OpenAI, LM Studio, Ollama, or vLLM, which may not understand the extension.
 - **Model ids.** `openai_compat` needs explicit ids and does not translate Anthropic aliases — `opus` is sent verbatim, not turned into `claude-opus-4-8` (that mapping only applies to the `claude_code` provider). Map role names per deployment with `[models.roles]` if you want `fast`/`general`/`smart` under native.
-- **Cancellation / `!stop`.** Works on both brains. The native brain bridges the scheduler's cancel poll into an `asyncio.Event` threaded through the loop, tools, and retry backoff.
+- **Cancellation / `!stop`.** Works on both brains. The native brain bridges the scheduler's cancel poll into an `asyncio.Event` threaded through the loop, tools, and retry backoff. A failing cancel poll (e.g. transient SQLite lock) is tolerated rather than silently disabling `!stop`.
+- **Task timeout.** The native loop runs under a wall-clock deadline of `scheduler.task_timeout_minutes` (`istota_scheduler_task_timeout_minutes`, default 30). On expiry it signals abort (killing any in-flight bash subprocess at the next poll), waits a short grace, then hard-cancels, and returns `stop_reason="timeout"`. This matches `claude_code` and prevents a runaway loop from outliving the scheduler's stuck-task reclaim (which would otherwise double-execute the task). `max_turns` is a second, coarser backstop.
 - **Context management.** The native brain owns compaction (runs in `prepare_next_turn`, file-operation aware across cycles). `claude_code` delegates it to Claude Code. The two are independent.
 - **Sandboxing.** `claude_code` runs the whole subprocess inside bwrap. The native brain runs the loop in-process and sandboxes each tool execution per-call (the loop itself never runs user-controlled code). Validate the per-tool sandbox on Linux, not on the Mac.
 - **Pass-2 skill routing.** Semantic skill routing (`[skills] semantic_routing`) runs its classification through the active brain — under native it uses the configured `[brain.native]` provider and **its own model** (role aliases like `fast` are claude_code-namespace only and aren't sent to a non-Anthropic endpoint). Two knobs matter for a slow or reasoning-heavy local model: raise `[skills] semantic_routing_timeout` (default 3 s is tight for a local model), and note that reasoning models emit `reasoning_content` before any answer — the classifier already gives them generous output headroom, but an empty result logs `pass2_no_result` and falls back to Pass-1-only selection. To skip the cost entirely, set `semantic_routing = false`.
