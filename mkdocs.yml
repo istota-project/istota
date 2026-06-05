@@ -82,6 +82,7 @@ nav:
     - configuration/reference.md
     - configuration/per-user.md
     - configuration/persona.md
+    - configuration/native-brain.md
   - Deployment:
     - deployment/ansible.md
     - deployment/docker.md

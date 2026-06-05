@@ -101,10 +101,20 @@ Both are re-exported from `executor` for `scheduler.py` and tests; canonical hom
 
 ```toml
 [brain]
-kind = "claude_code"  # only Phase 1 option
+kind = "claude_code"  # "claude_code" | "native"
+
+[brain.native]         # only when kind = "native" (or routed-to)
+provider = "openai_compat"
+model = "claude-sonnet-4-6"
+base_url = "https://api.anthropic.com/v1"
+# api_key via ISTOTA_BRAIN_NATIVE_API_KEY (kept out of TOML)
+
+[brain.source_type_overrides]   # per-source-type routing (gradual rollout)
+scheduled = "native"
+heartbeat = "native"
 ```
 
-Defaults to `"claude_code"`, so existing deployments need no changes. Future phases will add nested per-brain blocks (`[brain.openrouter]`, etc.) with their own dataclasses.
+Defaults to `"claude_code"`, so existing deployments need no changes. `source_type_overrides` maps a task's `source_type` to a brain kind, overriding `kind` for matching tasks — the gradual-rollout knob (`brain.resolve_brain_kind` resolves it per task; unknown kinds are logged and ignored). The second brain kind is `"native"` — istota's own in-process agent loop. See the [native brain operator runbook](../configuration/native-brain.md) for enabling it, the dev tiers, and shadow compare.
 
 ## Adding a new brain
 
