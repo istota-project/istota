@@ -1,0 +1,92 @@
+"""Istota LLM provider abstraction (Layer 1 of the native brain).
+
+Provider-agnostic inference. The standard interface is the OpenAI-compatible
+chat completions API (``OpenAICompatibleProvider``), which works against
+Anthropic, OpenRouter, and any local OpenAI-compatible endpoint. A second
+provider (``ClaudeCodeInferenceProvider``) drives the ``claude`` CLI in bare
+inference-only mode.
+
+This layer knows nothing about tools dispatch or agent loops — it converts
+istota's ``Message`` types to/from a provider's wire format and yields
+``StreamEvent``s. Providers never raise for model/API failures; they encode
+failures as ``StreamError`` events (Pi's contract) so the loop handles errors
+uniformly.
+"""
+
+from .provider import (
+    LLMProvider,
+    StreamDone,
+    StreamError,
+    StreamEvent,
+    StreamStart,
+    TextDelta,
+    ToolCallDelta,
+)
+from .types import (
+    AssistantMessage,
+    Content,
+    ImageContent,
+    Message,
+    TextContent,
+    ThinkingContent,
+    ToolCallContent,
+    ToolParameter,
+    ToolResultMessage,
+    ToolSchema,
+    Usage,
+    UserMessage,
+)
+
+__all__ = [
+    "AssistantMessage",
+    "Content",
+    "ImageContent",
+    "LLMProvider",
+    "Message",
+    "StreamDone",
+    "StreamError",
+    "StreamEvent",
+    "StreamStart",
+    "TextContent",
+    "TextDelta",
+    "ThinkingContent",
+    "ToolCallContent",
+    "ToolCallDelta",
+    "ToolParameter",
+    "ToolResultMessage",
+    "ToolSchema",
+    "Usage",
+    "UserMessage",
+    "make_provider",
+]
+
+
+def make_provider(config):
+    """Construct an ``LLMProvider`` from a native-brain config object.
+
+    ``config`` is duck-typed: it needs a ``provider`` attribute selecting the
+    backend plus the fields that backend reads. This keeps Layer 1 decoupled
+    from ``config.NativeBrainConfig`` (added in Phase 3) — tests pass a simple
+    namespace and the real config slots in unchanged.
+
+    Supported ``provider`` values:
+    - ``"openai_compat"`` → ``OpenAICompatibleProvider`` (api_key, base_url,
+      extra_headers)
+    - ``"claude_code"`` → ``ClaudeCodeInferenceProvider`` (model, claude_binary)
+    """
+    from .claude_code_inference import ClaudeCodeInferenceProvider
+    from .openai_compat import OpenAICompatibleProvider
+
+    kind = getattr(config, "provider", "openai_compat")
+    if kind == "openai_compat":
+        return OpenAICompatibleProvider(
+            api_key=getattr(config, "api_key", ""),
+            base_url=getattr(config, "base_url", "https://api.anthropic.com/v1"),
+            extra_headers=getattr(config, "extra_headers", None),
+        )
+    if kind == "claude_code":
+        return ClaudeCodeInferenceProvider(
+            model=getattr(config, "model", ""),
+            claude_binary=getattr(config, "claude_binary", "claude"),
+        )
+    raise ValueError(f"Unknown provider: {kind!r}")

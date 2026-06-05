@@ -117,8 +117,9 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
     "integration: tests requiring external services (deselected by default)",
+    "live: native-brain tests hitting a real LLM API (needs a key; deselected by default)",
 ]
-addopts = "-m 'not integration' -n auto"
+addopts = "-m 'not integration and not live' -n auto"
 asyncio_mode = "auto"
 
 [tool.uv.sources]
