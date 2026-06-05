@@ -368,9 +368,9 @@
 	}
 	.header {
 		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 1rem;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 0.6rem;
 	}
 	.back {
 		font-size: var(--text-xs);
@@ -438,15 +438,18 @@
 		border-radius: var(--radius-pill);
 	}
 	.badge.draft { background: #3a3017; color: #e6b96b; }
-	.actions { display: flex; gap: 0.5rem; }
+	/* Buttons sit under the header (not pinned to the right) at the compact
+	   size used by the main bloodwork header on mobile. */
+	.actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
 	.btn {
-		padding: 0.35rem 0.75rem;
+		padding: 0.2rem 0.5rem;
 		background: var(--surface-card);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-pill);
 		color: var(--text-primary);
 		font: inherit;
-		font-size: var(--text-sm);
+		font-size: var(--text-xs);
+		white-space: nowrap;
 		cursor: pointer;
 	}
 	.btn:hover:not(:disabled) { background: var(--surface-raised); }
