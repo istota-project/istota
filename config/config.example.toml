@@ -255,6 +255,12 @@ confirmation_timeout_minutes = 120
 stale_pending_warn_minutes = 30
 # Auto-fail tasks pending longer than N hours (default: 24 = 1 day)
 stale_pending_fail_hours = 24
+# How often a running worker pings liveness, in seconds (default: 60; 0 disables).
+# Reclaim uses this heartbeat to tell a slow-but-alive worker from a dead one.
+worker_heartbeat_seconds = 60
+# Reclaim a heartbeating worker's task after this many minutes of heartbeat
+# silence (default: 5). Independent of task_timeout_minutes.
+worker_stuck_minutes = 5
 # Delete completed/failed/cancelled tasks older than N days (default: 7)
 task_retention_days = 7
 # Delete emails older than N days from IMAP inbox (default: 7, 0 to disable)

@@ -191,6 +191,8 @@ istota_scheduler_confirmation_timeout_minutes: 120  # Auto-cancel pending confir
 istota_scheduler_stale_pending_warn_minutes: 30     # Log warnings for stale tasks
 istota_scheduler_stale_pending_fail_hours: 2        # Auto-fail ancient pending tasks
 istota_scheduler_max_retry_age_minutes: 60           # Don't retry stuck tasks older than this
+istota_scheduler_worker_heartbeat_seconds: 60        # Running worker pings liveness this often (0 disables)
+istota_scheduler_worker_stuck_minutes: 5             # Reclaim a heartbeating worker's task after this much silence
 istota_scheduler_task_retention_days: 7             # Delete old completed tasks
 istota_scheduler_email_retention_days: 7            # Delete old emails from IMAP (0 to disable)
 istota_scheduler_worker_idle_timeout: 30           # Seconds before idle worker exits

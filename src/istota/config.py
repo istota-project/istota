@@ -128,6 +128,8 @@ class SchedulerConfig:
     stale_pending_warn_minutes: int = 30  # log warning for tasks pending longer than this
     stale_pending_fail_hours: int = 2  # auto-fail tasks pending longer than this
     max_retry_age_minutes: int = 60  # don't retry stuck tasks older than this
+    worker_heartbeat_seconds: int = 60  # running worker pings liveness this often (0 disables)
+    worker_stuck_minutes: int = 5  # reclaim a heartbeating worker's task after this much silence
     task_retention_days: int = 7  # delete completed/failed/cancelled tasks older than this
     email_retention_days: int = 7  # delete emails older than N days from IMAP, 0 to disable
     temp_file_retention_days: int = 7  # delete temp files older than N days, 0 to disable
@@ -1010,6 +1012,8 @@ def load_config(config_path: Path | None = None) -> Config:
             stale_pending_warn_minutes=sched.get("stale_pending_warn_minutes", 30),
             stale_pending_fail_hours=sched.get("stale_pending_fail_hours", 2),
             max_retry_age_minutes=sched.get("max_retry_age_minutes", 60),
+            worker_heartbeat_seconds=sched.get("worker_heartbeat_seconds", 60),
+            worker_stuck_minutes=sched.get("worker_stuck_minutes", 5),
             task_retention_days=sched.get("task_retention_days", 7),
             email_retention_days=sched.get("email_retention_days", 7),
             temp_file_retention_days=sched.get("temp_file_retention_days", 7),
