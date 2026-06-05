@@ -224,9 +224,12 @@
 						<th class="sticky-left ref-col">Range</th>
 						{#each matrix.panels as p (p.id)}
 							<th class="date-cell">
-								<a href="{base}/health/bloodwork/panel?id={p.id}" class="date-link">
+								<a
+									href="{base}/health/bloodwork/panel?id={p.id}"
+									class="date-link"
+									title={p.lab_name ?? undefined}
+								>
 									<span class="date">{formatDate(p.drawn_at)}</span>
-									{#if p.lab_name}<span class="lab">{p.lab_name}</span>{/if}
 								</a>
 							</th>
 						{/each}
@@ -253,7 +256,7 @@
 								<th class="sticky-left ref-col ref">{formatRange(mk.ref_range_low, mk.ref_range_high)}</th>
 								{#each matrix.panels as p (p.id)}
 									{@const c = cell(p.id, mk.name)}
-									<td class={flagClass(c?.flag ?? null)}>
+									<td class="data-cell {flagClass(c?.flag ?? null)}">
 										{#if c}{c.value}{/if}
 									</td>
 								{/each}
@@ -361,7 +364,12 @@
 		border-collapse: separate;
 		border-spacing: 0;
 		font-size: var(--text-xs);
-		min-width: 100%;
+		/* Natural (shrink-to-fit) width: with few panels the table stays
+		   compact and left-aligned instead of stretching date columns to
+		   fill a wide desktop viewport. Horizontal scroll kicks in once the
+		   fixed-width date columns overflow the container. */
+		width: max-content;
+		max-width: 100%;
 	}
 
 	/* Date header row — pinned to the top so dates stay visible while you
@@ -378,25 +386,27 @@
 		color: var(--text-muted);
 		white-space: nowrap;
 	}
+	/* Fixed-width date / value columns so they don't auto-expand to fill a
+	   wide viewport. Same value applied to the header th and every data td so
+	   the column width is pinned regardless of row count. */
+	.date-cell,
+	td.data-cell {
+		width: 5.5rem;
+		min-width: 5.5rem;
+		max-width: 5.5rem;
+	}
 	.date-link {
 		display: inline-flex;
-		flex-direction: column;
 		align-items: center;
-		gap: 0.05rem;
 		color: var(--text-primary);
 		text-decoration: none;
-		min-width: 4rem;
+		white-space: nowrap;
 	}
 	.date-link:hover .date {
 		text-decoration: underline;
 	}
 	.date {
 		font-weight: 500;
-	}
-	.lab {
-		font-size: 10px;
-		color: var(--text-dim);
-		white-space: nowrap;
 	}
 
 	/* Category banner row — section divider running across the markers it
