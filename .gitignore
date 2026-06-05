@@ -46,6 +46,7 @@ data/
 !src/istota/money/data/
 !src/istota/health/data/
 config/config.toml
+config/config.dev.toml
 /tmp/istota/
 .env
 .env.*

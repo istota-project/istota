@@ -1,0 +1,3 @@
+"data: {\"choices\":[{\"delta\":{\"content\":\"This repo is istota \u2014 a Claude-Code-powered assistant bot.\"}}]}"
+"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":14}}"
+"data: [DONE]"

@@ -1,0 +1,34 @@
+# Native-brain local dev config (Tier 0–3 of the agent-loop spec).
+#
+# Copy to config/config.dev.toml (gitignored) and point CLI invocations at it:
+#   uv run istota task "..." -u dev -x -c config/config.dev.toml
+#   uv run python scripts/native_repl.py -c config/config.dev.toml --provider live "..."
+#
+# The API key NEVER goes in this file. Provide it via the env override
+# (ISTOTA_BRAIN_NATIVE_API_KEY), e.g. through direnv/.env or:
+#   istota secret ensure -u dev -s anthropic -k api_key -v sk-...   (real secrets path)
+
+[brain]
+kind = "native"
+
+[brain.native]
+provider = "openai_compat"
+model = "claude-sonnet-4-6"            # explicit id (openai_compat has no aliasing)
+base_url = "https://api.anthropic.com/v1"
+max_turns = 50
+# api_key resolved from ISTOTA_BRAIN_NATIVE_API_KEY — keep it out of TOML.
+
+# Zero-cost live loop: point at a local Ollama model instead. Quality is lower
+# (small models loop / mis-call tools — useful for shaking out the loop detector
+# and JSON repair), but it validates the whole stack offline.
+# [brain.native]
+# provider = "openai_compat"
+# model = "qwen3:32b"
+# base_url = "http://localhost:11434/v1"
+
+[security]
+sandbox_enabled = false                # bwrap is Linux-only; off for mac dev
+skill_proxy_enabled = false            # simplifies the inner loop; re-enable to test isolation
+
+[users.dev]
+display_name = "Dev"
