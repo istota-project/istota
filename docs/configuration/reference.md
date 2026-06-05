@@ -127,6 +127,8 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `confirmation_timeout_minutes` | `120` | Auto-cancel confirmations after |
 | `stale_pending_warn_minutes` | `30` | Warn for long-pending tasks |
 | `stale_pending_fail_hours` | `24` | Auto-fail ancient tasks |
+| `worker_heartbeat_seconds` | `60` | How often a running worker pings liveness (0 disables). Stuck-task reclaim uses the heartbeat to tell a slow-but-alive worker from a dead one. |
+| `worker_stuck_minutes` | `5` | Reclaim a heartbeating worker's task after this much heartbeat silence. Independent of `task_timeout_minutes`. |
 | `task_retention_days` | `7` | Delete old completed tasks |
 | `email_retention_days` | `7` | Delete old IMAP emails (0 = disable) |
 | `talk_cache_max_per_conversation` | `200` | Max cached Talk messages |

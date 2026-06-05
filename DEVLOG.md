@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-05: Native brain — Talk progress streaming + stuck-task reclaim/heartbeat (ISSUE-111, ISSUE-112)
+
+Two bugs surfaced once the native brain was running live on Talk. Both trace to the same root environment — the native brain runs its agent loop *in-process* in the worker thread — but they're distinct defects.
+
+ISSUE-111: Talk stopped showing in-progress updates (the live tool-call trail and partial text) under the native brain; the chat sat blank until the final reply. The original diagnosis assumed the native brain wasn't *emitting* progress, but it was — `tool_execution_start` → `ToolUseEvent` and `turn_end` → `TextEvent` fired in real time. The break was mechanical: `emit()` called `req.on_progress(event)` synchronously from inside the brain's own `asyncio.run` loop, and the scheduler's Talk-edit callback uses `asyncio.run(edit_talk_message(...))`, which raises `RuntimeError` from a running loop. The error was swallowed at debug level, so every in-progress edit silently failed while the final post (made after `execute_task` returns, with no running loop) still worked. ClaudeCodeBrain was never affected — it parses its subprocess stream on a synchronous loop. Fix: dispatch the sync callback via `run_in_executor` onto a worker thread (no running loop there, so its `asyncio.run` works), awaited to keep edits ordered.
+
+ISSUE-112: a `!stop` returned an immediate "Cancelled by user" but then a *later* "task failed" for the same task, with a backoff cadence. That smell was the giveaway — not a cancel problem, but **duplicate execution**. Both reclaim paths (`claim_task`, `fail_stuck_locked_running_tasks`) declared a `running` task stuck after a hardcoded 15 minutes, below the 30-minute task timeout, so a healthy long task got re-queued and a second worker ran a duplicate; after enough reclaim waves it surfaced "worker may have crashed". It hits the native brain hardest because in-process execution has no killable PID and no subprocess death to detect — a slow-but-alive worker looks identical to a crashed one. First fix made the reclaim window `task_timeout_minutes + grace`. Then, per the follow-up, added a real worker liveness heartbeat so reclaim no longer leans on the timeout as a proxy: a daemon pinger touches a new `last_heartbeat` column every `worker_heartbeat_seconds`, and reclaim treats a task as stuck only when that heartbeat goes silent past `worker_stuck_minutes` (falling back to the started_at window when no heartbeat was ever recorded). A live worker is never reclaimed however long it runs; a crashed one recovers in ~5 min, independent of the timeout.
+
+Also confirmed the native `!stop` cancel path itself is sound — cooperative via the `cancel_requested` poll (~0.5s), correctly reported as `cancelled` with no failure notice. The SIGTERM path in `!stop` is a no-op for native by design (no `worker_pid`, since SIGTERM would hit the shared scheduler process).
+
+**Key changes:**
+- `NativeBrain` dispatches `on_progress` off the event loop via `run_in_executor` (ISSUE-111).
+- Stuck-task reclaim window is now timeout-relative (`task_timeout_minutes` + 5 min grace) instead of a flat 15 min (ISSUE-112).
+- Added a worker liveness heartbeat: new `last_heartbeat` column, `db.touch_task_heartbeat`, a `_task_heartbeat` daemon-thread pinger wrapping the whole execution span, and a shared `_STUCK_RUNNING_PREDICATE` keying reclaim on heartbeat silence with a started_at fallback.
+- New `[scheduler]` config `worker_heartbeat_seconds` (default 60) / `worker_stuck_minutes` (default 5), wired through the Ansible role and example config.
+- `last_heartbeat` is SQL-only (not on the `Task` dataclass, like `worker_pid`) — only reclaim reads it.
+
+**Files added/modified:**
+- `src/istota/brain/native.py` - off-loop `_emit_progress`
+- `src/istota/db.py` - `last_heartbeat` migration, `touch_task_heartbeat`, `_STUCK_RUNNING_PREDICATE`, heartbeat-aware `claim_task` / `fail_stuck_locked_running_tasks`
+- `src/istota/scheduler.py` - `_stuck_running_minutes`, `_task_heartbeat` ctx mgr, reclaim call sites, execution wrap
+- `src/istota/config.py`, `schema.sql`, `config/config.example.toml`
+- `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2`
+- `tests/native/test_native_brain.py`, `tests/test_db.py`, `tests/test_scheduler.py`
+
 ## 2026-06-05: Native brain — drop the CLI-inference provider, reposition docs
 
 The native brain shipped with two inference providers: `openai_compat` and a `claude_code` provider (briefly renamed `claude_cli` mid-session before the rename was abandoned). The CLI provider ran `claude -p --allowedTools ""` as a bare completion endpoint. A request for a local multi-turn tool-use test surfaced the blocker: that provider only parses text from the CLI's stream-json and never emits tool-call deltas, and there is no `claude -p` mode that proposes Istota's own tools without executing them. The native agent loop drives tool use entirely off `ToolCallDelta` events, so it can never invoke a tool through that provider — keeping it was a trap, a config that silently can't use tools. Removed it. `openai_compat` is now the sole native provider, which also let the dead Anthropic-namespace branch in `native.py` go (it only existed to give the CLI provider Claude Code's alias table).
