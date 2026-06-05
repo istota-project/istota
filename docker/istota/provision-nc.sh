@@ -39,7 +39,20 @@ $OCC app:enable files_external || true
 
 echo "[istota-provision] Configuring external storage..."
 
-# files_external:create outputs "Storage created with id N"
+SHARED="/mnt/shared"
+USER_BASE="${SHARED}/Users/${USER_NAME}"
+# Bot workspace dir name. Must match Config.bot_dir_name (lowercase, spaces→_,
+# disallowed chars stripped) so the human user's mount below targets the very
+# same folder the istota container seeds via ensure_user_directories_v2() — no
+# rename-stray. Derived with tr/sed since this hook runs in the PHP container.
+BOT_DIR=$(printf '%s' "${ISTOTA_BOT_NAME:-Istota}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/_/g; s/[^a-z0-9_-]//g')
+[ -n "$BOT_DIR" ] || BOT_DIR=istota
+
+# Bot user: the full shared volume. The bot owns everything under it —
+# inbox/, memories/, shared/ (its holding space for Nextcloud shares users send
+# it), the bot dir, and Channels — all bot-internal.
 MOUNT_ID=$($OCC files_external:create "Shared Files" local null::null \
     -c datadir=/mnt/shared 2>&1 | grep -o '[0-9]*$') || true
 
@@ -50,8 +63,15 @@ else
     echo "[istota-provision] Warning: could not create external storage mount for bot."
 fi
 
+# Human user: ONLY the bot workspace dir — never the user base. The base holds
+# bot-internal folders (inbox/, memories/, shared/) that must stay invisible to
+# the user, and mounting the base would also nest any future bot→user share
+# inside the user's own tree. Pre-create the dir so the mount resolves; the
+# istota container reuses the same derived name. Mirrors the bare-metal deploy,
+# where the bot shares just the bot dir over Nextcloud.
+mkdir -p "${USER_BASE}/${BOT_DIR}"
 USER_MOUNT_ID=$($OCC files_external:create "${ISTOTA_BOT_NAME:-Istota}" local null::null \
-    -c "datadir=/mnt/shared/Users/${USER_NAME}" 2>&1 | grep -o '[0-9]*$') || true
+    -c "datadir=${USER_BASE}/${BOT_DIR}" 2>&1 | grep -o '[0-9]*$') || true
 
 if [ -n "$USER_MOUNT_ID" ] && [ "$USER_MOUNT_ID" -gt 0 ] 2>/dev/null; then
     $OCC files_external:applicable --add-user "${USER_NAME}" "${USER_MOUNT_ID}"
@@ -62,18 +82,12 @@ fi
 
 echo "[istota-provision] Creating directory structure..."
 
-SHARED="/mnt/shared"
-USER_BASE="${SHARED}/Users/${USER_NAME}"
-
-# The bot directory ({user}/<bot_dir_name>/{config,exports,examples,...}) is
-# created by the istota container's storage.ensure_user_directories_v2(), which
-# derives the name from ISTOTA_BOT_NAME via Config.bot_dir_name. Don't seed it
-# here — hardcoding "istota/" leaves a stray empty folder next to the real one
-# whenever the bot is renamed.
-mkdir -p "${USER_BASE}/inbox"
-mkdir -p "${USER_BASE}/memories"
-mkdir -p "${USER_BASE}/shared"
-mkdir -p "${USER_BASE}/scripts"
+# inbox/, memories/, shared/ and the bot dir's contents are created (and
+# migrated) by the istota container's ensure_user_directories_v2() — don't seed
+# them here. An empty base scripts/ in particular would dodge that migration's
+# non-empty check and linger as a stray next to the real <bot_dir>/scripts. The
+# bot dir itself was pre-created above only so the user mount resolves; Channels
+# holds group-room workspaces.
 mkdir -p "${SHARED}/Channels"
 
 # --- OAuth2 client for the web UI ---
