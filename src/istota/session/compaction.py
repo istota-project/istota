@@ -106,13 +106,25 @@ def find_cut_point(messages: list, keep_recent_tokens: int = 20000) -> int:
     if cut_idx == 0:
         return 0
 
-    # Never start the kept tail on a tool_result — advance past leading ones.
-    while cut_idx < len(messages) and isinstance(messages[cut_idx], ToolResultMessage):
-        cut_idx += 1
+    # Never start the kept tail on a tool_result — it would strand the result
+    # from its owning tool_call. Prefer advancing forward so both the call and
+    # the result land in the compacted prefix.
+    advanced = cut_idx
+    while advanced < len(messages) and isinstance(messages[advanced], ToolResultMessage):
+        advanced += 1
+    if advanced < len(messages):
+        return advanced
 
-    # Always keep at least the newest message.
-    cut_idx = min(cut_idx, len(messages) - 1)
-    return cut_idx
+    # Advancing ran off the end: the would-be tail was *only* trailing
+    # tool_results (e.g. the newest turn is Assistant+ToolResult and the budget
+    # grabbed just the result). Back up instead so the owning assistant message
+    # is kept and the tail never begins with an orphaned result. (The old code
+    # clamped forward to len-1, which landed the cut back on a tool_result and
+    # silently lost it.)
+    back = cut_idx
+    while back > 0 and isinstance(messages[back], ToolResultMessage):
+        back -= 1
+    return back
 
 
 def _extract_file_operations(messages: list) -> dict[str, list[str]]:

@@ -81,3 +81,20 @@ class TestSanitizeToolPairs:
         original_len = len(msgs)
         sanitize_tool_pairs(msgs)
         assert len(msgs) == original_len
+
+    def test_result_before_call_is_repaired(self):
+        # A tool_result that precedes its owning call (a context-reordering
+        # hazard) must not leave the call orphaned: the stray leading result is
+        # dropped and a synthetic result is added after the call.
+        msgs = [
+            ToolResultMessage(tool_call_id="c1", tool_name="Read", content=[]),
+            _assistant_with_call("c1"),
+        ]
+        out = sanitize_tool_pairs(msgs)
+        assert isinstance(out[0], AssistantMessage)
+        synth = [m for m in out if isinstance(m, ToolResultMessage)]
+        assert len(synth) == 1
+        assert synth[0].tool_call_id == "c1"
+        assert synth[0].is_error is True
+        # The call is no longer orphaned — it is followed by exactly one result.
+        assert out.index(synth[0]) > 0

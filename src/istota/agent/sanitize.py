@@ -36,14 +36,8 @@ def sanitize_tool_pairs(messages: list[Message]) -> list[Message]:
     results are inserted immediately after the assistant message that owns the
     orphaned call, preserving the call→result adjacency the providers expect.
     """
-    # First pass: collect the set of tool_call ids that have a result.
-    result_ids: set[str] = set()
-    for msg in messages:
-        if isinstance(msg, ToolResultMessage) and msg.tool_call_id:
-            result_ids.add(msg.tool_call_id)
-
     sanitized: list[Message] = []
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         if isinstance(msg, ToolResultMessage):
             # Drop results with no preceding call we've seen emitted.
             if msg.tool_call_id in _seen_call_ids(sanitized):
@@ -54,10 +48,14 @@ def sanitize_tool_pairs(messages: list[Message]) -> list[Message]:
         sanitized.append(msg)
 
         if isinstance(msg, AssistantMessage):
-            # Synthesize a result for every call this message makes that has
-            # no real result anywhere downstream.
+            # Synthesize a result for every call this message makes that has no
+            # real result *downstream*. Checking downstream (rather than a global
+            # id set built in a first pass) also repairs a result-before-call
+            # ordering: the stray leading result is dropped above, and because no
+            # downstream result remains, a synthetic one is added here. A global
+            # set would count the dropped result and leave the call orphaned.
             for call in msg.tool_calls:
-                if call.id not in result_ids:
+                if not _has_downstream_result(messages, idx + 1, call.id):
                     sanitized.append(
                         ToolResultMessage(
                             tool_call_id=call.id,
@@ -66,11 +64,16 @@ def sanitize_tool_pairs(messages: list[Message]) -> list[Message]:
                             is_error=True,
                         )
                     )
-                    # Treat the synthetic result as satisfying the call so a
-                    # later real result (shouldn't exist) doesn't double up.
-                    result_ids.add(call.id)
 
     return sanitized
+
+
+def _has_downstream_result(messages: list[Message], start: int, call_id: str) -> bool:
+    """Whether a tool_result for ``call_id`` appears at or after index ``start``."""
+    for msg in messages[start:]:
+        if isinstance(msg, ToolResultMessage) and msg.tool_call_id == call_id:
+            return True
+    return False
 
 
 def _seen_call_ids(messages: list[Message]) -> set[str]:
