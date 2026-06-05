@@ -31,6 +31,7 @@ class ClaudeCodeInferenceProvider:
     def __init__(self, model: str = "", claude_binary: str = "claude"):
         self._model = model
         self._binary = claude_binary
+        self._warned_tools = False
 
     async def stream(
         self,
@@ -42,6 +43,18 @@ class ClaudeCodeInferenceProvider:
         max_tokens: int = 16384,
     ) -> AsyncIterator[StreamEvent]:
         effective_model = model or self._model
+        if tools and not self._warned_tools:
+            # This provider is inference-only — it runs the CLI with no allowed
+            # tools and cannot emit tool-call deltas, so the agent loop will
+            # never see a tool invocation. Tools are only described inline. Warn
+            # once if it's wired as a brain provider with a non-empty tool set.
+            self._warned_tools = True
+            logger.warning(
+                "ClaudeCodeInferenceProvider received %d tool(s) but cannot emit "
+                "tool calls; the model will not be able to invoke them. Use it for "
+                "inference only (compaction, classification).",
+                len(tools),
+            )
         prompt_text = self._compose_prompt(system_prompt, messages, tools)
 
         cmd = [self._binary, "-p", "-", "--output-format", "stream-json", "--verbose"]

@@ -1,11 +1,14 @@
 """NativeBrain — the Brain-protocol adapter over the three-layer stack."""
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from istota.brain import BrainRequest, make_brain
 from istota.brain.native import NativeBrain
 from istota.config import BrainConfig, NativeBrainConfig
+from istota.llm.provider import StreamDone, StreamError, StreamStart, TextDelta
 from istota.llm.types import AssistantMessage, TextContent, ToolCallContent, Usage
 
 from ._mock_provider import MockProvider
@@ -188,6 +191,111 @@ class TestErrorAndStops:
         result = _brain(provider).execute(req)
         assert result.stop_reason == "cancelled"
         assert result.success is False
+
+    def test_cancellation_emits_scheduler_magic_string(self, tmp_path):
+        # The executor drops stop_reason; the scheduler routes cancellation by
+        # matching result_text == "Cancelled by user" exactly. NativeBrain must
+        # emit that string or a cancelled task gets retried.
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="x")], stop_reason="end_turn")]
+        )
+        req = _req("hi", tmp_path)
+        req.cancel_check = lambda: True
+        result = _brain(provider).execute(req)
+        assert result.result_text == "Cancelled by user"
+
+    def test_error_surfaces_message_into_result_text(self, tmp_path):
+        # The scheduler classifies policy refusals / errors from result_text; an
+        # empty string reads as a generic failure. The provider's error_message
+        # must reach result_text.
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="")],
+                    stop_reason="error",
+                    error_message="API Error: 400 content policy refused",
+                )
+            ]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.success is False
+        assert result.stop_reason == "error"
+        assert "content policy refused" in result.result_text
+
+    def test_cancel_check_exception_does_not_crash_run(self, tmp_path):
+        # A transient cancel_check failure (e.g. SQLite lock) must not abort the
+        # run or crash the brain — it's treated as "not cancelled".
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="done")], stop_reason="end_turn")]
+        )
+
+        def boom():
+            raise RuntimeError("db locked")
+
+        req = _req("hi", tmp_path)
+        req.cancel_check = boom
+        result = _brain(provider).execute(req)
+        assert result.success is True
+        assert result.result_text == "done"
+
+
+class TestTimeout:
+    def test_wall_clock_timeout_aborts(self, tmp_path):
+        # A provider that streams forever must be stopped at the task deadline,
+        # tagged stop_reason="timeout" — not run unbounded (which would let the
+        # scheduler reclaim and double-run the task).
+        class _ForeverProvider:
+            async def stream(
+                self, system_prompt, messages, tools, *, model="", max_tokens=16384
+            ) -> AsyncIterator:
+                yield StreamStart()
+                for _ in range(100000):
+                    yield TextDelta(text="x")
+                    await asyncio.sleep(0.02)
+
+        req = _req("hang", tmp_path)
+        req.timeout_seconds = 1
+        result = _brain(_ForeverProvider()).execute(req)
+        assert result.success is False
+        assert result.stop_reason == "timeout"
+        assert "timed out" in result.result_text
+
+
+class TestRetryProvider:
+    def test_streamstart_before_error_is_still_retried(self, tmp_path, monkeypatch):
+        # _RetryingProvider must not treat StreamStart as a committed turn: a
+        # transient error after StreamStart (but before any real delta) is
+        # retryable. Regression for the StreamStart-commits-the-turn bug.
+        from istota.brain import native as native_mod
+
+        monkeypatch.setattr(native_mod, "_API_RETRY_BASE_DELAY", 0.0)
+
+        calls = {"n": 0}
+
+        class _Flaky:
+            async def stream(
+                self, system_prompt, messages, tools, *, model="", max_tokens=16384
+            ) -> AsyncIterator:
+                calls["n"] += 1
+                yield StreamStart()
+                if calls["n"] == 1:
+                    yield StreamError(
+                        message=AssistantMessage(
+                            stop_reason="error", error_message="HTTP 503: overloaded"
+                        )
+                    )
+                else:
+                    yield StreamDone(
+                        message=AssistantMessage(
+                            content=[TextContent(text="recovered")],
+                            stop_reason="end_turn",
+                        )
+                    )
+
+        result = _brain(_Flaky()).execute(_req("hi", tmp_path))
+        assert calls["n"] == 2  # retried despite the leading StreamStart
+        assert result.success is True
+        assert result.result_text == "recovered"
 
 
 class TestFactory:

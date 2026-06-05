@@ -99,6 +99,31 @@ class TestFindCutPoint:
         cut = find_cut_point(msgs, keep_recent_tokens=20000)
         assert cut < len(msgs)  # the newest message survives
 
+    def test_trailing_tool_result_only_backs_up_to_owning_call(self):
+        # The newest turn is Assistant(tool_call) + ToolResult, and the budget
+        # alone grabs only the result. The cut must back up to the owning
+        # assistant message so the kept tail never begins with an orphaned
+        # result (the old clamp-forward lost the result entirely).
+        msgs = [
+            _user("older"),
+            _assistant("a" * 40_000),
+            AssistantMessage(
+                content=[ToolCallContent(id="t1", name="Read", arguments={"file_path": "f"})],
+                stop_reason="tool_use",
+            ),
+            ToolResultMessage(
+                tool_call_id="t1", tool_name="Read", content=[TextContent(text="x" * 200_000)]
+            ),
+        ]
+        cut = find_cut_point(msgs, keep_recent_tokens=4000)
+        assert 0 < cut < len(msgs)
+        # Tail starts on the assistant message that owns the result, not the
+        # result itself.
+        assert isinstance(msgs[cut], AssistantMessage)
+        assert msgs[cut].tool_calls and msgs[cut].tool_calls[0].id == "t1"
+        # The result is preserved in the kept tail.
+        assert any(isinstance(m, ToolResultMessage) for m in msgs[cut:])
+
 
 def _to_llm(msgs):
     out = []

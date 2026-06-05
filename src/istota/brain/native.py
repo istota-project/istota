@@ -40,7 +40,7 @@ from istota.agent.types import (
 )
 from istota.llm import make_provider
 from istota.llm.catalog import get_model_info
-from istota.llm.provider import StreamError
+from istota.llm.provider import StreamDone, StreamError, TextDelta, ToolCallDelta
 from istota.llm.types import (
     AssistantMessage,
     Message,
@@ -100,10 +100,14 @@ class _RetryingProvider:
                 if isinstance(event, StreamError) and not committed:
                     pending_error = event
                     break
-                # StreamStart carries nothing; forwarding it is harmless but the
-                # loop ignores it either way. Any delta / done / late error
-                # commits the turn.
-                committed = True
+                # Only content-bearing events commit the turn. A StreamStart (or
+                # any other zero-payload event a provider might emit) is forwarded
+                # without committing, so a StreamError arriving *after* a start —
+                # but before any real delta — is still retryable. Committing on
+                # StreamStart would silently defeat transient-error retry for any
+                # provider that announces the stream before failing.
+                if isinstance(event, (TextDelta, ToolCallDelta, StreamDone)):
+                    committed = True
                 yield event
 
             if pending_error is None:
@@ -204,8 +208,15 @@ class NativeBrain:
         cancel_task: asyncio.Task | None = None
         if req.cancel_check is not None:
             # Bridge the scheduler's polling cancel_check into the event the
-            # loop, tools, and provider backoff all wait on.
-            if req.cancel_check():
+            # loop, tools, and provider backoff all wait on. A cancel_check
+            # failure (e.g. transient SQLite lock contention) must not abort the
+            # run — treat it as "not cancelled" and let the poller keep trying.
+            try:
+                already_cancelled = req.cancel_check()
+            except Exception:  # noqa: BLE001 — see above
+                logger.debug("initial cancel_check raised; ignoring", exc_info=True)
+                already_cancelled = False
+            if already_cancelled:
                 abort.set()
             else:
                 cancel_task = asyncio.create_task(self._poll_cancel(req.cancel_check, abort))
@@ -218,9 +229,10 @@ class NativeBrain:
         trace: list[dict] = []
         actions: list[str] = []
         last_assistant_text = ""
+        last_error_message = ""
 
         async def emit(event: AgentEvent) -> None:
-            nonlocal last_assistant_text
+            nonlocal last_assistant_text, last_error_message
             if event.type == "tool_execution_start":
                 desc = _describe_tool_use(event.tool_name, event.args)
                 trace.append({"type": "tool", "text": desc})
@@ -229,6 +241,12 @@ class NativeBrain:
             elif event.type == "turn_end":
                 msg = event.message
                 if isinstance(msg, AssistantMessage):
+                    # Capture the provider's error text so _build_result can
+                    # surface it; the scheduler only sees result_text, and an
+                    # empty error reads as a generic failure (and a policy
+                    # refusal would be retried instead of failed-fast).
+                    if msg.stop_reason == "error" and msg.error_message:
+                        last_error_message = msg.error_message
                     if msg.usage.total_tokens > 0:
                         usage.add(msg.usage, get_model_info(model))
                     text = msg.text.strip()
@@ -309,14 +327,61 @@ class NativeBrain:
                 final_stop["reason"] = event.stop_reason
             await emit(event)
 
+        # Run the loop under a wall-clock deadline. Without one, a runaway model
+        # or a slow provider could run far past the task timeout; the scheduler
+        # would then reclaim the "stuck" task and a second worker would execute
+        # it concurrently (duplicate output + duplicate deferred-op replay).
+        # On timeout we set ``abort`` first so tools/provider unwind cleanly —
+        # the bash tool polls abort and kills its subprocess — then give a short
+        # grace period before hard-cancelling.
+        loop_task = asyncio.create_task(
+            run_agent_loop([prompt_msg], context, loop_config, emit_wrapped)
+        )
+        timed_out = False
         try:
-            await run_agent_loop([prompt_msg], context, loop_config, emit_wrapped)
+            if req.timeout_seconds and req.timeout_seconds > 0:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(loop_task), timeout=req.timeout_seconds
+                    )
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    abort.set()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(loop_task), timeout=10)
+                    except asyncio.TimeoutError:
+                        loop_task.cancel()
+                        try:
+                            await loop_task
+                        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                            pass
+            else:
+                await loop_task
         finally:
             abort.set()
             if cancel_task is not None:
                 cancel_task.cancel()
+                # Await the cancellation so the loop doesn't log a
+                # "Task was destroyed but it is pending" warning on teardown.
+                try:
+                    await cancel_task
+                except asyncio.CancelledError:
+                    pass
 
-        return self._build_result(final_stop["reason"], last_assistant_text, trace, actions, usage)
+        if timed_out:
+            timeout_min = req.timeout_seconds // 60
+            return BrainResult(
+                success=False,
+                result_text=f"Task execution timed out after {timeout_min} minutes",
+                actions_taken=json.dumps(actions) if actions else None,
+                execution_trace=json.dumps(trace) if trace else None,
+                stop_reason="timeout",
+                usage=usage,
+            )
+
+        return self._build_result(
+            final_stop["reason"], last_assistant_text, last_error_message, trace, actions, usage
+        )
 
     # --- helpers -----------------------------------------------------------
 
@@ -324,9 +389,16 @@ class NativeBrain:
     async def _poll_cancel(cancel_check, abort: asyncio.Event) -> None:
         try:
             while not abort.is_set():
-                if cancel_check():
-                    abort.set()
-                    return
+                try:
+                    if cancel_check():
+                        abort.set()
+                        return
+                except Exception:  # noqa: BLE001
+                    # A transient cancel_check failure (e.g. SQLite lock
+                    # contention) must not kill the poller — that would
+                    # permanently disable !stop for the rest of the run. Log and
+                    # keep polling.
+                    logger.debug("cancel_check raised; will retry", exc_info=True)
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             return
@@ -383,21 +455,40 @@ class NativeBrain:
         return ""
 
     @staticmethod
-    def _build_result(stop_reason, text, trace, actions, usage) -> BrainResult:
+    def _build_result(stop_reason, text, error_message, trace, actions, usage) -> BrainResult:
         # Map the loop's agent_end stop_reason to the executor's tag vocabulary.
+        # The executor drops stop_reason and the scheduler dispatches purely on
+        # result_text string matches (see scheduler.process_one_task), so a
+        # cancelled / errored native task MUST carry the same text ClaudeCodeBrain
+        # emits — otherwise the scheduler mis-routes it (retries a cancelled task,
+        # or retries a policy refusal instead of failing fast with an alert).
+        actions_json = json.dumps(actions) if actions else None
+        trace_json = json.dumps(trace) if trace else None
         if stop_reason == "aborted":
-            tag, success = "cancelled", False
-        elif stop_reason == "error":
-            tag, success = "error", False
-        else:
-            # "" (natural), "max_turns", "loop_detected" — all produced output.
-            tag, success = (stop_reason or "completed"), True
+            return BrainResult(
+                success=False,
+                result_text="Cancelled by user",
+                actions_taken=actions_json,
+                execution_trace=trace_json,
+                stop_reason="cancelled",
+                usage=usage,
+            )
+        if stop_reason == "error":
+            return BrainResult(
+                success=False,
+                result_text=error_message or text or "Native brain execution error",
+                actions_taken=actions_json,
+                execution_trace=trace_json,
+                stop_reason="error",
+                usage=usage,
+            )
+        # "" (natural), "max_turns", "loop_detected" — all produced output.
         return BrainResult(
-            success=success,
+            success=True,
             result_text=text,
-            actions_taken=json.dumps(actions) if actions else None,
-            execution_trace=json.dumps(trace) if trace else None,
-            stop_reason=tag,
+            actions_taken=actions_json,
+            execution_trace=trace_json,
+            stop_reason=stop_reason or "completed",
             usage=usage,
         )
 
