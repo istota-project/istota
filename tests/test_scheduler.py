@@ -38,6 +38,7 @@ from istota.scheduler import (
     post_result_to_email,
     process_one_task,
     _make_talk_progress_callback,
+    _stuck_running_minutes,
     post_result_to_talk,
 )
 from istota.config import (
@@ -57,6 +58,19 @@ from istota import db
 # ---------------------------------------------------------------------------
 # TestConfirmationPattern
 # ---------------------------------------------------------------------------
+
+
+class TestStuckRunningMinutes:
+    """ISSUE-112: the stuck-running reclaim window must exceed the task timeout
+    so a healthy worker (which self-kills at the timeout) is never reclaimed."""
+
+    def test_exceeds_task_timeout(self):
+        sched = SchedulerConfig(task_timeout_minutes=30)
+        assert _stuck_running_minutes(sched) > sched.task_timeout_minutes
+
+    def test_tracks_configured_timeout(self):
+        assert _stuck_running_minutes(SchedulerConfig(task_timeout_minutes=10)) == 15
+        assert _stuck_running_minutes(SchedulerConfig(task_timeout_minutes=60)) == 65
 
 
 class TestConfirmationPattern:

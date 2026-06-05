@@ -487,6 +487,7 @@ def claim_task(
     max_retry_age_minutes: int = 60,
     user_id: str | None = None,
     queue: str | None = None,
+    stuck_running_minutes: int = 15,
 ) -> Task | None:
     """Atomically claim the next available task. Returns None if no tasks available.
 
@@ -495,6 +496,12 @@ def claim_task(
         max_retry_age_minutes: Tasks older than this are failed instead of retried.
         user_id: If provided, only claim tasks for this user.
         queue: If provided, only claim tasks in this queue ('foreground' or 'background').
+        stuck_running_minutes: A 'running' task is treated as stuck (worker
+            presumed dead) only after this long. Must exceed the task timeout,
+            or a healthy still-running worker — especially the in-process native
+            brain, which has no killable PID to prove liveness — gets reclaimed
+            and a second worker runs a duplicate (ISSUE-112). Callers pass
+            ``task_timeout_minutes`` + a grace margin.
     """
     # First, fail old stale locks (created too long ago to be worth retrying)
     conn.execute(
@@ -527,10 +534,10 @@ def claim_task(
         UPDATE tasks
         SET status = 'failed', error = 'Task too old to retry (stuck running)'
         WHERE status = 'running'
-        AND started_at < datetime('now', '-15 minutes')
+        AND started_at < datetime('now', ? || ' minutes')
         AND created_at < datetime('now', ? || ' minutes')
         """,
-        (f"-{max_retry_age_minutes}",),
+        (f"-{stuck_running_minutes}", f"-{max_retry_age_minutes}"),
     )
 
     # Release recent stuck 'running' tasks for retry
@@ -540,11 +547,11 @@ def claim_task(
         SET status = 'pending', started_at = NULL, locked_at = NULL, locked_by = NULL,
             attempt_count = attempt_count + 1
         WHERE status = 'running'
-        AND started_at < datetime('now', '-15 minutes')
+        AND started_at < datetime('now', ? || ' minutes')
         AND created_at >= datetime('now', ? || ' minutes')
         AND attempt_count < max_attempts
         """,
-        (f"-{max_retry_age_minutes}",),
+        (f"-{stuck_running_minutes}", f"-{max_retry_age_minutes}"),
     )
 
     # Mark stuck 'running' tasks as failed if they've exhausted retries
@@ -553,9 +560,10 @@ def claim_task(
         UPDATE tasks
         SET status = 'failed', error = 'Task stuck in running state - worker may have crashed'
         WHERE status = 'running'
-        AND started_at < datetime('now', '-15 minutes')
+        AND started_at < datetime('now', ? || ' minutes')
         AND attempt_count >= max_attempts
-        """
+        """,
+        (f"-{stuck_running_minutes}",),
     )
 
     # Atomically claim a task (optionally filtered by user_id and/or queue)
@@ -1849,11 +1857,14 @@ def fail_ancient_pending_tasks(conn: sqlite3.Connection, fail_hours: int) -> lis
 
 def fail_stuck_locked_running_tasks(
     conn: sqlite3.Connection, max_retry_age_minutes: int = 60,
+    stuck_running_minutes: int = 15,
 ) -> list[dict]:
     """Fail or release tasks stuck in 'locked' or 'running' state.
 
     This mirrors the recovery logic in claim_task() but runs independently
     so stuck tasks are cleaned up even when no new tasks are being claimed.
+    ``stuck_running_minutes`` must exceed the task timeout — see claim_task()
+    (ISSUE-112).
 
     Returns list of failed task info for logging.
     """
@@ -1895,11 +1906,11 @@ def fail_stuck_locked_running_tasks(
         SET status = 'failed', error = 'Task too old to retry (stuck running)',
             completed_at = datetime('now'), updated_at = datetime('now')
         WHERE status = 'running'
-        AND started_at < datetime('now', '-15 minutes')
+        AND started_at < datetime('now', ? || ' minutes')
         AND created_at < datetime('now', ? || ' minutes')
         RETURNING id, user_id, conversation_token, source_type
         """,
-        (f"-{max_retry_age_minutes}",),
+        (f"-{stuck_running_minutes}", f"-{max_retry_age_minutes}"),
     )
     for row in cursor.fetchall():
         failed.append(dict(row))
@@ -1911,11 +1922,11 @@ def fail_stuck_locked_running_tasks(
         SET status = 'pending', started_at = NULL, locked_at = NULL, locked_by = NULL,
             attempt_count = attempt_count + 1
         WHERE status = 'running'
-        AND started_at < datetime('now', '-15 minutes')
+        AND started_at < datetime('now', ? || ' minutes')
         AND created_at >= datetime('now', ? || ' minutes')
         AND attempt_count < max_attempts
         """,
-        (f"-{max_retry_age_minutes}",),
+        (f"-{stuck_running_minutes}", f"-{max_retry_age_minutes}"),
     )
 
     # Fail stuck 'running' tasks that have exhausted retries
@@ -1926,10 +1937,11 @@ def fail_stuck_locked_running_tasks(
             error = 'Task stuck in running state - worker may have crashed',
             completed_at = datetime('now'), updated_at = datetime('now')
         WHERE status = 'running'
-        AND started_at < datetime('now', '-15 minutes')
+        AND started_at < datetime('now', ? || ' minutes')
         AND attempt_count >= max_attempts
         RETURNING id, user_id, conversation_token, source_type
         """,
+        (f"-{stuck_running_minutes}",),
     )
     for row in cursor.fetchall():
         failed.append(dict(row))

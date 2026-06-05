@@ -1140,6 +1140,70 @@ class TestFailStuckLockedRunningTasks:
             assert db.has_active_foreground_task_for_channel(conn, "room1") is False
 
 
+class TestStuckRunningThreshold:
+    """ISSUE-112: a 'running' task must not be reclaimed before it has had a
+    chance to hit its own timeout. The reclaim window is configurable
+    (task_timeout_minutes + grace) instead of a flat 15 min that sits below the
+    30-min default timeout — otherwise a slow-but-healthy worker (notably the
+    in-process native brain, which has no killable PID) gets reclaimed and a
+    second worker runs a duplicate.
+    """
+
+    def _make_running(self, conn, *, started_min_ago, created_min_ago=10):
+        task_id = db.create_task(
+            conn, prompt="hello", user_id="alice",
+            conversation_token="room1", queue="foreground",
+        )
+        conn.execute(
+            """UPDATE tasks SET status = 'running',
+               started_at = datetime('now', ? || ' minutes'),
+               created_at = datetime('now', ? || ' minutes')
+            WHERE id = ?""",
+            (f"-{started_min_ago}", f"-{created_min_ago}", task_id),
+        )
+        conn.commit()
+        return task_id
+
+    def test_maintenance_keeps_healthy_long_running_task(self, db_path):
+        # 20 min in, threshold 35 (30 timeout + 5 grace): still healthy.
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(conn, started_min_ago=20)
+            failed = db.fail_stuck_locked_running_tasks(
+                conn, stuck_running_minutes=35,
+            )
+            assert failed == []
+            task = db.get_task(conn, task_id)
+            assert task.status == "running"
+            assert task.attempt_count == 0
+
+    def test_maintenance_reclaims_past_threshold(self, db_path):
+        # 40 min in, past 35-min threshold, created recently → released for retry.
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(conn, started_min_ago=40)
+            db.fail_stuck_locked_running_tasks(conn, stuck_running_minutes=35)
+            task = db.get_task(conn, task_id)
+            assert task.status == "pending"
+            assert task.attempt_count == 1
+
+    def test_claim_task_keeps_healthy_long_running_task(self, db_path):
+        # claim_task's inline recovery must not reclaim a healthy 20-min task.
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(conn, started_min_ago=20)
+            db.claim_task(conn, "worker-1", stuck_running_minutes=35)
+            task = db.get_task(conn, task_id)
+            assert task.status == "running"
+            assert task.attempt_count == 0
+
+    def test_default_threshold_preserves_legacy_behavior(self, db_path):
+        # Callers that don't pass the param keep the old 15-min behavior.
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(conn, started_min_ago=20)
+            db.fail_stuck_locked_running_tasks(conn)  # default 15
+            task = db.get_task(conn, task_id)
+            assert task.status == "pending"  # reclaimed at the legacy threshold
+            assert task.attempt_count == 1
+
+
 class TestTrustedEmailSendersDB:
     def test_add_trusted_sender(self, db_path):
         with db.get_db(db_path) as conn:
