@@ -214,28 +214,33 @@
 	{:else}
 	<section class="spreadsheet">
 		<div class="scroll">
+			<!-- Markers run down the sticky left axis (one row each); draw
+			     dates run across as scrolling columns. The marker names stay
+			     pinned while you scroll sideways through dates (ISSUE-108). -->
 			<table>
 				<thead>
-					<tr class="categories">
-						<th class="sticky-left date-col"></th>
-						<th class="sticky-left lab-col"></th>
-						{#each matrix.categories as cat, ci (cat.name)}
-							<th
-								class="cat-cell"
-								class:section-start={ci > 0}
-								data-category={cat.name}
-								colspan={cat.markers.length}
-							>
-								{categoryLabel(cat.name)}
+					<tr class="dates">
+						<th class="sticky-left marker-col">Marker</th>
+						<th class="sticky-left ref-col">Range</th>
+						{#each matrix.panels as p (p.id)}
+							<th class="date-cell">
+								<a href="{base}/health/bloodwork/panel?id={p.id}" class="date-link">
+									<span class="date">{formatDate(p.drawn_at)}</span>
+									{#if p.lab_name}<span class="lab">{p.lab_name}</span>{/if}
+								</a>
 							</th>
 						{/each}
 					</tr>
-					<tr class="markers">
-						<th class="sticky-left date-col">Date</th>
-						<th class="sticky-left lab-col">Lab</th>
-						{#each matrix.categories as cat, ci (cat.name)}
-							{#each cat.markers as mk, mi (mk.name)}
-								<th data-category={cat.name} class:section-start={ci > 0 && mi === 0}>
+				</thead>
+				<tbody>
+					{#each matrix.categories as cat, ci (cat.name)}
+						<tr class="cat-row" class:section-start={ci > 0} data-category={cat.name}>
+							<th class="sticky-left cat-cell" colspan="2">{categoryLabel(cat.name)}</th>
+							<td class="cat-band" colspan={matrix.panels.length}></td>
+						</tr>
+						{#each cat.markers as mk (mk.name)}
+							<tr data-category={cat.name}>
+								<th class="sticky-left marker-col">
 									<a
 										href="{base}/health/bloodwork/marker?name={encodeMarker(mk.name)}"
 										class="marker-link"
@@ -245,35 +250,15 @@
 										{#if mk.unit}<span class="marker-unit">{mk.unit}</span>{/if}
 									</a>
 								</th>
-							{/each}
-						{/each}
-					</tr>
-					<tr class="reference">
-						<th class="sticky-left date-col">Reference range</th>
-						<th class="sticky-left lab-col"></th>
-						{#each matrix.categories as cat, ci (cat.name)}
-							{#each cat.markers as mk, mi (mk.name)}
-								<th class="ref" data-category={cat.name} class:section-start={ci > 0 && mi === 0}>{formatRange(mk.ref_range_low, mk.ref_range_high)}</th>
-							{/each}
-						{/each}
-					</tr>
-				</thead>
-				<tbody>
-					{#each matrix.panels as p (p.id)}
-						<tr>
-							<td class="sticky-left date-col">
-								<a href="{base}/health/bloodwork/panel?id={p.id}">{formatDate(p.drawn_at)}</a>
-							</td>
-							<td class="sticky-left lab-col">{p.lab_name || ''}</td>
-							{#each matrix.categories as cat, ci (cat.name)}
-								{#each cat.markers as mk, mi (mk.name)}
+								<th class="sticky-left ref-col ref">{formatRange(mk.ref_range_low, mk.ref_range_high)}</th>
+								{#each matrix.panels as p (p.id)}
 									{@const c = cell(p.id, mk.name)}
-									<td class="{flagClass(c?.flag ?? null)}{ci > 0 && mi === 0 ? ' section-start' : ''}" data-category={cat.name}>
+									<td class={flagClass(c?.flag ?? null)}>
 										{#if c}{c.value}{/if}
 									</td>
 								{/each}
-							{/each}
-						</tr>
+							</tr>
+						{/each}
 					{/each}
 				</tbody>
 			</table>
@@ -378,65 +363,76 @@
 		font-size: var(--text-xs);
 		min-width: 100%;
 	}
+
+	/* Date header row — pinned to the top so dates stay visible while you
+	   scroll down through the markers. */
 	thead th {
 		position: sticky;
 		top: 0;
-		background: var(--surface-card);
+		background: var(--surface-raised);
 		z-index: 2;
 		text-align: center;
-		padding: 0.3rem 0.4rem;
+		padding: 0.3rem 0.5rem;
 		border-bottom: 1px solid var(--border-subtle);
 		font-weight: 400;
 		color: var(--text-muted);
 		white-space: nowrap;
 	}
-	thead tr.categories th {
-		top: 0;
-		background: var(--surface-raised);
+	.date-link {
+		display: inline-flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.05rem;
+		color: var(--text-primary);
+		text-decoration: none;
+		min-width: 4rem;
+	}
+	.date-link:hover .date {
+		text-decoration: underline;
+	}
+	.date {
+		font-weight: 500;
+	}
+	.lab {
+		font-size: 10px;
+		color: var(--text-dim);
+		white-space: nowrap;
+	}
+
+	/* Category banner row — section divider running across the markers it
+	   groups. The label cell is pinned left with the marker columns; the
+	   coloured band scrolls with the date columns. The tint itself is the
+	   separator: the band carries no top/bottom border, so it doesn't pick
+	   up the generic ``tbody td`` bottom line (which the label th doesn't
+	   have) and leave a broken half-line under the banner. */
+	.cat-cell {
+		text-align: left;
 		font-size: var(--text-xs);
 		font-weight: 500;
 		letter-spacing: 0.05em;
 		color: var(--text-muted);
 		text-transform: uppercase;
+		padding: 0.3rem 0.5rem;
+		background: hsla(var(--cat-h), var(--cat-s), 65%, 0.22);
 	}
-	thead tr.markers th {
-		top: 1.65rem;
-		text-transform: none;
-		letter-spacing: 0;
-		color: var(--text-primary);
+	.cat-band {
+		padding: 0;
+		border-top: 0;
+		border-bottom: 0;
+		background: hsla(var(--cat-h), var(--cat-s), 65%, 0.22);
 	}
-	thead tr.reference th {
-		top: 5rem;
-		color: var(--text-dim);
-		font-style: italic;
-	}
-	/* Section divider — runs the full height of each biomarker group on
-	   its first column. Uses ``--border-subtle`` (the same value as the
-	   thead bottom border) so the section break reads as the same kind
-	   of structural line. First group at the table's left edge has no
-	   divider — it's already bounded by the sticky Lab column's right
-	   border. */
-	.cat-cell.section-start,
-	thead tr.markers th.section-start,
-	thead tr.reference th.section-start,
-	tbody td.section-start {
-		border-left: 1px solid var(--border-subtle);
-	}
-	thead tr.markers th {
-		vertical-align: bottom;
-		height: 3.4rem;
-	}
+
 	.marker-link {
-		display: inline-flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 0.05rem;
+		/* Name and unit on one line. The name takes the room it needs and
+		   ellipsises first if the row is cramped; the unit stays put. */
+		display: flex;
+		flex-direction: row;
+		align-items: baseline;
+		gap: 0.35rem;
 		color: inherit;
 		text-decoration: none;
 		width: 100%;
-		min-width: 4.5rem;
-		max-width: 7rem;
-		padding: 0 0.3rem;
+		min-width: 0;
 	}
 	.marker-link:hover .marker-name {
 		text-decoration: underline;
@@ -444,40 +440,46 @@
 	.marker-name {
 		font-size: var(--text-xs);
 		font-weight: 500;
-		text-align: center;
-		line-height: 1.15;
-		/* Up to two lines; anything longer ellipsises and the full name
-		   is on the link's title attribute as a tooltip. */
-		white-space: normal;
-		display: -webkit-box;
-		-webkit-box-orient: vertical;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
+		/* The fixed column width clips overlong names to an ellipsis (full
+		   name lives on the link's title tooltip). Keeping the column a fixed
+		   width is what keeps the ref column's sticky offset exact. */
+		flex: 0 1 auto;
+		min-width: 0;
+		white-space: nowrap;
 		overflow: hidden;
-		word-break: break-word;
+		text-overflow: ellipsis;
 	}
 	.marker-unit {
 		font-size: 10px;
 		color: var(--text-dim);
 		white-space: nowrap;
+		/* Yield before the name: under a space deficit the unit collapses
+		   (and ellipsises) first, so the marker name stays intact and only
+		   truncates as a last resort once the unit is gone. */
+		flex: 0 9999 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	.ref {
 		font-size: 10px;
+		color: var(--text-dim);
+		font-style: italic;
+		font-weight: 400;
 	}
 	tbody td {
 		text-align: center;
-		padding: 0.25rem 0.4rem;
+		padding: 0.25rem 0.5rem;
 		border-bottom: 1px solid var(--border-subtle);
 		white-space: nowrap;
 		color: var(--text-primary);
+		background: hsla(var(--cat-h), var(--cat-s), 65%, 0.08);
 	}
 
 	/* Per-category palette. Each section (Thyroid, Lipid, …) carries its
-	   own hue end-to-end: the category banner + marker-name row share the
-	   stronger tint so they read as one header block, and the reference
-	   row + data cells get a subtler version of the same hue. Hues are
-	   stored as CSS vars so the two intensity levels can share one rule
-	   pair. */
+	   own hue: the category banner gets the stronger tint, the marker's
+	   data cells a subtler version of the same hue. Hues are stored as CSS
+	   vars on the row so both intensity levels share one rule pair. */
 	[data-category="CBC"]          { --cat-h: 0;   --cat-s: 50%; }
 	[data-category="CMP"]          { --cat-h: 210; --cat-s: 45%; }
 	[data-category="Liver"]        { --cat-h: 30;  --cat-s: 55%; }
@@ -490,48 +492,76 @@
 	[data-category="Diabetes"]     { --cat-h: 85;  --cat-s: 45%; }
 	[data-category="Other"]        { --cat-h: 220; --cat-s: 8%;  }
 
-	thead tr.categories th[data-category],
-	thead tr.markers th[data-category] {
-		background: hsla(var(--cat-h), var(--cat-s), 65%, 0.22);
-	}
-	thead tr.reference th[data-category],
-	tbody td[data-category] {
-		background: hsla(var(--cat-h), var(--cat-s), 65%, 0.08);
-	}
-
-	/* Sticky left columns sit above every row's data, fully opaque so
-	   scrolling values never bleed through. */
+	/* Sticky left columns (marker name + reference range) sit above every
+	   row's data, fully opaque so scrolling values never bleed through.
+	   These are the pinned axis — they stay put while date columns scroll
+	   sideways (ISSUE-108). */
+	/* Stacking order, low → high:
+	     0  body data cells
+	     1  body sticky-left columns (marker / range / category label)
+	     2  header row (dates) — must sit above the body's frozen column
+	     3  header corner cells (pinned on both axes) — above everything
+	   Keeping the body column below the header row is what stops the
+	   category label and frozen columns from painting over the date
+	   header when you scroll down/right. */
 	td.sticky-left,
 	th.sticky-left {
 		position: sticky;
-		left: 0;
 		background: var(--surface-card);
-		z-index: 3;
+		z-index: 1;
 		text-align: left;
-		border-right: 1px solid var(--border-default);
+		padding: 0.3rem 0.5rem;
+		vertical-align: middle;
 	}
 	thead th.sticky-left {
-		z-index: 4;
+		z-index: 3;
 	}
-	.date-col {
-		min-width: 6.5rem;
-	}
-	.lab-col {
-		left: 6.5rem;
+	/* Both sticky columns get a fixed width so the ref column's ``left``
+	   offset (= marker column width) is always exact — otherwise a long
+	   marker name grows the first column and the ref column drifts out of
+	   its pinned position on horizontal scroll. */
+	.marker-col {
+		left: 0;
+		width: 9rem;
 		min-width: 9rem;
-		font-size: var(--text-xs);
-		color: var(--text-muted);
+		max-width: 9rem;
+		border-right: 1px solid var(--border-default);
 	}
-	tbody .sticky-left a {
-		color: var(--text-primary);
-		text-decoration: none;
+	.ref-col {
+		left: 9rem;
+		width: 5rem;
+		min-width: 5rem;
+		max-width: 5rem;
+		border-right: 1px solid var(--border-default);
 	}
-	tbody .sticky-left a:hover {
-		text-decoration: underline;
+	/* The category label cell spans both sticky columns, so it pins at the
+	   left edge and carries the right border itself. The tint is composited
+	   over an opaque card base (gradient layer over background-color) so the
+	   cell is fully opaque — a translucent sticky cell would let the
+	   scrolling category band show through and stack to a brighter strip. */
+	th.cat-cell.sticky-left {
+		left: 0;
+		background-color: var(--surface-card);
+		background-image: linear-gradient(
+			hsla(var(--cat-h), var(--cat-s), 65%, 0.22),
+			hsla(var(--cat-h), var(--cat-s), 65%, 0.22)
+		);
 	}
 	tbody td.flag-H { background: rgba(204, 102, 102, 0.22); color: #f8a09c; }
 	tbody td.flag-L { background: rgba(122, 163, 216, 0.22); color: #9cc7f8; }
 	tbody td.flag-C { background: #6b0000; color: #fff; font-weight: 500; }
+
+	/* Subtle full-row highlight on hover to make scanning a marker's values
+	   across dates easier. An inset overlay lightens every cell uniformly
+	   over its own background (tinted data, opaque frozen columns, flag
+	   cells) without replacing the base colour. Hover-capable devices only,
+	   and not on the category banner rows. */
+	@media (hover: hover) {
+		tbody tr:not(.cat-row):hover td,
+		tbody tr:not(.cat-row):hover th {
+			box-shadow: inset 0 0 0 9999px rgba(255, 255, 255, 0.025);
+		}
+	}
 	.msg.error {
 		font-size: var(--text-sm);
 		padding: 0.5rem;
@@ -580,13 +610,44 @@
 		.scroll {
 			max-height: calc(100vh - 160px);
 		}
-		/* Date stays fixed on horizontal scroll; lab scrolls away
-		   because it's the longer column and would eat the viewport. */
-		td.lab-col,
-		th.lab-col {
-			position: static;
+		/* Marker name stays pinned; the reference column scrolls away
+		   horizontally because it's secondary and would eat the narrow
+		   viewport. Drop only the *left* stick — the header row must keep its
+		   top stick so "Range" stays visible on vertical scroll. */
+		td.ref-col,
+		th.ref-col {
 			left: auto;
+			width: 4.5rem;
+			min-width: 4.5rem;
+			max-width: 4.5rem;
+		}
+		/* Body range cells aren't pinned at all — they scroll with the row. */
+		tbody td.ref-col,
+		tbody th.ref-col {
+			position: static;
+		}
+		/* The "Range" header is no longer left-pinned here, so drop it to the
+		   date-header level — otherwise it ties with the marker header's
+		   corner z-index and paints over it on horizontal scroll. */
+		thead th.ref-col {
+			z-index: 2;
+		}
+		/* Header "Range" keeps sticky top (from the base thead rule); left:auto
+		   above lets it scroll sideways with the date columns. */
+		.marker-col {
+			width: 7rem;
 			min-width: 7rem;
+			max-width: 7rem;
+		}
+		/* Narrow viewport: stack the unit under the name instead of cramming
+		   both on one line. The name fills the column and ellipsises if long. */
+		.marker-link {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 0;
+		}
+		.marker-name {
+			width: 100%;
 		}
 	}
 </style>
