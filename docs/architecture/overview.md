@@ -1,6 +1,6 @@
 # Architecture overview
 
-Istota is a self-hosted AI assistant that runs as a regular Nextcloud user. It dispatches each task to a pluggable **Brain** — Phase 1 ships only `ClaudeCodeBrain`, which wraps Anthropic's Claude Code CLI as a subprocess; future brains (OpenRouter, Anthropic-direct) drop in behind the same protocol without touching executor orchestration. Messages arrive from Nextcloud Talk, email, file-based task queues, scheduled jobs, or the CLI. They flow through a SQLite task queue, get claimed by per-user worker threads, and produce responses delivered back to the originating channel.
+Istota is a self-hosted AI assistant that runs as a regular Nextcloud user. It dispatches each task to a pluggable **Brain**. Two brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, and `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model). Swapping brains doesn't touch executor orchestration. Messages arrive from Nextcloud Talk, email, file-based task queues, scheduled jobs, or the CLI. They flow through a SQLite task queue, get claimed by per-user worker threads, and produce responses delivered back to the originating channel.
 
 ```
 Talk (polling) ──────►┐
@@ -10,7 +10,7 @@ CLI (direct) ────────►│
 CRON.md (scheduled) ─►┘
 ```
 
-Istota is not an agent framework. It doesn't implement custom tool calling, function dispatch, or agent loops — that's the brain's job. The executor constructs prompts and hands them to the brain. With `ClaudeCodeBrain` (the default), new Claude Code capabilities (tool use, model improvements) are automatically available.
+Tool calling, function dispatch, and the agent loop live in the brain, not the executor — and which code runs them depends on the brain. With `ClaudeCodeBrain` (the default) they are Claude Code's job, so new Claude Code capabilities (tool use, model improvements) come for free. With `NativeBrain` they are Istota's own: an in-process loop that dispatches tools, compacts context, and retries against any OpenAI-compatible model. Either way the executor's job is the same — it constructs the prompt and hands off a `BrainRequest`.
 
 ## Core data flow
 
@@ -45,7 +45,7 @@ Task lifecycle: `pending` -> `locked` -> `running` -> `completed` | `failed` | `
 |---|---|
 | `scheduler.py` | Main loop: daemon mode (long-running with WorkerPool) and single-pass mode |
 | `executor.py` | Builds prompts, constructs the per-task environment, orchestrates a `Brain`, composes results |
-| `brain/` | Pluggable model-invocation backend: `Brain` Protocol + `make_brain` factory, `BrainRequest`/`BrainResult` types, stream events, `ClaudeCodeBrain` (subprocess + stream-json + transient-API retry). Future brains drop in here. |
+| `brain/` | Pluggable model-invocation backend: `Brain` Protocol + `make_brain` factory, `BrainRequest`/`BrainResult` types, stream events, `ClaudeCodeBrain` (subprocess + stream-json + transient-API retry), and `NativeBrain` (Istota's in-process agent loop). The native loop's machinery lives in `llm/` (provider abstraction), `agent/` (the loop + tool dispatch), and `session/` (turn state + compaction). |
 | `context.py` | Selects relevant conversation history using hybrid recent + LLM-triaged approach |
 | `skills/_loader.py` | Loads skill documentation selectively based on keywords, resources, source types |
 | `stream_parser.py` | Backward-compat shim — re-exports stream event types from `brain/_events.py` |
@@ -118,7 +118,7 @@ Anti-detection strategy: Chrome launches with the stealth extension natively. Pa
 
 ## Design decisions
 
-**Claude Code as execution engine, not a framework.** Istota constructs prompts and invokes the existing Claude Code CLI. No custom tool dispatch or agent loops.
+**Pluggable execution — delegate, or run the loop in-house.** The default brain invokes the existing Claude Code CLI as the execution engine. The native brain instead runs Istota's own in-process agent loop (tool dispatch, context compaction, retries) against any OpenAI-compatible model. Same executor, same skills — the brain is the swappable seam, so Istota isn't bound to one vendor.
 
 **Regular Nextcloud user, not bot API.** The bot runs as an ordinary user. File sharing, CalDAV, and Talk messaging work through standard protocols. No special server configuration.
 
@@ -128,7 +128,7 @@ Anti-detection strategy: Chrome launches with the stealth extension natively. Pa
 
 **Graceful degradation everywhere.** Memory search falls back to BM25-only without sqlite-vec. Bubblewrap degrades to unsandboxed on macOS. Mount falls back to rclone CLI. Indexing failures never affect core processing.
 
-**Security by environment, not tool restriction.** Rather than limiting Claude Code tools, credentials are stripped from the subprocess environment and optionally routed through a credential proxy.
+**Security by environment, not tool restriction.** Rather than limiting the model's tools, credentials are stripped from the execution environment and optionally routed through a credential proxy.
 
 **Worker-per-user for fairness.** Each user gets their own serial worker thread per queue type (foreground/background). One user's slow task never blocks another.
 

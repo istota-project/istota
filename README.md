@@ -106,12 +106,12 @@ The Docker deployment differs from a bare metal / Ansible installation in a few 
 
 ```
 Talk message ──>┐
-Email ─────────>├──> SQLite queue -> Scheduler -> Claude Code -> Response
+Email ─────────>├──> SQLite queue -> Scheduler -> Brain -> Response
 TASKS.md ──────>│
 CLI ───────────>┘
 ```
 
-Messages arrive through Talk polling, IMAP, TASKS.md file watching, or the CLI. The scheduler claims tasks from a SQLite queue, builds a prompt with the user's resources, skills, memory, and conversation context, then invokes Claude Code in a sandbox. Responses go back through the same channel.
+Messages arrive through Talk polling, IMAP, TASKS.md file watching, or the CLI. The scheduler claims tasks from a SQLite queue, builds a prompt with the user's resources, skills, memory, and conversation context, then hands it to a **Brain** in a sandbox. Two brains ship: one wraps the Claude Code CLI; the other is Istota's own in-process agentic loop, which can drive any OpenAI-compatible model. Responses go back through the same channel.
 
 Per-user worker threads handle concurrency. Foreground tasks (chat) and background tasks (scheduled jobs, briefings) run on separate pools so a long-running job never blocks a conversation.
 
@@ -139,7 +139,7 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 
 **Web interface** — Authenticated SvelteKit dashboard at `/istota` (Nextcloud OIDC). Includes a feed reader (viewport-based read tracking, infinite scroll, lightbox, per-entry starring with a "Starred" sidebar view, scope-aware bulk mark-as-read with `Shift-A` / toolbar button, `f` to toggle star) backed by the in-tree `istota.feeds` module, with a sprocket-icon settings page for subscriptions, categories, and OPML import/export; a GPS location/places page with map, cluster discovery, dismiss-zones, and per-place visit stats; money pages backed by the same in-process accounting code the skill uses; and health pages (stats sparklines, bloodwork matrix, OCR upload, Garmin settings, immunization registry). The user's `/settings` page exposes Profile, Resources, Briefings, and a "Disabled modules" multiselect; per-module credentials live on a cog-icon page for each module (Tumblr API key on `/feeds/settings`, Monarch credentials on `/money/settings`, Garmin Connect on `/health/settings`, Overland ingest token on `/location/settings`); cross-cutting Connected services (Karakeep, Google Workspace) live on `/settings`.
 
-**Pluggable model backend** — A `Brain` protocol (`[brain] kind = "claude_code"`) sits between the executor and the model invocation. Phase 1 wraps the `claude` CLI with stream-json parsing and transient-API retries; future brains (anthropic, openrouter) drop in without touching the executor.
+**Pluggable model backend** — A `Brain` protocol sits between the executor and model invocation, with two implementations. `claude_code` (the default) wraps the `claude` CLI with stream-json parsing and transient-API retries. `native` is Istota's own in-process agentic loop — tool dispatch, context compaction, retries, usage accounting — running against any OpenAI-compatible endpoint: Anthropic, OpenRouter, or a local model served by Ollama, LM Studio, or vLLM. The native brain means Istota is a standalone agent, not tied to Claude Code; switch the whole instance or route specific task types to either brain.
 
 **Constitution** — An [Emissaries](https://commontask.org/emissaries/) layer defines how the agent reasons about data, handles the boundary between private and public action, and what it owes to people beyond its operator. Per-user persona customization sits on top.
 
@@ -154,7 +154,7 @@ In practice this means:
 - **Zero Nextcloud configuration.** Create a user account, invite it to a chat. No admin panel changes, no app installation, no API tokens on the Nextcloud side.
 - **File sharing is native.** Users share files with the bot the same way they share with colleagues. The bot shares files back the same way. Permissions, links, and access control are handled by Nextcloud.
 - **Multi-user comes free.** Nextcloud already handles user isolation, file ownership, and access control. Istota inherits all of it rather than reimplementing it.
-- **Self-hosted end to end.** Your data stays on your Nextcloud server and the VM running Istota. No external services required beyond the Claude API.
+- **Self-hosted end to end.** Your data stays on your Nextcloud server and the VM running Istota. The only external dependency is a model provider — Claude, any OpenAI-compatible API, or a model you host yourself.
 - **User self-service.** Config files (persona, briefings, cron jobs, heartbeat checks) live in the user's shared Nextcloud folder. Users edit them with any text editor or the Nextcloud web UI, no CLI access needed.
 
 Istota is built around Nextcloud — it uses your files, calendars, contacts, and chat directly rather than wrapping them in API adapters. This tight integration is by design: your assistant lives where your data already is. That said, like any agent, it integrates with outside services where useful — a Google Workspace skill (Drive, Gmail, Calendar, Sheets, Docs) ships in the box, and skills for Microsoft 365 or other services can be added the same way.

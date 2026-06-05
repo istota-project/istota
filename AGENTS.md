@@ -5,7 +5,7 @@ Claude Code-powered assistant bot with Nextcloud Talk interface.
 **Production server**: `your-server` (SSH, installed at `/srv/app/istota`).
 
 For module-specific internals, see `.claude/rules/`:
-- `brain.md` — Brain protocol + ClaudeCodeBrain
+- `brain.md` — Brain protocol + ClaudeCodeBrain + NativeBrain (in-process agent loop)
 - `executor.md` — `execute_task()`, env mapping, prompt assembly, security
 - `scheduler.md` — daemon loop, worker pool, DB tables, deferred ops
 - `config.md` — every dataclass field + TOML mapping
@@ -81,7 +81,7 @@ Web App ──► Nextcloud OAuth2 → Dashboard / Feeds / Location / Money / He
 - **Task queue**: atomic locking with `user_id` filter, exponential backoff (1, 4, 16 min).
 - **Scheduler**: per-user worker pool, three-tier concurrency (instance fg/bg + per-user).
 - **Executor**: builds prompt + env, hands a `BrainRequest` to the configured Brain.
-- **Brain**: pluggable model backend. Phase 1 = `ClaudeCodeBrain` (wraps `claude` CLI). Each brain owns its own model namespace — canonical IDs, provider aliases (`opus-high`, `opus-46-high`), and default role-target mappings (`fast`/`general`/`smart`). Consumers always go through `make_brain(config.brain).resolve_alias(...)` / `.resolve_model_name(...)`. Operator role overrides via `[models.roles]` TOML are global and provider-agnostic.
+- **Brain**: pluggable model backend. Two brains ship: `ClaudeCodeBrain` (default, wraps `claude` CLI) and `NativeBrain` (Istota's in-process agent loop against any OpenAI-compatible model; loop in `agent/`, providers in `llm/`, turn state in `session/`). Each brain owns its own model namespace — canonical IDs, provider aliases (`opus-high`, `opus-46-high`), and default role-target mappings (`fast`/`general`/`smart`). Consumers always go through `make_brain(config.brain).resolve_alias(...)` / `.resolve_model_name(...)`. Operator role overrides via `[models.roles]` TOML are global and provider-agnostic.
 - **`!model <alias> <prompt>`**: per-task model override prefix in Talk. Aliases (resolved by the active brain): `default`, role aliases (`fast`/`general`/`smart`/custom), provider aliases (`opus`, `opus-high`, `opus-xhigh`, `opus-max`, `opus-46`, `opus-46-high`, `sonnet`, `sonnet-high`, `haiku`). Stored canonical on the task row so the DB stays version-pinned. Companion: `!models` lists the resolved table.
 
 ## Key Concepts
