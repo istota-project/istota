@@ -458,9 +458,16 @@ class BrainConfig:
     ``"claude_code"`` (default) wraps the ``claude`` CLI subprocess.
     ``"native"`` runs istota's own agent loop in-process; its settings live in
     the nested ``native`` block (``[brain.native]`` in TOML).
+
+    ``source_type_overrides`` maps a task ``source_type`` (``scheduled``,
+    ``heartbeat``, ``talk``, …) to a brain kind, overriding ``kind`` for
+    matching tasks. This is the gradual-rollout knob: move cron/heartbeat to
+    the native brain while interactive tasks stay on ``claude_code``. Set in
+    TOML as ``[brain.source_type_overrides]``.
     """
     kind: str = "claude_code"
     native: NativeBrainConfig = field(default_factory=NativeBrainConfig)
+    source_type_overrides: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1065,9 +1072,15 @@ def load_config(config_path: Path | None = None) -> Config:
             max_turns=int(native_raw.get("max_turns", 100)),
             max_tokens=int(native_raw.get("max_tokens", 16384)),
         )
+        overrides_raw = br.get("source_type_overrides", {})
+        if not isinstance(overrides_raw, dict):
+            overrides_raw = {}
         config.brain = BrainConfig(
             kind=br.get("kind", "claude_code"),
             native=native,
+            source_type_overrides={
+                str(k): str(v) for k, v in overrides_raw.items()
+            },
         )
 
     # [models] table — operator-controlled role aliases. The mapping is

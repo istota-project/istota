@@ -140,12 +140,26 @@ home is `brain/claude_code.py`.
 ## Configuration
 ```toml
 [brain]
-kind = "claude_code"  # only Phase 1 option
+kind = "claude_code"  # "claude_code" | "native"
+
+[brain.native]         # only used when kind = "native" (or routed-to below)
+provider = "openai_compat"
+model = "claude-sonnet-4-6"
+base_url = "https://api.anthropic.com/v1"
+# api_key via ISTOTA_BRAIN_NATIVE_API_KEY env override (kept out of TOML)
+
+[brain.source_type_overrides]   # per-source-type routing (gradual rollout)
+scheduled = "native"
+heartbeat = "native"
 ```
 
-`Config.brain: BrainConfig` follows the existing dataclass-with-defaults
-convention. Future phases add nested per-brain blocks (`[brain.openrouter]`
-etc.) with their own dataclasses.
+`Config.brain: BrainConfig` follows the dataclass-with-defaults convention.
+`source_type_overrides` maps a task's `source_type` to a brain kind, overriding
+`kind` for matching tasks — the gradual-rollout knob (cron/heartbeat on native,
+interactive on claude_code). `brain.resolve_brain_kind(source_type, brain_config)`
+returns the routed `BrainConfig` (same object when no override applies; unknown
+target kinds are logged and ignored so a routing typo never wedges a task). The
+executor calls it per task: `make_brain(resolve_brain_kind(task.source_type, config.brain))`.
 
 ## Adding a new brain
 1. Create `brain/<name>.py` with a class implementing `Brain.execute()`.

@@ -27,10 +27,21 @@ from ._events import (
     make_stream_parser,
     parse_stream_line,
 )
+import dataclasses
+import logging
+
 from ._roles import get_role_override, get_role_overrides, set_role_overrides
 from ._types import Brain, BrainConfig, BrainRequest, BrainResult
 from .claude_code import ClaudeCodeBrain
 from .native import NativeBrain
+
+logger = logging.getLogger(__name__)
+
+# Every brain kind ``make_brain`` knows how to build. The routing resolver
+# validates override targets against this set so a typo in
+# ``[brain.source_type_overrides]`` falls back to the base kind instead of
+# raising and wedging the task.
+KNOWN_BRAIN_KINDS = frozenset({"claude_code", "native"})
 
 
 def make_brain(brain_config: BrainConfig) -> Brain:
@@ -49,6 +60,33 @@ def make_brain(brain_config: BrainConfig) -> Brain:
     raise ValueError(f"Unknown brain kind: {kind!r}")
 
 
+def resolve_brain_kind(source_type, brain_config):
+    """Return the BrainConfig to use for a task with the given source_type.
+
+    The instance default (``brain_config.kind``) applies unless an operator
+    has mapped this ``source_type`` to a different kind via
+    ``[brain.source_type_overrides]``. This is the gradual-rollout knob:
+    route cron/heartbeat tasks to the native brain while interactive tasks
+    stay on ``claude_code``, with no executor or DB change.
+
+    Returns ``brain_config`` unchanged (same object) when no override applies,
+    so callers can cheaply detect the common no-routing case. Unknown override
+    targets are logged and ignored — a routing typo must never break a task.
+    """
+    overrides = getattr(brain_config, "source_type_overrides", None) or {}
+    target = overrides.get((source_type or "").strip())
+    if not target or target == brain_config.kind:
+        return brain_config
+    if target not in KNOWN_BRAIN_KINDS:
+        logger.warning(
+            "brain routing: unknown kind %r mapped for source_type %r; "
+            "falling back to %r",
+            target, source_type, brain_config.kind,
+        )
+        return brain_config
+    return dataclasses.replace(brain_config, kind=target)
+
+
 __all__ = [
     "Brain",
     "BrainConfig",
@@ -56,6 +94,7 @@ __all__ = [
     "BrainResult",
     "ClaudeCodeBrain",
     "ContextManagementEvent",
+    "KNOWN_BRAIN_KINDS",
     "NativeBrain",
     "ResultEvent",
     "StreamEvent",
@@ -66,5 +105,6 @@ __all__ = [
     "make_brain",
     "make_stream_parser",
     "parse_stream_line",
+    "resolve_brain_kind",
     "set_role_overrides",
 ]

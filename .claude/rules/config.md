@@ -115,10 +115,16 @@ semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeou
 
 ### `BrainConfig`
 ```
-kind: str = "claude_code"  # "claude_code" (Phase 1 only); future: "openrouter", "anthropic"
+kind: str = "claude_code"                       # "claude_code" | "native"
+native: NativeBrainConfig                       # [brain.native] block (native harness)
+source_type_overrides: dict[str, str] = {}      # [brain.source_type_overrides] — per-source-type routing
 ```
-Selects which `Brain` implementation handles model invocation. See
-`.claude/rules/brain.md` for the protocol and ClaudeCodeBrain internals.
+Selects which `Brain` implementation handles model invocation. `source_type_overrides`
+maps a task `source_type` to a brain kind, overriding `kind` for matching tasks
+(gradual rollout: cron/heartbeat on native, interactive on claude_code). The
+executor routes per task via `brain.resolve_brain_kind(task.source_type, config.brain)`;
+unknown target kinds are logged and ignored. See `.claude/rules/brain.md` for the
+protocol, ClaudeCodeBrain, NativeBrain, and `NativeBrainConfig` fields.
 
 ### `ModelsConfig`
 ```
