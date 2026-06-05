@@ -420,13 +420,47 @@ class SkillsConfig:
 
 
 @dataclass
+class NativeBrainConfig:
+    """Settings for the native harness (``brain.kind = "native"``).
+
+    The native brain runs istota's own agent loop in-process against an
+    ``LLMProvider``. ``provider`` selects the backend; the rest configure it.
+
+    - ``provider`` — ``"openai_compat"`` (any OpenAI chat-completions endpoint:
+      Anthropic, OpenRouter, Ollama, …) or ``"claude_code"`` (the ``claude`` CLI
+      as a bare inference endpoint).
+    - ``model`` — explicit model id for ``openai_compat`` (no aliasing); a
+      Claude-Code alias (``opus``) for ``claude_code``.
+    - ``base_url`` / ``api_key`` / ``extra_headers`` — for ``openai_compat``.
+      ``api_key`` is populated from the ``ISTOTA_BRAIN_NATIVE_API_KEY`` env
+      override (kept out of the TOML file).
+    - ``context_window`` — 0 resolves from the bundled model catalog; set to
+      override per deployment.
+    - ``max_turns`` — hard cap on assistant turns per task (loop backstop).
+    - ``max_tokens`` — per-completion output cap.
+    """
+
+    provider: str = "openai_compat"  # "openai_compat" | "claude_code"
+    model: str = ""
+    base_url: str = "https://api.anthropic.com/v1"
+    api_key: str = ""  # from ISTOTA_BRAIN_NATIVE_API_KEY at load time
+    claude_binary: str = "claude"  # for provider="claude_code"
+    extra_headers: dict = field(default_factory=dict)
+    context_window: int = 0  # 0 = resolve from istota.llm.catalog
+    max_turns: int = 100
+    max_tokens: int = 16384
+
+
+@dataclass
 class BrainConfig:
     """Selects which brain implementation handles model invocation.
 
-    Phase 1 ships only "claude_code" (the existing CLI subprocess wrapper).
-    Future phases add "openrouter" (direct HTTP) and "anthropic" (Messages API).
+    ``"claude_code"`` (default) wraps the ``claude`` CLI subprocess.
+    ``"native"`` runs istota's own agent loop in-process; its settings live in
+    the nested ``native`` block (``[brain.native]`` in TOML).
     """
     kind: str = "claude_code"
+    native: NativeBrainConfig = field(default_factory=NativeBrainConfig)
 
 
 @dataclass
@@ -1017,8 +1051,23 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "brain" in data:
         br = data["brain"]
+        native_raw = br.get("native", {})
+        if not isinstance(native_raw, dict):
+            native_raw = {}
+        native = NativeBrainConfig(
+            provider=native_raw.get("provider", "openai_compat"),
+            model=native_raw.get("model", ""),
+            base_url=native_raw.get("base_url", "https://api.anthropic.com/v1"),
+            api_key=native_raw.get("api_key", ""),
+            claude_binary=native_raw.get("claude_binary", "claude"),
+            extra_headers=dict(native_raw.get("extra_headers", {}) or {}),
+            context_window=int(native_raw.get("context_window", 0)),
+            max_turns=int(native_raw.get("max_turns", 100)),
+            max_tokens=int(native_raw.get("max_tokens", 16384)),
+        )
         config.brain = BrainConfig(
             kind=br.get("kind", "claude_code"),
+            native=native,
         )
 
     # [models] table — operator-controlled role aliases. The mapping is
@@ -1217,6 +1266,12 @@ def load_config(config_path: Path | None = None) -> Config:
         val = os.environ.get(env_var)
         if val:
             setattr(getattr(config, section), field_name, val)
+
+    # Native-brain API key lives two levels deep (brain.native.api_key), so it
+    # doesn't fit the flat section/field table above.
+    _native_key = os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY")
+    if _native_key:
+        config.brain.native.api_key = _native_key
 
     # Phase 6: overlay profile fields from the user_profiles table.
     # DB rows replace the matching scalar fields on TOML-loaded UserConfig

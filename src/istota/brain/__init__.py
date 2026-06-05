@@ -30,6 +30,7 @@ from ._events import (
 from ._roles import get_role_override, get_role_overrides, set_role_overrides
 from ._types import Brain, BrainConfig, BrainRequest, BrainResult
 from .claude_code import ClaudeCodeBrain
+from .native import NativeBrain
 
 
 def make_brain(brain_config: BrainConfig) -> Brain:
@@ -41,6 +42,10 @@ def make_brain(brain_config: BrainConfig) -> Brain:
     kind = brain_config.kind
     if kind == "claude_code":
         return ClaudeCodeBrain()
+    if kind == "native":
+        from .native import NativeBrain
+
+        return NativeBrain(brain_config.native)
     raise ValueError(f"Unknown brain kind: {kind!r}")
 
 
@@ -51,6 +56,7 @@ __all__ = [
     "BrainResult",
     "ClaudeCodeBrain",
     "ContextManagementEvent",
+    "NativeBrain",
     "ResultEvent",
     "StreamEvent",
     "TextEvent",
