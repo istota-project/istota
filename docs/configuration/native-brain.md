@@ -118,6 +118,7 @@ It diffs result text (similarity + unified diff), tool-call sequence, and native
 - **Cancellation / `!stop`.** Works on both brains. The native brain bridges the scheduler's cancel poll into an `asyncio.Event` threaded through the loop, tools, and retry backoff.
 - **Context management.** The native brain owns compaction (runs in `prepare_next_turn`, file-operation aware across cycles). `claude_code` delegates it to Claude Code. The two are independent.
 - **Sandboxing.** `claude_code` runs the whole subprocess inside bwrap. The native brain runs the loop in-process and sandboxes each tool execution per-call (the loop itself never runs user-controlled code). Validate the per-tool sandbox on Linux, not on the Mac.
+- **Pass-2 skill routing.** Semantic skill routing (`[skills] semantic_routing`) runs its classification through the active brain — under native it uses the configured `[brain.native]` provider and **its own model** (role aliases like `fast` are claude_code-namespace only and aren't sent to a non-Anthropic endpoint). Two knobs matter for a slow or reasoning-heavy local model: raise `[skills] semantic_routing_timeout` (default 3 s is tight for a local model), and note that reasoning models emit `reasoning_content` before any answer — the classifier already gives them generous output headroom, but an empty result logs `pass2_no_result` and falls back to Pass-1-only selection. To skip the cost entirely, set `semantic_routing = false`.
 
 ## Rollback
 
