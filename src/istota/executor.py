@@ -2430,8 +2430,17 @@ def execute_task(
         if config.custom_system_prompt:
             sp_path = config.skills_dir.parent / "system-prompt.md"
 
-        from .brain import BrainRequest
-        brain = make_brain(config.brain)
+        from .brain import BrainRequest, resolve_brain_kind
+        # Per-source-type brain routing (gradual rollout): an operator can
+        # map this task's source_type to a different brain kind via
+        # [brain.source_type_overrides]. No-op for the common case.
+        _brain_config = resolve_brain_kind(task.source_type, config.brain)
+        if _brain_config.kind != config.brain.kind:
+            logger.info(
+                "brain routing: task %d source_type=%s -> kind=%s (default %s)",
+                task.id, task.source_type, _brain_config.kind, config.brain.kind,
+            )
+        brain = make_brain(_brain_config)
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller
         # tasks already arrive resolved via the !model prefix path; cron jobs,
         # briefings, email, and operator istota_model defaults can still carry

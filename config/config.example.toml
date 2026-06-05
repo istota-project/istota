@@ -83,12 +83,32 @@ temp_dir = "/tmp/istota"
 # features = ["money_tax", "money_wash_sales"]
 features = []
 
-# Brain — selects the model-invocation backend. Phase 1 ships only "claude_code"
-# (wraps the `claude` CLI). Future values: "openrouter", "anthropic" for
-# direct-HTTP brains. The Brain protocol lives in src/istota/brain/ so swapping
-# backends doesn't touch executor orchestration (memory, skills, sandbox, etc.).
+# Brain — selects the model-invocation backend. Two kinds coexist behind the
+# same protocol (src/istota/brain/), so swapping backends doesn't touch executor
+# orchestration (memory, skills, sandbox, etc.):
+#   "claude_code" (default) — wraps the `claude` CLI subprocess.
+#   "native"                — istota's own in-process agent loop against an
+#                             OpenAI-compatible (or Claude-CLI) provider.
 # [brain]
 # kind = "claude_code"
+#
+# Native-brain settings (only used when kind = "native", or via a routing
+# override below). The API key stays out of this file — set it via the
+# ISTOTA_BRAIN_NATIVE_API_KEY env override.
+# [brain.native]
+# provider = "openai_compat"                 # "openai_compat" | "claude_code"
+# model = "claude-sonnet-4-6"                # explicit id for openai_compat
+# base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
+# max_turns = 100                            # hard cap on assistant turns/task
+# max_tokens = 16384                         # per-completion output cap
+#
+# Per-source-type brain routing (gradual rollout): map a task's source_type to
+# a brain kind, overriding `kind` for matching tasks. Lets cron/heartbeat run on
+# the native brain while interactive talk/email stays on claude_code. Unknown
+# kinds are ignored (logged), never wedging a task.
+# [brain.source_type_overrides]
+# scheduled = "native"
+# heartbeat = "native"
 
 # ============================================================================
 # Security Hardening
