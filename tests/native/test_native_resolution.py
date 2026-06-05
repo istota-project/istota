@@ -1,11 +1,10 @@
-"""Provider-aware model resolution for the native brain.
+"""Model resolution for the native brain.
 
-When the native provider is ``claude_code`` (the CLI as a bare inference
-endpoint) the Anthropic alias table applies. When it's ``openai_compat`` the
-endpoint may be anything (LM Studio, Ollama, vLLM, OpenRouter), so Anthropic
-aliases like ``opus`` MUST NOT be translated to a ``claude-*`` id and shipped to
-a non-Anthropic endpoint. Explicit ids pass through; only operator
-``[models.roles]`` overrides resolve.
+The only provider is ``openai_compat``, whose endpoint may be anything (LM
+Studio, Ollama, vLLM, OpenRouter, Anthropic), so Anthropic aliases like ``opus``
+MUST NOT be translated to a ``claude-*`` id and shipped to a non-Anthropic
+endpoint. Explicit ids pass through; only operator ``[models.roles]`` overrides
+resolve.
 """
 
 from istota.brain._roles import set_role_overrides
@@ -58,12 +57,3 @@ class TestOpenAICompatResolution:
         b = _brain("openai_compat")
         assert b.resolve_alias("fast") == ("tiny-model", None)
         assert b.resolve_alias("opus") is None
-
-
-class TestClaudeCodeProviderResolution:
-    def test_aliases_still_resolve_under_claude_code_provider(self):
-        b = _brain("claude_code")
-        # The claude CLI inference path keeps the Anthropic alias table.
-        assert b.resolve_model_name("opus").startswith("claude-opus")
-        names = [a[0] for a in b.list_aliases()]
-        assert "opus" in names

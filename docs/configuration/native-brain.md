@@ -3,7 +3,7 @@
 Istota has two model-invocation backends behind one protocol:
 
 - **`claude_code`** (default) — wraps the `claude` CLI subprocess. Battle-tested; delegates the agentic loop, tool use, and context management to Claude Code.
-- **`native`** — istota's own in-process agent loop against an OpenAI-compatible (or Claude-CLI) provider. Gives istota direct control over the loop, tool execution, context compaction, and provider/model selection.
+- **`native`** — istota's own in-process agent loop against an OpenAI-compatible provider. Gives istota direct control over the loop, tool execution, context compaction, and model selection.
 
 Both coexist permanently and are switchable per instance or per task. Switching does not touch executor orchestration (memory, skills, sandbox, deferred writes) — only which `Brain` implementation runs.
 
@@ -16,7 +16,7 @@ Instance-wide:
 kind = "native"
 
 [brain.native]
-provider = "openai_compat"                 # "openai_compat" | "claude_code"
+provider = "openai_compat"                 # only provider currently
 model = "claude-sonnet-4-6"                # explicit id — openai_compat has no aliasing
 base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
 max_turns = 100                            # hard cap on assistant turns per task
@@ -34,7 +34,7 @@ ISTOTA_BRAIN_NATIVE_API_KEY=sk-...
 ### Model id format
 
 - `openai_compat` needs an **explicit** model id (e.g. `claude-sonnet-4-6`). It does not understand role aliases (`smart`) or Claude-CLI short names (`opus`).
-- `claude_code` (both the default brain and `provider = "claude_code"` under native) keeps Claude Code's aliasing — `opus` resolves to the latest Opus.
+- The `claude_code` brain (default) keeps Claude Code's aliasing — `opus` resolves to the latest Opus. The native brain does not; map role names with `[models.roles]` if you want them.
 
 ## Ansible deployment
 
@@ -62,7 +62,7 @@ istota_brain_source_type_overrides:
   heartbeat: native
 ```
 
-The full variable set (all defaulted to the code defaults) is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,base_url,claude_binary,extra_headers,context_window,max_turns,max_tokens,prompt_caching,api_key}` and `istota_brain_source_type_overrides`.
+The full variable set (all defaulted to the code defaults) is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,base_url,extra_headers,context_window,max_turns,max_tokens,prompt_caching,api_key}` and `istota_brain_source_type_overrides`.
 
 Key handling:
 
@@ -158,7 +158,7 @@ It diffs result text (similarity + unified diff), tool-call sequence, and native
 - **Cost telemetry.** The native brain computes per-task token usage and cost (priced from the bundled model catalog; pinned Anthropic ids ship at price 0.0 until set) and writes it to `task_logs` (a `usage {...}` info line) plus an `native_usage` log line. `claude_code` leaves usage opaque — the CLI doesn't surface per-call usage.
 - **Per-user API keys.** Beyond the instance-wide `[brain.native] api_key` / `ISTOTA_BRAIN_NATIVE_API_KEY`, each user can have their own provider key in the encrypted secrets table: `istota secret ensure -u <user> -s native_brain -k api_key -v <key>` (or the web settings). The per-user key overlays the instance key for that user's tasks (execution and Pass-2 routing).
 - **Prompt caching.** `[brain.native] prompt_caching` (default off) adds `cache_control` breakpoints on the system message and the first user message (the stable composed-prompt prefix). Enable it **only** for endpoints that honor the field — Anthropic and OpenRouter. Leave it off for plain-OpenAI, LM Studio, Ollama, or vLLM, which may not understand the extension.
-- **Model ids.** `openai_compat` needs explicit ids and does not translate Anthropic aliases — `opus` is sent verbatim, not turned into `claude-opus-4-8` (that mapping only applies to the `claude_code` provider). Map role names per deployment with `[models.roles]` if you want `fast`/`general`/`smart` under native.
+- **Model ids.** `openai_compat` needs explicit ids and does not translate Anthropic aliases — `opus` is sent verbatim, not turned into `claude-opus-4-8` (that mapping is the `claude_code` brain's, not the native brain's). Map role names per deployment with `[models.roles]` if you want `fast`/`general`/`smart` under native.
 - **Cancellation / `!stop`.** Works on both brains. The native brain bridges the scheduler's cancel poll into an `asyncio.Event` threaded through the loop, tools, and retry backoff. A failing cancel poll (e.g. transient SQLite lock) is tolerated rather than silently disabling `!stop`.
 - **Task timeout.** The native loop runs under a wall-clock deadline of `scheduler.task_timeout_minutes` (`istota_scheduler_task_timeout_minutes`, default 30). On expiry it signals abort (killing any in-flight bash subprocess at the next poll), waits a short grace, then hard-cancels, and returns `stop_reason="timeout"`. This matches `claude_code` and prevents a runaway loop from outliving the scheduler's stuck-task reclaim (which would otherwise double-execute the task). `max_turns` is a second, coarser backstop.
 - **Context management.** The native brain owns compaction (runs in `prepare_next_turn`, file-operation aware across cycles). `claude_code` delegates it to Claude Code. The two are independent.

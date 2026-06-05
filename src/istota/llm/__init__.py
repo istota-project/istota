@@ -1,10 +1,8 @@
 """Istota LLM provider abstraction (Layer 1 of the native brain).
 
-Provider-agnostic inference. The standard interface is the OpenAI-compatible
-chat completions API (``OpenAICompatibleProvider``), which works against
-Anthropic, OpenRouter, and any local OpenAI-compatible endpoint. A second
-provider (``ClaudeCodeInferenceProvider``) drives the ``claude`` CLI in bare
-inference-only mode.
+Provider-agnostic inference. The interface is the OpenAI-compatible chat
+completions API (``OpenAICompatibleProvider``), which works against Anthropic,
+OpenRouter, and any local OpenAI-compatible endpoint.
 
 This layer knows nothing about tools dispatch or agent loops — it converts
 istota's ``Message`` types to/from a provider's wire format and yields
@@ -72,9 +70,7 @@ def make_provider(config):
     Supported ``provider`` values:
     - ``"openai_compat"`` → ``OpenAICompatibleProvider`` (api_key, base_url,
       extra_headers)
-    - ``"claude_code"`` → ``ClaudeCodeInferenceProvider`` (model, claude_binary)
     """
-    from .claude_code_inference import ClaudeCodeInferenceProvider
     from .openai_compat import OpenAICompatibleProvider
 
     kind = getattr(config, "provider", "openai_compat")
@@ -84,10 +80,5 @@ def make_provider(config):
             base_url=getattr(config, "base_url", "https://api.anthropic.com/v1"),
             extra_headers=getattr(config, "extra_headers", None),
             prompt_caching=getattr(config, "prompt_caching", False),
-        )
-    if kind == "claude_code":
-        return ClaudeCodeInferenceProvider(
-            model=getattr(config, "model", ""),
-            claude_binary=getattr(config, "claude_binary", "claude"),
         )
     raise ValueError(f"Unknown provider: {kind!r}")

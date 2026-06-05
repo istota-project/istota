@@ -96,7 +96,7 @@ features = []
 # override below). The API key stays out of this file — set it via the
 # ISTOTA_BRAIN_NATIVE_API_KEY env override.
 # [brain.native]
-# provider = "openai_compat"                 # "openai_compat" | "claude_code"
+# provider = "openai_compat"                 # only provider currently
 # model = "claude-sonnet-4-6"                # explicit id for openai_compat
 # base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
 # max_turns = 100                            # hard cap on assistant turns/task

@@ -112,10 +112,9 @@ istota_brain_kind: "claude_code"
 # source_type_overrides entry routes some task type to "native". Defaults match
 # the code defaults (NativeBrainConfig), so most operators only set model +
 # base_url + the API key.
-istota_brain_native_provider: "openai_compat"     # "openai_compat" | "claude_code"
-istota_brain_native_model: ""                     # explicit id (openai_compat); alias (claude_code)
+istota_brain_native_provider: "openai_compat"     # only provider currently
+istota_brain_native_model: ""                     # explicit id (openai_compat has no aliasing)
 istota_brain_native_base_url: "https://api.anthropic.com/v1"
-istota_brain_native_claude_binary: "claude"       # provider="claude_code" only
 istota_brain_native_extra_headers: {}             # dict of extra HTTP headers (openai_compat)
 istota_brain_native_context_window: 0             # 0 = resolve from bundled model catalog
 istota_brain_native_max_turns: 100                # hard cap on assistant turns per task
