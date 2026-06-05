@@ -11,9 +11,12 @@ CM-aware composition) and deferred file processing stay in the executor.
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from ._events import StreamEvent
+
+if TYPE_CHECKING:
+    from istota.session.usage import TaskUsage
 
 
 @dataclass
@@ -77,6 +80,11 @@ class BrainResult:
     actions_taken: str | None = None
     execution_trace: str | None = None
     stop_reason: str = "completed"  # completed/cancelled/timeout/oom/transient_api_error/error/not_found
+
+    # Native-brain only: per-task token + cost telemetry. ClaudeCodeBrain leaves
+    # this None (the CLI doesn't surface per-call usage), so it's purely
+    # additive — the existing path is untouched.
+    usage: "TaskUsage | None" = None
 
 
 class Brain(Protocol):
