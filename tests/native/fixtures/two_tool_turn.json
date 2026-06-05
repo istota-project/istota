@@ -1,0 +1,5 @@
+[
+  {"tool_calls": [{"id": "c1", "name": "Write", "arguments": {"file_path": "hello.txt", "content": "hi from native repl"}}]},
+  {"tool_calls": [{"id": "c2", "name": "Read", "arguments": {"file_path": "hello.txt"}}]},
+  {"text": "Wrote and read hello.txt — contents: hi from native repl."}
+]
