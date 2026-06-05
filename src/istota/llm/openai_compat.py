@@ -42,6 +42,7 @@ class OpenAICompatibleProvider:
         base_url: str = "https://api.anthropic.com/v1",
         timeout: float = 300.0,
         extra_headers: dict[str, str] | None = None,
+        prompt_caching: bool = False,
     ):
         headers = {
             "authorization": f"Bearer {api_key}",
@@ -50,6 +51,9 @@ class OpenAICompatibleProvider:
         if extra_headers:
             headers.update(extra_headers)
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout, headers=headers)
+        # Opt-in: add Anthropic/OpenRouter cache_control breakpoints. Off by
+        # default so a plain-OpenAI / local endpoint never sees the extension.
+        self._prompt_caching = prompt_caching
 
     async def stream(
         self,
@@ -101,6 +105,9 @@ class OpenAICompatibleProvider:
             wire.append({"role": "system", "content": system_prompt})
         for msg in messages:
             wire.append(self._message_to_wire(msg))
+
+        if self._prompt_caching:
+            self._apply_cache_breakpoints(wire)
 
         body: dict = {
             "model": model,
@@ -157,6 +164,38 @@ class OpenAICompatibleProvider:
                     }
                 )
         return {"role": "user", "content": parts}
+
+    @staticmethod
+    def _apply_cache_breakpoints(wire: list[dict]) -> None:
+        """Mark the stable prefix with cache_control (Anthropic/OpenRouter).
+
+        Two breakpoints on the blocks that stay constant across a task's turns:
+        the system message and the first user message (the native brain's large
+        composed prompt). Mutates ``wire`` in place; converts string content to
+        a single text block so the cache_control field has somewhere to live.
+        """
+        cc = {"type": "ephemeral"}
+
+        def _mark(msg: dict) -> None:
+            content = msg.get("content")
+            if isinstance(content, str):
+                msg["content"] = [
+                    {"type": "text", "text": content, "cache_control": cc}
+                ]
+            elif isinstance(content, list) and content:
+                for block in reversed(content):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        block["cache_control"] = cc
+                        return
+                if isinstance(content[-1], dict):
+                    content[-1]["cache_control"] = cc
+
+        if wire and wire[0].get("role") == "system":
+            _mark(wire[0])
+        for msg in wire:
+            if msg.get("role") == "user":
+                _mark(msg)
+                break
 
     @staticmethod
     def _tool_to_wire(tool: ToolSchema) -> dict:

@@ -101,6 +101,8 @@ features = []
 # base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
 # max_turns = 100                            # hard cap on assistant turns/task
 # max_tokens = 16384                         # per-completion output cap
+# prompt_caching = false                     # opt-in cache_control breakpoints;
+#                                            #   enable only for Anthropic/OpenRouter
 #
 # Per-source-type brain routing (gradual rollout): map a task's source_type to
 # a brain kind, overriding `kind` for matching tasks. Lets cron/heartbeat run on
