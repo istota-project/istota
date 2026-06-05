@@ -59,6 +59,7 @@ from istota.session.messages import CompactionSummaryMessage
 from istota.session.retry import classify_error
 from istota.session.usage import TaskUsage
 
+from ._roles import get_role_override, get_role_overrides
 from ._types import BrainRequest, BrainResult
 
 logger = logging.getLogger("istota.brain.native")
@@ -141,25 +142,48 @@ class NativeBrain:
         self._config = config
         # ``provider`` injectable for tests; production builds from config.
         self._provider = provider if provider is not None else make_provider(config)
-        # Model-namespace resolution shares ClaudeCodeBrain's Anthropic alias
-        # table (native targets Anthropic models).
+        # Model-namespace resolution is provider-aware. The ``claude_code``
+        # inference provider IS the Claude CLI, so the Anthropic alias table
+        # applies. ``openai_compat`` can point at any endpoint, so Anthropic
+        # aliases must NOT be translated (sending "claude-opus-4-8" to a qwen
+        # endpoint would fail) — explicit ids pass through and only operator
+        # role overrides resolve.
         from .claude_code import ClaudeCodeBrain
 
         self._namespace = ClaudeCodeBrain()
+        self._anthropic_namespace = getattr(config, "provider", "") == "claude_code"
 
-    # --- Model resolution (delegated) --------------------------------------
+    # --- Model resolution (provider-aware) ---------------------------------
 
     def resolve_alias(self, alias):
-        return self._namespace.resolve_alias(alias)
+        if self._anthropic_namespace:
+            return self._namespace.resolve_alias(alias)
+        # openai_compat: only operator [models.roles] overrides resolve.
+        target = get_role_override(alias) if alias else None
+        return (target, None) if target else None
 
     def resolve_model_name(self, name):
-        return self._namespace.resolve_model_name(name)
+        if self._anthropic_namespace:
+            return self._namespace.resolve_model_name(name)
+        if not name:
+            return ""
+        resolved = self.resolve_alias(name)
+        if resolved is not None and resolved[0]:
+            return resolved[0]
+        return name  # explicit id pass-through; no Anthropic translation
 
     def list_aliases(self):
-        return self._namespace.list_aliases()
+        if self._anthropic_namespace:
+            return self._namespace.list_aliases()
+        return [
+            (role, target, None) for role, target in get_role_overrides().items()
+        ]
 
     def validate_role_override(self, role, target):
-        return self._namespace.validate_role_override(role, target)
+        if self._anthropic_namespace:
+            return self._namespace.validate_role_override(role, target)
+        # No alias table to validate against for an arbitrary endpoint.
+        return []
 
     # --- Execution ---------------------------------------------------------
 
