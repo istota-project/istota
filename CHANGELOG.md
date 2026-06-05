@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-06-05
+
 ### Fixed
 - **Slow-but-healthy tasks are no longer reclaimed and run twice** (ISSUE-112). A `running` task was treated as stuck after a hardcoded 15 minutes, well below the 30-minute task timeout, so a long task still executing got re-queued and a second worker ran a duplicate — eventually surfacing as a spurious "task failed" with a backoff cadence. This hit the native brain hardest because it runs in-process with no killable PID to prove liveness. Running workers now emit a periodic liveness heartbeat, and stuck-task reclaim keys on that heartbeat instead of raw runtime: a worker that keeps pinging is never reclaimed however long it runs, while a crashed worker is recovered within minutes. Two new `[scheduler]` settings, `worker_heartbeat_seconds` and `worker_stuck_minutes`, tune it.
 - **Native brain now streams in-progress updates to Nextcloud Talk again** (ISSUE-111). The native brain runs its agent loop inside its own event loop, but the Talk progress callback edits messages with `asyncio.run()`, which raises when called from a running loop — so every tool-call and partial-text update was silently dropped and the chat sat blank until the final reply. The brain now dispatches the progress callback on a worker thread, restoring the live action trail. Cancellation stays responsive.
@@ -588,7 +590,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.15.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.15.1...main
+[0.15.1]: https://gitlab.com/cynium/istota/-/releases/v0.15.1
 [0.15.0]: https://gitlab.com/cynium/istota/-/releases/v0.15.0
 [0.14.0]: https://gitlab.com/cynium/istota/-/releases/v0.14.0
 [0.13.0]: https://gitlab.com/cynium/istota/-/releases/v0.13.0
