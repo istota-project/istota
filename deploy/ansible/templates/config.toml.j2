@@ -62,7 +62,6 @@ provider = "{{ istota_brain_native_provider | default('openai_compat', true) }}"
 model = "{{ istota_brain_native_model }}"
 {% endif %}
 base_url = "{{ istota_brain_native_base_url | default('https://api.anthropic.com/v1', true) }}"
-claude_binary = "{{ istota_brain_native_claude_binary | default('claude', true) }}"
 context_window = {{ istota_brain_native_context_window | default(0, true) }}
 max_turns = {{ istota_brain_native_max_turns | default(100, true) }}
 max_tokens = {{ istota_brain_native_max_tokens | default(16384, true) }}

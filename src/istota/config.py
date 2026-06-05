@@ -426,11 +426,10 @@ class NativeBrainConfig:
     The native brain runs istota's own agent loop in-process against an
     ``LLMProvider``. ``provider`` selects the backend; the rest configure it.
 
-    - ``provider`` — ``"openai_compat"`` (any OpenAI chat-completions endpoint:
-      Anthropic, OpenRouter, Ollama, …) or ``"claude_code"`` (the ``claude`` CLI
-      as a bare inference endpoint).
-    - ``model`` — explicit model id for ``openai_compat`` (no aliasing); a
-      Claude-Code alias (``opus``) for ``claude_code``.
+    - ``provider`` — ``"openai_compat"``: any OpenAI chat-completions endpoint
+      (Anthropic, OpenRouter, Ollama, …). The only provider; the field stays so
+      the layer can grow new backends without a config break.
+    - ``model`` — explicit model id (``openai_compat`` does no aliasing).
     - ``base_url`` / ``api_key`` / ``extra_headers`` — for ``openai_compat``.
       ``api_key`` is populated from the ``ISTOTA_BRAIN_NATIVE_API_KEY`` env
       override (kept out of the TOML file).
@@ -440,11 +439,10 @@ class NativeBrainConfig:
     - ``max_tokens`` — per-completion output cap.
     """
 
-    provider: str = "openai_compat"  # "openai_compat" | "claude_code"
+    provider: str = "openai_compat"  # only "openai_compat"
     model: str = ""
     base_url: str = "https://api.anthropic.com/v1"
     api_key: str = ""  # from ISTOTA_BRAIN_NATIVE_API_KEY at load time
-    claude_binary: str = "claude"  # for provider="claude_code"
     extra_headers: dict = field(default_factory=dict)
     context_window: int = 0  # 0 = resolve from istota.llm.catalog
     max_turns: int = 100
@@ -1067,7 +1065,6 @@ def load_config(config_path: Path | None = None) -> Config:
             model=native_raw.get("model", ""),
             base_url=native_raw.get("base_url", "https://api.anthropic.com/v1"),
             api_key=native_raw.get("api_key", ""),
-            claude_binary=native_raw.get("claude_binary", "claude"),
             extra_headers=dict(native_raw.get("extra_headers", {}) or {}),
             context_window=int(native_raw.get("context_window", 0)),
             max_turns=int(native_raw.get("max_turns", 100)),
