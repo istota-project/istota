@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-06-05
+
 ### Added
 - **Native brain — Istota's own agentic loop.** Istota can now run its own in-process agent loop instead of delegating to the Claude Code CLI, driving any OpenAI-compatible model (Anthropic, OpenRouter, or a self-hosted model). The Claude Code CLI stays the default brain; switch the whole instance or route specific task types to either.
 
@@ -582,7 +584,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.14.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.15.0...main
+[0.15.0]: https://gitlab.com/cynium/istota/-/releases/v0.15.0
 [0.14.0]: https://gitlab.com/cynium/istota/-/releases/v0.14.0
 [0.13.0]: https://gitlab.com/cynium/istota/-/releases/v0.13.0
 [0.12.0]: https://gitlab.com/cynium/istota/-/releases/v0.12.0
