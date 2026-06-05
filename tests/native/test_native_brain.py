@@ -196,9 +196,19 @@ class TestFactory:
         brain = make_brain(cfg)
         assert isinstance(brain, NativeBrain)
 
-    def test_resolver_methods_delegate(self):
-        brain = NativeBrain(NativeBrainConfig(model="claude-sonnet-4-6"), provider=object())
+    def test_resolver_methods_delegate_under_claude_code_provider(self):
+        # The claude_code inference provider keeps the Anthropic alias table.
+        brain = NativeBrain(
+            NativeBrainConfig(provider="claude_code", model="claude-sonnet-4-6"),
+            provider=object(),
+        )
         assert brain.resolve_model_name("sonnet") == "claude-sonnet-4-6"
         assert brain.resolve_alias("smart") == ("claude-opus-4-8", None)
         assert isinstance(brain.list_aliases(), list)
         assert brain.validate_role_override("smart", "claude-sonnet-4-6") == []
+
+    def test_openai_compat_provider_does_not_translate_aliases(self):
+        # Provider-aware: a non-Anthropic endpoint gets explicit ids, not
+        # translated Anthropic aliases (see test_native_resolution.py).
+        brain = NativeBrain(NativeBrainConfig(model="qwen-x"), provider=object())
+        assert brain.resolve_model_name("opus") == "opus"

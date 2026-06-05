@@ -312,6 +312,62 @@ def _resolve_effort(task, config: Config) -> str:
     return task_effort or config.effort
 
 
+def _persist_task_usage(config: Config, conn, task_id: int, usage) -> None:
+    """Record native-brain token/cost telemetry to ``task_logs`` + an INFO log.
+
+    ``usage`` is a ``TaskUsage`` or None. ClaudeCodeBrain leaves it None (the CLI
+    doesn't surface per-call usage), so this is a no-op for it. Persisting to
+    ``task_logs`` keeps cost observable in production with no schema migration.
+    Best-effort — a logging failure never affects task success.
+    """
+    if usage is None:
+        return
+    payload = json.dumps(
+        {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_read_tokens": usage.cache_read_tokens,
+            "cost_usd": round(usage.cost_usd, 6),
+        }
+    )
+    logger.info("native_usage task_id=%s %s", task_id, payload)
+    try:
+        if conn is not None:
+            db.log_task(conn, task_id, "info", f"usage {payload}")
+        else:
+            with db.get_db(config.db_path) as usage_conn:
+                db.log_task(usage_conn, task_id, "info", f"usage {payload}")
+    except Exception:
+        logger.debug("failed to persist usage for task %s", task_id, exc_info=True)
+
+
+def _native_with_user_key(native_config, config: Config, user_id: str):
+    """Overlay the user's per-user native-brain API key onto the native config.
+
+    Looks up the encrypted ``native_brain``/``api_key`` secret for ``user_id``;
+    when present it replaces the instance-wide key (`[brain.native] api_key` /
+    `ISTOTA_BRAIN_NATIVE_API_KEY`), enabling per-user provider credentials in a
+    multi-user deployment. Falls back to the instance key on absence/error so a
+    missing secret never blocks the task. Returns a copy — never mutates input.
+    """
+    import dataclasses
+
+    try:
+        from . import secrets_store
+
+        key = secrets_store.get_secret(
+            config.db_path, user_id, "native_brain", "api_key"
+        )
+    except Exception:
+        logger.debug(
+            "native api key secret lookup failed for user=%s", user_id, exc_info=True
+        )
+        key = None
+    if key:
+        return dataclasses.replace(native_config, api_key=key)
+    return native_config
+
+
 def _build_native_classifier(native_config, timeout: float):
     """A `prompt -> raw_output | None` Pass-2 classifier over the native provider.
 
@@ -1972,10 +2028,13 @@ def execute_task(
         )
         _pass2_skip = False
         if _routed_brain.kind == "native":
-            _pass2_classifier = _build_native_classifier(
-                _routed_brain.native, config.skills.semantic_routing_timeout
+            _pass2_native = _native_with_user_key(
+                _routed_brain.native, config, task.user_id
             )
-            _pass2_model = _routed_brain.native.model
+            _pass2_classifier = _build_native_classifier(
+                _pass2_native, config.skills.semantic_routing_timeout
+            )
+            _pass2_model = _pass2_native.model
             # If the native classifier couldn't be built, skip Pass 2 rather
             # than falling back to `claude --model <native-id>` (wrong CLI).
             _pass2_skip = _pass2_classifier is None
@@ -2492,6 +2551,16 @@ def execute_task(
                 "brain routing: task %d source_type=%s -> kind=%s (default %s)",
                 task.id, task.source_type, _brain_config.kind, config.brain.kind,
             )
+        # Overlay the per-user native-brain API key (encrypted secrets) so a
+        # multi-user deployment can give each user their own provider credential.
+        if _brain_config.kind == "native":
+            import dataclasses as _dc
+            _brain_config = _dc.replace(
+                _brain_config,
+                native=_native_with_user_key(
+                    _brain_config.native, config, task.user_id
+                ),
+            )
         brain = make_brain(_brain_config)
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller
         # tasks already arrive resolved via the !model prefix path; cron jobs,
@@ -2526,6 +2595,9 @@ def execute_task(
         result = brain_result.result_text
         actions = brain_result.actions_taken
         trace = brain_result.execution_trace
+
+        # Persist native-brain token/cost telemetry (no-op for claude_code).
+        _persist_task_usage(config, conn, task.id, brain_result.usage)
 
         # CM-aware / terse-result composition: reconcile result_text with
         # the trace so substantial intermediate text isn't lost when the

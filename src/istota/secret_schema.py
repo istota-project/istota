@@ -66,6 +66,16 @@ CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
             {"key": "password",   "label": "Password (optional)",     "type": "password"},
         ],
     },
+    "native_brain": {
+        "label": "Native brain provider",
+        # Consumed by the native brain (brain.kind = "native"), not a skill.
+        # When set, this per-user key overlays the instance-wide
+        # `[brain.native] api_key` / `ISTOTA_BRAIN_NATIVE_API_KEY`.
+        "used_by": (),
+        "fields": [
+            {"key": "api_key", "label": "Provider API key", "type": "password"},
+        ],
+    },
 }
 
 # Module-owned credential blocks. Outer dict key = module name (must be in
