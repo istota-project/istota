@@ -83,6 +83,7 @@ def make_provider(config):
             api_key=getattr(config, "api_key", ""),
             base_url=getattr(config, "base_url", "https://api.anthropic.com/v1"),
             extra_headers=getattr(config, "extra_headers", None),
+            prompt_caching=getattr(config, "prompt_caching", False),
         )
     if kind == "claude_code":
         return ClaudeCodeInferenceProvider(

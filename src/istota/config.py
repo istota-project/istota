@@ -449,6 +449,7 @@ class NativeBrainConfig:
     context_window: int = 0  # 0 = resolve from istota.llm.catalog
     max_turns: int = 100
     max_tokens: int = 16384
+    prompt_caching: bool = False  # opt-in cache_control breakpoints (Anthropic/OpenRouter)
 
 
 @dataclass
@@ -1071,6 +1072,7 @@ def load_config(config_path: Path | None = None) -> Config:
             context_window=int(native_raw.get("context_window", 0)),
             max_turns=int(native_raw.get("max_turns", 100)),
             max_tokens=int(native_raw.get("max_tokens", 16384)),
+            prompt_caching=bool(native_raw.get("prompt_caching", False)),
         )
         overrides_raw = br.get("source_type_overrides", {})
         if not isinstance(overrides_raw, dict):
