@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Execution control
     cancel_requested INTEGER DEFAULT 0,  -- Flag to signal task cancellation
     worker_pid INTEGER,                  -- PID of worker process
+    last_heartbeat TEXT,                 -- Liveness ping from the running worker (ISSUE-112)
 
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action

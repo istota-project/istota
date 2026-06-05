@@ -158,6 +158,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("reply_to_content", "TEXT"),
         ("cancel_requested", "INTEGER DEFAULT 0"),
         ("worker_pid", "INTEGER"),
+        ("last_heartbeat", "TEXT"),
         ("heartbeat_silent", "INTEGER DEFAULT 0"),
         ("skip_log_channel", "INTEGER DEFAULT 0"),
         ("scheduled_job_id", "INTEGER"),
@@ -481,6 +482,26 @@ def _row_to_task(row: sqlite3.Row) -> Task:
     )
 
 
+# A 'running' task counts as stuck (its worker presumed dead) when its liveness
+# ping has gone silent — last_heartbeat older than ``heartbeat_stuck_minutes`` —
+# or, when the worker never recorded a heartbeat (legacy rows, or a worker whose
+# pinger never started), when it has simply been running past
+# ``stuck_running_minutes``. A live worker refreshes last_heartbeat every cycle,
+# so a healthy long task is never reclaimed regardless of how long it runs
+# (ISSUE-112). The fragment binds two params, in this order: heartbeat window
+# then started_at window — build them with ``_stuck_running_params``.
+_STUCK_RUNNING_PREDICATE = (
+    "((last_heartbeat IS NOT NULL "
+    "AND last_heartbeat < datetime('now', ? || ' minutes')) "
+    "OR (last_heartbeat IS NULL "
+    "AND started_at < datetime('now', ? || ' minutes')))"
+)
+
+
+def _stuck_running_params(heartbeat_stuck_minutes: int, stuck_running_minutes: int) -> tuple:
+    return (f"-{heartbeat_stuck_minutes}", f"-{stuck_running_minutes}")
+
+
 def claim_task(
     conn: sqlite3.Connection,
     worker_id: str,
@@ -488,6 +509,7 @@ def claim_task(
     user_id: str | None = None,
     queue: str | None = None,
     stuck_running_minutes: int = 15,
+    heartbeat_stuck_minutes: int = 5,
 ) -> Task | None:
     """Atomically claim the next available task. Returns None if no tasks available.
 
@@ -496,12 +518,15 @@ def claim_task(
         max_retry_age_minutes: Tasks older than this are failed instead of retried.
         user_id: If provided, only claim tasks for this user.
         queue: If provided, only claim tasks in this queue ('foreground' or 'background').
-        stuck_running_minutes: A 'running' task is treated as stuck (worker
-            presumed dead) only after this long. Must exceed the task timeout,
-            or a healthy still-running worker — especially the in-process native
-            brain, which has no killable PID to prove liveness — gets reclaimed
-            and a second worker runs a duplicate (ISSUE-112). Callers pass
+        stuck_running_minutes: Fallback stuck threshold for a 'running' task that
+            never recorded a heartbeat (legacy rows). Must exceed the task
+            timeout, or a healthy still-running worker — especially the in-process
+            native brain, which has no killable PID — gets reclaimed and a second
+            worker runs a duplicate (ISSUE-112). Callers pass
             ``task_timeout_minutes`` + a grace margin.
+        heartbeat_stuck_minutes: Stuck threshold once the worker has recorded a
+            heartbeat — how long last_heartbeat may go silent before the worker is
+            presumed dead. Small (a few missed pings); independent of the timeout.
     """
     # First, fail old stale locks (created too long ago to be worth retrying)
     conn.execute(
@@ -530,40 +555,42 @@ def claim_task(
 
     # Fail old stuck 'running' tasks (too old to be worth retrying)
     conn.execute(
-        """
+        f"""
         UPDATE tasks
         SET status = 'failed', error = 'Task too old to retry (stuck running)'
         WHERE status = 'running'
-        AND started_at < datetime('now', ? || ' minutes')
+        AND {_STUCK_RUNNING_PREDICATE}
         AND created_at < datetime('now', ? || ' minutes')
         """,
-        (f"-{stuck_running_minutes}", f"-{max_retry_age_minutes}"),
+        (*_stuck_running_params(heartbeat_stuck_minutes, stuck_running_minutes),
+         f"-{max_retry_age_minutes}"),
     )
 
     # Release recent stuck 'running' tasks for retry
     conn.execute(
-        """
+        f"""
         UPDATE tasks
         SET status = 'pending', started_at = NULL, locked_at = NULL, locked_by = NULL,
             attempt_count = attempt_count + 1
         WHERE status = 'running'
-        AND started_at < datetime('now', ? || ' minutes')
+        AND {_STUCK_RUNNING_PREDICATE}
         AND created_at >= datetime('now', ? || ' minutes')
         AND attempt_count < max_attempts
         """,
-        (f"-{stuck_running_minutes}", f"-{max_retry_age_minutes}"),
+        (*_stuck_running_params(heartbeat_stuck_minutes, stuck_running_minutes),
+         f"-{max_retry_age_minutes}"),
     )
 
     # Mark stuck 'running' tasks as failed if they've exhausted retries
     conn.execute(
-        """
+        f"""
         UPDATE tasks
         SET status = 'failed', error = 'Task stuck in running state - worker may have crashed'
         WHERE status = 'running'
-        AND started_at < datetime('now', ? || ' minutes')
+        AND {_STUCK_RUNNING_PREDICATE}
         AND attempt_count >= max_attempts
         """,
-        (f"-{stuck_running_minutes}",),
+        _stuck_running_params(heartbeat_stuck_minutes, stuck_running_minutes),
     )
 
     # Atomically claim a task (optionally filtered by user_id and/or queue)
@@ -1669,6 +1696,22 @@ def update_task_pid(conn: sqlite3.Connection, task_id: int, pid: int) -> None:
     conn.commit()
 
 
+def touch_task_heartbeat(conn: sqlite3.Connection, task_id: int) -> None:
+    """Record a liveness ping from the worker executing ``task_id``.
+
+    A running worker calls this periodically. Stuck-task reclaim uses the
+    heartbeat to tell a slow-but-alive worker from a dead one — see claim_task()
+    (ISSUE-112). Scoped to status='running' so a ping that races task completion
+    can't resurrect the heartbeat on a finished task.
+    """
+    conn.execute(
+        "UPDATE tasks SET last_heartbeat = datetime('now') "
+        "WHERE id = ? AND status = 'running'",
+        (task_id,),
+    )
+    conn.commit()
+
+
 def is_task_cancelled(conn: sqlite3.Connection, task_id: int) -> bool:
     """Check if a task has been flagged for cancellation."""
     row = conn.execute(
@@ -1858,12 +1901,13 @@ def fail_ancient_pending_tasks(conn: sqlite3.Connection, fail_hours: int) -> lis
 def fail_stuck_locked_running_tasks(
     conn: sqlite3.Connection, max_retry_age_minutes: int = 60,
     stuck_running_minutes: int = 15,
+    heartbeat_stuck_minutes: int = 5,
 ) -> list[dict]:
     """Fail or release tasks stuck in 'locked' or 'running' state.
 
     This mirrors the recovery logic in claim_task() but runs independently
     so stuck tasks are cleaned up even when no new tasks are being claimed.
-    ``stuck_running_minutes`` must exceed the task timeout — see claim_task()
+    See claim_task() for ``stuck_running_minutes`` / ``heartbeat_stuck_minutes``
     (ISSUE-112).
 
     Returns list of failed task info for logging.
@@ -1901,47 +1945,49 @@ def fail_stuck_locked_running_tasks(
 
     # Fail old stuck 'running' tasks
     cursor = conn.execute(
-        """
+        f"""
         UPDATE tasks
         SET status = 'failed', error = 'Task too old to retry (stuck running)',
             completed_at = datetime('now'), updated_at = datetime('now')
         WHERE status = 'running'
-        AND started_at < datetime('now', ? || ' minutes')
+        AND {_STUCK_RUNNING_PREDICATE}
         AND created_at < datetime('now', ? || ' minutes')
         RETURNING id, user_id, conversation_token, source_type
         """,
-        (f"-{stuck_running_minutes}", f"-{max_retry_age_minutes}"),
+        (*_stuck_running_params(heartbeat_stuck_minutes, stuck_running_minutes),
+         f"-{max_retry_age_minutes}"),
     )
     for row in cursor.fetchall():
         failed.append(dict(row))
 
     # Release recent stuck 'running' tasks for retry
     conn.execute(
-        """
+        f"""
         UPDATE tasks
         SET status = 'pending', started_at = NULL, locked_at = NULL, locked_by = NULL,
             attempt_count = attempt_count + 1
         WHERE status = 'running'
-        AND started_at < datetime('now', ? || ' minutes')
+        AND {_STUCK_RUNNING_PREDICATE}
         AND created_at >= datetime('now', ? || ' minutes')
         AND attempt_count < max_attempts
         """,
-        (f"-{stuck_running_minutes}", f"-{max_retry_age_minutes}"),
+        (*_stuck_running_params(heartbeat_stuck_minutes, stuck_running_minutes),
+         f"-{max_retry_age_minutes}"),
     )
 
     # Fail stuck 'running' tasks that have exhausted retries
     cursor = conn.execute(
-        """
+        f"""
         UPDATE tasks
         SET status = 'failed',
             error = 'Task stuck in running state - worker may have crashed',
             completed_at = datetime('now'), updated_at = datetime('now')
         WHERE status = 'running'
-        AND started_at < datetime('now', ? || ' minutes')
+        AND {_STUCK_RUNNING_PREDICATE}
         AND attempt_count >= max_attempts
         RETURNING id, user_id, conversation_token, source_type
         """,
-        (f"-{stuck_running_minutes}",),
+        _stuck_running_params(heartbeat_stuck_minutes, stuck_running_minutes),
     )
     for row in cursor.fetchall():
         failed.append(dict(row))

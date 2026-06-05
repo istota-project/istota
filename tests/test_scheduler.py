@@ -39,6 +39,7 @@ from istota.scheduler import (
     process_one_task,
     _make_talk_progress_callback,
     _stuck_running_minutes,
+    _task_heartbeat,
     post_result_to_talk,
 )
 from istota.config import (
@@ -71,6 +72,57 @@ class TestStuckRunningMinutes:
     def test_tracks_configured_timeout(self):
         assert _stuck_running_minutes(SchedulerConfig(task_timeout_minutes=10)) == 15
         assert _stuck_running_minutes(SchedulerConfig(task_timeout_minutes=60)) == 65
+
+
+class TestTaskHeartbeat:
+    """ISSUE-112: the worker pings liveness while a task runs."""
+
+    def _config(self, tmp_path, *, interval):
+        from istota import db
+        db_path = tmp_path / "hb.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(worker_heartbeat_seconds=interval),
+            temp_dir=tmp_path / "temp",
+        )
+
+    def test_pings_while_body_runs(self, tmp_path):
+        from istota import db
+        config = self._config(tmp_path, interval=1)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="hi", user_id="alice")
+            db.update_task_status(conn, task_id, "running")
+
+        def _hb(tid):
+            with db.get_db(config.db_path) as conn:
+                return conn.execute(
+                    "SELECT last_heartbeat FROM tasks WHERE id = ?", (tid,)
+                ).fetchone()[0]
+
+        with _task_heartbeat(config, task_id):
+            # First ping fires immediately on entry; poll briefly for it.
+            deadline = time.time() + 3
+            while _hb(task_id) is None and time.time() < deadline:
+                time.sleep(0.05)
+            assert _hb(task_id) is not None
+
+    def test_disabled_when_interval_zero(self, tmp_path):
+        from istota import db
+        config = self._config(tmp_path, interval=0)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="hi", user_id="alice")
+            db.update_task_status(conn, task_id, "running")
+        with _task_heartbeat(config, task_id):
+            time.sleep(0.2)
+        with db.get_db(config.db_path) as conn:
+            hb = conn.execute(
+                "SELECT last_heartbeat FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()[0]
+        assert hb is None  # no pinger started
 
 
 class TestConfirmationPattern:

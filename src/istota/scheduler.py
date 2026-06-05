@@ -1,6 +1,7 @@
 """Task scheduler - processes pending tasks and briefings."""
 
 import asyncio
+import contextlib
 import fcntl
 import json
 import logging
@@ -186,8 +187,46 @@ _STUCK_RUNNING_GRACE_MINUTES = 5
 
 
 def _stuck_running_minutes(sched) -> int:
-    """Minutes a 'running' task may persist before it's reclaimed as stuck."""
+    """Fallback stuck threshold (minutes) for a task that never heart-beat."""
     return sched.task_timeout_minutes + _STUCK_RUNNING_GRACE_MINUTES
+
+
+@contextlib.contextmanager
+def _task_heartbeat(config: Config, task_id: int):
+    """Ping the task's liveness while its body runs (ISSUE-112).
+
+    A background daemon thread touches ``last_heartbeat`` every
+    ``worker_heartbeat_seconds`` so stuck-task reclaim can tell a slow-but-alive
+    worker from a dead one — the native brain runs in-process with no killable
+    PID and no subprocess to die, so without this a long task looks identical to
+    a crashed one. The first ping fires immediately, so liveness is recorded as
+    soon as the body starts; the thread is stopped on exit (incl. on exception),
+    which lets reclaim fire promptly once a worker really dies.
+    """
+    interval = config.scheduler.worker_heartbeat_seconds
+    if interval <= 0:
+        yield  # heartbeat disabled
+        return
+
+    stop = threading.Event()
+
+    def _loop():
+        while True:
+            try:
+                with db.get_db(config.db_path) as conn:
+                    db.touch_task_heartbeat(conn, task_id)
+            except Exception:
+                logger.debug("heartbeat ping failed for task %s", task_id, exc_info=True)
+            if stop.wait(interval):
+                return
+
+    thread = threading.Thread(target=_loop, name=f"heartbeat-{task_id}", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=5)
 
 
 def _is_policy_refusal(error_text: str) -> bool:
@@ -1384,6 +1423,7 @@ def process_one_task(
             conn, worker_id, config.scheduler.max_retry_age_minutes,
             user_id=user_id, queue=queue,
             stuck_running_minutes=_stuck_running_minutes(config.scheduler),
+            heartbeat_stuck_minutes=config.scheduler.worker_stuck_minutes,
         )
         if not task:
             return None
@@ -1429,74 +1469,78 @@ def process_one_task(
     # Command and skill tasks skip Talk ack, attachment download, and
     # resource loading (cron-driven, no live user behind a Talk session).
     progress_callback = None
-    if task.skill:
-        success, result = _execute_skill_task(task, config)
-        actions_taken = None
-        execution_trace = None
-    elif task.command:
-        success, result = _execute_command_task(task, config)
-        actions_taken = None
-        execution_trace = None
-    else:
-        # Send progress update for Talk tasks
-        ack_msg_id = None
-        is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
-        if task.source_type == "talk" and task.conversation_token and not dry_run:
-            ack_text = f"`#{task.id}` *Retrying…*" if is_rerun else f"`#{task.id}` {random.choice(PROGRESS_MESSAGES)}"
-            ack_msg_id = asyncio.run(post_result_to_talk(
-                config, task, ack_text,
-                reference_id=f"istota:task:{task.id}:ack",
-            ))
-            if ack_msg_id is None:
-                logger.warning(
-                    "Ack message posted but no message ID returned for task %d "
-                    "(progress will fall back to legacy mode)",
-                    task.id,
-                )
+    # Ping liveness for the whole execution so stuck-task reclaim can tell a
+    # slow-but-alive worker from a dead one (ISSUE-112). Covers the skill,
+    # command, and brain paths; stops on exit even if execution raises.
+    with _task_heartbeat(config, task_id):
+        if task.skill:
+            success, result = _execute_skill_task(task, config)
+            actions_taken = None
+            execution_trace = None
+        elif task.command:
+            success, result = _execute_command_task(task, config)
+            actions_taken = None
+            execution_trace = None
+        else:
+            # Send progress update for Talk tasks
+            ack_msg_id = None
+            is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
+            if task.source_type == "talk" and task.conversation_token and not dry_run:
+                ack_text = f"`#{task.id}` *Retrying…*" if is_rerun else f"`#{task.id}` {random.choice(PROGRESS_MESSAGES)}"
+                ack_msg_id = asyncio.run(post_result_to_talk(
+                    config, task, ack_text,
+                    reference_id=f"istota:task:{task.id}:ack",
+                ))
+                if ack_msg_id is None:
+                    logger.warning(
+                        "Ack message posted but no message ID returned for task %d "
+                        "(progress will fall back to legacy mode)",
+                        task.id,
+                    )
 
-            # Build streaming progress callback if enabled
-            if config.scheduler.progress_updates:
-                progress_callback = _make_talk_progress_callback(
-                    config, task, ack_msg_id=ack_msg_id,
-                )
+                # Build streaming progress callback if enabled
+                if config.scheduler.progress_updates:
+                    progress_callback = _make_talk_progress_callback(
+                        config, task, ack_msg_id=ack_msg_id,
+                    )
 
-        # Build log channel callback (no rate limiting, streams every tool call)
-        if log_channel and log_channel_prefix:
-            log_callback = _make_log_channel_callback(
-                config, task, log_channel, log_channel_prefix,
+            # Build log channel callback (no rate limiting, streams every tool call)
+            if log_channel and log_channel_prefix:
+                log_callback = _make_log_channel_callback(
+                    config, task, log_channel, log_channel_prefix,
+                )
+                # Compose with existing Talk progress callback
+                if progress_callback:
+                    talk_cb = progress_callback
+
+                    def _composite_callback(message, *, italicize=True):
+                        talk_cb(message, italicize=italicize)
+                        log_callback(message, italicize=italicize)
+
+                    # Preserve Talk callback attributes for progress editing
+                    _composite_callback.sent_texts = talk_cb.sent_texts
+                    _composite_callback.last_progress_msg_id = talk_cb.last_progress_msg_id
+                    _composite_callback.all_descriptions = talk_cb.all_descriptions
+                    _composite_callback.ack_msg_id = talk_cb.ack_msg_id
+                    _composite_callback.use_edit = talk_cb.use_edit
+                    _composite_callback.style = talk_cb.style
+                    _composite_callback.start_time = talk_cb.start_time
+                    _composite_callback.text_msg_id = talk_cb.text_msg_id
+                    _composite_callback.accumulated_texts = talk_cb.accumulated_texts
+                    progress_callback = _composite_callback
+                else:
+                    progress_callback = log_callback
+
+            # Download Talk attachments to local filesystem before execution
+            if task.source_type == "talk" and task.attachments:
+                local_attachments = download_talk_attachments(config, task.attachments)
+                # Create modified task with local paths
+                task = replace(task, attachments=local_attachments)
+
+            # Execute the task (outside the db context to avoid long locks)
+            success, result, actions_taken, execution_trace = execute_task(
+                task, config, user_resources, dry_run=dry_run, on_progress=progress_callback,
             )
-            # Compose with existing Talk progress callback
-            if progress_callback:
-                talk_cb = progress_callback
-
-                def _composite_callback(message, *, italicize=True):
-                    talk_cb(message, italicize=italicize)
-                    log_callback(message, italicize=italicize)
-
-                # Preserve Talk callback attributes for progress editing
-                _composite_callback.sent_texts = talk_cb.sent_texts
-                _composite_callback.last_progress_msg_id = talk_cb.last_progress_msg_id
-                _composite_callback.all_descriptions = talk_cb.all_descriptions
-                _composite_callback.ack_msg_id = talk_cb.ack_msg_id
-                _composite_callback.use_edit = talk_cb.use_edit
-                _composite_callback.style = talk_cb.style
-                _composite_callback.start_time = talk_cb.start_time
-                _composite_callback.text_msg_id = talk_cb.text_msg_id
-                _composite_callback.accumulated_texts = talk_cb.accumulated_texts
-                progress_callback = _composite_callback
-            else:
-                progress_callback = log_callback
-
-        # Download Talk attachments to local filesystem before execution
-        if task.source_type == "talk" and task.attachments:
-            local_attachments = download_talk_attachments(config, task.attachments)
-            # Create modified task with local paths
-            task = replace(task, attachments=local_attachments)
-
-        # Execute the task (outside the db context to avoid long locks)
-        success, result, actions_taken, execution_trace = execute_task(
-            task, config, user_resources, dry_run=dry_run, on_progress=progress_callback,
-        )
 
     # Resolve the Talk room for delivering this task's notifications.
     # For email-source tasks with a synthetic thread-hash conversation_token,
@@ -2553,6 +2597,7 @@ async def run_cleanup_checks(config: Config) -> None:
         stuck = db.fail_stuck_locked_running_tasks(
             conn, sched.max_retry_age_minutes,
             stuck_running_minutes=_stuck_running_minutes(sched),
+            heartbeat_stuck_minutes=sched.worker_stuck_minutes,
         )
         for task_info in stuck:
             logger.warning(

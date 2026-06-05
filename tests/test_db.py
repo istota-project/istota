@@ -1204,6 +1204,109 @@ class TestStuckRunningThreshold:
             assert task.attempt_count == 1
 
 
+class TestHeartbeatReclaim:
+    """ISSUE-112 heartbeat: reclaim keys on worker liveness (last_heartbeat),
+    not raw runtime. A live worker that keeps pinging is never reclaimed no
+    matter how long it runs; a worker whose heartbeat goes silent is reclaimed
+    quickly, independent of the task timeout."""
+
+    def _make_running(self, conn, *, started_min_ago, heartbeat_min_ago, created_min_ago=10):
+        task_id = db.create_task(
+            conn, prompt="hi", user_id="alice",
+            conversation_token="room1", queue="foreground",
+        )
+        hb = (
+            f"datetime('now', '-{heartbeat_min_ago} minutes')"
+            if heartbeat_min_ago is not None else "NULL"
+        )
+        conn.execute(
+            f"""UPDATE tasks SET status = 'running',
+               started_at = datetime('now', ? || ' minutes'),
+               created_at = datetime('now', ? || ' minutes'),
+               last_heartbeat = {hb}
+            WHERE id = ?""",
+            (f"-{started_min_ago}", f"-{created_min_ago}", task_id),
+        )
+        conn.commit()
+        return task_id
+
+    def _status(self, conn, task_id):
+        return db.get_task(conn, task_id).status
+
+    def test_fresh_heartbeat_survives_long_runtime(self, db_path):
+        # Running 40 min (past the 35-min fallback), but pinged 1 min ago.
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(
+                conn, started_min_ago=40, heartbeat_min_ago=1,
+            )
+            failed = db.fail_stuck_locked_running_tasks(
+                conn, stuck_running_minutes=35, heartbeat_stuck_minutes=5,
+            )
+            assert failed == []
+            assert self._status(conn, task_id) == "running"
+            assert db.get_task(conn, task_id).attempt_count == 0
+
+    def test_stale_heartbeat_reclaimed_quickly(self, db_path):
+        # Only 10 min in (under the 35-min fallback) but silent for 8 min.
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(
+                conn, started_min_ago=10, heartbeat_min_ago=8,
+            )
+            db.fail_stuck_locked_running_tasks(
+                conn, stuck_running_minutes=35, heartbeat_stuck_minutes=5,
+            )
+            assert self._status(conn, task_id) == "pending"  # released for retry
+            assert db.get_task(conn, task_id).attempt_count == 1
+
+    def test_null_heartbeat_uses_started_at_fallback(self, db_path):
+        # No heartbeat ever recorded → fall back to the started_at window.
+        with db.get_db(db_path) as conn:
+            kept = self._make_running(
+                conn, started_min_ago=20, heartbeat_min_ago=None,
+            )
+            reclaimed = self._make_running(
+                conn, started_min_ago=40, heartbeat_min_ago=None,
+            )
+            db.fail_stuck_locked_running_tasks(
+                conn, stuck_running_minutes=35, heartbeat_stuck_minutes=5,
+            )
+            assert self._status(conn, kept) == "running"
+            assert self._status(conn, reclaimed) == "pending"
+
+    def test_claim_task_respects_fresh_heartbeat(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(
+                conn, started_min_ago=40, heartbeat_min_ago=1,
+            )
+            db.claim_task(
+                conn, "worker-1", stuck_running_minutes=35, heartbeat_stuck_minutes=5,
+            )
+            assert self._status(conn, task_id) == "running"
+
+
+class TestTouchTaskHeartbeat:
+    def _heartbeat(self, conn, task_id):
+        return conn.execute(
+            "SELECT last_heartbeat FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()[0]
+
+    def test_updates_running_task(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="hi", user_id="alice")
+            db.update_task_status(conn, task_id, "running")
+            assert self._heartbeat(conn, task_id) is None
+            db.touch_task_heartbeat(conn, task_id)
+            assert self._heartbeat(conn, task_id) is not None
+
+    def test_ignores_non_running_task(self, db_path):
+        # A ping racing completion must not resurrect the heartbeat.
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="hi", user_id="alice")
+            db.update_task_status(conn, task_id, "completed", result="done")
+            db.touch_task_heartbeat(conn, task_id)
+            assert self._heartbeat(conn, task_id) is None
+
+
 class TestTrustedEmailSendersDB:
     def test_add_trusted_sender(self, db_path):
         with db.get_db(db_path) as conn:
