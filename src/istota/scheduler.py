@@ -176,6 +176,19 @@ _POLICY_REFUSAL_KEYWORDS = ("safety", "policy", "content", "refused", "harm", "b
 
 _FROM_HEADER_PATTERN = re.compile(r"(?:^|\n)From:\s*(.+?)(?:\n|$)")
 
+# Grace margin added to task_timeout_minutes before a 'running' task is treated
+# as stuck (worker presumed dead) and reclaimed. A healthy worker self-kills at
+# the timeout and writes its result; the margin covers that write. Without it,
+# the reclaim window (formerly a flat 15 min) sits below the 30-min timeout, so
+# a slow-but-healthy task — notably the in-process native brain, which has no
+# killable PID — gets reclaimed and duplicated (ISSUE-112).
+_STUCK_RUNNING_GRACE_MINUTES = 5
+
+
+def _stuck_running_minutes(sched) -> int:
+    """Minutes a 'running' task may persist before it's reclaimed as stuck."""
+    return sched.task_timeout_minutes + _STUCK_RUNNING_GRACE_MINUTES
+
 
 def _is_policy_refusal(error_text: str) -> bool:
     """Check if a task failure is an API policy/safety refusal (non-retryable)."""
@@ -1370,6 +1383,7 @@ def process_one_task(
         task = db.claim_task(
             conn, worker_id, config.scheduler.max_retry_age_minutes,
             user_id=user_id, queue=queue,
+            stuck_running_minutes=_stuck_running_minutes(config.scheduler),
         )
         if not task:
             return None
@@ -2538,6 +2552,7 @@ async def run_cleanup_checks(config: Config) -> None:
         # but runs even when no tasks are being claimed)
         stuck = db.fail_stuck_locked_running_tasks(
             conn, sched.max_retry_age_minutes,
+            stuck_running_minutes=_stuck_running_minutes(sched),
         )
         for task_info in stuck:
             logger.warning(
