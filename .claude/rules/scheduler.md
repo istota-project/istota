@@ -207,7 +207,7 @@ After task completion, if enabled + `auto_index_conversations`:
 
 | Table | Dataclass | Key Columns |
 |---|---|---|
-| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, actions_taken, execution_trace, model, effort |
+| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, last_heartbeat, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, actions_taken, execution_trace, model, effort |
 | `user_resources` | `UserResource` | id, user_id, resource_type, resource_path, display_name, permissions |
 | `briefing_configs` | `BriefingConfig` | id, user_id, name, cron_expression, conversation_token, components (JSON), enabled |
 | `briefing_state` | — | user_id, briefing_name, last_run_at |
@@ -272,6 +272,18 @@ get_users_with_pending_background_tasks(conn) -> list[str]
    - Filters by `user_id` if provided
    - Orders by `priority DESC, created_at ASC`
    - Sets `status='locked', locked_at=now, locked_by=worker_id`
+
+Steps 3–5 (and the standalone `fail_stuck_locked_running_tasks()` maintenance
+pass) share `_STUCK_RUNNING_PREDICATE` to decide "stuck" by **worker liveness**,
+not raw runtime (ISSUE-112). A `running` task is stuck when its `last_heartbeat`
+has been silent longer than `worker_stuck_minutes` (default 5); when no heartbeat
+was ever recorded it falls back to `started_at` older than `task_timeout_minutes`
++ grace (`scheduler._stuck_running_minutes`). The running worker pings
+`last_heartbeat` every `worker_heartbeat_seconds` via the `_task_heartbeat`
+context manager (`db.touch_task_heartbeat`), so a slow-but-alive worker — notably
+the in-process native brain, which has no killable PID — is never reclaimed,
+while a crashed worker is recovered in minutes. (Distinct from the health-check
+heartbeat system in `heartbeat.py`.)
 
 ### Conversation & Context
 ```python
