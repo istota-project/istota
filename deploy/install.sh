@@ -398,6 +398,8 @@ except Exception:
 web = data.get("web") or {}
 site = data.get("site") or {}
 location = data.get("location") or {}
+brain = data.get("brain") or {}
+native = brain.get("native") or {}
 print(data.get("nextcloud_url", "").rstrip("/"))
 print(site.get("hostname", ""))
 print("1" if web.get("enabled", True) else "0")
@@ -405,11 +407,13 @@ print("1" if (web.get("oauth2_client_id") and web.get("oauth2_client_secret")) e
 print("1" if data.get("claude_oauth_token") else "0")
 print("1" if location.get("enabled") else "0")
 print("1" if (data.get("secret_key") or "") else "0")
+print(brain.get("kind", "claude_code"))
+print("1" if native.get("api_key") else "0")
 PY
 )
     [ -z "$meta" ] && return 0
 
-    local nc_url hostname web_on oauth_set claude_set location_on master_set
+    local nc_url hostname web_on oauth_set claude_set location_on master_set brain_kind native_key_set
     nc_url=$(echo "$meta"     | sed -n '1p')
     hostname=$(echo "$meta"   | sed -n '2p')
     web_on=$(echo "$meta"     | sed -n '3p')
@@ -417,6 +421,8 @@ PY
     claude_set=$(echo "$meta" | sed -n '5p')
     location_on=$(echo "$meta"| sed -n '6p')
     master_set=$(echo "$meta" | sed -n '7p')
+    brain_kind=$(echo "$meta" | sed -n '8p')
+    native_key_set=$(echo "$meta" | sed -n '9p')
 
     section "Next Steps"
 
@@ -454,8 +460,17 @@ PY
         n=$((n+1))
     fi
 
-    # 3. Claude CLI auth
-    if [ "$claude_set" != "1" ]; then
+    # 3. Model backend credential
+    if [ "$brain_kind" = "native" ]; then
+        if [ "$native_key_set" != "1" ]; then
+            echo -e "  ${_BOLD}$n.${_RESET} Set the native brain's provider API key"
+            echo "     The scheduler can't run tasks until the provider has a credential."
+            echo "     Add it to $SETTINGS_FILE under [brain.native] as api_key and re-run"
+            echo "     --update (the Claude CLI is not used with the native brain)."
+            echo
+            n=$((n+1))
+        fi
+    elif [ "$claude_set" != "1" ]; then
         echo -e "  ${_BOLD}$n.${_RESET} Authenticate the Claude CLI"
         echo "     The scheduler can't run tasks until Claude has a credential."
         echo "     Generate a token: ${_DIM}claude setup-token${_RESET}"

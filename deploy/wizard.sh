@@ -51,6 +51,15 @@ _WIZ_WEB_OAUTH2_CLIENT_ID=""
 _WIZ_WEB_OAUTH2_CLIENT_SECRET=""
 _WIZ_WEB_SECRET_KEY=""
 _WIZ_SECRET_KEY=""
+_WIZ_BRAIN_KIND="claude_code"
+_WIZ_BRAIN_NATIVE_PROVIDER="openai_compat"
+_WIZ_BRAIN_NATIVE_MODEL="claude-sonnet-4-6"
+_WIZ_BRAIN_NATIVE_BASE_URL="https://api.anthropic.com/v1"
+_WIZ_BRAIN_NATIVE_API_KEY=""
+_WIZ_BRAIN_NATIVE_PROMPT_CACHING=true
+_WIZ_BRAIN_ROLE_FAST=""
+_WIZ_BRAIN_ROLE_GENERAL=""
+_WIZ_BRAIN_ROLE_SMART=""
 
 # ============================================================
 # Output helpers
@@ -494,8 +503,61 @@ wiz_secrets_store() {
     fi
 }
 
+wiz_brain() {
+    section "8. Model Backend (Brain)"
+
+    dim "Istota can drive the model two ways:"
+    dim "  • claude_code (default) — shells out to the Claude CLI, using your"
+    dim "    Claude.ai subscription or OAuth token. No API key required."
+    dim "  • native — runs istota's own agent loop in-process against an"
+    dim "    OpenAI-compatible / Anthropic API endpoint. Needs an API key and"
+    dim "    bills per token."
+    echo
+    dim "Full runbook: docs/configuration/native-brain.md"
+    echo
+
+    local use_native
+    prompt_bool use_native "Use the native brain instead of the Claude CLI?" "n"
+    if [ "$use_native" != "true" ]; then
+        _WIZ_BRAIN_KIND="claude_code"
+        return
+    fi
+
+    _WIZ_BRAIN_KIND="native"
+    echo
+    dim "The native brain talks to any OpenAI-compatible endpoint. The default"
+    dim "below targets Anthropic's API directly. The model id is explicit —"
+    dim "the openai_compat provider does no alias resolution."
+    prompt_value _WIZ_BRAIN_NATIVE_BASE_URL "Provider base URL" "$_WIZ_BRAIN_NATIVE_BASE_URL"
+    prompt_value _WIZ_BRAIN_NATIVE_MODEL "Model id" "$_WIZ_BRAIN_NATIVE_MODEL"
+    prompt_secret _WIZ_BRAIN_NATIVE_API_KEY "Provider API key"
+    echo
+    dim "Prompt caching cuts cost on Anthropic / OpenRouter endpoints; disable"
+    dim "it for providers that don't support cache_control breakpoints."
+    prompt_bool _WIZ_BRAIN_NATIVE_PROMPT_CACHING "Enable prompt caching?" "y"
+
+    echo
+    dim "Internal subsystems pick a model by role: fast (conversation selection,"
+    dim "routing), general (sleep-cycle extraction, OCR), smart (heavy work,"
+    dim "!model smart). By default all three use the model above."
+    local diff_roles
+    prompt_bool diff_roles "Use a different model for any role?" "n"
+    if [ "$diff_roles" = "true" ]; then
+        dim "Each must be served by the same endpoint. Blank = use the default."
+        prompt_value _WIZ_BRAIN_ROLE_FAST    "fast model"    "$_WIZ_BRAIN_NATIVE_MODEL"
+        prompt_value _WIZ_BRAIN_ROLE_GENERAL "general model" "$_WIZ_BRAIN_NATIVE_MODEL"
+        prompt_value _WIZ_BRAIN_ROLE_SMART   "smart model"   "$_WIZ_BRAIN_NATIVE_MODEL"
+    fi
+}
+
 wiz_claude_auth() {
-    section "8. Claude Authentication"
+    section "9. Claude Authentication"
+
+    if [ "$_WIZ_BRAIN_KIND" = "native" ]; then
+        dim "Native brain selected — the Claude CLI isn't used, so no Claude"
+        dim "login is required. The provider API key you entered is used instead."
+        return
+    fi
 
     dim "Istota uses the Claude CLI which needs authentication."
     dim "You can either provide an OAuth token now, or authenticate"
@@ -513,7 +575,7 @@ wiz_claude_auth() {
 }
 
 wiz_review() {
-    section "9. Review Configuration"
+    section "10. Review Configuration"
 
     echo -e "  ${_BOLD}Bot name:${_RESET}          $_WIZ_BOT_NAME"
     echo -e "  ${_BOLD}Install dir:${_RESET}       $ISTOTA_HOME"
@@ -555,7 +617,12 @@ wiz_review() {
         echo -e "  ${_BOLD}OAuth2:${_RESET}            $oauth_status"
     fi
     echo -e "  ${_BOLD}Secrets master key:${_RESET} auto-generated (stored in $SETTINGS_FILE)"
-    echo -e "  ${_BOLD}Claude token:${_RESET}      $([ -n "$_WIZ_CLAUDE_TOKEN" ] && echo "provided" || echo "authenticate later")"
+    echo -e "  ${_BOLD}Brain:${_RESET}             $_WIZ_BRAIN_KIND$([ "$_WIZ_BRAIN_KIND" = "native" ] && echo " (model: ${_WIZ_BRAIN_NATIVE_MODEL:-unset}, $_WIZ_BRAIN_NATIVE_BASE_URL)")"
+    if [ "$_WIZ_BRAIN_KIND" = "native" ]; then
+        echo -e "  ${_BOLD}Provider key:${_RESET}      $([ -n "$_WIZ_BRAIN_NATIVE_API_KEY" ] && echo "provided" || echo "${_YELLOW}set later in $SETTINGS_FILE${_RESET}")"
+    else
+        echo -e "  ${_BOLD}Claude token:${_RESET}      $([ -n "$_WIZ_CLAUDE_TOKEN" ] && echo "provided" || echo "authenticate later")"
+    fi
     echo
 
     local confirm
@@ -571,6 +638,37 @@ wiz_write_settings() {
     local settings_dir
     settings_dir="$(dirname "$SETTINGS_FILE")"
     mkdir -p "$settings_dir"
+
+    # Brain block — always emit [brain].kind; the [brain.native] sub-block
+    # only when native is selected (mirrors the Ansible config.toml template).
+    local brain_block="
+[brain]
+kind = \"$_WIZ_BRAIN_KIND\"
+"
+    if [ "$_WIZ_BRAIN_KIND" = "native" ]; then
+        brain_block+="
+[brain.native]
+provider = \"$_WIZ_BRAIN_NATIVE_PROVIDER\"
+model = \"$_WIZ_BRAIN_NATIVE_MODEL\"
+base_url = \"$_WIZ_BRAIN_NATIVE_BASE_URL\"
+prompt_caching = $_WIZ_BRAIN_NATIVE_PROMPT_CACHING
+api_key = \"$_WIZ_BRAIN_NATIVE_API_KEY\"
+"
+        # Internal subsystems request models by role (fast/general/smart). The
+        # native brain has no built-in role table, so map all three — each
+        # defaulting to the configured model, individually overridable above.
+        if [ -n "$_WIZ_BRAIN_NATIVE_MODEL" ]; then
+            local _role_fast="${_WIZ_BRAIN_ROLE_FAST:-$_WIZ_BRAIN_NATIVE_MODEL}"
+            local _role_general="${_WIZ_BRAIN_ROLE_GENERAL:-$_WIZ_BRAIN_NATIVE_MODEL}"
+            local _role_smart="${_WIZ_BRAIN_ROLE_SMART:-$_WIZ_BRAIN_NATIVE_MODEL}"
+            brain_block+="
+[models.roles]
+fast = \"$_role_fast\"
+general = \"$_role_general\"
+smart = \"$_role_smart\"
+"
+        fi
+    fi
 
     cat > "$SETTINGS_FILE" <<TOML
 # Istota settings - generated by setup wizard
@@ -644,7 +742,7 @@ webhooks_port = $_WIZ_WEBHOOKS_PORT
 
 [backup]
 enabled = $_WIZ_BACKUP_ENABLED
-
+$brain_block
 $_WIZ_USERS_BLOCK
 TOML
 
@@ -687,6 +785,7 @@ EOF
     wiz_hostname
     wiz_web_ui
     wiz_secrets_store
+    wiz_brain
     wiz_claude_auth
     wiz_review
     wiz_write_settings

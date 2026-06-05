@@ -326,6 +326,44 @@ def convert(settings: dict) -> dict:
             if key in developer:
                 result[ansible_key] = developer[key]
 
+    # Brain section — nested: [brain], [brain.native], [brain.source_type_overrides].
+    # Ansible defaults + config.toml.j2 already render these; we just map the
+    # settings keys onto the istota_brain_* variable names.
+    brain = settings.get("brain", {})
+    if isinstance(brain, dict):
+        if "kind" in brain:
+            result["istota_brain_kind"] = brain["kind"]
+        native = brain.get("native", {})
+        if isinstance(native, dict):
+            native_map = {
+                "provider": "istota_brain_native_provider",
+                "model": "istota_brain_native_model",
+                "base_url": "istota_brain_native_base_url",
+                "api_key": "istota_brain_native_api_key",
+                "context_window": "istota_brain_native_context_window",
+                "max_turns": "istota_brain_native_max_turns",
+                "max_tokens": "istota_brain_native_max_tokens",
+                "prompt_caching": "istota_brain_native_prompt_caching",
+            }
+            for settings_key, ansible_key in native_map.items():
+                if settings_key in native:
+                    result[ansible_key] = native[settings_key]
+            extra_headers = native.get("extra_headers", {})
+            if isinstance(extra_headers, dict) and extra_headers:
+                result["istota_brain_native_extra_headers"] = extra_headers
+        overrides = brain.get("source_type_overrides", {})
+        if isinstance(overrides, dict) and overrides:
+            result["istota_brain_source_type_overrides"] = overrides
+
+    # Operator role aliases ([models.roles]) — maps roles (fast/general/smart and
+    # any custom role) to canonical model ids. Native deploys rely on this to
+    # resolve the role names internal subsystems request.
+    models = settings.get("models", {})
+    if isinstance(models, dict):
+        roles = models.get("roles", {})
+        if isinstance(roles, dict) and roles:
+            result["istota_models_roles"] = roles
+
     # Briefing defaults (pass through as-is, it's a nested dict)
     briefing_defaults = settings.get("briefing_defaults", {})
     if briefing_defaults:
