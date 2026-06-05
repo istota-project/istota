@@ -184,11 +184,14 @@ Role aliases never carry effort — `smart = "opus-46-high"` resolves the model 
 
 ## `[brain]`
 
-Selects which model-invocation backend the executor uses. See [architecture/brain](../architecture/brain.md) for the protocol.
+Selects which model-invocation backend the executor uses. See [architecture/brain](../architecture/brain.md) for the protocol and the [native brain runbook](native-brain.md) for the full `[brain.native]` settings.
 
 | Setting | Default | Description |
 |---|---|---|
-| `kind` | `"claude_code"` | Brain implementation. `"claude_code"` wraps the `claude` CLI subprocess (only Phase 1 option). Future values: `"openrouter"`, `"anthropic"`. |
+| `kind` | `"claude_code"` | Brain implementation. `"claude_code"` (default) wraps the `claude` CLI subprocess; `"native"` runs Istota's own in-process agent loop against any OpenAI-compatible model (configured under `[brain.native]`). |
+| `source_type_overrides` | `{}` | Per-`source_type` brain override (e.g. route `scheduled` to `native` while interactive tasks stay on `claude_code`). |
+
+`[brain.native]` (used when `kind = "native"` or a `source_type_overrides` entry routes to it): `provider` (only `"openai_compat"`), `model` (explicit id), `base_url`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`. The API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file.
 
 ## `[sleep_cycle]`
 

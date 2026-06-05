@@ -30,7 +30,7 @@ Once the prompt and env are built, the executor composes a `BrainRequest` and ca
 
 The brain returns a `BrainResult` carrying `(success, result_text, actions_taken, execution_trace, stop_reason)`. The executor then runs result composition (see below) and downstream cleanup (malformed-output detection, deferred file processing).
 
-`ClaudeCodeBrain`, the default and only Phase 1 brain, builds and invokes:
+`ClaudeCodeBrain`, the default brain, builds and invokes:
 
 ```
 claude -p - --allowedTools Read Write Edit Grep Glob Bash --disallowedTools Agent Workflow \

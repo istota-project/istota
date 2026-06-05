@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-05: Native brain — drop the CLI-inference provider, reposition docs
+
+The native brain shipped with two inference providers: `openai_compat` and a `claude_code` provider (briefly renamed `claude_cli` mid-session before the rename was abandoned). The CLI provider ran `claude -p --allowedTools ""` as a bare completion endpoint. A request for a local multi-turn tool-use test surfaced the blocker: that provider only parses text from the CLI's stream-json and never emits tool-call deltas, and there is no `claude -p` mode that proposes Istota's own tools without executing them. The native agent loop drives tool use entirely off `ToolCallDelta` events, so it can never invoke a tool through that provider — keeping it was a trap, a config that silently can't use tools. Removed it. `openai_compat` is now the sole native provider, which also let the dead Anthropic-namespace branch in `native.py` go (it only existed to give the CLI provider Claude Code's alias table).
+
+With the native loop now the unambiguous standalone path, repositioned the docs. Istota was previously framed as "an application built on top of Claude Code" with "no agent loops of its own" — false since the native brain landed. It's now described as a standalone agent that runs its own in-process loop against any OpenAI-compatible model, with the Claude Code CLI as the default-but-swappable brain.
+
+**Key changes:**
+- Deleted the CLI-inference provider module and its test; `make_provider` now only knows `openai_compat` and raises on anything else.
+- Collapsed `NativeBrain`'s provider-aware model resolution to a single `openai_compat` path; dropped the orphaned `claude_binary` config field and its Ansible plumbing.
+- Rewrote positioning across README, the docs index, architecture overview/brain/executor, the config reference, and AGENTS.md to describe the two-brain reality and the standalone-agent capability. Mechanics docs that accurately describe the still-default `claude_code` subprocess were left untouched.
+- No CHANGELOG migration note for the removal — the provider never shipped in a release. Added an `[Unreleased]` entry for the native brain itself, which had none.
+
+**Files added/modified:**
+- `src/istota/llm/__init__.py`, `src/istota/brain/native.py`, `src/istota/config.py`
+- removed `src/istota/llm/claude_code_inference.py`, `tests/native/test_claude_code_inference.py`
+- `tests/native/test_make_provider.py`, `test_native_brain.py`, `test_native_resolution.py`
+- `config/config.example.toml`, `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2`
+- `README.md`, `docs/index.md`, `docs/architecture/{overview,brain,executor}.md`, `docs/configuration/reference.md`, `AGENTS.md`
+
 ## 2026-06-01: Money transaction editing via stable ids + ledger-writer hardening
 
 Beancount has no native transaction identifier, so the money web UI's "Edit transaction" action used to identify a row by a fragile `(date, payee, narration, account, position)` tuple that breaks on the first edit. Solved identity with metadata: every transaction now carries an `id:` line, backfilled onto legacy entries by a one-time reversible migration and stamped by every writer (manual add, Monarch sync, CSV import, invoice posting). `edit_transaction` locates by id and surgically rewrites the header + the single edited posting, re-validates with `bean-check`, and rolls back on imbalance. A Mulder/Scully review of that commit then found four follow-up defects, all fixed TDD-first.

@@ -2,7 +2,7 @@
 
 The Brain layer (`src/istota/brain/`) is the single seam between executor orchestration and model invocation. The executor builds a fully composed prompt + env + sandbox configuration and hands a `BrainRequest` to a `Brain` implementation. Brains own the call to the model, stream parsing, and transient-API retry. Everything else — memory, skills, context, sandboxing, deferred DB writes, malformed-output detection, and result composition — stays in the executor.
 
-Phase 1 ships only `ClaudeCodeBrain` (the existing subprocess wrapper). Future phases add direct-HTTP brains (OpenRouter, Anthropic-direct) without changes to the executor.
+Two brains ship behind the same protocol: `ClaudeCodeBrain` (the default, a subprocess wrapper) and `NativeBrain` (Istota's own in-process agent loop against any OpenAI-compatible model). The executor doesn't change when you swap between them.
 
 ## Layout
 
@@ -12,10 +12,13 @@ brain/
 ├── _types.py       # BrainRequest, BrainResult, BrainConfig, Brain Protocol
 ├── _events.py      # StreamEvent types + Claude Code stream-json parser
 ├── _roles.py       # Global operator role-override state (provider-agnostic)
-└── claude_code.py  # ClaudeCodeBrain — wraps the `claude` CLI subprocess +
-                    # owns the Anthropic model namespace (canonical IDs,
-                    # MODEL_ALIASES, DEFAULT_ROLE_TARGETS, resolver methods)
+├── claude_code.py  # ClaudeCodeBrain — wraps the `claude` CLI subprocess +
+│                   # owns the Anthropic model namespace (canonical IDs,
+│                   # MODEL_ALIASES, DEFAULT_ROLE_TARGETS, resolver methods)
+└── native.py       # NativeBrain — drives Istota's in-process agent loop
 ```
+
+The native loop's machinery lives in sibling packages: `llm/` (the provider abstraction — `openai_compat` is the only provider), `agent/` (the loop and tool dispatch), and `session/` (turn state, compaction, retry).
 
 `stream_parser.py` at the package root is now a thin re-export shim of `brain/_events.py`, kept for backward compatibility with tests and a few internal callers.
 
