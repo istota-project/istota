@@ -21,6 +21,40 @@ With the native loop now the unambiguous standalone path, repositioned the docs.
 - `config/config.example.toml`, `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2`
 - `README.md`, `docs/index.md`, `docs/architecture/{overview,brain,executor}.md`, `docs/configuration/reference.md`, `AGENTS.md`
 
+## 2026-06-05: Native brain — switchable in-process agent loop (commit b4940f3)
+
+Backfilled entry: the native brain merged to main on 2026-06-05 (17-commit fast-forward, tip `b4940f3`) but never got a DEVLOG writeup. It adds a second `Brain` kind alongside `ClaudeCodeBrain` so Istota can run its own agent loop in-process against any OpenAI-compatible model instead of shelling out to the `claude` CLI. The executor is unchanged — it still composes the prompt and calls `brain.execute(req)`; only the brain behind that call differs.
+
+The implementation is three layers, each its own package:
+
+- `istota.llm` — provider abstraction. `make_provider` (duck-typed over the config), `OpenAICompatibleProvider` (SSE chat-completions, streaming usage, opt-in prompt caching), message/tool types, a token catalog (`model_catalog.json`) for pricing, and replay/record helpers for fixture-driven tests. (It also shipped with a CLI-inference shim that drove `claude -p` as a bare endpoint; that was removed shortly after — see the entry above.)
+- `istota.agent` — the generic, sandbox-agnostic loop: tool protocol, before/after hooks, composable stop conditions, orphaned-tool-pair sanitation, the double-loop (run/continue, prepare→execute→finalize), sequential/parallel tool batches with a path-overlap guard, and abort via an `asyncio.Event`.
+- `istota.session` — the app layer: six sandbox-aware tools (Read/Write/Edit/Grep/Glob/Bash; Grep/Glob are pure-Python, no ripgrep dependency), context compaction with file-op carry-forward, windowed loop detection, error classification + backoff retry, usage pricing, and `brain/native.py`'s `NativeBrain` adapter wiring all of it to the `Brain` protocol.
+
+**Key changes:**
+- Switchable brain via `[brain] kind = "native"` with a nested `[brain.native]` block (provider, model, base_url, context_window, max_turns, max_tokens, prompt_caching). API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file.
+- Per-source-type routing: `[brain.source_type_overrides]` + `resolve_brain_kind` lets cron/heartbeat move to native while interactive talk/email stays on claude_code — the gradual-rollout knob. Unknown kinds are logged and ignored so a typo can't wedge a task.
+- Retry lives at the provider/turn boundary (`_RetryingProvider`), not around the whole loop, so re-issuing a request never replays already-executed tools; only transient stream errors arriving before any delta commits the turn are retried.
+- Per-user API keys overlay an encrypted `native_brain`/`api_key` secret onto the instance key, at both the execution and Pass-2 classifier sites.
+- Usage persistence: catalog-priced `TaskUsage` written to `task_logs`; no-op for claude_code.
+- Pass-2 semantic routing no longer hardcodes the `claude` CLI — it accepts an injected classifier and, under native, classifies with the endpoint's own model.
+- A Mulder/Scully review hardened the NativeBrain↔scheduler seam: the exact `"Cancelled by user"` string (the scheduler matched it and was retrying cancelled tasks), provider error text surfaced into `result_text` (so policy refusals fail fast instead of retrying blank), and a wall-clock timeout (`asyncio.wait_for` + shield → abort → grace → hard-cancel, tagged `stop_reason="timeout"`) that closes the unbounded-runtime → reclaim → double-execution hazard.
+- The Ansible role renders brain-switching config from inventory; the `[brain.native]` / `[brain.source_type_overrides]` blocks are emitted only when in use, so existing deploys stay byte-identical.
+- Dev tooling: SSE replay/record providers, a standalone `native_repl.py` loop runner (mock/replay/live), and a Tier-4 `brain_shadow.py` that diffs claude_code vs native output.
+
+Validated live against a local OpenAI-compatible endpoint (LM Studio, a local qwen reasoning model): provider text+usage, a multi-turn tool loop (Bash + Write/Glob/Grep), the full executor path, and source-type routing all confirmed. A streaming-usage bug surfaced and was fixed along the way — the request wasn't asking for `stream_options.include_usage`, so cost telemetry always read zero.
+
+Known follow-ups at merge: the Linux/Docker bwrap isolation integration test (can't run on mac), and the Docker entrypoint still defaults to claude_code (native-brain env not wired into compose).
+
+**Files added/modified (highlights):**
+- new packages `src/istota/llm/`, `src/istota/agent/`, `src/istota/session/`; `src/istota/brain/native.py`
+- `src/istota/brain/__init__.py` (`make_brain` kind="native", `resolve_brain_kind`, `KNOWN_BRAIN_KINDS`), `brain/_roles.py`, `brain/_events.py` + `stream_parser.py` shim
+- `src/istota/config.py` (`NativeBrainConfig`, `[brain.native]` + `source_type_overrides` parsing), `executor.py` (routing site, per-user key overlay, usage persistence, native Pass-2 classifier)
+- `deploy/ansible/` (defaults, `config.toml.j2`, `secrets.env.j2`, `validate_config.py`, README)
+- `scripts/native_repl.py`, `scripts/brain_shadow.py`, `config/config.dev.toml.example`
+- `docs/configuration/native-brain.md`, `docs/architecture/brain.md`
+- `tests/native/` (~240 tests)
+
 ## 2026-06-01: Money transaction editing via stable ids + ledger-writer hardening
 
 Beancount has no native transaction identifier, so the money web UI's "Edit transaction" action used to identify a row by a fragile `(date, payee, narration, account, position)` tuple that breaks on the first edit. Solved identity with metadata: every transaction now carries an `id:` line, backfilled onto legacy entries by a one-time reversible migration and stamped by every writer (manual add, Monarch sync, CSV import, invoice posting). `edit_transaction` locates by id and surgically rewrites the header + the single edited posting, re-validates with `bean-check`, and rolls back on imbalance. A Mulder/Scully review of that commit then found four follow-up defects, all fixed TDD-first.
