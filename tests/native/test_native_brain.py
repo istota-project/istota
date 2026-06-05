@@ -239,6 +239,79 @@ class TestErrorAndStops:
         assert result.result_text == "done"
 
 
+class TestProgressStreaming:
+    """ISSUE-111: in-progress updates must reach the on_progress sink.
+
+    The scheduler's Talk-edit callback calls ``asyncio.run()`` internally. The
+    native brain drives ``on_progress`` from inside its own ``asyncio.run`` event
+    loop, so calling the callback directly would invoke ``asyncio.run()`` from a
+    running loop → RuntimeError, silently dropping every update. The brain must
+    invoke the sync callback off the loop so its ``asyncio.run`` works.
+    """
+
+    def _scheduler_like_callback(self, log):
+        """Mimic the scheduler progress callback: it calls asyncio.run()."""
+
+        def callback(event):
+            log.append(("received", type(event).__name__))
+
+            async def _edit():
+                return True
+
+            asyncio.run(_edit())  # exactly what edit_talk_message does
+            log.append(("edited", type(event).__name__))
+
+        return callback
+
+    def test_tool_and_text_progress_reach_sink(self, tmp_path):
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[
+                        ToolCallContent(
+                            id="c1",
+                            name="Write",
+                            arguments={"file_path": "out.txt", "content": "hi"},
+                        )
+                    ],
+                    stop_reason="tool_use",
+                ),
+                AssistantMessage(
+                    content=[TextContent(text="Wrote the file.")],
+                    stop_reason="end_turn",
+                ),
+            ]
+        )
+        log: list[tuple[str, str]] = []
+        req = _req("write a file", tmp_path, tools=["Write"])
+        req.on_progress = self._scheduler_like_callback(log)
+        result = _brain(provider).execute(req)
+
+        assert result.success is True
+        # Each received event must also be fully processed by the callback —
+        # i.e. its internal asyncio.run() completed, not swallowed as a
+        # RuntimeError ("asyncio.run() cannot be called from a running loop").
+        received = [name for kind, name in log if kind == "received"]
+        edited = [name for kind, name in log if kind == "edited"]
+        assert "ToolUseEvent" in received
+        assert "TextEvent" in received
+        assert edited == received  # every callback ran to completion
+
+    def test_progress_callback_exception_does_not_crash_run(self, tmp_path):
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="done")], stop_reason="end_turn")]
+        )
+
+        def boom(event):
+            raise RuntimeError("talk server down")
+
+        req = _req("hi", tmp_path)
+        req.on_progress = boom
+        result = _brain(provider).execute(req)
+        assert result.success is True
+        assert result.result_text == "done"
+
+
 class TestTimeout:
     def test_wall_clock_timeout_aborts(self, tmp_path):
         # A provider that streams forever must be stopped at the task deadline,
