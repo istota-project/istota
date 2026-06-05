@@ -120,6 +120,15 @@ istota_brain_native_context_window: 0             # 0 = resolve from bundled mod
 istota_brain_native_max_turns: 100                # hard cap on assistant turns per task
 istota_brain_native_max_tokens: 16384             # per-completion output cap
 istota_brain_native_prompt_caching: false         # cache_control breakpoints — Anthropic/OpenRouter only
+# Per-role model overrides for the native brain. Internal subsystems request
+# models by role (fast = conversation selection / routing; general = sleep-cycle
+# extraction, OCR; smart = !model smart / heavy work). Each defaults to
+# istota_brain_native_model; set one to point a role at a different model on the
+# SAME endpoint (e.g. a bigger model for "smart"). All three render into
+# [models.roles]. For custom roles beyond these three, use istota_models_roles.
+istota_brain_native_model_fast: ""                # "" → istota_brain_native_model
+istota_brain_native_model_general: ""             # "" → istota_brain_native_model
+istota_brain_native_model_smart: ""               # "" → istota_brain_native_model
 # Instance-wide provider API key. Never written to config.toml — rendered into
 # the EnvironmentFile as ISTOTA_BRAIN_NATIVE_API_KEY (or set it there directly).
 # Vault this. Per-user keys go through istota_user_secrets (service:

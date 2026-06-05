@@ -2443,9 +2443,15 @@ def cleanup_old_temp_files(config: Config, retention_days: int) -> int:
                 elif path.is_dir():
                     # Recurse into user subdirectories
                     count += _cleanup_dir(path)
-                    # Remove empty directories
+                    # Remove empty directories, but only once the directory
+                    # itself has gone untouched past the retention window.
+                    # execute_task creates an empty per-user temp dir and writes
+                    # its prompt file a few seconds later; without this age gate
+                    # a concurrent cleanup tick would rmdir that still-empty dir
+                    # mid-task and break the write (the temp-dir race).
                     try:
-                        path.rmdir()  # only succeeds if empty
+                        if path.stat().st_mtime < cutoff:
+                            path.rmdir()  # only succeeds if empty
                     except OSError:
                         pass
             except Exception as e:

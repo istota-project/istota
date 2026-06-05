@@ -164,6 +164,12 @@ ISTOTA_DEVELOPER_GITHUB_USERNAME=""
 BROWSER_MEMORY_LIMIT=""
 BROWSER_SHM_SIZE=""
 LOCATION_ENABLED=false  # internal flag — adds "location" to COMPOSE_PROFILES
+ISTOTA_BRAIN_KIND="claude_code"
+ISTOTA_BRAIN_NATIVE_PROVIDER="openai_compat"
+ISTOTA_BRAIN_NATIVE_MODEL=""
+ISTOTA_BRAIN_NATIVE_BASE_URL="https://api.anthropic.com/v1"
+ISTOTA_BRAIN_NATIVE_API_KEY=""
+ISTOTA_BRAIN_NATIVE_PROMPT_CACHING="false"
 
 # --- bot identity & public hostname ---
 section "Bot identity"
@@ -202,8 +208,38 @@ dim "from it. Examples: 'istota.example.com', 'home.example.com:8080'."
 prompt_value DOMAIN "DOMAIN" ""
 [ -n "$DOMAIN" ] && mark DOMAIN
 
+# --- model backend (brain) ---
+if [ "$MINIMAL" = false ]; then
+    section "Model backend (brain)"
+    dim "claude_code (default) shells out to the Claude CLI using the OAuth token"
+    dim "or ANTHROPIC_API_KEY. native runs istota's own agent loop in-process"
+    dim "against an OpenAI-compatible / Anthropic endpoint and bills per token."
+    dim "Runbook: docs/configuration/native-brain.md"
+    echo
+    prompt_bool _use_native "Use the native brain instead of the Claude CLI?" "n"
+    if [ "$_use_native" = "true" ]; then
+        ISTOTA_BRAIN_KIND="native"
+        echo
+        prompt_value  ISTOTA_BRAIN_NATIVE_BASE_URL "Provider base URL" "$ISTOTA_BRAIN_NATIVE_BASE_URL"
+        prompt_value  ISTOTA_BRAIN_NATIVE_MODEL    "Model id (explicit, e.g. claude-sonnet-4-6)" ""
+        prompt_secret ISTOTA_BRAIN_NATIVE_API_KEY  "Provider API key"
+        prompt_bool   ISTOTA_BRAIN_NATIVE_PROMPT_CACHING "Enable prompt caching (Anthropic/OpenRouter)?" "y"
+        mark ISTOTA_BRAIN_KIND
+        mark ISTOTA_BRAIN_NATIVE_PROVIDER
+        mark ISTOTA_BRAIN_NATIVE_MODEL
+        mark ISTOTA_BRAIN_NATIVE_BASE_URL
+        mark ISTOTA_BRAIN_NATIVE_API_KEY
+        mark ISTOTA_BRAIN_NATIVE_PROMPT_CACHING
+    fi
+fi
+
 # --- Claude Code OAuth token ---
 section "Claude Code OAuth token"
+if [ "$ISTOTA_BRAIN_KIND" = "native" ]; then
+    dim "Native brain selected — the Claude CLI isn't used, so a Claude token"
+    dim "is optional. Press Enter to skip; the provider API key is used instead."
+    echo
+fi
 cat <<'EOF'
   Istota needs a long-lived Claude Code OAuth token to talk to the model.
 
@@ -413,6 +449,12 @@ ISTOTA_DEVELOPER_GITHUB_TOKEN="$ISTOTA_DEVELOPER_GITHUB_TOKEN" \
 ISTOTA_DEVELOPER_GITHUB_USERNAME="$ISTOTA_DEVELOPER_GITHUB_USERNAME" \
 BROWSER_MEMORY_LIMIT="$BROWSER_MEMORY_LIMIT" \
 BROWSER_SHM_SIZE="$BROWSER_SHM_SIZE" \
+ISTOTA_BRAIN_KIND="$ISTOTA_BRAIN_KIND" \
+ISTOTA_BRAIN_NATIVE_PROVIDER="$ISTOTA_BRAIN_NATIVE_PROVIDER" \
+ISTOTA_BRAIN_NATIVE_MODEL="$ISTOTA_BRAIN_NATIVE_MODEL" \
+ISTOTA_BRAIN_NATIVE_BASE_URL="$ISTOTA_BRAIN_NATIVE_BASE_URL" \
+ISTOTA_BRAIN_NATIVE_API_KEY="$ISTOTA_BRAIN_NATIVE_API_KEY" \
+ISTOTA_BRAIN_NATIVE_PROMPT_CACHING="$ISTOTA_BRAIN_NATIVE_PROMPT_CACHING" \
 ACTIVE_KEYS="$(IFS=,; echo "${ACTIVE_KEYS[*]}")" \
 python3 - "$EXAMPLE_FILE" "$TMP_ENV" <<'PYEOF'
 import os, sys, re
@@ -458,6 +500,7 @@ echo "    Postgres          :  $POSTGRES_PASSWORD"
 echo
 echo -e "  ${_BOLD}Configuration:${_RESET}"
 echo "    Bot name          :  $ISTOTA_BOT_NAME"
+echo "    Brain             :  $ISTOTA_BRAIN_KIND$([ "$ISTOTA_BRAIN_KIND" = "native" ] && echo " (model: ${ISTOTA_BRAIN_NATIVE_MODEL:-unset}, $ISTOTA_BRAIN_NATIVE_BASE_URL)")"
 echo "    Public hostname   :  ${DOMAIN:-(localhost-only)}"
 echo "    Compose profiles  :  ${COMPOSE_PROFILES:-(none — only the core stack)}"
 echo "    Email             :  $ISTOTA_EMAIL_ENABLED"
@@ -465,7 +508,12 @@ echo "    Email             :  $ISTOTA_EMAIL_ENABLED"
 [ -n "$ISTOTA_DEVELOPER_GITHUB_USERNAME" ] && echo "    Developer GitHub  :  $ISTOTA_DEVELOPER_GITHUB_USERNAME"
 echo
 
-if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+if [ "$ISTOTA_BRAIN_KIND" = "native" ] && [ -z "$ISTOTA_BRAIN_NATIVE_API_KEY" ]; then
+    warn "Native brain selected but no provider API key set. The stack will"
+    warn "  start, but the bot can't call the model until you set"
+    warn "  ISTOTA_BRAIN_NATIVE_API_KEY in $ENV_FILE and 'docker compose restart istota web'."
+    echo
+elif [ "$ISTOTA_BRAIN_KIND" != "native" ] && [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
     warn "No Claude Code token set. The stack will start, but the bot can't"
     warn "  call the model until you set CLAUDE_CODE_OAUTH_TOKEN or"
     warn "  ANTHROPIC_API_KEY in $ENV_FILE and 'docker compose restart istota'."

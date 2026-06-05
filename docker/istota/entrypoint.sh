@@ -356,6 +356,47 @@ TOML
         echo "disabled_skills = [$(echo "$ISTOTA_DISABLED_SKILLS" | sed 's/[^,]*/"&"/g')]" >> "$CONFIG_FILE"
     fi
 
+    # Brain (model backend). kind=claude_code (default) shells out to the
+    # Claude CLI; kind=native runs the in-process agent loop. The provider
+    # API key is read from ISTOTA_BRAIN_NATIVE_API_KEY at load time, so it is
+    # deliberately not written into config.toml.
+    cat >> "$CONFIG_FILE" <<TOML
+
+[brain]
+kind = "${ISTOTA_BRAIN_KIND:-claude_code}"
+TOML
+    if [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "native" ]; then
+        cat >> "$CONFIG_FILE" <<TOML
+
+[brain.native]
+provider = "${ISTOTA_BRAIN_NATIVE_PROVIDER:-openai_compat}"
+base_url = "${ISTOTA_BRAIN_NATIVE_BASE_URL:-https://api.anthropic.com/v1}"
+context_window = ${ISTOTA_BRAIN_NATIVE_CONTEXT_WINDOW:-0}
+max_turns = ${ISTOTA_BRAIN_NATIVE_MAX_TURNS:-100}
+max_tokens = ${ISTOTA_BRAIN_NATIVE_MAX_TOKENS:-16384}
+prompt_caching = ${ISTOTA_BRAIN_NATIVE_PROMPT_CACHING:-false}
+TOML
+        if [ -n "${ISTOTA_BRAIN_NATIVE_MODEL:-}" ]; then
+            echo "model = \"${ISTOTA_BRAIN_NATIVE_MODEL}\"" >> "$CONFIG_FILE"
+
+            # Internal subsystems (conversation selection, sleep-cycle
+            # extraction, OCR, …) request models by ROLE — "fast" / "general" /
+            # "smart". The claude_code brain maps those to Haiku/Sonnet/Opus;
+            # a native brain has no built-in mapping, so without [models.roles]
+            # the role name passes through to the endpoint as a bogus model id.
+            # Each role defaults to the one configured model; set
+            # ISTOTA_BRAIN_NATIVE_MODEL_{FAST,GENERAL,SMART} to point a role at a
+            # different model served by the same endpoint.
+            cat >> "$CONFIG_FILE" <<TOML
+
+[models.roles]
+fast = "${ISTOTA_BRAIN_NATIVE_MODEL_FAST:-$ISTOTA_BRAIN_NATIVE_MODEL}"
+general = "${ISTOTA_BRAIN_NATIVE_MODEL_GENERAL:-$ISTOTA_BRAIN_NATIVE_MODEL}"
+smart = "${ISTOTA_BRAIN_NATIVE_MODEL_SMART:-$ISTOTA_BRAIN_NATIVE_MODEL}"
+TOML
+        fi
+    fi
+
     cat >> "$CONFIG_FILE" <<TOML
 
 [security]
@@ -397,7 +438,7 @@ TOML
 [conversation]
 enabled = ${ISTOTA_CONVERSATION_ENABLED:-true}
 lookback_count = ${ISTOTA_CONVERSATION_LOOKBACK_COUNT:-25}
-selection_model = "${ISTOTA_CONVERSATION_SELECTION_MODEL:-haiku}"
+selection_model = "${ISTOTA_CONVERSATION_SELECTION_MODEL:-fast}"
 selection_timeout = ${ISTOTA_CONVERSATION_SELECTION_TIMEOUT:-30.0}
 skip_selection_threshold = ${ISTOTA_CONVERSATION_SKIP_SELECTION_THRESHOLD:-3}
 use_selection = ${ISTOTA_CONVERSATION_USE_SELECTION:-true}

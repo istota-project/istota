@@ -1,8 +1,10 @@
 """Configuration loading for istota.scheduler module."""
 
 import json
+import os
 import sqlite3
 import subprocess
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -16,6 +18,7 @@ from istota.scheduler import (
     UserWorker,
     WorkerPool,
     cleanup_old_claude_logs,
+    cleanup_old_temp_files,
     download_talk_attachments,
     get_worker_id,
     strip_briefing_preamble,
@@ -83,6 +86,84 @@ class TestConfirmationPattern:
         assert CONFIRMATION_PATTERN.search("PLEASE CONFIRM this action")
         assert CONFIRMATION_PATTERN.search("i need your confirmation")
         assert CONFIRMATION_PATTERN.search("Reply Yes or No")
+
+
+# ---------------------------------------------------------------------------
+# TestCleanupOldTempFiles
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupOldTempFiles:
+    """cleanup_old_temp_files reaps stale temp files without disturbing the
+    per-user temp dir of an in-flight task.
+
+    The directory removal must be age-gated the same way file deletion is:
+    execute_task creates an empty /tmp/<user> dir and only writes its prompt
+    file seconds later, so a cleanup tick that rmdir'd freshly-created empty
+    dirs would break the task's prompt write (the temp-dir race).
+    """
+
+    def _config(self, tmp_path):
+        return Config(
+            db_path=tmp_path / "ignore.db",
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(),
+            temp_dir=tmp_path / "temp",
+        )
+
+    @staticmethod
+    def _age(path: Path, days: float) -> None:
+        old = time.time() - days * 86400
+        os.utime(path, (old, old))
+
+    def test_deletes_stale_files(self, tmp_path):
+        config = self._config(tmp_path)
+        user_dir = config.temp_dir / "alice"
+        user_dir.mkdir(parents=True)
+        stale = user_dir / "task_1_prompt.txt"
+        stale.write_text("x")
+        self._age(stale, 10)
+
+        deleted = cleanup_old_temp_files(config, retention_days=7)
+
+        assert deleted == 1
+        assert not stale.exists()
+
+    def test_preserves_recent_files(self, tmp_path):
+        config = self._config(tmp_path)
+        user_dir = config.temp_dir / "alice"
+        user_dir.mkdir(parents=True)
+        recent = user_dir / "task_2_prompt.txt"
+        recent.write_text("x")  # mtime = now
+
+        cleanup_old_temp_files(config, retention_days=7)
+
+        assert recent.exists()
+
+    def test_does_not_remove_active_empty_user_dir(self, tmp_path):
+        """The race: a just-created empty per-user dir must survive a cleanup
+        tick so the in-flight task can still write its prompt file."""
+        config = self._config(tmp_path)
+        user_dir = config.temp_dir / "alice"
+        user_dir.mkdir(parents=True)  # empty, mtime = now (mid-task)
+
+        cleanup_old_temp_files(config, retention_days=7)
+
+        assert user_dir.exists()
+
+    def test_removes_stale_empty_dir(self, tmp_path):
+        """A genuinely abandoned empty dir (untouched past retention) is still
+        reaped — the age gate doesn't disable cleanup, only defers it."""
+        config = self._config(tmp_path)
+        old_dir = config.temp_dir / "ghost"
+        old_dir.mkdir(parents=True)
+        self._age(old_dir, 10)
+
+        cleanup_old_temp_files(config, retention_days=7)
+
+        assert not old_dir.exists()
 
 
 # ---------------------------------------------------------------------------

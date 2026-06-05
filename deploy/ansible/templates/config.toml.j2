@@ -127,9 +127,22 @@ poll_folder = "{{ istota_email_poll_folder }}"
 bot_email = "{{ istota_email_bot_address }}"
 {% endif %}
 
+{# Role aliases (fast/general/smart) → concrete model ids. The native brain has
+   no built-in role table, so for a native deploy default all three to the
+   configured model, each optionally overridable. istota_models_roles then
+   overlays (operator-explicit wins, and can add custom roles). #}
+{% set _roles = {} %}
+{% if istota_brain_kind == 'native' and istota_brain_native_model %}
+{% set _ = _roles.update({'fast': istota_brain_native_model_fast | default('', true) or istota_brain_native_model}) %}
+{% set _ = _roles.update({'general': istota_brain_native_model_general | default('', true) or istota_brain_native_model}) %}
+{% set _ = _roles.update({'smart': istota_brain_native_model_smart | default('', true) or istota_brain_native_model}) %}
+{% endif %}
 {% if istota_models_roles %}
+{% set _ = _roles.update(istota_models_roles) %}
+{% endif %}
+{% if _roles %}
 [models.roles]
-{% for role, target in istota_models_roles.items() %}
+{% for role, target in _roles.items() %}
 {{ role }} = "{{ target }}"
 {% endfor %}
 
