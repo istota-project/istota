@@ -18,6 +18,7 @@ import logging
 import re
 import subprocess
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 from ._types import EnvSpec, SkillMeta
@@ -666,6 +667,42 @@ def build_skill_manifest(
     return body
 
 
+def _claude_cli_classify(prompt: str, model: str, timeout: float) -> str | None:
+    """Default Pass-2 inference: a one-shot `claude -p -` completion.
+
+    Returns the raw model output, or None on nonzero exit / timeout / missing
+    CLI. JSON parsing and validation stay in ``classify_skills`` so they apply
+    uniformly across inference backends.
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "-", "--model", model],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Skill classification failed (returncode=%d): %s",
+                result.returncode,
+                result.stderr or result.stdout,
+            )
+            return None
+        return result.stdout
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "pass2_timeout after=%.1fs — semantic routing skipped", timeout
+        )
+        return None
+    except FileNotFoundError:
+        logger.error("Claude CLI not found for skill classification")
+        return None
+    except Exception as e:  # never let classification crash task setup
+        logger.warning("Skill classification error: %s", e)
+        return None
+
+
 def classify_skills(
     prompt: str,
     skill_index: dict[str, SkillMeta],
@@ -676,6 +713,7 @@ def classify_skills(
     timeout: float = 3.0,
     user_resource_types: set[str] | None = None,
     enabled_experimental_features: frozenset[str] = frozenset(),
+    classifier: "Callable[[str], str | None] | None" = None,
 ) -> list[str]:
     """LLM-based skill classification (Pass 2).
 
@@ -683,6 +721,11 @@ def classify_skills(
     Returns [] on timeout, error, or if no additional skills are needed.
     Respects disabled_skills, admin_only, dependency checks, and
     experimental gating.
+
+    ``classifier`` is a ``prompt -> raw_output | None`` callable for inference.
+    When omitted, the default `claude -p -` subprocess path runs — so the active
+    brain's transport can be injected (the native brain passes its own provider
+    completer instead of shelling out to the CLI it isn't using).
     """
     manifest = build_skill_manifest(
         skill_index, exclude=already_selected,
@@ -706,71 +749,54 @@ def classify_skills(
         f"{manifest}"
     )
 
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "-", "--model", model],
-            input=classification_prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-
-        if result.returncode != 0:
-            logger.warning(
-                "Skill classification failed (returncode=%d): %s",
-                result.returncode,
-                result.stderr or result.stdout,
-            )
-            return []
-
-        output = result.stdout.strip()
-
-        # Extract JSON from code blocks or raw output
-        code_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", output, re.DOTALL)
-        if code_block:
-            output = code_block.group(1).strip()
-
-        skill_names = json.loads(output)
-        if not isinstance(skill_names, list):
-            logger.warning("Skill classification returned non-list: %s", output[:200])
-            return []
-
-        # Filter to valid skill names not already selected, respecting all guards
-        _disabled = disabled_skills or set()
-        valid_names = []
-        for name in skill_names:
-            if not isinstance(name, str) or name not in skill_index:
-                continue
-            if name in already_selected or name in _disabled:
-                continue
-            meta = skill_index[name]
-            if meta.admin_only and not is_admin:
-                continue
-            if meta.experimental and f"skill_{name}" not in enabled_experimental_features:
-                continue
-            if not _check_dependencies(meta):
-                continue
-            valid_names.append(name)
-
-        if valid_names:
-            logger.info("pass2_added skills=%s", ",".join(valid_names))
-        else:
-            logger.info("pass2_no_additions considered=%d", len(skill_lines))
-
-        return valid_names
-
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "pass2_timeout after=%.1fs considered=%d — semantic routing skipped",
-            timeout, len(skill_lines),
-        )
+    raw = (
+        classifier(classification_prompt)
+        if classifier is not None
+        else _claude_cli_classify(classification_prompt, model, timeout)
+    )
+    if not raw:
+        # Empty/None: timeout, transport error, or a model that spent its whole
+        # output budget on reasoning before emitting any content. The classifier
+        # logs the specific transport reason; log the no-result outcome so the
+        # fall-back to Pass-1-only selection isn't a silent black hole.
+        logger.info("pass2_no_result considered=%d", len(skill_lines))
         return []
+
+    output = raw.strip()
+    # Extract JSON from code blocks or raw output
+    code_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", output, re.DOTALL)
+    if code_block:
+        output = code_block.group(1).strip()
+
+    try:
+        skill_names = json.loads(output)
     except json.JSONDecodeError as e:
         logger.warning("Skill classification JSON parse error: %s", e)
         return []
-    except FileNotFoundError:
-        logger.error("Claude CLI not found for skill classification")
+    if not isinstance(skill_names, list):
+        logger.warning("Skill classification returned non-list: %s", output[:200])
         return []
-    except Exception as e:
-        logger.warning("Skill classification error: %s", e)
-        return []
+
+    # Filter to valid skill names not already selected, respecting all guards
+    _disabled = disabled_skills or set()
+    valid_names = []
+    for name in skill_names:
+        if not isinstance(name, str) or name not in skill_index:
+            continue
+        if name in already_selected or name in _disabled:
+            continue
+        meta = skill_index[name]
+        if meta.admin_only and not is_admin:
+            continue
+        if meta.experimental and f"skill_{name}" not in enabled_experimental_features:
+            continue
+        if not _check_dependencies(meta):
+            continue
+        valid_names.append(name)
+
+    if valid_names:
+        logger.info("pass2_added skills=%s", ",".join(valid_names))
+    else:
+        logger.info("pass2_no_additions considered=%d", len(skill_lines))
+
+    return valid_names

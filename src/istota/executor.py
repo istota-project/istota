@@ -312,6 +312,33 @@ def _resolve_effort(task, config: Config) -> str:
     return task_effort or config.effort
 
 
+def _build_native_classifier(native_config, timeout: float):
+    """A `prompt -> raw_output | None` Pass-2 classifier over the native provider.
+
+    Returns None if the provider can't be built (e.g. missing key / bad config),
+    so the caller skips semantic routing rather than mis-routing to the CLI.
+    """
+    try:
+        from istota.llm import make_provider
+        from istota.llm.oneshot import make_completer
+
+        provider = make_provider(native_config)
+        # Generous output budget: a JSON skill array is short, but reasoning
+        # models burn tokens thinking first and would otherwise return empty.
+        completer = make_completer(provider, native_config.model, max_tokens=4096)
+    except Exception:
+        logger.warning(
+            "native Pass-2 classifier setup failed; skipping semantic routing",
+            exc_info=True,
+        )
+        return None
+
+    def _classify(prompt: str) -> str | None:
+        return completer(prompt, timeout=timeout)
+
+    return _classify
+
+
 # Credential-related env var patterns to strip from subprocess environments
 _CREDENTIAL_ENV_PATTERNS = frozenset({
     "PASSWORD", "SECRET", "TOKEN", "API_KEY",
@@ -1931,18 +1958,43 @@ def execute_task(
         enabled_experimental_features=frozenset(config.experimental.features),
     )
 
-    # Pass 2: LLM-based semantic routing
+    # Pass 2: LLM-based semantic routing. Inference goes through the brain that
+    # will run the task (honoring per-source-type routing), so the native brain
+    # uses its own provider/model instead of shelling out to the `claude` CLI it
+    # isn't using. Role aliases like "fast" only make sense in the claude_code
+    # namespace; under native we classify with the endpoint's own model.
     if config.skills.semantic_routing:
-        extra_skills = classify_skills(
-            prompt=task.prompt,
-            skill_index=skill_index,
-            already_selected=set(selected_skills),
-            disabled_skills=_disabled if _disabled else None,
-            is_admin=is_admin,
-            model=make_brain(config.brain).resolve_model_name(config.skills.semantic_routing_model),
-            timeout=config.skills.semantic_routing_timeout,
-            user_resource_types=user_resource_types,
-            enabled_experimental_features=frozenset(config.experimental.features),
+        from .brain import resolve_brain_kind
+        _routed_brain = resolve_brain_kind(task.source_type, config.brain)
+        _pass2_classifier = None
+        _pass2_model = make_brain(config.brain).resolve_model_name(
+            config.skills.semantic_routing_model
+        )
+        _pass2_skip = False
+        if _routed_brain.kind == "native":
+            _pass2_classifier = _build_native_classifier(
+                _routed_brain.native, config.skills.semantic_routing_timeout
+            )
+            _pass2_model = _routed_brain.native.model
+            # If the native classifier couldn't be built, skip Pass 2 rather
+            # than falling back to `claude --model <native-id>` (wrong CLI).
+            _pass2_skip = _pass2_classifier is None
+
+        extra_skills = (
+            []
+            if _pass2_skip
+            else classify_skills(
+                prompt=task.prompt,
+                skill_index=skill_index,
+                already_selected=set(selected_skills),
+                disabled_skills=_disabled if _disabled else None,
+                is_admin=is_admin,
+                model=_pass2_model,
+                timeout=config.skills.semantic_routing_timeout,
+                user_resource_types=user_resource_types,
+                enabled_experimental_features=frozenset(config.experimental.features),
+                classifier=_pass2_classifier,
+            )
         )
         if extra_skills:
             all_selected = set(selected_skills) | set(extra_skills)

@@ -466,6 +466,61 @@ class TestClassifySkills:
         prompt_sent = call_args.kwargs.get("input", "")
         assert "developer" not in prompt_sent
 
+    # --- injected classifier (native brain routes through its own provider) ---
+
+    @patch("istota.skills._loader.subprocess.run")
+    def test_injected_classifier_bypasses_claude_cli(self, mock_run):
+        captured = {}
+
+        def _classifier(prompt):
+            captured["prompt"] = prompt
+            return '["developer"]'
+
+        result = classify_skills(
+            prompt="fix the timezone bug",
+            skill_index=self._make_index(),
+            already_selected={"files"},
+            classifier=_classifier,
+        )
+        assert result == ["developer"]
+        # The whole point: the claude CLI is never invoked.
+        mock_run.assert_not_called()
+        assert "fix the timezone bug" in captured["prompt"]
+
+    @patch("istota.skills._loader.subprocess.run")
+    def test_injected_classifier_none_returns_empty(self, mock_run):
+        result = classify_skills(
+            prompt="anything",
+            skill_index=self._make_index(),
+            already_selected={"files"},
+            classifier=lambda _p: None,
+        )
+        assert result == []
+        mock_run.assert_not_called()
+
+    @patch("istota.skills._loader.subprocess.run")
+    def test_injected_classifier_empty_string_returns_empty(self, mock_run):
+        # A reasoning model that spends its whole budget thinking returns "".
+        result = classify_skills(
+            prompt="anything",
+            skill_index=self._make_index(),
+            already_selected={"files"},
+            classifier=lambda _p: "",
+        )
+        assert result == []
+        mock_run.assert_not_called()
+
+    @patch("istota.skills._loader.subprocess.run")
+    def test_injected_classifier_code_block(self, mock_run):
+        result = classify_skills(
+            prompt="fix the bug",
+            skill_index=self._make_index(),
+            already_selected={"files"},
+            classifier=lambda _p: '```json\n["developer"]\n```',
+        )
+        assert result == ["developer"]
+        mock_run.assert_not_called()
+
 
 class TestExcludeSkillsReaddition:
     """Tests that Pass 2 can't re-add skills excluded by exclude_skills."""
