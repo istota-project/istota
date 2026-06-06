@@ -91,7 +91,7 @@ class TestSendTalk:
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
         )
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"ocs": {"data": {"id": 10}}}
             MockClient.return_value = mock_client
@@ -112,7 +112,7 @@ class TestSendTalk:
                 briefings=[BriefingConfig(name="morning", cron="0 6 * * *", conversation_token="room2")],
             )},
         )
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"ocs": {"data": {"id": 11}}}
             MockClient.return_value = mock_client
@@ -146,7 +146,7 @@ class TestSendTalk:
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
         )
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"ocs": {"data": {"id": 42}}}
             MockClient.return_value = mock_client
@@ -159,7 +159,7 @@ class TestSendTalk:
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
         )
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.side_effect = Exception("fail")
             MockClient.return_value = mock_client
@@ -173,7 +173,7 @@ class TestSendTalkConfirmation:
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
         )
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"ocs": {"data": {"id": 99}}}
             MockClient.return_value = mock_client

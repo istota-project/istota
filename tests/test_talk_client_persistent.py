@@ -6,6 +6,8 @@ persistent ``self._client`` is created and idle. Per-method use of ``_client``
 (and the post-aclose / per-request-timeout method behaviours) lands in Stage 6.
 """
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from istota.async_runtime import (
@@ -83,21 +85,33 @@ class TestTalkClientLifecycle:
 
 
 class TestGetTalkClientSingleton:
-    def test_returns_same_instance_and_client(self):
+    def test_returns_same_instance(self):
         cfg = _config()
         a = get_talk_client(cfg)
         b = get_talk_client(cfg)
         assert a is b
-        assert id(a._client) == id(b._client)
-        assert a._client is not None  # opened on the persistent loop
 
-    def test_client_opened_on_persistent_loop(self):
+    def test_accessor_starts_runtime_for_cleanup_hook(self):
+        # The accessor must not eagerly open the httpx pool (that would require
+        # run_coro and trip the within-the-loop guard for callers already on the
+        # persistent loop). The pool opens lazily on first awaited use.
         a = get_talk_client(_config())
-        # The underlying httpx client must be bound to the runtime's loop,
-        # not whatever thread first called get_talk_client.
+        assert a._client is None  # not opened eagerly
         rt = get_async_runtime()
-        assert rt.is_running is True
-        assert a._client is not None
+        assert rt.is_running is True  # started so the aclose hook will fire
+
+    def test_pool_opens_on_persistent_loop_via_run_coro(self):
+        client = get_talk_client(_config())
+
+        async def open_it():
+            return await client._ensure_open()
+
+        opened = run_coro(open_it())
+        assert client._client is opened
+        # A second get returns the same instance with the same live pool.
+        again = get_talk_client(_config())
+        assert again is client
+        assert again._client is opened
 
     def test_cleanup_hook_closes_client_on_runtime_stop(self):
         client = get_talk_client(_config())
@@ -111,3 +125,24 @@ class TestGetTalkClientSingleton:
         reset_async_runtime()
         b = get_talk_client(_config())
         assert b is not a
+
+
+class TestProofSiteReusesSingleton:
+    """Stage 3 proof: the migrated TalkTransport.edit path, driven via run_coro,
+    reuses the one persistent TalkClient across calls instead of constructing a
+    fresh transient client each time."""
+
+    def test_edit_reuses_persistent_singleton(self):
+        from istota.transport.talk import TalkTransport
+
+        cfg = _config()
+        client = get_talk_client(cfg)
+        client.edit_message = AsyncMock()
+        transport = TalkTransport(cfg)
+
+        run_coro(transport.edit("room1", 1, "first"))
+        run_coro(transport.edit("room1", 2, "second"))
+
+        assert client.edit_message.await_count == 2
+        # Both edits resolved the same cached singleton (no per-call construction).
+        assert get_talk_client(cfg) is client

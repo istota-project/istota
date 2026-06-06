@@ -9,16 +9,19 @@ the error/cancelled status edit.
 The writer calls ``on_event`` synchronously in the execution thread. For
 ``NativeBrain`` that thread is an off-loop worker (the brain routes the
 executor callback through ``run_in_executor`` — see ``brain/native.py``
-``_emit_progress``), so the ``asyncio.run`` calls below never collide with a
-running event loop (ISSUE-111).
+``_emit_progress``). The Talk sends below go through ``run_coro``, which
+submits to the scheduler's persistent loop on its own dedicated thread via
+``run_coroutine_threadsafe`` — so they never collide with a running event loop
+on the execution thread (ISSUE-111), and they reuse the shared persistent
+``TalkClient`` connection pool.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
+from ..async_runtime import run_coro
 from ..events import TaskEvent
 
 logger = logging.getLogger("istota.consumers.talk")
@@ -104,7 +107,7 @@ class TalkEventSubscriber:
     def _edit_ack(self, body: str) -> None:
         from ..scheduler import edit_talk_message
         try:
-            asyncio.run(edit_talk_message(self._config, self._task, self._ack_msg_id, body))
+            run_coro(edit_talk_message(self._config, self._task, self._ack_msg_id, body))
         except Exception:
             logger.debug("Talk ack edit failed", exc_info=True)
 
@@ -112,12 +115,12 @@ class TalkEventSubscriber:
         from ..scheduler import edit_talk_message, post_result_to_talk
         try:
             if self._text_msg_id is None:
-                self._text_msg_id = asyncio.run(post_result_to_talk(
+                self._text_msg_id = run_coro(post_result_to_talk(
                     self._config, self._task, body,
                     reference_id=f"istota:task:{self._task.id}:text",
                 ))
             else:
-                asyncio.run(edit_talk_message(
+                run_coro(edit_talk_message(
                     self._config, self._task, self._text_msg_id, body,
                 ))
         except Exception:

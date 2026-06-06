@@ -215,27 +215,30 @@ _TALK_CLIENT = None  # type: ignore[var-annotated]
 _TALK_CLIENT_LOCK = threading.Lock()
 
 
-async def _make_talk_client(config):
-    from .talk import TalkClient
-
-    client = TalkClient(config)
-    await client._ensure_open()  # open the httpx pool on the persistent loop
-    return client
-
-
 def get_talk_client(config):
     """Return the process-global persistent TalkClient, bound to the runtime loop.
 
     All Talk delivery paths (the transport seam, the event consumers,
     notifications) pull from this singleton so they share one connection pool
-    to Nextcloud. The underlying httpx client is created *on* the persistent
-    loop via run_coro, not on the calling thread.
+    to Nextcloud.
+
+    This is a *synchronous* accessor and must stay reentry-safe: it is called
+    from inside Talk coroutines that themselves run on the persistent loop
+    (e.g. ``TalkTransport.deliver`` invoked via ``run_coro``), so it must not
+    call ``run_coro`` itself (that would trip the within-the-loop guard). The
+    underlying ``httpx.AsyncClient`` is therefore opened lazily by the first
+    awaited method call (``TalkClient._ensure_open``) — which runs on the
+    persistent loop because every Talk call site goes through ``run_coro`` —
+    not eagerly here. ``get_async_runtime()`` ensures the runtime is started so
+    the registered ``aclose`` cleanup hook will fire on ``stop()``.
     """
     global _TALK_CLIENT
     with _TALK_CLIENT_LOCK:
         if _TALK_CLIENT is not None and not _TALK_CLIENT.is_closed:
             return _TALK_CLIENT
-        client = run_coro(_make_talk_client(config))
+        from .talk import TalkClient
+
+        client = TalkClient(config)
         get_async_runtime().add_cleanup_hook(client.aclose)
         _TALK_CLIENT = client
         return _TALK_CLIENT
