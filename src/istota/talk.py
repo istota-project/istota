@@ -76,6 +76,35 @@ class TalkClient:
         self.config = config
         self.base_url = config.nextcloud.url.rstrip("/")
         self.auth = (config.nextcloud.username, config.nextcloud.app_password)
+        # Persistent httpx client, created lazily on the persistent asyncio loop
+        # via get_talk_client(). Until Stage 6 the methods below still open a
+        # transient client per call; this one is created and idle.
+        self._client: httpx.AsyncClient | None = None
+        self._closed = False
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    async def _ensure_open(self) -> httpx.AsyncClient:
+        """Return the persistent httpx client, creating it on first use.
+
+        Must be awaited on the loop that will run the requests (the persistent
+        runtime loop), so the client's connection pool is bound to that loop.
+        """
+        if self._closed:
+            raise RuntimeError("TalkClient is closed")
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT)
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the persistent httpx client. Idempotent."""
+        self._closed = True
+        client = self._client
+        self._client = None
+        if client is not None:
+            await client.aclose()
 
     async def send_message(
         self,
