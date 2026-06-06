@@ -247,7 +247,9 @@ class TestLogChannelSubscriber:
 
     @patch("istota.consumers.log_channel.asyncio.run")
     def test_first_event_posts_message(self, mock_arun, tmp_path):
-        mock_arun.return_value = {"ocs": {"data": {"id": 100}}}
+        # The first send now goes through TalkTransport.deliver, which returns
+        # the posted message id directly (not the raw OCS dict).
+        mock_arun.return_value = 100
         sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
 
         sub.on_event(_tool_start("📄 Reading file.txt"))
@@ -259,7 +261,7 @@ class TestLogChannelSubscriber:
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     @patch("istota.consumers.log_channel.asyncio.run")
     def test_subsequent_events_edit_message(self, mock_arun, mock_edit, tmp_path):
-        mock_arun.return_value = {"ocs": {"data": {"id": 100}}}
+        mock_arun.return_value = 100
         sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
 
         sub.on_event(_tool_start("📄 Reading file.txt", seq=1))
