@@ -1755,7 +1755,7 @@ class TestProcessOneTask:
         assert task.confirmation_prompt is not None
 
     @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
-    @patch("istota.scheduler.asyncio.run", return_value=None)
+    @patch("istota.scheduler.run_coro", return_value=None)
     def test_talk_sends_ack_message(self, mock_arun, mock_exec, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
@@ -1770,7 +1770,7 @@ class TestProcessOneTask:
         assert mock_arun.call_count >= 2
 
     @patch("istota.scheduler.execute_task", return_value=(True, "Confirmed result", None, None))
-    @patch("istota.scheduler.asyncio.run", return_value=None)
+    @patch("istota.scheduler.run_coro", return_value=None)
     def test_talk_rerun_sends_retry_ack(self, mock_arun, mock_exec, db_path, tmp_path):
         """A task being rerun after confirmation should send a 'Retrying' ack."""
         config = self._make_config(db_path, tmp_path)
@@ -2133,7 +2133,7 @@ class TestSilentScheduledJob:
         )
 
     @patch("istota.scheduler.execute_task", return_value=(True, "ACTION: Found something important", None, None))
-    @patch("istota.scheduler.asyncio.run", return_value=42)
+    @patch("istota.scheduler.run_coro", return_value=42)
     def test_silent_scheduled_action_posts(self, mock_arun, mock_exec, db_path, tmp_path):
         """Silent scheduled job with ACTION: should post result."""
         config = self._make_config(db_path, tmp_path)
@@ -2179,7 +2179,7 @@ class TestSilentScheduledJob:
         assert mock_arun.call_count == 0
 
     @patch("istota.scheduler.execute_task", return_value=(True, "Just a result", None, None))
-    @patch("istota.scheduler.asyncio.run", return_value=42)
+    @patch("istota.scheduler.run_coro", return_value=42)
     def test_silent_scheduled_no_prefix_posts(self, mock_arun, mock_exec, db_path, tmp_path):
         """Silent scheduled job without prefix should post as fail-safe."""
         config = self._make_config(db_path, tmp_path)
@@ -5964,7 +5964,7 @@ class TestBriefingFailureSuppression:
         assert mock_arun.call_count == 0
 
     @patch("istota.scheduler.execute_task", return_value=(False, "Fatal error", None, None))
-    @patch("istota.scheduler.asyncio.run", return_value=None)
+    @patch("istota.scheduler.run_coro", return_value=None)
     def test_interactive_failure_still_notifies(self, mock_arun, mock_exec, db_path, tmp_path):
         """Interactive (Talk) task failures should still send error messages."""
         config = self._make_config(db_path, tmp_path)
@@ -6006,7 +6006,7 @@ class TestBriefingJsonDelivery:
         )
 
     @patch("istota.scheduler.execute_task")
-    @patch("istota.scheduler.asyncio.run", return_value=None)
+    @patch("istota.scheduler.run_coro", return_value=None)
     def test_briefing_json_posted_to_talk(self, mock_arun, mock_exec, db_path, tmp_path):
         """Briefing JSON result should have its body extracted and posted to Talk."""
         json_result = '{"subject": "Morning Briefing", "body": "📰 NEWS\\nStuff happened today."}'
@@ -6060,7 +6060,7 @@ class TestBriefingJsonDelivery:
             assert '"subject"' not in email_msg  # not raw JSON
 
     @patch("istota.scheduler.execute_task")
-    @patch("istota.scheduler.asyncio.run", return_value=None)
+    @patch("istota.scheduler.run_coro", return_value=None)
     def test_briefing_non_json_fallback(self, mock_arun, mock_exec, db_path, tmp_path):
         """If briefing result is not JSON, deliver as-is (backward compat)."""
         plain_result = "📰 NEWS\nStuff happened today."
