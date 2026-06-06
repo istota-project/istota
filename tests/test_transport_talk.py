@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from istota import db
-from istota.config import Config, NextcloudConfig, UserConfig
+from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
 from istota.transport.talk import TalkTransport
 
 
@@ -147,6 +147,57 @@ class TestEdit:
         with patch("istota.transport.talk.TalkClient") as MockClient:
             await t.edit("", 1, "x")
             MockClient.assert_not_called()
+
+
+def _talk_msg(**overrides):
+    defaults = dict(
+        id=100, actorId="alice", actorType="users",
+        message="Hello", messageType="comment", messageParameters={},
+    )
+    defaults.update(overrides)
+    return defaults
+
+
+class TestPoll:
+    @pytest.mark.asyncio
+    async def test_poll_delegates_to_collect(self):
+        t = TalkTransport(_config())
+        from istota.transport import IncomingMessage
+        sentinel = [IncomingMessage("alice", "x", "talk", "talk", "room1")]
+        with patch(
+            "istota.talk_poller.collect_talk_messages",
+            new=AsyncMock(return_value=sentinel),
+        ):
+            result = await t.poll()
+        assert result is sentinel
+
+    @pytest.mark.asyncio
+    async def test_poll_produces_incoming_message(self, tmp_path):
+        path = tmp_path / "t.db"
+        db.init_db(path)
+        config = _config(
+            db_path=path,
+            talk=TalkConfig(enabled=True, bot_username="istota"),
+            users={"alice": UserConfig()},
+        )
+        t = TalkTransport(config)
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            inst = MockClient.return_value
+            inst.list_conversations = AsyncMock(return_value=[{"token": "room1", "type": 1}])
+            inst.poll_messages = AsyncMock(return_value=[
+                _talk_msg(id=101, actorId="alice", message="Check my calendar"),
+            ])
+            with db.get_db(path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+            messages = await t.poll()
+        assert len(messages) == 1
+        msg = messages[0]
+        assert msg.user_id == "alice"
+        assert msg.source_type == "talk"
+        assert msg.surface == "talk"
+        assert msg.text == "Check my calendar"
+        assert msg.channel_token == "room1"
+        assert msg.platform_message_id == 101
 
 
 class TestResolveTarget:

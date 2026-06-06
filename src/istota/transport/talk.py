@@ -44,9 +44,11 @@ class TalkTransport:
         self._config = config
 
     async def poll(self) -> list[IncomingMessage]:
-        # Real body lands in Stage 3 (moved from poll_talk_conversations).
-        # Until the driver is switched, this is unused.
-        return []
+        # The inbound body lives in talk_poller.collect_talk_messages (it owns
+        # the module-global conversation/participant/DM caches and the
+        # Talk-specific filtering); the transport is the stable entry point.
+        from ..talk_poller import collect_talk_messages
+        return await collect_talk_messages(self._config)
 
     async def deliver(
         self, target: str, text: str, *,

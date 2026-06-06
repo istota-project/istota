@@ -38,7 +38,19 @@ class EmailTransport:
         self._config = config
 
     async def poll(self) -> list[IncomingMessage]:
-        # Real body lands in Stage 3 (moved from poll_emails).
+        """Poll IMAP and create email tasks.
+
+        Unlike Talk, email cannot use the ``collect → ingest_message`` split:
+        ``poll_emails`` needs the freshly-created task id mid-loop for the
+        untrusted-sender confirmation gate (``set_task_confirmation`` + posting
+        the gate message) and for linking the task into ``processed_emails``. So
+        email self-creates its tasks here and returns an empty
+        ``IncomingMessage`` list — there is nothing left for a driver to ingest.
+        The scheduler's email tick may call this or ``poll_emails`` directly;
+        both create the same tasks.
+        """
+        from ..email_poller import poll_emails
+        poll_emails(self._config)
         return []
 
     async def deliver(

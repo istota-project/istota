@@ -8,6 +8,7 @@ from pathlib import Path
 from . import db
 from .config import Config
 from .talk import TalkClient, clean_message_content
+from .transport import IncomingMessage, ingest_message
 
 logger = logging.getLogger("istota.talk_poller")
 
@@ -164,14 +165,25 @@ async def _poll_single_conversation(
         return (conversation_token, [])
 
 
-async def poll_talk_conversations(config: Config) -> list[int]:
+async def collect_talk_messages(config: Config) -> list[IncomingMessage]:
     """
-    Poll all Talk conversations concurrently for new messages and create tasks.
+    Poll all Talk conversations concurrently and normalize new messages.
+
+    This is the Talk transport's inbound body (``TalkTransport.poll`` delegates
+    here). It owns every Talk-protocol-specific step — conversation listing +
+    cache, per-room long-poll, system/own/unknown-user/unmentioned filtering,
+    ``!model`` prefix parsing, ``!command`` dispatch, confirmation-reply
+    handling, the per-channel active-task gate, attachment extraction, and
+    cancelling superseded confirmations — performing their DB side effects
+    inline. The only thing it does NOT do is create the task: for each
+    task-producing message it appends an ``IncomingMessage``; the caller
+    (``poll_talk_conversations`` / the scheduler driver) turns those into tasks
+    via ``ingest_message``.
 
     Uses asyncio.wait() with a timeout so fast rooms are processed immediately
     without waiting for slow (quiet) rooms to finish their long-poll.
 
-    Returns list of created task IDs.
+    Returns the list of normalized task-producing messages.
     """
     if not config.talk.enabled:
         return []
@@ -182,7 +194,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     global _conversation_cache
 
     client = TalkClient(config)
-    created_tasks = []
+    incoming: list[IncomingMessage] = []
 
     # Get all conversations, using cache to avoid blocking every cycle
     now = time.monotonic()
@@ -464,25 +476,43 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                         cancelled, conversation_token, actor_id,
                     )
 
-                # Create task
-                task_id = db.create_task(
-                    conn,
-                    prompt=prompt,
+                # Normalize into an IncomingMessage; the caller ingests it.
+                incoming.append(IncomingMessage(
                     user_id=actor_id,
+                    text=prompt,
                     source_type="talk",
-                    conversation_token=conversation_token,
+                    surface="talk",
+                    channel_token=conversation_token,
                     is_group_chat=is_multi_user,
-                    attachments=attachments if attachments else None,
-                    talk_message_id=message_id,
-                    reply_to_talk_id=reply_to_talk_id,
+                    attachments=attachments if attachments else [],
+                    platform_message_id=message_id,
+                    reply_to_message_id=reply_to_talk_id,
                     reply_to_content=reply_to_content,
                     model=model_override,
                     effort=effort_override,
-                )
+                ))
 
-                created_tasks.append(task_id)
+    return incoming
 
-    return created_tasks
+
+async def poll_talk_conversations(config: Config) -> list[int]:
+    """Poll Talk and create tasks for new messages. Returns created task IDs.
+
+    Thin shim over ``collect_talk_messages`` + ``ingest_message`` — the inbound
+    normalization (and every Talk-specific side effect) lives in
+    ``collect_talk_messages``; this just turns the normalized messages into
+    tasks. Kept for the existing scheduler drivers and tests.
+    """
+    incoming = await collect_talk_messages(config)
+    if not incoming:
+        return []
+    created: list[int] = []
+    with db.get_db(config.db_path) as conn:
+        for msg in incoming:
+            task_id = ingest_message(conn, config, msg)
+            if task_id is not None:
+                created.append(task_id)
+    return created
 
 
 async def handle_confirmation_reply(
