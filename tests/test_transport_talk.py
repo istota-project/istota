@@ -160,19 +160,20 @@ def _talk_msg(**overrides):
 
 class TestPoll:
     @pytest.mark.asyncio
-    async def test_poll_delegates_to_collect(self):
+    async def test_poll_self_creates_and_returns_empty(self):
+        # Talk self-creates inside poll_talk_conversations (atomic with the
+        # poll-state advance), so poll() returns an empty IncomingMessage list.
         t = TalkTransport(_config())
-        from istota.transport import IncomingMessage
-        sentinel = [IncomingMessage("alice", "x", "talk", "talk", "room1")]
         with patch(
-            "istota.talk_poller.collect_talk_messages",
-            new=AsyncMock(return_value=sentinel),
-        ):
+            "istota.talk_poller.poll_talk_conversations",
+            new=AsyncMock(return_value=[7, 8]),
+        ) as mock_poll:
             result = await t.poll()
-        assert result is sentinel
+        assert result == []
+        mock_poll.assert_awaited_once_with(t._config)
 
     @pytest.mark.asyncio
-    async def test_poll_produces_incoming_message(self, tmp_path):
+    async def test_poll_creates_task_atomically(self, tmp_path):
         path = tmp_path / "t.db"
         db.init_db(path)
         config = _config(
@@ -189,15 +190,16 @@ class TestPoll:
             ])
             with db.get_db(path) as conn:
                 db.set_talk_poll_state(conn, "room1", 50)
-            messages = await t.poll()
-        assert len(messages) == 1
-        msg = messages[0]
-        assert msg.user_id == "alice"
-        assert msg.source_type == "talk"
-        assert msg.surface == "talk"
-        assert msg.text == "Check my calendar"
-        assert msg.channel_token == "room1"
-        assert msg.platform_message_id == 101
+            result = await t.poll()
+        # poll() returns [] (self-creating); the task exists in the DB.
+        assert result == []
+        with db.get_db(path) as conn:
+            tasks = db.list_tasks(conn, user_id="alice")
+        assert len(tasks) == 1
+        assert tasks[0].source_type == "talk"
+        assert tasks[0].prompt == "Check my calendar"
+        assert tasks[0].conversation_token == "room1"
+        assert tasks[0].talk_message_id == 101
 
 
 class TestResolveTarget:

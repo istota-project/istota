@@ -44,11 +44,21 @@ class TalkTransport:
         self._config = config
 
     async def poll(self) -> list[IncomingMessage]:
-        # The inbound body lives in talk_poller.collect_talk_messages (it owns
-        # the module-global conversation/participant/DM caches and the
-        # Talk-specific filtering); the transport is the stable entry point.
-        from ..talk_poller import collect_talk_messages
-        return await collect_talk_messages(self._config)
+        """Poll Talk and create tasks.
+
+        Like email, Talk self-creates its tasks inside ``poll_talk_conversations``
+        rather than handing un-ingested ``IncomingMessage``s back to a driver:
+        the create must share the ``db.get_db`` transaction with the poll-state
+        advance / command dispatch / confirmation handling, or a create failure
+        would advance the poll cursor past messages whose tasks were never made
+        (silent message loss). So this returns an empty ``IncomingMessage`` list
+        — there is nothing left for a driver to ingest. The inbound body owns
+        the module-global conversation/participant/DM caches and the
+        Talk-specific filtering.
+        """
+        from ..talk_poller import poll_talk_conversations
+        await poll_talk_conversations(self._config)
+        return []
 
     async def deliver(
         self, target: str, text: str, *,

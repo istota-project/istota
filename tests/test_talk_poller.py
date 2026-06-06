@@ -746,6 +746,35 @@ class TestPollTalkConversations:
             assert task.talk_message_id == 101
 
     @pytest.mark.asyncio
+    async def test_create_failure_does_not_advance_poll_state(self, make_config):
+        # Atomicity regression guard: task creation shares the db.get_db
+        # transaction with set_talk_poll_state, so if create_task raises the
+        # whole batch (including the poll-cursor advance) rolls back and the
+        # message is re-polled next cycle rather than silently lost.
+        config = make_config()
+        msg = _msg(id=101, actor_id="alice", message="Do the thing")
+
+        with patch("istota.talk_poller.TalkClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            with patch("istota.talk_poller.ingest_message", side_effect=RuntimeError("db locked")):
+                with pytest.raises(RuntimeError):
+                    await poll_talk_conversations(config)
+
+        # Poll cursor must NOT have advanced past 50 — the message is re-pollable.
+        with db.get_db(config.db_path) as conn:
+            assert db.get_talk_poll_state(conn, "room1") == 50
+            # And no orphaned task was committed.
+            assert db.list_tasks(conn, user_id="alice") == []
+
+    @pytest.mark.asyncio
     async def test_model_prefix_overrides_task_model_and_effort(self, make_config):
         config = make_config()
 
