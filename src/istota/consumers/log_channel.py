@@ -39,17 +39,17 @@ class LogChannelSubscriber:
         self.all_descriptions.append(desc.replace("\n", " ").strip())
 
         from ..scheduler import _format_log_channel_body, edit_talk_message
-        from ..talk import TalkClient
+        from ..transport.talk import TalkTransport
 
         body = _format_log_channel_body(self._prefix, self.all_descriptions)
         try:
             if self.log_msg_id[0] is None:
-                client = TalkClient(self._config)
-                response = asyncio.run(client.send_message(
+                # The log channel is always a Talk room today; deliver through
+                # the Talk transport rather than constructing TalkClient here.
+                self.log_msg_id[0] = asyncio.run(TalkTransport(self._config).deliver(
                     self._channel, body,
                     reference_id=f"istota:log:{self._task.id}",
                 ))
-                self.log_msg_id[0] = response.get("ocs", {}).get("data", {}).get("id")
             else:
                 asyncio.run(edit_talk_message(
                     self._config,
