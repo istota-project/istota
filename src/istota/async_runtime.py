@@ -190,10 +190,63 @@ def run_coro(coro: Awaitable[T], *, timeout: float | None = None) -> T:
 
 
 def reset_async_runtime() -> None:
-    """Stop and discard the process-global runtime. Test-teardown helper."""
+    """Stop and discard the process-global runtime. Test-teardown helper.
+
+    Stopping runs the runtime's cleanup hooks, which closes the persistent
+    TalkClient; the talk-client singleton reference is then cleared so a
+    subsequent get_talk_client() rebuilds it on the next (fresh) runtime.
+    """
     global _RUNTIME
     with _RUNTIME_LOCK:
         rt = _RUNTIME
         _RUNTIME = None
     if rt is not None:
         rt.stop()
+    reset_talk_client()
+
+
+# --- Persistent TalkClient singleton --------------------------------------
+#
+# Lives here (not in talk.py) so its lifecycle is centralized with the runtime
+# it is bound to. TalkClient is imported lazily inside the helpers to keep this
+# module transport-agnostic and free of import cycles.
+
+_TALK_CLIENT = None  # type: ignore[var-annotated]
+_TALK_CLIENT_LOCK = threading.Lock()
+
+
+async def _make_talk_client(config):
+    from .talk import TalkClient
+
+    client = TalkClient(config)
+    await client._ensure_open()  # open the httpx pool on the persistent loop
+    return client
+
+
+def get_talk_client(config):
+    """Return the process-global persistent TalkClient, bound to the runtime loop.
+
+    All Talk delivery paths (the transport seam, the event consumers,
+    notifications) pull from this singleton so they share one connection pool
+    to Nextcloud. The underlying httpx client is created *on* the persistent
+    loop via run_coro, not on the calling thread.
+    """
+    global _TALK_CLIENT
+    with _TALK_CLIENT_LOCK:
+        if _TALK_CLIENT is not None and not _TALK_CLIENT.is_closed:
+            return _TALK_CLIENT
+        client = run_coro(_make_talk_client(config))
+        get_async_runtime().add_cleanup_hook(client.aclose)
+        _TALK_CLIENT = client
+        return _TALK_CLIENT
+
+
+def reset_talk_client() -> None:
+    """Drop the talk-client singleton reference. Test-teardown helper.
+
+    Does not itself close the client — closing happens via the runtime cleanup
+    hook on stop(). This only clears the cached reference.
+    """
+    global _TALK_CLIENT
+    with _TALK_CLIENT_LOCK:
+        _TALK_CLIENT = None
