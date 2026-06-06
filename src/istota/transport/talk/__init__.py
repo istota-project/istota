@@ -21,7 +21,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ...talk import TalkClient, split_message
+from ...async_runtime import get_talk_client
+from ...talk import split_message
 from .._types import IncomingMessage, TransportCapabilities
 from .inbound import get_dm_token, poll_talk_conversations
 
@@ -81,7 +82,7 @@ class TalkTransport:
             return None
 
         try:
-            client = TalkClient(self._config)
+            client = get_talk_client(self._config)
             parts = split_message(text)
             msg_id = None
             for i, part in enumerate(parts):
@@ -113,12 +114,12 @@ class TalkTransport:
         (the scheduler ``edit_talk_message`` shim catches and returns False)."""
         if not self._config.nextcloud.url or not target:
             return None
-        client = TalkClient(self._config)
+        client = get_talk_client(self._config)
         await client.edit_message(target, message_id, text)
         return None
 
     async def download_attachment(self, remote_ref: str, local_path: str) -> None:
-        client = TalkClient(self._config)
+        client = get_talk_client(self._config)
         await client.download_attachment(remote_ref, local_path)
 
     def resolve_target(self, task: "db.Task") -> str | None:

@@ -45,7 +45,7 @@ def _ev(kind, payload, seq=1):
 
 
 class TestTalkEventSubscriber:
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_tool_start_edits_ack(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=100)
@@ -59,7 +59,7 @@ class TestTalkEventSubscriber:
         assert "s)" in args[3]  # elapsed seconds annotation
         assert sub.descriptions == ["📄 Reading x.txt"]
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_tool_end_annotates_with_duration(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=100)
@@ -71,7 +71,7 @@ class TestTalkEventSubscriber:
         assert "✓" in body
         assert "180ms" in body
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_tool_end_failure_marks_cross(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=100)
@@ -81,7 +81,7 @@ class TestTalkEventSubscriber:
         }, seq=2))
         assert "✗" in mock_edit.call_args.args[3]
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_no_ack_msg_id_means_no_edits(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=None)
@@ -91,7 +91,7 @@ class TestTalkEventSubscriber:
         # descriptions are still accumulated.
         assert sub.descriptions == ["📄 Reading x.txt"]
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.post_result_to_talk", new_callable=MagicMock)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_progress_text_posts_then_edits(self, mock_edit, mock_post, mock_run, tmp_path):
@@ -106,7 +106,7 @@ class TestTalkEventSubscriber:
         body = mock_edit.call_args.args[3]
         assert "Working on it" in body and "Still working" in body
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_result_edits_ack_with_done_summary(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=100)
@@ -118,7 +118,7 @@ class TestTalkEventSubscriber:
         assert "2 actions" in body  # N-actions summary retained
         assert "#99" in body
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_result_summary_singular_and_zero(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=100)
@@ -127,28 +127,28 @@ class TestTalkEventSubscriber:
         assert "✅ Done" in body
         assert "action" not in body  # zero actions → no "— N actions" clause
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_error_edits_ack_with_failed_summary(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=100)
         sub.on_event(_ev("error", {"message": "Something broke"}))
         assert "❌ Failed" in mock_edit.call_args.args[3]
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_cancelled_edits_ack(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=100)
         sub.on_event(_ev("cancelled", {}))
         assert "Cancelled" in mock_edit.call_args.args[3]
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=Exception("network"))
+    @patch("istota.consumers.talk.run_coro", side_effect=Exception("network"))
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_edit_exception_swallowed(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=100)
         # Must not raise.
         sub.on_event(_ev("tool_start", {"description": "📄 Reading x.txt"}))
 
-    @patch("istota.consumers.talk.asyncio.run", side_effect=lambda x: x)
+    @patch("istota.consumers.talk.run_coro", side_effect=lambda x: x)
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     def test_on_finish_is_noop(self, mock_edit, mock_run, tmp_path):
         sub = TalkEventSubscriber(_make_config(tmp_path), _make_task(), ack_msg_id=100)
@@ -168,8 +168,8 @@ class TestEditTalkMessage:
             url="https://nc.test", username="bot", app_password="pass",
         ))
         task = _make_task()
-        with patch("istota.transport.talk.TalkClient") as MockClient:
-            mock_instance = MockClient.return_value
+        with patch("istota.transport.talk.get_talk_client") as mock_get:
+            mock_instance = mock_get.return_value
             mock_instance.edit_message = AsyncMock()
             result = await edit_talk_message(config, task, 42, "Updated")
         assert result is True
@@ -181,8 +181,8 @@ class TestEditTalkMessage:
             url="https://nc.test", username="bot", app_password="pass",
         ))
         task = _make_task()
-        with patch("istota.transport.talk.TalkClient") as MockClient:
-            mock_instance = MockClient.return_value
+        with patch("istota.transport.talk.get_talk_client") as mock_get:
+            mock_instance = mock_get.return_value
             mock_instance.edit_message = AsyncMock(side_effect=Exception("404"))
             result = await edit_talk_message(config, task, 42, "Updated")
         assert result is False

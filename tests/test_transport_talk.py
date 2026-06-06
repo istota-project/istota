@@ -36,7 +36,7 @@ class TestDeliver:
     async def test_dm_plain_post(self):
         t = TalkTransport(_config())
         task = _task(is_group_chat=False, talk_message_id=42)
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.send_message = AsyncMock(return_value={"ocs": {"data": {"id": 100}}})
             result = await t.deliver("room123", "Hello", task=task, threaded=True)
@@ -49,7 +49,7 @@ class TestDeliver:
     async def test_group_chat_threads_and_mentions_first_part(self):
         t = TalkTransport(_config())
         task = _task(is_group_chat=True, talk_message_id=42, user_id="bob")
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.send_message = AsyncMock(return_value={"ocs": {"data": {"id": 200}}})
             result = await t.deliver("room123", "Sure", task=task, threaded=True)
@@ -62,7 +62,7 @@ class TestDeliver:
     async def test_split_only_first_part_threaded(self):
         t = TalkTransport(_config())
         task = _task(is_group_chat=True, talk_message_id=42, user_id="carol")
-        with patch("istota.transport.talk.TalkClient") as MockClient, \
+        with patch("istota.transport.talk.get_talk_client") as MockClient, \
                 patch("istota.transport.talk.split_message", return_value=["P1", "P2"]):
             inst = MockClient.return_value
             inst.send_message = AsyncMock(return_value={"ocs": {"data": {"id": 300}}})
@@ -77,7 +77,7 @@ class TestDeliver:
     async def test_no_threading_for_progress(self):
         t = TalkTransport(_config())
         task = _task(is_group_chat=True, talk_message_id=42, user_id="eve")
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.send_message = AsyncMock(return_value={"ocs": {"data": {"id": 1}}})
             await t.deliver("room123", "Working...", task=task)  # threaded=False
@@ -89,7 +89,7 @@ class TestDeliver:
     async def test_reference_id_passed_through(self):
         t = TalkTransport(_config())
         task = _task()
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.send_message = AsyncMock(return_value={"ocs": {"data": {"id": 5}}})
             await t.deliver("room123", "R", task=task, reference_id="istota:task:1:result")
@@ -100,7 +100,7 @@ class TestDeliver:
     @pytest.mark.asyncio
     async def test_explicit_reply_to_without_task(self):
         t = TalkTransport(_config())
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.send_message = AsyncMock(return_value={"ocs": {"data": {"id": 7}}})
             await t.deliver("room1", "Hi", reply_to=9)
@@ -124,7 +124,7 @@ class TestDeliver:
     async def test_exception_returns_none(self):
         t = TalkTransport(_config())
         task = _task()
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.send_message = AsyncMock(side_effect=Exception("boom"))
             result = await t.deliver("room123", "x", task=task)
@@ -135,7 +135,7 @@ class TestEdit:
     @pytest.mark.asyncio
     async def test_edit_calls_client(self):
         t = TalkTransport(_config())
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.edit_message = AsyncMock()
             await t.edit("room123", 42, "Updated")
@@ -144,7 +144,7 @@ class TestEdit:
     @pytest.mark.asyncio
     async def test_edit_no_target_noop(self):
         t = TalkTransport(_config())
-        with patch("istota.transport.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             await t.edit("", 1, "x")
             MockClient.assert_not_called()
 
