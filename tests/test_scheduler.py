@@ -1884,7 +1884,7 @@ class TestTalkPollThread:
             sched_mod._shutdown_requested = True
             return []
 
-        with patch("istota.scheduler.asyncio.run", side_effect=stop_after_one) as mock_run, \
+        with patch("istota.scheduler.run_coro", side_effect=stop_after_one) as mock_run, \
              patch("istota.scheduler._shutdown_requested", False):
             # _shutdown_requested is checked at loop top, so we set it inside the poll
             _talk_poll_loop(config)
@@ -1897,7 +1897,7 @@ class TestTalkPollThread:
 
         with patch("istota.scheduler._shutdown_requested", True):
             # Should return immediately without calling anything
-            with patch("istota.scheduler.asyncio.run") as mock_run:
+            with patch("istota.scheduler.run_coro") as mock_run:
                 _talk_poll_loop(config)
             mock_run.assert_not_called()
 
@@ -1915,7 +1915,7 @@ class TestTalkPollThread:
             sched_mod._shutdown_requested = True
             return []
 
-        with patch("istota.scheduler.asyncio.run", side_effect=fail_then_stop), \
+        with patch("istota.scheduler.run_coro", side_effect=fail_then_stop), \
              patch("istota.scheduler._shutdown_requested", False):
             _talk_poll_loop(config)
 

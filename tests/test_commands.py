@@ -270,7 +270,7 @@ class TestDispatch:
         config = make_config()
         with (
             db.get_db(config.db_path) as conn,
-            patch("istota.commands.TalkClient") as MockClient,
+            patch("istota.commands.get_talk_client") as MockClient,
         ):
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock()
@@ -284,7 +284,7 @@ class TestDispatch:
         config = make_config()
         with (
             db.get_db(config.db_path) as conn,
-            patch("istota.commands.TalkClient") as MockClient,
+            patch("istota.commands.get_talk_client") as MockClient,
         ):
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock()
@@ -947,8 +947,8 @@ class TestPollerInterception:
             "messageParameters": {},
         }
 
-        with patch("istota.transport.talk.inbound.TalkClient") as MockTalkClient, patch(
-            "istota.commands.TalkClient"
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockTalkClient, patch(
+            "istota.commands.get_talk_client"
         ) as MockCmdClient:
             # Talk poller client
             mock_talk = MockTalkClient.return_value
@@ -989,7 +989,7 @@ class TestPollerInterception:
             "messageParameters": {},
         }
 
-        with patch("istota.transport.talk.inbound.TalkClient") as MockTalkClient:
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockTalkClient:
             mock_talk = MockTalkClient.return_value
             mock_talk.list_conversations = AsyncMock(
                 return_value=[{"token": "room1", "type": 1}]

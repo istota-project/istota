@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 from . import db
+from .async_runtime import get_talk_client
 from .brain import Brain, make_brain
 from .memory import search as memory_search_mod
 from .config import Config
@@ -123,7 +124,7 @@ async def dispatch(
         return False
 
     cmd_name, args_str = parsed
-    client = TalkClient(config)
+    client = get_talk_client(config)
 
     if cmd_name not in COMMANDS:
         await client.send_message(
