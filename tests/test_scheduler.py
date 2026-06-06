@@ -37,7 +37,6 @@ from istota.scheduler import (
     check_scheduled_jobs,
     post_result_to_email,
     process_one_task,
-    _make_talk_progress_callback,
     _stuck_running_minutes,
     _task_heartbeat,
     post_result_to_talk,
@@ -1833,40 +1832,34 @@ class TestProgressMessages:
 
 
 # ---------------------------------------------------------------------------
-# TestMakeTalkProgressCallback (additional coverage beyond test_progress_callback.py)
+# TalkEventSubscriber (additional coverage beyond test_progress_callback.py)
 # ---------------------------------------------------------------------------
 
 
-class TestMakeTalkProgressCallbackExtra:
-    def test_emoji_prefix_separated(self, tmp_path):
-        """Emoji prefix should be kept outside italic formatting."""
-        db_p = tmp_path / "test.db"
-        db.init_db(db_p)
+class TestTalkEventSubscriberExtra:
+    def test_tool_start_edits_ack_with_emoji_description(self, tmp_path):
+        from istota.consumers import TalkEventSubscriber
+        from istota.events import TaskEvent
 
         config = Config(
-            db_path=db_p,
-            scheduler=SchedulerConfig(
-                progress_updates=True,
-                progress_min_interval=0,
-                progress_max_messages=5,
-            ),
+            db_path=tmp_path / "test.db",
+            nextcloud=NextcloudConfig(url="https://nc", username="bot", app_password="pw"),
+            scheduler=SchedulerConfig(progress_updates=True),
         )
         task = db.Task(
             id=1, status="running", source_type="talk",
             user_id="testuser", prompt="test", conversation_token="room1",
         )
 
-        with patch("istota.scheduler.asyncio.run") as mock_run, \
-             patch("istota.scheduler.db.get_db") as mock_db:
-            mock_conn = MagicMock()
-            mock_db.return_value.__enter__ = MagicMock(return_value=mock_conn)
-            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+        with patch("istota.consumers.talk.asyncio.run") as mock_run, \
+             patch("istota.scheduler.edit_talk_message", new_callable=MagicMock):
+            sub = TalkEventSubscriber(config, task, ack_msg_id=100)
+            sub.on_event(TaskEvent(
+                task_id=1, seq=1, kind="tool_start",
+                payload={"description": "\U0001f4c4 Reading file.txt"},
+                created_at="2026-06-06T00:00:00.000Z",
+            ))
 
-            callback = _make_talk_progress_callback(config, task)
-            # Use a message with emoji prefix
-            callback("\U0001f4c4 Reading file.txt")
-
-        # Should have been called
         assert mock_run.called
 
 

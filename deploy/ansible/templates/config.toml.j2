@@ -181,15 +181,13 @@ shared_file_check_interval = {{ istota_scheduler_shared_file_check_interval }}
 heartbeat_check_interval = {{ istota_scheduler_heartbeat_check_interval }}
 db_health_check_interval = {{ istota_scheduler_db_health_check_interval }}
 
-# Progress updates (Talk only)
+# Progress / event streaming
 progress_updates = {{ istota_scheduler_progress_updates | lower }}
-progress_min_interval = {{ istota_scheduler_progress_min_interval }}
-progress_max_messages = {{ istota_scheduler_progress_max_messages }}
 progress_show_tool_use = {{ istota_scheduler_progress_show_tool_use | lower }}
 progress_show_text = {{ istota_scheduler_progress_show_text | lower }}
-progress_text_max_chars = {{ istota_scheduler_progress_text_max_chars }}
-progress_style = "{{ istota_scheduler_progress_style }}"
-progress_max_display_items = {{ istota_scheduler_progress_max_display_items }}
+event_log_enabled = {{ istota_scheduler_event_log_enabled | lower }}
+push_notification_threshold_seconds = {{ istota_scheduler_push_notification_threshold_seconds }}
+push_notification_sources = {{ istota_scheduler_push_notification_sources | to_json }}
 task_timeout_minutes = {{ istota_scheduler_task_timeout_minutes }}
 log_channel_show_skills = {{ istota_scheduler_log_channel_show_skills | lower }}
 

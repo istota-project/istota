@@ -107,6 +107,7 @@ class AgentEvent:
     update_text: str = ""  # for tool_execution_update events
     assistant_event: Any = None  # for streaming message_update events
     stop_reason: str = ""  # for agent_end: the named stop condition that fired
+    duration_ms: int = 0  # for tool_execution_end: per-tool wall time (loop-measured)
 
 
 # The loop pushes every lifecycle event through this sink. The application

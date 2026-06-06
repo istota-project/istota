@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Task event streaming — a single persisted event log per task feeds every output surface.** Each task now produces a typed event stream (started, tool started/finished, intermediate text, result, error, cancelled, done) that's persisted and fanned out to Talk, the log channel, push notifications, and new web endpoints. The native brain's tool events carry real durations and success/failure. New SSE, snapshot, and admin task-event endpoints let a client replay a task's progress live or after the fact (backend for the upcoming web chat).
+
+### Changed
+- **Progress configuration simplified.** `progress_style` and its rate-limit/display siblings are gone; Talk shows the latest tool call and edits the ack into a completion summary on finish. New `[scheduler]` settings: `event_log_enabled` (kill-switch for the event table), `push_notification_threshold_seconds`, and `push_notification_sources`.
+
 ## [0.15.1] - 2026-06-05
 
 ### Fixed

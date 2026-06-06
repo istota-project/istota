@@ -301,6 +301,29 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass  # Table doesn't exist yet (fresh install before schema.sql runs)
 
+    # Task event stream table (task-event-streaming spec). Created here for
+    # existing DBs; schema.sql also has it for fresh installs. The cascade
+    # clause is decorative (PRAGMA foreign_keys is unset) — events are
+    # hand-deleted in cleanup_old_tasks and delete_task_events.
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS task_events (
+                id          INTEGER PRIMARY KEY,
+                task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                seq         INTEGER NOT NULL,
+                kind        TEXT NOT NULL,
+                payload     TEXT NOT NULL DEFAULT '{}',
+                created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE (task_id, seq)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_events_task_seq "
+            "ON task_events (task_id, seq)"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
     # decrypt-or-fail and skipped. No-op on fresh installs (table not
@@ -1310,6 +1333,55 @@ def get_task_logs(
     return [dict(row) for row in cursor.fetchall()]
 
 
+# ============================================================================
+# Task event stream (task-event-streaming spec)
+# ============================================================================
+
+
+def get_task_events(
+    conn: sqlite3.Connection,
+    task_id: int,
+    since_seq: int = 0,
+    limit: int | None = None,
+) -> list[dict]:
+    """Return a task's events with ``seq > since_seq``, oldest first.
+
+    ``payload`` is decoded from JSON into a dict. Used by the web SSE generator
+    and the admin task-detail view — a range scan on the ``(task_id, seq)``
+    index, fast regardless of table size.
+    """
+    sql = (
+        "SELECT id, task_id, seq, kind, payload, created_at FROM task_events "
+        "WHERE task_id = ? AND seq > ? ORDER BY seq"
+    )
+    params: list = [task_id, since_seq]
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    cursor = conn.execute(sql, params)
+    events = []
+    for row in cursor.fetchall():
+        d = dict(row)
+        try:
+            d["payload"] = json.loads(d["payload"]) if d["payload"] else {}
+        except (json.JSONDecodeError, TypeError):
+            d["payload"] = {}
+        events.append(d)
+    return events
+
+
+def delete_task_events(conn: sqlite3.Connection, task_id: int) -> int:
+    """Delete all events for a task. Returns the row count.
+
+    Called on retry (a task keeps its id across attempts; a fresh EventWriter
+    resets its seq counter to 1, which would collide with the prior attempt's
+    surviving rows on UNIQUE(task_id, seq)). Clearing the slate makes the event
+    log reflect the final attempt only — matching deferred-op behavior.
+    """
+    cursor = conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+    return cursor.rowcount
+
+
 def list_tasks(
     conn: sqlite3.Connection,
     status: str | None = None,
@@ -2004,6 +2076,20 @@ def cleanup_old_tasks(conn: sqlite3.Connection, retention_days: int) -> int:
     conn.execute(
         """
         DELETE FROM task_logs
+        WHERE task_id IN (
+            SELECT id FROM tasks
+            WHERE status IN ('completed', 'failed', 'cancelled')
+            AND completed_at < datetime('now', '-' || ? || ' days')
+        )
+        """,
+        (retention_days,),
+    )
+
+    # ON DELETE CASCADE is a no-op without PRAGMA foreign_keys, so hand-delete
+    # the event stream alongside the logs (same retention window).
+    conn.execute(
+        """
+        DELETE FROM task_events
         WHERE task_id IN (
             SELECT id FROM tasks
             WHERE status IN ('completed', 'failed', 'cancelled')

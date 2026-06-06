@@ -851,6 +851,131 @@ class TestAdminStats:
             assert any(e["job_name"] == "alice/broken" for e in errs)
 
 
+@_needs_web_deps
+class TestTaskEventEndpoints:
+    """SSE / snapshot / admin consumers of the task_events table."""
+
+    def _config_with_admin(self, tmp_path):
+        from istota import db
+        config = _make_config(tmp_path)
+        config.db_path = tmp_path / "istota.db"
+        config.admin_users = {"alice"}
+        db.init_db(config.db_path)
+        return config
+
+    async def _login(self, client, username):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": username,
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    def _seed_task_with_events(self, config, user_id="alice"):
+        from istota import db
+        from istota.events import EventWriter
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(conn, "do a thing", user_id, source_type="talk")
+        w = EventWriter(tid, str(config.db_path))
+        w.emit("task_started")
+        w.emit("tool_start", {"tool_name": "Read", "description": "📄 Reading f", "tool_call_id": "t1"})
+        w.emit("result", {"text": "all done", "truncated": False})
+        w.emit("done", {"stop_reason": "completed", "duration_seconds": 1.2})
+        return tid
+
+    async def test_snapshot_returns_events_for_owner(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_task_with_events(config)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get(f"/istota/api/chat/tasks/{tid}/events", cookies=cookies)
+            assert resp.status_code == 200
+            events = resp.json()["events"]
+            assert [e["kind"] for e in events] == [
+                "task_started", "tool_start", "result", "done",
+            ]
+            assert events[1]["payload"]["description"] == "📄 Reading f"
+
+    async def test_snapshot_since_seq(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_task_with_events(config)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get(
+                f"/istota/api/chat/tasks/{tid}/events?since_seq=2", cookies=cookies,
+            )
+            assert [e["seq"] for e in resp.json()["events"]] == [3, 4]
+
+    async def test_snapshot_other_users_task_forbidden(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_task_with_events(config, user_id="alice")
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "bob")
+            resp = await client.get(f"/istota/api/chat/tasks/{tid}/events", cookies=cookies)
+            assert resp.status_code == 403
+
+    async def test_snapshot_unknown_task_404(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/chat/tasks/999/events", cookies=cookies)
+            assert resp.status_code == 404
+
+    async def test_snapshot_requires_auth(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_task_with_events(config)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            resp = await client.get(f"/istota/api/chat/tasks/{tid}/events")
+            assert resp.status_code == 401
+
+    async def test_sse_stream_dumps_history_and_closes(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_task_with_events(config)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get(f"/istota/api/chat/tasks/{tid}/stream", cookies=cookies)
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/event-stream")
+            body = resp.text
+            # Each event framed with id / event / data; stream ends after done.
+            assert "event: task_started" in body
+            assert "event: done" in body
+            assert "id: 4" in body
+
+    async def test_admin_events_endpoint(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_task_with_events(config, user_id="bob")
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")  # admin
+            resp = await client.get(f"/istota/api/admin/tasks/{tid}/events", cookies=cookies)
+            assert resp.status_code == 200
+            assert len(resp.json()["events"]) == 4
+
+    async def test_admin_events_forbidden_for_non_admin(self, tmp_path):
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_task_with_events(config, user_id="bob")
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "bob")
+            resp = await client.get(f"/istota/api/admin/tasks/{tid}/events", cookies=cookies)
+            assert resp.status_code == 403
+
+
 class TestWebConfigParsing:
     def test_web_config_defaults(self):
         cfg = Config()

@@ -24,6 +24,8 @@ src/istota/
 ├── db.py                 # SQLite operations (framework tables)
 ├── db_health.py          # `PRAGMA quick_check` + self-healing `REINDEX` for SQLite DBs on the FUSE-backed mount
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
+├── events.py             # Task event streaming: TaskEvent, EventWriter, EventSubscriber + task_events log
+├── consumers/            # Event consumers: TalkEventSubscriber, LogChannelSubscriber, PushNotificationSubscriber
 ├── scheduler.py          # Task processor, briefings, all polling
 ├── email_poller.py       # IMAP polling + plus-address routing
 ├── talk_poller.py        # Nextcloud Talk long-polling
@@ -144,6 +146,9 @@ Self-contained `src/istota/skills/<name>/skill.md` (YAML frontmatter + body). Tw
 - **Talk**: long-poll, message cache, ack/progress/result via referenceId. `!commands` intercepted in poller.
 - **Email**: IMAP poll, attachments to `inbox/`, threaded replies via deferred `email output` JSON. Outbound tracked in `sent_emails` for emissary thread matching.
 - **TASKS.md**: 30s poll, `[ ] [~] [x] [!]` markers, SHA-256 identity.
+
+### Task Event Streaming
+One persistent, typed event stream per task feeds every output surface. The executor adapts the brain's (widened) `StreamEvent` union into `TaskEvent`s via an `EventWriter` (`events.py`), which persists them to the `task_events` table (WAL, shared scheduler ⇄ web) and notifies in-process subscribers. Event kinds: `task_started`, `tool_start`, `tool_end` (NativeBrain only — carries loop-measured `duration_ms`), `tool_progress` (NativeBrain, SSE only), `progress_text`, `context_management`, `confirmation`, `result`, `error`, `cancelled`, `done`. Consumers: `TalkEventSubscriber` (edits the ack message in place), `LogChannelSubscriber` (accumulating edit), `PushNotificationSubscriber` (ntfy on long tasks) are in-process subscribers; the web SSE endpoint (`/istota/api/chat/tasks/{id}/stream`), the snapshot endpoint (`…/events`), and the admin endpoint (`/api/admin/tasks/{id}/events`) poll the table directly — the table is the bus, no IPC. `seq` is monotonic per task, assigned by the writer; events are hand-deleted in `cleanup_old_tasks` and on retry (the `ON DELETE CASCADE` clause is decorative — `PRAGMA foreign_keys` is unset). The brain owns dispatching the executor callback off any event loop (NativeBrain's `run_in_executor` hop), keeping the synchronous subscribers' `asyncio.run` calls safe (ISSUE-111 generalized). Config under `[scheduler]`: `progress_show_tool_use`, `progress_show_text`, `event_log_enabled`, `push_notification_threshold_seconds`, `push_notification_sources`.
 
 ### Briefings
 Sources: user `BRIEFINGS.md` > `briefing_configs` DB table > `[[users.X.briefings]]` block. Provision via `istota briefing ensure` or the web UI; `enabled=0` mutes a row. Cron in user TZ. Components: calendar, todos, email, markets, news, headlines, notes, reminders. Claude returns structured JSON (`{subject, body}`); scheduler delivers. Email skill excluded.

@@ -12,15 +12,24 @@ from istota.config import (
     TalkConfig,
     UserConfig,
 )
+from istota.consumers import LogChannelSubscriber
+from istota.events import TaskEvent
 from istota.scheduler import (
     _finalize_log_channel,
     _format_log_channel_body,
     _log_channel_source_label,
-    _make_log_channel_callback,
     _resolve_channel_name,
     _channel_name_cache,
     process_one_task,
 )
+
+
+def _tool_start(desc: str, seq: int = 1) -> TaskEvent:
+    return TaskEvent(
+        task_id=42, seq=seq, kind="tool_start",
+        payload={"tool_name": "Read", "description": desc, "tool_call_id": ""},
+        created_at="2026-06-06T00:00:00.000Z",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +228,7 @@ class TestResolveChannelName:
 # Log channel callback
 # ---------------------------------------------------------------------------
 
-class TestMakeLogChannelCallback:
+class TestLogChannelSubscriber:
     def _make_config(self, tmp_path):
         return Config(
             db_path=tmp_path / "test.db",
@@ -236,54 +245,49 @@ class TestMakeLogChannelCallback:
         defaults.update(overrides)
         return db.Task(**defaults)
 
-    @patch("istota.scheduler.asyncio.run")
-    def test_first_call_posts_message(self, mock_arun, tmp_path):
+    @patch("istota.consumers.log_channel.asyncio.run")
+    def test_first_event_posts_message(self, mock_arun, tmp_path):
         mock_arun.return_value = {"ocs": {"data": {"id": 100}}}
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        cb = _make_log_channel_callback(config, task, "logroom", "[42 #Dev]")
+        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
 
-        cb("📄 Reading file.txt")
+        sub.on_event(_tool_start("📄 Reading file.txt"))
 
-        assert len(cb.all_descriptions) == 1
+        assert len(sub.all_descriptions) == 1
+        assert sub.log_msg_id[0] == 100
         assert mock_arun.called
 
-    @patch("istota.scheduler.asyncio.run")
-    @patch("istota.scheduler.edit_talk_message")
-    def test_subsequent_calls_edit_message(self, mock_edit, mock_arun, tmp_path):
-        # First call posts, returns msg_id
+    @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
+    @patch("istota.consumers.log_channel.asyncio.run")
+    def test_subsequent_events_edit_message(self, mock_arun, mock_edit, tmp_path):
         mock_arun.return_value = {"ocs": {"data": {"id": 100}}}
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        cb = _make_log_channel_callback(config, task, "logroom", "[42 #Dev]")
+        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
 
-        cb("📄 Reading file.txt")
-        assert cb.log_msg_id[0] == 100
+        sub.on_event(_tool_start("📄 Reading file.txt", seq=1))
+        assert sub.log_msg_id[0] == 100
 
-        # Second call should edit
         mock_arun.return_value = True
-        cb("⚙️ Running ls")
-        assert len(cb.all_descriptions) == 2
+        sub.on_event(_tool_start("⚙️ Running ls", seq=2))
+        assert len(sub.all_descriptions) == 2
 
-    @patch("istota.scheduler.asyncio.run")
-    def test_skips_text_events(self, mock_arun, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        cb = _make_log_channel_callback(config, task, "logroom", "[42 #Dev]")
+    @patch("istota.consumers.log_channel.asyncio.run")
+    def test_ignores_non_tool_events(self, mock_arun, tmp_path):
+        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
 
-        cb("Some intermediate text", italicize=False)
-        assert len(cb.all_descriptions) == 0
+        sub.on_event(TaskEvent(
+            task_id=42, seq=1, kind="progress_text",
+            payload={"text": "Some intermediate text"},
+            created_at="2026-06-06T00:00:00.000Z",
+        ))
+        assert len(sub.all_descriptions) == 0
         assert not mock_arun.called
 
-    @patch("istota.scheduler.asyncio.run", side_effect=Exception("network"))
+    @patch("istota.consumers.log_channel.asyncio.run", side_effect=Exception("network"))
     def test_errors_dont_propagate(self, mock_arun, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        cb = _make_log_channel_callback(config, task, "logroom", "[42 #Dev]")
+        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
 
-        # Should not raise
-        cb("📄 Reading file.txt")
-        assert len(cb.all_descriptions) == 1
+        # Should not raise — but the description is still recorded.
+        sub.on_event(_tool_start("📄 Reading file.txt"))
+        assert len(sub.all_descriptions) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -462,16 +466,10 @@ class TestProcessOneTaskLogChannel:
     @patch("istota.scheduler.asyncio.run", return_value=42)
     @patch("istota.scheduler._resolve_channel_name")
     @patch("istota.scheduler._finalize_log_channel")
-    @patch("istota.scheduler._make_log_channel_callback")
     def test_channel_name_resolved_for_talk_source(
-        self, mock_make_cb, mock_finalize, mock_resolve, mock_arun,
-        mock_exec, db_path, tmp_path,
+        self, mock_finalize, mock_resolve, mock_arun, mock_exec, db_path, tmp_path,
     ):
         mock_resolve.return_value = "Dev Room"
-        mock_cb = MagicMock()
-        mock_cb.all_descriptions = []
-        mock_cb.log_msg_id = [None]
-        mock_make_cb.return_value = mock_cb
 
         users = {"testuser": UserConfig(log_channel="logroom")}
         config = self._make_config(db_path, tmp_path, users=users)
@@ -487,29 +485,13 @@ class TestProcessOneTaskLogChannel:
 
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.asyncio.run", return_value=42)
-    @patch("istota.scheduler._make_log_channel_callback")
-    @patch("istota.scheduler._make_talk_progress_callback")
     @patch("istota.scheduler._finalize_log_channel")
-    def test_composite_callback_created_for_talk_with_progress(
-        self, mock_finalize, mock_talk_cb_factory, mock_log_cb_factory,
-        mock_arun, mock_exec, db_path, tmp_path,
+    def test_subscribers_wired_for_talk_with_progress(
+        self, mock_finalize, mock_arun, mock_exec, db_path, tmp_path,
     ):
-        """When both Talk progress and log channel are active, a composite callback is used."""
+        """When both Talk progress and log channel are active, the executor
+        receives an EventWriter with both subscribers registered."""
         mock_exec.return_value = (True, "Done", None, None)
-
-        # Mock Talk progress callback with required attributes
-        talk_cb = MagicMock()
-        talk_cb.sent_texts = []
-        talk_cb.last_progress_msg_id = [None]
-        talk_cb.all_descriptions = []
-        talk_cb.ack_msg_id = 42
-        talk_cb.use_edit = True
-        mock_talk_cb_factory.return_value = talk_cb
-
-        log_cb = MagicMock()
-        log_cb.all_descriptions = []
-        log_cb.log_msg_id = [None]
-        mock_log_cb_factory.return_value = log_cb
 
         users = {"testuser": UserConfig(log_channel="logroom")}
         config = self._make_config(db_path, tmp_path, users=users)
@@ -521,10 +503,11 @@ class TestProcessOneTaskLogChannel:
 
         process_one_task(config)
 
-        # execute_task should have been called with a progress callback
         assert mock_exec.called
-        call_kwargs = mock_exec.call_args
-        on_progress = call_kwargs[1].get("on_progress") if call_kwargs[1] else None
-        # If Talk progress was created, execute_task got a callback
-        # (it's either the composite or the log callback)
-        assert on_progress is not None or mock_log_cb_factory.called
+        # execute_task is called with event_writer=<EventWriter> carrying the
+        # Talk + log channel subscribers (push is gated to talk source too).
+        _, kwargs = mock_exec.call_args
+        writer = kwargs["event_writer"]
+        sub_types = {type(s).__name__ for s in writer.subscribers}
+        assert "TalkEventSubscriber" in sub_types
+        assert "LogChannelSubscriber" in sub_types

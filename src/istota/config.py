@@ -113,15 +113,15 @@ class SchedulerConfig:
     talk_poll_interval: int = 10  # seconds between Talk polls
     talk_poll_timeout: int = 30  # long-poll timeout for Talk API
     talk_poll_wait: float = 2.0  # max seconds to wait for all rooms before processing available results
-    # Progress updates (Talk only)
-    progress_updates: bool = True          # master toggle
-    progress_min_interval: int = 8         # min seconds between progress messages
-    progress_max_messages: int = 5         # max progress messages per task
-    progress_show_tool_use: bool = True    # show "Reading file.txt", "Running script..."
-    progress_show_text: bool = False       # show intermediate assistant text (noisy)
-    progress_text_max_chars: int = 200     # max chars for text progress messages (0 = unlimited)
-    progress_style: str = "replace"        # "full" (append all), "replace" (latest + elapsed), "none" (silent)
-    progress_max_display_items: int = 20   # max tool actions shown in edited progress message (full mode only)
+    # Progress / event streaming. The event log (task_events table) is the
+    # shared bus for all output surfaces; progress_show_* gate whether the
+    # executor adapter emits tool_* / progress_text events at all.
+    progress_updates: bool = True          # master toggle for Talk progress
+    progress_show_tool_use: bool = True    # emit tool_start / tool_end events
+    progress_show_text: bool = False       # emit progress_text events (noisy)
+    event_log_enabled: bool = True         # write events to task_events table (kill-switch)
+    push_notification_threshold_seconds: int = 30  # min task duration before push fires
+    push_notification_sources: list[str] = field(default_factory=lambda: ["talk"])  # source_types that trigger push
     task_timeout_minutes: int = 30  # kill task execution after this
     # Robustness settings
     confirmation_timeout_minutes: int = 120  # auto-cancel pending_confirmation after this
@@ -1000,13 +1000,11 @@ def load_config(config_path: Path | None = None) -> Config:
             talk_poll_timeout=sched.get("talk_poll_timeout", 30),
             talk_poll_wait=sched.get("talk_poll_wait", 2.0),
             progress_updates=sched.get("progress_updates", True),
-            progress_min_interval=sched.get("progress_min_interval", 8),
-            progress_max_messages=sched.get("progress_max_messages", 5),
             progress_show_tool_use=sched.get("progress_show_tool_use", True),
             progress_show_text=sched.get("progress_show_text", False),
-            progress_text_max_chars=sched.get("progress_text_max_chars", 200),
-            progress_style=sched.get("progress_style", "replace"),
-            progress_max_display_items=sched.get("progress_max_display_items", 20),
+            event_log_enabled=sched.get("event_log_enabled", True),
+            push_notification_threshold_seconds=sched.get("push_notification_threshold_seconds", 30),
+            push_notification_sources=sched.get("push_notification_sources", ["talk"]),
             task_timeout_minutes=sched.get("task_timeout_minutes", 30),
             confirmation_timeout_minutes=sched.get("confirmation_timeout_minutes", 120),
             stale_pending_warn_minutes=sched.get("stale_pending_warn_minutes", 30),

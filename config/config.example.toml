@@ -225,24 +225,23 @@ briefing_check_interval = 60
 # Seconds between polling TASKS.md files for new tasks
 tasks_file_poll_interval = 30
 
-# Progress updates during task execution (Talk only)
-# When enabled, sends real-time updates to Talk as Claude works (e.g., "Reading TODO.txt")
+# Progress / event streaming.
+# Every task produces a typed, persisted event stream (the task_events table)
+# consumed by all output surfaces: web chat SSE, Talk, push, log channel, admin.
+# When enabled, Talk shows real-time tool progress as Claude works.
 progress_updates = true
-# Minimum seconds between progress messages (prevents flooding)
-progress_min_interval = 8
-# Maximum progress messages per task
-progress_max_messages = 5
-# Show tool use descriptions ("Reading file.txt", "Running script...")
+# Emit tool_start / tool_end events (the Talk ack edit + log channel use these).
 progress_show_tool_use = true
-# Show intermediate assistant text (can be noisy, off by default)
+# Emit intermediate assistant text events (can be noisy, off by default).
 progress_show_text = false
-# Max characters for text progress messages (0 = unlimited)
-progress_text_max_chars = 200
-# Progress display style: "replace" (latest tool + elapsed time), "full" (append all),
-# "none" (silent — no progress updates). Default: "replace"
-progress_style = "replace"
-# Max tool actions shown in the edited progress message (full mode only)
-progress_max_display_items = 20
+# Write events to the task_events table. Operational kill-switch — when false,
+# in-process consumers (Talk/log/push) still work but SSE/admin have nothing to read.
+event_log_enabled = true
+# A push notification fires only when a task ran longer than this (short tasks
+# don't need a ping — the user is likely still watching).
+push_notification_threshold_seconds = 30
+# Which task source_types trigger a push notification on completion.
+push_notification_sources = ["talk"]
 
 # Kill task execution after N minutes (default: 30)
 task_timeout_minutes = 30

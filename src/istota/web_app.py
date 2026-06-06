@@ -7,6 +7,7 @@ SvelteKit frontend served as static files, Python handles auth and API.
 """
 
 import asyncio
+import json
 import logging
 import os
 import platform
@@ -22,7 +23,13 @@ from pathlib import Path
 import httpx
 from authlib.integrations.starlette_client import OAuth
 from fastapi import APIRouter, Depends, FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -1071,6 +1078,98 @@ def _admin_module_location() -> dict:
 async def admin_stats(_: dict = Depends(_require_admin)):
     """Single payload backing the admin dashboard. Read-only."""
     return await asyncio.to_thread(_gather_admin_stats)
+
+
+# ---- Task event stream (task-event-streaming spec) ----
+#
+# SSE and snapshot consumers read the task_events table from the web process —
+# the table is the bus (WAL handles concurrent reads from scheduler writes).
+# No live subscriber, no IPC.
+
+_SSE_POLL_SECONDS = 0.2
+
+
+def _task_owner(task_id: int) -> str | None:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        task = db.get_task(conn, task_id)
+        return task.user_id if task else None
+
+
+def _load_task_events(task_id: int, since_seq: int) -> list[dict]:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        return db.get_task_events(conn, task_id, since_seq)
+
+
+async def _authorize_task_access(task_id: int, user: dict) -> None:
+    """404 if the task is unknown, 403 if it isn't the caller's (admins exempt)."""
+    from fastapi import HTTPException
+    owner = await asyncio.to_thread(_task_owner, task_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if owner != user["username"] and not _user_is_web_admin(user["username"]):
+        raise HTTPException(status_code=403, detail="not your task")
+
+
+@api_router.get("/chat/tasks/{task_id}/events")
+async def chat_task_events(
+    task_id: int, since_seq: int = 0, user: dict = Depends(_require_api_auth),
+):
+    """Snapshot of a task's events (web chat reconnect / late connect)."""
+    await _authorize_task_access(task_id, user)
+    events = await asyncio.to_thread(_load_task_events, task_id, since_seq)
+    return {"events": events}
+
+
+@api_router.get("/chat/tasks/{task_id}/stream")
+async def chat_task_stream(
+    task_id: int, request: Request, since_seq: int = 0,
+    user: dict = Depends(_require_api_auth),
+):
+    """SSE stream of a task's events.
+
+    Resumes from ``Last-Event-ID`` (browser EventSource) or ``?since_seq=``.
+    A late connect (task already finished) dumps the full history and closes.
+    The stream ends after the terminal ``done`` event.
+    """
+    await _authorize_task_access(task_id, user)
+
+    header_id = request.headers.get("last-event-id")
+    if header_id:
+        try:
+            since_seq = max(since_seq, int(header_id))
+        except ValueError:
+            pass
+
+    async def _generate():
+        last = since_seq
+        while True:
+            if await request.is_disconnected():
+                return
+            events = await asyncio.to_thread(_load_task_events, task_id, last)
+            for ev in events:
+                last = ev["seq"]
+                payload = json.dumps(ev["payload"])
+                yield f"id: {ev['seq']}\nevent: {ev['kind']}\ndata: {payload}\n\n"
+                if ev["kind"] == "done":
+                    return
+            await asyncio.sleep(_SSE_POLL_SECONDS)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@api_router.get("/admin/tasks/{task_id}/events")
+async def admin_task_events(
+    task_id: int, since_seq: int = 0, _: dict = Depends(_require_admin),
+):
+    """All events for a task — backs the admin in-flight task-detail view."""
+    events = await asyncio.to_thread(_load_task_events, task_id, since_seq)
+    return {"events": events}
 
 
 # ---- Google Workspace API routes ----

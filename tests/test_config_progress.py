@@ -1,18 +1,17 @@
-"""Tests for progress config fields."""
+"""Tests for progress / event-streaming config fields."""
 
-from pathlib import Path
-
-from istota.config import Config, SchedulerConfig, load_config
+from istota.config import Config, load_config
 
 
 class TestProgressConfigDefaults:
     def test_default_values(self):
         config = Config()
         assert config.scheduler.progress_updates is True
-        assert config.scheduler.progress_min_interval == 8
-        assert config.scheduler.progress_max_messages == 5
         assert config.scheduler.progress_show_tool_use is True
         assert config.scheduler.progress_show_text is False
+        assert config.scheduler.event_log_enabled is True
+        assert config.scheduler.push_notification_threshold_seconds == 30
+        assert config.scheduler.push_notification_sources == ["talk"]
 
 
 class TestProgressConfigParsing:
@@ -21,17 +20,19 @@ class TestProgressConfigParsing:
         config_file.write_text("""
 [scheduler]
 progress_updates = false
-progress_min_interval = 15
-progress_max_messages = 3
 progress_show_tool_use = false
 progress_show_text = true
+event_log_enabled = false
+push_notification_threshold_seconds = 60
+push_notification_sources = ["talk", "email"]
 """)
         config = load_config(config_file)
         assert config.scheduler.progress_updates is False
-        assert config.scheduler.progress_min_interval == 15
-        assert config.scheduler.progress_max_messages == 3
         assert config.scheduler.progress_show_tool_use is False
         assert config.scheduler.progress_show_text is True
+        assert config.scheduler.event_log_enabled is False
+        assert config.scheduler.push_notification_threshold_seconds == 60
+        assert config.scheduler.push_notification_sources == ["talk", "email"]
 
     def test_missing_progress_settings_use_defaults(self, tmp_path):
         config_file = tmp_path / "config.toml"
@@ -41,16 +42,16 @@ poll_interval = 10
 """)
         config = load_config(config_file)
         assert config.scheduler.progress_updates is True
-        assert config.scheduler.progress_min_interval == 8
-        assert config.scheduler.progress_max_messages == 5
+        assert config.scheduler.progress_show_tool_use is True
+        assert config.scheduler.event_log_enabled is True
 
     def test_partial_progress_settings(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [scheduler]
-progress_max_messages = 10
+progress_show_text = true
 """)
         config = load_config(config_file)
         assert config.scheduler.progress_updates is True  # default
-        assert config.scheduler.progress_max_messages == 10  # overridden
-        assert config.scheduler.progress_min_interval == 8  # default
+        assert config.scheduler.progress_show_text is True  # overridden
+        assert config.scheduler.event_log_enabled is True  # default

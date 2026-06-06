@@ -166,6 +166,60 @@ class TestBasicLoop:
         second_call_msgs = provider.calls[1]["messages"]
         assert any(isinstance(m, ToolResultMessage) for m in second_call_msgs)
 
+    async def test_tool_execution_end_carries_duration(self):
+        calls: list = []
+        provider = MockProvider([_tool_turn("echo", {"value": "x"}), _text_turn("done")])
+        sink = _Sink()
+        await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[_echo_tool(calls)]),
+            _config(provider),
+            sink,
+        )
+        ends = [e for e in sink.events if e.type == "tool_execution_end"]
+        assert len(ends) == 1
+        # Loop-measured, non-negative (sequential path).
+        assert ends[0].duration_ms >= 0
+        assert isinstance(ends[0].duration_ms, int)
+
+    async def test_parallel_durations_are_per_tool(self):
+        # Two parallel tools with different sleeps: each tool_execution_end
+        # carries its own wall time, not the batch total.
+        async def _slow(call_id, args, on_update, abort):
+            await asyncio.sleep(args.get("delay", 0))
+            return ToolResult(content=[TextContent(text="ok")])
+
+        slow_tool = AgentTool(
+            schema=ToolSchema(
+                name="slow", description="sleep",
+                parameters=[ToolParameter(name="delay", type="number", required=False)],
+            ),
+            execute=_slow,
+            execution_mode="parallel",
+        )
+        provider = MockProvider([
+            AssistantMessage(
+                content=[
+                    ToolCallContent(id="a", name="slow", arguments={"delay": 0.0}),
+                    ToolCallContent(id="b", name="slow", arguments={"delay": 0.15}),
+                ],
+                stop_reason="tool_use",
+            ),
+            _text_turn("done"),
+        ])
+        sink = _Sink()
+        await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[slow_tool]),
+            _config(provider, tool_execution="parallel"),
+            sink,
+        )
+        ends = {e.tool_call_id: e.duration_ms for e in sink.events if e.type == "tool_execution_end"}
+        assert set(ends) == {"a", "b"}
+        # The fast tool's span is well under the slow tool's — proving per-tool
+        # timing rather than a shared batch clock.
+        assert ends["a"] < ends["b"]
+
 
 # --------------------------------------------------------------------------- #
 # Error / unknown tool / coercion

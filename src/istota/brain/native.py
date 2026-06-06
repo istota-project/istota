@@ -218,13 +218,42 @@ class NativeBrain:
         last_assistant_text = ""
         last_error_message = ""
 
+        # Final-turn suppression (see spec "NativeBrain integration"): every
+        # turn_end carries assistant text, and the *last* text-bearing turn's
+        # text is exactly what becomes BrainResult.result_text. Emitting it as
+        # a TextEvent too would double-render (progress_text + result) on a
+        # single-turn task. We hold each turn's text and only emit it once a
+        # later text-bearing turn proves it wasn't the final one — so the
+        # final turn's text is never forwarded as progress.
+        pending_text: dict[str, str | None] = {"value": None}
+
         async def emit(event: AgentEvent) -> None:
             nonlocal last_assistant_text, last_error_message
             if event.type == "tool_execution_start":
                 desc = _describe_tool_use(event.tool_name, event.args)
                 trace.append({"type": "tool", "text": desc})
                 actions.append(desc)
-                await self._emit_progress(req, _tool_use_event(event.tool_name, desc))
+                await self._emit_progress(
+                    req, _tool_use_event(event.tool_name, desc, event.tool_call_id)
+                )
+            elif event.type == "tool_execution_end":
+                await self._emit_progress(
+                    req,
+                    _tool_end_event(
+                        event.tool_name,
+                        event.tool_call_id,
+                        not event.is_error,
+                        event.duration_ms,
+                    ),
+                )
+            elif event.type == "tool_execution_update":
+                if event.update_text:
+                    await self._emit_progress(
+                        req,
+                        _tool_progress_event(
+                            event.tool_name, event.tool_call_id, event.update_text
+                        ),
+                    )
             elif event.type == "turn_end":
                 msg = event.message
                 if isinstance(msg, AssistantMessage):
@@ -240,7 +269,14 @@ class NativeBrain:
                     if text:
                         trace.append({"type": "text", "text": text})
                         last_assistant_text = msg.text
-                        await self._emit_progress(req, _text_event(msg.text))
+                        # Flush the previously-held text (now known not to be
+                        # final); hold this one. The last text-bearing turn
+                        # stays held → suppressed.
+                        if pending_text["value"] is not None:
+                            await self._emit_progress(
+                                req, _text_event(pending_text["value"])
+                            )
+                        pending_text["value"] = msg.text
 
         # --- compaction via prepare_next_turn -----------------------------
         compaction_state = {"summary": None, "details": None}
@@ -502,10 +538,31 @@ class NativeBrain:
             logger.debug("on_progress callback raised", exc_info=True)
 
 
-def _tool_use_event(tool_name: str, description: str):
+def _tool_use_event(tool_name: str, description: str, tool_call_id: str = ""):
     from ._events import ToolUseEvent
 
-    return ToolUseEvent(tool_name=tool_name, description=description)
+    return ToolUseEvent(
+        tool_name=tool_name, description=description, tool_call_id=tool_call_id
+    )
+
+
+def _tool_end_event(tool_name: str, tool_call_id: str, success: bool, duration_ms: int):
+    from ._events import ToolEndEvent
+
+    return ToolEndEvent(
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+        success=success,
+        duration_ms=duration_ms,
+    )
+
+
+def _tool_progress_event(tool_name: str, tool_call_id: str, text: str):
+    from ._events import ToolProgressEvent
+
+    return ToolProgressEvent(
+        tool_name=tool_name, tool_call_id=tool_call_id, text=text
+    )
 
 
 def _text_event(text: str):

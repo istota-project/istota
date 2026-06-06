@@ -84,7 +84,7 @@ overrides plug in for free via `_roles.py`.
 | `effort: str` | `task.effort` or `config.effort`; brain default if empty |
 | `custom_system_prompt_path: Path \| None` | Override system prompt (claude_code-specific knob) |
 | `streaming: bool` | True when `on_progress` callback is supplied |
-| `on_progress: Callable[[StreamEvent], None] \| None` | Per-event callback (ToolUse/Text); brain filters internally |
+| `on_progress: Callable[[StreamEvent], None] \| None` | Per-event callback. Widened `StreamEvent` union (task-event-streaming spec): `ToolUseEvent` (carries a real `tool_call_id`) \| `TextEvent` \| `ResultEvent` \| `ContextManagementEvent` \| `ToolEndEvent` (NativeBrain only — `success` + loop-measured `duration_ms`) \| `ToolProgressEvent` (NativeBrain only). The executor's `_on_brain_event` adapter maps these to `TaskEvent`s via `EventWriter` (`istota/events.py`). A loop-based brain MUST dispatch this callback off its event loop (NativeBrain's `run_in_executor` hop) so the synchronous Talk/log subscribers' `asyncio.run` calls don't collide (ISSUE-111 generalized). NativeBrain suppresses the final turn's `TextEvent` (its text becomes the result). |
 | `cancel_check: Callable[[], bool] \| None` | Polled between events; True → kill subprocess, return `cancelled` |
 | `on_pid: Callable[[int], None] \| None` | Called once with subprocess PID after spawn |
 | `sandbox_wrap: Callable[[list[str]], list[str]] \| None` | Wraps raw cmd (e.g. with bwrap); no-op if not provided |

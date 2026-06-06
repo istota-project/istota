@@ -26,6 +26,12 @@ logger = logging.getLogger("istota.brain.events")
 class ToolUseEvent:
     tool_name: str
     description: str
+    # The brain's own id for this tool call. ClaudeCodeBrain threads the
+    # stream-json tool_use block id; NativeBrain threads the provider tool_call
+    # id. An empty string means "this brain doesn't expose one" — it is NOT a
+    # shared value to correlate against (every call would collide on ""), so
+    # consumers that key chips by id must treat "" as "no correlation".
+    tool_call_id: str = ""
 
 
 @dataclass
@@ -45,7 +51,32 @@ class ContextManagementEvent:
     pass
 
 
-StreamEvent = ToolUseEvent | TextEvent | ResultEvent | ContextManagementEvent
+@dataclass
+class ToolEndEvent:
+    """A tool call finished. NativeBrain only — ClaudeCodeBrain's stream-json
+    has no tool-completion frame, so it never emits this."""
+    tool_name: str
+    tool_call_id: str
+    success: bool       # from AgentEvent.is_error (inverted)
+    duration_ms: int    # measured in the agent loop
+
+
+@dataclass
+class ToolProgressEvent:
+    """Incremental output during a single tool call. NativeBrain only."""
+    tool_name: str
+    tool_call_id: str
+    text: str
+
+
+StreamEvent = (
+    ToolUseEvent
+    | TextEvent
+    | ResultEvent
+    | ContextManagementEvent
+    | ToolEndEvent
+    | ToolProgressEvent
+)
 
 
 def make_stream_parser() -> Callable[[str], StreamEvent | None]:
@@ -122,7 +153,9 @@ def parse_stream_line(
                 name = block.get("name", "")
                 input_data = block.get("input", {})
                 desc = _describe_tool_use(name, input_data)
-                tool_events.append(ToolUseEvent(tool_name=name, description=desc))
+                tool_events.append(
+                    ToolUseEvent(tool_name=name, description=desc, tool_call_id=block_id)
+                )
 
             elif block_type == "text":
                 text = block.get("text", "").strip()

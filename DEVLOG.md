@@ -2,6 +2,42 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-06: Task event streaming — one persisted event log for every output surface
+
+Replaced the string-based `on_progress` progress callback with a single typed, persisted event stream per task. The old pipeline was a chain of string callbacks composed at execution time, carrying mutable state on function attributes (`sent_texts`, `last_progress_msg_id`, `all_descriptions`, …) — fine for Talk-only delivery, but it breaks the moment a second consumer arrives, has no persistence (a missed event is gone), and couldn't carry the richer events the native brain already produces. This implements the task-event-streaming spec as one complete change (not a phased rollout), across three layers plus five consumers.
+
+**Layer 1 — taxonomy + writer** (`events.py`, new): `TaskEvent` (frozen) and `EventWriter` (writer-assigned monotonic `seq` per task, 8 KB payload cap, an `enabled=` kill-switch) and the `EventSubscriber` protocol. `emit()` inserts one row and notifies in-process subscribers synchronously.
+
+**Layer 2 — persistence**: a `task_events` table (`UNIQUE(task_id, seq)` + index), shared scheduler ⇄ web via WAL. The `ON DELETE CASCADE` clause is decorative — istota never sets `PRAGMA foreign_keys`, proven by `cleanup_old_tasks` already hand-deleting `task_logs` — so events are hand-deleted there and, critically, on retry: a task keeps its id across retries, so a fresh writer's `seq=1` would collide with the prior attempt's surviving rows. `db.delete_task_events` runs in the retry-eligible failure branch beside the deferred-file purge.
+
+**Brain boundary**: the four-member `StreamEvent` union was the bottleneck — the native brain already receives `tool_execution_end` (duration, is_error) and `tool_execution_update` but the union couldn't carry them. Widened it with `ToolEndEvent` and `ToolProgressEvent`, and gave `ToolUseEvent` a real `tool_call_id` (an empty string isn't "absent", it's a *colliding* key that collapses every tool chip onto one). The agent loop now brackets each tool dispatch with a monotonic span (`AgentEvent.duration_ms`) in both sequential and parallel paths — genuine new instrumentation, the loop measured nothing before. `NativeBrain.emit()` maps the richer events and holds back the final text-bearing turn's `TextEvent` (it becomes the result — otherwise a single-turn task double-renders its answer as both progress and result). The ISSUE-111 off-loop dispatch invariant (route the executor callback through `run_in_executor` so synchronous subscribers' `asyncio.run` calls don't collide with the brain's loop) generalizes cleanly: it now carries the whole `emit → on_event` chain.
+
+**Executor + scheduler**: `execute_task` swapped its `on_progress(str)` parameter for an `EventWriter`; `_on_brain_event` maps the widened stream to `TaskEvent`s. The scheduler builds the writer, subscribes Talk/log/push, then emits the terminal `result`/`error`/`cancelled`/`confirmation` + `done` events and `finish()`s — except on a retry-eligible failure, where it emits nothing terminal (the attempt isn't done) and deletes the event rows. Removed `_make_talk_progress_callback`, `_make_log_channel_callback`, the `_composite_callback` attr-copying hack, the legacy sent_texts dedup and text-msg-as-result delivery paths, and the `progress_style` config plus four sibling knobs.
+
+**Consumers** (`consumers/`, new): `TalkEventSubscriber` (edits the ack in place per tool, and into the `✅ Done — N actions (Xs)` completion summary on the terminal event), `LogChannelSubscriber` (accumulating edit; the scheduler's `_finalize_log_channel` still reads its `all_descriptions`/`log_msg_id`), `PushNotificationSubscriber` (ntfy on tasks over a threshold). The SSE / snapshot / admin consumers are *not* in-process subscribers — they poll the table from the web process (the table is the bus, no IPC): `/api/chat/tasks/{id}/stream` (SSE, `Last-Event-ID` resume, closes after `done`), `…/events` (snapshot), and `/api/admin/tasks/{id}/events`, all ownership-gated.
+
+A mid-session note: the user reversed the spec's first-draft decision to drop the Done/N-actions ack summary — it's a wanted UX feature — so the Talk subscriber re-derives the count from the tool descriptions it accumulates and edits the summary on the terminal event. The web-chat frontend that will consume the SSE endpoint is a separate pending spec; this lands the backend it needs.
+
+**Key changes:**
+- New `events.py` (TaskEvent / EventWriter / EventSubscriber) + `task_events` table + `db.get_task_events` / `db.delete_task_events`.
+- New `consumers/` package: Talk / log channel / push subscribers.
+- Widened `StreamEvent` union (`ToolEndEvent`, `ToolProgressEvent`, real `tool_call_id`); agent-loop per-tool timing; native final-turn text suppression.
+- `execute_task(on_progress=…)` → `event_writer=…`; scheduler builds the writer, wires subscribers, emits terminal events, deletes events on retry / in cleanup.
+- Web SSE / snapshot / admin event endpoints (poll the table).
+- Config: removed `progress_style` / `progress_min_interval` / `progress_max_messages` / `progress_text_max_chars` / `progress_max_display_items`; added `event_log_enabled`, `push_notification_threshold_seconds`, `push_notification_sources`.
+
+**Files added/modified:**
+- `src/istota/events.py`, `src/istota/consumers/{__init__,talk,log_channel,push}.py` - new
+- `src/istota/brain/_events.py`, `src/istota/brain/__init__.py`, `src/istota/brain/native.py` - widened union, native emit mapping + final-turn suppression
+- `src/istota/agent/events.py`, `src/istota/agent/loop.py` - `duration_ms` instrumentation
+- `src/istota/executor.py` - `event_writer` param + `_on_brain_event` adapter
+- `src/istota/scheduler.py` - writer wiring, terminal events, removed callbacks
+- `src/istota/db.py`, `schema.sql` - `task_events` table + helpers + cleanup delete
+- `src/istota/config.py`, `src/istota/web_app.py` - config keys, SSE/snapshot/admin endpoints
+- `deploy/ansible/{defaults/main.yml,templates/config.toml.j2}`, `config/config.example.toml`
+- `AGENTS.md`, `.claude/rules/{brain,executor,scheduler}.md`
+- `tests/test_events.py` (new), `tests/test_progress_callback.py`, `tests/test_log_channel.py`, `tests/test_config_progress.py`, `tests/test_config.py`, `tests/test_executor_streaming.py`, `tests/test_scheduler.py`, `tests/test_web_app.py`, `tests/native/{test_agent_loop,test_native_brain}.py`
+
 ## 2026-06-05: Native brain — Talk progress streaming + stuck-task reclaim/heartbeat (ISSUE-111, ISSUE-112)
 
 Two bugs surfaced once the native brain was running live on Talk. Both trace to the same root environment — the native brain runs its agent loop *in-process* in the worker thread — but they're distinct defects.

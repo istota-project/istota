@@ -138,6 +138,24 @@ CREATE TABLE IF NOT EXISTS task_logs (
 
 CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id);
 
+-- Task event stream — real-time, persisted observability for every output
+-- surface (web SSE, Talk, push, log channel, admin). seq is monotonic per
+-- task_id and assigned by the EventWriter. The ON DELETE CASCADE clause is
+-- documentation only: SQLite enforces FKs only with PRAGMA foreign_keys=ON,
+-- which istota never sets, so task_events is hand-deleted in cleanup_old_tasks
+-- and on retry (see db.delete_task_events).
+CREATE TABLE IF NOT EXISTS task_events (
+    id          INTEGER PRIMARY KEY,
+    task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    payload     TEXT NOT NULL DEFAULT '{}',  -- JSON
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (task_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events (task_id, seq);
+
 -- Processed emails (to avoid duplicate processing)
 CREATE TABLE IF NOT EXISTS processed_emails (
     id INTEGER PRIMARY KEY,
