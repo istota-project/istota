@@ -125,12 +125,16 @@ use across its own boundary.
 
 ## Outbound
 
-- **`TalkTransport.deliver` / `.edit`** own Talk message construction — the one
-  place outside the CLI that builds `TalkClient`. `deliver` splits at
-  `max_message_length`, posts parts sequentially, and threads + @mentions the
-  first part in group chats when `threaded=True`. `scheduler.post_result_to_talk`
-  and `edit_talk_message` are thin shims over these (kept so the event consumers
-  and `process_one_task` keep their signatures). `notifications._send_talk` also
+- **`TalkTransport.deliver` / `.edit`** own Talk message construction. They no
+  longer build a `TalkClient` per call — they pull the process-global persistent
+  client via `async_runtime.get_talk_client(config)` (one pooled `httpx.AsyncClient`
+  reused across the daemon's lifetime; see `.claude/rules/scheduler.md`
+  "Persistent asyncio runtime"). `deliver` splits at `max_message_length`, posts
+  parts sequentially, and threads + @mentions the first part in group chats when
+  `threaded=True`. `scheduler.post_result_to_talk` and `edit_talk_message` are
+  thin shims over these (kept so the event consumers and `process_one_task` keep
+  their signatures); their sync call sites invoke them via `run_coro` so the
+  awaited methods run on the persistent loop. `notifications._send_talk` also
   delegates to `TalkTransport.deliver`.
 - **`EmailTransport.deliver`** owns the send body via
   `transport.email.outbound.deliver_email_result` — structured-output parsing
@@ -153,16 +157,20 @@ use across its own boundary.
 
 ## Known residuals (candidates for a later sweep)
 
-`TalkClient` is still constructed directly in a few Talk-protocol-internal spots
-that are not part of the surface-delivery seam: `scheduler._resolve_channel_name`
-(log-channel name lookup), `scheduler._finalize_log_channel` and the
-`run_cleanup_checks` stale/ancient-task notices, and `commands.py` `!command`
-replies. The Talk inbound caches (conversation/participant/DM) remain
-module-global in `transport/talk/inbound.py` (they back its `get_dm_token`,
-which `notifications.resolve_conversation_token` calls) rather than instance
-state on `TalkTransport`. Email's shared, non-transport helpers live in
-`istota.email_support` (see the layout section). These are intentional: moving
-them buys little and would churn tightly-coupled tests.
+The Talk-protocol-internal spots that used to build their own `TalkClient`
+(`scheduler._resolve_channel_name`, `scheduler._finalize_log_channel`, the
+`run_cleanup_checks` stale/ancient-task notices, `commands.dispatch` `!command`
+replies, the inbound poller, the confirmation-reply handler) now all pull the
+persistent `get_talk_client(config)` singleton and run via `run_coro` — there
+are no transient `TalkClient(config)` constructions left in daemon Talk paths.
+The low-level `TalkClient` class itself lives in `istota.talk` and is still
+instantiated directly by the CLI (one-shot `asyncio.run` processes that don't
+share the daemon's loop). The Talk inbound caches (conversation/participant/DM)
+remain module-global in `transport/talk/inbound.py` (they back its
+`get_dm_token`, which `notifications.resolve_conversation_token` calls) rather
+than instance state on `TalkTransport`. Email's shared, non-transport helpers
+live in `istota.email_support` (see the layout section). These are intentional:
+moving them buys little and would churn tightly-coupled tests.
 
 ## How to add a transport (e.g. Matrix, web chat)
 

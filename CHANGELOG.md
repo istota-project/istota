@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Internal: all Nextcloud Talk I/O now runs on one persistent asyncio loop with a single reused HTTP client, instead of spinning up a fresh event loop and connection per call. Connections to Nextcloud are pooled across the daemon's lifetime, and a class of event-loop-teardown leaks becomes structurally impossible. Behavior-preserving; no config changes.
 - Internal: email is now a first-class transport (`transport/email/`) mirroring Talk, with shared non-transport helpers in `email_support`. Behavior-preserving refactor; adds end-to-end tests for the email send path.
 
 ## [0.16.0] - 2026-06-06

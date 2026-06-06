@@ -10,6 +10,7 @@ def run_daemon(config: Config) -> None
 2. Set SIGTERM/SIGINT handlers
 3. Hydrate user configs from Nextcloud API
 4. Ensure user directories
+4b. Start the persistent `AsyncRuntime` (`async_runtime.get_async_runtime()`) — see below
 5. Start Talk polling in daemon thread
 6. Create `WorkerPool`
 7. Main loop (while not `_shutdown_requested`):
@@ -26,7 +27,47 @@ def run_daemon(config: Config) -> None
    - Check invoice schedules (every `briefing_check_interval`)
    - `pool.dispatch()`
    - Sleep `poll_interval`
-8. Shutdown workers, release lock
+8. Shutdown workers (`pool.shutdown()`), stop the persistent runtime (`runtime.stop(timeout=10)`), release lock
+
+## Persistent asyncio runtime (`async_runtime.py`)
+
+All Nextcloud Talk I/O runs on **one** long-lived asyncio loop on a dedicated
+daemon thread, against **one** pooled `httpx.AsyncClient`, instead of a fresh
+`asyncio.run` loop + fresh client per call. This gives TCP/TLS connection reuse
+to Nextcloud and removes the per-call loop-teardown leak surface.
+
+- **`AsyncRuntime`** — owns the loop thread. `submit(coro, *, timeout=None)`
+  bridges sync→async via `run_coroutine_threadsafe(...).result(timeout)`
+  (`timeout=None` = wait forever, matching `asyncio.run`; on timeout it cancels
+  the coroutine and raises `TimeoutError`). Calling `submit` from the loop's own
+  thread raises (the reentry guard) instead of deadlocking. `stop(timeout=10)`
+  runs registered cleanup hooks (closing the shared client) then stops the loop.
+- **`run_coro(coro, *, timeout=None)`** — the workhorse every sync Talk call site
+  uses: `run_coro(post_result_to_talk(...))`, `run_coro(edit_talk_message(...))`,
+  `run_coro(poll_talk_conversations(config))`, etc. Lazily starts the process-global
+  runtime on first use (convenience for CLI/tests; `run_daemon` starts it
+  explicitly).
+- **`get_talk_client(config)`** — process-global persistent `TalkClient`
+  singleton. Every Talk delivery path pulls from it (the `TalkTransport` seam,
+  the event consumers, `notifications._send_talk`, the inbound poller,
+  `commands.dispatch`, `_resolve_channel_name`, `_finalize_log_channel`) so they
+  share one connection pool. It is a **synchronous, reentry-safe accessor**: it
+  must not call `run_coro` (it's invoked from inside Talk coroutines already on
+  the loop), so the underlying httpx pool opens lazily on the first awaited
+  method call — which always runs on the persistent loop because every call site
+  goes through `run_coro`. `get_async_runtime()` is called so the registered
+  `aclose` cleanup hook fires on `stop()`. `reset_async_runtime()` /
+  `reset_talk_client()` are test-teardown helpers.
+
+**Invariant:** every `TalkClient` method invocation must end up on the persistent
+loop (via `run_coro`), because the methods issue requests on the loop-bound
+`self._client`. There are no transient `TalkClient(config)` constructions left in
+daemon Talk paths. Email delivery stays on `asyncio.run` (sync SMTP, not httpx).
+Single-pass `run_scheduler` shares `process_one_task` (which uses `run_coro`), so
+it lazily uses the same persistent runtime; its one-shot process exits with the
+daemon thread. `run_cleanup_checks` is synchronous — its rare Talk notices go
+through `send_notification` (→ `run_coro`), keeping its blocking DB/IMAP/fs
+cleanup off the persistent loop.
 
 ### `run_scheduler()`
 ```python
