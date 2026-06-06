@@ -91,13 +91,18 @@ class TestSendTalk:
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
         )
-        with patch("istota.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"ocs": {"data": {"id": 10}}}
             MockClient.return_value = mock_client
             result = await _send_talk(config, "alice", "hello", conversation_token="room1")
         assert result == 10
-        mock_client.send_message.assert_called_once_with("room1", "hello")
+        # _send_talk now delegates to TalkTransport.deliver, which always passes
+        # reply_to / reference_id (both None here). Behaviour at the wire is
+        # identical — TalkClient.send_message no-ops on falsy values.
+        mock_client.send_message.assert_called_once_with(
+            "room1", "hello", reply_to=None, reference_id=None,
+        )
 
     @pytest.mark.asyncio
     async def test_resolves_token_from_user(self):
@@ -107,13 +112,15 @@ class TestSendTalk:
                 briefings=[BriefingConfig(name="morning", cron="0 6 * * *", conversation_token="room2")],
             )},
         )
-        with patch("istota.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"ocs": {"data": {"id": 11}}}
             MockClient.return_value = mock_client
             result = await _send_talk(config, "alice", "hello")
         assert result == 11
-        mock_client.send_message.assert_called_once_with("room2", "hello")
+        mock_client.send_message.assert_called_once_with(
+            "room2", "hello", reply_to=None, reference_id=None,
+        )
 
     @pytest.mark.asyncio
     async def test_returns_none_without_token(self):
@@ -139,7 +146,7 @@ class TestSendTalk:
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
         )
-        with patch("istota.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"ocs": {"data": {"id": 42}}}
             MockClient.return_value = mock_client
@@ -152,7 +159,7 @@ class TestSendTalk:
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
         )
-        with patch("istota.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.side_effect = Exception("fail")
             MockClient.return_value = mock_client
@@ -166,7 +173,7 @@ class TestSendTalkConfirmation:
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
         )
-        with patch("istota.talk.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"ocs": {"data": {"id": 99}}}
             MockClient.return_value = mock_client

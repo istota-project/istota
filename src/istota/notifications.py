@@ -53,14 +53,8 @@ async def _send_talk(
         logger.warning("Nextcloud not configured for notifications")
         return None
 
-    try:
-        from .talk import TalkClient
-        client = TalkClient(config)
-        response = await client.send_message(token, message)
-        return response.get("ocs", {}).get("data", {}).get("id")
-    except Exception as e:
-        logger.error("Failed to send Talk notification (user: %s): %s", user_id, e)
-        return None
+    from .transport.talk import TalkTransport
+    return await TalkTransport(config).deliver(token, message)
 
 
 def send_talk_confirmation(

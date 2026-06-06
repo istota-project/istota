@@ -168,7 +168,7 @@ class TestEditTalkMessage:
             url="https://nc.test", username="bot", app_password="pass",
         ))
         task = _make_task()
-        with patch("istota.scheduler.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.edit_message = AsyncMock()
             result = await edit_talk_message(config, task, 42, "Updated")
@@ -181,7 +181,7 @@ class TestEditTalkMessage:
             url="https://nc.test", username="bot", app_password="pass",
         ))
         task = _make_task()
-        with patch("istota.scheduler.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.edit_message = AsyncMock(side_effect=Exception("404"))
             result = await edit_talk_message(config, task, 42, "Updated")
