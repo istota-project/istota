@@ -197,7 +197,7 @@ class TestResolveChannelName:
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="bot", app_password="pw"),
         )
         mock_info = {"displayName": "Dev Room", "token": "abc123"}
-        with patch("istota.scheduler.TalkClient") as MockClient:
+        with patch("istota.scheduler.get_talk_client") as MockClient:
             instance = MockClient.return_value
             instance.get_conversation_info = AsyncMock(return_value=mock_info)
             name = await _resolve_channel_name(config, "abc123")
@@ -216,7 +216,7 @@ class TestResolveChannelName:
         config = Config(
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="bot", app_password="pw"),
         )
-        with patch("istota.scheduler.TalkClient") as MockClient:
+        with patch("istota.scheduler.get_talk_client") as MockClient:
             instance = MockClient.return_value
             instance.get_conversation_info = AsyncMock(side_effect=Exception("network error"))
             name = await _resolve_channel_name(config, "fail_tok")
@@ -245,7 +245,7 @@ class TestLogChannelSubscriber:
         defaults.update(overrides)
         return db.Task(**defaults)
 
-    @patch("istota.consumers.log_channel.asyncio.run")
+    @patch("istota.consumers.log_channel.run_coro")
     def test_first_event_posts_message(self, mock_arun, tmp_path):
         # The first send now goes through TalkTransport.deliver, which returns
         # the posted message id directly (not the raw OCS dict).
@@ -259,7 +259,7 @@ class TestLogChannelSubscriber:
         assert mock_arun.called
 
     @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
-    @patch("istota.consumers.log_channel.asyncio.run")
+    @patch("istota.consumers.log_channel.run_coro")
     def test_subsequent_events_edit_message(self, mock_arun, mock_edit, tmp_path):
         mock_arun.return_value = 100
         sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
@@ -271,7 +271,7 @@ class TestLogChannelSubscriber:
         sub.on_event(_tool_start("⚙️ Running ls", seq=2))
         assert len(sub.all_descriptions) == 2
 
-    @patch("istota.consumers.log_channel.asyncio.run")
+    @patch("istota.consumers.log_channel.run_coro")
     def test_ignores_non_tool_events(self, mock_arun, tmp_path):
         sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
 
@@ -283,7 +283,7 @@ class TestLogChannelSubscriber:
         assert len(sub.all_descriptions) == 0
         assert not mock_arun.called
 
-    @patch("istota.consumers.log_channel.asyncio.run", side_effect=Exception("network"))
+    @patch("istota.consumers.log_channel.run_coro", side_effect=Exception("network"))
     def test_errors_dont_propagate(self, mock_arun, tmp_path):
         sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
 
@@ -312,7 +312,7 @@ class TestFinalizeLogChannel:
         defaults.update(overrides)
         return db.Task(**defaults)
 
-    @patch("istota.scheduler.asyncio.run")
+    @patch("istota.scheduler.run_coro")
     def test_edits_existing_message_on_success(self, mock_arun, tmp_path):
         config = self._make_config(tmp_path)
         task = self._make_task()
@@ -323,7 +323,7 @@ class TestFinalizeLogChannel:
         _finalize_log_channel(config, task, "logroom", "[42 #Dev]", cb, True)
         mock_arun.assert_called()
 
-    @patch("istota.scheduler.asyncio.run")
+    @patch("istota.scheduler.run_coro")
     def test_posts_one_liner_when_no_tool_calls(self, mock_arun, tmp_path):
         config = self._make_config(tmp_path)
         task = self._make_task()
@@ -334,7 +334,7 @@ class TestFinalizeLogChannel:
         call_args = mock_arun.call_args
         assert call_args is not None
 
-    @patch("istota.scheduler.TalkClient")
+    @patch("istota.scheduler.get_talk_client")
     def test_one_liner_unpacks_tuple_prefix(self, mock_talk_cls, tmp_path):
         config = self._make_config(tmp_path)
         task = self._make_task()
@@ -351,7 +351,7 @@ class TestFinalizeLogChannel:
         assert "('#" not in msg  # no raw tuple
         assert "#istota" in msg
 
-    @patch("istota.scheduler.asyncio.run")
+    @patch("istota.scheduler.run_coro")
     def test_includes_error_on_failure(self, mock_arun, tmp_path):
         config = self._make_config(tmp_path)
         task = self._make_task()
@@ -365,7 +365,7 @@ class TestFinalizeLogChannel:
         )
         mock_arun.assert_called()
 
-    @patch("istota.scheduler.asyncio.run", side_effect=Exception("network"))
+    @patch("istota.scheduler.run_coro", side_effect=Exception("network"))
     def test_errors_dont_propagate(self, mock_arun, tmp_path):
         config = self._make_config(tmp_path)
         task = self._make_task()

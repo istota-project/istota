@@ -64,8 +64,8 @@ def send_talk_confirmation(
     conversation_token: str | None = None,
 ) -> int | None:
     """Send a confirmation prompt via Talk (sync). Returns message_id or None."""
-    import asyncio
-    return asyncio.run(_send_talk(config, user_id, message, conversation_token))
+    from .async_runtime import run_coro
+    return run_coro(_send_talk(config, user_id, message, conversation_token))
 
 
 def _send_email(
@@ -244,12 +244,12 @@ def send_notification(
         surface: "talk", "email", "ntfy", "both" (talk+email), or "all" (talk+email+ntfy).
         conversation_token: Talk room override (falls back to user config resolution).
     """
-    import asyncio
+    from .async_runtime import run_coro
 
     sent = False
 
     if surface in ("talk", "both", "all"):
-        if asyncio.run(_send_talk(config, user_id, message, conversation_token)):
+        if run_coro(_send_talk(config, user_id, message, conversation_token)):
             sent = True
 
     if surface in ("email", "both", "all"):

@@ -46,9 +46,9 @@ from .executor import (
     is_transient_api_error,
     parse_api_error,
 )
+from .async_runtime import get_talk_client, run_coro
 from .nextcloud_api import hydrate_user_configs
 from .notifications import send_notification
-from .talk import TalkClient
 from .transport import make_registry
 from .storage import ensure_user_directories_v2
 from .tasks_file_poller import handle_tasks_file_completion
@@ -456,7 +456,7 @@ async def _resolve_channel_name(config: Config, conversation_token: str) -> str:
     if conversation_token in _channel_name_cache:
         return _channel_name_cache[conversation_token]
     try:
-        client = TalkClient(config)
+        client = get_talk_client(config)
         info = await client.get_conversation_info(conversation_token)
         name = info.get("displayName", conversation_token)
         _channel_name_cache[conversation_token] = name
@@ -541,7 +541,7 @@ def _finalize_log_channel(
     try:
         if log_msg_id is not None:
             # Edit existing message with final state
-            asyncio.run(edit_talk_message(
+            run_coro(edit_talk_message(
                 config,
                 db.Task(
                     id=task.id, status="running", source_type=task.source_type,
@@ -551,15 +551,15 @@ def _finalize_log_channel(
             ))
         elif descriptions:
             # No existing message (shouldn't happen, but fallback)
-            client = TalkClient(config)
-            asyncio.run(client.send_message(
+            client = get_talk_client(config)
+            run_coro(client.send_message(
                 log_channel, body,
                 reference_id=f"istota:log:{task.id}",
             ))
         else:
             # No tool calls at all — post using pre-computed body (includes skills)
-            client = TalkClient(config)
-            asyncio.run(client.send_message(
+            client = get_talk_client(config)
+            run_coro(client.send_message(
                 log_channel, body,
                 reference_id=f"istota:log:{task.id}",
             ))
@@ -1234,7 +1234,7 @@ def process_one_task(
         channel_name = None
         if task.conversation_token:
             try:
-                channel_name = asyncio.run(
+                channel_name = run_coro(
                     _resolve_channel_name(config, task.conversation_token),
                 )
             except Exception:
@@ -1295,7 +1295,7 @@ def process_one_task(
             if (_supports_ack and task.source_type == "talk"
                     and task.conversation_token and not dry_run):
                 ack_text = f"`#{task.id}` *Retrying…*" if is_rerun else f"`#{task.id}` {random.choice(PROGRESS_MESSAGES)}"
-                ack_msg_id = asyncio.run(post_result_to_talk(
+                ack_msg_id = run_coro(post_result_to_talk(
                     config, task, ack_text,
                     reference_id=f"istota:task:{task.id}:ack",
                 ))
@@ -1664,7 +1664,7 @@ def process_one_task(
     # Talk subscriber never posts the result, so no dedup is needed.
     response_msg_id = None
     if post_talk_message:
-        response_msg_id = asyncio.run(post_result_to_talk(
+        response_msg_id = run_coro(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
             reference_id=f"istota:task:{task.id}:result",
             target_token=talk_token,
@@ -2039,10 +2039,15 @@ def check_db_health(config: Config) -> list[CheckReport]:
     return reports
 
 
-async def run_cleanup_checks(config: Config) -> None:
+def run_cleanup_checks(config: Config) -> None:
     """
     Run all cleanup checks for scheduler robustness.
     Call periodically from daemon loop.
+
+    Synchronous: the rare Talk notices (expired-confirmation / failed-ancient)
+    go through the sync ``send_notification`` dispatcher, which routes Talk
+    through the persistent loop. The body otherwise does blocking DB / IMAP /
+    filesystem cleanup that must NOT run on the persistent asyncio loop.
     """
     sched = config.scheduler
 
@@ -2057,12 +2062,14 @@ async def run_cleanup_checks(config: Config) -> None:
             # Notify user via Talk if conversation_token is set
             if task_info["conversation_token"] and config.nextcloud.url:
                 try:
-                    client = TalkClient(config)
                     msg = (
                         "Your pending confirmation request timed out and was cancelled. "
                         "Please submit your request again if you still need this action."
                     )
-                    await client.send_message(task_info["conversation_token"], msg)
+                    send_notification(
+                        config, task_info["user_id"], msg,
+                        conversation_token=task_info["conversation_token"],
+                    )
                 except Exception as e:
                     logger.error(f"Failed to notify user about expired confirmation: {e}")
 
@@ -2099,13 +2106,15 @@ async def run_cleanup_checks(config: Config) -> None:
             # Notify user via Talk if conversation_token is set
             if task_info["conversation_token"] and config.nextcloud.url:
                 try:
-                    client = TalkClient(config)
                     msg = (
                         "A task you submitted was cancelled because it was pending too long "
                         "without being processed. Please try again or contact support if this "
                         "keeps happening."
                     )
-                    await client.send_message(task_info["conversation_token"], msg)
+                    send_notification(
+                        config, task_info["user_id"], msg,
+                        conversation_token=task_info["conversation_token"],
+                    )
                 except Exception as e:
                     logger.error(f"Failed to notify user about failed task: {e}")
 
@@ -3118,7 +3127,7 @@ def run_daemon(config: Config) -> None:
         # Run cleanup checks periodically (same interval as briefing checks)
         if now - last_cleanup_check >= config.scheduler.briefing_check_interval:
             try:
-                asyncio.run(run_cleanup_checks(config))
+                run_cleanup_checks(config)
             except Exception as e:
                 logger.error("Error running cleanup checks: %s", e)
             last_cleanup_check = now

@@ -9,10 +9,10 @@ those attributes are part of the public surface.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from .. import db
+from ..async_runtime import run_coro
 from ..events import TaskEvent
 
 logger = logging.getLogger("istota.consumers.log_channel")
@@ -46,12 +46,12 @@ class LogChannelSubscriber:
             if self.log_msg_id[0] is None:
                 # The log channel is always a Talk room today; deliver through
                 # the Talk transport rather than constructing TalkClient here.
-                self.log_msg_id[0] = asyncio.run(TalkTransport(self._config).deliver(
+                self.log_msg_id[0] = run_coro(TalkTransport(self._config).deliver(
                     self._channel, body,
                     reference_id=f"istota:log:{self._task.id}",
                 ))
             else:
-                asyncio.run(edit_talk_message(
+                run_coro(edit_talk_message(
                     self._config,
                     db.Task(
                         id=self._task.id, status="running",
