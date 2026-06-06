@@ -69,23 +69,33 @@ transports and pushes ntfy via `notifications`.
 
 ## Inbound
 
-- **Talk** splits cleanly: `talk_poller.collect_talk_messages(config) ->
-  list[IncomingMessage]` owns every Talk-specific step (conversation listing +
-  cache, per-room long-poll, system/own/unknown/unmentioned filtering, `!model`
-  prefix, `!command` dispatch, confirmation-reply handling, the per-channel
-  active-task gate, attachment extraction, cancelling superseded confirmations)
-  and performs their DB side effects inline — it only defers the `create_task`
-  step. `TalkTransport.poll` delegates to it. `poll_talk_conversations` is a
-  shim (collect + `ingest_message`) kept for the scheduler drivers and tests.
-- **Email** can't split: `poll_emails` needs the freshly-created task id
-  mid-loop for the untrusted-sender confirmation gate and the `processed_emails`
-  linkage, so it self-creates its tasks. `EmailTransport.poll` delegates to
-  `poll_emails` and returns an empty `IncomingMessage` list. The scheduler's
-  email tick calls `poll_emails` directly.
+**Both surfaces self-create their tasks inside `poll`** — for the same class of
+reason: the `create_task` must share the surface's `db.get_db` transaction with
+the inbound side effects, so a create failure rolls the whole batch back and the
+messages are re-polled rather than silently lost.
+
+- **Talk**: `talk_poller.poll_talk_conversations(config) -> list[int]` owns every
+  Talk-specific step (conversation listing + cache, per-room long-poll,
+  system/own/unknown/unmentioned filtering, `!model` prefix, `!command` dispatch,
+  confirmation-reply handling, the per-channel active-task gate, attachment
+  extraction, cancelling superseded confirmations) **and** calls `ingest_message`
+  in the same transaction as `set_talk_poll_state` / the command + confirmation
+  side effects. If `create_task` raised after the poll cursor advanced (separate
+  transactions), the messages would be lost forever (the dedup guard can't help —
+  they'd never be re-polled). `TalkTransport.poll` delegates to it and returns an
+  empty `IncomingMessage` list. (An earlier design split this into a
+  `collect → ingest` step across a transaction boundary; that introduced exactly
+  this message-loss window and was reverted.)
+- **Email**: `poll_emails` needs the freshly-created task id mid-loop for the
+  untrusted-sender confirmation gate and the `processed_emails` linkage, so it
+  self-creates too. `EmailTransport.poll` delegates to `poll_emails` and returns
+  an empty list. The scheduler's email tick calls `poll_emails` directly.
 
 `ingest_message` is the only shared inbound code; it maps an `IncomingMessage`
 straight onto `db.create_task` (the duplicate-Talk-message guard returns the
-existing id rather than inserting twice).
+existing id rather than inserting twice). It is called *inside* the Talk poll
+transaction, and is the entry point a future driver-ingested surface (web chat)
+would use across its own boundary.
 
 ## Outbound
 
