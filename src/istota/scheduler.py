@@ -3009,6 +3009,15 @@ def run_daemon(config: Config) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("Skill-job purge skipped: %s", e)
 
+    # Start the persistent asyncio runtime that hosts all Talk (and other) I/O
+    # on one loop with one pooled httpx client. Explicit start here surfaces a
+    # loop-creation failure before the daemon goes live rather than lazily on the
+    # first run_coro call; every run_coro site (poller, delivery, consumers,
+    # notifications) shares it.
+    from .async_runtime import get_async_runtime
+    runtime = get_async_runtime()
+    logger.info("STARTUP Started persistent asyncio runtime")
+
     # Start Talk polling in background thread so it runs independently of task processing
     if config.talk.enabled:
         talk_thread = threading.Thread(
@@ -3189,6 +3198,17 @@ def run_daemon(config: Config) -> None:
 
     # Shutdown workers before releasing lock
     pool.shutdown()
+
+    # Stop the persistent asyncio runtime after the worker pool: runs cleanup
+    # hooks (closes the shared TalkClient httpx pool) then stops the loop. The
+    # talk-poller thread is a daemon and may be mid long-poll — runtime.stop
+    # cancels its in-flight coroutine. Best-effort with a timeout so a hung
+    # network coro can't block daemon shutdown.
+    try:
+        runtime.stop(timeout=10.0)
+        logger.info("Stopped persistent asyncio runtime")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Error stopping persistent asyncio runtime: %s", e)
 
     # Release lock on shutdown
     fcntl.flock(lock_file, fcntl.LOCK_UN)
