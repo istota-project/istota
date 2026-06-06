@@ -11,7 +11,8 @@ from .config import load_config
 from .logging_setup import setup_logging
 from .executor import execute_task, execute_task_interactive
 from .scheduler import process_one_task, check_briefings
-from .email_poller import get_email_config, poll_emails
+from .email_support import get_email_config
+from .transport.email import poll_emails
 from .skills.email import list_emails, send_email
 from .storage import (
     ensure_user_directories_v2,

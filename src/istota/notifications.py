@@ -82,7 +82,7 @@ def _send_email(
         return False
 
     try:
-        from .email_poller import get_email_config
+        from .email_support import get_email_config
         from .skills.email import send_email
         email_config = get_email_config(config)
         send_email(

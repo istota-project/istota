@@ -2,6 +2,36 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-06: Email promoted to a first-class transport (symmetry with Talk)
+
+When the transport seam landed, Talk became a proper subpackage (`transport/talk/`) but email stayed half-in: `transport/email.py` was a thin shell whose `poll` delegated to `email_poller.py` and whose `deliver` reached back into `scheduler.post_result_to_email`. The original rationale was that `email_poller.py` also carried non-transport plumbing, so moving it wholesale would drag that into `transport/`. This session corrected the asymmetry by splitting along the real seam instead of leaving the whole module behind: transport code goes into `transport/email/`, and only the genuinely-shared, non-transport helpers stay out — as a library, not a half-migrated poller.
+
+**The split.** `email_poller.py` is gone. The inbound poll loop (`poll_emails` + `_match_thread` + `_extract_user_from_recipient`) moved to `transport/email/inbound.py`; the email-send body moved out of `scheduler.py` into `transport/email/outbound.py` (`deliver_email_result` + `_parse_email_output` + `_load_deferred_email_output` + `_record_sent_email`); `EmailTransport` now lives in `transport/email/__init__.py`. This mirrors `transport/talk/` exactly (seam in `__init__.py`, inbound body in `inbound.py`), with email adding an `outbound.py` because its send path is ~270 lines vs Talk's ~40-line inline `deliver`.
+
+**De-duplicated inbound.** `poll_emails` used to call `db.create_task(...)` directly; it now routes through the shared `transport/ingest.py:ingest_message` like Talk does. The load-bearing subtlety: the old code passed `attachments = paths if paths else None`, the new path passes `[]` and `ingest_message` does `attachments=msg.attachments or None`, so `[]` collapses to `None` and `db.create_task` treats both as SQL NULL — byte-identical outcome. Every other field (`is_group_chat`, `priority`, `model`/`effort`, reply fields) resolves to the same `create_task` default the old omitted-arg call relied on.
+
+**Shared library, not a leftover.** The non-transport helpers (`get_email_config`, `is_synthetic_email_thread_token`, `normalize_subject`, `compute_thread_id`, `cleanup_old_emails`) moved to a new `email_support.py` — used by both transport halves *and* by non-transport callers (briefing skill, notifications, TASKS.md poller, scheduler delivery-routing / cleanup). The low-level IMAP/SMTP client stays in `skills.email`, email's analog of `talk.TalkClient`. `scheduler.post_result_to_email` is now a thin shim over `deliver_email_result`, parallel to `post_result_to_talk`; it calls the bool-returning body directly rather than `EmailTransport.deliver`, because the `Transport.deliver` protocol returns `int | None` and would discard the success flag the scheduler's two callers check.
+
+**Mulder/Scully review.** Ran both review agents on the result. Verdict: behavior-preserving and structurally faithful (inbound field mapping, the `[]`→`None` attachment handling, the smart-quote map, and the shim's bool semantics all verified equivalent against `HEAD`; no test cases dropped — 76 inbound tests before and after). One finding acted on: the refactor had made `import istota.transport` eagerly pull in `skills.briefing` via a module-top `strip_markdown` import in `outbound.py` — a transport structurally depending on a sibling feature-skill at import time, a latent cycle trap the old function-local imports avoided. Made `strip_markdown` lazy inside `deliver_email_result`; `import istota.transport` no longer loads `skills.briefing`.
+
+**Closed a pre-existing coverage gap.** The scheduler suite mocks `post_result_to_email` wholesale, so the four real send branches (reply-to-thread, fresh-send, briefing legacy fallback, briefing markdown-strip safety net) had no end-to-end coverage — true before the refactor too. Added `tests/test_transport_email_outbound.py` (15 tests) driving `deliver_email_result` directly with `send_email`/`reply_to_email` mocked at the outbound module, asserting call args (RFC 5322 `References` chain, `in_reply_to`, subject fallbacks), the True/False contract, and the `sent_emails` recording side effect, plus deferred-file-wins-over-inline-JSON and no-structured-output-skip edges.
+
+**Tests.** Full suite stays green (5538 → 5553 with the new file). `test_email_poller.py` renamed to `test_transport_email_inbound.py`; patch targets repointed (cleanup helpers → `email_support`, poll internals → `transport.email.inbound`); outbound-helper imports in `test_scheduler.py` repointed to `transport.email.outbound`.
+
+**Files added/modified:**
+- `src/istota/transport/email/__init__.py` - new: `EmailTransport` seam (poll→inbound, deliver→outbound, resolve_target)
+- `src/istota/transport/email/inbound.py` - new: `poll_emails` + routing + confirmation gate, via shared `ingest_message`
+- `src/istota/transport/email/outbound.py` - new: `deliver_email_result` + parse/deferred/record helpers (moved from scheduler), lazy `strip_markdown`
+- `src/istota/email_support.py` - new: shared non-transport email helpers (moved from `email_poller.py`)
+- `src/istota/email_poller.py` - removed
+- `src/istota/transport/email.py` - removed (became the package)
+- `src/istota/scheduler.py` - `post_result_to_email` now a thin shim; removed moved helpers + their imports
+- `src/istota/cli.py`, `notifications.py`, `tasks_file_poller.py`, `skills/briefing/__init__.py` - repointed imports to `email_support` / `transport.email`
+- `tests/test_transport_email_outbound.py` - new: 15 end-to-end `deliver_email_result` tests
+- `tests/test_email_poller.py` → `tests/test_transport_email_inbound.py` - renamed + patch targets repointed
+- `tests/test_scheduler.py`, `test_transport_email.py`, `test_notifications.py` - import/patch-target updates
+- `AGENTS.md`, `.claude/rules/transport.md`, `.claude/rules/scheduler.md`, `docs/architecture/overview.md`, `docs/architecture/task-lifecycle.md` - doc updates
+
 ## 2026-06-06: Task event streaming — one persisted event log for every output surface
 
 Replaced the string-based `on_progress` progress callback with a single typed, persisted event stream per task. The old pipeline was a chain of string callbacks composed at execution time, carrying mutable state on function attributes (`sent_texts`, `last_progress_msg_id`, `all_descriptions`, …) — fine for Talk-only delivery, but it breaks the moment a second consumer arrives, has no persistence (a missed event is gone), and couldn't carry the richer events the native brain already produces. This implements the task-event-streaming spec as one complete change (not a phased rollout), across three layers plus five consumers.

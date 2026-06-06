@@ -17,8 +17,8 @@ Tasks enter the queue from multiple sources:
 
 | Source | Entry point | `source_type` |
 |---|---|---|
-| Talk message | Talk poller (`talk_poller.py`) | `talk` |
-| Email | Email poller (`email_poller.py`) | `email` |
+| Talk message | Talk poller (`transport/talk/inbound.py`) | `talk` |
+| Email | Email poller (`transport/email/inbound.py`) | `email` |
 | TASKS.md file | File poller (`tasks_file_poller.py`) | `istota_file` |
 | CLI | `istota task` command (`cli.py`) | `cli` |
 | Scheduled job | `check_scheduled_jobs()` in scheduler | `scheduled` |

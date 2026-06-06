@@ -547,7 +547,7 @@ def _fetch_newsletter_content(news_config: dict, app_config: Config) -> str | No
         Formatted string with newsletter content, or None if none found
     """
     try:
-        from ...email_poller import get_email_config
+        from ...email_support import get_email_config
         from ..email import get_newsletters, read_email
 
         sources = news_config.get("sources", [])

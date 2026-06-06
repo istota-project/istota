@@ -3,7 +3,8 @@
 Email self-creates its tasks inside ``poll_emails`` (the confirmation gate and
 processed-email linkage need the task id mid-loop), so the transport's ``poll``
 delegates there and returns an empty IncomingMessage list. The routing
-precedence / gate behaviour itself is covered by ``test_email_poller.py``.
+precedence / gate behaviour itself is covered by
+``test_transport_email_inbound.py``.
 """
 
 from unittest.mock import MagicMock, patch
@@ -54,7 +55,9 @@ class TestPoll:
     @pytest.mark.asyncio
     async def test_poll_delegates_to_poll_emails(self, db_path):
         t = EmailTransport(_config(db_path))
-        with patch("istota.email_poller.poll_emails", return_value=[7, 8]) as mock_poll:
+        with patch(
+            "istota.transport.email.poll_emails", return_value=[7, 8],
+        ) as mock_poll:
             result = await t.poll()
         # Email self-creates; nothing to ingest downstream.
         assert result == []
@@ -63,11 +66,11 @@ class TestPoll:
 
 class TestDeliver:
     @pytest.mark.asyncio
-    async def test_deliver_delegates_to_post_result_to_email(self, db_path):
+    async def test_deliver_delegates_to_deliver_email_result(self, db_path):
         t = EmailTransport(_config(db_path))
         task = _task()
         with patch(
-            "istota.scheduler.post_result_to_email",
+            "istota.transport.email.deliver_email_result",
             new_callable=MagicMock,
         ) as mock_send:
             async def _ok(*a, **k):

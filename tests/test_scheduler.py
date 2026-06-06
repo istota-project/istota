@@ -22,8 +22,6 @@ from istota.scheduler import (
     download_talk_attachments,
     get_worker_id,
     strip_briefing_preamble,
-    _parse_email_output,
-    _load_deferred_email_output,
     _talk_poll_loop,
     _format_error_for_user,
     _is_policy_refusal,
@@ -53,6 +51,10 @@ from istota.config import (
     ResourceConfig,
 )
 from istota import db
+from istota.transport.email.outbound import (
+    _parse_email_output,
+    _load_deferred_email_output,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +242,7 @@ class TestTalkTargetForDelivery:
     """_talk_target_for_delivery resolves the Talk room for a task's notifications.
 
     Email-source tasks may carry a synthetic 16-char hex thread hash in
-    `conversation_token` (set by email_poller for plus_address / sender_match
+    `conversation_token` (set by the email inbound for plus_address / sender_match
     routing). Posting to that token silently no-ops because it isn't a real
     Talk room. The helper falls back to the user's resolved alerts/DM channel
     in that case while leaving real tokens (talk-originated chains) intact.
@@ -4996,7 +4998,7 @@ class TestRecordSentEmail:
     """Tests for _record_sent_email helper used by post_result_to_email."""
 
     def test_records_sent_email(self, db_path):
-        from istota.scheduler import _record_sent_email
+        from istota.transport.email.outbound import _record_sent_email
 
         config = Config(
             db_path=db_path,
@@ -5027,7 +5029,7 @@ class TestRecordSentEmail:
 
     def test_record_sent_email_failure_is_non_fatal(self, db_path):
         """DB errors in _record_sent_email should not propagate."""
-        from istota.scheduler import _record_sent_email
+        from istota.transport.email.outbound import _record_sent_email
 
         config = Config(db_path=Path("/nonexistent/db.sqlite"))
 
