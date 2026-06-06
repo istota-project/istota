@@ -1,22 +1,31 @@
 """TalkTransport — Nextcloud Talk surface adapter.
 
-Stage 1 is a thin seam: ``deliver`` / ``edit`` / ``resolve_target`` delegate to
-the existing scheduler functions so no behaviour moves yet, while the new types
-and registry are wired and tested. ``poll`` gains its real body (the
-``poll_talk_conversations`` logic, producing ``IncomingMessage`` instead of
-creating tasks inline) in a later stage; until then the scheduler's Talk
-poll driver still calls ``poll_talk_conversations`` directly.
+Owns Talk message construction: it is the one place outside the CLI that
+constructs ``TalkClient``. ``deliver`` replicates the previous
+``post_result_to_talk`` body (split + sequential post + group-chat
+reply-threading / @mention); ``edit`` replicates ``edit_talk_message``. The
+scheduler's ``post_result_to_talk`` / ``edit_talk_message`` are now thin shims
+over these methods, so existing callers (the event consumers,
+``process_one_task``) keep their signatures while the surface logic lives here.
+
+``poll`` gains its real body (moved from ``poll_talk_conversations``) in a later
+stage; until then the scheduler's Talk poll driver still calls
+``poll_talk_conversations`` directly.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
+from ..talk import TalkClient, split_message
 from ._types import IncomingMessage, TransportCapabilities
 
 if TYPE_CHECKING:
     from .. import db
     from ..config import Config
+
+logger = logging.getLogger("istota.transport.talk")
 
 
 class TalkTransport:
@@ -46,43 +55,52 @@ class TalkTransport:
         reference_id: str | None = None,
         threaded: bool = False,
     ) -> int | None:
-        from ..scheduler import post_result_to_talk
-        if task is not None:
-            return await post_result_to_talk(
-                self._config, task, text,
-                use_reply_threading=threaded,
-                reference_id=reference_id,
-                target_token=target,
-            )
-        # No task in scope (notification path): direct split + send.
-        from ..talk import TalkClient, split_message
-        if not self._config.nextcloud.url or not target:
+        """Send a message to a Talk room. Splits long messages and posts the
+        parts sequentially; in group chats with ``threaded=True`` the first part
+        replies to ``task.talk_message_id`` and @mentions the user. Returns the
+        last posted message id, or None on failure / no target."""
+        token = target or (task.conversation_token if task is not None else None)
+        if not self._config.nextcloud.url or not token:
             return None
+
         try:
             client = TalkClient(self._config)
+            parts = split_message(text)
             msg_id = None
-            for part in split_message(text):
+            for i, part in enumerate(parts):
+                # In group chats, reply to the original message and @mention the
+                # user for the first part only so they get a notification. Only
+                # applied for final results (threaded=True), not intermediate
+                # progress updates which would be too noisy.
+                part_reply_to = None
+                if threaded and i == 0 and task is not None and task.is_group_chat:
+                    part_reply_to = task.talk_message_id
+                    part = f"@{task.user_id} {part}"
+                elif reply_to is not None and i == 0:
+                    part_reply_to = reply_to
                 response = await client.send_message(
-                    target, part, reply_to=reply_to, reference_id=reference_id,
+                    token, part, reply_to=part_reply_to, reference_id=reference_id,
                 )
                 msg_id = response.get("ocs", {}).get("data", {}).get("id")
             return msg_id
-        except Exception:
+        except Exception as e:
+            task_id = task.id if task is not None else "?"
+            logger.error(
+                "Failed to post to Talk (task %s): %s: %r",
+                task_id, type(e).__name__, e,
+            )
             return None
 
     async def edit(self, target: str, message_id: int, text: str) -> None:
-        from ..scheduler import edit_talk_message
-        from .. import db
-        # edit_talk_message keys off task.conversation_token; build a minimal
-        # task carrying the target room.
-        shim = db.Task(
-            id=0, status="running", source_type="talk",
-            user_id="", prompt="", conversation_token=target,
-        )
-        await edit_talk_message(self._config, shim, message_id, text)
+        """Edit a previously posted Talk message in place. Raises on API error
+        (the scheduler ``edit_talk_message`` shim catches and returns False)."""
+        if not self._config.nextcloud.url or not target:
+            return None
+        client = TalkClient(self._config)
+        await client.edit_message(target, message_id, text)
+        return None
 
     async def download_attachment(self, remote_ref: str, local_path: str) -> None:
-        from ..talk import TalkClient
         client = TalkClient(self._config)
         await client.download_attachment(remote_ref, local_path)
 

@@ -49,7 +49,8 @@ from .executor import (
 )
 from .nextcloud_api import hydrate_user_configs
 from .notifications import send_notification
-from .talk import TalkClient, split_message
+from .talk import TalkClient
+from .transport import make_registry
 from .email_poller import get_email_config
 from .skills.email import reply_to_email
 from .storage import ensure_user_directories_v2
@@ -427,12 +428,15 @@ def get_worker_id(user_id: str | None = None) -> str:
 async def edit_talk_message(
     config: Config, task: db.Task, message_id: int, message: str,
 ) -> bool:
-    """Edit a Talk message in-place. Returns True on success, False on failure."""
+    """Edit a Talk message in-place. Returns True on success, False on failure.
+
+    Thin shim over ``TalkTransport.edit`` — the surface logic (and the
+    ``TalkClient`` construction) lives in ``transport/talk.py``."""
     if not config.nextcloud.url or not task.conversation_token:
         return False
+    from .transport.talk import TalkTransport
     try:
-        client = TalkClient(config)
-        await client.edit_message(task.conversation_token, message_id, message)
+        await TalkTransport(config).edit(task.conversation_token, message_id, message)
         return True
     except Exception as e:
         logger.debug("Edit message %d failed: %s", message_id, e)
@@ -1280,9 +1284,19 @@ def process_one_task(
                 enabled=config.scheduler.event_log_enabled,
             )
 
-            # Send ack message + wire the Talk subscriber for Talk tasks.
+            # Send ack message + wire the progress subscriber for surfaces that
+            # support a progress ack. The capability check is the transport seam;
+            # the source_type == "talk" guard preserves today's behaviour (only
+            # interactive Talk tasks get an editable ack — briefings, scheduled
+            # jobs, and subtasks that also resolve to the Talk surface do not).
             is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
-            if task.source_type == "talk" and task.conversation_token and not dry_run:
+            _delivery_transport = make_registry(config).for_task(task)
+            _supports_ack = bool(
+                _delivery_transport
+                and _delivery_transport.capabilities.supports_progress_ack
+            )
+            if (_supports_ack and task.source_type == "talk"
+                    and task.conversation_token and not dry_run):
                 ack_text = f"`#{task.id}` *Retrying…*" if is_rerun else f"`#{task.id}` {random.choice(PROGRESS_MESSAGES)}"
                 ack_msg_id = asyncio.run(post_result_to_talk(
                     config, task, ack_text,
@@ -1728,34 +1742,16 @@ async def post_result_to_talk(
     `target_token` overrides `task.conversation_token` for the actual post —
     use it when the task's stored token isn't a real Talk room (see
     `_talk_target_for_delivery` for the email-source synthetic-token case).
-    """
-    token = target_token or task.conversation_token
-    if not config.nextcloud.url or not token:
-        return None
 
-    try:
-        client = TalkClient(config)
-        parts = split_message(message)
-        msg_id = None
-        for i, part in enumerate(parts):
-            # In group chats, reply to the original message and @mention the user
-            # for the first part only so they get a notification.
-            # Only applied for final results (use_reply_threading=True), not
-            # intermediate progress updates which would be too noisy.
-            reply_to = None
-            if use_reply_threading and i == 0 and task.is_group_chat:
-                reply_to = task.talk_message_id
-                part = f"@{task.user_id} {part}"
-            response = await client.send_message(
-                token, part, reply_to=reply_to,
-                reference_id=reference_id,
-            )
-            msg_id = response.get("ocs", {}).get("data", {}).get("id")
-        return msg_id
-    except Exception as e:
-        # Log but don't fail the task — use Python logger to avoid DB lock issues
-        logger.error("Failed to post to Talk (task %s): %s: %r", task.id, type(e).__name__, e)
-        return None
+    Thin shim over ``TalkTransport.deliver`` — splitting, group-chat threading,
+    and the ``TalkClient`` construction live in ``transport/talk.py``.
+    """
+    from .transport.talk import TalkTransport
+    token = target_token or task.conversation_token
+    return await TalkTransport(config).deliver(
+        token, message, task=task,
+        threaded=use_reply_threading, reference_id=reference_id,
+    )
 
 
 def _parse_email_output(message: str) -> dict | None:

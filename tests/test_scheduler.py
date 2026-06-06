@@ -5344,7 +5344,7 @@ class TestPostResultToTalk:
         config = self._make_config()
         task = self._make_task(is_group_chat=False, talk_message_id=42)
 
-        with patch("istota.scheduler.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 100}}}
@@ -5364,7 +5364,7 @@ class TestPostResultToTalk:
         config = self._make_config()
         task = self._make_task(is_group_chat=True, talk_message_id=42, user_id="bob")
 
-        with patch("istota.scheduler.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 200}}}
@@ -5384,8 +5384,8 @@ class TestPostResultToTalk:
         config = self._make_config()
         task = self._make_task(is_group_chat=True, talk_message_id=42, user_id="carol")
 
-        with patch("istota.scheduler.TalkClient") as MockClient, \
-             patch("istota.scheduler.split_message", return_value=["Part 1", "Part 2"]):
+        with patch("istota.transport.talk.TalkClient") as MockClient, \
+             patch("istota.transport.talk.split_message", return_value=["Part 1", "Part 2"]):
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 300}}}
@@ -5409,7 +5409,7 @@ class TestPostResultToTalk:
         config = self._make_config()
         task = self._make_task(is_group_chat=True, talk_message_id=None, user_id="dave")
 
-        with patch("istota.scheduler.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 400}}}
@@ -5428,7 +5428,7 @@ class TestPostResultToTalk:
         config = self._make_config()
         task = self._make_task(is_group_chat=True, talk_message_id=42, user_id="eve")
 
-        with patch("istota.scheduler.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 500}}}
@@ -5446,7 +5446,7 @@ class TestPostResultToTalk:
         config = self._make_config()
         task = self._make_task(is_group_chat=False, talk_message_id=42)
 
-        with patch("istota.scheduler.TalkClient") as MockClient:
+        with patch("istota.transport.talk.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 100}}}
