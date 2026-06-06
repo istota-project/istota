@@ -65,8 +65,26 @@ server {
 {% endif %}
 
 {% if istota_web_enabled %}
+  # Task event SSE stream — must stream, not buffer. Longest-prefix match wins
+  # over /istota/, so this block handles the streaming chat endpoints. The web
+  # app also sets `X-Accel-Buffering: no`, but HTTP/1.1 + a long read timeout
+  # are needed here so a long idle gap between events doesn't drop the stream.
+  location /istota/api/chat/ {
+    proxy_pass http://127.0.0.1:{{ istota_web_port }}/istota/api/chat/;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 3600s;
+  }
+
   location /istota/ {
     proxy_pass http://127.0.0.1:{{ istota_web_port }}/istota/;
+    proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
