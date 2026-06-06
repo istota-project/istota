@@ -1,12 +1,13 @@
 """Tests for TalkClient's persistent-client lifecycle + get_talk_client singleton.
 
-Stage 2 of the persistent-asyncio-loop spec. The 11 TalkClient methods still
-wrap their bodies in ``async with httpx.AsyncClient(...)`` at this stage — the
-persistent ``self._client`` is created and idle. Per-method use of ``_client``
-(and the post-aclose / per-request-timeout method behaviours) lands in Stage 6.
+Persistent-asyncio-loop spec. Covers the Stage 2 lifecycle (``_ensure_open`` /
+``aclose`` / ``is_closed``), the Stage 3 proof that delivery reuses the
+singleton, and the Stage 6 behaviour where the 11 TalkClient methods issue
+requests on the persistent ``self._client`` (connection reuse, post-aclose
+failure, per-request timeout override).
 """
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -146,3 +147,63 @@ class TestProofSiteReusesSingleton:
         assert client.edit_message.await_count == 2
         # Both edits resolved the same cached singleton (no per-call construction).
         assert get_talk_client(cfg) is client
+
+
+class TestStage6PersistentRequests:
+    """Stage 6: methods use the persistent self._client (no per-call async-with).
+    Verify connection reuse, post-aclose failure, and per-request timeout
+    override."""
+
+    def _resp(self, json_value, status=200):
+        resp = MagicMock()
+        resp.status_code = status
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value=json_value)
+        return resp
+
+    def test_send_message_reuses_one_httpx_client(self):
+        client = get_talk_client(_config())
+        with patch("istota.talk.httpx.AsyncClient") as MockHttp:
+            inst = MockHttp.return_value
+            inst.post = AsyncMock(return_value=self._resp({"ocs": {"data": {"id": 1}}}))
+            inst.aclose = AsyncMock()
+
+            async def go():
+                await client.send_message("room", "a")
+                first = client._client
+                await client.send_message("room", "b")
+                return first, client._client
+
+            first, second = run_coro(go())
+
+        assert first is second  # same persistent httpx client across calls
+        assert MockHttp.call_count == 1  # constructed exactly once
+
+    def test_method_after_aclose_raises(self):
+        client = get_talk_client(_config())
+        with patch("istota.talk.httpx.AsyncClient") as MockHttp:
+            MockHttp.return_value.aclose = AsyncMock()
+
+            async def go():
+                await client._ensure_open()
+                await client.aclose()
+                with pytest.raises(RuntimeError, match="closed"):
+                    await client.send_message("room", "x")
+
+            run_coro(go())
+
+    def test_poll_messages_overrides_timeout_per_request(self):
+        client = get_talk_client(_config())
+        with patch("istota.talk.httpx.AsyncClient") as MockHttp:
+            inst = MockHttp.return_value
+            inst.get = AsyncMock(return_value=self._resp({"ocs": {"data": []}}))
+            inst.aclose = AsyncMock()
+
+            async def go():
+                # long-poll: request_timeout = timeout + 10 = 40, overriding the
+                # persistent client's DEFAULT_TIMEOUT.
+                await client.poll_messages("room", last_known_message_id=5, timeout=30)
+
+            run_coro(go())
+
+        assert inst.get.call_args.kwargs["timeout"] == 40

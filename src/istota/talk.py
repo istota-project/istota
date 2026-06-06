@@ -123,19 +123,19 @@ class TalkClient:
             data["referenceId"] = reference_id
 
         logger.debug("Sending message to %s (%d chars)", conversation_token, len(message))
-        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
-            response = await client.post(
-                url,
-                auth=self.auth,
-                headers={
-                    "OCS-APIRequest": "true",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                json=data,
-            )
-            response.raise_for_status()
-            return response.json()
+        client = await self._ensure_open()
+        response = await client.post(
+            url,
+            auth=self.auth,
+            headers={
+                "OCS-APIRequest": "true",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json=data,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def edit_message(
         self,
@@ -153,32 +153,32 @@ class TalkClient:
             "Editing message %d in %s (%d chars)",
             message_id, conversation_token, len(message),
         )
-        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
-            response = await client.put(
-                url,
-                auth=self.auth,
-                headers={
-                    "OCS-APIRequest": "true",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                json={"message": message},
-            )
-            response.raise_for_status()
-            return response.json()
+        client = await self._ensure_open()
+        response = await client.put(
+            url,
+            auth=self.auth,
+            headers={
+                "OCS-APIRequest": "true",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={"message": message},
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def list_conversations(self) -> list[dict]:
         """List all conversations the user is part of."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"
 
-        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
-            response = await client.get(
-                url,
-                auth=self.auth,
-                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
-            )
-            response.raise_for_status()
-            return response.json().get("ocs", {}).get("data", [])
+        client = await self._ensure_open()
+        response = await client.get(
+            url,
+            auth=self.auth,
+            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+        )
+        response.raise_for_status()
+        return response.json().get("ocs", {}).get("data", [])
 
     async def poll_messages(
         self,
@@ -217,25 +217,28 @@ class TalkClient:
             }
             request_timeout = 30  # standard timeout for history fetch
 
-        async with httpx.AsyncClient(timeout=request_timeout) as client:
-            response = await client.get(
-                url,
-                auth=self.auth,
-                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
-                params=params,
-            )
-            # 304 means no new messages (timeout)
-            if response.status_code == 304:
-                return []
-            response.raise_for_status()
+        client = await self._ensure_open()
+        # Per-request timeout override: the persistent client's default is
+        # DEFAULT_TIMEOUT, but a long-poll needs timeout+10 (history fetch 30).
+        response = await client.get(
+            url,
+            auth=self.auth,
+            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            params=params,
+            timeout=request_timeout,
+        )
+        # 304 means no new messages (timeout)
+        if response.status_code == 304:
+            return []
+        response.raise_for_status()
 
-            messages = response.json().get("ocs", {}).get("data", [])
+        messages = response.json().get("ocs", {}).get("data", [])
 
-            # History fetch returns newest-first, reverse for oldest-first processing
-            if not last_known_message_id and messages:
-                messages = list(reversed(messages))
+        # History fetch returns newest-first, reverse for oldest-first processing
+        if not last_known_message_id and messages:
+            messages = list(reversed(messages))
 
-            return messages
+        return messages
 
     async def get_latest_message_id(self, conversation_token: str) -> int | None:
         """
@@ -245,18 +248,18 @@ class TalkClient:
         """
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
 
-        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
-            response = await client.get(
-                url,
-                auth=self.auth,
-                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
-                params={"lookIntoFuture": 0, "limit": 1},
-            )
-            response.raise_for_status()
-            messages = response.json().get("ocs", {}).get("data", [])
-            if messages:
-                return messages[0].get("id")
-            return None
+        client = await self._ensure_open()
+        response = await client.get(
+            url,
+            auth=self.auth,
+            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            params={"lookIntoFuture": 0, "limit": 1},
+        )
+        response.raise_for_status()
+        messages = response.json().get("ocs", {}).get("data", [])
+        if messages:
+            return messages[0].get("id")
+        return None
 
     async def fetch_chat_history(
         self, conversation_token: str, limit: int = 100,
@@ -269,45 +272,46 @@ class TalkClient:
         """
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(
-                url,
-                auth=self.auth,
-                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
-                params={"lookIntoFuture": 0, "limit": limit},
-            )
-            response.raise_for_status()
-            messages = response.json().get("ocs", {}).get("data", [])
-            # History fetch returns newest-first, reverse for oldest-first
-            if messages:
-                messages = list(reversed(messages))
-            return messages
+        client = await self._ensure_open()
+        response = await client.get(
+            url,
+            auth=self.auth,
+            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            params={"lookIntoFuture": 0, "limit": limit},
+            timeout=30,
+        )
+        response.raise_for_status()
+        messages = response.json().get("ocs", {}).get("data", [])
+        # History fetch returns newest-first, reverse for oldest-first
+        if messages:
+            messages = list(reversed(messages))
+        return messages
 
     async def get_participants(self, conversation_token: str) -> list[dict]:
         """Get participants of a conversation."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room/{conversation_token}/participants"
 
-        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
-            response = await client.get(
-                url,
-                auth=self.auth,
-                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
-            )
-            response.raise_for_status()
-            return response.json().get("ocs", {}).get("data", [])
+        client = await self._ensure_open()
+        response = await client.get(
+            url,
+            auth=self.auth,
+            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+        )
+        response.raise_for_status()
+        return response.json().get("ocs", {}).get("data", [])
 
     async def get_conversation_info(self, conversation_token: str) -> dict:
         """Get conversation metadata (displayName, type, etc.)."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room/{conversation_token}"
 
-        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
-            response = await client.get(
-                url,
-                auth=self.auth,
-                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
-            )
-            response.raise_for_status()
-            return response.json().get("ocs", {}).get("data", {})
+        client = await self._ensure_open()
+        response = await client.get(
+            url,
+            auth=self.auth,
+            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+        )
+        response.raise_for_status()
+        return response.json().get("ocs", {}).get("data", {})
 
     async def fetch_full_history(
         self, conversation_token: str, batch_size: int = 200,
@@ -320,33 +324,34 @@ class TalkClient:
         all_messages: list[dict] = []
         last_known_id: int | None = None
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            while True:
-                params: dict = {"lookIntoFuture": 0, "limit": batch_size}
-                if last_known_id is not None:
-                    params["lastKnownMessageId"] = last_known_id
+        client = await self._ensure_open()
+        while True:
+            params: dict = {"lookIntoFuture": 0, "limit": batch_size}
+            if last_known_id is not None:
+                params["lastKnownMessageId"] = last_known_id
 
-                response = await client.get(
-                    url,
-                    auth=self.auth,
-                    headers={"OCS-APIRequest": "true", "Accept": "application/json"},
-                    params=params,
-                )
-                if response.status_code == 304:
-                    break
-                response.raise_for_status()
+            response = await client.get(
+                url,
+                auth=self.auth,
+                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+                params=params,
+                timeout=30,
+            )
+            if response.status_code == 304:
+                break
+            response.raise_for_status()
 
-                messages = response.json().get("ocs", {}).get("data", [])
-                if not messages:
-                    break
+            messages = response.json().get("ocs", {}).get("data", [])
+            if not messages:
+                break
 
-                # API returns newest-first; collect all then reverse at end
-                all_messages.extend(messages)
-                # The last item in the batch (oldest) — go further back
-                last_known_id = messages[-1]["id"]
+            # API returns newest-first; collect all then reverse at end
+            all_messages.extend(messages)
+            # The last item in the batch (oldest) — go further back
+            last_known_id = messages[-1]["id"]
 
-                if len(messages) < batch_size:
-                    break
+            if len(messages) < batch_size:
+                break
 
         # Reverse to oldest-first order
         all_messages.reverse()
@@ -363,34 +368,35 @@ class TalkClient:
         all_messages: list[dict] = []
         current_id = since_id
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            while True:
-                params = {
-                    "lookIntoFuture": 1,
-                    "timeout": 0,
-                    "limit": batch_size,
-                    "lastKnownMessageId": current_id,
-                }
+        client = await self._ensure_open()
+        while True:
+            params = {
+                "lookIntoFuture": 1,
+                "timeout": 0,
+                "limit": batch_size,
+                "lastKnownMessageId": current_id,
+            }
 
-                response = await client.get(
-                    url,
-                    auth=self.auth,
-                    headers={"OCS-APIRequest": "true", "Accept": "application/json"},
-                    params=params,
-                )
-                if response.status_code == 304:
-                    break
-                response.raise_for_status()
+            response = await client.get(
+                url,
+                auth=self.auth,
+                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+                params=params,
+                timeout=30,
+            )
+            if response.status_code == 304:
+                break
+            response.raise_for_status()
 
-                messages = response.json().get("ocs", {}).get("data", [])
-                if not messages:
-                    break
+            messages = response.json().get("ocs", {}).get("data", [])
+            if not messages:
+                break
 
-                all_messages.extend(messages)
-                current_id = messages[-1]["id"]
+            all_messages.extend(messages)
+            current_id = messages[-1]["id"]
 
-                if len(messages) < batch_size:
-                    break
+            if len(messages) < batch_size:
+                break
 
         return all_messages
 
@@ -407,12 +413,12 @@ class TalkClient:
         """
         url = f"{self.base_url}/remote.php/webdav/{file_path.lstrip('/')}"
 
-        async with httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT) as client:
-            response = await client.get(url, auth=self.auth)
-            response.raise_for_status()
+        client = await self._ensure_open()
+        response = await client.get(url, auth=self.auth)
+        response.raise_for_status()
 
-            with open(local_path, "wb") as f:
-                f.write(response.content)
+        with open(local_path, "wb") as f:
+            f.write(response.content)
 
 
 def split_message(message: str, max_length: int = 4000) -> list[str]:
