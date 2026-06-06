@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-06-06
+
 ### Added
 - **Task event streaming — a single persisted event log per task feeds every output surface.** Each task now produces a typed event stream (started, tool started/finished, intermediate text, result, error, cancelled, done) that's persisted and fanned out to Talk, the log channel, push notifications, and new web endpoints. The native brain's tool events carry real durations and success/failure. New SSE, snapshot, and admin task-event endpoints let a client replay a task's progress live or after the fact (backend for the upcoming web chat).
 
@@ -596,7 +598,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.15.1...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.16.0...main
+[0.16.0]: https://gitlab.com/cynium/istota/-/releases/v0.16.0
 [0.15.1]: https://gitlab.com/cynium/istota/-/releases/v0.15.1
 [0.15.0]: https://gitlab.com/cynium/istota/-/releases/v0.15.0
 [0.14.0]: https://gitlab.com/cynium/istota/-/releases/v0.14.0
