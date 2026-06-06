@@ -22,9 +22,18 @@ transport/
 ├── _types.py     # IncomingMessage, TransportCapabilities, Transport protocol
 ├── registry.py   # TransportRegistry, make_registry, _surface_for_source_type
 ├── ingest.py     # ingest_message(conn, config, msg) -> int
-├── talk.py       # TalkTransport
-└── email.py      # EmailTransport
+├── talk/         # Nextcloud Talk surface
+│   ├── __init__.py  # TalkTransport (seam: deliver/edit/resolve + poll entry)
+│   └── inbound.py   # poll_talk_conversations + filtering/dispatch + module caches
+└── email.py      # EmailTransport (inbound body still in email_poller.py — see below)
 ```
+
+Talk is a subpackage because both directions live together: `TalkTransport`
+(the seam) in `__init__.py`, the inbound poll body in `inbound.py`. The
+low-level HTTP/OCS client `TalkClient` stays in `istota.talk` (shared). Email's
+inbound body stays in `email_poller.py` because that module also carries
+non-transport plumbing (`get_email_config`, `is_synthetic_email_thread_token`,
+`cleanup_old_emails`) used across the tree; `EmailTransport` delegates to it.
 
 ## Core types (`_types.py`)
 
@@ -74,7 +83,7 @@ reason: the `create_task` must share the surface's `db.get_db` transaction with
 the inbound side effects, so a create failure rolls the whole batch back and the
 messages are re-polled rather than silently lost.
 
-- **Talk**: `talk_poller.poll_talk_conversations(config) -> list[int]` owns every
+- **Talk**: `transport.talk.inbound.poll_talk_conversations(config) -> list[int]` owns every
   Talk-specific step (conversation listing + cache, per-room long-poll,
   system/own/unknown/unmentioned filtering, `!model` prefix, `!command` dispatch,
   confirmation-reply handling, the per-channel active-task gate, attachment
@@ -122,12 +131,12 @@ would use across its own boundary.
 that are not part of the surface-delivery seam: `scheduler._resolve_channel_name`
 (log-channel name lookup), `scheduler._finalize_log_channel` and the
 `run_cleanup_checks` stale/ancient-task notices, and `commands.py` `!command`
-replies. The Talk inbound poll body also still lives in `talk_poller.py` (the
-transport's `poll` delegates to it) rather than physically inside
-`transport/talk.py`, and the conversation/participant/DM caches remain
-module-global there (they back `talk_poller.get_dm_token`, which
-`notifications.resolve_conversation_token` calls). These are intentional: moving
-them buys little and would churn a lot of tightly-coupled tests.
+replies. The Talk inbound caches (conversation/participant/DM) remain
+module-global in `transport/talk/inbound.py` (they back its `get_dm_token`,
+which `notifications.resolve_conversation_token` calls) rather than instance
+state on `TalkTransport`. Email's inbound body stays in `email_poller.py` (which
+also owns non-transport email plumbing). These are intentional: moving them buys
+little and would churn tightly-coupled tests.
 
 ## How to add a transport (e.g. Matrix, web chat)
 

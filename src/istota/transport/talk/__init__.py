@@ -1,16 +1,19 @@
-"""TalkTransport — Nextcloud Talk surface adapter.
+"""Nextcloud Talk surface.
 
-Owns Talk message construction: it is the one place outside the CLI that
-constructs ``TalkClient``. ``deliver`` replicates the previous
-``post_result_to_talk`` body (split + sequential post + group-chat
-reply-threading / @mention); ``edit`` replicates ``edit_talk_message``. The
-scheduler's ``post_result_to_talk`` / ``edit_talk_message`` are now thin shims
-over these methods, so existing callers (the event consumers,
-``process_one_task``) keep their signatures while the surface logic lives here.
+This package is the home for everything Talk-specific that sits above the
+low-level HTTP/OCS client (``istota.talk.TalkClient``):
 
-``poll`` gains its real body (moved from ``poll_talk_conversations``) in a later
-stage; until then the scheduler's Talk poll driver still calls
-``poll_talk_conversations`` directly.
+- ``TalkTransport`` (here) — the bidirectional seam: outbound ``deliver`` /
+  ``edit`` / ``resolve_target`` (the one place outside the CLI that constructs
+  ``TalkClient``) plus the ``poll`` entry point.
+- ``inbound`` — the inbound body (``poll_talk_conversations`` + the
+  Talk-specific filtering / `!command` dispatch / confirmation handling and the
+  module-global conversation/participant/DM caches).
+
+``deliver`` replicates the previous ``post_result_to_talk`` body (split +
+sequential post + group-chat reply-threading / @mention); ``edit`` replicates
+``edit_talk_message``. The scheduler's ``post_result_to_talk`` /
+``edit_talk_message`` are thin shims over these methods.
 """
 
 from __future__ import annotations
@@ -18,14 +21,17 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ..talk import TalkClient, split_message
-from ._types import IncomingMessage, TransportCapabilities
+from ...talk import TalkClient, split_message
+from .._types import IncomingMessage, TransportCapabilities
+from .inbound import get_dm_token, poll_talk_conversations
 
 if TYPE_CHECKING:
-    from .. import db
-    from ..config import Config
+    from ... import db
+    from ...config import Config
 
 logger = logging.getLogger("istota.transport.talk")
+
+__all__ = ["TalkTransport", "poll_talk_conversations", "get_dm_token"]
 
 
 class TalkTransport:
@@ -56,7 +62,6 @@ class TalkTransport:
         the module-global conversation/participant/DM caches and the
         Talk-specific filtering.
         """
-        from ..talk_poller import poll_talk_conversations
         await poll_talk_conversations(self._config)
         return []
 
@@ -117,5 +122,5 @@ class TalkTransport:
         await client.download_attachment(remote_ref, local_path)
 
     def resolve_target(self, task: "db.Task") -> str | None:
-        from ..scheduler import _talk_target_for_delivery
+        from ...scheduler import _talk_target_for_delivery
         return _talk_target_for_delivery(self._config, task)

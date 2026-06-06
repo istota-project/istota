@@ -55,14 +55,14 @@ class TestResolveConversationToken:
 
     def test_falls_back_to_dm_token(self):
         config = Config(users={"alice": UserConfig()})
-        with patch("istota.talk_poller.get_dm_token", return_value="dm_room_abc"):
+        with patch("istota.transport.talk.get_dm_token", return_value="dm_room_abc"):
             assert resolve_conversation_token(config, "alice") == "dm_room_abc"
 
     def test_dm_token_not_used_when_alerts_channel_set(self):
         config = Config(users={
             "alice": UserConfig(alerts_channel="alerts_room"),
         })
-        with patch("istota.talk_poller.get_dm_token", return_value="dm_room_abc"):
+        with patch("istota.transport.talk.get_dm_token", return_value="dm_room_abc"):
             assert resolve_conversation_token(config, "alice") == "alerts_room"
 
     def test_prefers_alerts_channel(self):

@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from istota import db
 from istota.brain.claude_code import OPUS
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
-from istota import talk_poller as _talk_poller_mod
-from istota.talk_poller import (
+from istota.transport.talk import inbound as _talk_poller_mod
+from istota.transport.talk.inbound import (
     _get_participants,
     _is_multi_user,
     _participant_cache,
@@ -241,7 +241,7 @@ class TestHandleConfirmationReply:
 
         with (
             db.get_db(config.db_path) as conn,
-            patch("istota.talk_poller.TalkClient") as MockClient,
+            patch("istota.transport.talk.inbound.TalkClient") as MockClient,
         ):
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock()
@@ -352,7 +352,7 @@ class TestConfirmAndTrust:
 
         with (
             db.get_db(config.db_path) as conn,
-            patch("istota.talk_poller.TalkClient") as MockClient,
+            patch("istota.transport.talk.inbound.TalkClient") as MockClient,
         ):
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock()
@@ -386,7 +386,7 @@ class TestConfirmAndTrust:
 
         with (
             db.get_db(config.db_path) as conn,
-            patch("istota.talk_poller.TalkClient") as MockClient,
+            patch("istota.transport.talk.inbound.TalkClient") as MockClient,
         ):
             mock_instance = MockClient.return_value
             mock_instance.send_message = AsyncMock()
@@ -605,7 +605,7 @@ class TestDmTokenCache:
             {"token": "group_room", "type": 2, "name": "Project Chat"},
         ]
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=conversations)
             mock_instance.poll_messages = AsyncMock(return_value=[])
@@ -629,7 +629,7 @@ class TestDmTokenCache:
             {"token": "dm_stranger", "type": 1, "name": "stranger"},
         ]
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=conversations)
             mock_instance.poll_messages = AsyncMock(return_value=[])
@@ -662,7 +662,7 @@ class TestPollTalkConversations:
 
         system_msg = _msg(message_type="system", actor_id="alice")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -683,7 +683,7 @@ class TestPollTalkConversations:
 
         bot_msg = _msg(actor_id="istota")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -703,7 +703,7 @@ class TestPollTalkConversations:
 
         unknown_msg = _msg(actor_id="stranger")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -723,7 +723,7 @@ class TestPollTalkConversations:
 
         msg = _msg(id=101, actor_id="alice", message="Check my calendar")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -754,7 +754,7 @@ class TestPollTalkConversations:
         config = make_config()
         msg = _msg(id=101, actor_id="alice", message="Do the thing")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -764,7 +764,7 @@ class TestPollTalkConversations:
             with db.get_db(config.db_path) as conn:
                 db.set_talk_poll_state(conn, "room1", 50)
 
-            with patch("istota.talk_poller.ingest_message", side_effect=RuntimeError("db locked")):
+            with patch("istota.transport.talk.inbound.ingest_message", side_effect=RuntimeError("db locked")):
                 with pytest.raises(RuntimeError):
                     await poll_talk_conversations(config)
 
@@ -780,7 +780,7 @@ class TestPollTalkConversations:
 
         msg = _msg(id=102, actor_id="alice", message="!model opus-high draft a spec for X")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -806,7 +806,7 @@ class TestPollTalkConversations:
 
         msg = _msg(id=103, actor_id="alice", message="!model default just do it")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -832,7 +832,7 @@ class TestPollTalkConversations:
 
         msg = _msg(id=104, actor_id="alice", message="!model gpt-4 draft a spec")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -858,7 +858,7 @@ class TestPollTalkConversations:
 
         msg = _msg(id=105, actor_id="alice", message="!model opus")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -880,7 +880,7 @@ class TestPollTalkConversations:
 
         msg = _msg(id=200, actor_id="alice", message="Hello")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "dm1", "type": 1},  # type 1 = DM
@@ -900,7 +900,7 @@ class TestPollTalkConversations:
 
         msg = _msg(id=500, actor_id="alice", message="Hello from new room")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "group1", "type": 2},  # type 2 = group
@@ -923,7 +923,7 @@ class TestPollTalkConversations:
     async def test_group_first_poll_no_messages_yet(self, make_config):
         config = make_config()
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "group1", "type": 2},
@@ -943,7 +943,7 @@ class TestPollTalkConversations:
     async def test_group_first_poll_error_skips_room(self, make_config):
         config = make_config()
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "group1", "type": 2},
@@ -968,7 +968,7 @@ class TestPollTalkConversations:
             parent={"id": 250, "message": "Original message content", "deleted": False},
         )
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1005,7 +1005,7 @@ class TestPollTalkConversations:
             """Simulate a room with an immediate new message."""
             return [fast_msg]
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "fast_room", "type": 1},
@@ -1045,7 +1045,7 @@ class TestPollTalkConversations:
             await asyncio.sleep(10)
             return []
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1266,7 +1266,7 @@ class TestPollTalkConversationsGroupRoom:
 
         msg = _msg(id=101, actor_id="alice", message="Just chatting")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "group1", "type": 2},
@@ -1301,7 +1301,7 @@ class TestPollTalkConversationsGroupRoom:
             },
         )
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "group1", "type": 2},
@@ -1337,7 +1337,7 @@ class TestPollTalkConversationsGroupRoom:
 
         msg = _msg(id=103, actor_id="alice", message="Hello there")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 2},
@@ -1368,7 +1368,7 @@ class TestPollTalkConversationsGroupRoom:
 
         msg = _msg(id=104, actor_id="alice", message="Hello")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "dm1", "type": 1},
@@ -1402,7 +1402,7 @@ class TestChannelGate:
 
         msg = _msg(id=200, actor_id="alice", message="Another request")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1430,7 +1430,7 @@ class TestChannelGate:
 
         msg = _msg(id=200, actor_id="alice", message="New request")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1459,7 +1459,7 @@ class TestChannelGate:
 
         msg = _msg(id=200, actor_id="alice", message="New request")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1489,7 +1489,7 @@ class TestTalkMessageCacheIntegration:
 
         msg = _msg(id=100, actor_id="alice", message="Hello")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1519,7 +1519,7 @@ class TestTalkMessageCacheIntegration:
             for i in range(1, 6)
         ]
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1548,7 +1548,7 @@ class TestTalkMessageCacheIntegration:
             db.set_talk_poll_state(conn, "room1", 50)
             db.upsert_talk_messages(conn, "room1", [_msg(id=50)])
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1569,7 +1569,7 @@ class TestConversationListCache:
         """Second poll cycle uses cached conversation list."""
         config = make_config()
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1590,7 +1590,7 @@ class TestConversationListCache:
         """Conversation list is refreshed after TTL expires."""
         config = make_config()
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1615,7 +1615,7 @@ class TestConversationListCache:
         """If list_conversations fails, use cached list instead of returning empty."""
         config = make_config()
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             rooms = [{"token": "room1", "type": 1}]
             mock_instance.list_conversations = AsyncMock(return_value=rooms)
@@ -1644,7 +1644,7 @@ class TestConversationListCache:
         """If list_conversations fails with no cache, returns empty."""
         config = make_config()
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(
                 side_effect=Exception("ReadTimeout")
@@ -1676,7 +1676,7 @@ class TestCancelPendingConfirmationsOnNewMessage:
         # User sends a new message (not yes/no)
         msg = _msg(id=101, actor_id="alice", message="Actually, change the subject")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},
@@ -1710,7 +1710,7 @@ class TestCancelPendingConfirmationsOnNewMessage:
 
         msg = _msg(id=101, actor_id="alice", message="yes")
 
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=[
                 {"token": "room1", "type": 1},

@@ -934,7 +934,7 @@ class TestPollerInterception:
 
     @pytest.mark.asyncio
     async def test_command_does_not_create_task(self, make_config):
-        from istota.talk_poller import poll_talk_conversations
+        from istota.transport.talk.inbound import poll_talk_conversations
 
         config = make_config()
 
@@ -947,7 +947,7 @@ class TestPollerInterception:
             "messageParameters": {},
         }
 
-        with patch("istota.talk_poller.TalkClient") as MockTalkClient, patch(
+        with patch("istota.transport.talk.inbound.TalkClient") as MockTalkClient, patch(
             "istota.commands.TalkClient"
         ) as MockCmdClient:
             # Talk poller client
@@ -976,7 +976,7 @@ class TestPollerInterception:
 
     @pytest.mark.asyncio
     async def test_normal_message_still_creates_task(self, make_config):
-        from istota.talk_poller import poll_talk_conversations
+        from istota.transport.talk.inbound import poll_talk_conversations
 
         config = make_config()
 
@@ -989,7 +989,7 @@ class TestPollerInterception:
             "messageParameters": {},
         }
 
-        with patch("istota.talk_poller.TalkClient") as MockTalkClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockTalkClient:
             mock_talk = MockTalkClient.return_value
             mock_talk.list_conversations = AsyncMock(
                 return_value=[{"token": "room1", "type": 1}]
