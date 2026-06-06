@@ -431,7 +431,7 @@ async def edit_talk_message(
     """Edit a Talk message in-place. Returns True on success, False on failure.
 
     Thin shim over ``TalkTransport.edit`` — the surface logic (and the
-    ``TalkClient`` construction) lives in ``transport/talk.py``."""
+    ``TalkClient`` construction) lives in ``transport/talk/``."""
     if not config.nextcloud.url or not task.conversation_token:
         return False
     from .transport.talk import TalkTransport
@@ -1744,7 +1744,7 @@ async def post_result_to_talk(
     `_talk_target_for_delivery` for the email-source synthetic-token case).
 
     Thin shim over ``TalkTransport.deliver`` — splitting, group-chat threading,
-    and the ``TalkClient`` construction live in ``transport/talk.py``.
+    and the ``TalkClient`` construction live in ``transport/talk/``.
     """
     from .transport.talk import TalkTransport
     token = target_token or task.conversation_token
@@ -3008,7 +3008,7 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     # Poll Talk conversations
     if config.talk.enabled:
         try:
-            from .talk_poller import poll_talk_conversations
+            from .transport.talk import poll_talk_conversations
             talk_tasks = asyncio.run(poll_talk_conversations(config))
             if talk_tasks:
                 logger.info("Queued %d Talk task(s)", len(talk_tasks))
@@ -3097,7 +3097,7 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
 
 def _talk_poll_loop(config: Config) -> None:
     """Background thread: continuously polls Talk conversations."""
-    from .talk_poller import poll_talk_conversations
+    from .transport.talk import poll_talk_conversations
 
     while not _shutdown_requested:
         try:

@@ -165,7 +165,7 @@ class TestPoll:
         # poll-state advance), so poll() returns an empty IncomingMessage list.
         t = TalkTransport(_config())
         with patch(
-            "istota.talk_poller.poll_talk_conversations",
+            "istota.transport.talk.poll_talk_conversations",
             new=AsyncMock(return_value=[7, 8]),
         ) as mock_poll:
             result = await t.poll()
@@ -182,7 +182,7 @@ class TestPoll:
             users={"alice": UserConfig()},
         )
         t = TalkTransport(config)
-        with patch("istota.talk_poller.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
             inst = MockClient.return_value
             inst.list_conversations = AsyncMock(return_value=[{"token": "room1", "type": 1}])
             inst.poll_messages = AsyncMock(return_value=[

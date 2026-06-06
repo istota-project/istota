@@ -1,16 +1,22 @@
-"""Talk conversation polling and task creation."""
+"""Talk conversation polling and task creation — the TalkTransport inbound body.
+
+Owns every Talk-protocol-specific inbound step and the module-global
+conversation/participant/DM caches. ``poll_talk_conversations`` self-creates its
+tasks (see its atomicity note); ``TalkTransport.poll`` delegates here.
+"""
 
 import asyncio
 import logging
 import time
 from pathlib import Path
 
-from . import db
-from .config import Config
-from .talk import TalkClient, clean_message_content
-from .transport import IncomingMessage, ingest_message
+from ... import db
+from ...config import Config
+from ...talk import TalkClient, clean_message_content
+from .._types import IncomingMessage
+from ..ingest import ingest_message
 
-logger = logging.getLogger("istota.talk_poller")
+logger = logging.getLogger("istota.transport.talk.inbound")
 
 
 # Participant cache: token -> (participants list, timestamp)
@@ -388,8 +394,8 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 # The active brain owns the alias namespace.
                 model_override: str | None = None
                 effort_override: str | None = None
-                from .brain import make_brain
-                from .commands import (
+                from ...brain import make_brain
+                from ...commands import (
                     dispatch as dispatch_command,
                     model_prefix_usage,
                     parse_model_prefix,

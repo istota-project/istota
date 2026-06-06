@@ -29,7 +29,7 @@ def resolve_conversation_token(config: "Config", user_id: str) -> str | None:
 
     # Fall back to auto-detected 1:1 DM from talk poller
     try:
-        from .talk_poller import get_dm_token
+        from .transport.talk import get_dm_token
         dm_token = get_dm_token(user_id)
         if dm_token:
             return dm_token
