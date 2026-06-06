@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -446,6 +447,7 @@ async def _execute_sequential(
                 )
             )
 
+        _start = time.monotonic()
         prepared = await _prepare_tool_call(ctx, assistant_message, tc, config)
 
         if prepared.immediate:
@@ -458,6 +460,7 @@ async def _execute_sequential(
             result_msg = _make_tool_result_message(tc, final.result, final.is_error)
             finalized.append(final)
 
+        duration_ms = int((time.monotonic() - _start) * 1000)
         await emit(
             AgentEvent(
                 type="tool_execution_end",
@@ -465,6 +468,7 @@ async def _execute_sequential(
                 tool_name=tc.name,
                 result=result_msg,
                 is_error=result_msg.is_error,
+                duration_ms=duration_ms,
             )
         )
         await emit(AgentEvent(type="message_start", message=result_msg))
@@ -508,28 +512,32 @@ async def _execute_parallel(
             prepared_list.append((i, tc, prepared))
 
     async def _run(idx: int, tc: ToolCallContent, prepared: _Prepared):
+        # Each tool's span lives inside its own gather coroutine, so
+        # duration_ms is per-tool wall time, not batch time.
+        _start = time.monotonic()
         executed = await _execute_prepared(prepared, on_update=None, abort=config.abort)
         final = await _finalize(ctx, assistant_message, prepared, executed, config)
-        return idx, tc, final
+        duration_ms = int((time.monotonic() - _start) * 1000)
+        return idx, tc, final, duration_ms
 
     executed_results = await asyncio.gather(
         *[_run(i, tc, p) for i, tc, p in prepared_list],
         return_exceptions=True,
     )
 
-    all_results: dict[int, tuple[ToolCallContent, ToolResult, bool]] = {}
+    all_results: dict[int, tuple[ToolCallContent, ToolResult, bool, int]] = {}
     for idx, (tc, result, is_error) in immediate.items():
-        all_results[idx] = (tc, result, is_error)
+        all_results[idx] = (tc, result, is_error, 0)
     for item in executed_results:
         if isinstance(item, Exception):
             continue  # _execute_prepared catches; defensive only
-        idx, tc, final = item
-        all_results[idx] = (tc, final.result, final.is_error)
+        idx, tc, final, duration_ms = item
+        all_results[idx] = (tc, final.result, final.is_error, duration_ms)
 
     messages: list[ToolResultMessage] = []
     results_for_terminate: list[ToolResult] = []
     for i in sorted(all_results.keys()):
-        tc, result, is_error = all_results[i]
+        tc, result, is_error, duration_ms = all_results[i]
         result_msg = _make_tool_result_message(tc, result, is_error)
         await emit(
             AgentEvent(
@@ -538,6 +546,7 @@ async def _execute_parallel(
                 tool_name=tc.name,
                 result=result_msg,
                 is_error=is_error,
+                duration_ms=duration_ms,
             )
         )
         await emit(AgentEvent(type="message_start", message=result_msg))

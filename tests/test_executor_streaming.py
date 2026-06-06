@@ -11,7 +11,42 @@ from contextlib import ExitStack
 
 from istota.config import Config, SchedulerConfig, SleepCycleConfig, UserConfig
 from istota.executor import execute_task, get_user_temp_dir
+from istota.events import EventWriter
 from istota import db
+
+
+class _RaisingSubscriber:
+    """Subscriber whose on_event always raises — EventWriter must swallow it."""
+
+    def on_event(self, event):
+        raise RuntimeError("kaboom")
+
+    def on_finish(self):
+        pass
+
+
+class _RecordingSubscriber:
+    """Captures every TaskEvent the writer emits, for assertions."""
+
+    def __init__(self):
+        self.events = []
+
+    def on_event(self, event):
+        self.events.append(event)
+
+    def on_finish(self):
+        pass
+
+    def kinds(self):
+        return [e.kind for e in self.events]
+
+
+def _writer(task, config, *, subscriber=None):
+    """An EventWriter with DB writes off (executor-path tests don't assert rows)."""
+    w = EventWriter(task.id, str(config.db_path), enabled=False)
+    if subscriber is not None:
+        w.subscribe(subscriber)
+    return w
 
 
 def _make_task(**kwargs):
@@ -341,7 +376,7 @@ class TestStreamingExecution:
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda m: progress.append(m),
+                task, config, [], event_writer=_writer(task, config),
             )
 
         assert success is True
@@ -367,14 +402,14 @@ class TestStreamingExecution:
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda m: progress.append(m),
+                task, config, [], event_writer=_writer(task, config),
             )
 
         assert success is False
         assert result == "Something went wrong"
 
     def test_progress_callback_called_for_tool_use(self, tmp_path):
-        """on_progress callback is called for ToolUseEvents."""
+        """The executor emits tool_start events for ToolUseEvents."""
         config = _make_config(tmp_path)
         config.scheduler.progress_show_tool_use = True
         config.scheduler.progress_show_text = False
@@ -408,25 +443,28 @@ class TestStreamingExecution:
         ]
 
         mock_process = self._make_mock_process(stream_lines)
-        progress_calls = []
+        rec = _RecordingSubscriber()
 
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda msg: progress_calls.append(msg),
+                task, config, [], event_writer=_writer(task, config, subscriber=rec),
             )
 
         assert success is True
         # Only the ResultEvent text is returned
         assert result == "File has 42 lines."
-        assert len(progress_calls) == 2
-        assert progress_calls[0] == "📄 Reading data.txt"
-        assert progress_calls[1] == "⚙️ Count lines"
+        tool_starts = [e for e in rec.events if e.kind == "tool_start"]
+        assert len(tool_starts) == 2
+        assert tool_starts[0].payload["description"] == "📄 Reading data.txt"
+        assert tool_starts[0].payload["tool_call_id"] == "t1"  # real block id threaded
+        assert tool_starts[1].payload["description"] == "⚙️ Count lines"
+        assert tool_starts[1].payload["tool_call_id"] == "t2"
 
     def test_text_progress_when_enabled(self, tmp_path):
-        """on_progress is called for TextEvents when progress_show_text=True."""
+        """progress_text events are emitted for TextEvents when progress_show_text=True."""
         config = _make_config(tmp_path)
         config.scheduler.progress_show_tool_use = False
         config.scheduler.progress_show_text = True
@@ -444,19 +482,20 @@ class TestStreamingExecution:
         ]
 
         mock_process = self._make_mock_process(stream_lines)
-        progress_calls = []
+        rec = _RecordingSubscriber()
 
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda msg, **kw: progress_calls.append(msg),
+                task, config, [], event_writer=_writer(task, config, subscriber=rec),
             )
 
         assert success is True
-        assert len(progress_calls) == 1
-        assert progress_calls[0] == "Checking things..."
+        texts = [e for e in rec.events if e.kind == "progress_text"]
+        assert len(texts) == 1
+        assert texts[0].payload["text"] == "Checking things..."
 
     def test_callback_exception_does_not_affect_execution(self, tmp_path):
         """If on_progress raises, task still completes normally."""
@@ -479,14 +518,14 @@ class TestStreamingExecution:
 
         mock_process = self._make_mock_process(stream_lines)
 
-        def exploding_callback(msg):
-            raise RuntimeError("kaboom")
-
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
         ]
         with contextmanager_chain(patches):
-            success, result, _actions, _trace = execute_task(task, config, [], on_progress=exploding_callback)
+            success, result, _actions, _trace = execute_task(
+                task, config, [],
+                event_writer=_writer(task, config, subscriber=_RaisingSubscriber()),
+            )
 
         assert success is True
         assert result == "All good."
@@ -514,7 +553,7 @@ class TestStreamingExecution:
             patch("istota.executor.subprocess.Popen", side_effect=capture_popen),
         ]
         with contextmanager_chain(patches):
-            execute_task(task, config, [], on_progress=lambda m: None)
+            execute_task(task, config, [], event_writer=_writer(task, config))
 
         assert "--output-format" in captured_cmd
         idx = captured_cmd.index("--output-format")
@@ -543,7 +582,7 @@ class TestStreamingExecution:
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda m: None,
+                task, config, [], event_writer=_writer(task, config),
             )
 
         assert success is False
@@ -577,7 +616,7 @@ class TestStreamingExecution:
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda m: None,
+                task, config, [], event_writer=_writer(task, config),
             )
 
         assert success is True
@@ -599,7 +638,7 @@ class TestStreamingExecution:
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda m: None,
+                task, config, [], event_writer=_writer(task, config),
             )
 
         assert success is False
@@ -645,7 +684,7 @@ class TestStreamingExecution:
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda m, **kw: None,
+                task, config, [], event_writer=_writer(task, config),
             )
 
         assert success is True
@@ -664,7 +703,7 @@ class TestStreamingExecution:
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda m: None,
+                task, config, [], event_writer=_writer(task, config),
             )
 
         assert success is False
@@ -688,7 +727,7 @@ class TestStreamingExecution:
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
-                task, config, [], on_progress=lambda m: None,
+                task, config, [], event_writer=_writer(task, config),
             )
 
         assert success is False

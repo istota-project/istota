@@ -6,9 +6,10 @@ def execute_task(
     task: db.Task, config: Config, user_resources: list[db.UserResource],
     dry_run: bool = False, use_context: bool = True,
     conn: "db.sqlite3.Connection | None" = None,
-    on_progress: Callable[[str], None] | None = None,
+    event_writer: "events.EventWriter | None" = None,
 ) -> tuple[bool, str, str | None, str | None]:
 ```
+The old `on_progress: Callable[[str], None]` parameter is gone (task-event-streaming spec). The scheduler builds an `EventWriter`, subscribes consumers, and passes it; the executor emits `task_started` then adapts the brain's widened `StreamEvent` stream to `TaskEvent`s via `_on_brain_event` → `event_writer.emit(...)`. `None` on dry-run / CLI paths.
 Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `actions_taken` is a JSON array of tool use descriptions from streaming execution, or `None` for simple/dry-run/error paths. `execution_trace` is a JSON array of interleaved `{"type": "tool", "text": "..."}` and `{"type": "text", "text": "..."}` events, or `None`.
 
 ### Flow
@@ -118,10 +119,13 @@ Per-task BrainRequest fields the executor populates:
   `env` (built per task), `timeout_seconds=config.scheduler.task_timeout_minutes * 60`
 - `model = (task.model or config.model)`, `effort = (task.effort or config.effort)`
 - `custom_system_prompt_path = config/system-prompt.md` when `custom_system_prompt = true`
-- `streaming = on_progress is not None`
-- `on_progress`: closure that filters `StreamEvent` by `progress_show_tool_use`
-  / `progress_show_text` and forwards `(message, italicize=False)` to the
-  scheduler's progress callback
+- `streaming = event_writer is not None`
+- `on_progress = _on_brain_event`: closure that maps the widened `StreamEvent`
+  union to `TaskEvent`s on the `EventWriter` — `ToolUseEvent`→`tool_start`,
+  `ToolEndEvent`→`tool_end`, `ToolProgressEvent`→`tool_progress`,
+  `TextEvent`→`progress_text`, `ContextManagementEvent`→`context_management`.
+  `tool_*` gated on `progress_show_tool_use`, `progress_text` on
+  `progress_show_text`; `tool_progress` always emitted (SSE only)
 - `cancel_check`: closure that polls `db.is_task_cancelled()`
 - `on_pid`: closure that calls `db.update_task_pid()` for `!stop` support
 - `sandbox_wrap`: closure over `build_bwrap_cmd(...)` so the brain can wrap

@@ -25,7 +25,13 @@ logger = logging.getLogger("istota.scheduler")
 
 from . import db
 from .brain import make_brain
+from .consumers import (
+    LogChannelSubscriber,
+    PushNotificationSubscriber,
+    TalkEventSubscriber,
+)
 from .db_health import CheckReport, check_and_repair
+from .events import EventWriter
 from .skills.briefing import (
     build_briefing_prompt,
     get_briefings_for_user,
@@ -433,179 +439,6 @@ async def edit_talk_message(
         return False
 
 
-def _format_progress_body(
-    descriptions: list[str], max_display: int, *, done: bool = False,
-) -> str:
-    """Format accumulated tool descriptions into a progress message body.
-
-    Descriptions already include emoji prefixes from stream_parser (e.g.
-    "📄 Reading file.txt"), so we don't add our own.
-    """
-    total = len(descriptions)
-    if done:
-        header = f"Done — {total} action{'s' if total != 1 else ''} taken"
-    else:
-        header = f"Working — {total} action{'s' if total != 1 else ''} so far…"
-
-    if total <= max_display:
-        lines = [f"`{d}`" for d in descriptions]
-    else:
-        skip = total - max_display
-        lines = [f"[+{skip} earlier]"]
-        lines.extend(f"`{d}`" for d in descriptions[skip:])
-
-    return header + "\n" + "\n".join(lines)
-
-
-def _make_talk_progress_callback(
-    config: Config, task: db.Task, ack_msg_id: int | None = None,
-):
-    """Build a progress callback that posts updates to Talk.
-
-    Behaviour depends on ``progress_style``:
-
-    - **"replace"** (default): Edit the ack message to show only the latest
-      tool call with elapsed time, e.g. ``Reading config.py… (4s)``
-      No rate limiting — every tool call triggers an edit.
-    - **"full"**: Edit the ack message with accumulated tool descriptions
-      (append list). Rate-limited by ``progress_min_interval``.
-    - **"legacy"**: Post individual progress messages (pre-edit-mode compat).
-      Rate-limited by ``progress_min_interval`` and ``progress_max_messages``.
-    - **"none"**: Silent — no progress updates at all. Callback still
-      accumulates descriptions for log channel / actions_taken.
-
-    The returned callback has:
-    - ``sent_texts``: list of raw strings posted as separate messages (legacy mode)
-    - ``last_progress_msg_id``: mutable [int|None] of last posted message ID (legacy mode)
-    - ``all_descriptions``: list of all tool descriptions seen (all modes)
-    """
-    start_time = time.time()
-    last_send = start_time  # starts from initial ack message
-    send_count = 0
-    sched = config.scheduler
-    sent_texts: list[str] = []
-    last_progress_msg_id: list[int | None] = [None]  # mutable container for nonlocal
-    all_descriptions: list[str] = []
-
-    # Resolve effective style, with ack_msg_id fallback
-    style = sched.progress_style
-    if style in ("replace", "full") and ack_msg_id is None:
-        style = "legacy"  # can't edit without an ack message
-
-    # Backward compat: use_edit is True for "full" and "replace" (both edit ack)
-    use_edit = style in ("replace", "full")
-
-    # Live text message — progressively updated with intermediate text events,
-    # then edited one final time with the completed result.
-    text_msg_id: list[int | None] = [None]  # mutable container
-    accumulated_texts: list[str] = []
-
-    def callback(message: str, *, italicize: bool = True):
-        nonlocal last_send, send_count
-
-        max_chars = sched.progress_text_max_chars
-        # Collapse multi-line tool output (e.g. inline scripts) to a single line
-        msg = message.replace("\n", " ").strip()
-        if max_chars:
-            msg = msg[:max_chars]
-
-        # Text events: post/edit a second live message (only in edit modes)
-        if not italicize:
-            if not use_edit:
-                return
-            # Use original message for text events (not truncated/collapsed)
-            accumulated_texts.append(message.strip())
-            body = "\n\n".join(accumulated_texts)
-            # Truncate to Talk limit (leave room for formatting)
-            if len(body) > 3900:
-                body = body[:3900] + "…"
-            try:
-                if text_msg_id[0] is None:
-                    # Post the first text message
-                    mid = asyncio.run(post_result_to_talk(
-                        config, task, body,
-                        reference_id=f"istota:task:{task.id}:text",
-                    ))
-                    text_msg_id[0] = mid
-                else:
-                    asyncio.run(edit_talk_message(
-                        config, task, text_msg_id[0], body,
-                    ))
-            except Exception as e:
-                logger.debug("Text progress update failed: %s", e)
-            return
-
-        if style == "replace":
-            all_descriptions.append(msg)
-            elapsed = int(time.time() - start_time)
-            body = f"`{msg} ({elapsed}s)`"
-            try:
-                ok = asyncio.run(edit_talk_message(config, task, ack_msg_id, body))
-                if ok:
-                    last_send = time.time()
-            except Exception as e:
-                logger.debug("Progress replace edit failed: %s", e)
-        elif style == "full":
-            if not italicize:
-                return
-            all_descriptions.append(msg)
-            now = time.time()
-            if now - last_send < sched.progress_min_interval:
-                return
-            body = _format_progress_body(
-                all_descriptions, sched.progress_max_display_items,
-            )
-            try:
-                ok = asyncio.run(edit_talk_message(config, task, ack_msg_id, body))
-                if ok:
-                    last_send = now
-                    with db.get_db(config.db_path) as conn:
-                        db.log_task(conn, task.id, "debug", f"Progress: {msg}")
-                else:
-                    logger.debug("Progress edit failed for task %d, skipping", task.id)
-            except Exception as e:
-                logger.debug("Progress edit failed: %s", e)
-        elif style == "none":
-            # Silent — still accumulate for log channel
-            if italicize:
-                all_descriptions.append(msg)
-        else:
-            # Legacy mode: post individual progress messages
-            if send_count >= sched.progress_max_messages:
-                return
-            now = time.time()
-            if now - last_send < sched.progress_min_interval:
-                return
-            if not italicize:
-                formatted = msg
-            else:
-                formatted = f"`{msg}`"
-            try:
-                msg_id = asyncio.run(post_result_to_talk(
-                    config, task, formatted,
-                    reference_id=f"istota:task:{task.id}:progress",
-                ))
-                last_send = now
-                send_count += 1
-                sent_texts.append(msg)
-                last_progress_msg_id[0] = msg_id
-                with db.get_db(config.db_path) as conn:
-                    db.log_task(conn, task.id, "debug", f"Progress: {msg}")
-            except Exception as e:
-                logger.debug("Progress update failed: %s", e)
-
-    callback.sent_texts = sent_texts
-    callback.last_progress_msg_id = last_progress_msg_id
-    callback.all_descriptions = all_descriptions
-    callback.ack_msg_id = ack_msg_id
-    callback.use_edit = use_edit
-    callback.style = style
-    callback.start_time = start_time
-    callback.text_msg_id = text_msg_id
-    callback.accumulated_texts = accumulated_texts
-    return callback
-
-
 # ---------------------------------------------------------------------------
 # Log channel — verbose per-user task execution log
 # ---------------------------------------------------------------------------
@@ -687,55 +520,6 @@ def _format_log_channel_body(
     if done and error:
         lines.append(f"Error: {error[:200]}")
     return "\n".join(lines)
-
-
-def _make_log_channel_callback(
-    config: Config, task: db.Task, log_channel: str, prefix: str,
-):
-    """Build a progress callback that streams tool calls to the log channel.
-
-    Unlike the Talk progress callback, this has NO rate limiting — every tool
-    call is emitted immediately via message editing.
-    """
-    all_descriptions: list[str] = []
-    log_msg_id: list[int | None] = [None]
-
-    def callback(message: str, *, italicize: bool = True):
-        # Skip text events — only log tool actions
-        if not italicize:
-            return
-        # Collapse multi-line tool output (e.g. inline scripts) to a single line
-        msg = message.replace("\n", " ").strip()
-        all_descriptions.append(msg)
-
-        body = _format_log_channel_body(prefix, all_descriptions)
-
-        try:
-            if log_msg_id[0] is None:
-                # First tool call — post initial message
-                client = TalkClient(config)
-                response = asyncio.run(client.send_message(
-                    log_channel, body,
-                    reference_id=f"istota:log:{task.id}",
-                ))
-                log_msg_id[0] = response.get("ocs", {}).get("data", {}).get("id")
-            else:
-                # Subsequent calls — edit in place
-                asyncio.run(edit_talk_message(
-                    config,
-                    # Create a minimal task-like object with the log channel token
-                    db.Task(
-                        id=task.id, status="running", source_type=task.source_type,
-                        user_id=task.user_id, prompt="", conversation_token=log_channel,
-                    ),
-                    log_msg_id[0], body,
-                ))
-        except Exception as e:
-            logger.debug("Log channel update failed for task %d: %s", task.id, e)
-
-    callback.all_descriptions = all_descriptions
-    callback.log_msg_id = log_msg_id
-    return callback
 
 
 def _finalize_log_channel(
@@ -1468,7 +1252,13 @@ def process_one_task(
 
     # Command and skill tasks skip Talk ack, attachment download, and
     # resource loading (cron-driven, no live user behind a Talk session).
-    progress_callback = None
+    # The brain path builds an EventWriter and subscribes the in-process
+    # consumers (Talk / log channel / push). ack_msg_id and the subscribers
+    # are referenced again during delivery, so they live at this scope.
+    event_writer: EventWriter | None = None
+    talk_sub: TalkEventSubscriber | None = None
+    log_callback: LogChannelSubscriber | None = None
+    ack_msg_id = None
     # Ping liveness for the whole execution so stuck-task reclaim can tell a
     # slow-but-alive worker from a dead one (ISSUE-112). Covers the skill,
     # command, and brain paths; stops on exit even if execution raises.
@@ -1482,8 +1272,15 @@ def process_one_task(
             actions_taken = None
             execution_trace = None
         else:
-            # Send progress update for Talk tasks
-            ack_msg_id = None
+            # One event writer per task; subscribers fan its stream out to
+            # their surfaces. SSE / admin consumers are NOT subscribers —
+            # they poll the task_events table the writer persists to.
+            event_writer = EventWriter(
+                task_id, str(config.db_path),
+                enabled=config.scheduler.event_log_enabled,
+            )
+
+            # Send ack message + wire the Talk subscriber for Talk tasks.
             is_rerun = task.attempt_count > 0 or task.confirmation_prompt is not None
             if task.source_type == "talk" and task.conversation_token and not dry_run:
                 ack_text = f"`#{task.id}` *Retrying…*" if is_rerun else f"`#{task.id}` {random.choice(PROGRESS_MESSAGES)}"
@@ -1494,42 +1291,26 @@ def process_one_task(
                 if ack_msg_id is None:
                     logger.warning(
                         "Ack message posted but no message ID returned for task %d "
-                        "(progress will fall back to legacy mode)",
+                        "(progress edits will no-op)",
                         task.id,
                     )
-
-                # Build streaming progress callback if enabled
                 if config.scheduler.progress_updates:
-                    progress_callback = _make_talk_progress_callback(
-                        config, task, ack_msg_id=ack_msg_id,
-                    )
+                    talk_sub = TalkEventSubscriber(config, task, ack_msg_id)
+                    event_writer.subscribe(talk_sub)
 
-            # Build log channel callback (no rate limiting, streams every tool call)
+            # Log channel subscriber (no rate limiting, streams every tool call).
             if log_channel and log_channel_prefix:
-                log_callback = _make_log_channel_callback(
+                log_callback = LogChannelSubscriber(
                     config, task, log_channel, log_channel_prefix,
                 )
-                # Compose with existing Talk progress callback
-                if progress_callback:
-                    talk_cb = progress_callback
+                event_writer.subscribe(log_callback)
 
-                    def _composite_callback(message, *, italicize=True):
-                        talk_cb(message, italicize=italicize)
-                        log_callback(message, italicize=italicize)
-
-                    # Preserve Talk callback attributes for progress editing
-                    _composite_callback.sent_texts = talk_cb.sent_texts
-                    _composite_callback.last_progress_msg_id = talk_cb.last_progress_msg_id
-                    _composite_callback.all_descriptions = talk_cb.all_descriptions
-                    _composite_callback.ack_msg_id = talk_cb.ack_msg_id
-                    _composite_callback.use_edit = talk_cb.use_edit
-                    _composite_callback.style = talk_cb.style
-                    _composite_callback.start_time = talk_cb.start_time
-                    _composite_callback.text_msg_id = talk_cb.text_msg_id
-                    _composite_callback.accumulated_texts = talk_cb.accumulated_texts
-                    progress_callback = _composite_callback
-                else:
-                    progress_callback = log_callback
+            # Push notification subscriber, gated by source type.
+            if task.source_type in config.scheduler.push_notification_sources and not dry_run:
+                event_writer.subscribe(PushNotificationSubscriber(
+                    config, task,
+                    threshold_seconds=config.scheduler.push_notification_threshold_seconds,
+                ))
 
             # Download Talk attachments to local filesystem before execution
             if task.source_type == "talk" and task.attachments:
@@ -1539,7 +1320,7 @@ def process_one_task(
 
             # Execute the task (outside the db context to avoid long locks)
             success, result, actions_taken, execution_trace = execute_task(
-                task, config, user_resources, dry_run=dry_run, on_progress=progress_callback,
+                task, config, user_resources, dry_run=dry_run, event_writer=event_writer,
             )
 
     # Resolve the Talk room for delivering this task's notifications.
@@ -1729,6 +1510,11 @@ def process_one_task(
                 _purge_deferred_files_for_retry(
                     task, get_user_temp_dir(config, task.user_id),
                 )
+                # Same hazard for the event log: the task keeps its id across
+                # retries, so a fresh EventWriter's seq=1 would collide with
+                # this attempt's surviving rows on UNIQUE(task_id, seq). Clear
+                # the slate so the log reflects the final attempt only.
+                db.delete_task_events(conn, task_id)
             else:
                 db.update_task_status(conn, task_id, "failed", error=result)
                 db.log_task(conn, task_id, "error", f"Task failed permanently: {result[:500]}")
@@ -1766,6 +1552,46 @@ def process_one_task(
                             task.scheduled_job_id, fail_count,
                         )
 
+    # Emit terminal task events + notify subscribers (brain path only). On a
+    # retry-eligible failure the task isn't done — emit nothing terminal; the
+    # event rows for this attempt were deleted in the retry branch so the next
+    # attempt's seq counter starts clean (UNIQUE(task_id, seq) collision fix).
+    if event_writer is not None:
+        is_confirmation_request = bool(
+            success
+            and target in ("talk", "both")
+            and talk_token
+            and CONFIRMATION_PATTERN.search(result)
+        )
+        is_cancelled = (not success) and result == "Cancelled by user"
+        is_policy = (not success) and _is_policy_refusal(result)
+        is_oom = (not success) and "killed (likely out of memory)" in result
+        will_retry = (
+            (not success)
+            and not is_cancelled
+            and not is_policy
+            and not is_oom
+            and task.attempt_count < task.max_attempts - 1
+        )
+        if not will_retry:
+            if is_confirmation_request:
+                event_writer.emit("confirmation", {"prompt": result[:8000]})
+            elif success:
+                event_writer.emit("result", {
+                    "text": result[:8000], "truncated": len(result) > 8000,
+                })
+            elif is_cancelled:
+                event_writer.emit("cancelled")
+            else:
+                event_writer.emit("error", {
+                    "message": result[:500], "stop_reason": "error",
+                })
+            event_writer.emit("done", {
+                "stop_reason": "completed" if success else "error",
+                "duration_seconds": round(event_writer.elapsed_seconds(), 1),
+            })
+            event_writer.finish()
+
     # Process deferred operations (subtasks, transaction tracking) on success
     if success and not (
         target in ("talk", "both")
@@ -1795,37 +1621,9 @@ def process_one_task(
             conversation_token=task.conversation_token,
         )
 
-    # Final cleanup edit: update the ack message with a summary of all actions taken
-    if (
-        progress_callback
-        and getattr(progress_callback, "use_edit", False)
-        and getattr(progress_callback, "all_descriptions", None) is not None
-        and progress_callback.ack_msg_id is not None
-    ):
-        cb_style = getattr(progress_callback, "style", "full")
-        if cb_style == "replace":
-            total = len(progress_callback.all_descriptions)
-            elapsed = int(time.time() - progress_callback.start_time)
-            if success:
-                status = "✅ Done"
-            else:
-                status = "❌ Failed"
-            if total == 0:
-                body = f"`#{task.id}` {status} ({elapsed}s)"
-            else:
-                body = f"`#{task.id}` {status} — {total} action{'s' if total != 1 else ''} ({elapsed}s)"
-        else:
-            body = _format_progress_body(
-                progress_callback.all_descriptions,
-                config.scheduler.progress_max_display_items,
-                done=True,
-            )
-        try:
-            asyncio.run(edit_talk_message(
-                config, task, progress_callback.ack_msg_id, body,
-            ))
-        except Exception as e:
-            logger.debug("Final progress edit failed for task %d: %s", task_id, e)
+    # The ack message is left as-is — it shows the last tool call as a compact
+    # execution summary. Error / cancelled status edits are handled live by the
+    # Talk subscriber's terminal-event handling.
 
     # Finalize log channel message with completion status
     if log_channel and log_channel_prefix:
@@ -1850,63 +1648,11 @@ def process_one_task(
             model=resolved_model, effort=resolved_effort,
         )
 
-    # Deduplicate: strip text already sent as progress from the final result.
-    # Only applies in legacy mode (progress_text_max_chars == 0, unlimited),
-    # since truncated progress texts would leave dangling partial sentences
-    # if stripped as a prefix. In edit mode, no deduplication is needed since
-    # progress edits a single ack message and the result is a separate post.
-    max_chars = config.scheduler.progress_text_max_chars
-    use_edit = progress_callback and getattr(progress_callback, "use_edit", False)
-    if post_talk_message and max_chars == 0 and not use_edit and progress_callback and hasattr(progress_callback, "sent_texts"):
-        # Normalize newlines to spaces for comparison — progress callback
-        # collapses newlines (line 341) but the final result has originals.
-        result_stripped = post_talk_message.replace("\n", " ").strip()
-        for sent in progress_callback.sent_texts:
-            sent_stripped = sent.strip()
-            if sent_stripped == result_stripped:
-                logger.debug("Final result already sent as progress for task %d, skipping", task_id)
-                post_talk_message = None
-                break
-            if result_stripped.startswith(sent_stripped):
-                remainder = result_stripped[len(sent_stripped):].strip()
-                if remainder:
-                    logger.debug("Stripping progress prefix from result for task %d (%d chars)", task_id, len(sent_stripped))
-                    post_talk_message = remainder
-                break
-
-    # Deliver results outside DB context to avoid lock conflicts
+    # Deliver results outside DB context to avoid lock conflicts. The final
+    # result is always a separate Talk message (the ack carries progress); the
+    # Talk subscriber never posts the result, so no dedup is needed.
     response_msg_id = None
-    text_mid = (
-        progress_callback
-        and getattr(progress_callback, "text_msg_id", None)
-        and progress_callback.text_msg_id[0]
-    )
-    if post_talk_message and text_mid and not is_failure_notify:
-        # Edit the live text message with the final result instead of posting new.
-        # If the result fits in one message (<=4000 chars), edit in place.
-        # If longer, edit the first part and post the rest as new messages.
-        from .talk import split_message
-        parts = split_message(post_talk_message)
-        try:
-            asyncio.run(edit_talk_message(config, task, text_mid, parts[0]))
-            response_msg_id = text_mid
-        except Exception as e:
-            logger.debug("Failed to edit text message with result: %s", e)
-            # Fall back to posting as new message
-            response_msg_id = asyncio.run(post_result_to_talk(
-                config, task, post_talk_message, use_reply_threading=True,
-                reference_id=f"istota:task:{task.id}:result",
-                target_token=talk_token,
-            ))
-            parts = []  # skip overflow posting
-        # Post any overflow parts as new messages
-        for part in parts[1:]:
-            asyncio.run(post_result_to_talk(
-                config, task, part,
-                reference_id=f"istota:task:{task.id}:result",
-                target_token=talk_token,
-            ))
-    elif post_talk_message:
+    if post_talk_message:
         response_msg_id = asyncio.run(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
             reference_id=f"istota:task:{task.id}:result",
@@ -1921,14 +1667,10 @@ def process_one_task(
             logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
 
     # Cache the result so it's immediately available for context building.
-    # Two cases: (1) result was posted to Talk → cache with its real msg ID,
-    # (2) result was deduped (already sent as progress) → use the last progress
-    # message's Talk ID to cache a :result entry.  This avoids a race where the
-    # poller hasn't stored the progress message yet when a re-tag UPDATE runs.
-    # The upsert preserves :result tags, so the poller won't overwrite them.
+    # The result is always posted as its own message, so its real Talk ID is
+    # the cache key. The upsert preserves :result tags so the poller won't
+    # overwrite them.
     cache_msg_id = response_msg_id
-    if not cache_msg_id and progress_callback and hasattr(progress_callback, "last_progress_msg_id"):
-        cache_msg_id = progress_callback.last_progress_msg_id[0]
 
     if success and talk_token and not is_failure_notify and cache_msg_id:
         try:

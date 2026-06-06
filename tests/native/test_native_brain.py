@@ -266,16 +266,19 @@ class TestProgressStreaming:
     def test_tool_and_text_progress_reach_sink(self, tmp_path):
         provider = MockProvider(
             [
+                # Turn 1: intermediate text + a tool call.
                 AssistantMessage(
                     content=[
+                        TextContent(text="Working on it."),
                         ToolCallContent(
                             id="c1",
                             name="Write",
                             arguments={"file_path": "out.txt", "content": "hi"},
-                        )
+                        ),
                     ],
                     stop_reason="tool_use",
                 ),
+                # Turn 2: final answer — its text becomes result_text.
                 AssistantMessage(
                     content=[TextContent(text="Wrote the file.")],
                     stop_reason="end_turn",
@@ -288,14 +291,38 @@ class TestProgressStreaming:
         result = _brain(provider).execute(req)
 
         assert result.success is True
+        assert result.result_text == "Wrote the file."
         # Each received event must also be fully processed by the callback —
         # i.e. its internal asyncio.run() completed, not swallowed as a
         # RuntimeError ("asyncio.run() cannot be called from a running loop").
         received = [name for kind, name in log if kind == "received"]
         edited = [name for kind, name in log if kind == "edited"]
         assert "ToolUseEvent" in received
+        assert "ToolEndEvent" in received  # NativeBrain emits tool completion
+        # The intermediate "Working on it." reaches the sink as a TextEvent…
         assert "TextEvent" in received
         assert edited == received  # every callback ran to completion
+
+    def test_final_turn_text_is_suppressed(self, tmp_path):
+        # A single-turn task's answer must NOT be emitted as a TextEvent
+        # (progress) — it equals result_text and would otherwise double-render.
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="The answer is 42.")],
+                    stop_reason="end_turn",
+                ),
+            ]
+        )
+        log: list[tuple[str, str]] = []
+        req = _req("question", tmp_path)
+        req.on_progress = self._scheduler_like_callback(log)
+        result = _brain(provider).execute(req)
+
+        assert result.success is True
+        assert result.result_text == "The answer is 42."
+        received = [name for kind, name in log if kind == "received"]
+        assert "TextEvent" not in received  # suppressed: it's the result
 
     def test_progress_callback_exception_does_not_crash_run(self, tmp_path):
         provider = MockProvider(

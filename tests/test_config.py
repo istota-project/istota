@@ -214,7 +214,7 @@ class TestConfigLoading:
             'email_poll_interval = 120\n'
             'talk_poll_interval = 5\n'
             'progress_updates = false\n'
-            'progress_min_interval = 15\n'
+            'event_log_enabled = false\n'
             'task_timeout_minutes = 60\n'
             'confirmation_timeout_minutes = 60\n'
             'task_retention_days = 14\n'
@@ -225,7 +225,7 @@ class TestConfigLoading:
         assert cfg.scheduler.email_poll_interval == 120
         assert cfg.scheduler.talk_poll_interval == 5
         assert cfg.scheduler.progress_updates is False
-        assert cfg.scheduler.progress_min_interval == 15
+        assert cfg.scheduler.event_log_enabled is False
         assert cfg.scheduler.task_timeout_minutes == 60
         assert cfg.scheduler.confirmation_timeout_minutes == 60
         assert cfg.scheduler.task_retention_days == 14

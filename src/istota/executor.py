@@ -32,7 +32,16 @@ from .storage import (
     read_dated_memories,
     read_user_memory_v2,
 )
-from .brain import StreamEvent, TextEvent, ToolUseEvent, make_brain
+from .brain import (
+    ContextManagementEvent,
+    StreamEvent,
+    TextEvent,
+    ToolEndEvent,
+    ToolProgressEvent,
+    ToolUseEvent,
+    make_brain,
+)
+from .events import EventWriter
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 
 logger = logging.getLogger("istota.executor")
@@ -1910,16 +1919,18 @@ def execute_task(
     dry_run: bool = False,
     use_context: bool = True,
     conn: "db.sqlite3.Connection | None" = None,
-    on_progress: Callable[[str], None] | None = None,
+    event_writer: EventWriter | None = None,
 ) -> tuple[bool, str, str | None, str | None]:
     """
-    Execute a task using Claude Code.
+    Execute a task using the configured brain.
 
     Returns (success, result_text, actions_taken_json, execution_trace_json).
 
     Args:
-        on_progress: Optional callback for progress updates. Called with
-            human-readable descriptions of tool uses and intermediate text.
+        event_writer: Optional task-event sink. When provided, the executor
+            adapts the brain's StreamEvent stream into TaskEvents and persists
+            them; consumers (Talk, log channel, push, SSE, admin) read those.
+            None for dry runs and CLI paths with no observability surface.
 
     Returns (success, result_or_error).
     """
@@ -2336,7 +2347,9 @@ def execute_task(
         result_file.unlink()
 
     try:
-        use_streaming = on_progress is not None
+        if event_writer is not None:
+            event_writer.emit("task_started")
+        use_streaming = event_writer is not None
         allowed = build_allowed_tools(is_admin, selected_skills)
 
         env = build_clean_env(config)
@@ -2501,25 +2514,45 @@ def execute_task(
                 selected_skills=frozenset(selected_skills),
             )
 
-        # Adapt the brain's StreamEvent stream to the executor's str-based
-        # progress callback (and to scheduler config for which event types
-        # to surface).
+        # Adapt the brain's (widened) StreamEvent stream to TaskEvents. Called
+        # by the brain in place of the old string callback. For loop-based
+        # brains (NativeBrain) this fires on a worker thread, not the brain's
+        # event loop (Layer 3 invariant) — the body stays plain-synchronous
+        # either way. progress_show_tool_use / progress_show_text gate whether
+        # tool_* and progress_text events are emitted at all.
         show_tool_use = config.scheduler.progress_show_tool_use
         show_text = config.scheduler.progress_show_text
 
         def _on_event(event: StreamEvent) -> None:
-            if on_progress is None:
+            if event_writer is None:
                 return
             if isinstance(event, ToolUseEvent) and show_tool_use:
-                try:
-                    on_progress(event.description)
-                except Exception:
-                    pass
+                event_writer.emit("tool_start", {
+                    "tool_name": event.tool_name,
+                    "description": event.description,
+                    "tool_call_id": event.tool_call_id,  # "" under ClaudeCodeBrain
+                })
+            elif isinstance(event, ToolEndEvent) and show_tool_use:
+                event_writer.emit("tool_end", {
+                    "tool_name": event.tool_name,
+                    "tool_call_id": event.tool_call_id,
+                    "success": event.success,
+                    "duration_ms": event.duration_ms,
+                })
+            elif isinstance(event, ToolProgressEvent):
+                # Web SSE only; Talk/log subscribers ignore this kind.
+                event_writer.emit("tool_progress", {
+                    "tool_name": event.tool_name,
+                    "tool_call_id": event.tool_call_id,
+                    "text": event.text,
+                })
             elif isinstance(event, TextEvent) and show_text:
-                try:
-                    on_progress(event.text, italicize=False)
-                except Exception:
-                    pass
+                # NativeBrain already suppresses the final turn's text (it
+                # becomes the result); ClaudeCodeBrain's ResultEvent is a
+                # distinct frame, so neither double-renders.
+                event_writer.emit("progress_text", {"text": event.text})
+            elif isinstance(event, ContextManagementEvent):
+                event_writer.emit("context_management")
 
         def _on_pid(pid: int) -> None:
             try:
