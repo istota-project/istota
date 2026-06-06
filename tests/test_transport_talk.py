@@ -182,7 +182,7 @@ class TestPoll:
             users={"alice": UserConfig()},
         )
         t = TalkTransport(config)
-        with patch("istota.transport.talk.inbound.TalkClient") as MockClient:
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.list_conversations = AsyncMock(return_value=[{"token": "room1", "type": 1}])
             inst.poll_messages = AsyncMock(return_value=[

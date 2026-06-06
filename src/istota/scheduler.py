@@ -2754,7 +2754,13 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     if config.talk.enabled:
         try:
             from .transport.talk import poll_talk_conversations
-            talk_tasks = asyncio.run(poll_talk_conversations(config))
+            # Single-pass mode still lazily uses the persistent loop here:
+            # poll_talk_conversations pulls the shared get_talk_client singleton
+            # (whose httpx pool is bound to the persistent loop), and the shared
+            # process_one_task delivery path already submits via run_coro, so all
+            # Talk I/O must stay on one loop. The persistent runtime is a single
+            # daemon thread that exits with the one-shot process.
+            talk_tasks = run_coro(poll_talk_conversations(config))
             if talk_tasks:
                 logger.info("Queued %d Talk task(s)", len(talk_tasks))
         except Exception as e:
@@ -2846,7 +2852,12 @@ def _talk_poll_loop(config: Config) -> None:
 
     while not _shutdown_requested:
         try:
-            talk_tasks = asyncio.run(poll_talk_conversations(config))
+            # Runs on the shared persistent loop. The long-poll awaits yield the
+            # loop, so delivery coroutines (acks, results) submitted via run_coro
+            # interleave normally; the poll's own FIRST_COMPLETED + cancel only
+            # touches the tasks it created. submit timeout=None matches the old
+            # asyncio.run-forever semantics — httpx-level timeouts bound each poll.
+            talk_tasks = run_coro(poll_talk_conversations(config))
             if talk_tasks:
                 logger.info("Queued %d Talk task(s)", len(talk_tasks))
         except Exception as e:

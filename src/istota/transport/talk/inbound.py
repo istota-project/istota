@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from ... import db
+from ...async_runtime import get_talk_client
 from ...config import Config
 from ...talk import TalkClient, clean_message_content
 from .._types import IncomingMessage
@@ -204,7 +205,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
     global _conversation_cache
 
-    client = TalkClient(config)
+    client = get_talk_client(config)
     created: list[int] = []
 
     # Get all conversations, using cache to avoid blocking every cycle
@@ -573,7 +574,7 @@ async def handle_confirmation_reply(
                     f"Trusted sender: {email_record.sender_email}",
                 )
                 try:
-                    client = TalkClient(config)
+                    client = get_talk_client(config)
                     await client.send_message(
                         conversation_token,
                         f"Trusted {email_record.sender_email} — future emails will be processed automatically.",
@@ -587,7 +588,7 @@ async def handle_confirmation_reply(
 
         # Notify user
         try:
-            client = TalkClient(config)
+            client = get_talk_client(config)
             await client.send_message(conversation_token, "Task cancelled.")
         except Exception:
             pass
