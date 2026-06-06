@@ -25,15 +25,25 @@ transport/
 ├── talk/         # Nextcloud Talk surface
 │   ├── __init__.py  # TalkTransport (seam: deliver/edit/resolve + poll entry)
 │   └── inbound.py   # poll_talk_conversations + filtering/dispatch + module caches
-└── email.py      # EmailTransport (inbound body still in email_poller.py — see below)
+└── email/        # IMAP/SMTP surface
+    ├── __init__.py  # EmailTransport (seam: poll/deliver/resolve)
+    ├── inbound.py   # poll_emails + routing precedence + confirmation gate
+    └── outbound.py  # deliver_email_result + structured-output parse + sent-email record
 ```
 
-Talk is a subpackage because both directions live together: `TalkTransport`
-(the seam) in `__init__.py`, the inbound poll body in `inbound.py`. The
-low-level HTTP/OCS client `TalkClient` stays in `istota.talk` (shared). Email's
-inbound body stays in `email_poller.py` because that module also carries
-non-transport plumbing (`get_email_config`, `is_synthetic_email_thread_token`,
-`cleanup_old_emails`) used across the tree; `EmailTransport` delegates to it.
+Both surfaces are subpackages because both directions live together. For Talk:
+`TalkTransport` (the seam) in `__init__.py`, the inbound poll body in
+`inbound.py`. For email: `EmailTransport` in `__init__.py`, the inbound poll
+body in `inbound.py`, the send body in `outbound.py`. The low-level clients stay
+shared and outside the seam — Talk's HTTP/OCS `TalkClient` in `istota.talk`,
+email's IMAP/SMTP client in `istota.skills.email`.
+
+Email's genuinely-shared, non-transport plumbing (`get_email_config`,
+`is_synthetic_email_thread_token`, `normalize_subject`, `compute_thread_id`,
+`cleanup_old_emails`) lives in `istota.email_support` — used by both transport
+halves and by non-transport callers (the briefing skill, the notification
+dispatcher, the TASKS.md poller, the scheduler's delivery-routing / cleanup
+paths). It is the only email code outside `transport/email/`.
 
 ## Core types (`_types.py`)
 
@@ -95,16 +105,23 @@ messages are re-polled rather than silently lost.
   empty `IncomingMessage` list. (An earlier design split this into a
   `collect → ingest` step across a transaction boundary; that introduced exactly
   this message-loss window and was reverted.)
-- **Email**: `poll_emails` needs the freshly-created task id mid-loop for the
-  untrusted-sender confirmation gate and the `processed_emails` linkage, so it
-  self-creates too. `EmailTransport.poll` delegates to `poll_emails` and returns
-  an empty list. The scheduler's email tick calls `poll_emails` directly.
+- **Email**: `transport.email.inbound.poll_emails(config) -> list[int]` owns
+  every email-specific step (IMAP listing, the plus-address → sender → thread
+  routing precedence, attachment download + Nextcloud upload, prompt assembly,
+  the untrusted-sender confirmation gate) **and**, like Talk, calls
+  `ingest_message` in the same `db.get_db` transaction as the confirmation gate /
+  `mark_email_processed`. It self-creates because the gate
+  (`set_task_confirmation` + the gate message) and the `processed_emails` linkage
+  both need the freshly created task id mid-loop. `EmailTransport.poll` delegates
+  to it and returns an empty list. The scheduler's email tick imports
+  `poll_emails` from `transport.email` and calls it directly.
 
 `ingest_message` is the only shared inbound code; it maps an `IncomingMessage`
 straight onto `db.create_task` (the duplicate-Talk-message guard returns the
-existing id rather than inserting twice). It is called *inside* the Talk poll
-transaction, and is the entry point a future driver-ingested surface (web chat)
-would use across its own boundary.
+existing id rather than inserting twice). **Both** surfaces route their creates
+through it — Talk inside its poll transaction, email inside its poll transaction
+— and it is the entry point a future driver-ingested surface (web chat) would
+use across its own boundary.
 
 ## Outbound
 
@@ -115,6 +132,15 @@ would use across its own boundary.
   and `edit_talk_message` are thin shims over these (kept so the event consumers
   and `process_one_task` keep their signatures). `notifications._send_talk` also
   delegates to `TalkTransport.deliver`.
+- **`EmailTransport.deliver`** owns the send body via
+  `transport.email.outbound.deliver_email_result` — structured-output parsing
+  (deferred file preferred over inline JSON), thread-reply vs fresh-send routing,
+  and `record_sent_email` for emissary thread matching. `scheduler.post_result_to_email`
+  is a thin shim, mirroring `post_result_to_talk`. The shim calls the
+  bool-returning `deliver_email_result` directly (not `EmailTransport.deliver`)
+  because its scheduler callers check the success flag, which the
+  `Transport.deliver` protocol (`int | None`) discards for a surface with no
+  message-id concept.
 - **`process_one_task`** gates the progress-ack subscriber on
   `transport.capabilities.supports_progress_ack` (resolved via the registry),
   keeping the `source_type == "talk"` guard so only interactive Talk tasks get
@@ -134,9 +160,9 @@ that are not part of the surface-delivery seam: `scheduler._resolve_channel_name
 replies. The Talk inbound caches (conversation/participant/DM) remain
 module-global in `transport/talk/inbound.py` (they back its `get_dm_token`,
 which `notifications.resolve_conversation_token` calls) rather than instance
-state on `TalkTransport`. Email's inbound body stays in `email_poller.py` (which
-also owns non-transport email plumbing). These are intentional: moving them buys
-little and would churn tightly-coupled tests.
+state on `TalkTransport`. Email's shared, non-transport helpers live in
+`istota.email_support` (see the layout section). These are intentional: moving
+them buys little and would churn tightly-coupled tests.
 
 ## How to add a transport (e.g. Matrix, web chat)
 

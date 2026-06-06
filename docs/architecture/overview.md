@@ -33,8 +33,8 @@ Task lifecycle: `pending` -> `locked` -> `running` -> `completed` | `failed` | `
 
 | Module | Purpose |
 |---|---|
-| `talk_poller.py` | Long-polls Talk conversations, creates tasks, intercepts `!commands`, handles confirmations |
-| `email_poller.py` | Polls INBOX via IMAP, creates tasks from known senders, downloads attachments |
+| `transport/talk/inbound.py` | Long-polls Talk conversations, creates tasks, intercepts `!commands`, handles confirmations (the TalkTransport inbound body) |
+| `transport/email/inbound.py` | Polls INBOX via IMAP, creates tasks from known senders, downloads attachments (the EmailTransport inbound body) |
 | `tasks_file_poller.py` | Watches TASKS.md files for changes, identifies tasks by SHA-256 content hash |
 | `cli.py` | Direct task execution (`istota task "prompt" -u USER -x`), supports `--dry-run` |
 | `cron_loader.py` | Reads CRON.md (markdown with embedded TOML), syncs jobs to `scheduled_jobs` DB table |

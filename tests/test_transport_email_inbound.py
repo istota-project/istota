@@ -1,4 +1,7 @@
-"""Tests for email polling and task creation."""
+"""Tests for the EmailTransport inbound body (``transport/email/inbound.py``:
+``poll_emails`` + routing precedence + confirmation gate) and the shared email
+helpers it depends on (``istota.email_support``: subject normalization, thread
+id, config adapter, IMAP cleanup)."""
 
 import json
 import sqlite3
@@ -9,12 +12,14 @@ import pytest
 
 from istota import db
 from istota.config import Config, EmailConfig as AppEmailConfig, UserConfig
-from istota.email_poller import (
-    _extract_user_from_recipient,
+from istota.email_support import (
     cleanup_old_emails,
     compute_thread_id,
     get_email_config,
     normalize_subject,
+)
+from istota.transport.email.inbound import (
+    _extract_user_from_recipient,
     poll_emails,
 )
 from istota.skills.email import Email, EmailConfig, EmailEnvelope
@@ -148,11 +153,11 @@ class TestPollEmails:
         email = _email()
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
-            patch("istota.email_poller.ensure_user_directories_v2"),
-            patch("istota.email_poller.upload_file_to_inbox_v2"),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.ensure_user_directories_v2"),
+            patch("istota.transport.email.inbound.upload_file_to_inbox_v2"),
         ):
             task_ids = poll_emails(config)
 
@@ -177,7 +182,7 @@ class TestPollEmails:
         with db.get_db(config.db_path) as conn:
             db.mark_email_processed(conn, email_id="1", sender_email="alice@test.com", subject="Hello")
 
-        with patch("istota.email_poller.list_emails", return_value=[envelope]):
+        with patch("istota.transport.email.inbound.list_emails", return_value=[envelope]):
             task_ids = poll_emails(config)
 
         assert task_ids == []
@@ -189,7 +194,7 @@ class TestPollEmails:
 
         envelope = _envelope(sender="bot@test.com")
 
-        with patch("istota.email_poller.list_emails", return_value=[envelope]):
+        with patch("istota.transport.email.inbound.list_emails", return_value=[envelope]):
             task_ids = poll_emails(config)
 
         assert task_ids == []
@@ -207,8 +212,8 @@ class TestPollEmails:
         email = _email(sender="stranger@unknown.com")
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
         ):
             task_ids = poll_emails(config)
 
@@ -229,7 +234,7 @@ class TestPollEmails:
         config = make_config()
         config.email = _email_config()
 
-        with patch("istota.email_poller.list_emails", side_effect=Exception("IMAP connection failed")):
+        with patch("istota.transport.email.inbound.list_emails", side_effect=Exception("IMAP connection failed")):
             task_ids = poll_emails(config)
 
         assert task_ids == []
@@ -266,8 +271,8 @@ class TestCleanupOldEmails:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[old_envelope]),
-            patch("istota.email_poller.delete_email", return_value=True) as mock_delete,
+            patch("istota.email_support.list_emails", return_value=[old_envelope]),
+            patch("istota.email_support.delete_email", return_value=True) as mock_delete,
         ):
             result = cleanup_old_emails(config, days=7)
 
@@ -278,7 +283,7 @@ class TestCleanupOldEmails:
         config = make_config()
         config.email = _email_config()
 
-        with patch("istota.email_poller.list_emails", side_effect=Exception("IMAP error")):
+        with patch("istota.email_support.list_emails", side_effect=Exception("IMAP error")):
             result = cleanup_old_emails(config, days=7)
 
         assert result == 0
@@ -440,7 +445,7 @@ class TestDeferredSentEmail:
 
 class TestMatchThread:
     def test_match_by_references(self, db_path):
-        from istota.email_poller import _match_thread
+        from istota.transport.email.inbound import _match_thread
 
         with db.get_db(db_path) as conn:
             db.record_sent_email(
@@ -465,7 +470,7 @@ class TestMatchThread:
             assert match.conversation_token == "room1"
 
     def test_no_match_without_references(self, db_path):
-        from istota.email_poller import _match_thread
+        from istota.transport.email.inbound import _match_thread
 
         with db.get_db(db_path) as conn:
             email = _email(sender="unknown@ext.com", subject="Random")
@@ -474,7 +479,7 @@ class TestMatchThread:
             assert _match_thread(conn, email) is None
 
     def test_no_match_with_unknown_references(self, db_path):
-        from istota.email_poller import _match_thread
+        from istota.transport.email.inbound import _match_thread
 
         with db.get_db(db_path) as conn:
             email = _email(sender="bob@ext.com", subject="Re: Something")
@@ -484,7 +489,7 @@ class TestMatchThread:
 
     def test_match_multiple_references(self, db_path):
         """References header with multiple IDs — should match our sent one."""
-        from istota.email_poller import _match_thread
+        from istota.transport.email.inbound import _match_thread
 
         with db.get_db(db_path) as conn:
             db.record_sent_email(
@@ -539,9 +544,9 @@ class TestPollEmailsThreadMatching:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -573,9 +578,9 @@ class TestPollEmailsThreadMatching:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -595,9 +600,9 @@ class TestPollEmailsThreadMatching:
         email = _email(sender="alice@test.com")
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -636,9 +641,9 @@ class TestPollEmailsThreadMatching:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -678,9 +683,9 @@ class TestPollEmailsThreadMatching:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -706,9 +711,9 @@ class TestPollEmailsThreadMatching:
         email = _email(sender="alice@test.com")
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -805,9 +810,9 @@ class TestPollEmailsPlusAddressRouting:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -838,9 +843,9 @@ class TestPollEmailsPlusAddressRouting:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -865,9 +870,9 @@ class TestPollEmailsPlusAddressRouting:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -892,9 +897,9 @@ class TestPollEmailsPlusAddressRouting:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             poll_emails(config)
 
@@ -915,9 +920,9 @@ class TestPollEmailsPlusAddressRouting:
         email = _email(id="14", sender="alice@test.com")
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             poll_emails(config)
 
@@ -954,9 +959,9 @@ class TestPollEmailsPlusAddressRouting:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             poll_emails(config)
 
@@ -983,9 +988,9 @@ class TestPollEmailsPlusAddressRouting:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             poll_emails(config)
 
@@ -1018,9 +1023,9 @@ class TestEmailConfirmationGate:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
             patch("istota.notifications.send_talk_confirmation", return_value=77) as mock_send,
         ):
             task_ids = poll_emails(config)
@@ -1050,9 +1055,9 @@ class TestEmailConfirmationGate:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -1078,9 +1083,9 @@ class TestEmailConfirmationGate:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -1112,9 +1117,9 @@ class TestEmailConfirmationGate:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -1136,9 +1141,9 @@ class TestEmailConfirmationGate:
         email = _email(id="23", sender="alice@test.com")
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -1160,9 +1165,9 @@ class TestEmailConfirmationGate:
         email = _email(id="23b", sender="alice@test.com")
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -1184,9 +1189,9 @@ class TestEmailConfirmationGate:
         email = _email(id="23c", sender="alice@test.com")
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -1213,9 +1218,9 @@ class TestEmailConfirmationGate:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
             patch("istota.notifications.send_talk_confirmation", return_value=None),
         ):
             task_ids = poll_emails(config)
@@ -1240,9 +1245,9 @@ class TestEmailPromptBoundaries:
         email = _email(id="b1", sender="alice@test.com", body="Hello world")
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -1277,9 +1282,9 @@ class TestEmailPromptBoundaries:
         )
 
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(config)
 
@@ -1316,9 +1321,9 @@ class TestEmissaryReplyDeliveryTokenResolution:
 
     def _poll(self, config, envelope, email):
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             return poll_emails(config)
 
@@ -1363,7 +1368,7 @@ class TestEmissaryReplyDeliveryTokenResolution:
         assert task.user_id == "stefan"
         assert task.talk_delivery_token == "original_talk_room"
         # conversation_token also preserved as the original Talk room
-        # (line 294 in email_poller.py: inherits from sent_email)
+        # (transport/email/inbound.py: inherits from sent_email)
         assert task.conversation_token == "original_talk_room"
 
     def test_email_originator_null_delivery_token_synthetic_falls_back_to_alerts(
@@ -1572,7 +1577,7 @@ class TestEmissaryRecordingShape:
 
     def test_record_sent_email_for_talk_source_task(self, db_path, tmp_path):
         """Talk-source task -> sent_emails.conversation_token = real Talk room."""
-        from istota.scheduler import _record_sent_email
+        from istota.transport.email.outbound import _record_sent_email
         config = self._config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
@@ -1597,13 +1602,13 @@ class TestEmissaryRecordingShape:
         assert row is not None
         assert row.conversation_token == "real_talk_room"
         # The known-NULL talk_delivery_token is the data shape that the
-        # email_poller fix has to handle correctly on the read side.
+        # the inbound fix has to handle correctly on the read side.
         assert row.talk_delivery_token is None
         assert row.user_id == "alice"
 
     def test_record_sent_email_for_email_source_task(self, db_path, tmp_path):
         """Email-source task -> sent_emails.talk_delivery_token populated."""
-        from istota.scheduler import _record_sent_email
+        from istota.transport.email.outbound import _record_sent_email
         config = self._config(db_path, tmp_path)
         synthetic = "abcdef0123456789"
 
@@ -1632,7 +1637,7 @@ class TestEmissaryRecordingShape:
         self, db_path, tmp_path,
     ):
         """Subtask sending email -> sent_emails carries parent's tokens."""
-        from istota.scheduler import _record_sent_email
+        from istota.transport.email.outbound import _record_sent_email
         config = self._config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
@@ -1715,7 +1720,7 @@ class TestEmissaryLifecycle:
         self, db_path, tmp_path,
     ):
         """Full loop: talk task sends, external replies, routes to original room."""
-        from istota.scheduler import _record_sent_email
+        from istota.transport.email.outbound import _record_sent_email
         sched_cfg = self._scheduler_config(db_path, tmp_path, alerts="alerts_room")
 
         with db.get_db(db_path) as conn:
@@ -1734,9 +1739,9 @@ class TestEmissaryLifecycle:
         poll_cfg = self._poller_config(db_path, tmp_path, alerts="alerts_room")
         envelope, email = self._inbound_for("m_talk@bot.com")
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(poll_cfg)
 
@@ -1752,7 +1757,7 @@ class TestEmissaryLifecycle:
         self, db_path, tmp_path,
     ):
         """Email-source originator: reply routes via the recorded delivery token."""
-        from istota.scheduler import _record_sent_email
+        from istota.transport.email.outbound import _record_sent_email
         sched_cfg = self._scheduler_config(db_path, tmp_path, alerts="alerts_room")
         synthetic = "0123456789abcdef"
 
@@ -1772,9 +1777,9 @@ class TestEmissaryLifecycle:
         poll_cfg = self._poller_config(db_path, tmp_path, alerts="alerts_room")
         envelope, email = self._inbound_for("m_email@bot.com")
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(poll_cfg)
 
@@ -1789,7 +1794,7 @@ class TestEmissaryLifecycle:
         self, db_path, tmp_path,
     ):
         """Subtask of a talk task sends an email — reply must reach parent's room."""
-        from istota.scheduler import _record_sent_email
+        from istota.transport.email.outbound import _record_sent_email
         sched_cfg = self._scheduler_config(db_path, tmp_path, alerts="alerts_room")
 
         with db.get_db(db_path) as conn:
@@ -1813,9 +1818,9 @@ class TestEmissaryLifecycle:
         poll_cfg = self._poller_config(db_path, tmp_path)
         envelope, email = self._inbound_for("m_sub@bot.com")
         with (
-            patch("istota.email_poller.list_emails", return_value=[envelope]),
-            patch("istota.email_poller.read_email", return_value=email),
-            patch("istota.email_poller.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
         ):
             task_ids = poll_emails(poll_cfg)
 

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Internal: email is now a first-class transport (`transport/email/`) mirroring Talk, with shared non-transport helpers in `email_support`. Behavior-preserving refactor; adds end-to-end tests for the email send path.
+
 ## [0.16.0] - 2026-06-06
 
 ### Added
