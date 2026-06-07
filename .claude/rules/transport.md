@@ -112,11 +112,14 @@ unconditionally (per-user / per-task gating happens in their `resolve_target` /
 `deliver`, not at construction).
 
 `_surface_for_source_type` (the *inbound* source_type → primary surface map):
-`email` → `"email"`; `repl` → `"repl"`; everything else (talk, briefing,
+`email` → `"email"`; `repl` → `"repl"`; `web` → `"web"` (a stream surface with
+no push transport, so `for_task` resolves it to `None` — the `task_events` log
+is the delivery, exactly as for REPL); everything else (talk, briefing,
 scheduled, subtask, heartbeat, cli, istota_file, unknown) → `"talk"`, the
 existing default. `registry.for_task(task)` uses it to resolve the primary
-delivery transport. Outbound fan-out (a task delivering to several surfaces) is
-the delivery planner's job, not this map — see below.
+delivery transport (the one consumer, the progress-ack gate, already no-ops on
+`None`). Outbound fan-out (a task delivering to several surfaces) is the
+delivery planner's job, not this map — see below.
 
 ## Inbound
 

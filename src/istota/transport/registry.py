@@ -21,15 +21,19 @@ if TYPE_CHECKING:
 def _surface_for_source_type(source_type: str) -> str:
     """Map a task's ``source_type`` to the delivery surface name.
 
-    ``email`` → ``"email"``; everything else (talk, briefing, scheduled,
-    subtask, heartbeat, cli, istota_file, unknown) → ``"talk"``, the existing
-    default. ntfy / istota_file remain fan-out side channels handled outside
-    the registry, so they are not surfaces here.
+    ``email`` → ``"email"``; ``repl`` → ``"repl"``; ``web`` → ``"web"`` (a
+    stream surface with no push transport — ``for_task`` resolves it to None,
+    since the task_events log is the delivery); everything else (talk, briefing,
+    scheduled, subtask, heartbeat, cli, istota_file, unknown) → ``"talk"``, the
+    existing default. ntfy / istota_file remain fan-out side channels handled
+    outside the registry, so they are not surfaces here.
     """
     if source_type == "email":
         return "email"
     if source_type == "repl":
         return "repl"
+    if source_type == "web":
+        return "web"
     return "talk"
 
 
