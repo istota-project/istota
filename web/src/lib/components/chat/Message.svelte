@@ -120,11 +120,10 @@
 	   then the message body. Consecutive messages from the same author collapse
 	   into one visual group (the `.continuation` rows hide the header). */
 	.msg {
-		position: relative;
 		display: flex;
 		gap: 0.6rem;
 		/* Extra bottom padding so the hover highlight isn't flush with the last
-		   line of text (and leaves room for the hover meta footer). */
+		   line of text. */
 		padding: 0.1rem 0.75rem 0.45rem;
 		align-items: flex-start;
 	}
@@ -133,20 +132,18 @@
 	.msg:hover .hover-time { opacity: 1; }
 	.msg:hover .meta-footer { opacity: 1; }
 
-	/* Subtle per-message metadata pinned bottom-right, revealed on hover. The
-	   background matches the hover highlight so it cleanly masks the end of a
-	   long last line rather than overlapping it. */
+	/* Subtle per-message metadata at the top-right, revealed on hover. It's a
+	   sibling of .content (not inside it), so it occupies the empty space beside
+	   the author/time header and never overlaps the message body. */
 	.meta-footer {
-		position: absolute;
-		right: 0.75rem;
-		bottom: 0.1rem;
+		flex: 0 0 auto;
+		margin-top: 0.15rem;
 		padding-left: 0.6rem;
-		background: var(--surface-card);
 		font-size: var(--text-xs);
 		color: var(--text-dim);
 		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
 		opacity: 0;
-		pointer-events: none;
 		transition: opacity var(--transition-fast);
 	}
 
