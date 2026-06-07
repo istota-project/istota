@@ -470,7 +470,9 @@ def cmd_briefing(args):
             sys.exit(1)
 
         output = args.output or "talk"
-        if output in {"talk", "both"} and not args.conversation_token:
+        from .transport import parse_output_target
+        talk_leaf = any(d.surface == "talk" for d in parse_output_target(output))
+        if talk_leaf and not args.conversation_token:
             print(
                 f"Error: --conversation-token is required when --output is {output!r}",
                 file=sys.stderr,
@@ -1275,7 +1277,9 @@ def main():
         help="Talk room token (required when output includes 'talk')",
     )
     briefing_parser.add_argument(
-        "--output", choices=["talk", "email", "both"], default="talk",
+        "--output", default="talk",
+        help="Delivery target: talk / email / ntfy, or a comma list / "
+             "surface:channel descriptor (validated by parse_output_target)",
     )
     briefing_parser.add_argument(
         "--components-json",

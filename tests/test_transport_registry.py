@@ -84,6 +84,32 @@ class TestMakeRegistry:
             assert mock_areq.call_count == 0
 
 
+class TestRoutableNames:
+    def test_excludes_self_routing_surfaces(self):
+        config = Config()
+        config.talk.enabled = True
+        config.email.enabled = True
+        reg = make_registry(config)
+        routable = set(reg.routable_names())
+        # User-routable push surfaces are offered.
+        assert {"talk", "email", "ntfy"} <= routable
+        # Self-routing / inline surfaces are held back from the UI.
+        assert "istota_file" not in routable
+        assert "repl" not in routable
+        # ...but they remain registered (still valid on the wire).
+        assert reg.get("istota_file") is not None
+        assert reg.get("repl") is not None
+
+    def test_disabled_surface_not_routable(self):
+        config = Config()
+        config.talk.enabled = False
+        config.email.enabled = True
+        reg = make_registry(config)
+        routable = set(reg.routable_names())
+        assert "talk" not in routable
+        assert "email" in routable
+
+
 class TestForTask:
     def setup_method(self):
         config = Config()

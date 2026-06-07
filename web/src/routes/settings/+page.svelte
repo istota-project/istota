@@ -65,12 +65,12 @@
 
 	let briefings: UserBriefingRow[] = $state([]);
 	let briefingRooms: BriefingRoomOption[] = $state([]);
-	let briefingOutputs: string[] = $state(['talk', 'email', 'both']);
+	let briefingOutputs: string[] = $state(['talk', 'email', 'ntfy']);
 	let newBriefing = $state({
 		name: '',
 		cron: '0 7 * * *',
 		conversation_token: '',
-		output: 'talk' as 'talk' | 'email' | 'both',
+		output: 'talk' as string,
 		componentsJson: '{"calendar": true, "todos": true, "email": true}',
 		enabled: true,
 	});
@@ -106,7 +106,7 @@
 			briefingRooms = briefResp.rooms;
 			briefingOutputs = briefResp.outputs?.length
 				? briefResp.outputs
-				: ['talk', 'email', 'both'];
+				: ['talk', 'email', 'ntfy'];
 			allModules = modResp.modules;
 			error = '';
 		} catch (e) {
@@ -132,7 +132,10 @@
 		profile.disabled_modules = [...next];
 	}
 
-	const BUILTIN_SURFACES = ['talk', 'email', 'ntfy', 'istota_file', 'stream'];
+	// User-routable surfaces only — self-routing (istota_file) and the
+	// events-only stream/repl surfaces are held back from the UI; the server's
+	// delivery_surfaces list is the source of truth, this is the offline fallback.
+	const BUILTIN_SURFACES = ['talk', 'email', 'ntfy'];
 
 	function deliverySurfaces(): string[] {
 		const s = profile?.delivery_surfaces;
@@ -302,8 +305,7 @@
 			briefingError = 'Name and cron are required.';
 			return;
 		}
-		if ((newBriefing.output === 'talk' || newBriefing.output === 'both') &&
-			!newBriefing.conversation_token.trim()) {
+		if (newBriefing.output === 'talk' && !newBriefing.conversation_token.trim()) {
 			briefingError = `Conversation token is required when output is "${newBriefing.output}".`;
 			return;
 		}

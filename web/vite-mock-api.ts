@@ -796,7 +796,7 @@ const handlers: MockHandler[] = [
 			default_destination: 'talk',
 			routing: {},
 			purposes: ['reply', 'alert', 'log', 'briefing', 'notification'],
-			delivery_surfaces: ['email', 'istota_file', 'ntfy', 'stream', 'talk'],
+			delivery_surfaces: ['email', 'ntfy', 'talk'],
 		};
 		let nextResourceId = 100;
 		const mockDbResources: {
@@ -875,7 +875,7 @@ const handlers: MockHandler[] = [
 			name: string;
 			cron: string;
 			conversation_token: string;
-			output: 'talk' | 'email' | 'both';
+			output: string;
 			components: Record<string, unknown>;
 			enabled: boolean;
 		}[] = [];
@@ -900,7 +900,7 @@ const handlers: MockHandler[] = [
 						{ token: 'abc123', name: 'Log channel' },
 						{ token: 'def456', name: 'Alerts channel' },
 					],
-					outputs: ['talk', 'email', 'both'],
+					outputs: ['talk', 'email', 'ntfy'],
 				};
 			}
 			if (url === '/istota/api/settings/briefings' && method === 'POST') {
@@ -913,7 +913,7 @@ const handlers: MockHandler[] = [
 					name,
 					cron: String(p.cron ?? ''),
 					conversation_token: String(p.conversation_token ?? ''),
-					output: (p.output as 'talk' | 'email' | 'both') ?? 'talk',
+					output: (p.output as string) ?? 'talk',
 					components:
 						(p.components as Record<string, unknown> | undefined) ?? {},
 					enabled: p.enabled !== false,

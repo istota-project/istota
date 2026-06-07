@@ -69,9 +69,18 @@ paths). It is the only email code outside `transport/email/`.
   `attachments`, `is_group_chat`, `output_target`, `model`/`effort`, `raw`.
 - **`TransportCapabilities`** (frozen) — `supports_edit`, `supports_threading`,
   `supports_progress_ack`, `supports_typing`, `max_message_length`,
-  `surface_class` (`"push"` | `"stream"`). Drives capability-gated wiring in the
-  scheduler instead of `source_type ==` checks; the delivery planner reads
-  `surface_class` to decide push-vs-stream.
+  `surface_class` (`"push"` | `"stream"`), `user_routable` (default `True`).
+  Drives capability-gated wiring in the scheduler instead of `source_type ==`
+  checks; the delivery planner reads `surface_class` to decide push-vs-stream.
+  `user_routable` marks a surface a user can deliberately point traffic at (a
+  briefing output, a default destination, an alert route). The self-routing
+  surfaces are `False` — `istota_file` only ever delivers back to the TASKS.md
+  line a task came from, and `repl`/stream is the inline terminal the daemon
+  never delivers to. `registry.routable_names()` filters on it, and the web UI
+  (`web_app._registered_delivery_surfaces`, the briefing `outputs` list)
+  offers only those; the grammar still validates the self-routing surfaces on
+  the wire (`_validate_descriptor_surfaces`), so programmatic / CLI descriptors
+  keep working — `user_routable` only governs what the UI *offers*.
 - **`DeliveryOptions`** (frozen) — optional per-delivery metadata passed
   alongside `deliver(target, text, *, options=…)`: `title` / `priority` /
   `tags`. `NtfyTransport.deliver` reads them; surfaces that don't use them

@@ -915,8 +915,9 @@
 # Write briefing rows into the briefing_configs DB table via
 # `istota briefing ensure`. The DB is the source of truth — each
 # (user, briefing.name) is upserted independently. Components is a
-# freeform dict so we pass it through as JSON; output (talk|email|both)
-# and conversation_token are extracted as flags.
+# freeform dict so we pass it through as JSON; output (talk|email|ntfy,
+# or a comma list / surface:channel descriptor) and conversation_token
+# are extracted as flags. Legacy "both" still parses as a silent alias.
 - name: Plan briefing ensure invocations
   set_fact:
     _istota_briefing_targets: "{{ _briefing_targets_json | from_json }}"
@@ -948,7 +949,7 @@
     --name "{{ item.name }}"
     --cron "{{ item.cron }}"
     {% if item.conversation_token %}--conversation-token "{{ item.conversation_token }}"{% endif %}
-    --output {{ item.output }}
+    --output "{{ item.output }}"
     {% if item.components %}--components-json '{{ item.components | to_json }}'{% endif %}
     {% if not item.enabled %}--disabled{% endif %}
   args:

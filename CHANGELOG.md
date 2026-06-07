@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The per-user delivery-routing settings are simpler. The Preferences page previously showed a five-row "per purpose" matrix (reply/alert/log/briefing/notification), most of which duplicated dedicated settings or did nothing. It now shows a default delivery destination plus a single optional "Send alerts to" override for heartbeat and security alerts. Finer per-purpose routes are still settable from the CLI, and any existing CLI-set routes are preserved.
+- Briefings can now be sent to ntfy, and the output picker shows the real delivery surfaces (talk / email / ntfy) instead of the old `talk`/`email`/`both` choices. The legacy `both` value still works everywhere it was already saved.
+- Delivery-destination pickers (default destination, alert route, briefing output) no longer list internal surfaces that aren't valid user choices — the TASKS.md write-back and terminal-stream surfaces are hidden from the UI. They still work as automatic/programmatic destinations.
 
 ### Fixed
 - **Native-brain tasks lost their conversation context.** Context triage still shelled out to the `claude` CLI even under the native brain, where there's no login token, so the CLI failed and context silently collapsed to the last few messages. Triage now runs through the task's own brain — native tasks use their own provider, Claude Code tasks keep the CLI. Triage also fails open on any error now, keeping all older messages instead of dropping them.

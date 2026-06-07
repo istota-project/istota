@@ -29,7 +29,7 @@ Your description here...
 name = "morning"
 cron = "0 6 * * *"           # cron expression in user's timezone
 conversation_token = "abc123" # Talk room to post to
-output = "talk"               # "talk", "email", or "both"
+output = "talk"               # talk / email / ntfy (or a comma list, e.g. "talk,email")
 
 [briefings.components]
 calendar = true

@@ -541,7 +541,7 @@ name = "Reminders"
 name = "morning"
 cron = "0 6 * * *"  # 6am in user's timezone
 conversation_token = "room123"  # Talk room to post to
-output = "both"  # "talk", "email", or "both" (default: "talk")
+output = "talk,email"  # talk / email / ntfy, or a comma list (default: "talk")
 
 [users.alice.briefings.components]
 calendar = true

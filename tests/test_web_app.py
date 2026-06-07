@@ -2148,6 +2148,65 @@ class TestBriefingEndpoints:
         )
         assert resp.status_code == 400
 
+    async def test_outputs_lists_only_routable_surfaces(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        cfg.talk.enabled = True
+        cfg.email.enabled = True
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.get(
+            "/istota/api/settings/briefings", cookies=cookies,
+        )
+        assert resp.status_code == 200
+        outputs = set(resp.json()["outputs"])
+        # User-routable, instance-enabled push surfaces are offered.
+        assert {"talk", "email", "ntfy"} <= outputs
+        # Self-routing / inline surfaces are never offered.
+        assert "istota_file" not in outputs
+        assert "repl" not in outputs
+        assert "stream" not in outputs
+
+    async def test_post_email_output_needs_no_token(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/briefings",
+            json={"name": "e", "cron": "0 7 * * *", "output": "email"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+
+    async def test_post_ntfy_output_accepted(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/briefings",
+            json={"name": "n", "cron": "0 7 * * *", "output": "ntfy"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+
+    async def test_post_legacy_both_still_parses(self, tmp_path, client, app):
+        """`both` is kept as a silent back-compat alias — token still required
+        because it expands to a talk leg."""
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/briefings",
+            json={
+                "name": "legacy", "cron": "0 7 * * *",
+                "output": "both", "conversation_token": "room1",
+            },
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+
     async def test_delete_db_briefing(self, tmp_path, client, app):
         from istota import user_briefings
         cfg = self._make_test_config(tmp_path)

@@ -98,6 +98,43 @@ class TestBriefingEnsureCreate:
         rows = user_briefings.list_briefings(db_path, "alice")
         assert rows[0].output == "email"
 
+    def test_ntfy_output_does_not_require_token(self, cfg_with_db, capsys):
+        from istota.cli import cmd_briefing
+
+        cfg, db_path = cfg_with_db
+        args = _FakeArgs(
+            action="ensure", config=str(cfg), user="alice",
+            name="push", cron="0 9 * * 1", output="ntfy",
+        )
+        cmd_briefing(args)
+        rows = user_briefings.list_briefings(db_path, "alice")
+        assert rows[0].output == "ntfy"
+
+    def test_comma_list_output_with_talk_requires_token(self, cfg_with_db, capsys):
+        from istota.cli import cmd_briefing
+
+        cfg, _ = cfg_with_db
+        args = _FakeArgs(
+            action="ensure", config=str(cfg), user="alice",
+            name="m", cron="0 7 * * *", output="talk,email",
+        )
+        with pytest.raises(SystemExit):
+            cmd_briefing(args)
+        assert "conversation-token" in capsys.readouterr().err
+
+    def test_comma_list_output_persists(self, cfg_with_db, capsys):
+        from istota.cli import cmd_briefing
+
+        cfg, db_path = cfg_with_db
+        args = _FakeArgs(
+            action="ensure", config=str(cfg), user="alice",
+            name="m", cron="0 7 * * *", output="talk,email",
+            conversation_token="t",
+        )
+        cmd_briefing(args)
+        rows = user_briefings.list_briefings(db_path, "alice")
+        assert rows[0].output == "talk,email"
+
 
 class TestBriefingEnsureIdempotency:
     def test_second_invocation_is_noop(self, cfg_with_db, capsys):
