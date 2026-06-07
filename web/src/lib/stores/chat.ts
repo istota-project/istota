@@ -70,6 +70,7 @@ export interface ChatSession {
 	cancel: () => Promise<void>;
 	confirm: (cid: number, taskId: number) => Promise<void>;
 	reject: (cid: number, taskId: number) => Promise<void>;
+	teardown: () => void;
 }
 
 function createSession(): ChatSession {
@@ -368,10 +369,18 @@ function createSession(): ChatSession {
 		activeTaskId.set(null);
 	}
 
+	// Stop the active SSE / poll loop without cancelling the task. The route
+	// calls this on unmount so navigating away from /chat doesn't leave an
+	// EventSource (or poll timer) running; remounting re-subscribes from the
+	// persisted task_events via loadHistory, so no progress is lost.
+	function teardown() {
+		if (activeStream) { activeStream.stop(); activeStream = null; }
+	}
+
 	return {
 		rooms, activeRoomId, messages, status, activeTaskId, loaded, error,
 		init, selectRoom, newRoom, renameRoom, archiveRoom,
-		send, cancel, confirm, reject,
+		send, cancel, confirm, reject, teardown,
 	};
 }
 
