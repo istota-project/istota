@@ -98,11 +98,21 @@ features = []
 # [brain.native]
 # provider = "openai_compat"                 # only provider currently
 # model = "claude-sonnet-4-6"                # explicit id for openai_compat
+# effort = ""                                # default effort: low/medium/high/xhigh/max.
+#                                            #   Sent as `reasoning_effort` only to a
+#                                            #   thinking-capable model; xhigh/max fold
+#                                            #   to high over the compat endpoint. Empty
+#                                            #   = no reasoning_effort field. Per-task
+#                                            #   effort (e.g. !model opus-high) overrides.
 # base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
 # max_turns = 100                            # hard cap on assistant turns/task
 # max_tokens = 16384                         # per-completion output cap
-# prompt_caching = false                     # opt-in cache_control breakpoints;
-#                                            #   enable only for Anthropic/OpenRouter
+# prompt_caching = true                      # cache_control breakpoints. Omit to use the
+#                                            #   default: ON for api.anthropic.com,
+#                                            #   OFF for any other endpoint. Set explicitly
+#                                            #   to force either way (a plain-OpenAI / local
+#                                            #   endpoint that rejects cache_control needs
+#                                            #   `false`).
 #
 # Per-source-type brain routing (gradual rollout): map a task's source_type to
 # a brain kind, overriding `kind` for matching tasks. Lets cron/heartbeat run on

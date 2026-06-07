@@ -281,6 +281,8 @@ async def _stream_assistant_response(
         tool_schemas,
         model=config.model,
         max_tokens=config.max_tokens,
+        reasoning_effort=config.reasoning_effort,
+        render_tool_images=config.render_tool_images,
     )
 
     async for event in stream:

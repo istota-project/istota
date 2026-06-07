@@ -27,10 +27,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
 from istota.agent.events import AgentEvent, _describe_tool_use
-from istota.agent.loop import run_agent_loop
+from istota.agent.loop import run_agent_loop, run_agent_loop_continue
 from istota.agent.sanitize import sanitize_tool_pairs
 from istota.agent.types import (
     AgentContext,
@@ -68,6 +69,13 @@ _API_RETRY_MAX_ATTEMPTS = 3
 _API_RETRY_BASE_DELAY = 5.0
 _API_RETRY_MAX_DELAY = 120.0
 
+# Reactive overflow recovery: how many force-compact + continue attempts a single
+# task may make before giving up and returning the overflow error. Bounded so a
+# genuinely too-large single turn can't thrash compaction forever.
+_MAX_OVERFLOW_RECOVERIES = 2
+
+_RECOVERY_NUDGE = "[context was compacted; continue]"
+
 
 class _RetryingProvider:
     """Wrap a provider with turn-level retry on *immediate* transient errors.
@@ -88,14 +96,30 @@ class _RetryingProvider:
         self._inner = inner
         self._abort = abort
 
-    async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384):
+    async def stream(
+        self,
+        system_prompt,
+        messages,
+        tools,
+        *,
+        model="",
+        max_tokens=16384,
+        reasoning_effort=None,
+        render_tool_images=False,
+    ):
         attempt = 0
         while True:
             committed = False
             pending_error: StreamError | None = None
 
             async for event in self._inner.stream(
-                system_prompt, messages, tools, model=model, max_tokens=max_tokens
+                system_prompt,
+                messages,
+                tools,
+                model=model,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+                render_tool_images=render_tool_images,
             ):
                 if isinstance(event, StreamError) and not committed:
                     pending_error = event
@@ -211,6 +235,20 @@ class NativeBrain:
         model = req.model or self._config.model
         provider = _RetryingProvider(self._provider, abort)
         usage = TaskUsage()
+
+        # Resolve the effort tier and capability-gate it. The compat field
+        # (``reasoning_effort``) only makes sense for a reasoning model; sending
+        # it to a non-thinking endpoint (a local qwen) would 400. The raw tier
+        # passes through — the provider folds xhigh/max → high at the wire.
+        effort = (req.effort or self._config.effort or "").strip()
+        reasoning_effort: str | None = None
+        if effort:
+            if get_model_info(model).supports_thinking:
+                reasoning_effort = effort
+            else:
+                logger.debug(
+                    "native effort ignored: model=%s does not support thinking", model
+                )
 
         # --- event accumulation -------------------------------------------
         trace: list[dict] = []
@@ -331,6 +369,8 @@ class NativeBrain:
             stop_conditions=[_max_turns_stop, _loop_detect_stop],
             tool_execution="sequential",
             max_tokens=self._config.max_tokens,
+            reasoning_effort=reasoning_effort,
+            render_tool_images=get_model_info(model).supports_vision,
             abort=abort,
         )
 
@@ -350,36 +390,96 @@ class NativeBrain:
                 final_stop["reason"] = event.stop_reason
             await emit(event)
 
-        # Run the loop under a wall-clock deadline. Without one, a runaway model
-        # or a slow provider could run far past the task timeout; the scheduler
-        # would then reclaim the "stuck" task and a second worker would execute
-        # it concurrently (duplicate output + duplicate deferred-op replay).
-        # On timeout we set ``abort`` first so tools/provider unwind cleanly —
-        # the bash tool polls abort and kills its subprocess — then give a short
-        # grace period before hard-cancelling.
-        loop_task = asyncio.create_task(
-            run_agent_loop([prompt_msg], context, loop_config, emit_wrapped)
+        # Run the loop under a wall-clock deadline shared across the initial run
+        # and every overflow-recovery continue. Without one, a runaway model or a
+        # slow provider could run far past the task timeout; the scheduler would
+        # then reclaim the "stuck" task and a second worker would execute it
+        # concurrently (duplicate output + duplicate deferred-op replay). On
+        # timeout we set ``abort`` first so tools/provider unwind cleanly — the
+        # bash tool polls abort and kills its subprocess — then give a short grace
+        # period before hard-cancelling.
+        deadline = (
+            time.monotonic() + req.timeout_seconds
+            if req.timeout_seconds and req.timeout_seconds > 0
+            else None
         )
+
+        async def _run_loop_once(prompts, ctx) -> tuple[list, bool]:
+            """Run one loop pass under the *remaining* shared deadline.
+
+            ``prompts`` non-None → ``run_agent_loop``; None → continue. Returns
+            ``(new_messages, timed_out)``. The deadline spans all attempts, so a
+            recovery continue gets only the time left, never a fresh budget.
+            """
+            remaining = None
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return [], True
+            if prompts is not None:
+                coro = run_agent_loop(prompts, ctx, loop_config, emit_wrapped)
+            else:
+                coro = run_agent_loop_continue(ctx, loop_config, emit_wrapped)
+            task = asyncio.create_task(coro)
+            if remaining is None:
+                return await task, False
+            try:
+                msgs = await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+                return msgs, False
+            except asyncio.TimeoutError:
+                abort.set()
+                try:
+                    msgs = await asyncio.wait_for(asyncio.shield(task), timeout=10)
+                    return msgs, True
+                except asyncio.TimeoutError:
+                    task.cancel()
+                    try:
+                        return await task, True
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        return [], True
+
         timed_out = False
         try:
-            if req.timeout_seconds and req.timeout_seconds > 0:
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(loop_task), timeout=req.timeout_seconds
-                    )
-                except asyncio.TimeoutError:
-                    timed_out = True
-                    abort.set()
-                    try:
-                        await asyncio.wait_for(asyncio.shield(loop_task), timeout=10)
-                    except asyncio.TimeoutError:
-                        loop_task.cancel()
-                        try:
-                            await loop_task
-                        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                            pass
-            else:
-                await loop_task
+            transcript, timed_out = await _run_loop_once([prompt_msg], context)
+
+            # Reactive overflow recovery: a mid-task context-length error is
+            # recoverable — force-compact the accumulated transcript and continue
+            # from the summary. The proactive ``prepare_next_turn`` path is the
+            # first line of defense; this is the safety net beneath it. Bounded
+            # (≤_MAX_OVERFLOW_RECOVERIES) and time-bounded (shares the deadline)
+            # so a genuinely too-large turn can't thrash forever.
+            recoveries = 0
+            while (
+                not timed_out
+                and final_stop["reason"] == "error"
+                and classify_error(last_error_message).is_context_overflow
+                and recoveries < _MAX_OVERFLOW_RECOVERIES
+            ):
+                recoveries += 1
+                logger.info(
+                    "native overflow recovery %d/%d: compacting and continuing",
+                    recoveries,
+                    _MAX_OVERFLOW_RECOVERIES,
+                )
+                recovery_ctx, summary, details = await _build_recovery_context(
+                    transcript,
+                    context.system_prompt,
+                    context.tools,
+                    compaction_state["summary"],
+                    compaction_state["details"],
+                    self._provider,
+                    model,
+                    self._convert_to_llm,
+                )
+                compaction_state["summary"] = summary
+                compaction_state["details"] = details
+                # Clear the error markers so the post-continue re-check sees the
+                # continue's own outcome, not the prior overflow.
+                final_stop["reason"] = ""
+                last_error_message = ""
+                _cont, timed_out = await _run_loop_once(None, recovery_ctx)
+                # continue mutates recovery_ctx.messages to the full transcript.
+                transcript = recovery_ctx.messages
         finally:
             abort.set()
             if cancel_task is not None:
@@ -390,6 +490,9 @@ class NativeBrain:
                     await cancel_task
                 except asyncio.CancelledError:
                     pass
+            # In ``finally`` so the per-task cache footer is logged at task end
+            # even if the recovery body raises a non-overflow exception.
+            _log_cache_telemetry(usage)
 
         if timed_out:
             timeout_min = req.timeout_seconds // 60
@@ -536,6 +639,103 @@ class NativeBrain:
             await loop.run_in_executor(None, req.on_progress, event)
         except Exception:  # noqa: BLE001 — progress is best-effort
             logger.debug("on_progress callback raised", exc_info=True)
+
+
+def _aggressive_cut(transcript: list) -> int:
+    """Cut index for the cut==0 overflow fallback: keep only the last
+    user/tool-result tail.
+
+    Walks back to the most recent ``UserMessage`` / ``ToolResultMessage`` and
+    compacts everything before it, guaranteeing forward progress when
+    ``find_cut_point`` declined to cut. With no user/tool-result anchor, the
+    whole transcript is compacted (``len(transcript)``) so only the summary
+    survives.
+
+    The kept tail never starts on a ``ToolResultMessage`` (that would strand the
+    result from its owning tool_call, which ``sanitize_tool_pairs`` then drops
+    silently — losing the very output recovery meant to preserve). Mirrors
+    ``find_cut_point``: advance forward past leading tool_results so the orphan
+    lands in the compacted prefix with its call; if that runs off the end (the
+    anchor was a trailing result with no newer message), back up so the owning
+    assistant message is kept instead.
+    """
+    anchor = len(transcript)
+    for i in range(len(transcript) - 1, -1, -1):
+        if isinstance(transcript[i], (UserMessage, ToolResultMessage)):
+            anchor = i
+            break
+    if anchor == len(transcript):
+        return anchor  # no anchor — compact everything, only the summary survives
+
+    advanced = anchor
+    while advanced < len(transcript) and isinstance(transcript[advanced], ToolResultMessage):
+        advanced += 1
+    if advanced < len(transcript):
+        return advanced
+    back = anchor
+    while back > 0 and isinstance(transcript[back], ToolResultMessage):
+        back -= 1
+    return back
+
+
+async def _build_recovery_context(
+    transcript: list,
+    system_prompt: str,
+    tools,
+    prev_summary: str | None,
+    prev_details,
+    provider,
+    model: str,
+    convert_to_llm,
+) -> tuple[AgentContext, str, object]:
+    """Force-compact ``transcript`` and return a context ready for continue.
+
+    Ignores ``should_compact`` (this is the reactive safety net — the window was
+    already exceeded). Falls back to ``_aggressive_cut`` when ``find_cut_point``
+    returns 0 so a turn is always reclaimed. Appends a synthetic user nudge when
+    the compacted tail ends on an assistant message, because
+    ``run_agent_loop_continue`` refuses to continue from one.
+    """
+    cut = find_cut_point(transcript)
+    if cut == 0:
+        cut = _aggressive_cut(transcript)
+    to_compact = transcript[:cut]
+    remaining = transcript[cut:]
+    summary, details = await compact_messages(
+        to_compact, prev_summary, prev_details, provider, model, convert_to_llm
+    )
+    messages: list = [
+        CompactionSummaryMessage(summary=summary, tokens_before=0, details=details),
+        *remaining,
+    ]
+    if messages and getattr(messages[-1], "role", None) == "assistant":
+        messages.append(UserMessage(content=[TextContent(text=_RECOVERY_NUDGE)]))
+    ctx = AgentContext(system_prompt=system_prompt, messages=messages, tools=tools)
+    return ctx, summary, details
+
+
+def _log_cache_telemetry(usage: TaskUsage) -> None:
+    """Log the cumulative cross-turn cache-hit rate at task end (Stage 5b).
+
+    ``hit_rate`` is ``cache_read_tokens / input_tokens`` as a percentage. Under
+    OpenAI-compat semantics (the sole transport) ``prompt_tokens`` already
+    includes ``cached_tokens``, so the read count is a subset of the input and
+    the ratio is bounded in [0, 100]. A non-conforming provider that reports
+    cache reads *outside* ``prompt_tokens`` could push it past 100%, so the
+    value is clamped defensively. With no input recorded the ratio is reported
+    as 0% (no divide-by-zero). Mirrors pi's per-task cache footer so Stage 2's
+    caching can be validated against production data.
+    """
+    read = usage.cache_read_tokens
+    inp = usage.input_tokens
+    rate = min(100.0, read / inp * 100.0) if inp else 0.0
+    logger.info(
+        "native cache hit_rate=%.1f%% read=%d input=%d write=%d",
+        rate,
+        read,
+        inp,
+        usage.cache_write_tokens,
+    )
 
 
 def _tool_use_event(tool_name: str, description: str, tool_call_id: str = ""):

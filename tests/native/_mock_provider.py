@@ -43,6 +43,8 @@ class MockProvider:
         *,
         model: str = "",
         max_tokens: int = 16384,
+        reasoning_effort: str | None = None,
+        render_tool_images: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         self.calls.append(
             {
@@ -51,6 +53,8 @@ class MockProvider:
                 "tools": list(tools),
                 "model": model,
                 "max_tokens": max_tokens,
+                "reasoning_effort": reasoning_effort,
+                "render_tool_images": render_tool_images,
             }
         )
         if not self._turns:

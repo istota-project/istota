@@ -86,3 +86,25 @@ class TestBash:
     async def test_no_output(self, tmp_path):
         result = await _run(make_bash_tool(_env(tmp_path)), {"command": "true"})
         assert "no output" in _text(result).lower()
+
+    async def test_exclude_from_context_stubs_model_output(self, tmp_path):
+        updates = []
+
+        async def _on_update(text):
+            updates.append(text)
+
+        result = await _run(
+            make_bash_tool(_env(tmp_path)),
+            {"command": "printf 'secret123\\n'", "exclude_from_context": True},
+            on_update=_on_update,
+        )
+        # The model-facing content is a stub — the real output is kept out of
+        # context…
+        assert "secret123" not in _text(result)
+        assert "omitted from context" in _text(result)
+        # …but the full output still reached the progress surface.
+        assert any("secret123" in u for u in updates)
+
+    async def test_exclude_from_context_default_includes_output(self, tmp_path):
+        result = await _run(make_bash_tool(_env(tmp_path)), {"command": "echo visible"})
+        assert "visible" in _text(result)

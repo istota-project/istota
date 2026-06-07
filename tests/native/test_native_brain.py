@@ -346,7 +346,7 @@ class TestTimeout:
         # scheduler reclaim and double-run the task).
         class _ForeverProvider:
             async def stream(
-                self, system_prompt, messages, tools, *, model="", max_tokens=16384
+                self, system_prompt, messages, tools, *, model="", max_tokens=16384, **kw
             ) -> AsyncIterator:
                 yield StreamStart()
                 for _ in range(100000):
@@ -374,7 +374,7 @@ class TestRetryProvider:
 
         class _Flaky:
             async def stream(
-                self, system_prompt, messages, tools, *, model="", max_tokens=16384
+                self, system_prompt, messages, tools, *, model="", max_tokens=16384, **kw
             ) -> AsyncIterator:
                 calls["n"] += 1
                 yield StreamStart()
@@ -396,6 +396,77 @@ class TestRetryProvider:
         assert calls["n"] == 2  # retried despite the leading StreamStart
         assert result.success is True
         assert result.result_text == "recovered"
+
+
+class TestCacheTelemetry:
+    def test_hit_rate_logged_at_task_end(self, tmp_path, caplog):
+        import logging
+
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="done")],
+                    usage=Usage(
+                        input_tokens=100,
+                        output_tokens=10,
+                        cache_read_tokens=40,
+                        cache_write_tokens=25,
+                    ),
+                    stop_reason="end_turn",
+                )
+            ]
+        )
+        with caplog.at_level(logging.INFO, logger="istota.brain.native"):
+            _brain(provider).execute(_req("hi", tmp_path))
+        line = next((r.message for r in caplog.records if "cache" in r.message), None)
+        assert line is not None
+        assert "hit_rate=" in line
+        assert "read=40" in line
+        assert "input=100" in line
+        # The documented cache_creation → cache_write_tokens mapping reaches the
+        # task-end footer (closes the end-to-end loop, not just the SSE parse).
+        assert "write=25" in line
+
+    def test_hit_rate_clamped_at_100(self, tmp_path, caplog):
+        # A non-conforming provider can report cache reads outside prompt_tokens;
+        # the footer must not show a >100% rate.
+        import logging
+
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="done")],
+                    usage=Usage(
+                        input_tokens=10, output_tokens=5, cache_read_tokens=40
+                    ),
+                    stop_reason="end_turn",
+                )
+            ]
+        )
+        with caplog.at_level(logging.INFO, logger="istota.brain.native"):
+            _brain(provider).execute(_req("hi", tmp_path))
+        line = next((r.message for r in caplog.records if "cache" in r.message), None)
+        assert line is not None
+        assert "hit_rate=100.0%" in line
+
+    def test_zero_input_no_divide_by_zero(self, tmp_path, caplog):
+        import logging
+
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="done")],
+                    usage=Usage(input_tokens=0, output_tokens=0),
+                    stop_reason="end_turn",
+                )
+            ]
+        )
+        with caplog.at_level(logging.INFO, logger="istota.brain.native"):
+            result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.success is True  # did not crash on divide-by-zero
+        line = next((r.message for r in caplog.records if "cache" in r.message), None)
+        assert line is not None
+        assert "hit_rate=0" in line
 
 
 class TestFactory:

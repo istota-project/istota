@@ -114,12 +114,17 @@ istota_brain_kind: "claude_code"
 # base_url + the API key.
 istota_brain_native_provider: "openai_compat"     # only provider currently
 istota_brain_native_model: ""                     # explicit id (openai_compat has no aliasing)
+istota_brain_native_effort: ""                    # default effort: low/medium/high/xhigh/max ("" = none).
+                                                  #   Sent as reasoning_effort only to a thinking-capable
+                                                  #   model; xhigh/max fold to high over the compat endpoint.
 istota_brain_native_base_url: "https://api.anthropic.com/v1"
 istota_brain_native_extra_headers: {}             # dict of extra HTTP headers (openai_compat)
 istota_brain_native_context_window: 0             # 0 = resolve from bundled model catalog
 istota_brain_native_max_turns: 100                # hard cap on assistant turns per task
 istota_brain_native_max_tokens: 16384             # per-completion output cap
-istota_brain_native_prompt_caching: false         # cache_control breakpoints — Anthropic/OpenRouter only
+istota_brain_native_prompt_caching: ""            # cache_control breakpoints. "" = derive from base_url
+                                                  #   (ON for api.anthropic.com, OFF otherwise). Set true/false
+                                                  #   to force; a plain-OpenAI / local endpoint needs false.
 # Per-role model overrides for the native brain. Internal subsystems request
 # models by role (fast = conversation selection / routing; general = sleep-cycle
 # extraction, OCR; smart = !model smart / heavy work). Each defaults to

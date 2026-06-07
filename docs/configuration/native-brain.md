@@ -18,9 +18,11 @@ kind = "native"
 [brain.native]
 provider = "openai_compat"                 # only provider currently
 model = "claude-sonnet-4-6"                # explicit id — openai_compat has no aliasing
+effort = ""                                # default reasoning effort (see below)
 base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
 max_turns = 100                            # hard cap on assistant turns per task
 max_tokens = 16384                         # per-completion output cap
+# prompt_caching                           # omit to derive from base_url (see below)
 ```
 
 The API key never goes in the TOML file. Set it via the env override:
@@ -47,7 +49,8 @@ istota_brain_kind: "native"
 istota_brain_native_provider: "openai_compat"
 istota_brain_native_model: "claude-sonnet-4-6"
 istota_brain_native_base_url: "https://api.anthropic.com/v1"
-istota_brain_native_prompt_caching: true          # Anthropic/OpenRouter only
+istota_brain_native_effort: ""                    # default reasoning effort (thinking models only)
+# istota_brain_native_prompt_caching             # "" (default) derives from base_url; set true/false to force
 istota_brain_native_api_key: "{{ vault_native_api_key }}"   # → ISTOTA_BRAIN_NATIVE_API_KEY
 ```
 
@@ -62,7 +65,7 @@ istota_brain_source_type_overrides:
   heartbeat: native
 ```
 
-The full variable set (all defaulted to the code defaults) is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,base_url,extra_headers,context_window,max_turns,max_tokens,prompt_caching,api_key}` and `istota_brain_source_type_overrides`.
+The full variable set (all defaulted to the code defaults) is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,effort,base_url,extra_headers,context_window,max_turns,max_tokens,prompt_caching,api_key}` and `istota_brain_source_type_overrides`. `istota_brain_native_prompt_caching` defaults to `""` (derive from `base_url`); set it to `true`/`false` only to force.
 
 Key handling:
 
@@ -157,7 +160,10 @@ It diffs result text (similarity + unified diff), tool-call sequence, and native
 
 - **Cost telemetry.** The native brain computes per-task token usage and cost (priced from the bundled model catalog; pinned Anthropic ids ship at price 0.0 until set) and writes it to `task_logs` (a `usage {...}` info line) plus an `native_usage` log line. `claude_code` leaves usage opaque — the CLI doesn't surface per-call usage.
 - **Per-user API keys.** Beyond the instance-wide `[brain.native] api_key` / `ISTOTA_BRAIN_NATIVE_API_KEY`, each user can have their own provider key in the encrypted secrets table: `istota secret ensure -u <user> -s native_brain -k api_key -v <key>` (or the web settings). The per-user key overlays the instance key for that user's tasks (execution and Pass-2 routing).
-- **Prompt caching.** `[brain.native] prompt_caching` (default off) adds `cache_control` breakpoints on the system message and the first user message (the stable composed-prompt prefix). Enable it **only** for endpoints that honor the field — Anthropic and OpenRouter. Leave it off for plain-OpenAI, LM Studio, Ollama, or vLLM, which may not understand the extension.
+- **Reasoning effort.** `[brain.native] effort` (`low` / `medium` / `high` / `xhigh` / `max`, default empty) sets a default reasoning budget; per-task overrides (e.g. `!model opus-high`, `[models.roles]`) win. It is sent as the OpenAI-compatible `reasoning_effort` field **only** when the target model is thinking-capable (`supports_thinking` in the bundled catalog) — for a non-reasoning endpoint it is dropped silently so the request never 400s. `xhigh` and `max` fold to `high` on the wire (the compat field exposes no finer knob); the original tier still tracks on the task row. Extended-thinking output is parsed but excluded from the visible result.
+- **Prompt caching.** `[brain.native] prompt_caching` adds `cache_control` breakpoints covering the tool definitions, the system message, the first user message, and a rolling breakpoint on the latest message each turn (up to Anthropic's 4-breakpoint cap), which is what produces cross-turn cache hits. **The default is derived from `base_url`:** on for `api.anthropic.com`, off for any other endpoint. Set it explicitly to force either way — a plain-OpenAI, LM Studio, Ollama, or vLLM endpoint that doesn't understand the extension needs `prompt_caching = false`. A per-task cache hit-rate line is logged at task end (`native cache hit_rate=… read=… input=…`).
+- **Context-overflow recovery.** If a turn exceeds the context window mid-task, the native brain force-compacts the accumulated transcript and continues from the summary instead of failing — up to two recovery attempts, sharing the task's wall-clock deadline. The proactive compaction hook (`prepare_next_turn`) is the first line of defense; this is the reactive safety net beneath it.
+- **Image tool results.** A tool result carrying image content renders as a follow-up `role:"user"` block on vision-capable models (`supports_vision`); on a no-vision model the image is dropped with a text note so the request still validates.
 - **Model ids.** `openai_compat` needs explicit ids and does not translate Anthropic aliases — `opus` is sent verbatim, not turned into `claude-opus-4-8` (that mapping is the `claude_code` brain's, not the native brain's). Map role names per deployment with `[models.roles]` if you want `fast`/`general`/`smart` under native.
 - **Cancellation / `!stop`.** Works on both brains. The native brain bridges the scheduler's cancel poll into an `asyncio.Event` threaded through the loop, tools, and retry backoff. A failing cancel poll (e.g. transient SQLite lock) is tolerated rather than silently disabling `!stop`.
 - **Task timeout.** The native loop runs under a wall-clock deadline of `scheduler.task_timeout_minutes` (`istota_scheduler_task_timeout_minutes`, default 30). On expiry it signals abort (killing any in-flight bash subprocess at the next poll), waits a short grace, then hard-cancels, and returns `stop_reason="timeout"`. This matches `claude_code` and prevents a runaway loop from outliving the scheduler's stuck-task reclaim (which would otherwise double-execute the task). `max_turns` is a second, coarser backstop.
