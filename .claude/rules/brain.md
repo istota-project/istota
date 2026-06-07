@@ -145,13 +145,45 @@ kind = "claude_code"  # "claude_code" | "native"
 [brain.native]         # only used when kind = "native" (or routed-to below)
 provider = "openai_compat"
 model = "claude-sonnet-4-6"
+effort = ""            # default reasoning effort; capability-gated on supports_thinking
 base_url = "https://api.anthropic.com/v1"
+# prompt_caching       # omit to derive from base_url (on for api.anthropic.com); set true/false to force
 # api_key via ISTOTA_BRAIN_NATIVE_API_KEY env override (kept out of TOML)
 
 [brain.source_type_overrides]   # per-source-type routing (gradual rollout)
 scheduled = "native"
 heartbeat = "native"
 ```
+
+NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
+- **Reasoning effort.** `req.effort or native.effort` → the OpenAI-compat
+  `reasoning_effort` field, gated on `get_model_info(model).supports_thinking`
+  (dropped + DEBUG-logged for non-reasoning endpoints). `xhigh`/`max` fold to
+  `high` at the wire (provider-side `_REASONING_EFFORT_WIRE`); the raw tier stays
+  on the task row. Extended-thinking deltas (`reasoning_content` / `reasoning`)
+  parse into a `ThinkingContent` block excluded from `result_text`.
+- **Prompt caching.** `_apply_cache_breakpoints` marks up to 4 `cache_control`
+  breakpoints — tool defs (last tool), system, first user, and a rolling
+  breakpoint on the last message each turn (the cross-turn-hit win).
+  `make_provider` defaults caching ON for `api.anthropic.com` and OFF elsewhere
+  unless `prompt_caching_explicit` (set when the TOML key is present). Usage
+  captures `cache_creation_input_tokens` → `Usage.cache_write_tokens`; a per-task
+  `native cache hit_rate=…` line logs at task end.
+- **Overflow recovery.** A mid-task context-length error triggers a bounded
+  (≤2) force-compact + `run_agent_loop_continue`, sharing the wall-clock deadline
+  via `_run_loop_once`. `_build_recovery_context` force-compacts (aggressive
+  `_aggressive_cut` fallback when `find_cut_point` returns 0) and appends a
+  synthetic user nudge when the tail ends on an assistant message.
+- **Image tool results.** `_tool_image_followup` renders an image-bearing tool
+  result as a follow-up `role:"user"` block on vision models
+  (`render_tool_images` = `supports_vision`); a no-vision model gets a text note.
+- **Bash `exclude_from_context`.** The Bash tool takes an optional
+  `exclude_from_context` boolean: the full output still streams to the user via
+  `on_update`, but the model gets a short `[output shown to user; N bytes
+  omitted from context]` stub instead of the body — for noisy commands the model
+  doesn't need to reason over. Failure markers (`[exit code: N]` /
+  `[command aborted]` / `[command timed out …]`) are appended to the stub so a
+  failure still surfaces even when the body is omitted.
 
 `Config.brain: BrainConfig` follows the dataclass-with-defaults convention.
 `source_type_overrides` maps a task's `source_type` to a brain kind, overriding

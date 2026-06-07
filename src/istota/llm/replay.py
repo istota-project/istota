@@ -62,6 +62,8 @@ class ReplayProvider:
         *,
         model: str = "",
         max_tokens: int = 16384,
+        reasoning_effort: str | None = None,
+        render_tool_images: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         lines = read_fixture(self._path)
 
@@ -96,9 +98,17 @@ class RecordingProvider:
         *,
         model: str = "",
         max_tokens: int = 16384,
+        reasoning_effort: str | None = None,
+        render_tool_images: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         body = self._inner._build_chat_completion_request(
-            system_prompt, messages, tools, model, max_tokens
+            system_prompt,
+            messages,
+            tools,
+            model,
+            max_tokens,
+            reasoning_effort=reasoning_effort,
+            render_tool_images=render_tool_images,
         )
         recorded: list[str] = []
         try:

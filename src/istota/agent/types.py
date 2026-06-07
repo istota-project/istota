@@ -146,4 +146,9 @@ class AgentLoopConfig:
     follow_up_queue_mode: QueueMode = "all"
     tool_execution: ToolExecutionMode = "sequential"
     max_tokens: int = 16384
+    # Forwarded to ``provider.stream`` each turn. ``reasoning_effort`` is the
+    # capability-gated effort tier (None = omit); ``render_tool_images`` lets the
+    # provider render image-bearing tool results for vision models.
+    reasoning_effort: str | None = None
+    render_tool_images: bool = False
     abort: asyncio.Event | None = None

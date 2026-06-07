@@ -20,6 +20,7 @@ from .types import (
     ImageContent,
     Message,
     TextContent,
+    ThinkingContent,
     ToolCallContent,
     ToolSchema,
     Usage,
@@ -32,6 +33,18 @@ _FINISH_REASON_MAP = {
     "stop": "end_turn",
     "tool_calls": "tool_use",
     "length": "max_tokens",
+}
+
+# The OpenAI-compatible ``reasoning_effort`` field accepts only low/medium/high.
+# Istota's finer Opus tiers fold down — the compat endpoint exposes no knob
+# below "high", so xhigh/max both map there. The original tier stays on the
+# task row unchanged.
+_REASONING_EFFORT_WIRE = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
 }
 
 
@@ -63,9 +76,17 @@ class OpenAICompatibleProvider:
         *,
         model: str = "",
         max_tokens: int = 16384,
+        reasoning_effort: str | None = None,
+        render_tool_images: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         body = self._build_chat_completion_request(
-            system_prompt, messages, tools, model, max_tokens
+            system_prompt,
+            messages,
+            tools,
+            model,
+            max_tokens,
+            reasoning_effort=reasoning_effort,
+            render_tool_images=render_tool_images,
         )
         try:
             async with self._client.stream("POST", "/chat/completions", json=body) as resp:
@@ -98,6 +119,8 @@ class OpenAICompatibleProvider:
         tools: list[ToolSchema],
         model: str,
         max_tokens: int,
+        reasoning_effort: str | None = None,
+        render_tool_images: bool = False,
     ) -> dict:
         """Convert istota Message types to an OpenAI chat completions body."""
         wire: list[dict] = []
@@ -105,9 +128,18 @@ class OpenAICompatibleProvider:
             wire.append({"role": "system", "content": system_prompt})
         for msg in messages:
             wire.append(self._message_to_wire(msg))
+            # A tool result carrying image content can't ride in the
+            # ``role:"tool"`` message on most endpoints; Anthropic's compat layer
+            # honors a follow-up ``role:"user"`` block instead. Inject it right
+            # after the tool message so the image lands in order.
+            extra = self._tool_image_followup(msg, render_tool_images)
+            if extra is not None:
+                wire.append(extra)
+
+        tools_wire = [self._tool_to_wire(t) for t in tools] if tools else None
 
         if self._prompt_caching:
-            self._apply_cache_breakpoints(wire)
+            self._apply_cache_breakpoints(wire, tools_wire)
 
         body: dict = {
             "model": model,
@@ -119,8 +151,12 @@ class OpenAICompatibleProvider:
             # no token usage in streaming mode and cost telemetry stays zero.
             "stream_options": {"include_usage": True},
         }
-        if tools:
-            body["tools"] = [self._tool_to_wire(t) for t in tools]
+        if tools_wire is not None:
+            body["tools"] = tools_wire
+
+        effort = _REASONING_EFFORT_WIRE.get((reasoning_effort or "").lower())
+        if effort:
+            body["reasoning_effort"] = effort
         return body
 
     @staticmethod
@@ -166,13 +202,66 @@ class OpenAICompatibleProvider:
         return {"role": "user", "content": parts}
 
     @staticmethod
-    def _apply_cache_breakpoints(wire: list[dict]) -> None:
-        """Mark the stable prefix with cache_control (Anthropic/OpenRouter).
+    def _tool_image_followup(msg: Message, render_tool_images: bool) -> dict | None:
+        """A follow-up ``role:"user"`` message carrying a tool result's images.
 
-        Two breakpoints on the blocks that stay constant across a task's turns:
-        the system message and the first user message (the native brain's large
-        composed prompt). Mutates ``wire`` in place; converts string content to
-        a single text block so the cache_control field has somewhere to live.
+        The ``role:"tool"`` message renders text only; image parts ride in a
+        follow-up user message injected right after it (the portable pattern
+        Anthropic's compat layer honors). On a no-vision model the images are
+        dropped and replaced with a text note so the request still validates.
+        Returns ``None`` when the message isn't an image-bearing tool result.
+        """
+        if getattr(msg, "role", "") != "tool_result":
+            return None
+        images = [c for c in msg.content if isinstance(c, ImageContent)]
+        if not images:
+            return None
+        if not render_tool_images:
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "[image output omitted: model has no vision support]",
+                    }
+                ],
+            }
+        tool_name = getattr(msg, "tool_name", "") or "tool"
+        parts: list[dict] = [
+            {"type": "text", "text": f"Image output of tool {tool_name}:"}
+        ]
+        for img in images:
+            parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{img.media_type};base64,{img.data}"},
+                }
+            )
+        return {"role": "user", "content": parts}
+
+    @staticmethod
+    def _apply_cache_breakpoints(
+        wire: list[dict], tools_wire: list[dict] | None = None
+    ) -> None:
+        """Mark the cacheable prefix with cache_control (Anthropic/OpenRouter).
+
+        Anthropic caps cache_control breakpoints at 4; we place up to four, in
+        priority order:
+
+        1. **Tool definitions** — the last tool's ``function`` (tool schemas are
+           constant across a task).
+        2. **System message** — the stable system prompt.
+        3. **First user message** — the large composed prompt.
+        4. **Rolling breakpoint** — the last content block of the *last* message,
+           so turn N reuses the cached prefix through turn N−1. This is what
+           yields cross-turn cache hits.
+
+        Because a cached breakpoint also reads everything before it, the rolling
+        breakpoint plus the system breakpoint together cover the whole prefix.
+        Marking the same block twice (single-turn: first user == last message) is
+        idempotent — one breakpoint, not two. Mutates ``wire`` / ``tools_wire``
+        in place; converts string content to a single text block so cache_control
+        has somewhere to live.
         """
         cc = {"type": "ephemeral"}
 
@@ -190,12 +279,25 @@ class OpenAICompatibleProvider:
                 if isinstance(content[-1], dict):
                     content[-1]["cache_control"] = cc
 
+        # 1. Tool definitions — mark the last tool's function object.
+        if tools_wire:
+            last_fn = tools_wire[-1].get("function")
+            if isinstance(last_fn, dict):
+                last_fn["cache_control"] = cc
+
+        # 2. System message.
         if wire and wire[0].get("role") == "system":
             _mark(wire[0])
+
+        # 3. First user message.
         for msg in wire:
             if msg.get("role") == "user":
                 _mark(msg)
                 break
+
+        # 4. Rolling breakpoint — the last message in the wire.
+        if wire:
+            _mark(wire[-1])
 
     @staticmethod
     def _tool_to_wire(tool: ToolSchema) -> dict:
@@ -228,6 +330,10 @@ class OpenAICompatibleProvider:
     ) -> AsyncIterator[StreamEvent]:
         """Parse OpenAI SSE chunks into stream events, assembling a final message."""
         text_parts: list[str] = []
+        # Extended-thinking deltas (Anthropic compat: ``reasoning_content``; some
+        # endpoints: ``reasoning``). Captured for message fidelity but never
+        # emitted as a TextDelta — it must not land in result_text or progress.
+        thinking_parts: list[str] = []
         # index -> {"id", "name", "args"}
         tool_acc: dict[int, dict] = {}
         finish_reason: str | None = None
@@ -255,6 +361,10 @@ class OpenAICompatibleProvider:
             choice = choices[0]
             delta = choice.get("delta") or {}
 
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if isinstance(reasoning, str) and reasoning:
+                thinking_parts.append(reasoning)
+
             content = delta.get("content")
             if content:
                 text_parts.append(content)
@@ -279,18 +389,27 @@ class OpenAICompatibleProvider:
                 finish_reason = choice["finish_reason"]
 
         yield StreamDone(
-            message=self._assemble_message(text_parts, tool_acc, finish_reason, usage_raw, model)
+            message=self._assemble_message(
+                text_parts, thinking_parts, tool_acc, finish_reason, usage_raw, model
+            )
         )
 
     @staticmethod
     def _assemble_message(
         text_parts: list[str],
+        thinking_parts: list[str],
         tool_acc: dict[int, dict],
         finish_reason: str | None,
         usage_raw: dict | None,
         model: str,
     ) -> AssistantMessage:
         content: list = []
+        thinking = "".join(thinking_parts)
+        if thinking:
+            # Thinking precedes the visible answer in the assembled message so a
+            # future surface can render it in order. AssistantMessage.text
+            # filters to TextContent, so this never leaks into the result.
+            content.append(ThinkingContent(thinking=thinking))
         joined = "".join(text_parts)
         if joined:
             content.append(TextContent(text=joined))
@@ -304,11 +423,21 @@ class OpenAICompatibleProvider:
 
         usage = Usage()
         if usage_raw:
-            cached = (usage_raw.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+            details = usage_raw.get("prompt_tokens_details") or {}
+            cached = details.get("cached_tokens", 0)
+            # Anthropic's OpenAI-compat usage reports cache writes either at the
+            # top level (``cache_creation_input_tokens``) or nested in
+            # prompt_tokens_details. Best-effort: absent → 0.
+            cache_write = (
+                usage_raw.get("cache_creation_input_tokens")
+                or details.get("cache_creation_input_tokens")
+                or 0
+            )
             usage = Usage(
                 input_tokens=usage_raw.get("prompt_tokens", 0),
                 output_tokens=usage_raw.get("completion_tokens", 0),
                 cache_read_tokens=cached,
+                cache_write_tokens=cache_write,
             )
 
         stop_reason = _FINISH_REASON_MAP.get(finish_reason or "", "end_turn")

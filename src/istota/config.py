@@ -443,13 +443,19 @@ class NativeBrainConfig:
 
     provider: str = "openai_compat"  # only "openai_compat"
     model: str = ""
+    effort: str = ""  # native-brain default effort: low/medium/high/xhigh/max (empty = none)
     base_url: str = "https://api.anthropic.com/v1"
     api_key: str = ""  # from ISTOTA_BRAIN_NATIVE_API_KEY at load time
     extra_headers: dict = field(default_factory=dict)
     context_window: int = 0  # 0 = resolve from istota.llm.catalog
     max_turns: int = 100
     max_tokens: int = 16384
-    prompt_caching: bool = False  # opt-in cache_control breakpoints (Anthropic/OpenRouter)
+    # Opt-in cache_control breakpoints (Anthropic/OpenRouter). Tri-state: ``None``
+    # (the operator set no explicit value) derives the default from base_url in
+    # make_provider — on for api.anthropic.com, off elsewhere. An explicit
+    # ``True``/``False`` always wins, whether it came from the TOML or was set
+    # directly on the dataclass.
+    prompt_caching: bool | None = None
 
 
 @dataclass
@@ -1065,13 +1071,19 @@ def load_config(config_path: Path | None = None) -> Config:
         native = NativeBrainConfig(
             provider=native_raw.get("provider", "openai_compat"),
             model=native_raw.get("model", ""),
+            effort=native_raw.get("effort", ""),
             base_url=native_raw.get("base_url", "https://api.anthropic.com/v1"),
             api_key=native_raw.get("api_key", ""),
             extra_headers=dict(native_raw.get("extra_headers", {}) or {}),
             context_window=int(native_raw.get("context_window", 0)),
             max_turns=int(native_raw.get("max_turns", 100)),
             max_tokens=int(native_raw.get("max_tokens", 16384)),
-            prompt_caching=bool(native_raw.get("prompt_caching", False)),
+            # Absent key → None (derive from base_url); present → explicit bool.
+            prompt_caching=(
+                bool(native_raw["prompt_caching"])
+                if "prompt_caching" in native_raw
+                else None
+            ),
         )
         overrides_raw = br.get("source_type_overrides", {})
         if not isinstance(overrides_raw, dict):

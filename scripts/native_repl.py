@@ -71,7 +71,9 @@ class _ScriptedMockProvider:
             stop = "tool_use" if turn.get("tool_calls") else "end_turn"
             self._turns.append(AssistantMessage(content=content, stop_reason=stop))
 
-    async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384):
+    async def stream(
+        self, system_prompt, messages, tools, *, model="", max_tokens=16384, **kw
+    ):
         msg = self._turns.pop(0) if self._turns else None
         if msg is None:
             from istota.llm.types import AssistantMessage, TextContent

@@ -30,11 +30,22 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
             ToolParameter(name="command", type="string", description="The command to run."),
             ToolParameter(name="description", type="string", description="5-10 word description.", required=False),
             ToolParameter(name="timeout", type="integer", description="Timeout in milliseconds.", required=False),
+            ToolParameter(
+                name="exclude_from_context",
+                type="boolean",
+                description=(
+                    "If true, keep the (possibly large/noisy) output out of the "
+                    "model's context — it still streams to the user. Use for "
+                    "commands whose output you don't need to reason over."
+                ),
+                required=False,
+            ),
         ],
     )
 
     async def _execute(call_id, args, on_update, abort):
         command = args["command"]
+        exclude_from_context = bool(args.get("exclude_from_context"))
         timeout_ms = args.get("timeout")
         timeout_s = (int(timeout_ms) / 1000.0) if timeout_ms else float(env.bash_timeout_seconds)
 
@@ -91,15 +102,31 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         if truncated:
             text += f"\n… [output truncated at {env.max_output_bytes} bytes]"
 
+        # Failure markers are kept separate so they can ride along even when the
+        # body is excluded from context — a failed/aborted/timed-out command the
+        # model can't see the status of would be reasoned about as a success.
+        status_suffix = ""
         if status == "aborted":
-            text += "\n[command aborted]"
+            status_suffix = "\n[command aborted]"
         elif status == "timeout":
-            text += f"\n[command timed out after {timeout_s:.0f}s]"
+            status_suffix = f"\n[command timed out after {timeout_s:.0f}s]"
         elif proc.returncode not in (0, None):
-            text += f"\n[exit code: {proc.returncode}]"
+            status_suffix = f"\n[exit code: {proc.returncode}]"
+        text += status_suffix
 
         if not text.strip():
             text = "(no output)"
+
+        # The full output already streamed to the progress surface via
+        # ``on_update``. When the caller asked to exclude it from context, the
+        # model sees only a short stub so noisy output doesn't bloat the window —
+        # but the status suffix is appended so a failure still surfaces.
+        if exclude_from_context:
+            stub = (
+                f"[output shown to user; {len(out)} bytes omitted from context]"
+                + status_suffix
+            )
+            return ToolResult(content=[TextContent(text=stub)])
         return ToolResult(content=[TextContent(text=text)])
 
     return AgentTool(schema=schema, execute=_execute, execution_mode="sequential")

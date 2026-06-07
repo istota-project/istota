@@ -75,10 +75,20 @@ def make_provider(config):
 
     kind = getattr(config, "provider", "openai_compat")
     if kind == "openai_compat":
+        base_url = getattr(config, "base_url", "https://api.anthropic.com/v1")
+        # Caching is tri-state. ``None`` (no explicit setting) defaults on for
+        # Anthropic (the default deployment) and off everywhere else, so a
+        # plain-OpenAI / local endpoint that rejects ``cache_control`` never
+        # sees it. An explicit ``True``/``False`` always wins.
+        pc = getattr(config, "prompt_caching", None)
+        if pc is None:
+            caching = "api.anthropic.com" in base_url
+        else:
+            caching = bool(pc)
         return OpenAICompatibleProvider(
             api_key=getattr(config, "api_key", ""),
-            base_url=getattr(config, "base_url", "https://api.anthropic.com/v1"),
+            base_url=base_url,
             extra_headers=getattr(config, "extra_headers", None),
-            prompt_caching=getattr(config, "prompt_caching", False),
+            prompt_caching=caching,
         )
     raise ValueError(f"Unknown provider: {kind!r}")
