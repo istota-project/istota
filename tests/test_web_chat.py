@@ -323,6 +323,40 @@ class TestChatMessagesApi:
         assert data["messages"][0]["text"] == "hello there"
         assert data["active_task"] is not None  # task is pending
 
+    async def test_history_multiple_in_flight_ordered(self, chat_client):
+        """Several queued messages each surface a user msg + an in-flight
+        assistant placeholder, and active_tasks lists them oldest-first so the
+        client can resume one and queue the rest in order."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        task_ids = []
+        for text in ("first", "second", "third"):
+            r = await chat_client.post(
+                f"/istota/api/chat/rooms/{room['id']}/messages",
+                json={"text": text}, cookies=cookies,
+                headers={"origin": "https://example.com"},
+            )
+            task_ids.append(r.json()["task_id"])
+
+        data = (await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )).json()
+
+        # Oldest-first, all three in-flight.
+        assert [t["id"] for t in data["active_tasks"]] == task_ids
+        assert data["active_task"]["id"] == task_ids[0]
+
+        # Each task contributes a user message and an in-flight assistant slot,
+        # interleaved in order.
+        roles = [(m["role"], m["task_id"]) for m in data["messages"]]
+        assert roles == [
+            ("user", task_ids[0]), ("assistant", task_ids[0]),
+            ("user", task_ids[1]), ("assistant", task_ids[1]),
+            ("user", task_ids[2]), ("assistant", task_ids[2]),
+        ]
+        assistants = [m for m in data["messages"] if m["role"] == "assistant"]
+        assert all(m["text"] == "" and m["status"] == "pending" for m in assistants)
+
     async def test_rate_limit_returns_429(self, chat_client):
         import istota.web_app as mod
         mod._config.web.chat.rate_limit_messages = 2

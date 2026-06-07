@@ -686,7 +686,12 @@ def claim_task(
         params.append(queue)
 
     # Per-channel gate: one active foreground task per conversation_token.
-    # Skip pending fg tasks whose channel already has a locked/running fg task.
+    # Skip pending fg tasks whose channel already has an active fg task.
+    # "Active" includes pending_confirmation: a task parked awaiting the user's
+    # confirmation still owns the room, so the next queued message must wait
+    # rather than barge ahead of it (web chat's single-active-per-room + queue).
+    # Talk is unaffected — it cancels pending confirmations in the same poll
+    # transaction before creating the new task, so none is left to block on.
     # Tasks with no conversation_token (cron, email routed to talk later) and
     # background-queue tasks are unaffected.
     if queue == "foreground" or queue is None:
@@ -700,7 +705,7 @@ def claim_task(
                     SELECT 1 FROM tasks t2
                     WHERE t2.conversation_token = tasks.conversation_token
                     AND t2.queue = 'foreground'
-                    AND t2.status IN ('locked', 'running')
+                    AND t2.status IN ('locked', 'running', 'pending_confirmation')
                     AND t2.cancel_requested = 0
                     AND t2.id != tasks.id
                 )

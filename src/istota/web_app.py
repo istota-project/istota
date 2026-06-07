@@ -1257,7 +1257,11 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
         ).fetchall()
     rows = list(reversed(rows))
     messages: list[dict] = []
-    active: dict | None = None
+    # In-flight tasks, oldest-first. The room runs them one at a time (the
+    # per-channel claim gate serializes them), so the client streams them in
+    # this order: resume the first, queue the rest. `active_task` is kept as
+    # the oldest for back-compat.
+    active_tasks: list[dict] = []
     for r in rows:
         messages.append({
             "role": "user", "text": r["prompt"], "task_id": r["id"],
@@ -1276,15 +1280,26 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
                 "task_id": r["id"], "status": status, "confirmation": True,
                 "created_at": r["created_at"],
             })
-            active = {"id": r["id"], "status": status}
+            active_tasks.append({"id": r["id"], "status": status})
         elif status in ("failed", "cancelled"):
             messages.append({
                 "role": "assistant", "text": r["result"] or r["error"] or "",
                 "task_id": r["id"], "status": status, "created_at": r["created_at"],
             })
         else:  # pending / locked / running
-            active = {"id": r["id"], "status": status}
-    return {"messages": messages, "active_task": active}
+            # Emit a placeholder assistant slot so the transcript stays ordered
+            # (user msg → its in-flight reply) and the client has a cid to bind
+            # this task's stream to on reload.
+            messages.append({
+                "role": "assistant", "text": "", "task_id": r["id"],
+                "status": status, "created_at": r["created_at"],
+            })
+            active_tasks.append({"id": r["id"], "status": status})
+    return {
+        "messages": messages,
+        "active_task": active_tasks[0] if active_tasks else None,
+        "active_tasks": active_tasks,
+    }
 
 
 def _chat_upload_roots(username: str) -> list[Path]:
