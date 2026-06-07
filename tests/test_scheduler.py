@@ -49,6 +49,7 @@ from istota.config import (
     EmailConfig,
     MemorySearchConfig,
     ResourceConfig,
+    LocationReceiverConfig,
 )
 from istota import db
 from istota.transport.email.outbound import (
@@ -6382,3 +6383,53 @@ class TestCheckDbHealth:
         reports = check_db_health(config)
         # Only the framework DB — no mount means no per-user paths to probe.
         assert [r.label for r in reports] == ["framework"]
+
+
+class TestReconcileVisitsMissingDb:
+    """A location-enabled user who has never ingested a ping has no
+    ``location.db`` (the file and its parent dir are created on first
+    webhook write). The reconcile/cleanup sweeps must skip such users
+    silently instead of trying to open a non-existent DB and logging an
+    exception traceback every tick.
+    """
+
+    def _config(self, tmp_path):
+        mount = tmp_path / "mount"
+        framework_db = tmp_path / "istota.db"
+        db.init_db(framework_db)
+        return Config(
+            db_path=framework_db,
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(),
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=mount,
+            location=LocationReceiverConfig(reconcile_enabled=True),
+            users={"stefan": UserConfig()},
+        )
+
+    def test_reconcile_skips_user_with_no_location_db(self, tmp_path, caplog):
+        import logging
+
+        from istota.scheduler import _reconcile_visits_for_all_users
+
+        config = self._config(tmp_path)
+
+        with caplog.at_level(logging.ERROR, logger="istota.scheduler"):
+            _reconcile_visits_for_all_users(config)
+
+        assert "Visit reconciliation failed" not in caplog.text
+
+    def test_cleanup_pings_skips_user_with_no_location_db(self, tmp_path, caplog):
+        import logging
+
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path)
+        config.scheduler.location_ping_retention_days = 30
+
+        with caplog.at_level(logging.ERROR, logger="istota.scheduler"):
+            run_cleanup_checks(config)
+
+        assert "Failed to clean up location pings" not in caplog.text
