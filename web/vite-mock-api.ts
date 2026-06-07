@@ -793,6 +793,10 @@ const handlers: MockHandler[] = [
 			max_foreground_workers: 0,
 			max_background_workers: 0,
 			site_enabled: false,
+			default_destination: 'talk',
+			routing: {},
+			purposes: ['reply', 'alert', 'log', 'briefing', 'notification'],
+			delivery_surfaces: ['email', 'istota_file', 'ntfy', 'stream', 'talk'],
 		};
 		let nextResourceId = 100;
 		const mockDbResources: {

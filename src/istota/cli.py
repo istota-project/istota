@@ -785,6 +785,40 @@ def cmd_user_ensure(args):
         updates["disabled_modules"] = names
     if args.site_enabled is not None:
         updates["site_enabled"] = args.site_enabled
+    if args.default_destination is not None:
+        from .transport import parse_output_target
+        if args.default_destination and not parse_output_target(args.default_destination):
+            print(
+                f"Error: invalid default destination descriptor: "
+                f"{args.default_destination!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        updates["default_destination"] = args.default_destination or "talk"
+    if args.route is not None:
+        from .transport import parse_output_target
+        routing: dict[str, str] = {}
+        for entry in args.route:
+            purpose, sep, descriptor = entry.partition("=")
+            purpose = purpose.strip()
+            descriptor = descriptor.strip()
+            if not sep or not purpose:
+                print(
+                    f"Error: --route expects purpose=descriptor, got {entry!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            # Empty descriptor clears the route for that purpose.
+            if descriptor and not parse_output_target(descriptor):
+                print(
+                    f"Error: invalid route descriptor for {purpose!r}: "
+                    f"{descriptor!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if descriptor:
+                routing[purpose] = descriptor
+        updates["routing"] = routing
 
     profile, state = user_profiles.update_profile_with_status(db_path, user_id, **updates)
 
@@ -801,6 +835,10 @@ def cmd_user_ensure(args):
         print(f"  trusted_senders: {', '.join(profile.trusted_email_senders)}")
     if profile.disabled_modules:
         print(f"  disabled_modules: {', '.join(profile.disabled_modules)}")
+    if profile.default_destination and profile.default_destination != "talk":
+        print(f"  default_destination: {profile.default_destination}")
+    if profile.routing:
+        print(f"  routing: {', '.join(f'{k}={v}' for k, v in sorted(profile.routing.items()))}")
     print(f"STATE: {state}")
 
 
@@ -832,6 +870,8 @@ def cmd_user_show(args):
         "disabled_skills": profile.disabled_skills,
         "disabled_modules": profile.disabled_modules,
         "trusted_email_senders": profile.trusted_email_senders,
+        "routing": profile.routing,
+        "default_destination": profile.default_destination,
     }, indent=2))
 
 
@@ -1273,6 +1313,22 @@ def main():
         help=(
             "Module to opt this user out of (repeatable). One of "
             "feeds, money, location. Pass an empty value to clear."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--default-destination",
+        help=(
+            "Fallback delivery descriptor (e.g. talk, email, both, talk:<token>). "
+            "Default 'talk'."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--route", action="append", metavar="PURPOSE=DESCRIPTOR",
+        help=(
+            "Per-purpose delivery route (repeatable; replaces the routing table "
+            "when passed). PURPOSE is one of reply/alert/log/briefing/"
+            "notification; DESCRIPTOR is an output_target like email or "
+            "matrix:<room>. Empty descriptor clears that purpose."
         ),
     )
     site_group = user_ensure_parser.add_mutually_exclusive_group()

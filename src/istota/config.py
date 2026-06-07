@@ -246,6 +246,8 @@ class UserConfig:
     disabled_skills: list[str] = field(default_factory=list)  # skills to exclude from selection
     trusted_email_senders: list[str] = field(default_factory=list)  # patterns for trusted senders
     disabled_modules: list[str] = field(default_factory=list)  # modules to disable (default-on otherwise)
+    routing: dict[str, str] = field(default_factory=dict)  # purpose -> output_target descriptor
+    default_destination: str = "talk"  # fallback delivery descriptor
 
 
 @dataclass
@@ -858,6 +860,8 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         disabled_skills=user_data.get("disabled_skills", []),
         trusted_email_senders=user_data.get("trusted_email_senders", []),
         disabled_modules=user_data.get("disabled_modules", []),
+        routing=dict(user_data.get("routing", {}) or {}),
+        default_destination=user_data.get("default_destination", "talk") or "talk",
     )
 
 

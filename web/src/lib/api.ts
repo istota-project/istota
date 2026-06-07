@@ -589,6 +589,11 @@ export interface UserProfile {
 	max_foreground_workers: number;
 	max_background_workers: number;
 	site_enabled: boolean;
+	default_destination: string;
+	routing: Record<string, string>;
+	// Read-only hints from the server for rendering the routing UI.
+	purposes?: string[];
+	delivery_surfaces?: string[];
 }
 
 export async function getProfile(): Promise<{ profile: UserProfile | null }> {

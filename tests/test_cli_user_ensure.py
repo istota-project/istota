@@ -38,6 +38,8 @@ class _FakeArgs:
             "disabled_skill": None,
             "disabled_module": None,
             "site_enabled": None,
+            "default_destination": None,
+            "route": None,
         }
         defaults.update(kwargs)
         self.__dict__.update(defaults)
@@ -148,3 +150,37 @@ class TestUserEnsureDisabledModule:
         ))
         profile = user_profiles.get_profile(db_path, "alice")
         assert profile.disabled_modules == ["location"]
+
+
+class TestUserEnsureRouting:
+    def test_route_and_default_destination_persist(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice",
+            route=["alert=email", "briefing=talk:room"],
+            default_destination="both",
+        ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.routing == {"alert": "email", "briefing": "talk:room"}
+        assert profile.default_destination == "both"
+
+    def test_route_empty_descriptor_clears_purpose(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", route=["alert="],
+        ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.routing == {}
+
+    def test_route_without_equals_exits(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        with pytest.raises(SystemExit):
+            cmd_user_ensure(_FakeArgs(
+                config=str(cfg), name="alice", route=["alert"],
+            ))

@@ -15,9 +15,12 @@ from istota.notifications import (
     _send_email,
     _send_ntfy,
     _send_talk,
+    is_channel_configured,
     resolve_conversation_token,
+    resolve_destination,
     send_notification,
 )
+from istota.transport import Destination
 
 
 def _ntfy_secrets(**values: str):
@@ -321,3 +324,80 @@ class TestSendNotification:
         mock_ntfy.assert_called_once_with(
             config, "alice", "msg", title="T", priority=5, tags="urgent",
         )
+
+
+class TestResolveDestination:
+    """Purpose-keyed routing table precedence."""
+
+    def test_routing_entry_wins(self):
+        config = Config(users={"alice": UserConfig(
+            routing={"alert": "email"}, alerts_channel="achan",
+        )})
+        assert resolve_destination(config, "alice", "alert") == Destination("email")
+
+    def test_legacy_alerts_channel_for_alert(self):
+        config = Config(users={"alice": UserConfig(alerts_channel="achan")})
+        assert resolve_destination(config, "alice", "alert") == Destination("talk", "achan")
+
+    def test_legacy_log_channel_for_log(self):
+        config = Config(users={"alice": UserConfig(log_channel="lchan")})
+        assert resolve_destination(config, "alice", "log") == Destination("talk", "lchan")
+
+    def test_briefing_token_for_briefing_purpose(self):
+        config = Config(users={"alice": UserConfig(
+            briefings=[BriefingConfig(name="m", cron="0 8 * * *", conversation_token="brt")],
+        )})
+        assert resolve_destination(config, "alice", "briefing") == Destination("talk", "brt")
+
+    def test_default_destination_fallback(self):
+        config = Config(users={"alice": UserConfig(default_destination="email")})
+        assert resolve_destination(config, "alice", "notification") == Destination("email")
+
+    def test_instance_fallback_bare_talk(self):
+        config = Config(users={"alice": UserConfig()})
+        assert resolve_destination(config, "alice", "notification") == Destination("talk", None)
+
+
+class TestResolveConversationTokenRouting:
+    def test_routing_alert_talk_route_wins(self):
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc"),
+            users={"alice": UserConfig(
+                routing={"alert": "talk:routed"}, alerts_channel="achan",
+            )},
+        )
+        assert resolve_conversation_token(config, "alice") == "routed"
+
+    def test_off_talk_routing_does_not_break_talk_fallback(self):
+        # alert routed to email; resolve_conversation_token must still fall back
+        # to alerts_channel (so is_channel_configured._talk_ok stays True).
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc"),
+            users={"alice": UserConfig(
+                routing={"alert": "email"}, alerts_channel="achan",
+            )},
+        )
+        assert resolve_conversation_token(config, "alice") == "achan"
+        assert is_channel_configured(config, "alice", "talk") is True
+
+    def test_legacy_order_preserved_without_routing(self):
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc"),
+            users={"alice": UserConfig(
+                alerts_channel="achan",
+                briefings=[BriefingConfig(name="m", cron="0 8 * * *", conversation_token="brt")],
+            )},
+        )
+        assert resolve_conversation_token(config, "alice") == "achan"
+
+
+class TestSendNotificationConversationTokenOverride:
+    @patch("istota.notifications._send_email")
+    @patch("istota.notifications._send_talk")
+    def test_conversation_token_overrides_bare_talk(self, mock_talk, mock_email):
+        mock_talk.return_value = True
+        mock_email.return_value = True
+        config = Config(users={"alice": UserConfig()})
+        # heartbeat pattern: surface="both", conversation_token=X → Talk leg X.
+        send_notification(config, "alice", "msg", surface="both", conversation_token="roomX")
+        assert mock_talk.call_args[0][3] == "roomX"

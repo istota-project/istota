@@ -546,6 +546,8 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     disabled_skills TEXT NOT NULL DEFAULT '[]',          -- JSON array
     trusted_email_senders TEXT NOT NULL DEFAULT '[]',    -- JSON array (patterns)
     disabled_modules TEXT NOT NULL DEFAULT '[]',         -- JSON array (default-on otherwise)
+    routing TEXT NOT NULL DEFAULT '{}',                  -- JSON object: purpose -> output_target descriptor
+    default_destination TEXT NOT NULL DEFAULT 'talk',    -- fallback delivery descriptor
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

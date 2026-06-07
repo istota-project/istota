@@ -282,6 +282,25 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass  # Column already dropped or never existed.
 
+    # User profiles: purpose-keyed delivery routing. `routing` is a JSON object
+    # {purpose -> output_target descriptor}; `default_destination` is the
+    # fallback descriptor. Defaults reproduce current behaviour (everything →
+    # Talk).
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "routing TEXT NOT NULL DEFAULT '{}'"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "default_destination TEXT NOT NULL DEFAULT 'talk'"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError
     # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id

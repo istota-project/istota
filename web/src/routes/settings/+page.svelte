@@ -94,6 +94,11 @@
 			]);
 			services = svcResp.services;
 			profile = profResp.profile;
+			if (profile) {
+				// Normalize optional routing fields so the bindings are safe.
+				profile.routing = profile.routing || {};
+				profile.default_destination = profile.default_destination || 'talk';
+			}
 			initialProfileJson = profile ? JSON.stringify(profile) : '';
 			resourceTypes = resResp.types;
 			resources = resResp.resources;
@@ -125,6 +130,17 @@
 		if (next.has(name)) next.delete(name);
 		else next.add(name);
 		profile.disabled_modules = [...next];
+	}
+
+	const DEFAULT_PURPOSES = ['reply', 'alert', 'log', 'briefing', 'notification'];
+
+	function setRoute(purpose: string, value: string) {
+		if (!profile) return;
+		const next = { ...(profile.routing || {}) };
+		const v = (value || '').trim();
+		if (v) next[purpose] = v;
+		else delete next[purpose];
+		profile.routing = next;
 	}
 
 	function connectGoogle() {
@@ -173,6 +189,8 @@
 				disabled_skills: profile.disabled_skills,
 				disabled_modules: profile.disabled_modules,
 				site_enabled: profile.site_enabled,
+				default_destination: profile.default_destination || 'talk',
+				routing: profile.routing || {},
 			};
 			await updateProfile(patch);
 			info = 'Profile saved.';
@@ -464,6 +482,44 @@
 					</p>
 				</div>
 			{/if}
+			<SettingsField label="Default delivery destination">
+				<input
+					type="text"
+					value={profile.default_destination || 'talk'}
+					placeholder="talk"
+					onchange={(e) => {
+						if (profile)
+							profile.default_destination =
+								(e.currentTarget as HTMLInputElement).value.trim() || 'talk';
+					}}
+				/>
+			</SettingsField>
+			<div class="field">
+				<span>Delivery routing (per purpose)</span>
+				<div class="route-grid">
+					{#each profile.purposes && profile.purposes.length ? profile.purposes : DEFAULT_PURPOSES as purpose (purpose)}
+						<label class="route-row">
+							<span class="route-purpose">{purpose}</span>
+							<input
+								type="text"
+								value={(profile.routing || {})[purpose] || ''}
+								placeholder="(default)"
+								onchange={(e) =>
+									setRoute(purpose, (e.currentTarget as HTMLInputElement).value)}
+							/>
+						</label>
+					{/each}
+				</div>
+				<p class="hint">
+					Where each kind of message goes. A destination is
+					<code>surface[:channel]</code> (e.g. <code>email</code>,
+					<code>talk:&lt;token&gt;</code>, <code>talk,email</code>). Leave blank to
+					use the default destination.
+					{#if profile.delivery_surfaces && profile.delivery_surfaces.length}
+						Available surfaces: {profile.delivery_surfaces.join(', ')}.
+					{/if}
+				</p>
+			</div>
 			<SettingsField label="Static website hosting at /~user/" checkbox>
 				<input type="checkbox" bind:checked={profile.site_enabled} />
 			</SettingsField>

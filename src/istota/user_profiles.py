@@ -51,6 +51,10 @@ class UserProfile:
     disabled_skills: list[str] = field(default_factory=list)
     trusted_email_senders: list[str] = field(default_factory=list)
     disabled_modules: list[str] = field(default_factory=list)
+    # Purpose-keyed delivery routing: {purpose -> output_target descriptor}.
+    routing: dict[str, str] = field(default_factory=dict)
+    # Default delivery descriptor when no per-purpose route applies.
+    default_destination: str = "talk"
 
 
 _PROFILE_COLUMNS = (
@@ -59,7 +63,14 @@ _PROFILE_COLUMNS = (
     "site_enabled", "max_foreground_workers", "max_background_workers",
     "disabled_skills", "trusted_email_senders",
     "disabled_modules",
+    "routing", "default_destination",
 )
+
+# Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
+_DICT_COLUMNS = frozenset({"routing"})
+_LIST_COLUMNS = frozenset({
+    "email_addresses", "disabled_skills", "trusted_email_senders", "disabled_modules",
+})
 
 
 @contextmanager
@@ -95,7 +106,29 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         disabled_skills=_parse_json_list(row["disabled_skills"]),
         trusted_email_senders=_parse_json_list(row["trusted_email_senders"]),
         disabled_modules=_parse_json_list(row["disabled_modules"]),
+        routing=_parse_json_dict(row["routing"]),
+        default_destination=row["default_destination"] or "talk",
     )
+
+
+def _parse_json_dict(value: str | None) -> dict[str, str]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError) as e:
+        logger.warning(
+            "user_profiles: failed to decode JSON dict column (%s); falling back to {}",
+            e,
+        )
+        return {}
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "user_profiles: JSON dict column has non-dict type %s; falling back to {}",
+            type(parsed).__name__,
+        )
+        return {}
+    return {str(k): str(v) for k, v in parsed.items()}
 
 
 def _parse_json_list(value: str | None) -> list[str]:
@@ -198,6 +231,8 @@ def ensure_profile(
         trusted_email_senders=list(_attr(seed_from, "trusted_email_senders") or []),
         disabled_skills=list(_attr(seed_from, "disabled_skills") or []),
         disabled_modules=list(_attr(seed_from, "disabled_modules") or []),
+        routing=dict(_attr(seed_from, "routing") or {}),
+        default_destination=_attr(seed_from, "default_destination") or "talk",
     )
     _insert(db_path, profile)
     logger.info("ensured user_profile user=%s (new row)", user_id)
@@ -292,8 +327,16 @@ def update_profile_with_status(
             same = False  # update_profile will raise — let it; treat as change
             break
         current = getattr(existing, col)
-        if col in {"email_addresses", "disabled_skills", "trusted_email_senders", "disabled_modules"}:
+        if col in _LIST_COLUMNS:
             if list(current or []) != list(value or []):
+                same = False
+                break
+        elif col in _DICT_COLUMNS:
+            if dict(current or {}) != dict(value or {}):
+                same = False
+                break
+        elif col == "default_destination":
+            if (current or "talk") != (value or "talk"):
                 same = False
                 break
         elif col == "site_enabled":
@@ -339,12 +382,16 @@ def update_profile(
     sets: list[str] = []
     params: list[object] = []
     for col, value in fields.items():
-        if col in {"email_addresses", "disabled_skills", "trusted_email_senders", "disabled_modules"}:
+        if col in _LIST_COLUMNS:
             value = json.dumps(list(value or []))
+        elif col in _DICT_COLUMNS:
+            value = json.dumps(dict(value or {}))
         elif col == "site_enabled":
             value = 1 if value else 0
         elif col in {"max_foreground_workers", "max_background_workers"}:
             value = int(value or 0)
+        elif col == "default_destination":
+            value = str(value) if value else "talk"
         else:
             value = str(value or "")
         sets.append(f"{col} = ?")
@@ -396,6 +443,8 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         json.dumps(list(profile.disabled_skills)),
         json.dumps(list(profile.trusted_email_senders)),
         json.dumps(list(profile.disabled_modules)),
+        json.dumps(dict(profile.routing)),
+        profile.default_destination or "talk",
     )
     cols_sql = ", ".join(insert_cols)
     if replace:
@@ -455,6 +504,8 @@ def import_from_user_configs(
             disabled_skills=list(getattr(user_config, "disabled_skills", []) or []),
             trusted_email_senders=list(getattr(user_config, "trusted_email_senders", []) or []),
             disabled_modules=list(getattr(user_config, "disabled_modules", []) or []),
+            routing=dict(getattr(user_config, "routing", {}) or {}),
+            default_destination=getattr(user_config, "default_destination", "") or "talk",
         )
         try:
             _insert(db_path, profile, replace=False)
@@ -486,6 +537,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
 
     setattr(user_config, "display_name", profile.display_name or getattr(user_config, "display_name", "") or profile.user_id)
     setattr(user_config, "timezone", profile.timezone or "UTC")
+    setattr(user_config, "default_destination", profile.default_destination or "talk")
     for attr in (
         "log_channel", "alerts_channel",
         "site_enabled", "max_foreground_workers", "max_background_workers",
@@ -500,5 +552,9 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
         "trusted_email_senders", "disabled_modules",
     ):
         setattr(user_config, attr, list(getattr(profile, attr) or []))
+
+    # routing is a dict but follows the same "DB owns it once the row exists"
+    # rule as the list fields.
+    setattr(user_config, "routing", dict(profile.routing or {}))
 
     return user_config
