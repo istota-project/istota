@@ -98,8 +98,61 @@ class TestSelectRelevantContext:
         assert result == history[-2:]
 
     @patch("istota.context.subprocess.run")
-    def test_triage_error_falls_back_to_recent(self, mock_run):
-        """On triage failure, guaranteed recent messages still returned."""
+    def test_injected_completer_used_instead_of_cli(self, mock_run):
+        """When a completer is supplied (native brain), the `claude` CLI is not invoked."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)  # older = [0,1,2], recent = last 2
+        calls = []
+
+        def completer(prompt):
+            calls.append(prompt)
+            return '{"relevant_ids": [0, 2]}'
+
+        result = select_relevant_context("test", history, config, completer=completer)
+
+        mock_run.assert_not_called()  # never shells out to `claude`
+        assert len(calls) == 1
+        # triaged 0, 2 + guaranteed last 2
+        assert result == [history[0], history[2], history[3], history[4]]
+
+    @patch("istota.context.subprocess.run")
+    def test_completer_returning_none_fails_open(self, mock_run):
+        """Native completer unavailable (returns None) → include all older, no CLI."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        result = select_relevant_context(
+            "test", history, config, completer=lambda _p: None
+        )
+        mock_run.assert_not_called()
+        assert result == history
+
+    @patch("istota.context.subprocess.run")
+    def test_completer_raising_fails_open(self, mock_run):
+        """A completer that raises is caught and triage fails open."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+
+        def completer(_prompt):
+            raise RuntimeError("transport boom")
+
+        result = select_relevant_context("test", history, config, completer=completer)
+        mock_run.assert_not_called()
+        assert result == history
+
+    @patch("istota.context.subprocess.run")
+    def test_completer_empty_array_keeps_recent_only(self, mock_run):
+        """Completer judges nothing relevant → only guaranteed recent (not fail-open)."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        history = _history(5)
+        result = select_relevant_context(
+            "test", history, config, completer=lambda _p: '{"relevant_ids": []}'
+        )
+        mock_run.assert_not_called()
+        assert result == history[-2:]
+
+    @patch("istota.context.subprocess.run")
+    def test_triage_invalid_json_fails_open(self, mock_run):
+        """On unparseable output, fail open: include ALL older + recent."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = _history(5)
         mock_run.return_value = subprocess.CompletedProcess(
@@ -108,27 +161,27 @@ class TestSelectRelevantContext:
             stderr="",
         )
         result = select_relevant_context("test", history, config)
-        # Fallback: guaranteed recent only
-        assert result == history[-2:]
+        # Fail open: older messages included rather than silently dropped
+        assert result == history
 
     @patch("istota.context.subprocess.run")
-    def test_triage_timeout_falls_back_to_recent(self, mock_run):
+    def test_triage_timeout_fails_open(self, mock_run):
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = _history(5)
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=30)
         result = select_relevant_context("test", history, config)
-        assert result == history[-2:]
+        assert result == history
 
     @patch("istota.context.subprocess.run")
-    def test_triage_cli_not_found_falls_back_to_recent(self, mock_run):
+    def test_triage_cli_not_found_fails_open(self, mock_run):
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = _history(5)
         mock_run.side_effect = FileNotFoundError("claude not found")
         result = select_relevant_context("test", history, config)
-        assert result == history[-2:]
+        assert result == history
 
     @patch("istota.context.subprocess.run")
-    def test_triage_nonzero_return_falls_back_to_recent(self, mock_run):
+    def test_triage_nonzero_return_fails_open(self, mock_run):
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = _history(5)
         mock_run.return_value = subprocess.CompletedProcess(
@@ -137,7 +190,7 @@ class TestSelectRelevantContext:
             stderr="error occurred",
         )
         result = select_relevant_context("test", history, config)
-        assert result == history[-2:]
+        assert result == history
 
     @patch("istota.context.subprocess.run")
     def test_triage_markdown_code_fence(self, mock_run):

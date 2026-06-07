@@ -5,7 +5,7 @@ import logging
 import re
 import subprocess
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .brain import make_brain
@@ -36,6 +36,7 @@ def select_relevant_context(
     current_prompt: str,
     history: list[ConversationMessage],
     config: Config,
+    completer: "Callable[[str], str | None] | None" = None,
 ) -> list[ConversationMessage]:
     """
     Select which previous messages are relevant to the current request.
@@ -45,8 +46,16 @@ def select_relevant_context(
     - Older messages beyond that are triaged by a selection model.
     - If selection is disabled or history is short, all messages are included.
 
+    ``completer`` is a ``prompt -> raw_output | None`` callable for triage
+    inference. When omitted, the default `claude -p -` subprocess path runs —
+    so the active brain's transport can be injected (the native brain passes
+    its own provider completer instead of shelling out to the CLI it isn't
+    using). See ``_triage_older_messages``.
+
     Returns a filtered list of ConversationMessages in chronological order.
-    On any selection error, falls back to the guaranteed recent messages.
+    On any triage failure, fails open: includes all the older messages
+    (matching the triage prompt's own "when in doubt, include" rule) so a
+    transient triage hiccup never silently drops context.
     """
     if not history:
         return []
@@ -85,7 +94,7 @@ def select_relevant_context(
 
     # Triage older messages with the selection model
     selected_older = _triage_older_messages(
-        current_prompt, older_history, config
+        current_prompt, older_history, config, completer=completer
     )
 
     # Combine: selected older + guaranteed recent (chronological order)
@@ -101,12 +110,86 @@ def select_relevant_context(
     return selected
 
 
+def _claude_cli_triage(prompt: str, model: str, timeout: float) -> str | None:
+    """Default triage inference: a one-shot `claude -p -` completion.
+
+    Returns the raw model output, or None on nonzero exit / timeout / missing
+    CLI / any subprocess error. JSON parsing and validation stay in
+    ``_parse_relevant_ids`` so they apply uniformly across inference backends.
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "-", "--model", model],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Context triage failed (returncode=%d): %s",
+                result.returncode,
+                result.stderr or result.stdout,
+            )
+            return None
+        return result.stdout
+    except subprocess.TimeoutExpired:
+        logger.warning("Context triage timed out after %.1fs", timeout)
+        return None
+    except FileNotFoundError:
+        logger.error("Claude CLI not found for context triage")
+        return None
+    except Exception as e:  # never let triage crash context assembly
+        logger.warning("Context triage error: %s", e)
+        return None
+
+
+def _parse_relevant_ids(raw: str | None, n: int) -> list[int] | None:
+    """Parse a `{"relevant_ids": [...]}` triage response.
+
+    Returns sorted valid indices in [0, n), or None if the output is missing /
+    unparseable / malformed. None signals the caller to fail open (include all
+    older messages) rather than silently dropping context.
+    """
+    if not raw:
+        return None
+    output = raw.strip()
+
+    code_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", output, re.DOTALL)
+    if code_block:
+        output = code_block.group(1).strip()
+    else:
+        json_match = re.search(r"\{.*\}", output, re.DOTALL)
+        if json_match:
+            output = json_match.group(0)
+
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError as e:
+        logger.warning("Context triage JSON parse error: %s (output: %s)", e, output[:200])
+        return None
+
+    relevant_ids = data.get("relevant_ids") if isinstance(data, dict) else None
+    if not isinstance(relevant_ids, list):
+        logger.warning("Context triage returned invalid format: %s", data)
+        return None
+
+    valid_ids = [idx for idx in relevant_ids if isinstance(idx, int) and 0 <= idx < n]
+    return sorted(valid_ids)
+
+
 def _triage_older_messages(
     current_prompt: str,
     older_history: list[ConversationMessage],
     config: Config,
+    completer: "Callable[[str], str | None] | None" = None,
 ) -> list[ConversationMessage]:
-    """Run the selection model to triage older messages. Returns selected messages in order."""
+    """Run the selection model to triage older messages. Returns selected messages in order.
+
+    On any triage failure (timeout, transport error, unparseable output) this
+    fails open and returns *all* the older messages, matching the prompt's own
+    "when in doubt, include" rule.
+    """
 
     def _format_triage_msg(i: int, msg: ConversationMessage) -> str:
         ts = msg.created_at[:16] if msg.created_at else "unknown"
@@ -149,69 +232,37 @@ Rules:
 - Only exclude messages that are clearly unrelated (different topic, fully resolved, trivial small talk)
 - Respond with ONLY the JSON, no other text"""
 
-    try:
-        result = subprocess.run(
-            [
-                "claude",
-                "-p", "-",
-                "--model", make_brain(config.brain).resolve_model_name(config.conversation.selection_model),
-            ],
-            input=selection_prompt,
-            capture_output=True,
-            text=True,
-            timeout=config.conversation.selection_timeout,
+    if completer is not None:
+        try:
+            raw = completer(selection_prompt)
+        except Exception as e:  # never let triage crash context assembly
+            logger.warning("Context triage error: %s", e)
+            raw = None
+    else:
+        model = make_brain(config.brain).resolve_model_name(
+            config.conversation.selection_model
+        )
+        raw = _claude_cli_triage(
+            selection_prompt, model, config.conversation.selection_timeout
         )
 
-        if result.returncode != 0:
-            logger.warning(
-                "Context triage failed (returncode=%d): %s",
-                result.returncode,
-                result.stderr or result.stdout,
-            )
-            return []
-
-        # Parse JSON response — extract from code blocks or raw JSON anywhere in output
-        output = result.stdout.strip()
-
-        code_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", output, re.DOTALL)
-        if code_block:
-            output = code_block.group(1).strip()
-        else:
-            json_match = re.search(r"\{.*\}", output, re.DOTALL)
-            if json_match:
-                output = json_match.group(0)
-
-        data = json.loads(output)
-        relevant_ids = data.get("relevant_ids", [])
-
-        if not isinstance(relevant_ids, list):
-            logger.warning("Context triage returned invalid format: %s", data)
-            return []
-
-        # Filter to valid integer indices, preserve chronological order
-        valid_ids = [idx for idx in relevant_ids if isinstance(idx, int) and 0 <= idx < len(older_history)]
-        selected = [older_history[idx] for idx in sorted(valid_ids)]
-
-        logger.debug(
-            "Triage selected %d/%d older messages (ids: %s)",
-            len(selected),
+    ids = _parse_relevant_ids(raw, len(older_history))
+    if ids is None:
+        # Fail open: a triage hiccup should add context, not silently drop it.
+        logger.warning(
+            "Context triage unavailable; including all %d older messages",
             len(older_history),
-            relevant_ids,
         )
-        return selected
+        return older_history
 
-    except subprocess.TimeoutExpired:
-        logger.warning("Context triage timed out after %.1fs", config.conversation.selection_timeout)
-        return []
-    except json.JSONDecodeError as e:
-        logger.warning("Context triage JSON parse error: %s (output: %s)", e, output[:200] if 'output' in dir() else "N/A")
-        return []
-    except FileNotFoundError:
-        logger.error("Claude CLI not found for context triage")
-        return []
-    except Exception as e:
-        logger.warning("Context triage error: %s", e)
-        return []
+    selected = [older_history[idx] for idx in ids]
+    logger.debug(
+        "Triage selected %d/%d older messages (ids: %s)",
+        len(selected),
+        len(older_history),
+        ids,
+    )
+    return selected
 
 
 def format_context_for_prompt(
@@ -366,12 +417,17 @@ def select_relevant_talk_context(
     current_prompt: str,
     messages: list[TalkMessage],
     config: "Config",
+    completer: "Callable[[str], str | None] | None" = None,
 ) -> list[TalkMessage]:
     """Select relevant Talk messages for context, mirroring select_relevant_context().
 
     Uses the same hybrid approach: guaranteed recent messages + LLM triage of older.
     The Talk API may fetch many messages (talk_context_limit), but we only triage
     the most recent `lookback_count` to keep the selection prompt manageable.
+
+    ``completer`` is a ``prompt -> raw_output | None`` callable for triage
+    inference (see ``select_relevant_context``); None uses the `claude` CLI.
+    On any triage failure, fails open and includes all the older messages.
     """
     if not messages:
         return []
@@ -398,7 +454,9 @@ def select_relevant_talk_context(
     if not older:
         return guaranteed_recent
 
-    selected_older = _triage_older_talk_messages(current_prompt, older, config)
+    selected_older = _triage_older_talk_messages(
+        current_prompt, older, config, completer=completer
+    )
     selected = selected_older + guaranteed_recent
 
     logger.info(
@@ -412,8 +470,14 @@ def _triage_older_talk_messages(
     current_prompt: str,
     older: list[TalkMessage],
     config: "Config",
+    completer: "Callable[[str], str | None] | None" = None,
 ) -> list[TalkMessage]:
-    """Run the selection model to triage older Talk messages."""
+    """Run the selection model to triage older Talk messages.
+
+    On any triage failure (timeout, transport error, unparseable output) this
+    fails open and returns *all* the older messages, matching the prompt's own
+    "when in doubt, include" rule.
+    """
 
     def _format_msg(i: int, msg: TalkMessage) -> str:
         ts = datetime.fromtimestamp(msg.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -453,41 +517,32 @@ Rules:
 - Only exclude messages that are clearly unrelated (different topic, fully resolved, trivial small talk)
 - Respond with ONLY the JSON, no other text"""
 
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "-", "--model", make_brain(config.brain).resolve_model_name(config.conversation.selection_model)],
-            input=selection_prompt,
-            capture_output=True,
-            text=True,
-            timeout=config.conversation.selection_timeout,
+    if completer is not None:
+        try:
+            raw = completer(selection_prompt)
+        except Exception as e:  # never let triage crash context assembly
+            logger.warning("Talk context triage error: %s", e)
+            raw = None
+    else:
+        model = make_brain(config.brain).resolve_model_name(
+            config.conversation.selection_model
+        )
+        raw = _claude_cli_triage(
+            selection_prompt, model, config.conversation.selection_timeout
         )
 
-        if result.returncode != 0:
-            logger.warning("Talk context triage failed (rc=%d)", result.returncode)
-            return []
+    ids = _parse_relevant_ids(raw, len(older))
+    if ids is None:
+        # Fail open: a triage hiccup should add context, not silently drop it.
+        logger.warning(
+            "Talk context triage unavailable; including all %d older messages",
+            len(older),
+        )
+        return older
 
-        output = result.stdout.strip()
-        code_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", output, re.DOTALL)
-        if code_block:
-            output = code_block.group(1).strip()
-        else:
-            json_match = re.search(r"\{.*\}", output, re.DOTALL)
-            if json_match:
-                output = json_match.group(0)
-
-        data = json.loads(output)
-        relevant_ids = data.get("relevant_ids", [])
-        if not isinstance(relevant_ids, list):
-            return []
-
-        valid_ids = [idx for idx in relevant_ids if isinstance(idx, int) and 0 <= idx < len(older)]
-        selected = [older[idx] for idx in sorted(valid_ids)]
-        logger.debug("Talk triage selected %d/%d older messages", len(selected), len(older))
-        return selected
-
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError, Exception) as e:
-        logger.warning("Talk context triage error: %s", e)
-        return []
+    selected = [older[idx] for idx in ids]
+    logger.debug("Talk triage selected %d/%d older messages", len(selected), len(older))
+    return selected
 
 
 def format_talk_context_for_prompt(

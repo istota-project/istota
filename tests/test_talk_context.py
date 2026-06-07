@@ -285,7 +285,8 @@ class TestSelectRelevantTalkContext:
         assert result[3].message_id == 8
         assert result[4].message_id == 9
 
-    def test_triage_error_returns_recent_only(self):
+    def test_triage_error_fails_open(self):
+        """A triage hiccup includes all older messages rather than dropping them."""
         config = _make_config(skip_selection_threshold=3, always_include_recent=2)
         messages = [
             TalkMessage(i, "alice", "Alice", False, f"msg {i}", 100 + i, None, "user", None)
@@ -295,10 +296,45 @@ class TestSelectRelevantTalkContext:
         with patch("istota.context.subprocess.run", side_effect=Exception("boom")):
             result = select_relevant_talk_context("hello", messages, config)
 
-        # Only guaranteed recent
-        assert len(result) == 2
-        assert result[0].message_id == 8
-        assert result[1].message_id == 9
+        # Fail open: all 10 messages (8 older + 2 recent), chronological order
+        assert [m.message_id for m in result] == list(range(10))
+
+    def test_injected_completer_used_instead_of_cli(self):
+        """When a completer is supplied (native brain), the `claude` CLI is not invoked."""
+        config = _make_config(skip_selection_threshold=3, always_include_recent=2)
+        messages = [
+            TalkMessage(i, "alice", "Alice", False, f"msg {i}", 100 + i, None, "user", None)
+            for i in range(10)
+        ]
+        calls = []
+
+        def completer(prompt):
+            calls.append(prompt)
+            return json.dumps({"relevant_ids": [0, 3, 5]})
+
+        with patch("istota.context.subprocess.run") as mock_run:
+            result = select_relevant_talk_context(
+                "hello", messages, config, completer=completer
+            )
+
+        mock_run.assert_not_called()
+        assert len(calls) == 1
+        # 3 triaged older + 2 guaranteed recent
+        assert [m.message_id for m in result] == [0, 3, 5, 8, 9]
+
+    def test_completer_returning_none_fails_open(self):
+        """Native completer unavailable (returns None) → include all older, no CLI."""
+        config = _make_config(skip_selection_threshold=3, always_include_recent=2)
+        messages = [
+            TalkMessage(i, "alice", "Alice", False, f"msg {i}", 100 + i, None, "user", None)
+            for i in range(10)
+        ]
+        with patch("istota.context.subprocess.run") as mock_run:
+            result = select_relevant_talk_context(
+                "hello", messages, config, completer=lambda _p: None
+            )
+        mock_run.assert_not_called()
+        assert [m.message_id for m in result] == list(range(10))
 
     def test_lookback_count_limits_triage_input(self):
         """Messages exceeding lookback_count are trimmed before triage."""
