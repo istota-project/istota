@@ -830,8 +830,9 @@
 
 # Write user profile rows into the user_profiles DB table.
 # Profile-shaped fields (display_name, email_addresses, log/alerts channels,
-# worker overrides, disabled_skills, trusted_email_senders, disabled_modules)
-# are authoritatively stored in the DB. The `user ensure` CLI is idempotent,
+# worker overrides, disabled_skills, trusted_email_senders, disabled_modules,
+# routing, default_destination) are authoritatively stored in the DB. The
+# `user ensure` CLI is idempotent,
 # prints STATE: created|updated|noop per call, and is the only path Ansible
 # uses to provision user profiles.
 #
@@ -854,6 +855,8 @@
     {% if user_item.value.max_background_workers is defined %}--max-background-workers {{ user_item.value.max_background_workers }}{% endif %}
     {% for skill in user_item.value.disabled_skills | default([]) %}--disabled-skill "{{ skill }}" {% endfor %}
     {% for module in user_item.value.disabled_modules | default([]) %}--disabled-module "{{ module }}" {% endfor %}
+    {% for purpose, descriptor in (user_item.value.routing | default({})).items() %}--route "{{ purpose }}={{ descriptor }}" {% endfor %}
+    {% if (user_item.value.default_destination | default('')) %}--default-destination "{{ user_item.value.default_destination }}"{% endif %}
     {% if user_item.value.site_enabled | default(false) %}--site-enabled{% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"

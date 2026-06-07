@@ -314,6 +314,17 @@ istota_experimental_features: []
 #     max_background_workers: 1    # per-user override (0 or omit = use global default)
 #     disabled_skills: []          # per-user skill exclusion list
 #     disabled_modules: []         # per-user module opt-outs; one of: feeds, money, location
+#     # Purpose-keyed delivery routing (routes notifications by purpose). Each
+#     # purpose maps to an output_target descriptor (talk / email / ntfy / both /
+#     # all / talk:<room> / comma lists). Purposes: reply, alert, log, briefing,
+#     # notification. When `routing:` is set, the listed purposes REPLACE the
+#     # stored table on each deploy; omit `routing:` entirely to leave a web-set
+#     # table untouched (same non-clobber rule as timezone, ISSUE-102).
+#     routing:
+#       alert: "ntfy"               # send alerts to the user's ntfy instead of Talk
+#       log: "talk:room123"
+#     default_destination: "talk"   # fallback descriptor when no purpose matches;
+#                                   # omit to leave the stored value (default "talk")
 #     resources:
 #       - type: "folder"
 #         path: "/alice/Projects"
