@@ -136,10 +136,14 @@ def _validate_effort(name: str, user_id: str, effort: str) -> None:
         )
 
 
-# Surfaces a CRON.md `target` descriptor may name. Aliases (both/all/none) and
-# stream included. Unknown leaves warn-and-drop at delivery; this is warn-only.
+# Leaf surfaces a CRON.md `target` descriptor may name — the surfaces that have
+# a registered transport / delivery path today. Aliases (both/all/none) are
+# expanded away by parse_output_target before this check, so only real leaves
+# appear here. Surfaces without a transport yet (matrix, web) are intentionally
+# absent so a `target = "matrix:…"` warns instead of validating clean and then
+# silently dropping at delivery. Unknown leaves warn-and-drop; this is warn-only.
 _KNOWN_TARGET_SURFACES = frozenset({
-    "talk", "email", "ntfy", "istota_file", "stream", "matrix", "web",
+    "talk", "email", "ntfy", "istota_file", "stream",
 })
 
 

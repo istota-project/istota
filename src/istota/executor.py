@@ -2714,10 +2714,14 @@ def execute_task(
             # working directory at the launch dir directly. No blocklist here —
             # without bwrap the process already runs with the user's own FS
             # access, so the bind-shadowing threat the blocklist guards doesn't
-            # apply (it fires in build_bwrap_cmd, the sandboxed path).
+            # apply (it fires in build_bwrap_cmd, the sandboxed path). Keyed off
+            # *effective* sandboxing: when sandbox_enabled is set but bwrap is
+            # absent (Mac/dev), build_bwrap_cmd returns the cmd unwrapped with no
+            # --chdir, so this cwd is what actually takes effect for --workspace.
             cwd=(
                 Path(workspace_dir).resolve()
-                if workspace_dir is not None and not config.security.sandbox_enabled
+                if workspace_dir is not None
+                and not (config.security.sandbox_enabled and _bwrap_available())
                 else Path(config.temp_dir)
             ),
             env=env,

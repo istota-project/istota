@@ -49,7 +49,12 @@ from .executor import (
 from .async_runtime import get_talk_client, reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
 from .notifications import send_notification
-from .transport import make_registry, plan_has_surface, resolve_delivery_plan
+from .transport import (
+    make_registry,
+    parse_output_target,
+    plan_has_surface,
+    resolve_delivery_plan,
+)
 from .storage import ensure_user_directories_v2
 
 # Deferred-op handlers were extracted to a sibling module; re-export the
@@ -277,7 +282,7 @@ def _post_policy_refusal_alert(
         )
 
     try:
-        send_notification(config, task.user_id, message, surface="talk")
+        send_notification(config, task.user_id, message, purpose="alert")
     except Exception as e:
         logger.warning(
             "Failed to post policy refusal alert for task %d (user=%s): %s",
@@ -798,7 +803,7 @@ def _notify_confirmed_email_result(
     message = f"Email reply sent to {sender} (task #{task.id}):\n\n{body}"
 
     from .notifications import send_notification
-    return send_notification(config, task.user_id, message, surface="talk")
+    return send_notification(config, task.user_id, message, purpose="notification")
 
 
 def _deliver_deferred_email_output(
@@ -1491,17 +1496,22 @@ def process_one_task(
             task_id, success, len(result), _qm_tool_count,
         )
 
+    # A confirmation prompt is answered by a Talk reply, so it's only eligible
+    # when Talk is a resolved destination. We also exclude any plan that pushes
+    # ntfy — that's the "all" broadcast target (talk+email+ntfy), a fan-out
+    # notification rather than an interactive turn. Mirrors main's deliberate
+    # `target in ("talk", "both")` gate, which excluded "all". Computed once and
+    # reused by the status, event-emission, and deferred-op-skip branches below.
+    is_confirmation_request = bool(
+        success
+        and plan_talk
+        and not plan_ntfy
+        and talk_token
+        and CONFIRMATION_PATTERN.search(result)
+    )
+
     with db.get_db(config.db_path) as conn:
         if success:
-            # Check if the result is a confirmation request. Eligible whenever
-            # Talk is a resolved destination (a Talk reply is how the user
-            # answers the confirmation prompt).
-            is_confirmation_request = (
-                plan_talk
-                and talk_token
-                and CONFIRMATION_PATTERN.search(result)
-            )
-
             if is_confirmation_request:
                 # Set task to pending confirmation instead of completing
                 db.set_task_confirmation(conn, task_id, result)
@@ -1666,12 +1676,6 @@ def process_one_task(
     # event rows for this attempt were deleted in the retry branch so the next
     # attempt's seq counter starts clean (UNIQUE(task_id, seq) collision fix).
     if event_writer is not None:
-        is_confirmation_request = bool(
-            success
-            and plan_talk
-            and talk_token
-            and CONFIRMATION_PATTERN.search(result)
-        )
         is_cancelled = (not success) and result == "Cancelled by user"
         is_policy = (not success) and _is_policy_refusal(result)
         is_oom = (not success) and "killed (likely out of memory)" in result
@@ -1701,12 +1705,9 @@ def process_one_task(
             })
             event_writer.finish()
 
-    # Process deferred operations (subtasks, transaction tracking) on success
-    if success and not (
-        plan_talk
-        and talk_token
-        and CONFIRMATION_PATTERN.search(result)
-    ):
+    # Process deferred operations (subtasks, transaction tracking) on success,
+    # unless the task is awaiting confirmation (drain after the user confirms).
+    if success and not is_confirmation_request:
         _drain_deferred_ops(config, task, result)
 
     # Save briefing digest for deduplication in the next run
@@ -1905,7 +1906,24 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
             for briefing in briefings:
                 if not briefing.cron:
                     continue
-                if not briefing.conversation_token and briefing.output in ("talk", "both"):
+                # Skip a briefing with no deliverable route: its only
+                # destination(s) are bare Talk (no inline channel) and no
+                # conversation_token is configured. Grammar-aware over the full
+                # output_target descriptor (talk / both / all / email,talk /
+                # talk:<room> / …) — an email/ntfy leg or an inline talk:<room>
+                # keeps it alive (the bare Talk leg then DMs at delivery).
+                _dests = parse_output_target(briefing.output)
+                _talk_needs_room = any(
+                    d.surface == "talk" and not d.channel for d in _dests
+                )
+                _has_other_route = any(
+                    d.surface != "talk" or d.channel for d in _dests
+                )
+                if (
+                    _talk_needs_room
+                    and not briefing.conversation_token
+                    and not _has_other_route
+                ):
                     continue
 
                 should_run = False

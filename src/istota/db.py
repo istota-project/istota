@@ -539,6 +539,16 @@ _STUCK_RUNNING_PREDICATE = (
     "AND started_at < datetime('now', ? || ' minutes')))"
 )
 
+# Source types whose tasks are executed inline by their creator
+# (`scheduler.run_task_inline`), never by a daemon worker. The daemon must not
+# claim or dispatch these — a REPL turn creates a `pending` row and runs it
+# in-process, so a concurrently-running daemon worker for the same user would
+# otherwise claim and double-execute it (second brain run + second deferred-op
+# drain). `claim_task` is the enforcement boundary; the discovery helpers below
+# exclude them too so the daemon never spawns an idle worker for an inline task.
+INLINE_ONLY_SOURCE_TYPES = ("repl",)
+_INLINE_ONLY_IN = ", ".join(f"'{s}'" for s in INLINE_ONLY_SOURCE_TYPES)
+
 
 def _stuck_running_params(heartbeat_stuck_minutes: int, stuck_running_minutes: int) -> tuple:
     return (f"-{heartbeat_stuck_minutes}", f"-{stuck_running_minutes}")
@@ -635,8 +645,14 @@ def claim_task(
         _stuck_running_params(heartbeat_stuck_minutes, stuck_running_minutes),
     )
 
-    # Atomically claim a task (optionally filtered by user_id and/or queue)
-    filters = ["status = 'pending'", "(scheduled_for IS NULL OR scheduled_for <= datetime('now'))"]
+    # Atomically claim a task (optionally filtered by user_id and/or queue).
+    # Inline-only source types (REPL) are never claimed here — their creator
+    # runs them in-process via run_task_inline.
+    filters = [
+        "status = 'pending'",
+        f"source_type NOT IN ({_INLINE_ONLY_IN})",
+        "(scheduled_for IS NULL OR scheduled_for <= datetime('now'))",
+    ]
     params: list = [worker_id]
     if user_id is not None:
         filters.append("user_id = ?")
@@ -694,9 +710,10 @@ def claim_task(
 def get_users_with_pending_tasks(conn: sqlite3.Connection) -> list[str]:
     """Get distinct user IDs that have pending tasks ready to run."""
     cursor = conn.execute(
-        """
+        f"""
         SELECT DISTINCT user_id FROM tasks
         WHERE status = 'pending'
+        AND source_type NOT IN ({_INLINE_ONLY_IN})
         AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
         """
     )
@@ -2631,10 +2648,10 @@ def get_users_with_pending_interactive_tasks(conn: sqlite3.Connection) -> list[s
 def get_users_with_pending_background_tasks(conn: sqlite3.Connection) -> list[str]:
     """Get users with pending background (non-interactive) tasks only."""
     cursor = conn.execute(
-        """
+        f"""
         SELECT DISTINCT user_id FROM tasks
         WHERE status = 'pending'
-        AND source_type NOT IN ('talk', 'email')
+        AND source_type NOT IN ('talk', 'email', {_INLINE_ONLY_IN})
         AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
         """
     )
@@ -2644,10 +2661,11 @@ def get_users_with_pending_background_tasks(conn: sqlite3.Connection) -> list[st
 def get_users_with_pending_fg_queue_tasks(conn: sqlite3.Connection) -> list[str]:
     """Get users with pending foreground queue tasks."""
     cursor = conn.execute(
-        """
+        f"""
         SELECT DISTINCT user_id FROM tasks
         WHERE status = 'pending'
         AND queue = 'foreground'
+        AND source_type NOT IN ({_INLINE_ONLY_IN})
         AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
         """
     )
@@ -2657,10 +2675,11 @@ def get_users_with_pending_fg_queue_tasks(conn: sqlite3.Connection) -> list[str]
 def get_users_with_pending_bg_queue_tasks(conn: sqlite3.Connection) -> list[str]:
     """Get users with pending background queue tasks."""
     cursor = conn.execute(
-        """
+        f"""
         SELECT DISTINCT user_id FROM tasks
         WHERE status = 'pending'
         AND queue = 'background'
+        AND source_type NOT IN ({_INLINE_ONLY_IN})
         AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
         """
     )

@@ -40,7 +40,9 @@ class HeartbeatCheck:
     name: str
     type: str  # file-watch, shell-command, url-health, calendar-conflicts, task-deadline, self-check
     config: dict  # type-specific fields
-    channel: str = "talk"
+    # Empty = no per-check override; the user's `alert` routing decides (default
+    # talk). A non-empty value is an explicit per-check surface that wins.
+    channel: str = ""
     cooldown_minutes: int | None = None
     interval_minutes: int | None = None  # Per-check frequency (None = every cycle)
 
@@ -129,7 +131,7 @@ def load_heartbeat_config(
             name=name,
             type=check_type,
             config=check_config,
-            channel=check_data.get("channel", "talk"),
+            channel=check_data.get("channel", ""),
             cooldown_minutes=check_data.get("cooldown_minutes"),
             interval_minutes=check_data.get("interval_minutes"),
         ))
@@ -808,6 +810,19 @@ def should_alert(
     return True
 
 
+def effective_alert_surface(config: "Config", user_id: str, check: HeartbeatCheck) -> str:
+    """The surface a heartbeat alert delivers to: the check's explicit ``channel``
+    if it set one, else the user's ``alert`` routing default (then bare talk).
+
+    A check with no ``channel`` defers to the per-user routing table, so
+    ``routing={"alert": "ntfy"}`` reroutes every otherwise-default check.
+    """
+    if check.channel:
+        return check.channel
+    from .notifications import surface_for_purpose
+    return surface_for_purpose(config, user_id, "alert")
+
+
 def send_heartbeat_alert(
     config: "Config",
     user_id: str,
@@ -826,7 +841,7 @@ def send_heartbeat_alert(
 
     return send_notification(
         config, user_id, message,
-        surface=check.channel,
+        surface=effective_alert_surface(config, user_id, check),
         conversation_token=settings.conversation_token,
         title=f"Heartbeat Alert: {check.name}",
     )
@@ -888,14 +903,15 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                     # alert-pipeline outage; we log instead and move on.
                     from .notifications import is_channel_configured
 
+                    alert_surface = effective_alert_surface(config, user_id, check)
                     if not is_channel_configured(
-                        config, user_id, check.channel,
+                        config, user_id, alert_surface,
                         conversation_token=settings.conversation_token,
                     ):
                         logger.warning(
                             "heartbeat %r for user %s: channel %r not configured "
                             "— alert skipped (configure via /istota/settings)",
-                            check.name, user_id, check.channel,
+                            check.name, user_id, alert_surface,
                         )
                         continue
 

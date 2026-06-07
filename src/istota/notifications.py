@@ -26,18 +26,19 @@ logger = logging.getLogger("istota.notifications")
 PURPOSES = ("reply", "alert", "log", "briefing", "notification")
 
 
-def resolve_destination(config: "Config", user_id: str, purpose: str):
-    """Resolve the delivery ``Destination`` for a user + purpose. Surface-agnostic.
+def resolve_destinations(config: "Config", user_id: str, purpose: str):
+    """Resolve the ordered list of delivery ``Destination``s for a user + purpose.
 
     Precedence:
-      1. the user's ``routing[purpose]`` descriptor (first destination),
+      1. the user's ``routing[purpose]`` descriptor (a full comma-list — every
+         destination, not just the first),
       2. legacy per-purpose fields (alerts_channel → ``alert``;
-         log_channel → ``log``; first briefing token → ``briefing`` / ``reply``),
+         log_channel → ``log``; first briefing token → ``briefing``),
       3. the user's ``default_destination`` descriptor,
-      4. instance fallback ``talk`` (channel ``None`` → resolve at delivery / DM).
+      4. instance fallback ``[talk]`` (channel ``None`` → resolve at delivery / DM).
 
-    The returned ``Destination`` may carry ``channel=None`` for Talk, meaning
-    "resolve the user's Talk channel at delivery time."
+    A returned Talk destination may carry ``channel=None``, meaning "resolve the
+    user's Talk channel at delivery time." Always returns at least one entry.
     """
     from .transport import Destination, parse_output_target
 
@@ -48,24 +49,49 @@ def resolve_destination(config: "Config", user_id: str, purpose: str):
         if spec:
             dests = parse_output_target(spec)
             if dests:
-                return dests[0]
+                return dests
 
     if uc:
         if purpose == "alert" and uc.alerts_channel:
-            return Destination("talk", uc.alerts_channel)
+            return [Destination("talk", uc.alerts_channel)]
         if purpose == "log" and uc.log_channel:
-            return Destination("talk", uc.log_channel)
-        if purpose in ("briefing", "reply"):
+            return [Destination("talk", uc.log_channel)]
+        if purpose == "briefing":
             for briefing in uc.briefings:
                 if briefing.conversation_token:
-                    return Destination("talk", briefing.conversation_token)
+                    return [Destination("talk", briefing.conversation_token)]
 
     if uc and uc.default_destination:
         dests = parse_output_target(uc.default_destination)
         if dests:
-            return dests[0]
+            return dests
 
-    return Destination("talk", None)
+    return [Destination("talk", None)]
+
+
+def resolve_destination(config: "Config", user_id: str, purpose: str):
+    """The primary (first) delivery ``Destination`` for a user + purpose.
+
+    Thin wrapper over :func:`resolve_destinations` for callers that only need a
+    single channel. See that function for the precedence rules.
+    """
+    return resolve_destinations(config, user_id, purpose)[0]
+
+
+def _descriptor_for_destination(dest) -> str:
+    """Render a ``Destination`` back into an ``output_target`` descriptor leaf."""
+    return dest.surface if dest.channel is None else f"{dest.surface}:{dest.channel}"
+
+
+def surface_for_purpose(config: "Config", user_id: str, purpose: str) -> str:
+    """The ``output_target`` descriptor string the routing table resolves a
+    purpose to (a comma list when the user routes a purpose to several surfaces).
+
+    Used where a surface *string* is needed rather than ``Destination``s — e.g.
+    heartbeat's :func:`is_channel_configured` probe.
+    """
+    dests = resolve_destinations(config, user_id, purpose)
+    return ",".join(_descriptor_for_destination(d) for d in dests) or "talk"
 
 
 def resolve_conversation_token(config: "Config", user_id: str) -> str | None:
@@ -243,27 +269,41 @@ def send_notification(
     user_id: str,
     message: str,
     *,
-    surface: str = "talk",
+    surface: str | None = None,
+    purpose: str | None = None,
     conversation_token: str | None = None,
     title: str | None = None,
     priority: int | None = None,
     tags: str | None = None,
 ) -> bool:
-    """Send a notification via the specified surface(s).
+    """Send a notification via an explicit surface or the user's routing table.
+
+    Destination resolution:
+      1. ``surface`` if given — an ``output_target`` descriptor ("talk", "email",
+         "ntfy", "both", "all", "talk:<token>", or a comma list). An explicit
+         surface always wins (e.g. a heartbeat check's own channel).
+      2. else ``purpose`` (one of :data:`PURPOSES`) resolved through the user's
+         per-user routing table via :func:`resolve_destinations` — this is what
+         makes ``routing={"alert": "ntfy"}`` actually route alerts to ntfy.
+      3. else bare ``talk``.
 
     Args:
-        surface: an ``output_target`` descriptor — "talk", "email", "ntfy",
-            "both" (talk+email), "all" (talk+email+ntfy), "talk:<token>", or a
-            comma-separated list.
         conversation_token: Talk room override for any *bare* talk destination
             (``talk`` with no explicit ``:token``); an explicit ``talk:<token>``
-            in the descriptor keeps its own channel.
+            in the descriptor (or a routed channel) keeps its own channel.
     """
     from .async_runtime import run_coro
     from .transport import parse_output_target
 
+    if surface is not None:
+        dests = parse_output_target(surface)
+    elif purpose is not None:
+        dests = resolve_destinations(config, user_id, purpose)
+    else:
+        dests = parse_output_target("talk")
+
     sent = False
-    for dest in parse_output_target(surface):
+    for dest in dests:
         if dest.surface == "talk":
             token = dest.channel or conversation_token
             if run_coro(_send_talk(config, user_id, message, token)):
@@ -282,7 +322,8 @@ def send_notification(
 
     if not sent:
         logger.warning(
-            "Notification not delivered (user: %s, surface: %s)", user_id, surface,
+            "Notification not delivered (user: %s, surface: %s, purpose: %s)",
+            user_id, surface, purpose,
         )
 
     return sent

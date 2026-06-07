@@ -396,7 +396,7 @@ def _process_deferred_user_alerts(
             formatted = f"⚠️ **Security alert** (task #{task.id})\n\n{message}"
 
         from .notifications import send_notification
-        if send_notification(config, task.user_id, formatted, surface="talk"):
+        if send_notification(config, task.user_id, formatted, purpose="alert"):
             count += 1
 
     if count:

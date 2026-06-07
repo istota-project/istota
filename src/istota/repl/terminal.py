@@ -72,3 +72,12 @@ class TerminalSubscriber:
         elif kind == "confirmation":
             self._print()
             self._print(self._c(_YELLOW, p.get("prompt") or "(confirmation requested)"))
+
+    def on_finish(self) -> None:
+        """No-op: the terminal renders everything live via ``on_event``.
+
+        Part of the ``EventSubscriber`` contract — ``EventWriter.finish()`` calls
+        it on every subscriber. Defined explicitly so the call doesn't raise an
+        ``AttributeError`` that ``finish()`` would silently swallow.
+        """
+        return None

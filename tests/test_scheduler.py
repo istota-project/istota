@@ -1755,6 +1755,36 @@ class TestProcessOneTask:
         assert task.status == "pending_confirmation"
         assert task.confirmation_prompt is not None
 
+    @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.run_coro", return_value=42)
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_confirmation_excluded_for_all_broadcast(
+        self, mock_arun, mock_runcoro, mock_exec, db_path, tmp_path,
+    ):
+        """A confirmation prompt on an output_target='all' broadcast must NOT
+        stall in pending_confirmation — 'all' is a fan-out, not an interactive
+        turn (parity with main's `target in ('talk','both')` gate)."""
+        mock_exec.return_value = (
+            True, "I need your confirmation before deleting the file. Reply yes or no.",
+            None, None,
+        )
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="Delete file", user_id="testuser",
+                source_type="talk", conversation_token="room1",
+                output_target="all",
+            )
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, _ = result
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "completed"
+        assert task.confirmation_prompt is None
+
     @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.run_coro", return_value=None)
     def test_talk_sends_ack_message(self, mock_arun, mock_exec, db_path, tmp_path):
@@ -4450,12 +4480,13 @@ class TestDeferredOperations:
 
         assert count == 2
         assert mock_notify.call_count == 2
-        # Should use alerts channel resolution (no explicit token — send_notification resolves it)
+        # Routed by purpose="alert" — resolve_destinations maps it to the
+        # user's alerts channel (legacy alerts_channel field).
         call_args = mock_notify.call_args_list[0]
         assert call_args[0][0] is config
         assert call_args[0][1] == "alice"
         assert "attacker@evil.com" in call_args[0][2]
-        assert call_args[1]["surface"] == "talk"
+        assert call_args[1]["purpose"] == "alert"
 
         # File should be cleaned up
         assert not (user_temp / f"task_{task_id}_user_alerts.json").exists()
@@ -4871,7 +4902,9 @@ class TestNotifyConfirmedEmailResult:
         assert call_args[0][1] == "alice"
         assert "joe@example.com" in call_args[0][2]
         assert "Let me check with Stefan" in call_args[0][2]
-        assert call_args[1]["surface"] == "talk"
+        # Routed by purpose so the user's notification routing / default
+        # destination applies (resolves to the alerts/DM Talk channel by default).
+        assert call_args[1]["purpose"] == "notification"
 
     def test_non_confirmed_email_skipped(self, db_path, tmp_path):
         """Email task that was NOT confirmed should not trigger notification."""
