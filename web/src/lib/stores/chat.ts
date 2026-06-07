@@ -47,6 +47,8 @@ export interface ChatMessage {
 	error?: boolean;
 	attachments?: string[];
 	createdAt?: string;
+	// Total wall time in seconds, from the task's terminal `done` event.
+	durationSeconds?: number;
 }
 
 export type ChatStatus = 'idle' | 'sending' | 'streaming';
@@ -177,6 +179,9 @@ function createSession(): ChatSession {
 					// still stop streaming and freeze any running tools.
 					m.streaming = false;
 					finalizeTools(m);
+					if (typeof payload.duration_seconds === 'number') {
+						m.durationSeconds = payload.duration_seconds;
+					}
 					break;
 			}
 		});
