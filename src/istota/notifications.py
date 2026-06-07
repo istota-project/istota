@@ -1,9 +1,20 @@
-"""Centralized notification dispatcher for Talk, Email, and ntfy."""
+"""Centralized notification dispatcher for Talk, Email, and ntfy.
+
+Dispatch is driven through the transport routing helpers: a ``surface`` string
+is an ``output_target`` descriptor (``talk`` / ``email`` / ``ntfy`` / ``both``
+/ ``all`` / ``talk:<token>`` / comma lists), parsed into destinations and
+looped — there is no per-surface ``if surface == "both"`` chain. The actual
+ntfy POST lives in ``transport.ntfy`` (the single ntfy delivery path); the
+``_send_ntfy`` shim here just adapts the sync notification signature to it.
+"""
 
 import logging
 from typing import TYPE_CHECKING
 
-import httpx
+# Re-exported so existing references (and the is_channel_configured probe) keep
+# working; the canonical home is the ntfy transport.
+from .transport.ntfy import _NTFY_DEFAULT_PRIORITY  # noqa: F401
+from .transport.ntfy import ntfy_settings as _ntfy_settings
 
 if TYPE_CHECKING:
     from .config import Config
@@ -99,83 +110,25 @@ def _send_email(
         return False
 
 
-_NTFY_DEFAULT_PRIORITY = 3
-_NTFY_DEFAULT_SERVER = "https://ntfy.sh"
-
-
-def _ntfy_settings(config: "Config", user_id: str) -> dict[str, str] | None:
-    """Resolve the user's ntfy settings from the encrypted secrets table.
-
-    Returns None if the user hasn't configured a topic, or if the secrets
-    DB is unreachable (missing path, no secrets table). Notifications are
-    best-effort: a misconfigured DB must not raise into a heartbeat or
-    scheduler loop.
-
-    Uses a single SELECT to fetch all ntfy keys at once — heartbeat polling
-    fires this on every check, and 5× separate connections per send adds
-    real WAL contention.
-    """
-    import sqlite3
-
-    from . import secrets_store
-
-    db_path = config.db_path
-    if not db_path:
-        return None
-
-    try:
-        rows = secrets_store.get_service_secrets(db_path, user_id, "ntfy")
-    except (sqlite3.Error, OSError, TypeError) as e:
-        logger.warning("ntfy settings lookup failed for user %s: %s", user_id, e)
-        return None
-
-    topic = rows.get("topic")
-    if not topic:
-        return None
-    return {
-        "topic": topic,
-        "server_url": rows.get("server_url") or _NTFY_DEFAULT_SERVER,
-        "token": rows.get("token", ""),
-        "username": rows.get("username", ""),
-        "password": rows.get("password", ""),
-    }
-
-
 def _send_ntfy(
     config: "Config", user_id: str, message: str,
     title: str | None = None,
     priority: int | None = None,
     tags: str | None = None,
 ) -> bool:
-    """Send a notification via the user's own ntfy server. Returns True on success."""
-    settings = _ntfy_settings(config, user_id)
-    if settings is None:
-        logger.warning("ntfy not configured for user %s", user_id)
-        return False
+    """Send a notification via the user's own ntfy server. Returns True on success.
 
-    url = f"{settings['server_url'].rstrip('/')}/{settings['topic']}"
-    headers = {}
-    if settings["token"]:
-        headers["Authorization"] = f"Bearer {settings['token']}"
-    elif settings["username"]:
-        import base64
-        credentials = base64.b64encode(
-            f"{settings['username']}:{settings['password']}".encode()
-        ).decode()
-        headers["Authorization"] = f"Basic {credentials}"
-    if title:
-        headers["Title"] = title.replace("\r", "").replace("\n", " ")
-    headers["Priority"] = str(priority if priority is not None else _NTFY_DEFAULT_PRIORITY)
-    if tags:
-        headers["Tags"] = tags.replace("\r", "").replace("\n", " ")
+    Thin sync shim: builds ``DeliveryOptions`` and calls the ntfy transport
+    (the single ntfy delivery path) on the persistent loop via ``run_coro``.
+    """
+    from .async_runtime import run_coro
+    from .transport._types import DeliveryOptions
+    from .transport.ntfy import send_ntfy_async
 
-    try:
-        response = httpx.post(url, content=message, headers=headers, timeout=10)
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error("Failed to send ntfy notification (user: %s): %s", user_id, e)
-        return False
+    return bool(run_coro(send_ntfy_async(
+        config, user_id, message,
+        DeliveryOptions(title=title, priority=priority, tags=tags),
+    )))
 
 
 def is_channel_configured(
@@ -195,6 +148,8 @@ def is_channel_configured(
     Compound surfaces (``both``, ``all``) are configured if **any** of
     their leaf channels are.
     """
+    from .transport import parse_output_target
+
     user_config = config.users.get(user_id)
 
     def _talk_ok() -> bool:
@@ -214,17 +169,12 @@ def is_channel_configured(
     def _ntfy_ok() -> bool:
         return _ntfy_settings(config, user_id) is not None
 
-    if surface == "talk":
-        return _talk_ok()
-    if surface == "email":
-        return _email_ok()
-    if surface == "ntfy":
-        return _ntfy_ok()
-    if surface == "both":
-        return _talk_ok() or _email_ok()
-    if surface == "all":
-        return _talk_ok() or _email_ok() or _ntfy_ok()
-    return False
+    probes = {"talk": _talk_ok, "email": _email_ok, "ntfy": _ntfy_ok}
+    dests = parse_output_target(surface)
+    if not dests:
+        return False
+    # Compound surfaces (both/all) are configured if ANY leaf is.
+    return any(probes.get(d.surface, lambda: False)() for d in dests)
 
 
 def send_notification(
@@ -238,27 +188,36 @@ def send_notification(
     priority: int | None = None,
     tags: str | None = None,
 ) -> bool:
-    """Send a notification via the specified surface.
+    """Send a notification via the specified surface(s).
 
     Args:
-        surface: "talk", "email", "ntfy", "both" (talk+email), or "all" (talk+email+ntfy).
-        conversation_token: Talk room override (falls back to user config resolution).
+        surface: an ``output_target`` descriptor — "talk", "email", "ntfy",
+            "both" (talk+email), "all" (talk+email+ntfy), "talk:<token>", or a
+            comma-separated list.
+        conversation_token: Talk room override for any *bare* talk destination
+            (``talk`` with no explicit ``:token``); an explicit ``talk:<token>``
+            in the descriptor keeps its own channel.
     """
     from .async_runtime import run_coro
+    from .transport import parse_output_target
 
     sent = False
-
-    if surface in ("talk", "both", "all"):
-        if run_coro(_send_talk(config, user_id, message, conversation_token)):
-            sent = True
-
-    if surface in ("email", "both", "all"):
-        if _send_email(config, user_id, title or "Notification", message):
-            sent = True
-
-    if surface in ("ntfy", "all"):
-        if _send_ntfy(config, user_id, message, title=title, priority=priority, tags=tags):
-            sent = True
+    for dest in parse_output_target(surface):
+        if dest.surface == "talk":
+            token = dest.channel or conversation_token
+            if run_coro(_send_talk(config, user_id, message, token)):
+                sent = True
+        elif dest.surface == "email":
+            if _send_email(config, user_id, title or "Notification", message):
+                sent = True
+        elif dest.surface == "ntfy":
+            if _send_ntfy(config, user_id, message, title=title, priority=priority, tags=tags):
+                sent = True
+        else:
+            logger.warning(
+                "Unsupported notification surface %r (user: %s)",
+                dest.surface, user_id,
+            )
 
     if not sent:
         logger.warning(

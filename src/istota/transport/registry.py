@@ -57,11 +57,14 @@ class TransportRegistry:
 def make_registry(config: "Config") -> TransportRegistry:
     """Build the registry from config. No network on construction.
 
-    Only enabled surfaces are registered: Talk when ``talk.enabled``, email
-    when ``email.enabled``. Adding Matrix or web chat is one more ``if`` here
-    plus the transport class.
+    Talk is registered when ``talk.enabled`` and email when ``email.enabled``;
+    ntfy and istota_file are registered unconditionally (per-user gating happens
+    in their ``resolve_target`` / ``deliver``, not at construction). Adding
+    Matrix or web chat is one more ``if`` here plus the transport class.
     """
     from .email import EmailTransport
+    from .istota_file import IstotaFileTransport
+    from .ntfy import NtfyTransport
     from .talk import TalkTransport
 
     transports: dict[str, Transport] = {}
@@ -69,4 +72,6 @@ def make_registry(config: "Config") -> TransportRegistry:
         transports["talk"] = TalkTransport(config)
     if config.email.enabled:
         transports["email"] = EmailTransport(config)
+    transports["ntfy"] = NtfyTransport(config)
+    transports["istota_file"] = IstotaFileTransport(config)
     return TransportRegistry(transports)
