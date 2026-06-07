@@ -607,6 +607,15 @@
   notify:
     - "restart istota-scheduler"
 
+- name: "Deploy {{ istota_namespace }}-run CLI wrapper"
+  template:
+    src: ns-run.sh.j2
+    dest: "/usr/local/bin/{{ istota_namespace }}-run"
+    owner: root
+    group: root
+    mode: '0755'
+  when: not istota_web_only
+
 - name: Compute money-enabled users (those with a money resource carrying monarch credentials)
   set_fact:
     _istota_money_users: >-

@@ -99,3 +99,17 @@ Authenticate the Claude CLI:
 ```bash
 sudo -u istota HOME=/srv/app/istota claude login
 ```
+
+## Running the CLI on the host
+
+The role installs a `<namespace>-run` wrapper (e.g. `istota-run`) to
+`/usr/local/bin`. It self-sudoes into the service user, loads the same secret
+bundle (`/etc/<namespace>/secrets.env`) and admins file the daemon uses, then
+passes its arguments straight through to the `istota` CLI. The caller needs
+sudo rights.
+
+```bash
+istota-run repl -u stefan        # interactive REPL as that user
+istota-run list                  # any istota subcommand works
+istota-run task "..." -u stefan -x
+```

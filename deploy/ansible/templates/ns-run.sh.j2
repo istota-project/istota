@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# {{ istota_namespace }}-run — run the {{ istota_package }} CLI on this host as the
+# service user with the full daemon environment loaded.
+#
+# Managed by Ansible (templates/ns-run.sh.j2). Do not edit in place.
+#
+# Usage:
+#   {{ istota_namespace }}-run repl -u stefan
+#   {{ istota_namespace }}-run list
+#   {{ istota_namespace }}-run task "..." -u stefan -x
+#
+# Any arguments are passed straight through to `{{ istota_package }} <args>`.
+# Self-sudoes into the "{{ istota_user }}" service user, so the caller needs
+# sudo rights (passwordless or interactive).
+set -euo pipefail
+
+SELF="/usr/local/bin/{{ istota_namespace }}-run"
+SERVICE_USER="{{ istota_user }}"
+
+# Re-exec as the service user if we aren't already it. sudo's default env_reset
+# discards the caller's environment, which is what we want — we rebuild it below.
+if [ "$(id -un)" != "$SERVICE_USER" ]; then
+    exec sudo -u "$SERVICE_USER" -- "$SELF" "$@"
+fi
+
+export HOME="{{ istota_home }}"
+export PATH="{{ istota_home }}/.venv/bin:$PATH"
+export PYTHONUNBUFFERED=1
+
+# Load the same secret bundle the systemd units use, if present. Absent when
+# istota_use_environment_file=false (secrets are inlined into config.toml then,
+# which the CLI reads directly), so this is best-effort.
+SECRETS_ENV="/etc/{{ istota_namespace }}/secrets.env"
+if [ -r "$SECRETS_ENV" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$SECRETS_ENV"
+    set +a
+fi
+
+# Set by the systemd units via Environment=, not carried in secrets.env.
+export ISTOTA_ADMINS_FILE="/etc/{{ istota_namespace }}/admins"
+
+cd "{{ istota_repo_dir }}"
+exec "{{ istota_home }}/.venv/bin/{{ istota_package }}" "$@"

@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-07: `<namespace>-run` host CLI wrapper
+
+Running the `istota` CLI ad-hoc on a production box (notably `istota repl -u <user>`) meant reconstructing the daemon's environment by hand: switch to the service user, source the secret bundle, set the admins-file path that lives only in the systemd unit, fix `HOME`/`PATH`/venv, and `cd` into the repo. A long, error-prone incantation that the REPL work made painful enough to fix.
+
+Decision (settled in prose with the user before building): an Ansible-templated shell wrapper, not a Python console script — Ansible already resolves the namespace, service user, install paths, venv, and env-file path at deploy time, and a Python entry point has a bootstrap chicken-and-egg (need the venv env to run the Python that builds the venv env). Self-sudoes into the service user with a re-exec guard; no sudoers rule shipped — it leans on the caller's existing sudo rights (the deploy model has operators acting as root/sudoers; the service user isn't a sudoer and app-level admins are NC usernames, not Unix logins). General passthrough to `istota "$@"`, so every subcommand works, not just `repl`. Prod-only (dev just uses `uv run istota …`); no `--` escape hatch yet (deferred until it proves useful).
+
+Env parity is best-effort sourcing of the same `/etc/<ns>/secrets.env` the units use — absent when `istota_use_environment_file=false`, in which case secrets are inlined into `config.toml` (which the CLI reads anyway), so the `[ -r … ]` guard covers both deploy modes with no branching. `ISTOTA_ADMINS_FILE` is exported separately because it rides on the unit's `Environment=` line, not in the env file. The re-exec uses a hardcoded absolute self-path (`/usr/local/bin/<ns>-run`) rather than `$0`, so it's loop-safe and independent of sudo's `secure_path`.
+
+Verified: rendered the template with the defaults → `shellcheck` clean + `bash -n` OK; `ansible-playbook --syntax-check` passes.
+
+**Key changes:**
+- New `<namespace>-run` wrapper at `/usr/local/bin` (e.g. `istota-run repl -u stefan`).
+- Self-sudo with re-exec guard; sources `secrets.env` best-effort; exports `ISTOTA_ADMINS_FILE`; `cd`s into the repo; `exec`s the venv `istota`.
+- Ansible deploy task gated `not istota_web_only`; no new variables, no sudoers.d.
+
+**Files added/modified:**
+- `deploy/ansible/templates/ns-run.sh.j2` - the wrapper template
+- `deploy/ansible/tasks/main.yml` - template task → `/usr/local/bin/{{ istota_namespace }}-run`
+- `deploy/ansible/README.md` - "Running the CLI on the host" section
+- `CHANGELOG.md` - Unreleased → Added entry
+
 ## 2026-06-07: Briefing output speaks the transport grammar + `user_routable` capability
 
 Residual cleanup after the delivery-abstraction layer: briefings still offered `talk`/`email`/`both` while the routing layer already supported the full `surface[:channel]` comma-list grammar. Two findings drove the change.
