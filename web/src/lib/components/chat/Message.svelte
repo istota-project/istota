@@ -33,6 +33,17 @@
 
 	const hasRunningTool = $derived(message.tools.some((t) => t.running));
 
+	// Subtle per-message metadata, revealed on hover (bottom-right).
+	const meta = $derived.by(() => {
+		const parts: string[] = [];
+		if (message.taskId) parts.push(`#${message.taskId}`);
+		if (typeof message.durationSeconds === 'number') parts.push(`${message.durationSeconds}s`);
+		if (message.tools.length) {
+			parts.push(`${message.tools.length} tool${message.tools.length === 1 ? '' : 's'}`);
+		}
+		return parts;
+	});
+
 	const time = $derived.by(() => {
 		if (!message.createdAt) return '';
 		const d = new Date(message.createdAt);
@@ -97,6 +108,10 @@
 				/>
 			{/if}
 		</div>
+
+		{#if meta.length && !message.streaming}
+			<div class="meta-footer">{meta.join(' · ')}</div>
+		{/if}
 	</div>
 {/if}
 
@@ -105,16 +120,35 @@
 	   then the message body. Consecutive messages from the same author collapse
 	   into one visual group (the `.continuation` rows hide the header). */
 	.msg {
+		position: relative;
 		display: flex;
 		gap: 0.6rem;
 		/* Extra bottom padding so the hover highlight isn't flush with the last
-		   line of text. */
+		   line of text (and leaves room for the hover meta footer). */
 		padding: 0.1rem 0.75rem 0.45rem;
 		align-items: flex-start;
 	}
 	.msg:not(.continuation) { margin-top: 0.7rem; padding-top: 0.15rem; }
 	.msg:hover { background: var(--surface-card); }
 	.msg:hover .hover-time { opacity: 1; }
+	.msg:hover .meta-footer { opacity: 1; }
+
+	/* Subtle per-message metadata pinned bottom-right, revealed on hover. The
+	   background matches the hover highlight so it cleanly masks the end of a
+	   long last line rather than overlapping it. */
+	.meta-footer {
+		position: absolute;
+		right: 0.75rem;
+		bottom: 0.1rem;
+		padding-left: 0.6rem;
+		background: var(--surface-card);
+		font-size: var(--text-xs);
+		color: var(--text-dim);
+		font-variant-numeric: tabular-nums;
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity var(--transition-fast);
+	}
 
 	.gutter {
 		flex: 0 0 2.25rem;
