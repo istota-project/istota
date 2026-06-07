@@ -11,19 +11,35 @@ and web chat are the designed-for next consumers — adding one is a new
 ``.claude/rules/transport.md`` for the "how to add a transport" guide.
 """
 
-from ._types import IncomingMessage, Transport, TransportCapabilities
+from ._types import (
+    DeliveryOptions,
+    IncomingMessage,
+    Transport,
+    TransportCapabilities,
+)
 from .email import EmailTransport
 from .ingest import ingest_message
 from .registry import TransportRegistry, make_registry
+from .routing import (
+    Destination,
+    parse_output_target,
+    plan_has_surface,
+    resolve_delivery_plan,
+)
 from .talk import TalkTransport
 
 __all__ = [
     "IncomingMessage",
     "Transport",
     "TransportCapabilities",
+    "DeliveryOptions",
     "TransportRegistry",
     "make_registry",
     "ingest_message",
+    "Destination",
+    "parse_output_target",
+    "plan_has_surface",
+    "resolve_delivery_plan",
     "TalkTransport",
     "EmailTransport",
 ]

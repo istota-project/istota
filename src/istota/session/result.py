@@ -49,7 +49,12 @@ def detect_malformed_result(
         return None
 
     stripped = text.strip()
-    strict = output_target in ("talk", "both", "all")
+    # Strict mode applies whenever Talk is one of the resolved delivery
+    # destinations (Talk output must be valid markdown). Parse the descriptor
+    # through the routing helpers so talk / both / all / talk:<token> all gate
+    # strict, rather than matching a hardcoded string set.
+    from ..transport import parse_output_target, plan_has_surface
+    strict = plan_has_surface(parse_output_target(output_target), "talk")
 
     # Check for leaked tool-call XML syntax
     if strict:

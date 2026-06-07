@@ -29,6 +29,7 @@ from .inbound import get_dm_token, poll_talk_conversations
 if TYPE_CHECKING:
     from ... import db
     from ...config import Config
+    from .._types import DeliveryOptions
 
 logger = logging.getLogger("istota.transport.talk")
 
@@ -72,6 +73,7 @@ class TalkTransport:
         reply_to: int | None = None,
         reference_id: str | None = None,
         threaded: bool = False,
+        options: "DeliveryOptions | None" = None,
     ) -> int | None:
         """Send a message to a Talk room. Splits long messages and posts the
         parts sequentially; in group chats with ``threaded=True`` the first part

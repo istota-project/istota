@@ -31,6 +31,7 @@ from .outbound import deliver_email_result
 if TYPE_CHECKING:
     from ... import db
     from ...config import Config
+    from .._types import DeliveryOptions
 
 __all__ = ["EmailTransport", "poll_emails", "deliver_email_result"]
 
@@ -71,6 +72,7 @@ class EmailTransport:
         reply_to: int | None = None,
         reference_id: str | None = None,
         threaded: bool = False,
+        options: "DeliveryOptions | None" = None,
     ) -> int | None:
         """Send a task result via email. Requires ``task`` for the deferred
         email-output file / ``ProcessedEmail`` lookup (the recipient is resolved

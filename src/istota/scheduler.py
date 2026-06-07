@@ -49,7 +49,7 @@ from .executor import (
 from .async_runtime import get_talk_client, reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
 from .notifications import send_notification
-from .transport import make_registry
+from .transport import make_registry, plan_has_surface, resolve_delivery_plan
 from .storage import ensure_user_directories_v2
 from .tasks_file_poller import handle_tasks_file_completion
 
@@ -781,8 +781,8 @@ def _notify_confirmed_email_result(
 
     # If output_target already includes Talk, the user sees the result in
     # their conversation — no need to duplicate it in the alerts channel.
-    target = task.output_target or ""
-    if target in ("both", "all", "talk"):
+    from .transport import parse_output_target
+    if plan_has_surface(parse_output_target(task.output_target), "talk"):
         return False
 
     # Look up the sender from the processed_emails record
@@ -819,8 +819,8 @@ def _deliver_deferred_email_output(
        delete, because there's no processed_email record and the scheduler
        would send to the wrong recipient.
     """
-    target = task.output_target or ""
-    if target in ("email", "both", "all"):
+    from .transport import parse_output_target
+    if plan_has_surface(parse_output_target(task.output_target), "email"):
         # Normal path will deliver via post_email flag — nothing to do here.
         return
     path = user_temp_dir / f"task_{task.id}_email_output.json"
@@ -832,8 +832,8 @@ def _deliver_deferred_email_output(
         # with output_target="talk"). The processed_email record exists, so
         # post_result_to_email can reply correctly.
         logger.info(
-            "Delivering deferred email output for task %d (source=%s, target=%s)",
-            task.id, task.source_type, target,
+            "Delivering deferred email output for task %d (source=%s, output_target=%s)",
+            task.id, task.source_type, task.output_target,
         )
         email_ok = asyncio.run(post_result_to_email(config, task, ""))
         if not email_ok:
@@ -1334,26 +1334,32 @@ def process_one_task(
                 task, config, user_resources, dry_run=dry_run, event_writer=event_writer,
             )
 
-    # Resolve the Talk room for delivering this task's notifications.
-    # For email-source tasks with a synthetic thread-hash conversation_token,
-    # this falls back to the user's resolved alerts/DM channel — otherwise
-    # follow-up notifications would silently no-op.
-    talk_token = _talk_target_for_delivery(config, task)
+    # Resolve the delivery plan: the single source of truth for where this
+    # task's result goes. Replaces the hardcoded output_target fan-out — the
+    # plan parses task.output_target descriptors (talk/email/ntfy/istota_file/
+    # stream, comma-separated, surface[:channel]), normalizes legacy both/all,
+    # infers the source_type default when unset, and resolves Talk channels via
+    # the synthetic-email-token fallback.
+    registry = make_registry(config)
+    plan = resolve_delivery_plan(config, task, registry)
+    _talk_dest = next((d for d in plan if d.surface == "talk"), None)
+    # talk_token: the plan's Talk channel when Talk is a destination (honours an
+    # explicit talk:<token>; equals _talk_target_for_delivery for the inferred
+    # case). Falls back to the unconditional resolution when Talk is NOT in the
+    # plan, because the heartbeat_silent branch delivers to Talk regardless of
+    # output_target (it bypasses the plan entirely, matching prior behaviour).
+    talk_token = (
+        _talk_dest.channel if _talk_dest else _talk_target_for_delivery(config, task)
+    )
+    plan_talk = _talk_dest is not None
+    plan_email = plan_has_surface(plan, "email")
+    plan_ntfy = plan_has_surface(plan, "ntfy")
+    plan_file = plan_has_surface(plan, "istota_file")
 
     # Track if we need to call istota_file handler after db connection closes
     call_file_handler = False
     file_handler_success = False
     post_ntfy = False
-
-    # Resolve effective output target: explicit field > inferred from source_type
-    target = task.output_target
-    if not target:
-        if task.source_type in ("talk", "briefing"):
-            target = "talk"
-        elif task.source_type == "email":
-            target = "email"
-        elif task.source_type == "istota_file":
-            target = "istota_file"
 
     # Track what to post after DB transaction closes
     post_talk_message = None
@@ -1369,9 +1375,13 @@ def process_one_task(
         )
         success = False
 
-    # Guard: detect malformed model output (leaked tool-call XML syntax)
+    # Guard: detect malformed model output (leaked tool-call XML syntax).
+    # Strict mode applies when the result will render in Talk, i.e. Talk is a
+    # resolved destination (the inferred default included). Passing a "talk"
+    # descriptor when Talk is in the plan keeps the prior strict/lenient split.
     if success:
-        malformed_reason = detect_malformed_result(result, output_target=target)
+        _malformed_target = "talk" if plan_talk else None
+        malformed_reason = detect_malformed_result(result, output_target=_malformed_target)
         if malformed_reason:
             logger.warning(
                 "Task %d: malformed result detected (%s), treating as failure",
@@ -1395,9 +1405,11 @@ def process_one_task(
 
     with db.get_db(config.db_path) as conn:
         if success:
-            # Check if the result is a confirmation request
+            # Check if the result is a confirmation request. Eligible whenever
+            # Talk is a resolved destination (a Talk reply is how the user
+            # answers the confirmation prompt).
             is_confirmation_request = (
-                target in ("talk", "both")
+                plan_talk
                 and talk_token
                 and CONFIRMATION_PATTERN.search(result)
             )
@@ -1451,13 +1463,13 @@ def process_one_task(
                             delivery_result = strip_briefing_preamble(result)
                     else:
                         delivery_result = result
-                    if target in ("talk", "both", "all") and talk_token:
+                    if plan_talk and talk_token:
                         post_talk_message = delivery_result
-                    if target in ("email", "both", "all"):
+                    if plan_email:
                         post_email = True
-                    if target in ("ntfy", "all"):
+                    if plan_ntfy:
                         post_ntfy = True
-                    if target == "istota_file":
+                    if plan_file:
                         call_file_handler = True
                         file_handler_success = True
 
@@ -1534,15 +1546,15 @@ def process_one_task(
                     # Suppress user-facing error delivery for automated tasks.
                     # Errors are logged to DB and log_channel; no need to confuse users.
                     db.log_task(conn, task_id, "info", "Suppressed error delivery for automated task")
-                elif target in ("talk", "both", "all") and talk_token:
+                elif plan_talk and talk_token:
                     # Use user-friendly error message, not raw error
                     friendly_error = _format_error_for_user(result)
                     post_talk_message = f"🐙 {friendly_error}"
                     is_failure_notify = True
                 # NOTE: We intentionally do NOT email errors to users.
-                # Failed tasks with target="email" or "both" only log the error.
+                # Failed tasks routed to email/ntfy only log the error.
                 # Receiving error emails is confusing; users can check Talk or retry.
-                if target == "istota_file":
+                if plan_file:
                     call_file_handler = True
                     file_handler_success = False
 
@@ -1570,7 +1582,7 @@ def process_one_task(
     if event_writer is not None:
         is_confirmation_request = bool(
             success
-            and target in ("talk", "both")
+            and plan_talk
             and talk_token
             and CONFIRMATION_PATTERN.search(result)
         )
@@ -1605,7 +1617,7 @@ def process_one_task(
 
     # Process deferred operations (subtasks, transaction tracking) on success
     if success and not (
-        target in ("talk", "both")
+        plan_talk
         and talk_token
         and CONFIRMATION_PATTERN.search(result)
     ):
