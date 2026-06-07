@@ -46,6 +46,11 @@ from .skills.calendar import get_caldav_client, get_calendars_for_user
 
 logger = logging.getLogger("istota.executor")
 
+# Source types treated as interactive (live user behind the turn): they load
+# conversation context, sticky skills, the skills changelog, and personal
+# memory. The REPL is a full-stack interactive surface like talk/email.
+_INTERACTIVE_SOURCE_TYPES = ("talk", "email", "repl")
+
 
 def _resolve_user_tz(
     config: Config,
@@ -743,6 +748,61 @@ def build_allowed_tools(is_admin: bool, skill_names: list[str]) -> list[str]:
     return ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 
 
+def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
+    """Resolve and bounds-check a REPL workspace directory (blocklist posture).
+
+    An arbitrary RW bind expands the sandbox's writable surface, so reject paths
+    that overlap sensitive roots: other users' Nextcloud mounts, the istota
+    source tree, the credential/secret dirs, and $HOME dotfile config dirs
+    (~/.ssh, ~/.config, ~/.claude, ~/.developer). The bwrap-host
+    ``--workspace cwd`` case is the security-relevant one; Mac/Docker have no
+    bwrap and degrade to running in cwd directly.
+
+    Raises ValueError when the path is forbidden. Returns the resolved path.
+    """
+    resolved = Path(workspace_dir).resolve()
+    home = Path.home().resolve()
+
+    forbidden: list[Path] = []
+    # The istota source tree (don't let a workspace shadow our own code).
+    try:
+        forbidden.append(Path(__file__).resolve().parents[2])
+    except IndexError:
+        pass
+    # Nextcloud mount root (other users' data live under here).
+    if config.nextcloud_mount_path:
+        forbidden.append(Path(config.nextcloud_mount_path).resolve())
+    # Credential / secret dirs + $HOME dotfile config dirs.
+    for rel in (".ssh", ".config", ".claude", ".developer", ".aws", ".gnupg"):
+        forbidden.append(home / rel)
+    secret_key_path = os.environ.get("ISTOTA_SECRET_KEY_FILE")
+    if secret_key_path:
+        forbidden.append(Path(secret_key_path).resolve().parent)
+
+    def _overlaps(a: Path, b: Path) -> bool:
+        # True if a == b, a is under b, or b is under a.
+        return a == b or _is_relative_to(a, b) or _is_relative_to(b, a)
+
+    for bad in forbidden:
+        try:
+            bad_resolved = bad.resolve()
+        except OSError:
+            continue
+        if _overlaps(resolved, bad_resolved):
+            raise ValueError(
+                f"workspace {resolved} overlaps a protected path ({bad_resolved})"
+            )
+    return resolved
+
+
+def _is_relative_to(path: Path, other: Path) -> bool:
+    try:
+        path.relative_to(other)
+        return True
+    except ValueError:
+        return False
+
+
 def build_bwrap_cmd(
     cmd: list[str],
     config: Config,
@@ -754,11 +814,18 @@ def build_bwrap_cmd(
     net_proxy_sock: Path | None = None,
     extra_ro_binds: list[Path] | None = None,
     selected_skills: "frozenset[str] | set[str] | list[str] | None" = None,
+    workspace_dir: Path | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
     Returns the original cmd unchanged if sandbox is not available
     (non-Linux, bwrap not installed, or namespace creation denied).
+
+    ``workspace_dir`` (REPL ``--workspace cwd``) is bound RW and becomes the
+    sandbox ``--chdir`` target instead of ``user_temp_dir``. It is bounds-checked
+    against the protected-path blocklist (see ``_validate_workspace_dir``) — an
+    arbitrary RW bind would otherwise let a workspace shadow the RO ``.developer``
+    protections or reach another user's mount.
     """
     if not _bwrap_available():
         return cmd
@@ -854,6 +921,12 @@ def build_bwrap_cmd(
 
     # --- User workspace (RW) ---
     _bind(user_temp_dir.resolve())
+
+    # --- REPL workspace (RW) — validated, bound, and used as the chdir target.
+    workspace_resolved: Path | None = None
+    if workspace_dir is not None:
+        workspace_resolved = _validate_workspace_dir(config, workspace_dir)
+        _bind(workspace_resolved)
 
     # .developer/ scripts (credential-fetch, git helpers) must be read-only
     # to prevent a compromised subprocess from replacing them to intercept
@@ -972,7 +1045,8 @@ def build_bwrap_cmd(
             _bind(site_dir)
 
     # --- Lifecycle ---
-    args.extend(["--die-with-parent", "--chdir", str(user_temp_dir.resolve())])
+    chdir_target = workspace_resolved or user_temp_dir.resolve()
+    args.extend(["--die-with-parent", "--chdir", str(chdir_target)])
     args.append("--")
 
     if net_proxy_sock:
@@ -1951,6 +2025,7 @@ def execute_task(
     use_context: bool = True,
     conn: "db.sqlite3.Connection | None" = None,
     event_writer: EventWriter | None = None,
+    workspace_dir: "Path | None" = None,
 ) -> tuple[bool, str, str | None, str | None]:
     """
     Execute a task using the configured brain.
@@ -2016,7 +2091,7 @@ def execute_task(
 
     # Build sticky skills from recent conversation + explicit reply parent
     sticky_skills: set[str] | None = None
-    if task.conversation_token and task.source_type in ("talk", "email"):
+    if task.conversation_token and task.source_type in _INTERACTIVE_SOURCE_TYPES:
         def _get_sticky(c: "db.sqlite3.Connection") -> set[str]:
             skills = db.get_recent_conversation_skills(
                 c, task.conversation_token,
@@ -2148,7 +2223,7 @@ def execute_task(
 
     # Skills changelog: detect changes for interactive tasks
     skills_changelog = None
-    _is_interactive = task.source_type in ("talk", "email")
+    _is_interactive = task.source_type in _INTERACTIVE_SOURCE_TYPES
     current_fingerprint = compute_skills_fingerprint(config.skills_dir, bundled_dir=_bundled_dir)
     if _is_interactive:
         try:
@@ -2178,8 +2253,8 @@ def execute_task(
         context_skip_reason = "use_context=False"
     elif not config.conversation.enabled:
         context_skip_reason = "conversation.enabled=False in config"
-    elif task.source_type not in ("talk", "email"):
-        context_skip_reason = f"source_type={task.source_type!r} (not talk/email)"
+    elif task.source_type not in _INTERACTIVE_SOURCE_TYPES:
+        context_skip_reason = f"source_type={task.source_type!r} (not interactive)"
     elif not task.conversation_token:
         context_skip_reason = "no conversation_token"
 
@@ -2543,6 +2618,7 @@ def execute_task(
                 net_proxy_sock=_net_proxy_sock,
                 extra_ro_binds=_extra_ro_binds,
                 selected_skills=frozenset(selected_skills),
+                workspace_dir=workspace_dir,
             )
 
         # Adapt the brain's (widened) StreamEvent stream to TaskEvents. Called
@@ -2634,7 +2710,16 @@ def execute_task(
         req = BrainRequest(
             prompt=prompt,
             allowed_tools=allowed,
-            cwd=Path(config.temp_dir),
+            # Non-sandbox path (Mac/dev/Docker): the REPL points the brain's
+            # working directory at the launch dir directly. No blocklist here —
+            # without bwrap the process already runs with the user's own FS
+            # access, so the bind-shadowing threat the blocklist guards doesn't
+            # apply (it fires in build_bwrap_cmd, the sandboxed path).
+            cwd=(
+                Path(workspace_dir).resolve()
+                if workspace_dir is not None and not config.security.sandbox_enabled
+                else Path(config.temp_dir)
+            ),
             env=env,
             timeout_seconds=config.scheduler.task_timeout_minutes * 60,
             model=brain.resolve_model_name((task.model or "").strip() or config.model),

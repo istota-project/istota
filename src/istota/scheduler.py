@@ -1187,6 +1187,95 @@ def _execute_command_task(
         return False, error
 
 
+def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
+    """Replay a completed task's deferred-op files (memory / kv / KG / health /
+    subtasks / tracking / sent-emails / email-output) and warn on unconsumed
+    files. The single source of truth for the post-success drain — shared by
+    ``process_one_task`` and ``run_task_inline`` so the two can't drift.
+    """
+    from .executor import get_user_temp_dir
+    user_temp_dir = get_user_temp_dir(config, task.user_id)
+    _process_deferred_subtasks(config, task, user_temp_dir)
+    _process_deferred_tracking(config, task, user_temp_dir)
+    _process_deferred_sent_emails(config, task, user_temp_dir)
+    _process_deferred_kv_ops(config, task, user_temp_dir)
+    _process_deferred_kg_ops(config, task, user_temp_dir)
+    _process_deferred_health_ops(config, task, user_temp_dir)
+    _process_deferred_user_alerts(config, task, user_temp_dir)
+    _deliver_deferred_email_output(config, task, user_temp_dir)
+    _warn_unconsumed_deferred_files(task, user_temp_dir)
+    _notify_confirmed_email_result(config, task, result)
+
+
+def run_task_inline(
+    config: Config,
+    task: db.Task,
+    *,
+    event_writer: "EventWriter | None" = None,
+    workspace_dir: "Path | None" = None,
+) -> tuple[bool, str]:
+    """Execute a task to completion in-process and finalize it, with no claim,
+    ack, transport push, or retry.
+
+    Runs ``execute_task`` (streaming the brain's events through ``event_writer``
+    so a subscriber can render them), emits the terminal ``result`` / ``error``
+    / ``cancelled`` + ``done`` events, updates the task status, and drains the
+    deferred-op files. This is the "run a task to completion locally" core the
+    REPL (and a future ``istota task -x``) reuses — so the deferred-op drain and
+    terminal-event emission can't drift from the daemon path.
+
+    Returns ``(success, result_text)``.
+    """
+    with db.get_db(config.db_path) as conn:
+        user_resources = db.get_user_resources(conn, task.user_id)
+
+    success, result, actions_taken, execution_trace = execute_task(
+        task, config, user_resources,
+        event_writer=event_writer, workspace_dir=workspace_dir,
+    )
+
+    # Same success-guards the daemon applies: API errors masquerading as
+    # success, and malformed (leaked tool-call XML) output.
+    if success and parse_api_error(result):
+        success = False
+    if success:
+        malformed = detect_malformed_result(result, output_target=task.output_target)
+        if malformed:
+            success = False
+            result = f"Malformed output: {malformed}"
+
+    is_cancelled = (not success) and result == "Cancelled by user"
+
+    if event_writer is not None:
+        if is_cancelled:
+            event_writer.emit("cancelled")
+        elif success:
+            event_writer.emit("result", {
+                "text": result[:8000], "truncated": len(result) > 8000,
+            })
+        else:
+            event_writer.emit("error", {"message": result[:500], "stop_reason": "error"})
+        event_writer.emit("done", {
+            "stop_reason": "completed" if success else "error",
+            "duration_seconds": round(event_writer.elapsed_seconds(), 1),
+        })
+        event_writer.finish()
+
+    status = "completed" if success else ("cancelled" if is_cancelled else "failed")
+    with db.get_db(config.db_path) as conn:
+        db.update_task_status(
+            conn, task.id, status,
+            result=result if success else None,
+            error=None if success else result,
+            actions_taken=actions_taken, execution_trace=execution_trace,
+        )
+
+    if success:
+        _drain_deferred_ops(config, task, result)
+
+    return success, result
+
+
 def process_one_task(
     config: Config, dry_run: bool = False, user_id: str | None = None,
     queue: str | None = None,
@@ -1618,18 +1707,7 @@ def process_one_task(
         and talk_token
         and CONFIRMATION_PATTERN.search(result)
     ):
-        from .executor import get_user_temp_dir
-        user_temp_dir = get_user_temp_dir(config, task.user_id)
-        _process_deferred_subtasks(config, task, user_temp_dir)
-        _process_deferred_tracking(config, task, user_temp_dir)
-        _process_deferred_sent_emails(config, task, user_temp_dir)
-        _process_deferred_kv_ops(config, task, user_temp_dir)
-        _process_deferred_kg_ops(config, task, user_temp_dir)
-        _process_deferred_health_ops(config, task, user_temp_dir)
-        _process_deferred_user_alerts(config, task, user_temp_dir)
-        _deliver_deferred_email_output(config, task, user_temp_dir)
-        _warn_unconsumed_deferred_files(task, user_temp_dir)
-        _notify_confirmed_email_result(config, task, result)
+        _drain_deferred_ops(config, task, result)
 
     # Save briefing digest for deduplication in the next run
     if success and task.source_type == "briefing":

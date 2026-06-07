@@ -28,6 +28,9 @@ class TestSurfaceForSourceType:
         assert _surface_for_source_type("talk") == "talk"
         assert _surface_for_source_type("briefing") == "talk"
 
+    def test_repl_maps_to_repl(self):
+        assert _surface_for_source_type("repl") == "repl"
+
     def test_unknown_defaults_to_talk(self):
         assert _surface_for_source_type("scheduled") == "talk"
         assert _surface_for_source_type("subtask") == "talk"
@@ -109,9 +112,9 @@ class TestForTask:
 
     def test_pollers_lists_all_registered(self):
         names = {t.name for t in self.reg.pollers()}
-        # ntfy + istota_file are registered unconditionally (per-user gating
-        # happens in their resolve_target/deliver, not at construction).
-        assert names == {"talk", "email", "ntfy", "istota_file"}
+        # ntfy + istota_file + repl are registered unconditionally (per-user /
+        # stream gating happens in their resolve_target/deliver).
+        assert names == {"talk", "email", "ntfy", "istota_file", "repl"}
 
 
 class TestEmptyRegistry:

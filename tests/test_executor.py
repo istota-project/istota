@@ -3844,3 +3844,76 @@ class TestSmtpFrom:
         call_args = mock_run.call_args
         env = call_args[1]["env"]
         assert env["SMTP_FROM"] == "zorg@x.cynium.com"
+
+
+class TestWorkspaceDirBwrap:
+    """build_bwrap_cmd workspace_dir: RW bind + --chdir + blocklist validation."""
+
+    def _cfg(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        _db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            temp_dir=tmp_path / "temp",
+            security=SecurityConfig(),
+        )
+
+    def _task(self, tmp_path):
+        with _db.get_db((tmp_path / "test.db")) as conn:
+            tid = _db.create_task(conn, prompt="x", user_id="alice", source_type="repl")
+            return _db.get_task(conn, tid)
+
+    def test_workspace_bind_and_chdir(self, tmp_path, monkeypatch):
+        from istota import executor
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        cfg = self._cfg(tmp_path)
+        task = self._task(tmp_path)
+        ws = tmp_path / "project"
+        ws.mkdir()
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        cmd = executor.build_bwrap_cmd(
+            ["claude"], cfg, task, True, [], user_temp, workspace_dir=ws,
+        )
+        joined = " ".join(cmd)
+        # chdir targets the workspace, and the workspace is bound RW.
+        assert "--chdir" in cmd
+        chdir_idx = cmd.index("--chdir")
+        assert cmd[chdir_idx + 1] == str(ws.resolve())
+        assert str(ws.resolve()) in joined
+
+    def test_workspace_blocklist_rejects_home_ssh(self, tmp_path, monkeypatch):
+        from istota import executor
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        cfg = self._cfg(tmp_path)
+        task = self._task(tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        ssh_dir = Path.home() / ".ssh"
+        with pytest.raises(ValueError):
+            executor.build_bwrap_cmd(
+                ["claude"], cfg, task, True, [], user_temp, workspace_dir=ssh_dir,
+            )
+
+    def test_validate_workspace_rejects_source_tree(self, tmp_path):
+        from istota import executor
+        cfg = self._cfg(tmp_path)
+        # The istota package dir is inside the source tree → rejected.
+        src_dir = Path(executor.__file__).resolve().parent
+        with pytest.raises(ValueError):
+            executor._validate_workspace_dir(cfg, src_dir)
+
+    def test_validate_workspace_allows_arbitrary_dir(self, tmp_path):
+        from istota import executor
+        cfg = self._cfg(tmp_path)
+        ok = tmp_path / "safe"
+        ok.mkdir()
+        assert executor._validate_workspace_dir(cfg, ok) == ok.resolve()
+
+
+class TestReplInteractiveGate:
+    def test_repl_in_interactive_source_types(self):
+        from istota.executor import _INTERACTIVE_SOURCE_TYPES
+        assert "repl" in _INTERACTIVE_SOURCE_TYPES
+        assert "talk" in _INTERACTIVE_SOURCE_TYPES
+        assert "email" in _INTERACTIVE_SOURCE_TYPES

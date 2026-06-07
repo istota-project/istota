@@ -28,6 +28,8 @@ def _surface_for_source_type(source_type: str) -> str:
     """
     if source_type == "email":
         return "email"
+    if source_type == "repl":
+        return "repl"
     return "talk"
 
 
@@ -65,6 +67,7 @@ def make_registry(config: "Config") -> TransportRegistry:
     from .email import EmailTransport
     from .istota_file import IstotaFileTransport
     from .ntfy import NtfyTransport
+    from .repl import ReplTransport
     from .talk import TalkTransport
 
     transports: dict[str, Transport] = {}
@@ -74,4 +77,5 @@ def make_registry(config: "Config") -> TransportRegistry:
         transports["email"] = EmailTransport(config)
     transports["ntfy"] = NtfyTransport(config)
     transports["istota_file"] = IstotaFileTransport(config)
+    transports["repl"] = ReplTransport(config)
     return TransportRegistry(transports)
