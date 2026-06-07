@@ -515,6 +515,7 @@ async def api_me(user: dict = Depends(_require_api_auth)):
     username = user["username"]
     is_admin = _user_is_web_admin(username)
     features: dict = {
+        "chat": True,  # web chat is always-on
         "feeds": False,
         "location": False,
         "money": False,
@@ -670,7 +671,7 @@ def _scan_db_backups(backups_dir: Path) -> tuple[int, str | None]:
     return count, iso
 
 
-_INTERACTIVE_SOURCES = frozenset({"talk", "email", "tasks_file", "cli"})
+_INTERACTIVE_SOURCES = frozenset({"talk", "email", "tasks_file", "cli", "web"})
 _AUTOMATED_SOURCES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"})
 
 
@@ -1170,6 +1171,295 @@ async def admin_task_events(
     """All events for a task — backs the admin in-flight task-detail view."""
     events = await asyncio.to_thread(_load_task_events, task_id, since_seq)
     return {"events": events}
+
+
+# ---- Web chat surface ----
+#
+# Always-on in-app companion to Talk. Rooms are per-user channel tokens (each
+# carries its own CHANNEL.md + sleep-cycle handling). A sent message becomes a
+# source_type="web" / output_target="web" task; the result and progress live in
+# the task_events table the existing /chat/tasks/{id}/stream SSE endpoint tails.
+
+
+def _room_to_dict(room) -> dict:
+    return {
+        "id": room.id,
+        "token": room.token,
+        "name": room.name,
+        "archived": room.archived,
+        "created_at": room.created_at,
+        "updated_at": room.updated_at,
+    }
+
+
+def _chat_list_rooms(username: str) -> list[dict]:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        db.ensure_default_web_chat_room(conn, username)
+        rooms = db.list_web_chat_rooms(conn, username, include_archived=False)
+    return [_room_to_dict(r) for r in rooms]
+
+
+def _chat_create_room(username: str, name: str) -> dict:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        room = db.create_web_chat_room(conn, username, name)
+    return _room_to_dict(room)
+
+
+def _chat_owned_room(username: str, room_id: int):
+    """Return the room if it belongs to ``username``, else None."""
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        room = db.get_web_chat_room(conn, room_id)
+    if room is None or room.user_id != username:
+        return None
+    return room
+
+
+def _chat_update_room(
+    username: str, room_id: int, name: str | None, archived: bool | None,
+) -> dict | None:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        room = db.get_web_chat_room(conn, room_id)
+        if room is None or room.user_id != username:
+            return None
+        updated = db.update_web_chat_room(
+            conn, room_id, name=name, archived=archived,
+        )
+    return _room_to_dict(updated) if updated else None
+
+
+def _chat_room_messages(username: str, token: str, limit: int) -> dict:
+    """Recent messages for a room plus the active (in-flight) task, if any.
+
+    Each task contributes a user message (its prompt) and, once terminal, an
+    assistant message (its result / error / confirmation prompt). Non-terminal
+    tasks surface as ``active_task`` so a reload mid-stream can resume the SSE.
+    """
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, prompt, result, status, error, confirmation_prompt, "
+            "created_at FROM tasks "
+            "WHERE conversation_token = ? AND user_id = ? AND source_type = 'web' "
+            "ORDER BY id DESC LIMIT ?",
+            (token, username, limit),
+        ).fetchall()
+    rows = list(reversed(rows))
+    messages: list[dict] = []
+    active: dict | None = None
+    for r in rows:
+        messages.append({
+            "role": "user", "text": r["prompt"], "task_id": r["id"],
+            "created_at": r["created_at"],
+        })
+        status = r["status"]
+        if status == "completed":
+            messages.append({
+                "role": "assistant", "text": r["result"] or "", "task_id": r["id"],
+                "status": status, "created_at": r["created_at"],
+            })
+        elif status == "pending_confirmation":
+            messages.append({
+                "role": "assistant",
+                "text": r["confirmation_prompt"] or r["result"] or "",
+                "task_id": r["id"], "status": status, "confirmation": True,
+                "created_at": r["created_at"],
+            })
+            active = {"id": r["id"], "status": status}
+        elif status in ("failed", "cancelled"):
+            messages.append({
+                "role": "assistant", "text": r["result"] or r["error"] or "",
+                "task_id": r["id"], "status": status, "created_at": r["created_at"],
+            })
+        else:  # pending / locked / running
+            active = {"id": r["id"], "status": status}
+    return {"messages": messages, "active_task": active}
+
+
+def _chat_create_web_task(username: str, token: str, text: str) -> tuple[str, int]:
+    """Rate-limited web-task creation. Returns ``("ok", task_id)`` or
+    ``("rate_limited", window_seconds)``."""
+    from . import db
+    chat = _config.web.chat
+    with db.get_db(_config.db_path) as conn:
+        recent = db.count_recent_web_tasks(conn, username, chat.rate_limit_window_seconds)
+        if recent >= chat.rate_limit_messages:
+            return ("rate_limited", chat.rate_limit_window_seconds)
+        task_id = db.create_task(
+            conn, prompt=text, user_id=username, source_type="web",
+            conversation_token=token, output_target="web", priority=5,
+        )
+    return ("ok", task_id)
+
+
+@api_router.get("/chat/config")
+async def chat_config(user: dict = Depends(_require_api_auth)):
+    """Client-facing chat knobs."""
+    chat = _config.web.chat
+    return {
+        "max_prompt_chars": chat.max_prompt_chars,
+        "max_attachment_mb": chat.max_attachment_mb,
+        "attachment_extensions": chat.attachment_extensions,
+        "client_poll_interval_ms": chat.client_poll_interval_ms,
+    }
+
+
+@api_router.get("/chat/rooms")
+async def chat_list_rooms(user: dict = Depends(_require_api_auth)):
+    rooms = await asyncio.to_thread(_chat_list_rooms, user["username"])
+    return {"rooms": rooms}
+
+
+@api_router.post("/chat/rooms")
+async def chat_create_room(
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    data = await request.json()
+    name = (data.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    if len(name) > 80:
+        name = name[:80]
+    room = await asyncio.to_thread(_chat_create_room, user["username"], name)
+    return room
+
+
+@api_router.patch("/chat/rooms/{room_id}")
+async def chat_update_room(
+    room_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    data = await request.json()
+    name = data.get("name")
+    archived = data.get("archived")
+    if name is not None:
+        name = str(name).strip()[:80] or None
+    if archived is not None:
+        archived = bool(archived)
+    updated = await asyncio.to_thread(
+        _chat_update_room, user["username"], room_id, name, archived,
+    )
+    if updated is None:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    return updated
+
+
+@api_router.get("/chat/rooms/{room_id}/messages")
+async def chat_room_messages(
+    room_id: int, limit: int = 50, user: dict = Depends(_require_api_auth),
+):
+    room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)
+    if room is None:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    limit = max(1, min(limit, 200))
+    return await asyncio.to_thread(
+        _chat_room_messages, user["username"], room.token, limit,
+    )
+
+
+@api_router.post("/chat/rooms/{room_id}/messages")
+async def chat_send_message(
+    room_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    username = user["username"]
+    room = await asyncio.to_thread(_chat_owned_room, username, room_id)
+    if room is None:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+
+    data = await request.json()
+    text = (data.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "text required"}, status_code=400)
+    if len(text) > _config.web.chat.max_prompt_chars:
+        return JSONResponse({"error": "message too long"}, status_code=400)
+
+    # !commands run synchronously and return inline — no task row, no events.
+    if text.startswith("!"):
+        from . import commands
+        from .async_runtime import run_coro
+
+        def _run_cmd():
+            return run_coro(commands.run_inline(_config, username, room.token, text))
+
+        handled, inline = await asyncio.to_thread(_run_cmd)
+        if handled:
+            return {"task_id": None, "inline_result": inline or ""}
+
+    outcome, value = await asyncio.to_thread(
+        _chat_create_web_task, username, room.token, text,
+    )
+    if outcome == "rate_limited":
+        return JSONResponse(
+            {"error": "rate limit exceeded"},
+            status_code=429,
+            headers={"Retry-After": str(value)},
+        )
+    task_id = value
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "stream_url": f"/istota/api/chat/tasks/{task_id}/stream",
+        "snapshot_url": f"/istota/api/chat/tasks/{task_id}/events",
+    }
+
+
+def _chat_confirm_task(task_id: int) -> None:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        # Clear prior events so the confirmed re-run's reset seq counter can't
+        # collide on UNIQUE(task_id, seq) — the client already captured them.
+        db.delete_task_events(conn, task_id)
+        db.confirm_task(conn, task_id)
+
+
+def _chat_cancel_task(task_id: int) -> None:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,)
+        )
+        pid_row = conn.execute(
+            "SELECT worker_pid, status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    # Best-effort subprocess kill; the scheduler's cancel_check ends the task
+    # and emits cancelled/done so the SSE stream closes cleanly.
+    if pid_row and pid_row["worker_pid"]:
+        try:
+            os.kill(pid_row["worker_pid"], signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+@api_router.post("/chat/tasks/{task_id}/confirm")
+async def chat_confirm_task(
+    task_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    await _authorize_task_access(task_id, user)
+    await asyncio.to_thread(_chat_confirm_task, task_id)
+    return {"status": "ok"}
+
+
+@api_router.post("/chat/tasks/{task_id}/cancel")
+async def chat_cancel_task(
+    task_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    await _authorize_task_access(task_id, user)
+    await asyncio.to_thread(_chat_cancel_task, task_id)
+    return {"status": "cancelling"}
 
 
 # ---- Google Workspace API routes ----

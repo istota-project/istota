@@ -149,6 +149,45 @@ async def dispatch(
     return True
 
 
+async def run_inline(
+    config: Config,
+    user_id: str,
+    conversation_token: str,
+    content: str,
+) -> tuple[bool, str | None]:
+    """Run a ``!command`` and return ``(handled, response_text)`` WITHOUT
+    delivering it anywhere.
+
+    For non-Talk surfaces (web chat) that render the command result inline
+    instead of posting it to a Talk room. Opens its own DB connection so the
+    coroutine can run on the persistent asyncio loop (the same thread the
+    shared ``TalkClient`` is bound to). Returns ``(False, None)`` when
+    ``content`` is not a command.
+    """
+    parsed = parse_command(content)
+    if parsed is None:
+        return (False, None)
+
+    cmd_name, args_str = parsed
+    if cmd_name not in COMMANDS:
+        return (
+            True,
+            f"Unknown command `!{cmd_name}`. Type `!help` for available commands.",
+        )
+
+    handler, _ = COMMANDS[cmd_name]
+    client = get_talk_client(config)
+    try:
+        with db.get_db(config.db_path) as conn:
+            response = await handler(
+                config, conn, user_id, conversation_token, args_str, client,
+            )
+        return (True, response or "")
+    except Exception as e:
+        logger.error("Inline command !%s failed: %s", cmd_name, e, exc_info=True)
+        return (True, f"Command `!{cmd_name}` failed: {e}")
+
+
 # =============================================================================
 # Command implementations
 # =============================================================================

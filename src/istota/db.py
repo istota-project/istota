@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -339,6 +340,29 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_task_events_task_seq "
             "ON task_events (task_id, seq)"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # Web chat rooms (web chat surface). Created here for existing DBs;
+    # schema.sql also has it for fresh installs. Each room's token is the
+    # conversation_token used by its tasks, so each room gets its own
+    # CHANNEL.md + sleep-cycle handling.
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS web_chat_rooms (
+                id          INTEGER PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                token       TEXT NOT NULL UNIQUE,
+                name        TEXT NOT NULL,
+                archived    INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_web_chat_rooms_user "
+            "ON web_chat_rooms (user_id, archived, id)"
         )
     except sqlite3.OperationalError:
         pass
@@ -1416,6 +1440,133 @@ def delete_task_events(conn: sqlite3.Connection, task_id: int) -> int:
     """
     cursor = conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
     return cursor.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Web chat rooms (web chat surface)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class WebChatRoom:
+    id: int
+    user_id: str
+    token: str
+    name: str
+    archived: bool
+    created_at: str
+    updated_at: str
+
+
+def _row_to_web_chat_room(row: sqlite3.Row) -> WebChatRoom:
+    return WebChatRoom(
+        id=row["id"],
+        user_id=row["user_id"],
+        token=row["token"],
+        name=row["name"],
+        archived=bool(row["archived"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _new_web_chat_token(user_id: str) -> str:
+    """Per-room channel token. The ``web-`` prefix is informational, not a
+    security boundary — handlers always derive ``user_id`` from the session."""
+    return f"web-{user_id}-{uuid.uuid4().hex[:12]}"
+
+
+def list_web_chat_rooms(
+    conn: sqlite3.Connection, user_id: str, include_archived: bool = False,
+) -> list[WebChatRoom]:
+    """Rooms for a user, oldest first (creation order)."""
+    sql = "SELECT * FROM web_chat_rooms WHERE user_id = ?"
+    params: list = [user_id]
+    if not include_archived:
+        sql += " AND archived = 0"
+    sql += " ORDER BY id ASC"
+    return [_row_to_web_chat_room(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def get_web_chat_room(conn: sqlite3.Connection, room_id: int) -> WebChatRoom | None:
+    row = conn.execute(
+        "SELECT * FROM web_chat_rooms WHERE id = ?", (room_id,)
+    ).fetchone()
+    return _row_to_web_chat_room(row) if row else None
+
+
+def get_web_chat_room_by_token(
+    conn: sqlite3.Connection, token: str,
+) -> WebChatRoom | None:
+    row = conn.execute(
+        "SELECT * FROM web_chat_rooms WHERE token = ?", (token,)
+    ).fetchone()
+    return _row_to_web_chat_room(row) if row else None
+
+
+def create_web_chat_room(
+    conn: sqlite3.Connection, user_id: str, name: str,
+) -> WebChatRoom:
+    """Create a room with a freshly generated channel token."""
+    token = _new_web_chat_token(user_id)
+    row = conn.execute(
+        "INSERT INTO web_chat_rooms (user_id, token, name) VALUES (?, ?, ?) "
+        "RETURNING *",
+        (user_id, token, name.strip() or "general"),
+    ).fetchone()
+    return _row_to_web_chat_room(row)
+
+
+def update_web_chat_room(
+    conn: sqlite3.Connection,
+    room_id: int,
+    *,
+    name: str | None = None,
+    archived: bool | None = None,
+) -> WebChatRoom | None:
+    """Rename and/or (un)archive a room. Returns the updated row, or None if
+    the id is unknown."""
+    sets: list[str] = []
+    params: list = []
+    if name is not None:
+        sets.append("name = ?")
+        params.append(name.strip() or "general")
+    if archived is not None:
+        sets.append("archived = ?")
+        params.append(1 if archived else 0)
+    if not sets:
+        return get_web_chat_room(conn, room_id)
+    sets.append("updated_at = datetime('now')")
+    params.append(room_id)
+    row = conn.execute(
+        f"UPDATE web_chat_rooms SET {', '.join(sets)} WHERE id = ? RETURNING *",
+        params,
+    ).fetchone()
+    return _row_to_web_chat_room(row) if row else None
+
+
+def ensure_default_web_chat_room(
+    conn: sqlite3.Connection, user_id: str,
+) -> WebChatRoom:
+    """Guarantee the user has at least one active room. Returns the first
+    active room, creating a ``general`` room when none exist."""
+    rooms = list_web_chat_rooms(conn, user_id, include_archived=False)
+    if rooms:
+        return rooms[0]
+    return create_web_chat_room(conn, user_id, "general")
+
+
+def count_recent_web_tasks(
+    conn: sqlite3.Connection, user_id: str, window_seconds: int,
+) -> int:
+    """Count this user's web-chat tasks created within the last
+    ``window_seconds`` — backs the per-user rate limit (no extra state)."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE user_id = ? AND source_type = 'web' "
+        "AND created_at > datetime('now', ?)",
+        (user_id, f"-{int(window_seconds)} seconds"),
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def list_tasks(

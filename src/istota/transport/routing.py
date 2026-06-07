@@ -28,10 +28,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("istota.transport.routing")
 
-# Surfaces whose outbound is the task_events log (no push delivery).
-_STREAM_SURFACES = frozenset({"stream"})
+# Surfaces whose outbound is the task_events log (no push delivery). Web chat
+# rides the same substrate as the REPL: the client tails task_events over SSE,
+# so there is nothing to push.
+_STREAM_SURFACES = frozenset({"stream", "web"})
 # Source types that must never silently drop a reply (interactive surfaces).
-_INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "repl"})
+_INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "repl", "web"})
 
 # Legacy compound aliases, normalized in exactly one place.
 _ALIASES: dict[str, list[str]] = {
@@ -122,6 +124,8 @@ def _infer_default_plan(task: "db.Task") -> list[Destination]:
         return [Destination("istota_file")]
     if st == "repl":
         return [Destination("stream", "stream", "stream")]
+    if st == "web":
+        return [Destination("web", "stream", "stream")]
     return []
 
 
@@ -192,6 +196,8 @@ def _reply_origin_destination(
         return Destination("email", None, "push")
     if st == "repl":
         return Destination("stream", "stream", "stream")
+    if st == "web":
+        return Destination("web", "stream", "stream")
     channel = _resolve_talk_channel(config, task)
     if not channel:
         return None
