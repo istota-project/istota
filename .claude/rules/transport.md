@@ -180,8 +180,13 @@ use across its own boundary.
   Talk surface do not). Result + email delivery still call the
   `post_result_to_*` shims (extensive introspection-test coverage depends on the
   call shape).
-- **`LogChannelSubscriber`** delivers the log-channel message through
-  `TalkTransport` (the log channel is always a Talk room today).
+- **`LogChannelSubscriber`** delivers the verbose execution log to the user's
+  resolved log destinations via the registry (`notifications.effective_log_destinations`
+  — opt-in: `routing["log"]` > legacy `log_channel` > disabled). Delivery is
+  capability-keyed on `supports_edit`: edit-capable surfaces (Talk) get the live
+  in-place edited message stream; non-edit surfaces (email, ntfy) get a single
+  final-summary delivery from `scheduler._finalize_log_channel` instead of
+  per-tool spam. No longer Talk-only.
 
 ## Outbound delivery routing (`routing.py`)
 
@@ -239,16 +244,17 @@ Distinct from `resolve_delivery_plan` (which routes task *results* by
 - Set via `istota user ensure --route purpose=descriptor` (validated against
   `PURPOSES`) or the web `/settings` Preferences card; both go through the same
   `user_profiles.routing` JSON column. The CLI can set any purpose. The web card
-  is deliberately narrowed (see below): it edits only `default_destination` and
-  the `alert` route, since `alert` is the one purpose framework-generated
-  notifications can't override per-task and benefits from a separate/louder
-  channel. The other purposes are effectively dead UI — `log` duplicates the
-  dedicated `log_channel` field, `briefing` duplicates each briefing's own
-  `conversation_token`, `reply` is vestigial (result delivery routes via
-  `resolve_delivery_plan`/`output_target`, not the routing table), and
-  `notification` falls to the default. The web card preserves any
-  CLI-set non-`alert` routes on round-trip rather than stripping them — it just
-  doesn't surface them.
+  surfaces `default_destination`, the `alert` route, and the `log` route. The
+  `log` route is what drives the verbose execution log — it's read by
+  `effective_log_destinations` (the log path), not just stored: routing it to
+  `email` / `ntfy` actually moves the log there (the "(off)" empty option
+  disables it; the legacy `log_channel` field is the back-compat Talk shorthand
+  it supersedes). The remaining purposes are still UI-dead — `briefing`
+  duplicates each briefing's own `conversation_token`, `reply` is vestigial
+  (result delivery routes via `resolve_delivery_plan`/`output_target`, not the
+  routing table), and `notification` falls to the default. The web card
+  preserves any CLI-set non-surfaced routes on round-trip rather than stripping
+  them.
 
 ## Deliberate residuals (ISSUE-113, closed)
 

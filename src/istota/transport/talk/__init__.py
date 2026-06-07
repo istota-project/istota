@@ -120,6 +120,23 @@ class TalkTransport:
         await client.edit_message(target, message_id, text)
         return None
 
+    async def resolve_channel_name(self, token: str) -> str:
+        """Resolve a Talk room token to its display name, falling back to the
+        token on any OCS error / missing config. Houses the last log-path OCS
+        read behind the transport seam (was a direct ``get_conversation_info``
+        in ``scheduler._resolve_channel_name``)."""
+        if not self._config.nextcloud.url or not token:
+            return token
+        try:
+            client = get_talk_client(self._config)
+            info = await client.get_conversation_info(token)
+            return info.get("displayName") or token
+        except Exception:
+            logger.debug(
+                "Failed to resolve Talk channel name for %s", token, exc_info=True,
+            )
+            return token
+
     async def download_attachment(self, remote_ref: str, local_path: str) -> None:
         client = get_talk_client(self._config)
         await client.download_attachment(remote_ref, local_path)

@@ -46,15 +46,17 @@ from .executor import (
     is_transient_api_error,
     parse_api_error,
 )
-from .async_runtime import get_talk_client, reset_async_runtime, run_coro
+from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
-from .notifications import send_notification
+from .notifications import effective_log_destinations, send_notification
 from .transport import (
+    Destination,
     make_registry,
     parse_output_target,
     plan_has_surface,
     resolve_delivery_plan,
 )
+from .transport.registry import _surface_for_source_type
 from .storage import ensure_user_directories_v2
 
 # Deferred-op handlers were extracted to a sibling module; re-export the
@@ -453,22 +455,19 @@ _channel_name_cache: dict[str, str] = {}
 
 
 async def _resolve_channel_name(config: Config, conversation_token: str) -> str:
-    """Resolve a conversation token to its display name via Talk API.
+    """Resolve a Talk conversation token to its display name.
 
+    Thin process-cache wrapper over ``TalkTransport.resolve_channel_name`` — the
+    OCS read itself lives behind the transport seam now. Only meaningful for
+    Talk-origin tasks; callers gate on the origin surface before invoking.
     Results are cached for the lifetime of the process.
     """
     if conversation_token in _channel_name_cache:
         return _channel_name_cache[conversation_token]
-    try:
-        client = get_talk_client(config)
-        info = await client.get_conversation_info(conversation_token)
-        name = info.get("displayName", conversation_token)
-        _channel_name_cache[conversation_token] = name
-        return name
-    except Exception:
-        logger.debug("Failed to resolve channel name for %s", conversation_token)
-        _channel_name_cache[conversation_token] = conversation_token
-        return conversation_token
+    from .transport.talk import TalkTransport
+    name = await TalkTransport(config).resolve_channel_name(conversation_token)
+    _channel_name_cache[conversation_token] = name
+    return name
 
 
 def _log_channel_source_label(task: db.Task, channel_name: str | None) -> tuple[str, str]:
@@ -528,47 +527,46 @@ def _format_log_channel_body(
 
 
 def _finalize_log_channel(
-    config: Config, task: db.Task, log_channel: str, prefix: str,
+    config: Config, task: db.Task, log_dests: list[Destination], prefix: str,
     log_callback, success: bool, error: str | None = None,
     skills: list[str] | None = None,
     model: str | None = None, effort: str | None = None,
 ):
-    """Post/edit the final summary to the log channel."""
+    """Post/edit the final summary to every resolved log destination.
+
+    Edit-capable surfaces that streamed during the run get their in-flight
+    message edited to the final state; edit-capable surfaces with no prior
+    message (no tool calls) and all non-edit surfaces get a single fresh
+    delivery of the footer. Each destination is delivered through its registered
+    transport; one failing destination never aborts the others or the task.
+    """
     descriptions = getattr(log_callback, "all_descriptions", []) if log_callback else []
-    log_msg_id = getattr(log_callback, "log_msg_id", [None])[0] if log_callback else None
+    delivery_state = getattr(log_callback, "delivery_state", {}) if log_callback else {}
 
     body = _format_log_channel_body(
         prefix, descriptions, done=True, success=success, error=error,
         skills=skills, model=model, effort=effort,
     )
 
-    try:
-        if log_msg_id is not None:
-            # Edit existing message with final state
-            run_coro(edit_talk_message(
-                config,
-                db.Task(
-                    id=task.id, status="running", source_type=task.source_type,
-                    user_id=task.user_id, prompt="", conversation_token=log_channel,
-                ),
-                log_msg_id, body,
-            ))
-        elif descriptions:
-            # No existing message (shouldn't happen, but fallback)
-            client = get_talk_client(config)
-            run_coro(client.send_message(
-                log_channel, body,
-                reference_id=f"istota:log:{task.id}",
-            ))
-        else:
-            # No tool calls at all — post using pre-computed body (includes skills)
-            client = get_talk_client(config)
-            run_coro(client.send_message(
-                log_channel, body,
-                reference_id=f"istota:log:{task.id}",
-            ))
-    except Exception as e:
-        logger.debug("Log channel finalize failed for task %d: %s", task.id, e)
+    registry = make_registry(config)
+    for dest in log_dests:
+        transport = registry.get(dest.surface)
+        if transport is None:
+            continue
+        msg_id = delivery_state.get((dest.surface, dest.channel))
+        try:
+            if transport.capabilities.supports_edit and msg_id is not None:
+                run_coro(transport.edit(dest.channel, msg_id, body))
+            else:
+                run_coro(transport.deliver(
+                    dest.channel, body, task=task,
+                    reference_id=f"istota:log:{task.id}",
+                ))
+        except Exception as e:
+            logger.debug(
+                "Log channel finalize failed for task %d dest %s: %s",
+                task.id, dest.surface, e,
+            )
 
 
 class UserWorker(threading.Thread):
@@ -1315,17 +1313,21 @@ def process_one_task(
         # Get user resources
         user_resources = db.get_user_resources(conn, task.user_id)
 
-    # Log channel setup — resolve before execution starts
-    user_cfg = config.get_user(task.user_id)
-    log_channel = user_cfg.log_channel if user_cfg else ""
-    if task.skip_log_channel:
-        log_channel = ""
+    # Log channel setup — resolve before execution starts. The verbose log is
+    # opt-in and routes to any user-routable transport destination (talk default
+    # / email / ntfy / comma list); effective_log_destinations returns [] when
+    # the user configured neither a log route nor a legacy log_channel.
+    log_dests: list[Destination] = []
+    if not task.skip_log_channel:
+        log_dests = effective_log_destinations(config, task.user_id)
     log_channel_prefix = ""
     log_callback = None
-    if log_channel and config.nextcloud.url and not dry_run:
-        # Resolve source channel name for the log prefix
+    if log_dests and not dry_run:
+        # Resolve the *source* channel name for the log prefix — only when the
+        # task originated on Talk (an OCS display-name lookup is meaningless for
+        # email / repl origins, which fall back to source_type).
         channel_name = None
-        if task.conversation_token:
+        if task.conversation_token and _surface_for_source_type(task.source_type) == "talk":
             try:
                 channel_name = run_coro(
                     _resolve_channel_name(config, task.conversation_token),
@@ -1402,10 +1404,11 @@ def process_one_task(
                     talk_sub = TalkEventSubscriber(config, task, ack_msg_id)
                     event_writer.subscribe(talk_sub)
 
-            # Log channel subscriber (no rate limiting, streams every tool call).
-            if log_channel and log_channel_prefix:
+            # Log channel subscriber (no rate limiting, streams every tool call
+            # to edit-capable destinations).
+            if log_dests and log_channel_prefix:
                 log_callback = LogChannelSubscriber(
-                    config, task, log_channel, log_channel_prefix,
+                    config, task, log_dests, log_channel_prefix,
                 )
                 event_writer.subscribe(log_callback)
 
@@ -1725,7 +1728,7 @@ def process_one_task(
     # Talk subscriber's terminal-event handling.
 
     # Finalize log channel message with completion status
-    if log_channel and log_channel_prefix:
+    if log_dests and log_channel_prefix:
         error_msg = result if not success else None
         # Read selected skills from DB (set during execute_task, not on local task object)
         selected_skills = None
@@ -1741,7 +1744,7 @@ def process_one_task(
         resolved_model = (task.model or "").strip() or config.model or None
         resolved_effort = _resolve_effort(task, config) or None
         _finalize_log_channel(
-            config, task, log_channel, log_channel_prefix,
+            config, task, log_dests, log_channel_prefix,
             log_callback, success, error=error_msg,
             skills=selected_skills,
             model=resolved_model, effort=resolved_effort,

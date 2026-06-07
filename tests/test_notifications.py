@@ -15,6 +15,7 @@ from istota.notifications import (
     _send_email,
     _send_ntfy,
     _send_talk,
+    effective_log_destinations,
     is_channel_configured,
     resolve_conversation_token,
     resolve_destination,
@@ -397,6 +398,107 @@ class TestResolveDestination:
     def test_instance_fallback_bare_talk(self):
         config = Config(users={"alice": UserConfig()})
         assert resolve_destination(config, "alice", "notification") == Destination("talk", None)
+
+
+class TestEffectiveLogDestinations:
+    """Opt-in log-channel resolution: routing['log'] > legacy log_channel > [].
+
+    Unlike resolve_destinations, this NEVER falls through to default_destination
+    or a bare-talk instance default — an unconfigured user gets no log output.
+    """
+
+    def test_route_set_wins(self):
+        config = Config(users={"alice": UserConfig(routing={"log": "ntfy"})})
+        assert effective_log_destinations(config, "alice") == [Destination("ntfy", None)]
+
+    def test_route_wins_over_legacy_log_channel(self):
+        config = Config(users={"alice": UserConfig(
+            routing={"log": "ntfy"}, log_channel="lchan",
+        )})
+        assert effective_log_destinations(config, "alice") == [Destination("ntfy", None)]
+
+    def test_legacy_log_channel_only(self):
+        config = Config(users={"alice": UserConfig(log_channel="lchan")})
+        assert effective_log_destinations(config, "alice") == [Destination("talk", "lchan")]
+
+    def test_neither_configured_is_empty(self):
+        # The opt-in regression guard: no route, no log_channel -> disabled.
+        config = Config(users={"alice": UserConfig()})
+        assert effective_log_destinations(config, "alice") == []
+
+    def test_default_destination_not_used(self):
+        # default_destination must NOT silently enable the verbose log.
+        config = Config(users={"alice": UserConfig(default_destination="email")})
+        assert effective_log_destinations(config, "alice") == []
+
+    def test_unknown_user_is_empty(self):
+        assert effective_log_destinations(Config(), "nobody") == []
+
+    def test_drops_unregistered_surface(self):
+        # email disabled -> not registered -> the email log route is dropped.
+        config = Config(
+            email=EmailConfig(enabled=False),
+            users={"alice": UserConfig(routing={"log": "email"})},
+        )
+        assert effective_log_destinations(config, "alice") == []
+
+    def test_email_route_when_enabled(self):
+        config = Config(
+            email=EmailConfig(enabled=True),
+            users={"alice": UserConfig(routing={"log": "email"})},
+        )
+        assert effective_log_destinations(config, "alice") == [Destination("email", None)]
+
+    def test_drops_non_user_routable_surface(self):
+        # repl is registered but user_routable=False -> never a log destination.
+        config = Config(users={"alice": UserConfig(routing={"log": "repl"})})
+        assert effective_log_destinations(config, "alice") == []
+
+    def test_bare_talk_prefers_log_channel(self):
+        # Bare `talk` for the log purpose means "the logs room" — prefer
+        # log_channel over the default Talk channel / DM.
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc"),
+            users={"alice": UserConfig(
+                routing={"log": "talk"}, log_channel="logs", alerts_channel="achan",
+            )},
+        )
+        assert effective_log_destinations(config, "alice") == [Destination("talk", "logs")]
+
+    def test_bare_talk_falls_back_to_default_channel_without_log_channel(self):
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc"),
+            users={"alice": UserConfig(routing={"log": "talk"}, alerts_channel="achan")},
+        )
+        assert effective_log_destinations(config, "alice") == [Destination("talk", "achan")]
+
+    def test_none_disables_even_with_log_channel(self):
+        # Explicit "none" overrides a provisioned log_channel (the only way to
+        # turn the log fully off from the web UI).
+        config = Config(users={"alice": UserConfig(
+            routing={"log": "none"}, log_channel="logs",
+        )})
+        assert effective_log_destinations(config, "alice") == []
+
+    def test_bare_talk_unresolvable_is_dropped(self):
+        config = Config(users={"alice": UserConfig(routing={"log": "talk"})})
+        assert effective_log_destinations(config, "alice") == []
+
+    def test_explicit_talk_token_kept(self):
+        config = Config(users={"alice": UserConfig(routing={"log": "talk:room5"})})
+        assert effective_log_destinations(config, "alice") == [Destination("talk", "room5")]
+
+    def test_comma_list_mixed_capability(self):
+        config = Config(users={"alice": UserConfig(routing={"log": "talk:room,ntfy"})})
+        assert effective_log_destinations(config, "alice") == [
+            Destination("talk", "room"),
+            Destination("ntfy", None),
+        ]
+
+    def test_never_raises_on_registry_failure(self):
+        config = Config(users={"alice": UserConfig(log_channel="lchan")})
+        with patch("istota.notifications.make_registry", side_effect=RuntimeError("boom")):
+            assert effective_log_destinations(config, "alice") == []
 
 
 class TestResolveConversationTokenRouting:
