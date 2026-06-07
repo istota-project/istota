@@ -180,7 +180,7 @@ istota_scheduler_progress_show_tool_use: true          # Emit tool_start / tool_
 istota_scheduler_progress_show_text: false             # Emit intermediate assistant text events (noisy)
 istota_scheduler_event_log_enabled: true               # Write events to the task_events table (kill-switch)
 istota_scheduler_push_notification_threshold_seconds: 30  # Min task duration before a push notification fires
-istota_scheduler_push_notification_sources: ["talk"]   # source_types that trigger a push notification
+istota_scheduler_push_notification_sources: []   # source_types that trigger a completion push; empty = ntfy opt-in only
 istota_scheduler_task_timeout_minutes: 30             # Kill task execution after N minutes
 istota_scheduler_log_channel_show_skills: true        # Include selected skills in log channel messages
 

@@ -240,8 +240,11 @@ event_log_enabled = true
 # A push notification fires only when a task ran longer than this (short tasks
 # don't need a ping — the user is likely still watching).
 push_notification_threshold_seconds = 30
-# Which task source_types trigger a push notification on completion.
-push_notification_sources = ["talk"]
+# Which task source_types trigger a push notification on completion. Empty by
+# default: ntfy is opt-in, never a default surface. ntfy still fires for
+# explicit requests (scheduled jobs with output_target=ntfy, heartbeat alerts).
+# Add source_types here (e.g. ["talk"]) to opt back into completion pushes.
+push_notification_sources = []
 
 # Kill task execution after N minutes (default: 30)
 task_timeout_minutes = 30

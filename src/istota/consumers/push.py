@@ -1,9 +1,12 @@
 """Push notification consumer — fires when a long-running task finishes.
 
-Short tasks don't need a ping (the user is likely still watching the screen),
-so the notification only fires when the task ran longer than
-``push_notification_threshold_seconds``. Gated by source type
-(``push_notification_sources``) at construction time by the scheduler.
+ntfy is opt-in: ``push_notification_sources`` is empty by default, so the
+scheduler never attaches this subscriber unless an operator lists a source
+type. When attached, it only fires for tasks that ran longer than
+``push_notification_threshold_seconds`` (short tasks don't need a ping).
+ntfy still reaches the user for explicit requests — scheduled jobs with
+``output_target=ntfy``, heartbeat alerts, and ``surface="ntfy"`` calls —
+which go through ``send_notification`` directly, not this subscriber.
 """
 
 from __future__ import annotations

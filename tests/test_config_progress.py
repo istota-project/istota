@@ -11,7 +11,8 @@ class TestProgressConfigDefaults:
         assert config.scheduler.progress_show_text is False
         assert config.scheduler.event_log_enabled is True
         assert config.scheduler.push_notification_threshold_seconds == 30
-        assert config.scheduler.push_notification_sources == ["talk"]
+        # ntfy is opt-in: no source type triggers a push by default.
+        assert config.scheduler.push_notification_sources == []
 
 
 class TestProgressConfigParsing:
