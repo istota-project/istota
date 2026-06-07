@@ -2,6 +2,35 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-07: Web chat — Discord/Slack styling, markdown-it, real names
+
+Visual polish on the now-working web chat surface. Two asks: move off messenger-style bubbles toward a Discord/Slack transcript, and stop hand-rolling Markdown.
+
+Layout: `Message.svelte` was a bubble (max-width 80%, right-aligned for the user). It's now a full-width row with an avatar gutter, an author + timestamp header, and the body below — the Discord/Slack pattern. Consecutive messages from the same author within a 5-minute window collapse into one group (`isContinuation(i)` in the page computes this from the previous message; continuation rows hide the header and show a hover-only timestamp in the gutter). The whole-row hover highlight spans the full channel width, so I moved the horizontal padding out of the scroll container (`.messages`) and into each row, and dropped the old 820px centered column. System notices stay centered and muted. Added `createdAt` to `ChatMessage`, threaded from history (`created_at`) and stamped client-side for live sends/placeholders.
+
+Markdown: replaced the dependency-free renderer in `lib/markdown/index.ts` with markdown-it, keeping the same `renderMarkdown(src)` signature so the only caller (`Message.svelte`) is untouched. Kept the safe-by-construction posture rather than reaching for DOMPurify: `html: false` means raw HTML in source is escaped and never passed through, so the emitted tag set is bounded by markdown-it's own renderers — the same safety model the hand-rolled one had, but complete. Tightened link safety with a strict `http/https/mailto/relative` `validateLink` allowlist and layered `target`/`rel` onto the default link_open rule (so URL normalization still runs). Gains over the old renderer: nested lists, blockquotes, GFM tables, strikethrough, autolinks. This supersedes the same-cycle hand-rolled table support. Added matching styles for blockquotes / nested lists / `<del>`.
+
+Real names: the frontend had no bot name, so author labels were hardcoded "You" / "Istota". The user wanted real names. Surfaced `bot_name` from the global `/me` endpoint (the natural identity surface) rather than the chat-config endpoint; the chat page fetches `/me` on mount for the user's `display_name` + the bot name and passes both into `Message`, which derives the avatar initial from the name. Falls back to You / Istota until `/me` resolves or if it fails.
+
+Verified in-browser against the mock backend (`VITE_MOCK_API=1`): grouping, avatars, tool chips, timestamps, bold/list/inline-code rendering, full-width hover highlight, and real names ("Stefan" / "Istota"). `svelte-check` + `npm run build` clean; the `/me` web_app tests pass with a new `bot_name` assertion.
+
+**Key changes:**
+- Discord/Slack transcript: avatar + author/time header, same-author grouping, full-width hover highlight, no bubbles.
+- markdown-it replaces the hand-rolled renderer; same signature, same safe-by-construction posture, fuller grammar.
+- `bot_name` added to `/me`; chat headers show real display name + bot name (avatar initial derived).
+- `createdAt` added to the chat message model and threaded through history + live sends.
+
+**Files added/modified:**
+- `web/src/lib/components/chat/Message.svelte` - row layout, avatar, author/time header, grouping, name props
+- `web/src/lib/markdown/index.ts` - rewritten on markdown-it (html:false, link allowlist, target/rel)
+- `web/src/routes/chat/+page.svelte` - continuation grouping, `/me` fetch, name props, full-width container
+- `web/src/lib/stores/chat.ts` - `createdAt` on `ChatMessage`, stamped/threaded
+- `web/src/lib/api.ts`, `web/vite-mock-api.ts` - `bot_name` on the `User` shape + mock
+- `src/istota/web_app.py` - `/me` returns `bot_name`
+- `tests/test_web_app.py` - assert `bot_name` in `/me`
+- `web/package.json`, `web/package-lock.json` - add `markdown-it` + `@types/markdown-it`
+- `CHANGELOG.md` - Unreleased Changed entries
+
 ## 2026-06-07: `<namespace>-run` host CLI wrapper
 
 Running the `istota` CLI ad-hoc on a production box (notably `istota repl -u <user>`) meant reconstructing the daemon's environment by hand: switch to the service user, source the secret bundle, set the admins-file path that lives only in the systemd unit, fix `HOME`/`PATH`/venv, and `cd` into the repo. A long, error-prone incantation that the REPL work made painful enough to fix.
