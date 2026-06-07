@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-07: Simplify delivery-routing settings UI + close ISSUE-113
+
+Two related transport cleanups.
+
+First, reviewed and closed ISSUE-113 (collapse delivery shims / sweep residual `TalkClient` constructions). The persistent-asyncio-loop refactor had already settled two of its three parts — a repo-wide grep finds exactly one `TalkClient(...)` construction (the singleton factory in `async_runtime.py`), and the Talk inbound caches are documented as an intentional keep. The remaining "collapse the shims" item is zero-behavior churn: the `post_result_to_talk` / `post_result_to_email` / `edit_talk_message` shims centralize genuine impedance-matching (Talk `target_token` override, email bool-vs-`int|None`, the edit url/token guard) that a uniform `Transport.deliver` can't carry, and collapsing them would rewrite ~30 test references for no behavioral gain. Recorded the decision as a "Deliberate residuals" section in `transport.md` instead.
+
+Second, simplified the per-user delivery-routing UI. The web Preferences card exposed a five-row per-purpose matrix (reply/alert/log/briefing/notification), but tracing each purpose to its consumer showed only `alert` does something a dedicated field doesn't already cover: `log` duplicates `log_channel`, `briefing` duplicates each briefing's `conversation_token`, `reply` is vestigial (results route via `resolve_delivery_plan`/`output_target`, not the routing table), and `notification` falls to the default. Collapsed the UI to two controls — default destination + a single optional "Send alerts to" override. The backend `routing` dict and `istota user ensure --route` are untouched (any purpose still settable via CLI), and the web card preserves CLI-set non-`alert` routes on round-trip rather than stripping them.
+
+Note for future sessions: this landed mid-air against `main`. The branch was 1 behind `main`, whose newer commit had just reworked the same `+page.svelte` routing block into a dropdown / per-line layout. The settings edit was redone against that newer layout (matrix `{#each}` → single `Select`); the `web_app.py` / `api.ts` edits were unaffected.
+
+**Key changes:**
+- Closed ISSUE-113 as substantially-resolved; documented the shim keep + the already-done `TalkClient` sweep in `transport.md`.
+- Web Preferences "Delivery routing (per purpose)" matrix replaced by one "Send alerts to" dropdown bound to `routing["alert"]`; default-destination control kept with a clearer hint.
+- Dropped the dead `purposes` hint from `GET /settings/profile`, the `_routing_purposes` helper, the `purposes?` api.ts field, the unused `DEFAULT_PURPOSES` const, and the `.route-section` / `.route-heading` CSS.
+- Logs and briefings deliberately left for a separate config pass (log destination belongs with log settings, briefing output with briefing settings).
+
+**Files added/modified:**
+- `web/src/routes/settings/+page.svelte` - matrix → single alerts override; removed `DEFAULT_PURPOSES` + dead CSS
+- `src/istota/web_app.py` - removed `_routing_purposes` + the `purposes` payload field
+- `web/src/lib/api.ts` - dropped `purposes?` from `UserProfile`
+- `.claude/rules/transport.md` - "Deliberate residuals (ISSUE-113)" section; routing-table doc notes the narrowed web card
+
 ## 2026-06-06: Mulder/Scully review of the persistent asyncio loop — shutdown ordering + lifecycle fixes
 
 Ran both review agents over the just-landed persistent-asyncio-loop refactor. Verdict: architecture sound, the dangerous traps (reentry deadlock, transient `TalkClient(config)` in a daemon path, email accidentally on the persistent loop) were genuinely avoided, all stated guarantees verified, suite green. The agents surfaced a handful of real fragilities; this session fixed the ones worth acting on.
