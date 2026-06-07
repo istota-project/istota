@@ -218,6 +218,10 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 		return { status: 'ok' };
 	}
 
+	if (path === '/istota/api/chat/attachments' && method === 'POST') {
+		return { path: `inbox/web-chat/mock/${Date.now()}.bin`, name: 'upload', size: 0 };
+	}
+
 	return undefined;
 };
 

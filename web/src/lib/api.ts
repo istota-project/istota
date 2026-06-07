@@ -1486,4 +1486,24 @@ export function chatStreamUrl(taskId: number): string {
 	return `${base}/api/chat/tasks/${taskId}/stream`;
 }
 
+export interface ChatAttachment {
+	path: string;
+	name: string;
+	size: number;
+}
+
+export async function uploadChatAttachment(file: File): Promise<ChatAttachment> {
+	const form = new FormData();
+	form.append('file', file);
+	const resp = await fetch(`${base}/api/chat/attachments`, {
+		method: 'POST',
+		credentials: 'same-origin',
+		body: form,
+	});
+	if (resp.status === 401) throw new AuthError();
+	const data = await resp.json().catch(() => ({}));
+	if (!resp.ok) throw new Error(data.error || `upload failed (${resp.status})`);
+	return data as ChatAttachment;
+}
+
 export { AuthError };

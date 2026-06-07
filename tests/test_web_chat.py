@@ -415,3 +415,42 @@ class TestChatTaskActions:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 403
+
+
+@_needs_web_deps
+class TestChatAttachments:
+    async def test_upload_saves_file(self, chat_client):
+        import os
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("note.txt", b"hello world", "text/plain")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["name"] == "note.txt"
+        assert body["size"] == 11
+        assert os.path.exists(body["path"])
+        assert "inbox/web-chat" in body["path"].replace(os.sep, "/")
+
+    async def test_disallowed_extension_rejected(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("evil.exe", b"MZ", "application/octet-stream")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_oversize_rejected(self, chat_client):
+        import istota.web_app as mod
+        mod._config.web.chat.max_attachment_mb = 0  # everything is too big
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("a.txt", b"x", "text/plain")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 413
+        mod._config.web.chat.max_attachment_mb = 25
