@@ -20,6 +20,8 @@
 	/* Interactive */
 	--accent: #e0e0e0;
 	--accent-hover: #fff;
+	/* Amber terminal accent — the bot's identity color + highlights (links). */
+	--accent-amber: #f5a623;
 
 	/* Map colors */
 	--map-path: #4a9eff;
