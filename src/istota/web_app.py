@@ -1425,17 +1425,23 @@ def _chat_confirm_task(task_id: int) -> None:
 def _chat_cancel_task(task_id: int) -> None:
     from . import db
     with db.get_db(_config.db_path) as conn:
+        row = conn.execute(
+            "SELECT worker_pid, status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        status = row["status"] if row else None
+        if status == "pending_confirmation":
+            # A parked confirmation isn't running — reject it outright rather
+            # than flagging a worker that will never see the flag.
+            db.cancel_task(conn, task_id)
+            return
         conn.execute(
             "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,)
         )
-        pid_row = conn.execute(
-            "SELECT worker_pid, status FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
     # Best-effort subprocess kill; the scheduler's cancel_check ends the task
     # and emits cancelled/done so the SSE stream closes cleanly.
-    if pid_row and pid_row["worker_pid"]:
+    if row and row["worker_pid"]:
         try:
-            os.kill(pid_row["worker_pid"], signal.SIGTERM)
+            os.kill(row["worker_pid"], signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
 
