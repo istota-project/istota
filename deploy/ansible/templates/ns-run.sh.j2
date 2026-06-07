@@ -41,5 +41,25 @@ fi
 # Set by the systemd units via Environment=, not carried in secrets.env.
 export ISTOTA_ADMINS_FILE="/etc/{{ istota_namespace }}/admins"
 
+# cwd = repo dir so the CLI finds config/config.toml via the relative search
+# path (same as the systemd units' WorkingDirectory).
 cd "{{ istota_repo_dir }}"
-exec "{{ istota_home }}/.venv/bin/{{ istota_package }}" "$@"
+
+# The `repl` subcommand defaults --workspace to cwd, which is now the install
+# tree — a protected path the sandbox refuses to bind RW (it would let the bot
+# shadow its own source). Default server repls to the per-user temp dir (the
+# daemon's normal sandbox workspace) unless the caller chose a workspace.
+args=("$@")
+if [ "${1:-}" = "repl" ]; then
+    has_workspace=0
+    for a in "$@"; do
+        case "$a" in
+            --workspace|--workspace=*) has_workspace=1; break ;;
+        esac
+    done
+    if [ "$has_workspace" -eq 0 ]; then
+        args+=(--workspace standard)
+    fi
+fi
+
+exec "{{ istota_home }}/.venv/bin/{{ istota_package }}" "${args[@]}"
