@@ -346,3 +346,72 @@ class TestChatMessagesApi:
         body = resp.json()
         assert body["task_id"] is None
         assert "inline_result" in body
+
+
+@_needs_web_deps
+class TestChatTaskActions:
+    async def _seed_task(self, username, status="running"):
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            room = db.ensure_default_web_chat_room(c, username)
+            tid = db.create_task(
+                c, prompt="do a thing", user_id=username, source_type="web",
+                conversation_token=room.token, output_target="web",
+            )
+            db.update_task_status(c, tid, status)
+        return tid
+
+    async def test_confirm_marks_pending_and_clears_events(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        tid = await self._seed_task("alice", status="pending_confirmation")
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            c.execute(
+                "INSERT INTO task_events (task_id, seq, kind, payload) VALUES (?,1,'confirmation','{}')",
+                (tid,),
+            )
+        resp = await chat_client.post(
+            f"/istota/api/chat/tasks/{tid}/confirm", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        with db.get_db(mod._config.db_path) as c:
+            assert db.get_task(c, tid).status == "pending"
+            assert db.get_task_events(c, tid) == []
+
+    async def test_cancel_pending_confirmation_cancels(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        tid = await self._seed_task("alice", status="pending_confirmation")
+        resp = await chat_client.post(
+            f"/istota/api/chat/tasks/{tid}/cancel", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            assert db.get_task(c, tid).status == "cancelled"
+
+    async def test_cancel_running_sets_flag(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        tid = await self._seed_task("alice", status="running")
+        resp = await chat_client.post(
+            f"/istota/api/chat/tasks/{tid}/cancel", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            flag = c.execute(
+                "SELECT cancel_requested FROM tasks WHERE id = ?", (tid,)
+            ).fetchone()[0]
+            assert flag == 1
+
+    async def test_cannot_confirm_other_users_task(self, chat_client):
+        await _login(chat_client, "alice")
+        tid = await self._seed_task("alice", status="pending_confirmation")
+        cookies = await _login(chat_client, "bob")
+        resp = await chat_client.post(
+            f"/istota/api/chat/tasks/{tid}/confirm", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 403
