@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The native brain reaches parity with the Claude Code brain on four fronts.** Reasoning effort now flows through to thinking-capable models. Prompt caching marks cache breakpoints (on by default against Anthropic, off for other endpoints) and logs a per-task cache hit-rate. A mid-task context overflow is recovered by compacting the conversation and continuing instead of failing the task. Image-bearing tool results are passed through to vision models. All native-brain only; the Claude Code brain is unchanged.
+- **The Bash tool can keep noisy command output out of the model's context.** A command can stream its full output to you while the model sees only a short stub, so large or repetitive output doesn't crowd the context window. Failure markers still ride along on the stub, so a failed command is never mistaken for a success.
+
 ### Changed
 - Internal: all Nextcloud Talk I/O now runs on one persistent asyncio loop with a single reused HTTP client, instead of spinning up a fresh event loop and connection per call. Connections to Nextcloud are pooled across the daemon's lifetime, and a class of event-loop-teardown leaks becomes structurally impossible. Behavior-preserving; no config changes.
 - Internal: email is now a first-class transport (`transport/email/`) mirroring Talk, with shared non-transport helpers in `email_support`. Behavior-preserving refactor; adds end-to-end tests for the email send path.
