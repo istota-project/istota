@@ -43,6 +43,7 @@ export interface ChatMessage {
 	progress?: string;
 	streaming: boolean;
 	error?: boolean;
+	attachments?: string[];
 }
 
 export type ChatStatus = 'idle' | 'sending' | 'streaming';
@@ -65,7 +66,7 @@ export interface ChatSession {
 	newRoom: (name: string) => Promise<void>;
 	renameRoom: (id: number, name: string) => Promise<void>;
 	archiveRoom: (id: number) => Promise<void>;
-	send: (text: string) => Promise<void>;
+	send: (text: string, attachments?: { path: string; name: string }[]) => Promise<void>;
 	cancel: () => Promise<void>;
 	confirm: (cid: number, taskId: number) => Promise<void>;
 	reject: (cid: number, taskId: number) => Promise<void>;
@@ -292,14 +293,17 @@ function createSession(): ChatSession {
 		}
 	}
 
-	async function send(text: string) {
+	async function send(text: string, attachments: { path: string; name: string }[] = []) {
 		const roomId = get(activeRoomId);
 		const trimmed = text.trim();
-		if (!roomId || !trimmed) return;
+		if (!roomId || (!trimmed && attachments.length === 0)) return;
 
 		messages.update((a) => [
 			...a,
-			{ cid: nextCid(), role: 'user', text: trimmed, tools: [], streaming: false },
+			{
+				cid: nextCid(), role: 'user', text: trimmed, tools: [], streaming: false,
+				attachments: attachments.map((x) => x.name),
+			},
 		]);
 		const phCid = nextCid();
 		messages.update((a) => [
@@ -308,7 +312,7 @@ function createSession(): ChatSession {
 		]);
 		status.set('sending');
 
-		const res = await sendChatMessage(roomId, trimmed);
+		const res = await sendChatMessage(roomId, trimmed, attachments.map((x) => x.path));
 		if (!res.ok) {
 			updateMsg(phCid, (m) => {
 				m.text = res.status === 429

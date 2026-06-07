@@ -22,7 +22,7 @@ from pathlib import Path
 
 import httpx
 from authlib.integrations.starlette_client import OAuth
-from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, UploadFile
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -1466,6 +1466,52 @@ async def chat_cancel_task(
     await _authorize_task_access(task_id, user)
     await asyncio.to_thread(_chat_cancel_task, task_id)
     return {"status": "cancelling"}
+
+
+def _chat_attachment_dir(username: str, day: str) -> Path:
+    """Where a web-chat upload lands: the user's inbox under the mount when one
+    is configured (so the brain reads it via the sandboxed workspace), else the
+    user temp dir (always RW inside the sandbox)."""
+    if _config.nextcloud_mount_path:
+        return _config.nextcloud_mount_path / "Users" / username / "inbox" / "web-chat" / day
+    return _config.temp_dir / username / "web-chat-uploads" / day
+
+
+def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:
+    import uuid
+    from datetime import date
+    ext = Path(filename).suffix.lower()
+    day = date.today().isoformat()
+    dest_dir = _chat_attachment_dir(username, day)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{uuid.uuid4().hex}{ext}"
+    dest.write_bytes(data)
+    return str(dest)
+
+
+@api_router.post("/chat/attachments")
+async def chat_upload_attachment(
+    file: UploadFile = File(...),
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Upload one file for a chat message. Lands in the user's
+    ``inbox/web-chat/YYYY-MM-DD/`` and returns the path the next message
+    should reference."""
+    chat = _config.web.chat
+    name = file.filename or "upload"
+    ext = Path(name).suffix.lower().lstrip(".")
+    if chat.attachment_extensions and ext not in chat.attachment_extensions:
+        return JSONResponse(
+            {"error": f"file type .{ext} not allowed"}, status_code=400,
+        )
+    data = await file.read()
+    if len(data) > chat.max_attachment_mb * 1024 * 1024:
+        return JSONResponse(
+            {"error": f"file exceeds {chat.max_attachment_mb} MB"}, status_code=413,
+        )
+    path = await asyncio.to_thread(_save_chat_attachment, user["username"], name, data)
+    return {"path": path, "name": name, "size": len(data)}
 
 
 # ---- Google Workspace API routes ----

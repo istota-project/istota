@@ -37,7 +37,14 @@
 				<span>{message.progress || 'Thinking…'}</span>
 			</div>
 		{:else if isUser}
-			<div class="body user-body">{message.text}</div>
+			{#if message.text}<div class="body user-body">{message.text}</div>{/if}
+			{#if message.attachments?.length}
+				<div class="attachments">
+					{#each message.attachments as name}
+						<span class="attachment">📎 {name}</span>
+					{/each}
+				</div>
+			{/if}
 		{:else}
 			<div class="body markdown">{@html bodyHtml}</div>
 			{#if message.streaming && message.progress}
@@ -89,6 +96,16 @@
 	}
 
 	.user-body { white-space: pre-wrap; }
+
+	.attachments { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.3rem; }
+	.attachment {
+		font-size: var(--text-xs);
+		color: var(--text-muted);
+		background: var(--surface-base);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-pill);
+		padding: 0.1rem 0.45rem;
+	}
 
 	.tools {
 		display: flex;

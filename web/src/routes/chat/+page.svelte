@@ -122,7 +122,7 @@
 			{/if}
 		</div>
 		<Composer
-			onSend={(t) => session.send(t)}
+			onSend={(t, atts) => session.send(t, atts)}
 			onCancel={() => session.cancel()}
 			busy={busy}
 			placeholder={activeRoom ? `Message #${activeRoom.name}…` : 'Message Istota…'}
