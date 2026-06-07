@@ -159,6 +159,16 @@ class TestWebChatConfig:
         # Untouched knobs keep defaults.
         assert config.web.chat.max_attachment_mb == 25
 
+    @_needs_web_deps
+    def test_sse_poll_interval_wired(self, tmp_path):
+        """The SSE generator's poll cadence must come from config, not a
+        hardcoded constant."""
+        import istota.web_app as mod
+        config = _make_config(tmp_path)
+        config.web.chat.sse_poll_interval_ms = 750
+        mod._config = config
+        assert mod._sse_poll_seconds() == 0.75
+
 
 # ---------------------------------------------------------------------------
 # API endpoints
@@ -347,6 +357,40 @@ class TestChatMessagesApi:
         assert body["task_id"] is None
         assert "inline_result" in body
 
+    async def test_send_attaches_uploaded_file_to_task(self, chat_client):
+        """An uploaded attachment's path must land on the task's attachments
+        column so the brain actually sees the file."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        up = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("note.txt", b"hello world", "text/plain")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        path = up.json()["path"]
+        resp = await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "summarize this", "attachments": [path]},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            task = db.get_task(c, resp.json()["task_id"])
+        assert task.attachments == [path]
+
+    async def test_send_drops_foreign_attachment_path(self, chat_client):
+        """A path outside the user's web-chat upload root is rejected — a client
+        can't get the brain to read arbitrary host paths."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        resp = await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "read this", "attachments": ["/etc/passwd"]},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
 
 @_needs_web_deps
 class TestChatTaskActions:
@@ -415,6 +459,27 @@ class TestChatTaskActions:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 403
+
+    async def test_confirm_on_running_task_preserves_events(self, chat_client):
+        """Confirming a task that is NOT pending_confirmation must be a no-op —
+        it must never wipe a live task's event log."""
+        cookies = await _login(chat_client, "alice")
+        tid = await self._seed_task("alice", status="running")
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            c.execute(
+                "INSERT INTO task_events (task_id, seq, kind, payload) VALUES (?,1,'tool_start','{}')",
+                (tid,),
+            )
+        resp = await chat_client.post(
+            f"/istota/api/chat/tasks/{tid}/confirm", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        with db.get_db(mod._config.db_path) as c:
+            # Status untouched and the running task's events are intact.
+            assert db.get_task(c, tid).status == "running"
+            assert len(db.get_task_events(c, tid)) == 1
 
 
 @_needs_web_deps

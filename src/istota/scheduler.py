@@ -1451,6 +1451,7 @@ def process_one_task(
     plan_email = plan_has_surface(plan, "email")
     plan_ntfy = plan_has_surface(plan, "ntfy")
     plan_file = plan_has_surface(plan, "istota_file")
+    plan_web = plan_has_surface(plan, "web")
 
     # Track if we need to call istota_file handler after db connection closes.
     # The transport derives success from the task's terminal status at delivery.
@@ -1499,17 +1500,18 @@ def process_one_task(
             task_id, success, len(result), _qm_tool_count,
         )
 
-    # A confirmation prompt is answered by a Talk reply, so it's only eligible
-    # when Talk is a resolved destination. We also exclude any plan that pushes
-    # ntfy — that's the "all" broadcast target (talk+email+ntfy), a fan-out
-    # notification rather than an interactive turn. Mirrors main's deliberate
-    # `target in ("talk", "both")` gate, which excluded "all". Computed once and
-    # reused by the status, event-emission, and deferred-op-skip branches below.
+    # A confirmation prompt is answerable on an interactive surface: a Talk
+    # reply (Talk is a resolved destination, and not the "all" broadcast
+    # fan-out, which pushes ntfy), or the web /chat confirm endpoint (a
+    # web/stream task — the confirmation rides the task_events SSE stream and is
+    # answered by POST /chat/tasks/{id}/confirm). Without the web arm the gate
+    # never fired for web tasks and the whole web confirmation flow was dead
+    # code. Computed once and reused by the status, event-emission, and
+    # deferred-op-skip branches below.
+    _confirmable_surface = (plan_talk and talk_token and not plan_ntfy) or plan_web
     is_confirmation_request = bool(
         success
-        and plan_talk
-        and not plan_ntfy
-        and talk_token
+        and _confirmable_surface
         and CONFIRMATION_PATTERN.search(result)
     )
 
@@ -1519,7 +1521,11 @@ def process_one_task(
                 # Set task to pending confirmation instead of completing
                 db.set_task_confirmation(conn, task_id, result)
                 db.log_task(conn, task_id, "info", "Task awaiting user confirmation")
-                post_talk_message = result
+                # Talk confirmations post the prompt to the room; web/stream
+                # confirmations surface it via the `confirmation` task event
+                # (emitted below) and must not cross-post to Talk.
+                if plan_talk and talk_token:
+                    post_talk_message = result
             else:
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")

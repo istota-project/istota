@@ -1090,6 +1090,13 @@ async def admin_stats(_: dict = Depends(_require_admin)):
 _SSE_POLL_SECONDS = 0.2
 
 
+def _sse_poll_seconds() -> float:
+    """The SSE generator's table-poll cadence, from ``[web.chat]
+    sse_poll_interval_ms`` (falls back to the module default if unset)."""
+    ms = getattr(_config.web.chat, "sse_poll_interval_ms", None)
+    return (ms / 1000.0) if ms else _SSE_POLL_SECONDS
+
+
 def _task_owner(task_id: int) -> str | None:
     from . import db
     with db.get_db(_config.db_path) as conn:
@@ -1155,7 +1162,7 @@ async def chat_task_stream(
                 yield f"id: {ev['seq']}\nevent: {ev['kind']}\ndata: {payload}\n\n"
                 if ev["kind"] == "done":
                     return
-            await asyncio.sleep(_SSE_POLL_SECONDS)
+            await asyncio.sleep(_sse_poll_seconds())
 
     return StreamingResponse(
         _generate(),
@@ -1279,7 +1286,41 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     return {"messages": messages, "active_task": active}
 
 
-def _chat_create_web_task(username: str, token: str, text: str) -> tuple[str, int]:
+def _chat_upload_roots(username: str) -> list[Path]:
+    """Directories a web-chat upload for this user may legitimately live under
+    (mount inbox + temp fallback). Both are listed regardless of mount config so
+    a path saved under either still validates."""
+    return [
+        _config.nextcloud_mount_path / "Users" / username / "inbox" / "web-chat",
+        _config.temp_dir / username / "web-chat-uploads",
+    ] if _config.nextcloud_mount_path else [
+        _config.temp_dir / username / "web-chat-uploads",
+    ]
+
+
+def _validate_chat_attachments(username: str, paths: list) -> list[str] | None:
+    """Keep only attachment paths that resolve inside the user's web-chat upload
+    roots. Returns the cleaned list, or ``None`` if any path is foreign — a
+    client must not point the brain at arbitrary host paths or escape via
+    symlink / ``..``. ``realpath`` collapses both."""
+    if not paths:
+        return []
+    roots = [os.path.realpath(r) for r in _chat_upload_roots(username)]
+    out: list[str] = []
+    for p in paths:
+        if not isinstance(p, str) or not p:
+            return None
+        real = os.path.realpath(p)
+        if not any(real == r or real.startswith(r + os.sep) for r in roots):
+            return None
+        out.append(p)
+    return out
+
+
+def _chat_create_web_task(
+    username: str, token: str, text: str,
+    attachments: list[str] | None = None,
+) -> tuple[str, int]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)`` or
     ``("rate_limited", window_seconds)``."""
     from . import db
@@ -1291,6 +1332,7 @@ def _chat_create_web_task(username: str, token: str, text: str) -> tuple[str, in
         task_id = db.create_task(
             conn, prompt=text, user_id=username, source_type="web",
             conversation_token=token, output_target="web", priority=5,
+            attachments=attachments or None,
         )
     return ("ok", task_id)
 
@@ -1383,6 +1425,10 @@ async def chat_send_message(
     if len(text) > _config.web.chat.max_prompt_chars:
         return JSONResponse({"error": "message too long"}, status_code=400)
 
+    attachments = _validate_chat_attachments(username, data.get("attachments") or [])
+    if attachments is None:
+        return JSONResponse({"error": "invalid attachment path"}, status_code=400)
+
     # !commands run synchronously and return inline — no task row, no events.
     if text.startswith("!"):
         from . import commands
@@ -1396,7 +1442,7 @@ async def chat_send_message(
             return {"task_id": None, "inline_result": inline or ""}
 
     outcome, value = await asyncio.to_thread(
-        _chat_create_web_task, username, room.token, text,
+        _chat_create_web_task, username, room.token, text, attachments,
     )
     if outcome == "rate_limited":
         return JSONResponse(
@@ -1416,6 +1462,15 @@ async def chat_send_message(
 def _chat_confirm_task(task_id: int) -> None:
     from . import db
     with db.get_db(_config.db_path) as conn:
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row or row["status"] != "pending_confirmation":
+            # Only a parked confirmation is confirmable. Returning early keeps a
+            # stray confirm (a duplicate click, a running re-run) from wiping a
+            # live task's event log — delete_task_events is unconditional, so
+            # the status gate must live here, not just in db.confirm_task.
+            return
         # Clear prior events so the confirmed re-run's reset seq counter can't
         # collide on UNIQUE(task_id, seq) — the client already captured them.
         db.delete_task_events(conn, task_id)
@@ -1471,10 +1526,9 @@ async def chat_cancel_task(
 def _chat_attachment_dir(username: str, day: str) -> Path:
     """Where a web-chat upload lands: the user's inbox under the mount when one
     is configured (so the brain reads it via the sandboxed workspace), else the
-    user temp dir (always RW inside the sandbox)."""
-    if _config.nextcloud_mount_path:
-        return _config.nextcloud_mount_path / "Users" / username / "inbox" / "web-chat" / day
-    return _config.temp_dir / username / "web-chat-uploads" / day
+    user temp dir (always RW inside the sandbox). The first upload root is the
+    write target; the validator (`_validate_chat_attachments`) accepts both."""
+    return _chat_upload_roots(username)[0] / day
 
 
 def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:

@@ -31,10 +31,22 @@ class TestSurfaceForSourceType:
     def test_repl_maps_to_repl(self):
         assert _surface_for_source_type("repl") == "repl"
 
+    def test_web_maps_to_web(self):
+        # Web is a stream surface with no push transport — it must not fall
+        # through to "talk" (which would resolve a web task to TalkTransport).
+        assert _surface_for_source_type("web") == "web"
+
     def test_unknown_defaults_to_talk(self):
         assert _surface_for_source_type("scheduled") == "talk"
         assert _surface_for_source_type("subtask") == "talk"
         assert _surface_for_source_type("totally-unknown") == "talk"
+
+    def test_for_task_web_resolves_to_no_push_transport(self):
+        # There is no WebTransport — the task_events log is the delivery — so
+        # for_task must resolve a web task to None, not to TalkTransport.
+        config = Config()
+        registry = make_registry(config)
+        assert registry.for_task(_task("web")) is None
 
 
 class TestMakeRegistry:

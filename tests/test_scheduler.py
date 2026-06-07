@@ -1756,6 +1756,60 @@ class TestProcessOneTask:
         assert task.confirmation_prompt is not None
 
     @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.run_coro", return_value=None)
+    def test_confirmation_detected_for_web_task(self, mock_runcoro, mock_exec, db_path, tmp_path):
+        """A web (stream) task whose result asks for confirmation must park in
+        pending_confirmation — the gate keyed only on Talk before, so the whole
+        web confirmation flow was unreachable."""
+        mock_exec.return_value = (
+            True, "I need your confirmation before deleting the file. Reply yes or no.",
+            None, None,
+        )
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="Delete file", user_id="testuser",
+                source_type="web", conversation_token="web-testuser-abc",
+                output_target="web",
+            )
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is True
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "pending_confirmation"
+        assert task.confirmation_prompt is not None
+        # A web confirmation is answered via the /chat confirm endpoint, never
+        # cross-posted to Talk.
+        assert mock_runcoro.call_count == 0
+
+    @patch("istota.scheduler._drain_deferred_ops")
+    @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.run_coro", return_value=None)
+    def test_web_confirmation_skips_deferred_drain(
+        self, mock_runcoro, mock_exec, mock_drain, db_path, tmp_path,
+    ):
+        """Deferred ops must not be applied while a web task is parked awaiting
+        confirmation — they drain only after the user confirms."""
+        mock_exec.return_value = (
+            True, "I need your confirmation before deleting the file. Reply yes or no.",
+            None, None,
+        )
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="Delete file", user_id="testuser",
+                source_type="web", conversation_token="web-testuser-abc",
+                output_target="web",
+            )
+
+        process_one_task(config)
+        mock_drain.assert_not_called()
+
+    @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.run_coro", return_value=42)
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_confirmation_excluded_for_all_broadcast(
