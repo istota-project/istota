@@ -136,6 +136,13 @@ def cmd_run(args):
     else:
         print(f"Processed {processed} task(s)")
 
+    # process_one_task may have lazily started the persistent asyncio runtime
+    # (Talk delivery via run_coro). Stop it so the shared httpx client closes
+    # cleanly rather than being dropped on interpreter exit. No-op if unused.
+    from .async_runtime import reset_async_runtime
+
+    reset_async_runtime()
+
 
 def cmd_list(args):
     """List tasks."""

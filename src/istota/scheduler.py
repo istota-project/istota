@@ -46,7 +46,7 @@ from .executor import (
     is_transient_api_error,
     parse_api_error,
 )
-from .async_runtime import get_talk_client, run_coro
+from .async_runtime import get_talk_client, reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
 from .notifications import send_notification
 from .transport import make_registry
@@ -2843,6 +2843,12 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
         if max_tasks and processed >= max_tasks:
             break
 
+    # Single-pass mode lazily started the persistent runtime via run_coro
+    # (poller / delivery). Stop it so the shared httpx client's aclose hook
+    # runs a clean TLS shutdown instead of the connections being dropped on
+    # process exit. No-op if the runtime was never started (Talk disabled).
+    reset_async_runtime()
+
     return processed
 
 
@@ -3015,7 +3021,7 @@ def run_daemon(config: Config) -> None:
     # first run_coro call; every run_coro site (poller, delivery, consumers,
     # notifications) shares it.
     from .async_runtime import get_async_runtime
-    runtime = get_async_runtime()
+    get_async_runtime()
     logger.info("STARTUP Started persistent asyncio runtime")
 
     # Start Talk polling in background thread so it runs independently of task processing
@@ -3199,13 +3205,14 @@ def run_daemon(config: Config) -> None:
     # Shutdown workers before releasing lock
     pool.shutdown()
 
-    # Stop the persistent asyncio runtime after the worker pool: runs cleanup
-    # hooks (closes the shared TalkClient httpx pool) then stops the loop. The
-    # talk-poller thread is a daemon and may be mid long-poll — runtime.stop
-    # cancels its in-flight coroutine. Best-effort with a timeout so a hung
-    # network coro can't block daemon shutdown.
+    # Stop the persistent asyncio runtime after the worker pool: cancels any
+    # in-flight coroutine (the talk-poller daemon thread may be mid long-poll),
+    # then runs cleanup hooks (closes the shared TalkClient httpx pool) and stops
+    # the loop. reset_async_runtime also clears the process globals so an
+    # in-process restart rebuilds from a clean slate. Best-effort — a hung
+    # network coro can't block daemon shutdown (stop has its own timeout).
     try:
-        runtime.stop(timeout=10.0)
+        reset_async_runtime()
         logger.info("Stopped persistent asyncio runtime")
     except Exception as e:  # noqa: BLE001
         logger.warning("Error stopping persistent asyncio runtime: %s", e)

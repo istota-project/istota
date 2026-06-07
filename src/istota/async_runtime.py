@@ -76,6 +76,10 @@ class AsyncRuntime:
                 return
             self._ready.clear()
             self._stopped = False
+            # A restart of the same instance must not carry hooks from the prior
+            # run — get_talk_client appends a fresh aclose hook per client, so
+            # without this they'd accumulate across stop()/start() cycles.
+            self._cleanup_hooks = []
             self._thread = threading.Thread(
                 target=self._run, name="async-runtime", daemon=True
             )
@@ -132,11 +136,38 @@ class AsyncRuntime:
                 f"coroutine did not complete within {timeout}s"
             ) from exc
 
-    def stop(self, timeout: float = 10.0) -> None:
-        """Run cleanup hooks, stop the loop, and join the thread. Idempotent.
+    async def _shutdown(
+        self, hooks: list[Callable[[], Awaitable[None]]]
+    ) -> None:
+        """Cancel in-flight coroutines, then run cleanup hooks. Runs on the loop.
 
-        If the thread doesn't stop within ``timeout`` (a coroutine hung on a
-        network op), log a warning and return — daemon shutdown is not blocked.
+        Ordering matters: in-flight coroutines (e.g. an active long-poll awaiting
+        ``self._client.get(...)``) are cancelled *first* so a cleanup hook like
+        ``TalkClient.aclose`` doesn't close the shared client out from under a
+        live request. Doing it the other way round surfaces as a spurious
+        "client closed" error on the awaited request instead of a clean
+        ``CancelledError``.
+        """
+        current = asyncio.current_task()
+        pending = [
+            t for t in asyncio.all_tasks() if t is not current and not t.done()
+        ]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for hook in hooks:
+            try:
+                await hook()
+            except Exception as exc:  # noqa: BLE001 — never let a hook block stop
+                logger.warning("AsyncRuntime cleanup hook failed: %s", exc)
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """Cancel in-flight work, run cleanup hooks, stop the loop, join. Idempotent.
+
+        If shutdown doesn't finish within ``timeout`` (a coroutine hung on a
+        network op or swallowing cancellation), log a warning and return —
+        daemon shutdown is not blocked.
         """
         with self._lock:
             if self._stopped:
@@ -148,16 +179,20 @@ class AsyncRuntime:
             return
 
         hooks = list(self._cleanup_hooks)
-        hook_budget = (timeout / 2.0) if hooks else 0.0
-        for hook in hooks:
-            try:
-                fut = asyncio.run_coroutine_threadsafe(hook(), loop)
-                fut.result(timeout=hook_budget)
-            except Exception as exc:  # noqa: BLE001 — never let a hook block stop
-                logger.warning("AsyncRuntime cleanup hook failed: %s", exc)
+        shutdown_budget = timeout / 2.0
+        try:
+            fut = asyncio.run_coroutine_threadsafe(self._shutdown(hooks), loop)
+            fut.result(timeout=shutdown_budget)
+        except concurrent.futures.TimeoutError:
+            fut.cancel()
+            logger.warning(
+                "AsyncRuntime shutdown did not finish within %.1fs", shutdown_budget
+            )
+        except Exception as exc:  # noqa: BLE001 — never let shutdown block stop
+            logger.warning("AsyncRuntime shutdown failed: %s", exc)
 
         loop.call_soon_threadsafe(loop.stop)
-        join_budget = timeout - hook_budget
+        join_budget = timeout - shutdown_budget
         thread.join(timeout=join_budget)
         if thread.is_alive():
             logger.warning(

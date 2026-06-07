@@ -41,7 +41,10 @@ to Nextcloud and removes the per-call loop-teardown leak surface.
   (`timeout=None` = wait forever, matching `asyncio.run`; on timeout it cancels
   the coroutine and raises `TimeoutError`). Calling `submit` from the loop's own
   thread raises (the reentry guard) instead of deadlocking. `stop(timeout=10)`
-  runs registered cleanup hooks (closing the shared client) then stops the loop.
+  cancels in-flight coroutines first, then runs registered cleanup hooks
+  (closing the shared client), then stops the loop — cancel-before-aclose so a
+  cleanup hook can't close the client out from under a live request. `start()`
+  clears stale cleanup hooks so an in-process restart doesn't accumulate them.
 - **`run_coro(coro, *, timeout=None)`** — the workhorse every sync Talk call site
   uses: `run_coro(post_result_to_talk(...))`, `run_coro(edit_talk_message(...))`,
   `run_coro(poll_talk_conversations(config))`, etc. Lazily starts the process-global
@@ -64,8 +67,10 @@ loop (via `run_coro`), because the methods issue requests on the loop-bound
 `self._client`. There are no transient `TalkClient(config)` constructions left in
 daemon Talk paths. Email delivery stays on `asyncio.run` (sync SMTP, not httpx).
 Single-pass `run_scheduler` shares `process_one_task` (which uses `run_coro`), so
-it lazily uses the same persistent runtime; its one-shot process exits with the
-daemon thread. `run_cleanup_checks` is synchronous — its rare Talk notices go
+it lazily uses the same persistent runtime; it calls `reset_async_runtime()`
+before returning (as does the `istota run` CLI) so the shared client's `aclose`
+runs a clean shutdown instead of connections being dropped on process exit.
+`run_cleanup_checks` is synchronous — its rare Talk notices go
 through `send_notification` (→ `run_coro`), keeping its blocking DB/IMAP/fs
 cleanup off the persistent loop.
 
