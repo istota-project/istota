@@ -51,7 +51,6 @@ from .nextcloud_api import hydrate_user_configs
 from .notifications import send_notification
 from .transport import make_registry, plan_has_surface, resolve_delivery_plan
 from .storage import ensure_user_directories_v2
-from .tasks_file_poller import handle_tasks_file_completion
 
 # Deferred-op handlers were extracted to a sibling module; re-export the
 # names so existing tests and call-sites that import them from this module
@@ -1356,9 +1355,9 @@ def process_one_task(
     plan_ntfy = plan_has_surface(plan, "ntfy")
     plan_file = plan_has_surface(plan, "istota_file")
 
-    # Track if we need to call istota_file handler after db connection closes
+    # Track if we need to call istota_file handler after db connection closes.
+    # The transport derives success from the task's terminal status at delivery.
     call_file_handler = False
-    file_handler_success = False
     post_ntfy = False
 
     # Track what to post after DB transaction closes
@@ -1471,7 +1470,6 @@ def process_one_task(
                         post_ntfy = True
                     if plan_file:
                         call_file_handler = True
-                        file_handler_success = True
 
                 # Track scheduled job success
                 if task.scheduled_job_id:
@@ -1556,7 +1554,6 @@ def process_one_task(
                 # Receiving error emails is confusing; users can check Talk or retry.
                 if plan_file:
                     call_file_handler = True
-                    file_handler_success = False
 
                 # Track scheduled job failure + auto-disable
                 if task.scheduled_job_id:
@@ -1725,15 +1722,23 @@ def process_one_task(
                 db.update_task_status(conn, task_id, "failed", error="Email delivery failed")
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
     if post_ntfy:
-        from .notifications import _send_ntfy
+        from .transport._types import DeliveryOptions
         if task.source_type == "briefing":
             pb = parse_briefing_json(result)
             ntfy_result = pb["body"] if pb else strip_briefing_preamble(result)
         else:
             ntfy_result = result
-        _send_ntfy(config, task.user_id, ntfy_result, title=f"Task {task_id}")
+        ntfy_transport = registry.get("ntfy")
+        if ntfy_transport is not None:
+            run_coro(ntfy_transport.deliver(
+                "", ntfy_result, task=task,
+                options=DeliveryOptions(title=f"Task {task_id}"),
+            ))
     if call_file_handler:
-        handle_tasks_file_completion(config, task, file_handler_success, result)
+        # The transport re-reads the task's terminal status to derive success.
+        file_transport = registry.get("istota_file")
+        if file_transport is not None:
+            run_coro(file_transport.deliver("", result, task=task))
 
     return task_id, success
 

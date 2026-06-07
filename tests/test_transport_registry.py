@@ -43,6 +43,16 @@ class TestMakeRegistry:
         assert isinstance(reg.get("talk"), TalkTransport)
         assert isinstance(reg.get("email"), EmailTransport)
 
+    def test_ntfy_and_istota_file_registered_unconditionally(self):
+        from istota.transport.istota_file import IstotaFileTransport
+        from istota.transport.ntfy import NtfyTransport
+        config = Config()
+        config.talk.enabled = False
+        config.email.enabled = False
+        reg = make_registry(config)
+        assert isinstance(reg.get("ntfy"), NtfyTransport)
+        assert isinstance(reg.get("istota_file"), IstotaFileTransport)
+
     def test_talk_disabled_excluded(self):
         config = Config()
         config.talk.enabled = False
@@ -99,7 +109,9 @@ class TestForTask:
 
     def test_pollers_lists_all_registered(self):
         names = {t.name for t in self.reg.pollers()}
-        assert names == {"talk", "email"}
+        # ntfy + istota_file are registered unconditionally (per-user gating
+        # happens in their resolve_target/deliver, not at construction).
+        assert names == {"talk", "email", "ntfy", "istota_file"}
 
 
 class TestEmptyRegistry:

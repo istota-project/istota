@@ -217,150 +217,31 @@ class TestSendEmail:
         assert result is False
 
 
-class TestSendNtfy:
-    """ntfy is per-user — settings live in the encrypted secrets table.
+class TestSendNtfyShim:
+    """_send_ntfy is now a thin sync shim over the ntfy transport (the POST
+    detail tests live in test_ntfy_transport.py). These verify the shim
+    delegates and adapts the sync signature correctly."""
 
-    These tests stub `secrets_store.get_service_secrets` so we don't need a real DB.
-    """
-
-    @patch("istota.notifications.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
-    def test_sends_to_user_topic(self, mock_get_secrets, mock_httpx):
-        mock_get_secrets.side_effect = _ntfy_secrets(topic="alice-topic", server_url="https://ntfy.sh")
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_httpx.post.return_value = mock_response
-
+    def test_delegates_to_transport_with_options(self):
         config = Config(users={"alice": UserConfig()})
-        result = _send_ntfy(config, "alice", "Hello world")
+        with patch("istota.transport.ntfy.send_ntfy_async") as mock_send:
+            async def _ok(*a, **k):
+                return True
+            mock_send.side_effect = _ok
+            result = _send_ntfy(config, "alice", "msg", title="T", priority=5, tags="x")
         assert result is True
-        mock_httpx.post.assert_called_once()
-        call_args = mock_httpx.post.call_args
-        assert call_args[0][0] == "https://ntfy.sh/alice-topic"
-        assert call_args[1]["content"] == "Hello world"
-
-    @patch("istota.notifications.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
-    def test_default_server_when_unset(self, mock_get_secrets, mock_httpx):
-        # Topic only — server_url falls back to the public ntfy.sh.
-        mock_get_secrets.side_effect = _ntfy_secrets(topic="t")
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_httpx.post.return_value = mock_response
-
-        config = Config(users={"alice": UserConfig()})
-        _send_ntfy(config, "alice", "msg")
-        assert mock_httpx.post.call_args[0][0] == "https://ntfy.sh/t"
-
-    @patch("istota.notifications.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
-    def test_includes_token_auth_header(self, mock_get_secrets, mock_httpx):
-        mock_get_secrets.side_effect = _ntfy_secrets(topic="t", token="secret")
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_httpx.post.return_value = mock_response
-
-        config = Config(users={"alice": UserConfig()})
-        _send_ntfy(config, "alice", "msg")
-        headers = mock_httpx.post.call_args[1]["headers"]
-        assert headers["Authorization"] == "Bearer secret"
-
-    @patch("istota.notifications.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
-    def test_includes_title_priority_tags(self, mock_get_secrets, mock_httpx):
-        mock_get_secrets.side_effect = _ntfy_secrets(topic="t")
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_httpx.post.return_value = mock_response
-
-        config = Config(users={"alice": UserConfig()})
-        _send_ntfy(config, "alice", "msg", title="Alert!", priority=5, tags="warning")
-        headers = mock_httpx.post.call_args[1]["headers"]
-        assert headers["Title"] == "Alert!"
-        assert headers["Priority"] == "5"
-        assert headers["Tags"] == "warning"
-
-    @patch("istota.notifications.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
-    def test_default_priority_is_3(self, mock_get_secrets, mock_httpx):
-        mock_get_secrets.side_effect = _ntfy_secrets(topic="t")
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_httpx.post.return_value = mock_response
-
-        config = Config(users={"alice": UserConfig()})
-        _send_ntfy(config, "alice", "msg")
-        assert mock_httpx.post.call_args[1]["headers"]["Priority"] == "3"
-
-    @patch("istota.notifications.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
-    def test_strips_newlines_from_title_and_tags(self, mock_get_secrets, mock_httpx):
-        """CRLF in title/tags must be stripped to prevent header injection."""
-        mock_get_secrets.side_effect = _ntfy_secrets(topic="t")
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_httpx.post.return_value = mock_response
-
-        config = Config(users={"alice": UserConfig()})
-        _send_ntfy(
-            config, "alice", "msg",
-            title="Alert\r\nX-Injected: evil",
-            tags="warn\nsmuggled",
-        )
-        headers = mock_httpx.post.call_args[1]["headers"]
-        assert "\r" not in headers["Title"]
-        assert "\n" not in headers["Title"]
-        assert "\r" not in headers["Tags"]
-        assert "\n" not in headers["Tags"]
-        assert "Alert" in headers["Title"]
-        assert "warn" in headers["Tags"]
+        call = mock_send.call_args
+        assert call[0][0] is config
+        assert call[0][1] == "alice"
+        assert call[0][2] == "msg"
+        opts = call[0][3]
+        assert opts.title == "T" and opts.priority == 5 and opts.tags == "x"
 
     @patch("istota.secrets_store.get_service_secrets")
     def test_returns_false_when_topic_unset(self, mock_get_secrets):
-        # No topic configured — ntfy is opt-in per user, so this is a no-op.
         mock_get_secrets.return_value = {}
         config = Config(users={"alice": UserConfig()})
-        result = _send_ntfy(config, "alice", "msg")
-        assert result is False
-
-    @patch("istota.notifications.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
-    def test_basic_auth(self, mock_get_secrets, mock_httpx):
-        mock_get_secrets.side_effect = _ntfy_secrets(topic="t", username="user", password="pass")
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_httpx.post.return_value = mock_response
-
-        config = Config(users={"alice": UserConfig()})
-        _send_ntfy(config, "alice", "msg")
-        headers = mock_httpx.post.call_args[1]["headers"]
-        import base64
-        expected = base64.b64encode(b"user:pass").decode()
-        assert headers["Authorization"] == f"Basic {expected}"
-
-    @patch("istota.notifications.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
-    def test_token_auth_takes_precedence_over_basic(self, mock_get_secrets, mock_httpx):
-        mock_get_secrets.side_effect = _ntfy_secrets(
-            topic="t", token="tok", username="user", password="pass",
-        )
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_httpx.post.return_value = mock_response
-
-        config = Config(users={"alice": UserConfig()})
-        _send_ntfy(config, "alice", "msg")
-        headers = mock_httpx.post.call_args[1]["headers"]
-        assert headers["Authorization"] == "Bearer tok"
-
-    @patch("istota.notifications.httpx")
-    @patch("istota.secrets_store.get_service_secrets")
-    def test_returns_false_on_error(self, mock_get_secrets, mock_httpx):
-        mock_get_secrets.side_effect = _ntfy_secrets(topic="t")
-        mock_httpx.post.side_effect = Exception("connection refused")
-        config = Config(users={"alice": UserConfig()})
-        result = _send_ntfy(config, "alice", "msg")
-        assert result is False
+        assert _send_ntfy(config, "alice", "msg") is False
 
 
 class TestSendNotification:
