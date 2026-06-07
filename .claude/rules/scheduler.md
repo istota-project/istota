@@ -282,6 +282,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `talk_messages` / `talk_poll_state` | — | Talk poller state + message cache |
 | `istota_kv` | — | user_id, namespace, key, value (JSON) — backs the `kv` skill |
 | `trusted_email_senders` | — | user_id, pattern (fnmatch) — email-gate allowlist |
+| `web_chat_rooms` | `WebChatRoom` | id, user_id, token (channel id), name, archived, created_at, updated_at — backs the web chat surface; one room = one `conversation_token` |
 
 ## Key DB Functions
 

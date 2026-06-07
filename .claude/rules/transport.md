@@ -15,9 +15,13 @@ consumers, and the notification dispatcher.
 Transports split into two `surface_class`es (`TransportCapabilities.surface_class`):
 - **push** (`talk`, `email`, `ntfy`, `istota_file`, future Matrix) — the daemon
   actively delivers via `Transport.deliver()` to a resolved channel.
-- **stream** (`repl`, future web chat) — outbound is the `task_events` log; the
+- **stream** (`repl`, `web`) — outbound is the `task_events` log; the
   client tails it. `deliver()` is a no-op; the `result`/`error`/`done` events
-  satisfy delivery.
+  satisfy delivery. The web chat surface uses `source_type="web"` /
+  `output_target="web"`; `web` is in `routing._STREAM_SURFACES` so the planner
+  resolves it to a stream destination (no push) and the `/api/chat/*` SSE
+  endpoint tails `task_events`. There is no `WebTransport` yet — the events
+  table is the delivery, exactly as for REPL.
 
 `conversation_token` keeps its name and stays opaque at every consumer (it is
 the per-surface channel id); `source_type` stays the routing key. Neither was
