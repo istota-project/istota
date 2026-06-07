@@ -535,6 +535,7 @@ async def api_me(user: dict = Depends(_require_api_auth)):
     return {
         "username": username,
         "display_name": user.get("display_name", username),
+        "bot_name": _config.bot_name if _config else "Istota",
         "is_admin": is_admin,
         "features": features,
     }

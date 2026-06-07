@@ -8,11 +8,16 @@
 	import Message from '$lib/components/chat/Message.svelte';
 	import Composer from '$lib/components/chat/Composer.svelte';
 	import { getChatSession } from '$lib/stores/chat';
+	import { getMe } from '$lib/api';
 
 	const session = getChatSession();
 	const { rooms, activeRoomId, messages, status, loaded } = session;
 
 	let sidebarOpen = $state(false);
+	// Author labels for message headers; fall back to generic labels until /me
+	// resolves (or if it fails).
+	let userName = $state('You');
+	let botName = $state('Istota');
 	let creatingRoom = $state(false);
 	let newRoomName = $state('');
 	let listEl: HTMLDivElement | undefined = $state();
@@ -20,8 +25,30 @@
 	const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
 	const busy = $derived($status === 'sending' || $status === 'streaming');
 
+	// Discord/Slack-style grouping: a message continues the previous author's
+	// run (collapsing its avatar + header) when it's the same non-system author
+	// within a short window.
+	const GROUP_WINDOW_MS = 5 * 60 * 1000;
+	function isContinuation(i: number): boolean {
+		if (i <= 0) return false;
+		const prev = $messages[i - 1];
+		const cur = $messages[i];
+		if (!prev || prev.role !== cur.role || cur.role === 'system') return false;
+		if (prev.createdAt && cur.createdAt) {
+			const gap = new Date(cur.createdAt).getTime() - new Date(prev.createdAt).getTime();
+			if (Number.isFinite(gap) && gap > GROUP_WINDOW_MS) return false;
+		}
+		return true;
+	}
+
 	onMount(() => {
 		session.init();
+		getMe()
+			.then((me) => {
+				if (me.display_name) userName = me.display_name;
+				if (me.bot_name) botName = me.bot_name;
+			})
+			.catch(() => {});
 	});
 
 	// Stop the active stream when leaving /chat so the EventSource / poll timer
@@ -120,8 +147,15 @@
 					<span class="hint">Configuration help, quick tasks, or one-off questions.</span>
 				</div>
 			{:else}
-				{#each $messages as message (message.cid)}
-					<Message {message} onConfirm={session.confirm} onReject={session.reject} />
+				{#each $messages as message, i (message.cid)}
+					<Message
+						{message}
+						continuation={isContinuation(i)}
+						{userName}
+						{botName}
+						onConfirm={session.confirm}
+						onReject={session.reject}
+					/>
 				{/each}
 			{/if}
 		</div>
@@ -145,10 +179,10 @@
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
-		padding: 0.75rem 1rem;
-		max-width: 820px;
+		/* Row padding lives in Message (so the hover highlight spans the full
+		   channel width, Discord-style). Just a little breathing room here. */
+		padding: 0.5rem 0 1rem;
 		width: 100%;
-		margin: 0 auto;
 	}
 	.messages::-webkit-scrollbar { width: 4px; }
 	.messages::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
