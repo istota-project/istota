@@ -121,7 +121,7 @@ class SchedulerConfig:
     progress_show_text: bool = False       # emit progress_text events (noisy)
     event_log_enabled: bool = True         # write events to task_events table (kill-switch)
     push_notification_threshold_seconds: int = 30  # min task duration before push fires
-    push_notification_sources: list[str] = field(default_factory=lambda: ["talk"])  # source_types that trigger push
+    push_notification_sources: list[str] = field(default_factory=list)  # source_types that trigger a push; empty = ntfy opt-in only (never a default surface)
     task_timeout_minutes: int = 30  # kill task execution after this
     # Robustness settings
     confirmation_timeout_minutes: int = 120  # auto-cancel pending_confirmation after this
@@ -1004,7 +1004,7 @@ def load_config(config_path: Path | None = None) -> Config:
             progress_show_text=sched.get("progress_show_text", False),
             event_log_enabled=sched.get("event_log_enabled", True),
             push_notification_threshold_seconds=sched.get("push_notification_threshold_seconds", 30),
-            push_notification_sources=sched.get("push_notification_sources", ["talk"]),
+            push_notification_sources=sched.get("push_notification_sources", []),
             task_timeout_minutes=sched.get("task_timeout_minutes", 30),
             confirmation_timeout_minutes=sched.get("confirmation_timeout_minutes", 120),
             stale_pending_warn_minutes=sched.get("stale_pending_warn_minutes", 30),
