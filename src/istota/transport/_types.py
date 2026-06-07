@@ -47,7 +47,7 @@ class IncomingMessage:
     reply_to_content: str | None = None
     attachments: list[str] = field(default_factory=list)
     is_group_chat: bool = False
-    output_target: str | None = None  # "talk"|"email"|"both"|"all"|None
+    output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)  # original payload
@@ -71,6 +71,14 @@ class TransportCapabilities:
       ``deliver()`` is a no-op. REPL and web chat. A ``stream`` destination
       contributes no push work; the ``result``/``error``/``done`` events satisfy
       it.
+
+    ``user_routable`` marks a surface as one a user can deliberately point
+    traffic at (a briefing output, a default destination, an alert route). The
+    self-routing surfaces are False: ``istota_file`` only ever delivers back to
+    the TASKS.md line a task came from (no row → dropped), and ``repl`` is the
+    inline terminal the daemon never delivers to. Both still validate on the
+    wire and work as programmatic destinations — ``user_routable`` only governs
+    what the UI *offers*, never what the grammar permits.
     """
 
     supports_edit: bool = False          # can edit a previously sent message
@@ -79,6 +87,7 @@ class TransportCapabilities:
     supports_typing: bool = False
     max_message_length: int | None = None  # None = unlimited; drives splitting
     surface_class: str = "push"          # "push" | "stream"
+    user_routable: bool = True           # can a user select it as a destination
 
 
 @dataclass(frozen=True)

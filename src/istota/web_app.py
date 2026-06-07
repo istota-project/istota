@@ -1570,13 +1570,19 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
 
 
 def _registered_delivery_surfaces() -> list[str]:
-    """Surfaces the Preferences UI can offer for routing (registered transports
-    plus the events-only ``stream`` surface)."""
+    """Surfaces the UI can offer as a user-chosen destination (briefing output,
+    default destination, alert route).
+
+    Only ``user_routable`` registered transports — ``talk`` / ``email`` /
+    ``ntfy``. Self-routing surfaces (``istota_file`` delivers back to its own
+    TASKS.md line; ``repl`` is the inline terminal) and the events-only
+    ``stream`` surface are held back from the UI; all still validate on the wire
+    via ``_validate_descriptor_surfaces`` so programmatic / CLI descriptors keep
+    working."""
+    if _config is None:
+        return []
     from .transport import make_registry
-    surfaces = {"stream"}
-    if _config is not None:
-        surfaces |= set(make_registry(_config).names())
-    return sorted(surfaces)
+    return sorted(make_registry(_config).routable_names())
 
 
 _BUILTIN_DELIVERY_SURFACES = frozenset({
@@ -1964,9 +1970,6 @@ async def settings_delete_resource(
 # TOML briefings appear with ``"managed": "config"`` so the UI can render
 # them as read-only.
 
-_BRIEFING_OUTPUTS = {"talk", "email", "both"}
-
-
 def _briefing_to_dict(b, *, managed: str) -> dict:
     """Serialize a BriefingConfig (TOML) or UserBriefing (DB) for the API."""
     out = {
@@ -2037,7 +2040,7 @@ async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
     return {
         "briefings": out,
         "rooms": rooms,
-        "outputs": sorted(_BRIEFING_OUTPUTS),
+        "outputs": _registered_delivery_surfaces(),
     }
 
 
@@ -2060,14 +2063,18 @@ def _validate_briefing_payload(payload: dict, *, name_required: bool) -> dict:
         raise HTTPException(status_code=400, detail="cron is required")
 
     output = (payload.get("output") or "talk").strip()
-    if output not in _BRIEFING_OUTPUTS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"output must be one of {sorted(_BRIEFING_OUTPUTS)}",
-        )
+    # Validate every leaf surface is known (rejects typos like "sms"); the
+    # grammar stays permissive so legacy ``both`` / comma lists still parse,
+    # while the UI offers only ``_registered_delivery_surfaces()``.
+    try:
+        _validate_descriptor_surfaces(output)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
+    from .transport import parse_output_target
     token = (payload.get("conversation_token") or "").strip()
-    if output in {"talk", "both"} and not token:
+    talk_leaf = any(d.surface == "talk" for d in parse_output_target(output))
+    if talk_leaf and not token:
         raise HTTPException(
             status_code=400,
             detail=f"conversation_token is required when output is {output!r}",

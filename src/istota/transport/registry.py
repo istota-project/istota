@@ -55,6 +55,16 @@ class TransportRegistry:
     def names(self) -> list[str]:
         return list(self._by_name.keys())
 
+    def routable_names(self) -> list[str]:
+        """Names of surfaces a user can deliberately route to (a briefing
+        output, a default destination, an alert route). Excludes self-routing
+        surfaces (``istota_file``, ``repl``) whose ``user_routable`` is False —
+        they still validate on the wire, they're just never UI-offered."""
+        return [
+            name for name, t in self._by_name.items()
+            if getattr(t.capabilities, "user_routable", True)
+        ]
+
 
 def make_registry(config: "Config") -> TransportRegistry:
     """Build the registry from config. No network on construction.

@@ -187,7 +187,7 @@ class BriefingConfig:
     name: str
     cron: str  # cron expression, evaluated in user's timezone
     conversation_token: str = ""  # Talk room to post to
-    output: str = "talk"  # "talk", "email", or "both"
+    output: str = "talk"  # delivery surface(s): talk / email / ntfy or a comma list
     components: dict = field(default_factory=dict)
     # Marks entries appended by ``_apply_user_briefings`` from the DB. The
     # web listing endpoint skips these so post-delete in-memory staleness

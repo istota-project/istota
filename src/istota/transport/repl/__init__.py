@@ -36,6 +36,7 @@ class ReplTransport:
         supports_typing=False,
         max_message_length=None,
         surface_class="stream",
+        user_routable=False,  # inline terminal (and future web chat); held back from UI
     )
 
     def __init__(self, config: "Config"):

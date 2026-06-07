@@ -280,8 +280,8 @@ def send_notification(
 
     Destination resolution:
       1. ``surface`` if given — an ``output_target`` descriptor ("talk", "email",
-         "ntfy", "both", "all", "talk:<token>", or a comma list). An explicit
-         surface always wins (e.g. a heartbeat check's own channel).
+         "ntfy", "all", "talk:<token>", or a comma list). An explicit surface
+         always wins (e.g. a heartbeat check's own channel).
       2. else ``purpose`` (one of :data:`PURPOSES`) resolved through the user's
          per-user routing table via :func:`resolve_destinations` — this is what
          makes ``routing={"alert": "ntfy"}`` actually route alerts to ntfy.

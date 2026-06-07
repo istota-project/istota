@@ -812,7 +812,7 @@ def _deliver_deferred_email_output(
     """Deliver or clean up deferred email output files not handled by the normal path.
 
     The normal email delivery path (post_result_to_email via `post_email` flag)
-    handles tasks whose output_target includes "email"/"both"/"all". This
+    handles tasks whose output_target includes an "email" leg. This
     function handles two gap cases:
 
     1. source_type="email" but output_target doesn't include email (e.g. an

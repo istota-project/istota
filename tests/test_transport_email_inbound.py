@@ -555,7 +555,7 @@ class TestPollEmailsThreadMatching:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
             assert task.user_id == "stefan"
-            assert task.output_target == "both"
+            assert task.output_target == "talk,email"
             assert task.conversation_token == "talk_room_42"
             assert "Emissary email reply" in task.prompt
             assert "external@proton.me" in task.prompt
@@ -652,7 +652,7 @@ class TestPollEmailsThreadMatching:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
             assert task.user_id == "stefan"
-            assert task.output_target == "both"
+            assert task.output_target == "talk,email"
             # Should use thread_id since no conversation_token on sent email
             assert task.conversation_token is not None
 
@@ -1751,7 +1751,7 @@ class TestEmissaryLifecycle:
         assert new_task.user_id == "alice"
         assert new_task.talk_delivery_token == "talkroom_42"
         assert new_task.conversation_token == "talkroom_42"
-        assert new_task.output_target == "both"
+        assert new_task.output_target == "talk,email"
 
     def test_email_task_sends_email_reply_routes_via_alerts(
         self, db_path, tmp_path,

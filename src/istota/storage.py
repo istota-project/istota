@@ -80,7 +80,7 @@ See `examples/BRIEFINGS.md` for all available options.
 # name = "morning"
 # cron = "0 7 * * 1-5"         # 7am weekdays (in your timezone)
 # conversation_token = "{conversation_token}"
-# output = "talk"               # "talk", "email", or "both"
+# output = "talk"               # talk / email / ntfy (or a comma list, e.g. "talk,email")
 #
 # [briefings.components]
 # markets = true
@@ -105,7 +105,7 @@ The scheduler reads this file automatically — changes take effect within ~60 s
 name = "morning"
 cron = "0 7 * * 1-5"         # 7am weekdays (in your timezone)
 conversation_token = "abc123"
-output = "talk"               # "talk", "email", or "both"
+output = "talk"               # talk / email / ntfy (or a comma list, e.g. "talk,email")
 
 [briefings.components]
 markets = true
@@ -143,7 +143,8 @@ Use a dict to override, e.g.: `markets = { enabled = true, futures = ["ES=F"] }`
 
 - `output = "talk"` — Send to Nextcloud Talk room (requires `conversation_token`)
 - `output = "email"` — Send via email
-- `output = "both"` — Send to both Talk and email
+- `output = "ntfy"` — Send as an ntfy push notification
+- `output = "talk,email"` — Comma-separate surfaces to deliver to several at once
 
 ## Cron Format
 

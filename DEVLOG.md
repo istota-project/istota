@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-07: Briefing output speaks the transport grammar + `user_routable` capability
+
+Residual cleanup after the delivery-abstraction layer: briefings still offered `talk`/`email`/`both` while the routing layer already supported the full `surface[:channel]` comma-list grammar. Two findings drove the change.
+
+The backend already supports multiple/arbitrary output targets end-to-end — `parse_output_target` splits comma lists and `surface:channel` leaves, `user_briefings.ensure_briefing` validates via that parser, the CLI passes the descriptor straight through, and `check_briefings` is grammar-aware. The only chokepoint was the web UI plus its endpoint validation (`_BRIEFING_OUTPUTS = {talk, email, both}`), which rejected anything richer before it reached the storage layer.
+
+The second finding (spotted mid-review): the Preferences "default delivery destination" and "alert route" dropdowns were populated by `_registered_delivery_surfaces() = {"stream"} | registry.names()`, which blindly dumped *every* registered transport — including `istota_file` and `repl`. Both are self-routing/internal surfaces: `istota_file` resolves its target from the originating TASKS.md row (a non-TASKS.md task has no row → dropped), and `repl` is the inline terminal the daemon never delivers to. Neither is a meaningful user-pickable destination, and they were leaking into the UI as footguns.
+
+Fix: made "can a user route to this" an intrinsic transport property rather than a blind name union. Added `user_routable: bool = True` to `TransportCapabilities`; `IstotaFileTransport` and `ReplTransport` set it `False`. New `TransportRegistry.routable_names()` filters on the flag, and `_registered_delivery_surfaces()` returns only routable, instance-enabled surfaces — talk/email/ntfy. The hand-added `"stream"` was dropped (held back from the UI until web chat ships; flips back via one flag). The briefing dropdown is now server-driven from the same helper, single-select, token field kept; token is required only when `talk` is a leaf.
+
+`both` decision: removed from every UI, producer, CLI choices list, and example/doc string, but **kept as a silent back-compat parse alias** in `routing.py` so deployed DB rows, hand-authored CRON.md/BRIEFINGS.md, and operator TOML still saying `both` keep working — no migration. The email-reply producer (`transport/email/inbound.py`) now emits `"talk,email"` instead of `"both"`. The two unrelated `both` meanings (logging console+file, prose) were left untouched. Briefing validation now reuses `_validate_descriptor_surfaces` (known-surface check) so the grammar stays permissive while the UI offers only the clean set; `sms`-style typos still 400.
+
+Ansible: no new field needed (`user_routable` is code-only; instance-enable defaults `istota_talk_enabled`/`istota_email_enabled` already exist, ntfy is per-user). Cosmetic touch-ups only — quoted `--output` for comma-list safety, scrubbed `both` from two planning/example comments.
+
+**Key changes:**
+- `TransportCapabilities.user_routable` (default `True`); `istota_file` + `repl` set `False`.
+- `TransportRegistry.routable_names()`; `_registered_delivery_surfaces()` filters on it and drops the hand-added `"stream"`.
+- Briefing `outputs` endpoint + dropdown driven by routable surfaces; token required only when `talk` is a leaf.
+- `_BRIEFING_OUTPUTS` removed; briefing validation reuses `_validate_descriptor_surfaces` (keeps `both`/comma lists valid on the wire).
+- CLI `briefing --output` dropped its `{talk,email,both}` choices restriction.
+- `both` scrubbed from UI/producers/docs; kept as silent alias in `routing.py`; email-reply producer emits `talk,email`.
+
+**Files added/modified:**
+- `src/istota/transport/_types.py` - `user_routable` capability + doc; `IncomingMessage.output_target` comment
+- `src/istota/transport/registry.py` - `routable_names()`
+- `src/istota/transport/istota_file/__init__.py`, `repl/__init__.py` - `user_routable=False`
+- `src/istota/transport/email/inbound.py` - emissary reply `both` → `talk,email`
+- `src/istota/web_app.py` - `_registered_delivery_surfaces` filter; briefing validation/outputs rework; `_BRIEFING_OUTPUTS` removed
+- `src/istota/cli.py` - briefing `--output` free-form; talk-leaf token check
+- `web/src/routes/settings/+page.svelte`, `web/src/lib/api.ts`, `web/vite-mock-api.ts` - dropdown + types
+- `src/istota/config.py`, `storage.py`, `skills/briefings_config/skill.md`, `notifications.py`, `scheduler.py` - `both` doc scrub
+- `config/config.example.toml`, `deploy/ansible/{defaults/main.yml,tasks/main.yml}` - examples + quoted `--output`
+- `.claude/rules/transport.md` - `user_routable` documented
+- `tests/test_transport_registry.py`, `test_web_app.py`, `test_cli_briefing_ensure.py`, `test_transport_email_inbound.py` - coverage
+
 ## 2026-06-07: Simplify delivery-routing settings UI + close ISSUE-113
 
 Two related transport cleanups.

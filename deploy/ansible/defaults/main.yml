@@ -315,7 +315,7 @@ istota_experimental_features: []
 #     disabled_skills: []          # per-user skill exclusion list
 #     disabled_modules: []         # per-user module opt-outs; one of: feeds, money, location
 #     # Purpose-keyed delivery routing (routes notifications by purpose). Each
-#     # purpose maps to an output_target descriptor (talk / email / ntfy / both /
+#     # purpose maps to an output_target descriptor (talk / email / ntfy /
 #     # all / talk:<room> / comma lists). Purposes: reply, alert, log, briefing,
 #     # notification. When `routing:` is set, the listed purposes REPLACE the
 #     # stored table on each deploy; omit `routing:` entirely to leave a web-set
@@ -342,7 +342,7 @@ istota_experimental_features: []
 #       - name: "morning"
 #         cron: "0 6 * * *"
 #         conversation_token: "room123"
-#         output: "both"
+#         output: "talk,email"   # talk / email / ntfy, or a comma list
 #         components:
 #           calendar: true
 #           todos: true

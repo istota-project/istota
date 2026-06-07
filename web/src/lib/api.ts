@@ -661,7 +661,9 @@ export interface UserBriefingRow {
 	name: string;
 	cron: string;
 	conversation_token: string;
-	output: 'talk' | 'email' | 'both';
+	// A delivery surface (talk / email / ntfy) or a comma/surface:channel
+	// descriptor; the dropdown is driven by the server's `outputs` list.
+	output: string;
 	components: Record<string, unknown>;
 	enabled: boolean;
 }
@@ -683,7 +685,7 @@ export async function upsertBriefing(payload: {
 	name: string;
 	cron: string;
 	conversation_token?: string;
-	output?: 'talk' | 'email' | 'both';
+	output?: string;
 	components?: Record<string, unknown>;
 	enabled?: boolean;
 }): Promise<{ ok: boolean; id: number; state: 'created' | 'updated' | 'noop' }> {

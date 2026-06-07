@@ -38,6 +38,7 @@ class IstotaFileTransport:
         supports_typing=False,
         max_message_length=None,
         surface_class="push",
+        user_routable=False,  # self-routing: only delivers back to its TASKS.md line
     )
 
     def __init__(self, config: "Config"):
