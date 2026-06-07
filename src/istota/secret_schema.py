@@ -9,7 +9,9 @@ There are two flavors:
 
 * **Connected services** — cross-cutting per-user credentials a skill
   consumes (Karakeep, Google Workspace). They appear on the main
-  ``/istota/settings`` page.
+  ``/istota/settings`` page, unless flagged ``cli_only`` (e.g.
+  ``native_brain``), in which case they stay operator-provisioned via the
+  ``istota secret`` CLI and never render in the web UI.
 * **Module services** — credentials owned by a specific module (Monarch
   for ``money``, Tumblr for ``feeds``, Overland for ``location``). They
   appear on the matching per-module settings page and are gated by
@@ -71,6 +73,16 @@ CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
         # Consumed by the native brain (brain.kind = "native"), not a skill.
         # When set, this per-user key overlays the instance-wide
         # `[brain.native] api_key` / `ISTOTA_BRAIN_NATIVE_API_KEY`.
+        #
+        # cli_only: not surfaced in the web UI. The web knob overrode only the
+        # key (not provider/model/base_url), so it did less than it appeared to
+        # — a per-user *billing* override, not a "bring your own brain" one.
+        # Rather than grow it into a full per-user brain config (which opens an
+        # SSRF surface, since NativeBrain runs in-process on the daemon), we
+        # keep it operator-provisioned via `istota secret ensure -s native_brain`
+        # and the runtime overlay in `executor._native_with_user_key`. Still in
+        # the schema so CLI validation accepts it; just hidden from the UI.
+        "cli_only": True,
         "used_by": (),
         "fields": [
             {"key": "api_key", "label": "Provider API key", "type": "password"},
