@@ -302,7 +302,7 @@ class TestExecutorModelArg:
 class TestCmdCronShowsModel:
     @pytest.mark.asyncio
     async def test_lists_model_when_set(self, db_path, make_config):
-        from istota.commands import cmd_cron
+        from istota.commands import CommandContext, cmd_cron
 
         config = make_config(db_path=db_path)
         with db.get_db(config.db_path) as conn:
@@ -313,13 +313,15 @@ class TestCmdCronShowsModel:
                 ("alice", "feed-digest", "0 9 * * *", "t", "claude-sonnet-4-6"),
             )
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "", client)
+            result = await cmd_cron(CommandContext(
+                config=config, conn=conn, user_id="alice",
+                conversation_token="room1", args=""))
 
         assert "claude-sonnet-4-6" in result
 
     @pytest.mark.asyncio
     async def test_omits_model_when_unset(self, db_path, make_config):
-        from istota.commands import cmd_cron
+        from istota.commands import CommandContext, cmd_cron
 
         config = make_config(db_path=db_path)
         with db.get_db(config.db_path) as conn:
@@ -330,7 +332,9 @@ class TestCmdCronShowsModel:
                 ("alice", "default-job", "0 9 * * *", "t"),
             )
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "", client)
+            result = await cmd_cron(CommandContext(
+                config=config, conn=conn, user_id="alice",
+                conversation_token="room1", args=""))
 
         # No "model =" or model token in output for jobs without model override
         assert "claude-" not in result
@@ -543,7 +547,7 @@ class TestExecutorEffortArg:
 class TestCmdCronShowsEffort:
     @pytest.mark.asyncio
     async def test_lists_effort_when_set(self, db_path, make_config):
-        from istota.commands import cmd_cron
+        from istota.commands import CommandContext, cmd_cron
         config = make_config(db_path=db_path)
         with db.get_db(config.db_path) as conn:
             conn.execute(
@@ -553,7 +557,9 @@ class TestCmdCronShowsEffort:
                 ("alice", "j", "0 9 * * *", "t", "low"),
             )
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "", client)
+            result = await cmd_cron(CommandContext(
+                config=config, conn=conn, user_id="alice",
+                conversation_token="room1", args=""))
         assert "low" in result
 
 

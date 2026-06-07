@@ -53,8 +53,10 @@
 </script>
 
 {#if isSystem}
-	<div class="system-row">
-		<div class="system-line markdown" class:error={message.error}>{@html bodyHtml}</div>
+	<!-- Command (!…) output. Left-aligned block, not a centered notice: it
+	     carries lists / code / tables that must read left-to-right. -->
+	<div class="cmd-row">
+		<div class="cmd-output markdown" class:error={message.error}>{@html bodyHtml}</div>
 	</div>
 {:else}
 	<div class="msg" class:continuation class:error={message.error}>
@@ -126,19 +128,22 @@
 		   line of text. */
 		padding: 0.1rem 0.75rem 0.45rem;
 		align-items: flex-start;
+		/* Anchor for the absolutely-positioned .meta-footer (top-right). */
+		position: relative;
 	}
 	.msg:not(.continuation) { margin-top: 0.7rem; padding-top: 0.15rem; }
 	.msg:hover { background: var(--surface-card); }
 	.msg:hover .hover-time { opacity: 1; }
 	.msg:hover .meta-footer { opacity: 1; }
 
-	/* Subtle per-message metadata at the top-right, revealed on hover. It's a
-	   sibling of .content (not inside it), so it occupies the empty space beside
-	   the author/time header and never overlaps the message body. */
+	/* Subtle per-message metadata at the top-right, revealed on hover. Absolutely
+	   positioned so it overlays the row's top-right corner instead of consuming a
+	   flex column — otherwise it narrows the message content (badly on mobile). */
 	.meta-footer {
-		flex: 0 0 auto;
-		margin-top: 0.15rem;
-		padding-left: 0.6rem;
+		position: absolute;
+		top: 0.3rem;
+		right: 0.75rem;
+		pointer-events: none;
 		font-size: var(--text-xs);
 		color: var(--text-dim);
 		font-variant-numeric: tabular-nums;
@@ -202,23 +207,31 @@
 		line-height: 1.5;
 		color: var(--text-primary);
 		word-break: break-word;
+		/* Cap readable content width so long lines / wide blocks stay legible;
+		   the row itself stays full-width so the hover highlight spans it. */
+		max-width: 900px;
 	}
 	.user-body { white-space: pre-wrap; }
 
 	.msg.error .body,
-	.system-line.error { color: #e0a0a0; }
+	.cmd-output.error { color: #e0a0a0; }
 
-	/* System notices: centered, muted, set apart from the conversation. */
-	.system-row {
-		display: flex;
-		justify-content: center;
-		padding: 0.4rem 0.75rem;
+	/* Command (!…) output: a left-aligned block set apart from the conversation
+	   by a subtle card, so its lists / code / tables render left-to-right. */
+	.cmd-row {
+		padding: 0.2rem 0.75rem 0.5rem;
 	}
-	.system-line {
-		max-width: 90%;
+	.cmd-output {
+		max-width: 900px;
 		font-size: var(--text-sm);
-		color: var(--text-muted);
-		text-align: center;
+		line-height: 1.5;
+		color: var(--text-secondary);
+		background: var(--surface-card);
+		border: 1px solid var(--border-subtle);
+		border-radius: 0.4rem;
+		padding: 0.5rem 0.75rem;
+		text-align: left;
+		word-break: break-word;
 	}
 
 	.attachments { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.3rem; }

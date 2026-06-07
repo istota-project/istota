@@ -7,12 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from istota import db
 from istota.commands import (
-    _build_export_metadata, _filter_user_messages, _format_messages_markdown,
-    _format_messages_text, _parse_export_metadata, _parse_search_args,
+    CommandContext, CommandResult,
+    _build_export_metadata, _format_history_markdown,
+    _format_history_text, _parse_export_metadata, _parse_search_args,
     cmd_check, cmd_cron, cmd_export, cmd_help, cmd_memory, cmd_more, cmd_search,
     cmd_skills, cmd_status, cmd_stop,
     dispatch, parse_command,
-    model_prefix_usage, parse_model_prefix,
+    model_prefix_usage, parse_model_prefix, resolve_model_prefix,
 )
 from istota.brain import BrainConfig, make_brain, set_role_overrides
 from istota.brain.claude_code import HAIKU, MODEL_ALIASES, OPUS, OPUS_46, SONNET
@@ -63,6 +64,16 @@ def make_config(db_path, tmp_path):
         return config
 
     return _make
+
+
+def _ctx(config, conn, user_id="alice", conversation_token="room1", args="",
+         surface="talk", registry=None):
+    """Build a CommandContext for invoking handlers directly in tests."""
+    return CommandContext(
+        config=config, conn=conn, user_id=user_id,
+        conversation_token=conversation_token, args=args,
+        surface=surface, registry=registry,
+    )
 
 
 # =============================================================================
@@ -257,44 +268,129 @@ class TestParseModelPrefix:
 # =============================================================================
 
 
+class TestResolveModelPrefix:
+    """The shared cross-surface !model rule (Talk + web both call this)."""
+
+    def test_not_a_prefix(self, brain):
+        out = resolve_model_prefix("just a normal message", brain)
+        assert out.matched is False
+        assert out.content == "just a normal message"
+        assert out.model is None
+        assert out.usage is None
+
+    def test_valid_alias_with_prompt(self, brain):
+        out = resolve_model_prefix("!model opus summarize this", brain)
+        assert out.matched is True
+        assert out.usage is None
+        assert out.model == OPUS
+        assert out.content == "summarize this"
+
+    def test_unknown_alias_yields_usage(self, brain):
+        out = resolve_model_prefix("!model bogus do it", brain)
+        assert out.matched is True
+        assert out.usage is not None
+        assert "Aliases" in out.usage
+
+    def test_alias_only_no_attachment_yields_usage(self, brain):
+        out = resolve_model_prefix("!model opus", brain, has_attachments=False)
+        assert out.matched is True
+        assert out.usage is not None
+
+    def test_alias_only_with_attachment_is_valid(self, brain):
+        out = resolve_model_prefix("!model opus", brain, has_attachments=True)
+        assert out.matched is True
+        assert out.usage is None
+        assert out.model == OPUS
+        assert out.content == ""
+
+    def test_default_alias_clears_overrides(self, brain):
+        out = resolve_model_prefix("!model default keep going", brain)
+        assert out.matched is True
+        assert out.usage is None
+        assert out.model is None
+        assert out.effort is None
+        assert out.content == "keep going"
+
+
+class _FakePushTransport:
+    """Minimal push transport that records what dispatch delivers to it."""
+
+    def __init__(self):
+        from istota.transport._types import TransportCapabilities
+        self.capabilities = TransportCapabilities(surface_class="push")
+        self.delivered: list[tuple[str, str]] = []
+
+    async def deliver(self, target, text, **kwargs):
+        self.delivered.append((target, text))
+        return 1
+
+    async def resolve_channel_name(self, token):
+        return token
+
+
+class _FakeRegistry:
+    def __init__(self, transport):
+        self._t = transport
+
+    def get(self, name):
+        return self._t
+
+
 class TestDispatch:
     @pytest.mark.asyncio
-    async def test_non_command_returns_false(self, make_config):
+    async def test_non_command_returns_not_handled(self, make_config):
         config = make_config()
+        transport = _FakePushTransport()
         with db.get_db(config.db_path) as conn:
-            result = await dispatch(config, conn, "alice", "room1", "hello world")
-        assert result is False
+            result = await dispatch(
+                config, "alice", "room1", "hello world",
+                conn=conn, registry=_FakeRegistry(transport),
+            )
+        assert isinstance(result, CommandResult)
+        assert result.handled is False
+        assert transport.delivered == []
 
     @pytest.mark.asyncio
-    async def test_known_command_handled(self, make_config):
+    async def test_known_command_delivered_on_push_surface(self, make_config):
         config = make_config()
-        with (
-            db.get_db(config.db_path) as conn,
-            patch("istota.commands.get_talk_client") as MockClient,
-        ):
-            mock_instance = MockClient.return_value
-            mock_instance.send_message = AsyncMock()
-            result = await dispatch(config, conn, "alice", "room1", "!help")
-
-        assert result is True
-        mock_instance.send_message.assert_called_once()
+        transport = _FakePushTransport()
+        with db.get_db(config.db_path) as conn:
+            result = await dispatch(
+                config, "alice", "room1", "!help",
+                conn=conn, registry=_FakeRegistry(transport),
+            )
+        assert result.handled is True
+        assert result.delivered is True
+        assert len(transport.delivered) == 1
+        assert "!help" in transport.delivered[0][1]
 
     @pytest.mark.asyncio
     async def test_unknown_command_posts_error(self, make_config):
         config = make_config()
-        with (
-            db.get_db(config.db_path) as conn,
-            patch("istota.commands.get_talk_client") as MockClient,
-        ):
-            mock_instance = MockClient.return_value
-            mock_instance.send_message = AsyncMock()
-            result = await dispatch(config, conn, "alice", "room1", "!nonexistent")
-
-        assert result is True
-        msg = mock_instance.send_message.call_args[0][1]
+        transport = _FakePushTransport()
+        with db.get_db(config.db_path) as conn:
+            result = await dispatch(
+                config, "alice", "room1", "!nonexistent",
+                conn=conn, registry=_FakeRegistry(transport),
+            )
+        assert result.handled is True
+        msg = transport.delivered[0][1]
         assert "Unknown command" in msg
         assert "!nonexistent" in msg
         assert "!help" in msg
+
+    @pytest.mark.asyncio
+    async def test_stream_surface_returns_text_undelivered(self, make_config):
+        """On a stream surface (no push transport) the result comes back inline."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            result = await dispatch(
+                config, "alice", "room1", "!help",
+                surface="web", conn=conn, registry=_FakeRegistry(None),
+            )
+        assert result.handled is True
+        assert result.delivered is False
+        assert "!help" in (result.text or "")
 
 
 # =============================================================================
@@ -308,7 +404,7 @@ class TestCmdHelp:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_help(config, conn, "alice", "room1", "", client)
+            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
 
         assert "!help" in result
         assert "!stop" in result
@@ -320,7 +416,7 @@ class TestCmdHelp:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_help(config, conn, "alice", "room1", "", client)
+            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
 
         assert "!model" in result
         # at least one alias surfaces so users can discover them from !help
@@ -338,7 +434,7 @@ class TestCmdStop:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_stop(config, conn, "alice", "room1", "", client)
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
         assert "No active task" in result
 
     @pytest.mark.asyncio
@@ -355,7 +451,7 @@ class TestCmdStop:
             db.update_task_status(conn, task_id, "running")
 
             client = AsyncMock()
-            result = await cmd_stop(config, conn, "alice", "room1", "", client)
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
 
         assert f"#{task_id}" in result
         assert "Cancelling" in result
@@ -377,7 +473,7 @@ class TestCmdStop:
             db.set_task_confirmation(conn, task_id, "Are you sure?")
 
             client = AsyncMock()
-            result = await cmd_stop(config, conn, "alice", "room1", "", client)
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
 
         assert f"#{task_id}" in result
 
@@ -397,7 +493,7 @@ class TestCmdStop:
             db.update_task_status(conn, task_id, "running")
 
             client = AsyncMock()
-            result = await cmd_stop(config, conn, "alice", "room1", "", client)
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
 
         assert "No active task" in result
 
@@ -416,7 +512,7 @@ class TestCmdStatus:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_status(config, conn, "alice", "room1", "", client)
+            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
         assert "No active or pending tasks" in result
         assert "System:" in result
 
@@ -439,7 +535,7 @@ class TestCmdStatus:
             db.update_task_status(conn, t2, "running")
 
             client = AsyncMock()
-            result = await cmd_status(config, conn, "alice", "room1", "", client)
+            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Your tasks (2)" in result
         assert "Task one" in result
@@ -460,7 +556,7 @@ class TestCmdStatus:
             )
 
             client = AsyncMock()
-            result = await cmd_status(config, conn, "alice", "room1", "", client)
+            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "No active or pending tasks" in result
         # But system stats should show bob's pending task
@@ -481,7 +577,7 @@ class TestCmdStatus:
             )
 
             client = AsyncMock()
-            result = await cmd_status(config, conn, "alice", "room1", "", client)
+            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "1 running" in result
         assert "1 queued" in result
@@ -503,7 +599,7 @@ class TestCmdStatus:
             )
 
             client = AsyncMock()
-            result = await cmd_status(config, conn, "alice", "room1", "", client)
+            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "System:" not in result
         assert "running" not in result
@@ -518,7 +614,7 @@ class TestCmdStatus:
             db.create_task(conn, prompt="Briefing", user_id="alice", source_type="briefing")
 
             client = AsyncMock()
-            result = await cmd_status(config, conn, "alice", "room1", "", client)
+            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Your tasks (1)" in result
         assert "Talk task" in result
@@ -532,7 +628,7 @@ class TestCmdStatus:
             db.create_task(conn, prompt="Cron job", user_id="alice", source_type="scheduled")
 
             client = AsyncMock()
-            result = await cmd_status(config, conn, "alice", "room1", "", client)
+            result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Background (1)" in result
         assert "Your tasks" not in result
@@ -549,7 +645,7 @@ class TestCmdCron:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "", client)
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
         assert "No scheduled jobs" in result
 
     @pytest.mark.asyncio
@@ -562,7 +658,7 @@ class TestCmdCron:
                 ("alice", "daily-check", "0 9 * * *", "check stuff"),
             )
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "", client)
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
 
         assert "daily-check" in result
         assert "0 9 * * *" in result
@@ -578,7 +674,7 @@ class TestCmdCron:
                 ("alice", "flaky", "0 * * * *", "flaky job"),
             )
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "", client)
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
 
         assert "3 failures" in result
 
@@ -605,7 +701,7 @@ enabled = false
                 ("alice", "broken", "0 * * * *", "stuff"),
             )
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "enable broken", client)
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable broken"))
 
         assert "Enabled" in result
         assert "DB-only" not in result
@@ -643,7 +739,7 @@ enabled = false
                 ("alice", "nightly", "0 22 * * *", "stuff"),
             )
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "enable nightly", client)
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable nightly"))
 
         assert "Enabled" in result
         with db.get_db(config.db_path) as conn:
@@ -675,7 +771,7 @@ prompt = "stuff"
                 ("alice", "active-job", "0 * * * *", "stuff"),
             )
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "disable active-job", client)
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "disable active-job"))
 
         assert "Disabled" in result
         assert "DB-only" not in result
@@ -699,7 +795,7 @@ prompt = "stuff"
                 ("alice", "broken", "0 * * * *", "stuff"),
             )
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "enable broken", client)
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable broken"))
 
         assert "Enabled" in result
         assert "DB-only" in result
@@ -712,7 +808,7 @@ prompt = "stuff"
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_cron(config, conn, "alice", "room1", "enable nope", client)
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable nope"))
         assert "not found" in result or "No scheduled job" in result
 
 
@@ -727,7 +823,7 @@ class TestCmdMemory:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", ""))
         assert "!memory user" in result
         assert "!memory channel" in result
         assert "!memory facts" in result
@@ -737,7 +833,7 @@ class TestCmdMemory:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "user", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
         assert "User memory:** (empty)" in result
 
     @pytest.mark.asyncio
@@ -750,7 +846,7 @@ class TestCmdMemory:
 
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "user", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
         assert "Alice likes coffee" in result
         assert "User memory**" in result
 
@@ -765,7 +861,7 @@ class TestCmdMemory:
 
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "user", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
         # Full content should be present, not truncated
         assert long_content in result
 
@@ -774,7 +870,7 @@ class TestCmdMemory:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "channel", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "channel"))
         assert "Channel memory:** (empty)" in result
 
     @pytest.mark.asyncio
@@ -787,7 +883,7 @@ class TestCmdMemory:
 
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "channel", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "channel"))
         assert "This is the dev channel" in result
         assert "Channel memory**" in result
 
@@ -798,7 +894,7 @@ class TestCmdMemory:
 
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "user", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
         assert "mount not configured" in result
 
     @pytest.mark.asyncio
@@ -806,7 +902,7 @@ class TestCmdMemory:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "facts", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
         assert "no facts" in result
 
     @pytest.mark.asyncio
@@ -820,7 +916,7 @@ class TestCmdMemory:
             add_fact(conn, "alice", "alice", "knows", "python")
             conn.commit()
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "facts", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
         assert "Knowledge graph" in result
         assert "2 facts" in result
         assert "works_at" in result
@@ -837,7 +933,7 @@ class TestCmdMemory:
                 add_fact(conn, "alice", "alice", "knows", f"tech_{i}")
             conn.commit()
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "facts", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
         assert "25 facts" in result
         assert "Entities:" in result
         assert "alice (25)" in result
@@ -855,7 +951,7 @@ class TestCmdMemory:
             add_fact(conn, "alice", "bob", "works_at", "globex")
             conn.commit()
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "facts alice", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts alice"))
         assert "Facts about alice" in result
         assert "works_at" in result
         assert "globex" not in result
@@ -867,7 +963,7 @@ class TestCmdMemory:
         with db.get_db(config.db_path) as conn:
             ensure_table(conn)
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "facts nobody", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts nobody"))
         assert "none found" in result
 
     @pytest.mark.asyncio
@@ -881,7 +977,7 @@ class TestCmdMemory:
             add_fact(conn, "alice", "alice", "speaks", "polish")
             conn.commit()
             client = AsyncMock()
-            result = await cmd_memory(config, conn, "alice", "room1", "facts", client)
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
         assert "Knowledge graph" in result
         assert "speaks" in result
 
@@ -948,8 +1044,8 @@ class TestPollerInterception:
         }
 
         with patch("istota.transport.talk.inbound.get_talk_client") as MockTalkClient, patch(
-            "istota.commands.get_talk_client"
-        ) as MockCmdClient:
+            "istota.transport.talk.get_talk_client"
+        ) as MockDeliverClient:
             # Talk poller client
             mock_talk = MockTalkClient.return_value
             mock_talk.list_conversations = AsyncMock(
@@ -957,9 +1053,12 @@ class TestPollerInterception:
             )
             mock_talk.poll_messages = AsyncMock(return_value=[msg])
 
-            # Command dispatcher client
-            mock_cmd = MockCmdClient.return_value
-            mock_cmd.send_message = AsyncMock()
+            # Command delivery goes through TalkTransport.deliver, which pulls
+            # the persistent client from istota.transport.talk.
+            mock_deliver = MockDeliverClient.return_value
+            mock_deliver.send_message = AsyncMock(
+                return_value={"ocs": {"data": {"id": 1}}}
+            )
 
             with db.get_db(config.db_path) as conn:
                 db.set_talk_poll_state(conn, "room1", 50)
@@ -969,9 +1068,9 @@ class TestPollerInterception:
         # No tasks should have been created
         assert result == []
 
-        # Command should have posted a response
-        mock_cmd.send_message.assert_called_once()
-        sent_msg = mock_cmd.send_message.call_args[0][1]
+        # Command should have posted a response via the transport
+        mock_deliver.send_message.assert_called_once()
+        sent_msg = mock_deliver.send_message.call_args[0][1]
         assert "System:" in sent_msg  # !status output
 
     @pytest.mark.asyncio
@@ -1015,7 +1114,7 @@ class TestCmdSkills:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_skills(config, conn, "alice", "room1", "", client)
+            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Skills" in result
         assert "total" in result
@@ -1029,7 +1128,7 @@ class TestCmdSkills:
         config.admin_users = {"bob"}  # alice is not admin
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_skills(config, conn, "alice", "room1", "", client)
+            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
 
         # tasks skill is admin_only, should not appear for non-admin
         assert "**tasks**" not in result
@@ -1040,7 +1139,7 @@ class TestCmdSkills:
         config.admin_users = set()  # empty = all admin
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_skills(config, conn, "alice", "room1", "", client)
+            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
 
         # With all users as admin, admin-only skills should be visible
         assert "tasks" in result
@@ -1057,7 +1156,7 @@ class TestCmdSkills:
                         return ("unavailable", "faster-whisper")
                     return ("available", None)
                 mock_avail.side_effect = side_effect
-                result = await cmd_skills(config, conn, "alice", "room1", "", client)
+                result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Unavailable" in result
         assert "faster-whisper" in result
@@ -1068,7 +1167,7 @@ class TestCmdSkills:
         config.disabled_skills = ["browse"]
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_skills(config, conn, "alice", "room1", "", client)
+            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Disabled" in result
         assert "browse" in result
@@ -1078,7 +1177,7 @@ class TestCmdSkills:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_skills(config, conn, "alice", "room1", "calendar", client)
+            result = await cmd_skills(_ctx(config, conn, "alice", "room1", "calendar"))
 
         assert "**calendar**" in result
         assert "Status:" in result
@@ -1110,7 +1209,7 @@ class TestCmdCheck:
                     MagicMock(stdout="claude 1.0.0", stderr="", returncode=0),
                     MagicMock(stdout="healthcheck-ok", stderr="", returncode=0),
                 ]
-                result = await cmd_check(config, conn, "alice", "room1", "", client)
+                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Claude binary: PASS" in result
         assert "Sandbox: skipped" in result
@@ -1132,7 +1231,7 @@ class TestCmdCheck:
                 mock_run.return_value = MagicMock(
                     stdout="healthcheck-ok", stderr="", returncode=0,
                 )
-                result = await cmd_check(config, conn, "alice", "room1", "", client)
+                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Claude binary: **FAIL**" in result
         assert "not found in PATH" in result
@@ -1157,7 +1256,7 @@ class TestCmdCheck:
                     MagicMock(stdout="bubblewrap 0.8.0", stderr="", returncode=0),
                     MagicMock(stdout="healthcheck-ok", stderr="", returncode=0),
                 ]
-                result = await cmd_check(config, conn, "alice", "room1", "", client)
+                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Sandbox (bwrap): PASS" in result
 
@@ -1182,7 +1281,7 @@ class TestCmdCheck:
                     MagicMock(stdout="claude 1.0.0", stderr="", returncode=0),
                     MagicMock(stdout="healthcheck-ok", stderr="", returncode=0),
                 ]
-                result = await cmd_check(config, conn, "alice", "room1", "", client)
+                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Sandbox (bwrap): **FAIL**" in result
 
@@ -1204,7 +1303,7 @@ class TestCmdCheck:
                 patch("istota.commands.shutil.which", return_value="/usr/bin/claude"),
                 patch("istota.commands.subprocess.run", side_effect=run_side_effect),
             ):
-                result = await cmd_check(config, conn, "alice", "room1", "", client)
+                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
         assert "timed out" in result
 
@@ -1221,7 +1320,7 @@ class TestCmdCheck:
                     MagicMock(stdout="claude 1.0.0", stderr="", returncode=0),
                     MagicMock(stdout="something else", stderr="error msg", returncode=1),
                 ]
-                result = await cmd_check(config, conn, "alice", "room1", "", client)
+                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Claude + Bash: **FAIL**" in result
         assert "stderr: error msg" in result
@@ -1246,7 +1345,7 @@ class TestCmdCheck:
                     MagicMock(stdout="claude 1.0.0", stderr="", returncode=0),
                     MagicMock(stdout="healthcheck-ok", stderr="", returncode=0),
                 ]
-                result = await cmd_check(config, conn, "alice", "room1", "", client)
+                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
         assert "3 failed" in result
         assert "warning: high failure rate" in result
@@ -1256,7 +1355,7 @@ class TestCmdCheck:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = AsyncMock()
-            result = await cmd_help(config, conn, "alice", "room1", "", client)
+            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
         assert "!check" in result
 
 
@@ -1299,73 +1398,37 @@ class TestBuildExportMetadata:
         assert "-->" not in result
 
 
-class TestFilterUserMessages:
-    def test_filters_system_messages(self):
-        messages = [
-            {"id": 1, "actorType": "users", "messageType": "comment", "message": "hello"},
-            {"id": 2, "actorType": "guests", "messageType": "system", "message": "joined"},
-            {"id": 3, "actorType": "users", "messageType": "comment", "message": "bye"},
-            {"id": 4, "actorType": "users", "messageType": "comment_deleted", "message": ""},
-        ]
-        result = _filter_user_messages(messages)
-        assert [m["id"] for m in result] == [1, 3]
-
-    def test_empty_list(self):
-        assert _filter_user_messages([]) == []
+def _hist_msg(id, prompt, result, user_id="alice", created_at="2026-02-25T10:00:00Z"):
+    return db.ConversationMessage(
+        id=id, prompt=prompt, result=result, created_at=created_at, user_id=user_id,
+    )
 
 
-class TestFormatMessagesMarkdown:
-    def test_basic_messages(self):
-        messages = [
-            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000000, "message": "Hello", "messageParameters": {}},
-            {"actorDisplayName": "Bob", "actorId": "bob", "timestamp": 1740000060, "message": "Hi there", "messageParameters": {}},
-        ]
-        result = _format_messages_markdown(messages)
-        assert "**Alice**" in result
+class TestFormatHistoryMarkdown:
+    def test_basic_turns(self):
+        msgs = [_hist_msg(1, "Hello", "Hi there"), _hist_msg(2, "Bye", "Cya", "bob")]
+        result = _format_history_markdown(msgs, "Istota")
+        assert "**alice**" in result
         assert "Hello" in result
-        assert "**Bob**" in result
+        assert "**Istota**" in result
         assert "Hi there" in result
+        assert "**bob**" in result
         assert "---" in result
 
-    def test_coalescing(self):
-        messages = [
-            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000000, "message": "Line 1", "messageParameters": {}},
-            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000010, "message": "Line 2", "messageParameters": {}},
-            {"actorDisplayName": "Bob", "actorId": "bob", "timestamp": 1740000060, "message": "Reply", "messageParameters": {}},
-        ]
-        result = _format_messages_markdown(messages)
-        # Alice should appear only once as a header
-        assert result.count("**Alice**") == 1
-        assert "Line 1" in result
-        assert "Line 2" in result
-        assert "**Bob**" in result
-
-    def test_empty_messages(self):
-        assert _format_messages_markdown([]) == ""
+    def test_empty(self):
+        assert _format_history_markdown([], "Istota") == ""
 
 
-class TestFormatMessagesText:
-    def test_basic_messages(self):
-        messages = [
-            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000000, "message": "Hello", "messageParameters": {}},
-            {"actorDisplayName": "Bob", "actorId": "bob", "timestamp": 1740000060, "message": "Hi", "messageParameters": {}},
-        ]
-        result = _format_messages_text(messages)
-        assert "Alice" in result
+class TestFormatHistoryText:
+    def test_basic_turns(self):
+        result = _format_history_text([_hist_msg(1, "Hello", "Hi")], "Istota")
+        assert "alice" in result
         assert "Hello" in result
-        assert "Bob" in result
+        assert "Istota" in result
         assert "---" not in result  # plaintext doesn't use HR
 
-    def test_coalescing(self):
-        messages = [
-            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000000, "message": "Line 1", "messageParameters": {}},
-            {"actorDisplayName": "Alice", "actorId": "alice", "timestamp": 1740000010, "message": "Line 2", "messageParameters": {}},
-        ]
-        result = _format_messages_text(messages)
-        # Alice header only once
-        lines = result.split("\n")
-        alice_headers = [l for l in lines if l.startswith("Alice")]
-        assert len(alice_headers) == 1
+    def test_empty(self):
+        assert _format_history_text([], "Istota") == ""
 
 
 # =============================================================================
@@ -1373,46 +1436,34 @@ class TestFormatMessagesText:
 # =============================================================================
 
 
-class TestCmdExport:
-    def _make_messages(self, count=3, start_id=1):
-        """Generate test messages."""
-        messages = []
-        for i in range(count):
-            messages.append({
-                "id": start_id + i,
-                "actorType": "users",
-                "actorId": f"user{i % 2}",
-                "actorDisplayName": f"User{i % 2}",
-                "messageType": "comment",
-                "message": f"Message {start_id + i}",
-                "messageParameters": {},
-                "timestamp": 1740000000 + i * 60,
-            })
-        return messages
+def _seed_conversation(conn, token="room1", user_id="alice", count=3, start=1):
+    """Create ``count`` completed talk tasks in a conversation. Returns task ids."""
+    ids = []
+    for i in range(count):
+        tid = db.create_task(
+            conn, prompt=f"Prompt {start + i}", user_id=user_id,
+            conversation_token=token, source_type="talk",
+        )
+        db.update_task_status(conn, tid, "completed", result=f"Reply {start + i}")
+        ids.append(tid)
+    return ids
 
+
+class TestCmdExport:
     @pytest.mark.asyncio
     async def test_no_mount_configured(self, make_config):
         config = make_config()
         config.nextcloud_mount_path = None
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
-            result = await cmd_export(config, conn, "alice", "room1", "", client)
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
         assert "mount not configured" in result
 
     @pytest.mark.asyncio
     async def test_full_export_markdown(self, make_config):
         config = make_config()
-        messages = self._make_messages(3)
-        client = AsyncMock()
-        client.fetch_full_history = AsyncMock(return_value=messages)
-        client.get_conversation_info = AsyncMock(return_value={"displayName": "Test Room"})
-        client.get_participants = AsyncMock(return_value=[
-            {"actorType": "users", "actorId": "user0", "displayName": "User0"},
-            {"actorType": "users", "actorId": "user1", "displayName": "User1"},
-        ])
-
         with db.get_db(config.db_path) as conn:
-            result = await cmd_export(config, conn, "alice", "room1", "", client)
+            _seed_conversation(conn, count=3)
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Exported 3 messages" in result
         assert "room1.md" in result
@@ -1421,23 +1472,18 @@ class TestCmdExport:
         assert export_path.exists()
         content = export_path.read_text()
         assert "<!-- export:token=room1" in content
-        assert "# Test Room" in content
-        assert "**Participants:**" in content
-        assert "User0" in content
-        assert "Message 1" in content
-        assert "Message 3" in content
+        # No registry → room name falls back to the token (surface-agnostic).
+        assert "# room1" in content
+        assert "Prompt 1" in content
+        assert "Reply 1" in content
+        assert "Prompt 3" in content
 
     @pytest.mark.asyncio
     async def test_full_export_text(self, make_config):
         config = make_config()
-        messages = self._make_messages(2)
-        client = AsyncMock()
-        client.fetch_full_history = AsyncMock(return_value=messages)
-        client.get_conversation_info = AsyncMock(return_value={"displayName": "Test Room"})
-        client.get_participants = AsyncMock(return_value=[])
-
         with db.get_db(config.db_path) as conn:
-            result = await cmd_export(config, conn, "alice", "room1", "text", client)
+            _seed_conversation(conn, count=2)
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", "text"))
 
         assert "Exported 2 messages" in result
         export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
@@ -1450,82 +1496,76 @@ class TestCmdExport:
     @pytest.mark.asyncio
     async def test_empty_channel(self, make_config):
         config = make_config()
-        client = AsyncMock()
-        client.fetch_full_history = AsyncMock(return_value=[])
-
         with db.get_db(config.db_path) as conn:
-            result = await cmd_export(config, conn, "alice", "room1", "", client)
-
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
         assert "No messages to export" in result
 
     @pytest.mark.asyncio
-    async def test_filters_system_messages(self, make_config):
+    async def test_excludes_incomplete_tasks(self, make_config):
+        """Only completed tasks with a result are exported."""
         config = make_config()
-        messages = [
-            {"id": 1, "actorType": "users", "actorId": "alice", "actorDisplayName": "Alice",
-             "messageType": "comment", "message": "Hello", "messageParameters": {}, "timestamp": 1740000000},
-            {"id": 2, "actorType": "guests", "actorId": "system", "actorDisplayName": "System",
-             "messageType": "system", "message": "joined", "messageParameters": {}, "timestamp": 1740000010},
-        ]
-        client = AsyncMock()
-        client.fetch_full_history = AsyncMock(return_value=messages)
-        client.get_conversation_info = AsyncMock(return_value={"displayName": "Room"})
-        client.get_participants = AsyncMock(return_value=[])
-
         with db.get_db(config.db_path) as conn:
-            result = await cmd_export(config, conn, "alice", "room1", "", client)
-
+            _seed_conversation(conn, count=1)
+            # A pending task in the same room must not be exported.
+            db.create_task(conn, prompt="not done yet", user_id="alice",
+                           conversation_token="room1", source_type="talk")
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
         assert "Exported 1 messages" in result
+
+    @pytest.mark.asyncio
+    async def test_web_surface_export(self, make_config):
+        """Export works for a web-chat conversation with no Talk server at all."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(conn, prompt="web question", user_id="alice",
+                                 conversation_token="webroom", source_type="web")
+            db.update_task_status(conn, tid, "completed", result="web answer")
+            (config.nextcloud_mount_path / "Channels" / "webroom").mkdir(parents=True, exist_ok=True)
+            result = await cmd_export(
+                _ctx(config, conn, "alice", "webroom", "", surface="web"),
+            )
+        assert "Exported 1 messages" in result
+        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "webroom.md"
+        content = export_path.read_text()
+        assert "web question" in content
+        assert "web answer" in content
 
     @pytest.mark.asyncio
     async def test_incremental_export(self, make_config):
         config = make_config()
-
-        # First do a full export
-        messages = self._make_messages(2, start_id=1)
-        client = AsyncMock()
-        client.fetch_full_history = AsyncMock(return_value=messages)
-        client.get_conversation_info = AsyncMock(return_value={"displayName": "Room"})
-        client.get_participants = AsyncMock(return_value=[])
-
         with db.get_db(config.db_path) as conn:
-            await cmd_export(config, conn, "alice", "room1", "", client)
+            _seed_conversation(conn, count=2, start=1)
+            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
 
         export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
-        original_content = export_path.read_text()
-
-        # Now do incremental export
-        new_messages = self._make_messages(2, start_id=3)
-        client.fetch_messages_since = AsyncMock(return_value=new_messages)
 
         with db.get_db(config.db_path) as conn:
-            result = await cmd_export(config, conn, "alice", "room1", "", client)
+            new_ids = _seed_conversation(conn, count=2, start=3)
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Appended 2 new messages" in result
         updated_content = export_path.read_text()
-        assert "Message 3" in updated_content
-        assert "Message 4" in updated_content
-        # Original messages should still be there
-        assert "Message 1" in updated_content
-        # Metadata should be updated with new last_id
+        assert "Prompt 3" in updated_content
+        assert "Reply 4" in updated_content
+        # Original turns still present
+        assert "Prompt 1" in updated_content
+        # Metadata last_id is the newest exported task id
         meta = _parse_export_metadata(updated_content.split("\n")[0])
-        assert meta["last_id"] == 4
+        assert meta["last_id"] == new_ids[-1]
 
     @pytest.mark.asyncio
     async def test_incremental_no_new_messages(self, make_config):
         config = make_config()
 
-        # Set up existing export file
+        # Existing export file with a last_id higher than any seeded task.
         export_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations"
         export_dir.mkdir(parents=True, exist_ok=True)
         export_path = export_dir / "room1.md"
-        export_path.write_text("<!-- export:token=room1,last_id=10,updated=2026-02-25T00:00:00Z -->\n\n# Room\n")
-
-        client = AsyncMock()
-        client.fetch_messages_since = AsyncMock(return_value=[])
+        export_path.write_text("<!-- export:token=room1,last_id=100000,updated=2026-02-25T00:00:00Z -->\n\n# Room\n")
 
         with db.get_db(config.db_path) as conn:
-            result = await cmd_export(config, conn, "alice", "room1", "", client)
+            _seed_conversation(conn, count=2)
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
 
         assert "No new messages" in result
 
@@ -1533,27 +1573,22 @@ class TestCmdExport:
     async def test_format_aliases(self, make_config):
         """txt and plaintext should also work as format arguments."""
         config = make_config()
-        messages = self._make_messages(1)
-        client = AsyncMock()
-        client.fetch_full_history = AsyncMock(return_value=messages)
-        client.get_conversation_info = AsyncMock(return_value={"displayName": "R"})
-        client.get_participants = AsyncMock(return_value=[])
+        with db.get_db(config.db_path) as conn:
+            _seed_conversation(conn, count=1)
 
         export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
         for fmt_arg in ("txt", "plaintext", "text"):
-            # Remove existing file to avoid incremental path
             if export_path.exists():
                 export_path.unlink()
             with db.get_db(config.db_path) as conn:
-                result = await cmd_export(config, conn, "alice", "room1", fmt_arg, client)
+                result = await cmd_export(_ctx(config, conn, "alice", "room1", fmt_arg))
             assert "room1.txt" in result
 
     @pytest.mark.asyncio
     async def test_help_includes_export(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
-            result = await cmd_help(config, conn, "alice", "room1", "", client)
+            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
         assert "!export" in result
 
     @pytest.mark.asyncio
@@ -1561,19 +1596,13 @@ class TestCmdExport:
         """If existing export is .md but user asks for text, it creates .txt (new export)."""
         config = make_config()
 
-        # Create existing markdown export
         export_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations"
         export_dir.mkdir(parents=True, exist_ok=True)
         (export_dir / "room1.md").write_text("<!-- export:token=room1,last_id=10,updated=2026-02-25T00:00:00Z -->\n")
 
-        messages = self._make_messages(1)
-        client = AsyncMock()
-        client.fetch_full_history = AsyncMock(return_value=messages)
-        client.get_conversation_info = AsyncMock(return_value={"displayName": "R"})
-        client.get_participants = AsyncMock(return_value=[])
-
         with db.get_db(config.db_path) as conn:
-            result = await cmd_export(config, conn, "alice", "room1", "text", client)
+            _seed_conversation(conn, count=1)
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", "text"))
 
         # Should create a new .txt file, not append to .md
         assert "room1.txt" in result
@@ -1605,7 +1634,7 @@ class TestCmdMore:
 
         client = MagicMock()
         with db.get_db(db_path) as conn:
-            result = await cmd_more(config, conn, "alice", "room1", str(task_id), client)
+            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
 
         assert f"Task #{task_id}" in result
         assert "Let me look into that." in result
@@ -1623,7 +1652,7 @@ class TestCmdMore:
 
         client = MagicMock()
         with db.get_db(db_path) as conn:
-            result = await cmd_more(config, conn, "alice", "room1", f"#{task_id}", client)
+            result = await cmd_more(_ctx(config, conn, "alice", "room1", f"#{task_id}"))
 
         assert f"Task #{task_id}" in result
 
@@ -1636,7 +1665,7 @@ class TestCmdMore:
 
         client = MagicMock()
         with db.get_db(db_path) as conn:
-            result = await cmd_more(config, conn, "alice", "room1", str(task_id), client)
+            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
 
         assert "no execution trace" in result
 
@@ -1645,7 +1674,7 @@ class TestCmdMore:
         config = make_config()
         client = MagicMock()
         with db.get_db(db_path) as conn:
-            result = await cmd_more(config, conn, "alice", "room1", "99999", client)
+            result = await cmd_more(_ctx(config, conn, "alice", "room1", "99999"))
 
         assert "not found" in result
 
@@ -1659,7 +1688,7 @@ class TestCmdMore:
 
         client = MagicMock()
         with db.get_db(db_path) as conn:
-            result = await cmd_more(config, conn, "alice", "room1", str(task_id), client)
+            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
 
         assert "another user" in result
 
@@ -1668,7 +1697,7 @@ class TestCmdMore:
         config = make_config()
         client = MagicMock()
         with db.get_db(db_path) as conn:
-            result = await cmd_more(config, conn, "alice", "room1", "notanumber", client)
+            result = await cmd_more(_ctx(config, conn, "alice", "room1", "notanumber"))
 
         assert "Usage" in result
 
@@ -1681,7 +1710,7 @@ class TestCmdMore:
 
         client = MagicMock()
         with db.get_db(db_path) as conn:
-            result = await cmd_more(config, conn, "alice", "room1", str(task_id), client)
+            result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
 
         assert "still running" in result
 
@@ -1705,7 +1734,7 @@ class TestCmdSearch:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", ""))
         assert "Usage" in result
         assert "!search" in result
 
@@ -1714,7 +1743,7 @@ class TestCmdSearch:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "   ", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "   "))
         assert "Usage" in result
 
     @pytest.mark.asyncio
@@ -1722,7 +1751,7 @@ class TestCmdSearch:
         config = make_config()
         with db.get_db(db_path) as conn:
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "nonexistent query xyz", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "nonexistent query xyz"))
         assert "No results" in result
 
     @pytest.mark.asyncio
@@ -1753,7 +1782,7 @@ class TestCmdSearch:
             ]
             mock_talk.return_value = []
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "parser bug", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "parser bug"))
 
         # Only room1 result should appear
         assert "Parser bug in room1" in result
@@ -1777,7 +1806,7 @@ class TestCmdSearch:
             ]
             mock_talk.return_value = []
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all parser bug", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all parser bug"))
 
         assert "room1" in result
         assert "room2" in result
@@ -1800,7 +1829,7 @@ class TestCmdSearch:
             ]
             mock_talk.return_value = []
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--room otherroom some query", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--room otherroom some query"))
 
         assert "otherroom" in result
         assert "Result in room1" not in result
@@ -1821,9 +1850,33 @@ class TestCmdSearch:
             ]
             mock_talk.return_value = []
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all parser bug", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all parser bug"))
 
         assert "#46945" in result
+
+    @pytest.mark.asyncio
+    async def test_web_surface_skips_talk_api(self, make_config, db_path):
+        """On a non-Talk surface, search relies on the memory index only and
+        never reaches for the Talk full-text API or builds Talk deep links."""
+        config = make_config()
+        with (
+            db.get_db(db_path) as conn,
+            patch("istota.commands._search_memory") as mock_mem,
+            patch("istota.commands._search_talk_api") as mock_talk,
+            self._mock_resolve(),
+        ):
+            mock_mem.return_value = [
+                {"date": "Apr 1", "room": "webroom", "summary": "found in web chat",
+                 "task_id": 5, "conversation_token": "webroom", "talk_message_id": 999},
+            ]
+            result = await cmd_search(
+                _ctx(config, conn, "alice", "webroom", "--all web chat", surface="web"),
+            )
+
+        mock_talk.assert_not_called()
+        assert "found in web chat" in result
+        # No Talk deep link on a non-Talk surface
+        assert "/call/" not in result
 
     @pytest.mark.asyncio
     async def test_output_format_with_message_link(self, make_config, db_path):
@@ -1842,7 +1895,7 @@ class TestCmdSearch:
             ]
             mock_talk.return_value = []
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all parser bug", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all parser bug"))
 
         assert "https://nc.test/call/room1#message_38939" in result
 
@@ -1862,7 +1915,7 @@ class TestCmdSearch:
             ]
             mock_talk.return_value = []
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all test query", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all test query"))
 
         assert "1 result" in result
         assert "test query" in result
@@ -1884,7 +1937,7 @@ class TestCmdSearch:
                  "conversation_token": "room1"},
             ]
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all recent chat", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all recent chat"))
 
         assert "Recent chat message" in result
         assert "https://nc.test/call/room1#message_123" in result
@@ -1910,7 +1963,7 @@ class TestCmdSearch:
             ]
             client = MagicMock()
             # Default: current room only
-            result = await cmd_search(config, conn, "alice", "room1", "some query", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "some query"))
 
         assert "In room1" in result
         assert "In room2" not in result
@@ -1933,7 +1986,7 @@ class TestCmdSearch:
             mock_mem.return_value = many_results
             mock_talk.return_value = []
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all lots of results", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all lots of results"))
 
         # Count numbered results (lines starting with "N. ")
         import re
@@ -1960,7 +2013,7 @@ class TestCmdSearch:
                  "task_id": 100, "conversation_token": "room1"},
             ]
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all test", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all test"))
 
         assert "1 result" in result
 
@@ -1984,7 +2037,7 @@ class TestCmdSearch:
             ]
             mock_talk.return_value = []
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all discussion", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all discussion"))
 
         assert "in General" in result
         assert "room1" not in result  # token should not appear
@@ -1995,7 +2048,7 @@ class TestCmdSearch:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             client = MagicMock()
-            result = await cmd_help(config, conn, "alice", "room1", "", client)
+            result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
         assert "!search" in result
 
 
@@ -2214,7 +2267,7 @@ class TestCmdSearchFiltering:
             ]
             mock_talk.return_value = []
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all --memories test", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all --memories test"))
 
         mock_talk.assert_not_called()
         assert "Memory result" in result
@@ -2232,7 +2285,7 @@ class TestCmdSearchFiltering:
             mock_mem.return_value = []
             mock_talk.return_value = []
             client = MagicMock()
-            await cmd_search(config, conn, "alice", "room1", "--all --memories test", client)
+            await cmd_search(_ctx(config, conn, "alice", "room1", "--all --memories test"))
 
         call_kwargs = mock_mem.call_args
         assert call_kwargs.kwargs.get("source_types") == ["memory_file"]
@@ -2250,7 +2303,7 @@ class TestCmdSearchFiltering:
             mock_mem.return_value = []
             mock_talk.return_value = []
             client = MagicMock()
-            await cmd_search(config, conn, "alice", "room1", "--all --since 2026-03-01 test", client)
+            await cmd_search(_ctx(config, conn, "alice", "room1", "--all --since 2026-03-01 test"))
 
         call_kwargs = mock_mem.call_args
         assert call_kwargs.kwargs.get("since") == "2026-03-01"
@@ -2273,7 +2326,7 @@ class TestCmdSearchFiltering:
                  "conversation_token": "room1"},
             ]
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "--all --since 2026-03-20 test", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all --since 2026-03-20 test"))
 
         assert "Recent result" in result
         assert "Old result" not in result
@@ -2284,7 +2337,7 @@ class TestCmdSearchFiltering:
         config = make_config()
         with db.get_db(db_path) as conn:
             client = MagicMock()
-            result = await cmd_search(config, conn, "alice", "room1", "", client)
+            result = await cmd_search(_ctx(config, conn, "alice", "room1", ""))
         assert "--since" in result
         assert "--memories" in result
 
@@ -2301,7 +2354,7 @@ class TestTrustCommand:
         config = make_config()
         with db.get_db(db_path) as conn:
             client = MagicMock()
-            result = await cmd_trust(config, conn, "alice", "room1", "joe@example.com", client)
+            result = await cmd_trust(_ctx(config, conn, "alice", "room1", "joe@example.com"))
         assert "Trusted" in result
         assert "joe@example.com" in result
         with db.get_db(db_path) as conn:
@@ -2314,7 +2367,7 @@ class TestTrustCommand:
         with db.get_db(db_path) as conn:
             db.add_trusted_sender(conn, "alice", "joe@example.com")
             client = MagicMock()
-            result = await cmd_trust(config, conn, "alice", "room1", "joe@example.com", client)
+            result = await cmd_trust(_ctx(config, conn, "alice", "room1", "joe@example.com"))
         assert "already trusted" in result
 
     @pytest.mark.asyncio
@@ -2325,7 +2378,7 @@ class TestTrustCommand:
         with db.get_db(db_path) as conn:
             db.add_trusted_sender(conn, "alice", "joe@example.com")
             client = MagicMock()
-            result = await cmd_trust(config, conn, "alice", "room1", "", client)
+            result = await cmd_trust(_ctx(config, conn, "alice", "room1", ""))
         assert "*@corp.com" in result
         assert "(config)" in result
         assert "joe@example.com" in result
@@ -2336,7 +2389,7 @@ class TestTrustCommand:
         config = make_config()
         with db.get_db(db_path) as conn:
             client = MagicMock()
-            result = await cmd_trust(config, conn, "alice", "room1", "notanemail", client)
+            result = await cmd_trust(_ctx(config, conn, "alice", "room1", "notanemail"))
         assert "Usage" in result
 
     @pytest.mark.asyncio
@@ -2346,7 +2399,7 @@ class TestTrustCommand:
         with db.get_db(db_path) as conn:
             db.add_trusted_sender(conn, "alice", "joe@example.com")
             client = MagicMock()
-            result = await cmd_untrust(config, conn, "alice", "room1", "joe@example.com", client)
+            result = await cmd_untrust(_ctx(config, conn, "alice", "room1", "joe@example.com"))
         assert "Removed" in result
         with db.get_db(db_path) as conn:
             assert db.is_sender_trusted_in_db(conn, "alice", "joe@example.com") is False
@@ -2357,7 +2410,7 @@ class TestTrustCommand:
         config = make_config()
         with db.get_db(db_path) as conn:
             client = MagicMock()
-            result = await cmd_untrust(config, conn, "alice", "room1", "nobody@example.com", client)
+            result = await cmd_untrust(_ctx(config, conn, "alice", "room1", "nobody@example.com"))
         assert "not in your trusted" in result
 
     @pytest.mark.asyncio
@@ -2366,5 +2419,5 @@ class TestTrustCommand:
         config = make_config()
         with db.get_db(db_path) as conn:
             client = MagicMock()
-            result = await cmd_trust(config, conn, "alice", "room1", "", client)
+            result = await cmd_trust(_ctx(config, conn, "alice", "room1", ""))
         assert "No trusted senders" in result

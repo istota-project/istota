@@ -1321,6 +1321,8 @@ def _validate_chat_attachments(username: str, paths: list) -> list[str] | None:
 def _chat_create_web_task(
     username: str, token: str, text: str,
     attachments: list[str] | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> tuple[str, int]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)`` or
     ``("rate_limited", window_seconds)``."""
@@ -1339,6 +1341,7 @@ def _chat_create_web_task(
             conn, prompt=text, user_id=username, source_type="web",
             conversation_token=token, output_target="web", priority=5,
             attachments=attachments or None,
+            model=model, effort=effort,
         )
     return ("ok", task_id)
 
@@ -1439,20 +1442,45 @@ async def chat_send_message(
     if attachments is None:
         return JSONResponse({"error": "invalid attachment path"}, status_code=400)
 
-    # !commands run synchronously and return inline — no task row, no events.
+    # A leading "!" is either a `!model` prefix (strip + carry overrides into the
+    # task) or a `!command` (run synchronously, return inline — no task row, no
+    # events). Mirrors the Talk inbound order so the command set is identical
+    # across surfaces.
+    model_override: str | None = None
+    effort_override: str | None = None
     if text.startswith("!"):
         from . import commands
         from .async_runtime import run_coro
+        from .brain import make_brain
+        from .transport import make_registry
 
-        def _run_cmd():
-            return run_coro(commands.run_inline(_config, username, room.token, text))
+        brain = make_brain(_config.brain)
+        prefix = commands.resolve_model_prefix(
+            text, brain, has_attachments=bool(attachments),
+        )
+        if prefix.usage is not None:
+            return {"task_id": None, "inline_result": prefix.usage}
+        if prefix.matched:
+            model_override = prefix.model
+            effort_override = prefix.effort
+            text = prefix.content
 
-        handled, inline = await asyncio.to_thread(_run_cmd)
-        if handled:
-            return {"task_id": None, "inline_result": inline or ""}
+        if text.startswith("!"):
+            registry = make_registry(_config)
+
+            def _run_cmd():
+                return run_coro(commands.dispatch(
+                    _config, username, room.token, text,
+                    surface="web", registry=registry,
+                ))
+
+            result = await asyncio.to_thread(_run_cmd)
+            if result.handled:
+                return {"task_id": None, "inline_result": result.text or ""}
 
     outcome, value = await asyncio.to_thread(
         _chat_create_web_task, username, room.token, text, attachments,
+        model_override, effort_override,
     )
     if outcome == "rate_limited":
         return JSONResponse(

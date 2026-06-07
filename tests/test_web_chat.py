@@ -373,6 +373,39 @@ class TestChatMessagesApi:
         body = resp.json()
         assert body["task_id"] is None
         assert "inline_result" in body
+        assert "!help" in body["inline_result"]
+
+    async def test_model_prefix_creates_task_with_override(self, chat_client):
+        """`!model <alias> <prompt>` must create a real task carrying the model
+        override — it's a prefix, not a command (this was broken before)."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        resp = await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "!model opus summarize my day"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["task_id"] is not None
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            task = db.get_task(c, body["task_id"])
+        assert task.model  # canonical Opus id
+        assert task.prompt == "summarize my day"  # prefix stripped
+
+    async def test_model_prefix_unknown_alias_returns_usage_inline(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        resp = await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "!model bogus do something"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["task_id"] is None
+        assert "Aliases" in body["inline_result"]
 
     async def test_send_attaches_uploaded_file_to_task(self, chat_client):
         """An uploaded attachment's path must land on the task's attachments

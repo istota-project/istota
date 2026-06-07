@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 import re
 import shutil
 import sqlite3
@@ -10,26 +9,61 @@ import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 
+
+from typing import TYPE_CHECKING
 
 from . import db
-from .async_runtime import get_talk_client
 from .brain import Brain, make_brain
 from .memory import search as memory_search_mod
 from .config import Config
 from .nextcloud_client import ocs_get
-from .talk import TalkClient, clean_message_content, split_message
+
+if TYPE_CHECKING:
+    from .transport.registry import TransportRegistry
 
 logger = logging.getLogger("istota.commands")
 
-# Type for command handlers
-# Args: (config, conn, user_id, conversation_token, args_str, talk_client)
-# Returns: response message string (posted to Talk by dispatcher)
-CommandHandler = Callable[
-    [Config, sqlite3.Connection, str, str, str, TalkClient],
-    Awaitable[str],
-]
+
+@dataclass
+class CommandContext:
+    """Everything a ``!command`` handler needs, free of any one surface.
+
+    A handler reads ``config`` / ``conn`` / ``user_id`` / ``conversation_token``
+    / ``args`` like before. ``surface`` (``"talk"`` | ``"web"`` | future
+    ``"matrix"``) and ``registry`` let the handful of commands that genuinely
+    need surface-specific behavior (room-name resolution, the Talk-only search
+    enhancement) branch on the surface or resolve a transport — instead of being
+    handed a baked-in ``TalkClient``. Most handlers ignore both.
+    """
+
+    config: Config
+    conn: sqlite3.Connection
+    user_id: str
+    conversation_token: str
+    args: str
+    surface: str = "talk"
+    registry: "TransportRegistry | None" = None
+
+
+@dataclass
+class CommandResult:
+    """Outcome of ``dispatch``.
+
+    ``handled`` is False only when the content was not a ``!command`` at all (the
+    caller falls through to task creation). ``text`` is the command's response.
+    ``delivered`` is True when ``dispatch`` already pushed ``text`` to the
+    surface (push surfaces like Talk); on stream surfaces (web chat) it stays
+    False and the caller renders ``text`` inline.
+    """
+
+    handled: bool
+    text: str | None = None
+    delivered: bool = False
+
+
+# Type for command handlers — a single surface-agnostic context in, text out.
+CommandHandler = Callable[[CommandContext], Awaitable[str]]
 
 # Command registry: name -> (handler, help_text)
 COMMANDS: dict[str, tuple[CommandHandler, str]] = {}
@@ -108,84 +142,152 @@ def model_prefix_usage(brain: Brain) -> str:
     return f"Usage: `!model <alias> <prompt>`. Aliases: {', '.join(f'`{a}`' for a in aliases)}."
 
 
+@dataclass
+class ModelPrefixOutcome:
+    """Surface-agnostic result of pre-processing a message for a `!model` prefix.
+
+    ``matched`` is True when the message started with ``!model``. ``usage`` is
+    set when the prefix was malformed (unknown alias, or no prompt and no
+    attachments) — the caller shows it and stops. Otherwise ``model`` / ``effort``
+    carry the override and ``content`` is the prompt with the prefix stripped.
+    Both Talk inbound and the web send handler call this so the rule
+    ("`!model opus` alone is valid only with an attachment") lives in one place.
+    """
+
+    matched: bool
+    content: str
+    model: str | None = None
+    effort: str | None = None
+    usage: str | None = None
+
+
+def resolve_model_prefix(
+    content: str, brain: Brain, *, has_attachments: bool = False,
+) -> ModelPrefixOutcome:
+    """Apply the shared `!model <alias> <prompt>` rule across surfaces."""
+    prefix = parse_model_prefix(content, brain)
+    if prefix is None:
+        return ModelPrefixOutcome(matched=False, content=content)
+    if prefix.unknown_alias is not None:
+        return ModelPrefixOutcome(matched=True, content=content, usage=model_prefix_usage(brain))
+    # "!model opus" with no prompt is only meaningful when there's an attachment
+    # to act on; otherwise there's nothing to do — show usage.
+    if not prefix.remainder.strip() and not has_attachments:
+        return ModelPrefixOutcome(matched=True, content=content, usage=model_prefix_usage(brain))
+    return ModelPrefixOutcome(
+        matched=True, content=prefix.remainder, model=prefix.model, effort=prefix.effort,
+    )
+
+
+async def resolve_room_name(ctx: CommandContext, token: str) -> str:
+    """Resolve a channel token to a human-readable name, surface-agnostically.
+
+    Talk goes through the registered transport's ``resolve_channel_name`` (an OCS
+    read); web chat reads the room's stored name; any other surface falls back to
+    the opaque token.
+    """
+    if not token:
+        return token
+    if ctx.registry is not None:
+        transport = ctx.registry.get(ctx.surface)
+        resolver = getattr(transport, "resolve_channel_name", None)
+        if resolver is not None:
+            try:
+                return await resolver(token)
+            except Exception:
+                return token
+    if ctx.surface == "web":
+        try:
+            room = db.get_web_chat_room_by_token(ctx.conn, token)
+            if room is not None and room.name:
+                return room.name
+        except Exception:
+            pass
+    return token
+
+
+async def _deliver_result(
+    config: Config,
+    registry: "TransportRegistry | None",
+    surface: str,
+    conversation_token: str,
+    text: str,
+) -> CommandResult:
+    """Push ``text`` to the surface (push transports) or return it for the caller
+    to render (stream surfaces / no registered transport)."""
+    transport = registry.get(surface) if registry is not None else None
+    is_push = (
+        transport is not None
+        and getattr(transport.capabilities, "surface_class", "push") == "push"
+    )
+    if is_push and text:
+        try:
+            await transport.deliver(conversation_token, text)
+        except Exception as e:
+            logger.error("Command delivery to %s failed: %s", surface, e, exc_info=True)
+        return CommandResult(handled=True, text=text, delivered=True)
+    return CommandResult(handled=True, text=text, delivered=False)
+
+
 async def dispatch(
     config: Config,
-    conn: sqlite3.Connection,
     user_id: str,
     conversation_token: str,
     content: str,
-) -> bool:
-    """
-    Try to dispatch content as a !command.
-    Returns True if handled (command executed or error posted), False if not a command.
+    *,
+    surface: str = "talk",
+    conn: sqlite3.Connection | None = None,
+    registry: "TransportRegistry | None" = None,
+) -> CommandResult:
+    """Dispatch ``content`` as a ``!command``, surface-agnostically.
+
+    On a push surface (Talk) the result is delivered through the transport and
+    ``CommandResult.delivered`` is True; on a stream surface (web chat) it is
+    returned in ``CommandResult.text`` for the caller to render inline. Returns
+    ``CommandResult(handled=False)`` when ``content`` is not a command.
+
+    ``conn`` is reused when supplied (Talk inbound runs inside its poll
+    transaction); otherwise a connection is opened for the handler. ``registry``
+    is built on demand when omitted (``make_registry`` does no I/O).
     """
     parsed = parse_command(content)
     if parsed is None:
-        return False
+        return CommandResult(handled=False)
 
     cmd_name, args_str = parsed
-    client = get_talk_client(config)
+    if registry is None:
+        from .transport import make_registry
+        registry = make_registry(config)
 
     if cmd_name not in COMMANDS:
-        await client.send_message(
-            conversation_token,
-            f"Unknown command `!{cmd_name}`. Type `!help` for available commands.",
-        )
-        return True
+        text = f"Unknown command `!{cmd_name}`. Type `!help` for available commands."
+        return await _deliver_result(config, registry, surface, conversation_token, text)
 
     handler, _ = COMMANDS[cmd_name]
+
+    async def _run(active_conn: sqlite3.Connection) -> str:
+        ctx = CommandContext(
+            config=config,
+            conn=active_conn,
+            user_id=user_id,
+            conversation_token=conversation_token,
+            args=args_str,
+            surface=surface,
+            registry=registry,
+        )
+        return await handler(ctx)
+
     try:
-        response = await handler(config, conn, user_id, conversation_token, args_str, client)
-        if response:
-            for part in split_message(response):
-                await client.send_message(conversation_token, part)
+        if conn is not None:
+            text = await _run(conn)
+        else:
+            with db.get_db(config.db_path) as own_conn:
+                text = await _run(own_conn)
     except Exception as e:
         logger.error("Command !%s failed: %s", cmd_name, e, exc_info=True)
-        await client.send_message(
-            conversation_token,
-            f"Command `!{cmd_name}` failed: {e}",
-        )
+        text = f"Command `!{cmd_name}` failed: {e}"
 
-    return True
-
-
-async def run_inline(
-    config: Config,
-    user_id: str,
-    conversation_token: str,
-    content: str,
-) -> tuple[bool, str | None]:
-    """Run a ``!command`` and return ``(handled, response_text)`` WITHOUT
-    delivering it anywhere.
-
-    For non-Talk surfaces (web chat) that render the command result inline
-    instead of posting it to a Talk room. Opens its own DB connection so the
-    coroutine can run on the persistent asyncio loop (the same thread the
-    shared ``TalkClient`` is bound to). Returns ``(False, None)`` when
-    ``content`` is not a command.
-    """
-    parsed = parse_command(content)
-    if parsed is None:
-        return (False, None)
-
-    cmd_name, args_str = parsed
-    if cmd_name not in COMMANDS:
-        return (
-            True,
-            f"Unknown command `!{cmd_name}`. Type `!help` for available commands.",
-        )
-
-    handler, _ = COMMANDS[cmd_name]
-    client = get_talk_client(config)
-    try:
-        with db.get_db(config.db_path) as conn:
-            response = await handler(
-                config, conn, user_id, conversation_token, args_str, client,
-            )
-        return (True, response or "")
-    except Exception as e:
-        logger.error("Inline command !%s failed: %s", cmd_name, e, exc_info=True)
-        return (True, f"Command `!{cmd_name}` failed: {e}")
+    return await _deliver_result(config, registry, surface, conversation_token, text or "")
 
 
 # =============================================================================
@@ -194,7 +296,8 @@ async def run_inline(
 
 
 @command("help", "List available commands")
-async def cmd_help(config, conn, user_id, conversation_token, args, client):
+async def cmd_help(ctx: CommandContext):
+    config = ctx.config
     lines = ["**Available commands:**", ""]
     for name, (_, help_text) in sorted(COMMANDS.items()):
         lines.append(f"- `!{name}` -- {help_text}")
@@ -207,7 +310,8 @@ async def cmd_help(config, conn, user_id, conversation_token, args, client):
 
 
 @command("stop", "Cancel your currently running task")
-async def cmd_stop(config, conn, user_id, conversation_token, args, client):
+async def cmd_stop(ctx: CommandContext):
+    conn, user_id = ctx.conn, ctx.user_id
     cursor = conn.execute(
         """
         SELECT id, prompt FROM tasks
@@ -247,7 +351,8 @@ async def cmd_stop(config, conn, user_id, conversation_token, args, client):
 
 
 @command("models", "List available model aliases (and what they resolve to)")
-async def cmd_models(config, conn, user_id, conversation_token, args, client):
+async def cmd_models(ctx: CommandContext):
+    config = ctx.config
     lines = ["**Model aliases**", "", "Use `!model <alias> <prompt>` to override the model for a single task.", ""]
     for alias, model, effort in make_brain(config.brain).list_aliases():
         if model is None:
@@ -261,7 +366,8 @@ async def cmd_models(config, conn, user_id, conversation_token, args, client):
 
 
 @command("status", "Show your running/pending tasks and system status")
-async def cmd_status(config, conn, user_id, conversation_token, args, client):
+async def cmd_status(ctx: CommandContext):
+    config, conn, user_id = ctx.config, ctx.conn, ctx.user_id
     rows = conn.execute(
         """
         SELECT id, status, prompt, created_at, source_type FROM tasks
@@ -323,7 +429,9 @@ async def cmd_status(config, conn, user_id, conversation_token, args, client):
 
 
 @command("memory", "Show memory: `!memory user`, `!memory channel`, `!memory facts`")
-async def cmd_memory(config, conn, user_id, conversation_token, args, client):
+async def cmd_memory(ctx: CommandContext):
+    config, conn = ctx.config, ctx.conn
+    user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
     mount = config.nextcloud_mount_path
     target = args.strip().lower()
 
@@ -393,7 +501,8 @@ async def cmd_memory(config, conn, user_id, conversation_token, args, client):
 
 
 @command("cron", "List/enable/disable scheduled jobs: `!cron`, `!cron enable <name>`, `!cron disable <name>`")
-async def cmd_cron(config, conn, user_id, conversation_token, args, client):
+async def cmd_cron(ctx: CommandContext):
+    config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
     from .cron_loader import update_job_enabled_in_cron_md
 
     parts = args.strip().split(maxsplit=1)
@@ -448,7 +557,8 @@ async def cmd_cron(config, conn, user_id, conversation_token, args, client):
 
 
 @command("skills", "List available skills and their triggers")
-async def cmd_skills(config, conn, user_id, conversation_token, args, client):
+async def cmd_skills(ctx: CommandContext):
+    config, user_id, args = ctx.config, ctx.user_id, ctx.args
     from .skills._loader import get_skill_availability, load_skill_index
 
     skills_dir = config.skills_dir
@@ -558,7 +668,9 @@ def _format_skill_detail(meta, name, disabled, is_admin):
 
 
 @command("check", "Run Claude Code health check")
-async def cmd_check(config, conn, user_id, conversation_token, args, client):
+async def cmd_check(ctx: CommandContext):
+    config, conn = ctx.config, ctx.conn
+    user_id, conversation_token = ctx.user_id, ctx.conversation_token
     from .executor import build_bwrap_cmd, build_clean_env
 
     lines = ["**Health Check**", ""]
@@ -663,7 +775,7 @@ async def cmd_check(config, conn, user_id, conversation_token, args, client):
         else:
             stderr_preview = (result.stderr.strip()[:200]) if result.stderr else ""
             stdout_preview = output[:200] if output else "(empty)"
-            lines.append(f"- Claude + Bash: **FAIL** (expected 'healthcheck-ok')")
+            lines.append("- Claude + Bash: **FAIL** (expected 'healthcheck-ok')")
             if stderr_preview:
                 lines.append(f"  stderr: {stderr_preview}")
             else:
@@ -705,80 +817,69 @@ def _build_export_metadata(token: str, last_id: int, fmt: str) -> str:
     return f"# export:token={token},last_id={last_id},updated={ts}"
 
 
-def _format_timestamp(epoch: int, tz=None) -> str:
-    """Format a Unix epoch timestamp to a readable string."""
-    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
-    if tz:
-        dt = dt.astimezone(tz)
-    return dt.strftime("%Y-%m-%d %H:%M")
+# Upper bound on turns pulled for an export. A conversation rarely approaches
+# this; it just keeps a runaway room from materializing unbounded history.
+_EXPORT_LIMIT = 10000
 
 
-def _format_messages_markdown(messages: list[dict], tz=None) -> str:
-    """Format messages as markdown with coalescing."""
+def _format_db_timestamp(created_at: str, tz=None) -> str:
+    """Format a DB ISO ``created_at`` string to a readable local time."""
+    if not created_at:
+        return ""
+    try:
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if tz:
+            dt = dt.astimezone(tz)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return created_at[:16]
+
+
+def _format_history_markdown(
+    messages: list["db.ConversationMessage"], bot_name: str, tz=None,
+) -> str:
+    """Render completed conversation turns (user prompt + bot result) as
+    markdown. Surface-agnostic — works for any conversation_token."""
     lines: list[str] = []
-    prev_actor: str | None = None
-
-    for msg in messages:
-        actor = msg.get("actorDisplayName") or msg.get("actorId", "Unknown")
-        content = clean_message_content(msg)
-        timestamp = msg.get("timestamp", 0)
-
-        if actor == prev_actor:
-            # Coalesce: just append content under same header
+    for m in messages:
+        ts = _format_db_timestamp(m.created_at, tz)
+        if m.prompt and m.prompt.strip():
             lines.append("")
-            lines.append(content)
-        else:
-            # New actor group
-            if prev_actor is not None:
-                lines.append("")
-                lines.append("---")
+            lines.append(f"**{m.user_id or 'User'}** — {ts}")
+            lines.append(m.prompt.strip())
+        if m.result and m.result.strip():
             lines.append("")
-            lines.append(f"**{actor}** — {_format_timestamp(timestamp, tz)}")
-            lines.append(content)
-            prev_actor = actor
-
-    # Final separator
-    if lines:
+            lines.append(f"**{bot_name}** — {ts}")
+            lines.append(m.result.strip())
         lines.append("")
         lines.append("---")
-
     return "\n".join(lines)
 
 
-def _format_messages_text(messages: list[dict], tz=None) -> str:
-    """Format messages as plaintext with coalescing."""
+def _format_history_text(
+    messages: list["db.ConversationMessage"], bot_name: str, tz=None,
+) -> str:
+    """Render completed conversation turns as plaintext."""
     lines: list[str] = []
-    prev_actor: str | None = None
-
-    for msg in messages:
-        actor = msg.get("actorDisplayName") or msg.get("actorId", "Unknown")
-        content = clean_message_content(msg)
-        timestamp = msg.get("timestamp", 0)
-
-        if actor == prev_actor:
+    for m in messages:
+        ts = _format_db_timestamp(m.created_at, tz)
+        if m.prompt and m.prompt.strip():
+            lines.append(f"{m.user_id or 'User'} — {ts}")
+            lines.append(m.prompt.strip())
             lines.append("")
-            lines.append(content)
-        else:
-            if prev_actor is not None:
-                lines.append("")
-            lines.append(f"{actor} — {_format_timestamp(timestamp, tz)}")
-            lines.append(content)
-            prev_actor = actor
-
-    return "\n".join(lines)
-
-
-def _filter_user_messages(messages: list[dict]) -> list[dict]:
-    """Filter to only user/bot comment messages (skip system messages)."""
-    return [
-        m for m in messages
-        if m.get("actorType") == "users"
-        and m.get("messageType") == "comment"
-    ]
+        if m.result and m.result.strip():
+            lines.append(f"{bot_name} — {ts}")
+            lines.append(m.result.strip())
+            lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 @command("export", "Export conversation history to a file: `!export [markdown|text]`")
-async def cmd_export(config, conn, user_id, conversation_token, args, client):
+async def cmd_export(ctx: CommandContext):
+    config, conn = ctx.config, ctx.conn
+    user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
     mount = config.nextcloud_mount_path
     if mount is None:
         return "Nextcloud mount not configured — cannot write export file."
@@ -808,6 +909,15 @@ async def cmd_export(config, conn, user_id, conversation_token, args, client):
     except Exception:
         tz = None
 
+    bot_name = config.bot_name
+
+    # Conversation history comes from the tasks DB (each completed task is a
+    # user prompt + bot result turn), so export works on any surface — Talk,
+    # web chat, future ones — without reaching into a surface's message store.
+    messages = db.get_conversation_history(conn, conversation_token, limit=_EXPORT_LIMIT)
+    format_md = fmt == "markdown"
+    render = _format_history_markdown if format_md else _format_history_text
+
     # Check for existing export
     existing_meta = None
     if export_path.exists():
@@ -818,99 +928,53 @@ async def cmd_export(config, conn, user_id, conversation_token, args, client):
             pass
 
     if existing_meta and existing_meta["token"] == conversation_token:
-        # Incremental export
+        # Incremental export — only turns newer than the last exported task id.
         since_id = existing_meta["last_id"]
-        new_messages = await client.fetch_messages_since(conversation_token, since_id)
-        user_messages = _filter_user_messages(new_messages)
-
-        if not user_messages:
+        new_messages = [m for m in messages if m.id > since_id]
+        if not new_messages:
             return "No new messages since last export."
 
-        last_id = user_messages[-1]["id"]
+        last_id = new_messages[-1].id
+        new_content = render(new_messages, bot_name, tz=tz)
 
-        # Format new messages
-        if fmt == "markdown":
-            new_content = _format_messages_markdown(user_messages, tz=tz)
-        else:
-            new_content = _format_messages_text(user_messages, tz=tz)
-
-        # Read existing content, replace metadata line, append new messages
         existing_content = export_path.read_text()
-        # Replace first line (metadata) with updated one
+        # Replace first line (metadata) with the updated one, then append.
         rest = existing_content.split("\n", 1)[1] if "\n" in existing_content else ""
         new_meta = _build_export_metadata(conversation_token, last_id, fmt)
         export_path.write_text(new_meta + "\n" + rest.rstrip("\n") + "\n" + new_content + "\n")
 
         rel_path = f"/{export_path.relative_to(mount)}"
-        return f"Appended {len(user_messages)} new messages to `{rel_path}`"
+        return f"Appended {len(new_messages)} new messages to `{rel_path}`"
 
+    # Full export
+    if not messages:
+        return "No messages to export."
+
+    last_id = messages[-1].id
+    title = await resolve_room_name(ctx, conversation_token)
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    if tz:
+        now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
+
+    meta_line = _build_export_metadata(conversation_token, last_id, fmt)
+
+    if format_md:
+        header_parts = [meta_line, "", f"# {title}", "", f"**Exported:** {now_str}", "", "---"]
     else:
-        # Full export
-        all_messages = await client.fetch_full_history(conversation_token)
-        user_messages = _filter_user_messages(all_messages)
+        header_parts = [meta_line, "", title, f"Exported: {now_str}", "=" * 40]
 
-        if not user_messages:
-            return "No messages to export."
+    body = render(messages, bot_name, tz=tz)
+    content = "\n".join(header_parts) + "\n" + body + "\n"
+    export_path.write_text(content)
 
-        last_id = user_messages[-1]["id"]
-
-        # Get conversation info for frontmatter
-        try:
-            room_info = await client.get_conversation_info(conversation_token)
-            title = room_info.get("displayName", conversation_token)
-        except Exception:
-            title = conversation_token
-
-        try:
-            participants = await client.get_participants(conversation_token)
-            participant_names = sorted(
-                p.get("displayName") or p.get("actorId", "")
-                for p in participants
-                if p.get("actorType") == "users"
-            )
-        except Exception:
-            participant_names = []
-
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        if tz:
-            now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
-
-        meta_line = _build_export_metadata(conversation_token, last_id, fmt)
-
-        if fmt == "markdown":
-            header_parts = [
-                meta_line,
-                "",
-                f"# {title}",
-                "",
-                f"**Exported:** {now_str}",
-            ]
-            if participant_names:
-                header_parts.append(f"**Participants:** {', '.join(participant_names)}")
-            header_parts.append("")
-            header_parts.append("---")
-            body = _format_messages_markdown(user_messages, tz=tz)
-        else:
-            header_parts = [
-                meta_line,
-                "",
-                title,
-                f"Exported: {now_str}",
-            ]
-            if participant_names:
-                header_parts.append(f"Participants: {', '.join(participant_names)}")
-            header_parts.append("=" * 40)
-            body = _format_messages_text(user_messages, tz=tz)
-
-        content = "\n".join(header_parts) + "\n" + body + "\n"
-        export_path.write_text(content)
-
-        rel_path = f"/{export_path.relative_to(mount)}"
-        return f"Exported {len(user_messages)} messages to `{rel_path}`"
+    rel_path = f"/{export_path.relative_to(mount)}"
+    return f"Exported {len(messages)} messages to `{rel_path}`"
 
 
 @command("more", "Show execution trace for a task: `!more #31875` or `!more 31875`")
-async def cmd_more(config, conn, user_id, conversation_token, args, client):
+async def cmd_more(ctx: CommandContext):
+    config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
     # Parse task ID from args (strip # prefix if present)
     task_id_str = args.strip().lstrip("#")
     if not task_id_str.isdigit():
@@ -1156,17 +1220,14 @@ def _parse_search_args(args_str: str) -> SearchArgs:
 
 
 async def _resolve_room_names(
-    client: TalkClient,
+    ctx: CommandContext,
     tokens: set[str],
 ) -> dict[str, str]:
-    """Resolve conversation tokens to display names. Returns token→name map."""
+    """Resolve conversation tokens to display names, surface-agnostically.
+    Returns token→name map."""
     names: dict[str, str] = {}
     for token in tokens:
-        try:
-            info = await client.get_conversation_info(token)
-            names[token] = info.get("displayName", token)
-        except Exception:
-            names[token] = token
+        names[token] = await resolve_room_name(ctx, token)
     return names
 
 
@@ -1210,7 +1271,9 @@ def _format_search_results(results: list[dict], query: str) -> str:
 
 
 @command("search", "Search conversation history: `!search <query>`, `!search --all <query>`, `!search --since DATE <query>`, `!search --memories <query>`")
-async def cmd_search(config, conn, user_id, conversation_token, args, client):
+async def cmd_search(ctx: CommandContext):
+    config, conn = ctx.config, ctx.conn
+    user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
     parsed = _parse_search_args(args)
     if not parsed.query:
         return (
@@ -1219,14 +1282,17 @@ async def cmd_search(config, conn, user_id, conversation_token, args, client):
             "Filters: `--since YYYY-MM-DD`, `--week`, `--memories`"
         )
 
+    # The memory index (conversations + memory files) is the surface-agnostic
+    # backbone — it works on Talk, web chat, and any future surface.
     source_types = ["memory_file"] if parsed.memories_only else None
     mem_results = _search_memory(
         config, conn, user_id, parsed.query,
         source_types=source_types, since=parsed.since,
     )
 
-    # Skip Talk API when filtering to memories only
-    if parsed.memories_only:
+    # The Nextcloud Talk full-text search is a Talk-only enhancement layered on
+    # top of the memory index; skip it on other surfaces and for memories-only.
+    if parsed.memories_only or ctx.surface != "talk":
         talk_results: list[dict] = []
     else:
         talk_results = await _search_talk_api(config, parsed.query)
@@ -1273,23 +1339,24 @@ async def cmd_search(config, conn, user_id, conversation_token, args, client):
 
     # Resolve room display names for all unique tokens
     tokens = {r["conversation_token"] for r in all_results if r.get("conversation_token")}
-    room_names = await _resolve_room_names(client, tokens)
+    room_names = await _resolve_room_names(ctx, tokens)
 
-    # Enrich results with room names and message links
+    # Enrich results with room names and (Talk-only) message links
     for r in all_results:
         token = r.get("conversation_token", "")
         r["room_name"] = room_names.get(token, token)
 
-        # Build message deep link from task's talk_message_id
+        # Deep links are a Talk concept — only build them on the Talk surface.
         msg_id = r.get("talk_message_id")
-        if token and msg_id:
+        if ctx.surface == "talk" and token and msg_id:
             r["talk_link"] = _build_message_link(config, token, msg_id)
 
     return _format_search_results(all_results, parsed.query)
 
 
 @command("trust", "Trust an email sender: `!trust sender@example.com`")
-async def cmd_trust(config, conn, user_id, conversation_token, args, client):
+async def cmd_trust(ctx: CommandContext):
+    config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
     email = args.strip().lower()
     if not email:
         # List trusted senders
@@ -1318,7 +1385,8 @@ async def cmd_trust(config, conn, user_id, conversation_token, args, client):
 
 
 @command("untrust", "Remove a trusted email sender: `!untrust sender@example.com`")
-async def cmd_untrust(config, conn, user_id, conversation_token, args, client):
+async def cmd_untrust(ctx: CommandContext):
+    conn, user_id, args = ctx.conn, ctx.user_id, ctx.args
     email = args.strip().lower()
     if not email or "@" not in email:
         return "Usage: `!untrust sender@example.com`"

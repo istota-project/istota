@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-07: Surface-agnostic !commands — CommandContext + unified dispatch
+
+`!commands` were built around `TalkClient`: every handler took one as its last positional arg, and the web-chat path papered over it with a `run_inline` shim that handed handlers a Talk client they mostly ignored. Two commands didn't ignore it (`export`, `search`), and `!model` was outright broken on web (it's a prefix, not a command, and the web handler never parsed it — so `!model opus …` hit dispatch and errored as an unknown command). This session abstracted the command set off Talk so it works identically on every surface, and unified delivery through the transport registry.
+
+**The seam.** Handlers now take a single `CommandContext` (config, conn, user_id, conversation_token, args, `surface`, `registry`) instead of `(config, conn, user_id, conversation_token, args, talk_client)`. The rare command that needs surface-specific behavior branches on `ctx.surface` or resolves a transport from `ctx.registry`; most ignore both.
+
+**Unified dispatch (push/stream).** `dispatch()` returns a `CommandResult(handled, text, delivered)`. It runs the handler, then on a push surface (Talk) delivers via the resolved transport and sets `delivered=True`; on a stream surface (web — no push transport) it returns the text for the caller to render inline. `run_inline` is gone; Talk inbound and the web send handler call the same `dispatch` with different `surface=`. Delivery is keyed on `TransportCapabilities.surface_class`, matching the existing transport seam.
+
+**Shared `!model` prefix.** `resolve_model_prefix(content, brain, has_attachments=…)` centralizes the rule ("alias-only is valid only with an attachment"; unknown alias → usage). Talk inbound and web both call it, so the web `!model` gap is closed — a valid prefix now strips and carries the model/effort override into the web task.
+
+**export + search are DB-backed.** `export` reads conversation turns from the `tasks` table (each completed task = a user prompt + bot result turn) and keys incremental exports on task id, so it works on any surface — including web rooms that have no Talk server. Participant lists (Talk-only) were dropped; room titles resolve surface-agnostically (Talk transport's `resolve_channel_name`, web's room name, else the token). `search` relies on the memory index everywhere; the Nextcloud Talk full-text API and deep links are kept as Talk-only enhancements gated on `ctx.surface == "talk"`.
+
+**Web chat command rendering.** Inline command results were assigned `role: 'system'`, which the message component rendered centered (`text-align: center`) — so `!help`'s lists and code came out centered. They now render as a left-aligned card (`.cmd-output`). Per request, `.body` and command output are capped at 900px max-width. Separately, the hover `.meta-footer` was a flex sibling consuming a column and narrowing content (bad on mobile) — it's now absolutely positioned top-right with `pointer-events: none`, so it overlays the corner instead of taking layout width.
+
+**Dev preview.** The mock backend (`vite-mock-api.ts`) now returns realistic `!help` / `!models` / `!status` markdown and mirrors the `!model` prefix, so command rendering is previewable with `VITE_MOCK_API=1 npm run dev` without a live server.
+
+**Tests.** Migrated `test_commands.py` (93 handler call sites) to `CommandContext` via a `_ctx` helper; rewrote the dispatch tests around `CommandResult` + a fake push/stream registry; rewrote export tests DB-backed and search to assert Talk-API gating on non-Talk surfaces; added `resolve_model_prefix` coverage and web `!model` (override + usage) tests. Full suite green; `svelte-check` and prod build clean.
+
+**Key changes:**
+- `CommandContext` + `CommandResult`; all 13 handlers take `ctx`. `CommandHandler` type updated.
+- `dispatch()` delivers via registry push transport or returns inline text for stream surfaces; `run_inline` removed.
+- `resolve_model_prefix()` shared by Talk inbound + web send handler; fixes broken web `!model`.
+- `export` / `search` read from the tasks DB + memory index; Talk specifics gated on surface.
+- Web `_chat_create_web_task` threads `model`/`effort`; send handler parses `!model` and dispatches commands via the registry.
+- Command output renders left-aligned (was centered); `.body` capped at 900px; `.meta-footer` absolutely positioned.
+
+**Files added/modified:**
+- `src/istota/commands.py` — CommandContext/CommandResult, unified dispatch, resolve_model_prefix, DB-backed export/search, all handler signatures.
+- `src/istota/transport/talk/inbound.py` — call new dispatch + shared model-prefix helper.
+- `src/istota/web_app.py` — `!model` parsing, registry-based command dispatch, model/effort on web task creation.
+- `web/src/lib/components/chat/Message.svelte` — left-aligned command-output card, 900px body cap, absolute meta-footer.
+- `web/vite-mock-api.ts` — realistic `!help`/`!models`/`!status` + `!model` mock.
+- `tests/test_commands.py`, `tests/test_web_chat.py`, `tests/test_model_override.py` — migrated + extended.
+- `AGENTS.md` — updated commands.py + web chat descriptions.
+
 ## 2026-06-07: Web chat — live progress, shared verbs, single tool box, spinner fix
 
 Follow-up polish on the web chat streaming UI. Four asks plus two bugs found along the way.
