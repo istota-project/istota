@@ -537,7 +537,12 @@
 		font-size: var(--text-xs);
 		color: var(--text-muted);
 	}
-	.empty { color: var(--text-dim); padding: 2rem 0; }
+	.empty {
+		color: var(--text-dim);
+		font-size: var(--text-base);
+		padding: 2rem 1rem;
+		text-align: center;
+	}
 	.msg {
 		font-size: var(--text-sm);
 		padding: 0.4rem 0.6rem;

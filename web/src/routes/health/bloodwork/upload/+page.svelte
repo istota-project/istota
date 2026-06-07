@@ -466,7 +466,12 @@
 	}
 	.del { background: none; border: none; color: var(--text-dim); cursor: pointer; }
 	.del:hover { color: #c66; }
-	.empty { color: var(--text-dim); padding: 0.5rem 0; }
+	.empty {
+		color: var(--text-dim);
+		font-size: var(--text-base);
+		padding: 2rem 1rem;
+		text-align: center;
+	}
 	.source {
 		background: var(--surface-card);
 		border: 1px solid var(--border-default);

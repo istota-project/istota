@@ -348,7 +348,12 @@
 		color: #e6b96b;
 	}
 	.muted { color: var(--text-muted); }
-	.empty { color: var(--text-dim); padding: 2rem 0; }
+	.empty {
+		color: var(--text-dim);
+		font-size: var(--text-base);
+		padding: 2rem 1rem;
+		text-align: center;
+	}
 
 	.spreadsheet {
 		background: var(--surface-card);

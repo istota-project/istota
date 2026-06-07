@@ -630,7 +630,12 @@
 	.flag-H { background: #4a2020; color: #f8a09c; }
 	.flag-L { background: #20384a; color: #9cc7f8; }
 	.flag-C { background: #6b0000; color: #fff; }
-	.empty { color: var(--text-dim); padding: 1rem 0; }
+	.empty {
+		color: var(--text-dim);
+		font-size: var(--text-base);
+		padding: 2rem 1rem;
+		text-align: center;
+	}
 	.msg {
 		font-size: var(--text-sm);
 		padding: 0.4rem 0.6rem;
