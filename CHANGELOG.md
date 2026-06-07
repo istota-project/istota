@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - In-app web chat. A new always-on "Chat" tab in the web UI lets you talk to the bot without leaving the dashboard — a full-page console with Discord/Slack-style rooms in a sidebar, live streaming of tool use and intermediate text, inline `!commands`, confirmation prompts rendered as Confirm/Cancel cards, cancel, and drag-drop/paste file attachments. Each room is its own persistent conversation with its own channel memory. It complements Nextcloud Talk rather than replacing it.
 
+### Changed
+- Web chat now uses a Discord/Slack-style transcript instead of chat bubbles: full-width rows with an avatar, the author name and time, and grouping of consecutive messages from the same author. Messages show your real display name and the bot's configured name.
+- Web chat message rendering moved to a full Markdown library. Bot replies now render nested lists, blockquotes, tables, strikethrough, and auto-linked URLs, on top of the formatting already supported.
+
 ### Fixed
 - Web chat: confirmation prompts now work. An action that needs your approval parks correctly and shows the Confirm/Cancel card instead of silently completing as a plain message, and any staged side effects wait until you confirm. Previously the confirmation only fired for Nextcloud Talk.
 - Web chat: file attachments now actually reach the bot. Uploaded files were saved but never linked to the message, so the bot couldn't see them; the message now carries them through, and a message can only reference files you uploaded.
