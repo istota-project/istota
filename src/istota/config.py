@@ -338,6 +338,26 @@ class LocationReceiverConfig:
 
 
 @dataclass
+class WebChatConfig:
+    """In-app web chat surface (``[web.chat]``).
+
+    Always-on companion to Talk — there is no per-user opt-out. Knobs cap
+    prompt size, attachment size, and the per-user message rate; the poll
+    intervals tune the SSE generator cadence and the client polling fallback.
+    """
+    max_prompt_chars: int = 32000
+    max_attachment_mb: int = 25
+    attachment_extensions: list[str] = field(default_factory=lambda: [
+        "pdf", "png", "jpg", "jpeg", "webp", "gif", "txt", "md",
+        "csv", "wav", "mp3", "m4a", "ogg", "docx", "xlsx",
+    ])
+    rate_limit_messages: int = 30
+    rate_limit_window_seconds: int = 300
+    sse_poll_interval_ms: int = 200
+    client_poll_interval_ms: int = 1500
+
+
+@dataclass
 class WebConfig:
     """Authenticated web interface configuration.
 
@@ -359,6 +379,7 @@ class WebConfig:
     oauth2_redirect_uri: str = ""       # explicit override; otherwise derived from request
     token_storage: str = "ephemeral"    # self-documenting; only "ephemeral" supported today
     session_secret_key: str = ""
+    chat: WebChatConfig = field(default_factory=WebChatConfig)
 
 
 @dataclass
@@ -1217,6 +1238,23 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "web" in data:
         w = data["web"]
+        chat_data = w.get("chat", {})
+        _chat_defaults = WebChatConfig()
+        web_chat = WebChatConfig(
+            max_prompt_chars=chat_data.get("max_prompt_chars", _chat_defaults.max_prompt_chars),
+            max_attachment_mb=chat_data.get("max_attachment_mb", _chat_defaults.max_attachment_mb),
+            attachment_extensions=chat_data.get(
+                "attachment_extensions", _chat_defaults.attachment_extensions
+            ),
+            rate_limit_messages=chat_data.get("rate_limit_messages", _chat_defaults.rate_limit_messages),
+            rate_limit_window_seconds=chat_data.get(
+                "rate_limit_window_seconds", _chat_defaults.rate_limit_window_seconds
+            ),
+            sse_poll_interval_ms=chat_data.get("sse_poll_interval_ms", _chat_defaults.sse_poll_interval_ms),
+            client_poll_interval_ms=chat_data.get(
+                "client_poll_interval_ms", _chat_defaults.client_poll_interval_ms
+            ),
+        )
         config.web = WebConfig(
             enabled=w.get("enabled", False),
             port=w.get("port", 8766),
@@ -1228,6 +1266,7 @@ def load_config(config_path: Path | None = None) -> Config:
             oauth2_redirect_uri=w.get("oauth2_redirect_uri", ""),
             token_storage=w.get("token_storage", "ephemeral"),
             session_secret_key=w.get("session_secret_key", ""),
+            chat=web_chat,
         )
 
     if "developer" in data:

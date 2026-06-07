@@ -48,8 +48,9 @@ logger = logging.getLogger("istota.executor")
 
 # Source types treated as interactive (live user behind the turn): they load
 # conversation context, sticky skills, the skills changelog, and personal
-# memory. The REPL is a full-stack interactive surface like talk/email.
-_INTERACTIVE_SOURCE_TYPES = ("talk", "email", "repl")
+# memory. The REPL and web chat are full-stack interactive surfaces like
+# talk/email.
+_INTERACTIVE_SOURCE_TYPES = ("talk", "email", "repl", "web")
 
 
 def _resolve_user_tz(

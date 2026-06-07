@@ -551,3 +551,20 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Web chat rooms (in-app chat surface). Each room owns a per-user channel
+-- token used as the task's conversation_token, so every room gets its own
+-- CHANNEL.md memory and sleep-cycle treatment with no special-casing.
+-- Always-on surface: there is no per-user opt-out.
+CREATE TABLE IF NOT EXISTS web_chat_rooms (
+    id          INTEGER PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    token       TEXT NOT NULL UNIQUE,            -- conversation_token (channel id)
+    name        TEXT NOT NULL,
+    archived    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_web_chat_rooms_user
+    ON web_chat_rooms (user_id, archived, id);
