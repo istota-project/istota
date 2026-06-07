@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 # working; the canonical home is the ntfy transport.
 from .transport.ntfy import _NTFY_DEFAULT_PRIORITY  # noqa: F401
 from .transport.ntfy import ntfy_settings as _ntfy_settings
+from .transport.registry import make_registry
 
 if TYPE_CHECKING:
     from .config import Config
@@ -92,6 +93,81 @@ def surface_for_purpose(config: "Config", user_id: str, purpose: str) -> str:
     """
     dests = resolve_destinations(config, user_id, purpose)
     return ",".join(_descriptor_for_destination(d) for d in dests) or "talk"
+
+
+def effective_log_destinations(config: "Config", user_id: str):
+    """Resolve where a user's verbose execution log goes — and whether it is
+    enabled at all.
+
+    The log channel is **opt-in**, so this deliberately does *not* reuse
+    :func:`resolve_destinations` (whose generic fall-through to
+    ``default_destination`` / bare ``talk`` would silently turn the verbose log
+    on for every user). Sources, in precedence order:
+
+      1. the user's ``routing["log"]`` descriptor,
+      2. the legacy ``log_channel`` Talk token (→ ``talk:<token>``),
+      3. otherwise ``[]`` — the log channel is disabled for this user.
+
+    Resolved destinations are filtered to surfaces that are registered **and**
+    ``user_routable`` (each drop logged at WARNING). A bare ``talk`` destination
+    (no explicit ``:token``) has its channel resolved via
+    :func:`resolve_conversation_token`; if that yields nothing the destination is
+    dropped. Returns a deduplicated list; never raises into the caller.
+    """
+    from .transport import Destination, parse_output_target
+
+    try:
+        uc = config.users.get(user_id)
+        if not uc:
+            return []
+
+        if uc.routing and uc.routing.get("log"):
+            dests = parse_output_target(uc.routing["log"])
+        elif uc.log_channel:
+            dests = [Destination("talk", uc.log_channel)]
+        else:
+            return []
+
+        registry = make_registry(config)
+        resolved: list[Destination] = []
+        seen: set[tuple[str, str | None]] = set()
+        for dest in dests:
+            transport = registry.get(dest.surface)
+            if transport is None:
+                logger.warning(
+                    "Dropping log destination %r for user %s: surface not registered",
+                    dest.surface, user_id,
+                )
+                continue
+            if not getattr(transport.capabilities, "user_routable", True):
+                logger.warning(
+                    "Dropping log destination %r for user %s: surface not user-routable",
+                    dest.surface, user_id,
+                )
+                continue
+            channel = dest.channel
+            if dest.surface == "talk" and channel is None:
+                # Bare `talk` for the log purpose means "the user's logs room":
+                # prefer the provisioned log_channel, fall back to the default
+                # Talk channel / DM only if no logs room is set.
+                channel = uc.log_channel or resolve_conversation_token(config, user_id)
+                if not channel:
+                    logger.warning(
+                        "Dropping bare talk log destination for user %s: no "
+                        "resolvable Talk channel", user_id,
+                    )
+                    continue
+            key = (dest.surface, channel)
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(Destination(dest.surface, channel))
+        return resolved
+    except Exception:
+        logger.warning(
+            "effective_log_destinations failed for user %s", user_id, exc_info=True,
+        )
+        return []
 
 
 def resolve_conversation_token(config: "Config", user_id: str) -> str | None:

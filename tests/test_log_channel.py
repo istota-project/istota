@@ -22,6 +22,7 @@ from istota.scheduler import (
     _channel_name_cache,
     process_one_task,
 )
+from istota.transport import Destination
 
 
 def _tool_start(desc: str, seq: int = 1) -> TaskEvent:
@@ -197,7 +198,7 @@ class TestResolveChannelName:
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="bot", app_password="pw"),
         )
         mock_info = {"displayName": "Dev Room", "token": "abc123"}
-        with patch("istota.scheduler.get_talk_client") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             instance = MockClient.return_value
             instance.get_conversation_info = AsyncMock(return_value=mock_info)
             name = await _resolve_channel_name(config, "abc123")
@@ -216,7 +217,7 @@ class TestResolveChannelName:
         config = Config(
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="bot", app_password="pw"),
         )
-        with patch("istota.scheduler.get_talk_client") as MockClient:
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
             instance = MockClient.return_value
             instance.get_conversation_info = AsyncMock(side_effect=Exception("network error"))
             name = await _resolve_channel_name(config, "fail_tok")
@@ -245,35 +246,79 @@ class TestLogChannelSubscriber:
         defaults.update(overrides)
         return db.Task(**defaults)
 
+    _TALK = [Destination("talk", "logroom")]
+
     @patch("istota.consumers.log_channel.run_coro")
     def test_first_event_posts_message(self, mock_arun, tmp_path):
-        # The first send now goes through TalkTransport.deliver, which returns
-        # the posted message id directly (not the raw OCS dict).
+        # The first send goes through TalkTransport.deliver (edit-capable),
+        # which returns the posted message id directly.
         mock_arun.return_value = 100
-        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
+        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), self._TALK, "[42 #Dev]")
 
         sub.on_event(_tool_start("📄 Reading file.txt"))
 
         assert len(sub.all_descriptions) == 1
-        assert sub.log_msg_id[0] == 100
+        assert sub.delivery_state[("talk", "logroom")] == 100
         assert mock_arun.called
 
-    @patch("istota.scheduler.edit_talk_message", new_callable=MagicMock)
     @patch("istota.consumers.log_channel.run_coro")
-    def test_subsequent_events_edit_message(self, mock_arun, mock_edit, tmp_path):
+    def test_subsequent_events_edit_message(self, mock_arun, tmp_path):
         mock_arun.return_value = 100
-        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
+        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), self._TALK, "[42 #Dev]")
 
         sub.on_event(_tool_start("📄 Reading file.txt", seq=1))
-        assert sub.log_msg_id[0] == 100
+        assert sub.delivery_state[("talk", "logroom")] == 100
 
-        mock_arun.return_value = True
+        # Second event edits (run_coro return value ignored for the edit path).
+        mock_arun.return_value = None
         sub.on_event(_tool_start("⚙️ Running ls", seq=2))
         assert len(sub.all_descriptions) == 2
+        # Still the same posted message id (edited, not re-posted).
+        assert sub.delivery_state[("talk", "logroom")] == 100
+        assert mock_arun.call_count == 2
+
+    @patch("istota.consumers.log_channel.run_coro")
+    def test_non_edit_surface_no_streaming(self, mock_arun, tmp_path):
+        # ntfy is not edit-capable → nothing delivered during the run; the final
+        # summary is the scheduler's job.
+        sub = LogChannelSubscriber(
+            self._make_config(tmp_path), self._make_task(),
+            [Destination("ntfy", None)], "[42 #Dev]",
+        )
+        sub.on_event(_tool_start("📄 Reading file.txt"))
+        assert len(sub.all_descriptions) == 1
+        assert sub.delivery_state == {}
+        assert not mock_arun.called
+
+    @patch("istota.consumers.log_channel.run_coro")
+    def test_mixed_capability_only_edit_surface_streams(self, mock_arun, tmp_path):
+        mock_arun.return_value = 100
+        sub = LogChannelSubscriber(
+            self._make_config(tmp_path), self._make_task(),
+            [Destination("talk", "room"), Destination("ntfy", None)], "[42 #Dev]",
+        )
+        sub.on_event(_tool_start("📄 Reading file.txt"))
+        # Talk streamed, ntfy untouched.
+        assert sub.delivery_state == {("talk", "room"): 100}
+        assert mock_arun.call_count == 1
+
+    @patch("istota.consumers.log_channel.run_coro")
+    def test_per_destination_exception_isolation(self, mock_arun, tmp_path):
+        # First Talk destination's delivery raises; the second still gets posted.
+        mock_arun.side_effect = [Exception("network"), 200]
+        sub = LogChannelSubscriber(
+            self._make_config(tmp_path), self._make_task(),
+            [Destination("talk", "a"), Destination("talk", "b")], "[42 #Dev]",
+        )
+        sub.on_event(_tool_start("📄 Reading file.txt"))
+        assert mock_arun.call_count == 2
+        assert ("talk", "a") not in sub.delivery_state
+        assert sub.delivery_state[("talk", "b")] == 200
+        assert len(sub.all_descriptions) == 1
 
     @patch("istota.consumers.log_channel.run_coro")
     def test_ignores_non_tool_events(self, mock_arun, tmp_path):
-        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
+        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), self._TALK, "[42 #Dev]")
 
         sub.on_event(TaskEvent(
             task_id=42, seq=1, kind="progress_text",
@@ -285,7 +330,7 @@ class TestLogChannelSubscriber:
 
     @patch("istota.consumers.log_channel.run_coro", side_effect=Exception("network"))
     def test_errors_dont_propagate(self, mock_arun, tmp_path):
-        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), "logroom", "[42 #Dev]")
+        sub = LogChannelSubscriber(self._make_config(tmp_path), self._make_task(), self._TALK, "[42 #Dev]")
 
         # Should not raise — but the description is still recorded.
         sub.on_event(_tool_start("📄 Reading file.txt"))
@@ -297,6 +342,8 @@ class TestLogChannelSubscriber:
 # ---------------------------------------------------------------------------
 
 class TestFinalizeLogChannel:
+    _LOGROOM = [Destination("talk", "logroom")]
+
     def _make_config(self, tmp_path):
         return Config(
             db_path=tmp_path / "test.db",
@@ -312,70 +359,127 @@ class TestFinalizeLogChannel:
         defaults.update(overrides)
         return db.Task(**defaults)
 
+    def _fake_registry(self, supports_edit=True):
+        """A registry returning a single mock transport for every surface."""
+        transport = MagicMock()
+        transport.capabilities.supports_edit = supports_edit
+        transport.deliver = MagicMock(return_value="coro")
+        transport.edit = MagicMock(return_value="coro")
+        reg = MagicMock()
+        reg.get.return_value = transport
+        return reg, transport
+
     @patch("istota.scheduler.run_coro")
-    def test_edits_existing_message_on_success(self, mock_arun, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
+    @patch("istota.scheduler.make_registry")
+    def test_edits_existing_message_on_success(self, mock_mr, mock_arun, tmp_path):
+        reg, transport = self._fake_registry(supports_edit=True)
+        mock_mr.return_value = reg
         cb = MagicMock()
         cb.all_descriptions = ["📄 Reading file.txt"]
-        cb.log_msg_id = [100]
+        cb.delivery_state = {("talk", "logroom"): 100}
 
-        _finalize_log_channel(config, task, "logroom", "[42 #Dev]", cb, True)
-        mock_arun.assert_called()
+        _finalize_log_channel(self._make_config(tmp_path), self._make_task(), self._LOGROOM, "[42 #Dev]", cb, True)
+        transport.edit.assert_called_once()
+        assert transport.edit.call_args[0][:2] == ("logroom", 100)
+        transport.deliver.assert_not_called()
 
     @patch("istota.scheduler.run_coro")
-    def test_posts_one_liner_when_no_tool_calls(self, mock_arun, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
+    @patch("istota.scheduler.make_registry")
+    def test_posts_one_liner_when_no_tool_calls(self, mock_mr, mock_arun, tmp_path):
+        reg, transport = self._fake_registry(supports_edit=True)
+        mock_mr.return_value = reg
 
-        _finalize_log_channel(config, task, "logroom", "[42 #Dev]", None, True)
-        mock_arun.assert_called()
-        # Should have been called with a send_message (no msg to edit)
-        call_args = mock_arun.call_args
-        assert call_args is not None
+        _finalize_log_channel(self._make_config(tmp_path), self._make_task(), self._LOGROOM, "[42 #Dev]", None, True)
+        # No prior message → fresh deliver, not edit.
+        transport.deliver.assert_called_once()
+        transport.edit.assert_not_called()
 
-    @patch("istota.scheduler.get_talk_client")
-    def test_one_liner_unpacks_tuple_prefix(self, mock_talk_cls, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        mock_client = MagicMock()
-        mock_talk_cls.return_value = mock_client
-        mock_client.send_message = AsyncMock(return_value=200)
+    @patch("istota.scheduler.run_coro")
+    @patch("istota.scheduler.make_registry")
+    def test_non_edit_surface_delivered_once(self, mock_mr, mock_arun, tmp_path):
+        # A non-edit destination (e.g. ntfy) gets exactly one final delivery.
+        reg, transport = self._fake_registry(supports_edit=False)
+        mock_mr.return_value = reg
+        cb = MagicMock()
+        cb.all_descriptions = ["📄 Reading file.txt"]
+        cb.delivery_state = {}
 
         _finalize_log_channel(
-            config, task, "logroom", ("**[#42]**", "#istota"), None, True,
+            self._make_config(tmp_path), self._make_task(),
+            [Destination("ntfy", None)], "[42 #Dev]", cb, True,
         )
-        mock_client.send_message.assert_called_once()
-        msg = mock_client.send_message.call_args[0][1]
-        assert "**[#42]**" in msg
-        assert "('#" not in msg  # no raw tuple
-        assert "#istota" in msg
+        transport.deliver.assert_called_once()
+        transport.edit.assert_not_called()
 
     @patch("istota.scheduler.run_coro")
-    def test_includes_error_on_failure(self, mock_arun, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        cb = MagicMock()
-        cb.all_descriptions = ["📄 Reading file.txt"]
-        cb.log_msg_id = [100]
+    @patch("istota.scheduler.make_registry")
+    def test_one_liner_unpacks_tuple_prefix(self, mock_mr, mock_arun, tmp_path):
+        reg, transport = self._fake_registry(supports_edit=True)
+        mock_mr.return_value = reg
 
         _finalize_log_channel(
-            config, task, "logroom", "[42 #Dev]", cb, False,
+            self._make_config(tmp_path), self._make_task(), self._LOGROOM,
+            ("**[#42]**", "#istota"), None, True,
+        )
+        transport.deliver.assert_called_once()
+        body = transport.deliver.call_args[0][1]
+        assert "**[#42]**" in body
+        assert "('#" not in body  # no raw tuple
+        assert "#istota" in body
+
+    @patch("istota.scheduler.run_coro")
+    @patch("istota.scheduler.make_registry")
+    def test_includes_error_on_failure(self, mock_mr, mock_arun, tmp_path):
+        reg, transport = self._fake_registry(supports_edit=True)
+        mock_mr.return_value = reg
+        cb = MagicMock()
+        cb.all_descriptions = ["📄 Reading file.txt"]
+        cb.delivery_state = {("talk", "logroom"): 100}
+
+        _finalize_log_channel(
+            self._make_config(tmp_path), self._make_task(), self._LOGROOM, "[42 #Dev]", cb, False,
             error="API Error: 500",
         )
-        mock_arun.assert_called()
+        body = transport.edit.call_args[0][2]
+        assert "API Error: 500" in body
 
     @patch("istota.scheduler.run_coro", side_effect=Exception("network"))
-    def test_errors_dont_propagate(self, mock_arun, tmp_path):
-        config = self._make_config(tmp_path)
-        task = self._make_task()
-        # Should not raise
-        _finalize_log_channel(config, task, "logroom", "[42 #Dev]", None, True)
+    @patch("istota.scheduler.make_registry")
+    def test_errors_dont_propagate(self, mock_mr, mock_arun, tmp_path):
+        # run_coro raises — must be swallowed per destination, not propagated.
+        reg, _ = self._fake_registry(supports_edit=True)
+        mock_mr.return_value = reg
+        _finalize_log_channel(self._make_config(tmp_path), self._make_task(), self._LOGROOM, "[42 #Dev]", None, True)
 
 
 # ---------------------------------------------------------------------------
 # Integration: process_one_task with log channel
 # ---------------------------------------------------------------------------
+
+class TestNoDirectTalkClientInLogPath:
+    """Audit-residual regression (ISSUE-113): the log path delivers through the
+    transport registry — no direct get_talk_client / send_message calls remain
+    in the subscriber or the finalize helper. Talk OCS reads live behind
+    TalkTransport.resolve_channel_name."""
+
+    def test_log_channel_consumer_has_no_direct_talk_client(self):
+        import inspect
+
+        from istota.consumers import log_channel
+
+        src = inspect.getsource(log_channel)
+        assert "get_talk_client" not in src
+        assert ".send_message(" not in src
+
+    def test_finalize_log_channel_has_no_direct_talk_client(self):
+        import inspect
+
+        from istota.scheduler import _finalize_log_channel
+
+        src = inspect.getsource(_finalize_log_channel)
+        assert "get_talk_client" not in src
+        assert ".send_message(" not in src
+
 
 class TestProcessOneTaskLogChannel:
     def _make_config(self, db_path, tmp_path, users=None):

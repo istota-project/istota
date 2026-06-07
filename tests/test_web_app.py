@@ -1596,6 +1596,54 @@ class TestProfileEndpoints:
         assert p.default_destination == "both"
         assert p.routing == {"alert": "email"}
 
+    async def test_update_profile_log_route_round_trips(self, tmp_path, client, app):
+        # The log destination is stored as routing["log"] (D5: one descriptor
+        # control, no separate raw log_channel field in the UI).
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"routing": {"log": "ntfy"}},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import user_profiles
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.routing == {"log": "ntfy"}
+        # And it comes back on the GET so the card can render it.
+        got = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert got.json()["profile"]["routing"]["log"] == "ntfy"
+
+    async def test_update_profile_log_route_none_disables(self, tmp_path, client, app):
+        # "(off)" in the UI writes the explicit "none" sentinel so the log can be
+        # turned off even when a log_channel is provisioned. It must validate.
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"routing": {"log": "none"}},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import user_profiles
+        assert user_profiles.get_profile(self._db_path, "alice").routing == {"log": "none"}
+
+    async def test_update_profile_rejects_unknown_log_route_surface(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"routing": {"log": "carrier-pigeon"}},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
     async def test_update_profile_rejects_unknown_routing_surface(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)

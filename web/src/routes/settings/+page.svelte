@@ -142,25 +142,44 @@
 		return s && s.length ? s : BUILTIN_SURFACES;
 	}
 
-	// Options for a per-purpose route dropdown: a "(default)" no-op plus every
-	// known delivery surface. If the saved descriptor isn't a bare surface
-	// (e.g. "talk:<token>" or "talk,email"), keep it as an extra option so the
-	// current value still shows and isn't silently dropped when re-saving.
-	function routeOptions(current: string): SelectOption[] {
+	// Per-purpose route dropdown. `emptyValue`/`emptyLabel` is the leading no-op
+	// option; `talkLabel` spells out where the bare `talk` surface resolves for
+	// this purpose (the logs room vs the alerts channel) so it isn't ambiguous.
+	// A saved descriptor that isn't one of the offered surfaces (e.g. a
+	// CLI-set "talk:<token>" or "talk,email") is kept as an extra option so it
+	// shows and isn't silently dropped on re-save.
+	function routeOptions(
+		current: string,
+		opts: { emptyValue?: string; emptyLabel?: string; talkLabel?: string } = {}
+	): SelectOption[] {
+		const { emptyValue = '', emptyLabel = '(default)', talkLabel = 'talk' } = opts;
 		const surfaces = deliverySurfaces();
-		const opts: SelectOption[] = [{ value: '', label: '(default)' }];
-		for (const s of surfaces) opts.push({ value: s, label: s });
-		if (current && !surfaces.includes(current)) opts.push({ value: current, label: current });
-		return opts;
+		const out: SelectOption[] = [{ value: emptyValue, label: emptyLabel }];
+		for (const s of surfaces) out.push({ value: s, label: s === 'talk' ? talkLabel : s });
+		if (current && current !== emptyValue && !surfaces.includes(current))
+			out.push({ value: current, label: current });
+		return out;
 	}
 
-	// Options for the default destination dropdown: every delivery surface, plus
-	// the current value if it's a custom descriptor that isn't a bare surface.
+	// Default destination dropdown: every surface, no no-op option (there is
+	// always a default), plus the current value if it's a custom descriptor.
 	function destinationOptions(current: string): SelectOption[] {
 		const surfaces = deliverySurfaces();
-		const opts: SelectOption[] = surfaces.map((s) => ({ value: s, label: s }));
-		if (current && !surfaces.includes(current)) opts.push({ value: current, label: current });
-		return opts;
+		const out: SelectOption[] = surfaces.map((s) => ({ value: s, label: s }));
+		if (current && !surfaces.includes(current)) out.push({ value: current, label: current });
+		return out;
+	}
+
+	// The execution log is opt-in and (off) must override a provisioned
+	// log_channel, so its empty option carries the explicit "none" sentinel. The
+	// displayed value reflects the *effective* destination: an explicit
+	// routing.log wins, else a provisioned log_channel shows as "talk" (the logs
+	// channel), else "(off)".
+	function logRouteValue(): string {
+		const r = (profile?.routing || {})['log'];
+		if (r) return r;
+		if (profile?.log_channel) return 'talk';
+		return 'none';
 	}
 
 	function setRoute(purpose: string, value: string) {
@@ -526,14 +545,32 @@
 			</SettingsField>
 			<SettingsField
 				label="Send alerts to"
-				hint="Optional. Route alerts (heartbeat failures, security and policy notices) to a louder or separate channel, e.g. ntfy for push. Leave on (default) to use the default destination."
+				hint="Optional. Route alerts (heartbeat failures, security and policy notices) to a louder or separate channel, e.g. ntfy for push. 'talk' uses your alerts channel; leave on (default) to use the default destination."
 			>
 				<Select
 					value={(profile.routing || {})['alert'] || ''}
-					options={routeOptions((profile.routing || {})['alert'] || '')}
+					options={routeOptions((profile.routing || {})['alert'] || '', {
+						talkLabel: 'talk (alerts channel)'
+					})}
 					ariaLabel="Alert delivery destination"
 					fullWidth
 					onValueChange={(v) => setRoute('alert', v)}
+				/>
+			</SettingsField>
+			<SettingsField
+				label="Send execution log to"
+				hint="Optional. The verbose per-task execution log — every tool call plus a final summary. 'talk' uses your logs channel; email and ntfy get a single final summary. (off) disables it."
+			>
+				<Select
+					value={logRouteValue()}
+					options={routeOptions(logRouteValue(), {
+						emptyValue: 'none',
+						emptyLabel: '(off)',
+						talkLabel: 'talk (logs channel)'
+					})}
+					ariaLabel="Execution log destination"
+					fullWidth
+					onValueChange={(v) => setRoute('log', v)}
 				/>
 			</SettingsField>
 			<SettingsField label="Static website hosting at /~user/" checkbox>

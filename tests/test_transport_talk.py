@@ -149,6 +149,41 @@ class TestEdit:
             MockClient.assert_not_called()
 
 
+class TestResolveChannelName:
+    @pytest.mark.asyncio
+    async def test_returns_display_name(self):
+        t = TalkTransport(_config())
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
+            inst = MockClient.return_value
+            inst.get_conversation_info = AsyncMock(
+                return_value={"displayName": "Dev Room", "token": "room123"},
+            )
+            assert await t.resolve_channel_name("room123") == "Dev Room"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_token_on_error(self):
+        t = TalkTransport(_config())
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
+            inst = MockClient.return_value
+            inst.get_conversation_info = AsyncMock(side_effect=Exception("boom"))
+            assert await t.resolve_channel_name("room123") == "room123"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_no_display_name(self):
+        t = TalkTransport(_config())
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
+            inst = MockClient.return_value
+            inst.get_conversation_info = AsyncMock(return_value={"token": "room123"})
+            assert await t.resolve_channel_name("room123") == "room123"
+
+    @pytest.mark.asyncio
+    async def test_no_nextcloud_returns_token(self):
+        t = TalkTransport(Config())
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
+            assert await t.resolve_channel_name("room123") == "room123"
+            MockClient.assert_not_called()
+
+
 def _talk_msg(**overrides):
     defaults = dict(
         id=100, actorId="alice", actorType="users",

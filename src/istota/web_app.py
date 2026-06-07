@@ -1588,6 +1588,25 @@ def _registered_delivery_surfaces() -> list[str]:
     return sorted(make_registry(_config).routable_names())
 
 
+def _user_rooms(uc) -> list[dict]:
+    """Best-effort list of Talk room tokens the UI can offer as a specific
+    ``talk:<token>`` destination — the user's auto-provisioned ``log_channel`` /
+    ``alerts_channel`` rooms. Shared by the briefings and profile endpoints so a
+    routing dropdown can pin a concrete room instead of only the bare ``talk``
+    surface (which resolves to the user's default channel / DM)."""
+    rooms: list[dict] = []
+    seen: set[str] = set()
+    if uc:
+        for label, token in (
+            ("Log channel", uc.log_channel),
+            ("Alerts channel", uc.alerts_channel),
+        ):
+            if token and token not in seen:
+                rooms.append({"token": token, "name": label})
+                seen.add(token)
+    return rooms
+
+
 _BUILTIN_DELIVERY_SURFACES = frozenset({
     "talk", "email", "ntfy", "istota_file", "stream",
 })
@@ -1692,6 +1711,12 @@ def _coerce_profile_value(field: str, value: object) -> object:
                 raise ValueError(f"route {purpose} must be a string")
             descriptor = descriptor.strip()
             if not descriptor:
+                continue
+            if descriptor.lower() == "none":
+                # Explicit "deliver nowhere" sentinel — the only way to disable a
+                # purpose that would otherwise inherit a legacy field (e.g. turn
+                # the execution log off despite a provisioned log_channel).
+                out[purpose] = "none"
                 continue
             if not parse_output_target(descriptor):
                 raise ValueError(f"route {purpose} is not a valid descriptor")
@@ -2029,20 +2054,9 @@ async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
     for r in db_rows:
         out.append(_briefing_to_dict(r, managed="db"))
 
-    rooms: list[dict] = []
-    seen_tokens: set[str] = set()
-    if uc:
-        for label, token in (
-            ("Log channel", uc.log_channel),
-            ("Alerts channel", uc.alerts_channel),
-        ):
-            if token and token not in seen_tokens:
-                rooms.append({"token": token, "name": label})
-                seen_tokens.add(token)
-
     return {
         "briefings": out,
-        "rooms": rooms,
+        "rooms": _user_rooms(uc),
         "outputs": _registered_delivery_surfaces(),
     }
 

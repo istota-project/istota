@@ -94,6 +94,13 @@
 	.field-hint {
 		font-size: var(--text-xs);
 		color: var(--text-muted);
+		/* Wrap at the same width as the inputs so long hints form a tidy column
+		   under the field instead of stretching the full container. */
+		max-width: 24rem;
+	}
+
+	.field-wide .field-hint {
+		max-width: 36rem;
 	}
 
 	.field-error {
