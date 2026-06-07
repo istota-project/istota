@@ -155,4 +155,18 @@
 	}
 	.markdown :global(pre code) { background: none; padding: 0; }
 	.markdown :global(a) { color: var(--map-path); }
+	.markdown :global(table) {
+		border-collapse: collapse;
+		margin: 0 0 0.5rem;
+		font-size: var(--text-sm);
+		display: block;
+		overflow-x: auto;
+	}
+	.markdown :global(th),
+	.markdown :global(td) {
+		border: 1px solid var(--border-subtle);
+		padding: 0.2rem 0.45rem;
+		text-align: left;
+	}
+	.markdown :global(th) { background: var(--surface-base); font-weight: 600; }
 </style>

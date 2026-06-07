@@ -1326,6 +1326,11 @@ def _chat_create_web_task(
     from . import db
     chat = _config.web.chat
     with db.get_db(_config.db_path) as conn:
+        # Take the write lock up front so the count and the insert are one
+        # critical section — a plain SELECT takes no lock under WAL, so two
+        # concurrent sends could both read under-limit and both insert,
+        # overshooting the cap (TOCTOU). BEGIN IMMEDIATE serializes them.
+        conn.execute("BEGIN IMMEDIATE")
         recent = db.count_recent_web_tasks(conn, username, chat.rate_limit_window_seconds)
         if recent >= chat.rate_limit_messages:
             return ("rate_limited", chat.rate_limit_window_seconds)
@@ -1417,6 +1422,10 @@ async def chat_send_message(
     room = await asyncio.to_thread(_chat_owned_room, username, room_id)
     if room is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
+    if room.archived:
+        # Archived rooms are hidden in the UI; reject sends so they don't keep
+        # spawning tasks and churning their channel memory behind your back.
+        return JSONResponse({"error": "room is archived"}, status_code=409)
 
     data = await request.json()
     text = (data.get("text") or "").strip()

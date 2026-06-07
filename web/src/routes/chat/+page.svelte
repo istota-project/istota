@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, tick } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { Plus, MessageSquare } from 'lucide-svelte';
 	import AppShell from '$lib/components/ui/AppShell.svelte';
 	import ShellHeader from '$lib/components/ui/ShellHeader.svelte';
@@ -23,6 +23,10 @@
 	onMount(() => {
 		session.init();
 	});
+
+	// Stop the active stream when leaving /chat so the EventSource / poll timer
+	// doesn't linger; remounting re-subscribes from persisted events.
+	onDestroy(() => session.teardown());
 
 	// Auto-scroll to the newest message whenever the list changes.
 	$effect(() => {

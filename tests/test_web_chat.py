@@ -344,6 +344,23 @@ class TestChatMessagesApi:
         assert "Retry-After" in blocked.headers
         mod._config.web.chat.rate_limit_messages = 30
 
+    async def test_send_to_archived_room_rejected(self, chat_client):
+        """An archived room must not accept new messages — it's hidden from the
+        UI and shouldn't keep spawning tasks / churning its channel memory."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        await chat_client.patch(
+            f"/istota/api/chat/rooms/{room['id']}",
+            json={"archived": True}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        resp = await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "anyone there?"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 409
+
     async def test_command_runs_inline_no_task(self, chat_client):
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)

@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web chat: file attachments now actually reach the bot. Uploaded files were saved but never linked to the message, so the bot couldn't see them; the message now carries them through, and a message can only reference files you uploaded.
 - Web chat: confirming or double-clicking a task that isn't awaiting confirmation no longer wipes a running task's live progress log.
 - Web chat: the server-side stream poll interval is now read from config instead of a fixed value.
+- Web chat: Markdown tables now render. The chat renderer gained GitHub-style pipe-table support with per-column alignment, so tabular answers (health, money, feeds data) display as real tables.
+- Web chat: fixed a rendering bug where `*` or `**` inside a link URL produced a broken link. (Not exploitable — links were already safe — but the link came out malformed.)
+- Web chat: archived rooms no longer accept new messages, and leaving the Chat tab mid-response no longer leaves a stream connection open in the background.
 
 ## [0.18.0] - 2026-06-07
 

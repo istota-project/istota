@@ -8,8 +8,8 @@
  * can use `{@html}` on the output without a separate sanitizer pass.
  *
  * Supported: fenced code blocks, inline code, bold, italic, links, headings,
- * unordered/ordered lists, and paragraphs. Everything else renders as plain
- * (escaped) text.
+ * unordered/ordered lists, tables, and paragraphs. Everything else renders as
+ * plain (escaped) text.
  */
 
 function escapeHtml(s: string): string {
@@ -22,6 +22,12 @@ function escapeHtml(s: string): string {
 
 const SAFE_URL = /^(https?:\/\/|mailto:|\/)/i;
 
+function applyEmphasis(s: string): string {
+	let out = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+	out = out.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
+	return out;
+}
+
 function renderInline(escaped: string): string {
 	// `escaped` is already HTML-escaped. We only add our own tags from here.
 	// Split out inline code first so emphasis/links inside it are left alone.
@@ -31,19 +37,65 @@ function renderInline(escaped: string): string {
 			if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
 				return `<code>${part.slice(1, -1)}</code>`;
 			}
-			let out = part;
-			// Links: [text](url) — url validated against the safe-scheme allowlist.
-			out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, text, url) => {
+			// Emit link HTML verbatim and emphasis-process only the gaps between
+			// links (and a link's own visible text). Emphasis runs over the whole
+			// string, so applying it after building links would let a `*` inside a
+			// URL inject a <strong>/<em> tag into the href attribute value — this
+			// walk keeps emphasis away from the href entirely.
+			const linkRe = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+			let out = '';
+			let last = 0;
+			let m: RegExpExecArray | null;
+			while ((m = linkRe.exec(part)) !== null) {
+				out += applyEmphasis(part.slice(last, m.index));
+				const [full, text, url] = m;
 				// `url` is escaped text; &amp; etc. don't affect scheme detection.
 				const raw = url.replace(/&amp;/g, '&');
-				if (!SAFE_URL.test(raw)) return text;
-				return `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`;
-			});
-			out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-			out = out.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
+				out += SAFE_URL.test(raw)
+					? `<a href="${url}" target="_blank" rel="noopener noreferrer">${applyEmphasis(text)}</a>`
+					: applyEmphasis(text);
+				last = m.index + full.length;
+			}
+			out += applyEmphasis(part.slice(last));
 			return out;
 		})
 		.join('');
+}
+
+function splitTableRow(line: string): string[] {
+	return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+}
+
+// Returns per-column alignment for a GitHub pipe-table separator row
+// (e.g. `|:--|--:|:-:|`), or null when the line isn't a separator.
+function parseTableAligns(sep: string): string[] | null {
+	if (!sep.includes('|')) return null;
+	const cells = splitTableRow(sep);
+	if (!cells.length || !cells.every((c) => /^:?-+:?$/.test(c))) return null;
+	return cells.map((c) =>
+		c.startsWith(':') && c.endsWith(':') ? 'center'
+		: c.endsWith(':') ? 'right'
+		: c.startsWith(':') ? 'left' : '',
+	);
+}
+
+// Alignment is from a fixed {left,right,center} set — safe to inline as style.
+function alignAttr(a: string): string {
+	return a ? ` style="text-align:${a}"` : '';
+}
+
+function renderTable(header: string[], aligns: string[], rows: string[][]): string {
+	const th = header
+		.map((c, j) => `<th${alignAttr(aligns[j] ?? '')}>${renderInline(escapeHtml(c))}</th>`)
+		.join('');
+	const body = rows
+		.map((r) =>
+			`<tr>${header
+				.map((_c, j) => `<td${alignAttr(aligns[j] ?? '')}>${renderInline(escapeHtml(r[j] ?? ''))}</td>`)
+				.join('')}</tr>`,
+		)
+		.join('');
+	return `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
 export function renderMarkdown(src: string): string {
@@ -96,6 +148,26 @@ export function renderMarkdown(src: string): string {
 			const level = Math.min(heading[1].length, 4); // cap at h4 visually
 			html.push(`<h${level}>${renderInline(escapeHtml(heading[2]))}</h${level}>`);
 			i++;
+			continue;
+		}
+
+		// Table (GitHub pipe table): a header row with pipes followed by a
+		// `---|:--:|--` separator row. Column count is fixed by the header;
+		// extra body cells are dropped and missing ones render empty.
+		const aligns = line.includes('|') && i + 1 < lines.length
+			? parseTableAligns(lines[i + 1])
+			: null;
+		if (aligns) {
+			flushPara();
+			flushList();
+			const header = splitTableRow(line);
+			i += 2;
+			const rows: string[][] = [];
+			while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
+				rows.push(splitTableRow(lines[i]));
+				i++;
+			}
+			html.push(renderTable(header, aligns, rows));
 			continue;
 		}
 
