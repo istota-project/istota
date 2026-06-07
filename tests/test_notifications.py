@@ -326,6 +326,47 @@ class TestSendNotification:
         )
 
 
+class TestSendNotificationPurposeRouting:
+    """The per-user routing table is consulted when a purpose (not an explicit
+    surface) is given — this is what makes routing={'alert': 'ntfy'} live."""
+
+    @patch("istota.notifications._send_ntfy")
+    @patch("istota.notifications._send_talk")
+    def test_purpose_routes_alert_to_ntfy(self, mock_talk, mock_ntfy):
+        mock_ntfy.return_value = True
+        config = Config(users={"alice": UserConfig(routing={"alert": "ntfy"})})
+        result = send_notification(config, "alice", "msg", purpose="alert", title="T")
+        assert result is True
+        mock_ntfy.assert_called_once()
+        mock_talk.assert_not_called()
+
+    @patch("istota.notifications._send_ntfy")
+    @patch("istota.notifications._send_talk")
+    def test_purpose_routes_to_multiple_surfaces(self, mock_talk, mock_ntfy):
+        mock_talk.return_value = True
+        mock_ntfy.return_value = True
+        config = Config(users={"alice": UserConfig(routing={"alert": "talk,ntfy"})})
+        send_notification(config, "alice", "msg", purpose="alert")
+        mock_talk.assert_called_once()
+        mock_ntfy.assert_called_once()
+
+    @patch("istota.notifications._send_talk")
+    def test_explicit_surface_overrides_purpose(self, mock_talk):
+        mock_talk.return_value = True
+        # routing says ntfy, but an explicit surface= wins.
+        config = Config(users={"alice": UserConfig(routing={"alert": "ntfy"})})
+        send_notification(config, "alice", "msg", surface="talk", purpose="alert")
+        mock_talk.assert_called_once()
+
+    @patch("istota.notifications._send_talk")
+    def test_purpose_falls_back_to_legacy_alerts_channel(self, mock_talk):
+        mock_talk.return_value = True
+        config = Config(users={"alice": UserConfig(alerts_channel="achan")})
+        send_notification(config, "alice", "msg", purpose="alert")
+        # talk delivery resolves to the legacy alerts channel.
+        assert "achan" in str(mock_talk.call_args)
+
+
 class TestResolveDestination:
     """Purpose-keyed routing table precedence."""
 

@@ -28,10 +28,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("istota.transport.routing")
 
-# Surfaces the daemon delivers to directly today. talk/email/ntfy/istota_file
-# are resolved here with the exact logic process_one_task used inline, rather
-# than through a registered transport, so Stage 1 is byte-for-byte parity.
-_BUILTIN_PUSH_SURFACES = frozenset({"talk", "email", "ntfy", "istota_file"})
 # Surfaces whose outbound is the task_events log (no push delivery).
 _STREAM_SURFACES = frozenset({"stream"})
 # Source types that must never silently drop a reply (interactive surfaces).
@@ -83,6 +79,11 @@ def parse_output_target(spec: str | None) -> list[Destination]:
         surface_raw, sep, channel_raw = token.partition(":")
         surface = surface_raw.strip().lower()
         if not surface:
+            continue
+        # `none` is the explicit "deliver nowhere" sentinel — valid both as the
+        # whole spec (handled above) and as a list leaf (e.g. a typo'd
+        # "talk,none"); drop the leaf rather than emit an unknown-surface warning.
+        if surface == "none":
             continue
         channel = channel_raw.strip() if sep else None
         if channel == "":

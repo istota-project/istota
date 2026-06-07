@@ -209,6 +209,50 @@ class TestClaimTaskChannelGate:
             assert claimed.id == t2
 
 
+class TestClaimTaskInlineOnlyExclusion:
+    """REPL tasks run inline via run_task_inline and must never be claimed by a
+    daemon worker — otherwise a running daemon double-executes the pending row
+    (second brain run + second deferred-op drain)."""
+
+    def test_claim_skips_repl_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            repl_id = db.create_task(
+                conn, prompt="hi", user_id="user1", source_type="repl",
+                conversation_token="repl-user1-abcd1234", output_target="stream",
+                queue="foreground",
+            )
+            claimed = db.claim_task(conn, "worker-1", queue="foreground")
+            assert claimed is None
+            # The REPL row is still pending, untouched.
+            assert db.get_task(conn, repl_id).status == "pending"
+
+    def test_claim_returns_nonrepl_when_both_pending(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="hi", user_id="user1", source_type="repl",
+                conversation_token="repl-user1-abcd1234", output_target="stream",
+                queue="foreground",
+            )
+            talk_id = db.create_task(
+                conn, prompt="do", user_id="user1", source_type="talk",
+                conversation_token="room1", queue="foreground",
+            )
+            claimed = db.claim_task(conn, "worker-1", queue="foreground")
+            assert claimed is not None
+            assert claimed.id == talk_id
+
+    def test_pending_user_discovery_excludes_repl(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="hi", user_id="reploner", source_type="repl",
+                conversation_token="repl-reploner-abcd1234",
+                output_target="stream", queue="foreground",
+            )
+            assert "reploner" not in db.get_users_with_pending_tasks(conn)
+            assert "reploner" not in db.get_users_with_pending_background_tasks(conn)
+            assert "reploner" not in db.get_users_with_pending_fg_queue_tasks(conn)
+
+
 class TestTaskColumnRoundTrip:
     """Every helper that returns a `Task` must preserve dispatch-relevant
     columns. A missing column in `claim_task`'s RETURNING clause masked

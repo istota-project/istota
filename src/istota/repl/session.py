@@ -68,10 +68,7 @@ def run_session(
 
     ``input_fn`` / ``stream`` are injectable for testing.
     """
-    from .. import db
     from ..brain import make_brain
-    from ..events import EventWriter
-    from ..scheduler import run_task_inline
 
     brain = make_brain(config.brain)
     sub = TerminalSubscriber(stream=stream)
@@ -85,6 +82,29 @@ def run_session(
 
     _say(f"istota repl — user={user_id} token={token}")
     _say(f"workspace={workspace_dir or '(standard temp dir)'}  (/help for commands)")
+
+    try:
+        _run_loop(
+            config, user_id, brain, sub, token, workspace_dir,
+            cur_model, cur_effort, input_fn, _say,
+        )
+    finally:
+        # A confirmed-email-reply drain (or any send_notification on the Talk
+        # surface) lazily starts the process-global asyncio runtime; reset it so
+        # the pooled httpx client's aclose hook fires on exit, matching the
+        # `istota run` / run_scheduler CLI entry points.
+        from ..async_runtime import reset_async_runtime
+        reset_async_runtime()
+
+
+def _run_loop(
+    config: "Config", user_id: str, brain, sub, token: str,
+    workspace_dir: "Path | None", cur_model: str | None, cur_effort: str | None,
+    input_fn, _say,
+) -> None:
+    from .. import db
+    from ..events import EventWriter
+    from ..scheduler import run_task_inline
 
     while True:
         try:

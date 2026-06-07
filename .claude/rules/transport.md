@@ -6,29 +6,43 @@ those into tasks. Outbound, `deliver` / `edit` push a task's result to a
 resolved channel. `TransportRegistry` holds the enabled transports and resolves
 one per task.
 
-Two concrete transports ship: `TalkTransport` and `EmailTransport`. **Matrix
-and web chat are the designed-for next consumers** — adding one is a new
-`Transport` subclass plus a line in `make_registry`, not a patch across the
-scheduler, the consumers, and the notification dispatcher.
+Five concrete transports ship: `TalkTransport`, `EmailTransport`,
+`NtfyTransport`, `IstotaFileTransport`, and `ReplTransport`. **Matrix and web
+chat are the designed-for next consumers** — adding one is a new `Transport`
+subclass plus a line in `make_registry`, not a patch across the scheduler, the
+consumers, and the notification dispatcher.
 
-This is a pure-refactor seam: no DB migration, no config change. `conversation_token`
-keeps its name and stays opaque at every consumer (it is the per-surface
-channel id); `source_type` stays the routing key. Neither was renamed.
+Transports split into two `surface_class`es (`TransportCapabilities.surface_class`):
+- **push** (`talk`, `email`, `ntfy`, `istota_file`, future Matrix) — the daemon
+  actively delivers via `Transport.deliver()` to a resolved channel.
+- **stream** (`repl`, future web chat) — outbound is the `task_events` log; the
+  client tails it. `deliver()` is a no-op; the `result`/`error`/`done` events
+  satisfy delivery.
+
+`conversation_token` keeps its name and stays opaque at every consumer (it is
+the per-surface channel id); `source_type` stays the routing key. Neither was
+renamed. (Folding ntfy + istota_file into transports and adding the REPL
+stream surface superseded the original "ntfy/istota_file are side channels"
+design — see "Outbound delivery routing" below.)
 
 ## Layout
 ```
 transport/
 ├── __init__.py   # re-exports + the public surface
-├── _types.py     # IncomingMessage, TransportCapabilities, Transport protocol
+├── _types.py     # IncomingMessage, TransportCapabilities, DeliveryOptions, Transport protocol
 ├── registry.py   # TransportRegistry, make_registry, _surface_for_source_type
+├── routing.py    # Destination, parse_output_target, resolve_delivery_plan, plan_has_surface
 ├── ingest.py     # ingest_message(conn, config, msg) -> int
-├── talk/         # Nextcloud Talk surface
+├── talk/         # Nextcloud Talk surface (push)
 │   ├── __init__.py  # TalkTransport (seam: deliver/edit/resolve + poll entry)
 │   └── inbound.py   # poll_talk_conversations + filtering/dispatch + module caches
-└── email/        # IMAP/SMTP surface
-    ├── __init__.py  # EmailTransport (seam: poll/deliver/resolve)
-    ├── inbound.py   # poll_emails + routing precedence + confirmation gate
-    └── outbound.py  # deliver_email_result + structured-output parse + sent-email record
+├── email/        # IMAP/SMTP surface (push)
+│   ├── __init__.py  # EmailTransport (seam: poll/deliver/resolve)
+│   ├── inbound.py   # poll_emails + routing precedence + confirmation gate
+│   └── outbound.py  # deliver_email_result + structured-output parse + sent-email record
+├── ntfy/         # ntfy push surface (push) — NtfyTransport + send_ntfy_async (the single ntfy POST)
+├── istota_file/  # TASKS.md result write-back (push) — IstotaFileTransport
+└── repl/         # terminal REPL (stream) — ReplTransport (deliver is a no-op; outbound is task_events)
 ```
 
 Both surfaces are subpackages because both directions live together. For Talk:
@@ -54,8 +68,14 @@ paths). It is the only email code outside `transport/email/`.
   `Task.reply_to_talk_id`; plus `user_id`, `text`, `source_type`, `surface`,
   `attachments`, `is_group_chat`, `output_target`, `model`/`effort`, `raw`.
 - **`TransportCapabilities`** (frozen) — `supports_edit`, `supports_threading`,
-  `supports_progress_ack`, `supports_typing`, `max_message_length`. Drives
-  capability-gated wiring in the scheduler instead of `source_type ==` checks.
+  `supports_progress_ack`, `supports_typing`, `max_message_length`,
+  `surface_class` (`"push"` | `"stream"`). Drives capability-gated wiring in the
+  scheduler instead of `source_type ==` checks; the delivery planner reads
+  `surface_class` to decide push-vs-stream.
+- **`DeliveryOptions`** (frozen) — optional per-delivery metadata passed
+  alongside `deliver(target, text, *, options=…)`: `title` / `priority` /
+  `tags`. `NtfyTransport.deliver` reads them; surfaces that don't use them
+  ignore them. A typed object rather than untyped `**extra`.
 - **`Transport`** (`@runtime_checkable` Protocol) — `name`, `capabilities`, and
   `async poll() -> list[IncomingMessage]`, `async deliver(target, text, *, task,
   reply_to, reference_id, threaded) -> int | None`, `async edit(target,
@@ -73,18 +93,17 @@ amputating email's needs.)
 `make_registry(config)` does **no I/O on construction** (`TalkClient.__init__`
 only stores credentials), so callers without a registry in scope — notably
 `notifications.send_notification`, called from heartbeat / scheduled jobs — can
-build one on demand. Only enabled surfaces are registered (`talk.enabled`,
-`email.enabled`).
+build one on demand. Talk is registered when `talk.enabled` and email when
+`email.enabled`; `ntfy`, `istota_file`, and `repl` are registered
+unconditionally (per-user / per-task gating happens in their `resolve_target` /
+`deliver`, not at construction).
 
-`_surface_for_source_type`: `email` → `"email"`; everything else (talk,
-briefing, scheduled, subtask, heartbeat, cli, istota_file, unknown) → `"talk"`,
-the existing default. `registry.for_task(task)` uses it to resolve the primary
-delivery transport.
-
-ntfy and `istota_file` are **not** transports — ntfy is one-way push, istota_file
-writes a file. They stay as fan-out side channels (`notifications` / the file
-handler). A task with `output_target="all"` posts to Talk + email via their
-transports and pushes ntfy via `notifications`.
+`_surface_for_source_type` (the *inbound* source_type → primary surface map):
+`email` → `"email"`; `repl` → `"repl"`; everything else (talk, briefing,
+scheduled, subtask, heartbeat, cli, istota_file, unknown) → `"talk"`, the
+existing default. `registry.for_task(task)` uses it to resolve the primary
+delivery transport. Outbound fan-out (a task delivering to several surfaces) is
+the delivery planner's job, not this map — see below.
 
 ## Inbound
 
@@ -154,6 +173,63 @@ use across its own boundary.
   call shape).
 - **`LogChannelSubscriber`** delivers the log-channel message through
   `TalkTransport` (the log channel is always a Talk room today).
+
+## Outbound delivery routing (`routing.py`)
+
+The single source of truth for "where does a task's result go". A **destination**
+is `surface[:channel]`; a task's `output_target` column is a comma-separated list
+of them.
+
+- **`parse_output_target(spec) -> list[Destination]`** (pure, no I/O) — splits
+  on commas, normalizes the legacy compound aliases (`both` → talk+email,
+  `all` → talk+email+ntfy), parses each `surface[:channel]` leaf, dedups. `None`
+  / empty / `"none"` (whole spec *or* a list leaf) → dropped. Surface validity
+  is **not** checked here.
+- **`resolve_delivery_plan(config, task, registry) -> list[Destination]`** —
+  turns a task into the ordered, deduplicated, channel-resolved destinations the
+  scheduler delivers to. Precedence: explicit `output_target` > reply-to-origin
+  (interactive source types: `talk` / `email` / `repl`) > source-type default >
+  drop. Each destination has its channel filled (Talk via
+  `_talk_target_for_delivery`) or is dropped with a WARNING (unregistered
+  surface, or a configured surface whose user-level channel resolves to `None`).
+  **Never raises** — plan resolution must not abort task finalization. An empty
+  post-drop plan for an interactive source type falls back to reply-to-origin so
+  a misconfigured `output_target` can't silently eat a reply.
+- **`plan_has_surface(plan, surface) -> bool`** — the replacement for the old
+  `target in ("talk", "both", "all")` string checks. `process_one_task`
+  precomputes `plan_talk` / `plan_email` / `plan_ntfy` / `plan_file` from the
+  resolved plan and branches on those.
+
+`process_one_task` builds the plan once (`make_registry(config)` +
+`resolve_delivery_plan`) and fans out to every push destination. A confirmation
+prompt is eligible only when Talk is in the plan **and** ntfy is not (the `all`
+broadcast target is a fan-out notification, not an interactive turn — mirrors
+main's deliberate exclusion of `all` from the confirmation gate). `stream`
+destinations (REPL) contribute no push work — the `task_events` log is the
+delivery.
+
+### Purpose-keyed routing table (`notifications.py`)
+
+Distinct from `resolve_delivery_plan` (which routes task *results* by
+`output_target`), the per-user **routing table** routes *notifications* by
+*purpose*. `PURPOSES = (reply, alert, log, briefing, notification)`. Each user's
+`UserConfig.routing` maps a purpose → an `output_target` descriptor (e.g.
+`{"alert": "ntfy"}`), persisted in the `user_profiles.routing` JSON column.
+
+- **`resolve_destinations(config, user_id, purpose) -> list[Destination]`** —
+  precedence: `routing[purpose]` descriptor (full comma list) > legacy fields
+  (`alerts_channel` → alert, `log_channel` → log, first briefing token →
+  briefing) > `default_destination` > `[talk]`.
+- **`send_notification(..., surface=None, purpose=None)`** — an explicit
+  `surface` wins (e.g. a heartbeat check's own channel, push.py's `ntfy`); else
+  `purpose` resolves through the routing table; else bare `talk`. This is what
+  makes `routing={"alert": "ntfy"}` actually reroute alerts. Wired purposes:
+  heartbeat alerts (`effective_alert_surface` — a check with no explicit
+  `channel` defers to `routing["alert"]`), policy-refusal + deferred
+  security/action alerts (`alert`), email-sent notices (`notification`).
+- Set via `istota user ensure --route purpose=descriptor` (validated against
+  `PURPOSES`) or the web `/settings` Preferences card; both go through the same
+  `user_profiles` row.
 
 ## Known residuals (candidates for a later sweep)
 

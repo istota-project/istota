@@ -825,6 +825,7 @@ def cmd_user_ensure(args):
             sys.exit(1)
         updates["default_destination"] = args.default_destination or "talk"
     if args.route is not None:
+        from .notifications import PURPOSES
         from .transport import parse_output_target
         routing: dict[str, str] = {}
         for entry in args.route:
@@ -834,6 +835,15 @@ def cmd_user_ensure(args):
             if not sep or not purpose:
                 print(
                     f"Error: --route expects purpose=descriptor, got {entry!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            # Reject unknown purposes — a typo would persist a dead routing entry
+            # that nothing reads (mirrors the web settings validator).
+            if purpose not in PURPOSES:
+                print(
+                    f"Error: unknown route purpose {purpose!r}; expected one of "
+                    f"{', '.join(PURPOSES)}",
                     file=sys.stderr,
                 )
                 sys.exit(1)
