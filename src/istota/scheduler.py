@@ -2163,6 +2163,12 @@ def run_cleanup_checks(config: Config) -> None:
                     ctx = _location.resolve_for_user(uid, config, conn=fw_conn)
                 except _location.UserNotFoundError:
                     continue
+                # No location.db yet (user never ingested a ping) → nothing
+                # to clean up. The file + parent dir are created on first
+                # webhook write; connecting before then raises "unable to
+                # open database file".
+                if not ctx.db_path.exists():
+                    continue
                 try:
                     with _location.connect(ctx.db_path) as conn:
                         deleted = _location.db.cleanup_old_pings(
@@ -2224,6 +2230,10 @@ def _reconcile_visits_for_all_users(config: Config) -> None:
             try:
                 ctx = _location.resolve_for_user(uid, config, conn=fw_conn)
             except _location.UserNotFoundError:
+                continue
+            # No location.db yet (user never ingested a ping) → no visits
+            # to reconcile. See the matching guard in run_cleanup_checks.
+            if not ctx.db_path.exists():
                 continue
             try:
                 with _location.connect(ctx.db_path) as conn:
