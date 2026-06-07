@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Native-brain tasks lost their conversation context.** Context triage still shelled out to the `claude` CLI even under the native brain, where there's no login token, so the CLI failed and context silently collapsed to the last few messages. Triage now runs through the task's own brain — native tasks use their own provider, Claude Code tasks keep the CLI. Triage also fails open on any error now, keeping all older messages instead of dropping them.
+
 ## [0.17.0] - 2026-06-06
 
 ### Added
