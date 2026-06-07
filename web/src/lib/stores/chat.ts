@@ -90,7 +90,14 @@ function createSession(): ChatSession {
 	let cidCounter = 0;
 	const nextCid = () => ++cidCounter;
 	let pollIntervalMs = 1500;
+	// The single in-flight stream for the active room, plus a FIFO of tasks
+	// waiting their turn. A room runs one task at a time (the backend's
+	// per-channel claim gate serializes them), so the UI streams them in order:
+	// start one, queue the rest, advance when the active one settles. Different
+	// rooms run concurrently on the backend; switching rooms tears this down and
+	// resumes from the new room's history.
 	let activeStream: { stop: () => void } | null = null;
+	let streamQueue: { taskId: number; cid: number }[] = [];
 
 	const updateMsg = (cid: number, fn: (m: ChatMessage) => void) => {
 		messages.update((arr) => {
@@ -192,14 +199,26 @@ function createSession(): ChatSession {
 		let es: EventSource | null = null;
 		let pollTimer: ReturnType<typeof setInterval> | null = null;
 		let finished = false;
+		// A task parked awaiting confirmation owns its room until the user acts —
+		// hold the queue rather than advancing past it.
+		let paused = false;
 
-		const finish = () => {
+		// Stop the stream without touching the queue. Used both as the terminal
+		// path (settle, below) and as the external "stop now" hook for room
+		// switches / unmount.
+		const halt = () => {
 			if (finished) return;
 			finished = true;
 			if (es) { es.close(); es = null; }
 			if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-			status.set('idle');
-			activeTaskId.set(null);
+		};
+
+		// Natural terminal: halt, then let the session advance to the next queued
+		// task (or go idle) — unless we paused for a confirmation.
+		const settle = () => {
+			if (finished) return;
+			halt();
+			onStreamSettled(paused);
 		};
 
 		const handle = (kind: string, dataStr: string, seq: number) => {
@@ -207,7 +226,8 @@ function createSession(): ChatSession {
 			let payload: Record<string, any> = {};
 			try { payload = JSON.parse(dataStr); } catch { /* keep {} */ }
 			applyEvent(cid, kind, payload);
-			if (kind === 'done' || kind === 'cancelled') finish();
+			if (kind === 'confirmation') paused = true;
+			if (kind === 'done' || kind === 'cancelled') settle();
 		};
 
 		const poll = async () => {
@@ -246,53 +266,99 @@ function createSession(): ChatSession {
 			startPolling();
 		}
 
-		return { stop: finish };
+		return { stop: halt };
 	}
 
-	function beginStream(taskId: number, cid: number) {
-		if (activeStream) activeStream.stop();
+	// Start streaming `taskId` immediately. Caller guarantees no stream is active.
+	function startStream(taskId: number, cid: number) {
 		status.set('streaming');
 		activeTaskId.set(taskId);
 		activeStream = streamTask(taskId, cid);
 	}
 
+	// Stream now, or queue behind the active stream. Queued placeholders show a
+	// "Queued…" line until their turn (task_started then stamps the real verb).
+	function enqueueStream(taskId: number, cid: number) {
+		if (activeStream) {
+			// Insert in taskId order: ids are monotonic with backend execution
+			// order, and concurrent send() POSTs can resolve out of order, so a
+			// plain push could stream them in the wrong sequence.
+			const at = streamQueue.findIndex((q) => q.taskId > taskId);
+			if (at === -1) streamQueue.push({ taskId, cid });
+			else streamQueue.splice(at, 0, { taskId, cid });
+			updateMsg(cid, (m) => { if (!m.progress) m.progress = 'Queued…'; });
+			// A stream is still running — keep the room in the streaming state
+			// (send() flipped it to 'sending' optimistically before the POST).
+			status.set('streaming');
+		} else {
+			startStream(taskId, cid);
+		}
+	}
+
+	// The active stream reached a terminal state. If it paused for a
+	// confirmation, hold the queue (the user must confirm/reject first).
+	// Otherwise advance to the next queued task, or go idle.
+	function onStreamSettled(paused: boolean) {
+		activeStream = null;
+		if (!paused) {
+			const next = streamQueue.shift();
+			if (next) { startStream(next.taskId, next.cid); return; }
+		}
+		status.set('idle');
+		activeTaskId.set(null);
+	}
+
+	// Halt the active stream and drop the queue without advancing — for room
+	// switches and unmount. Remounting/reselecting resumes from history.
+	function stopActive() {
+		if (activeStream) { activeStream.stop(); activeStream = null; }
+		streamQueue = [];
+		status.set('idle');
+		activeTaskId.set(null);
+	}
+
 	async function loadHistory(roomId: number) {
 		const hist = await getRoomMessages(roomId);
-		const msgs: ChatMessage[] = hist.messages.map((m) => ({
-			cid: nextCid(),
-			role: m.role,
-			text: m.text,
-			taskId: m.task_id,
-			status: m.status,
-			confirmation: !!m.confirmation,
-			tools: [],
-			streaming: false,
-			createdAt: m.created_at,
-		}));
+		// taskId → cid for assistant placeholders, so an in-flight task's stream
+		// binds to the message the server already laid out in order.
+		const cidByTask = new Map<number, number>();
+		const inFlight = (s?: string) => s === 'pending' || s === 'locked' || s === 'running';
+		const msgs: ChatMessage[] = hist.messages.map((m) => {
+			const cid = nextCid();
+			if (m.role === 'assistant' && typeof m.task_id === 'number') {
+				cidByTask.set(m.task_id, cid);
+			}
+			return {
+				cid,
+				role: m.role,
+				text: m.text,
+				taskId: m.task_id,
+				status: m.status,
+				confirmation: !!m.confirmation,
+				tools: [],
+				streaming: m.role === 'assistant' && inFlight(m.status),
+				createdAt: m.created_at,
+			};
+		});
 		messages.set(msgs);
 
-		if (hist.active_task) {
-			const at = hist.active_task;
-			let cid = 0;
-			messages.update((arr) => {
-				const existing = [...arr].reverse().find(
-					(x) => x.role === 'assistant' && x.taskId === at.id,
-				);
-				if (existing) {
-					cid = existing.cid;
-					if (at.status !== 'pending_confirmation') existing.streaming = true;
-				} else {
-					const ph: ChatMessage = {
-						cid: nextCid(), role: 'assistant', text: '', taskId: at.id,
-						status: at.status, tools: [], streaming: true,
-						createdAt: new Date().toISOString(),
-					};
-					arr.push(ph);
-					cid = ph.cid;
-				}
-				return arr;
-			});
-			if (at.status !== 'pending_confirmation') beginStream(at.id, cid);
+		// Resume the room's in-flight tasks in order: the first streams, the rest
+		// queue behind it. A leading pending_confirmation is left parked (its card
+		// is shown) — the user must act before the queue moves.
+		const actives = hist.active_tasks ?? (hist.active_task ? [hist.active_task] : []);
+		for (const at of actives) {
+			if (at.status === 'pending_confirmation') continue;
+			let cid = cidByTask.get(at.id);
+			if (cid == null) {
+				const ph: ChatMessage = {
+					cid: nextCid(), role: 'assistant', text: '', taskId: at.id,
+					status: at.status, tools: [], streaming: true,
+					createdAt: new Date().toISOString(),
+				};
+				messages.update((arr) => { arr.push(ph); return arr; });
+				cid = ph.cid;
+			}
+			enqueueStream(at.id, cid);
 		}
 	}
 
@@ -316,7 +382,7 @@ function createSession(): ChatSession {
 
 	async function selectRoom(id: number) {
 		if (get(activeRoomId) === id) return;
-		if (activeStream) { activeStream.stop(); activeStream = null; }
+		stopActive();
 		activeRoomId.set(id);
 		saveSetting('chat.activeRoomId', id);
 		messages.set([]);
@@ -390,7 +456,9 @@ function createSession(): ChatSession {
 			return;
 		}
 		updateMsg(phCid, (m) => { m.taskId = res.task_id!; m.status = 'pending'; });
-		beginStream(res.task_id, phCid);
+		// Stream now if the room is free, otherwise queue behind the in-flight
+		// task. The backend gate keeps this task pending until its turn either way.
+		enqueueStream(res.task_id, phCid);
 	}
 
 	async function cancel() {
@@ -408,7 +476,9 @@ function createSession(): ChatSession {
 			m.streaming = true;
 			m.error = false;
 		});
-		beginStream(taskId, cid);
+		// The confirmed task resumes ahead of anything queued behind it. The
+		// stream paused (so no stream is active); enqueueStream starts it now.
+		enqueueStream(taskId, cid);
 	}
 
 	async function reject(cid: number, taskId: number) {
@@ -419,8 +489,9 @@ function createSession(): ChatSession {
 			m.streaming = false;
 			m.text = m.text ? `~~${m.text}~~` : '_(declined)_';
 		});
-		status.set('idle');
-		activeTaskId.set(null);
+		// The parked confirmation was holding the queue; release it so the next
+		// queued message (if any) starts.
+		onStreamSettled(false);
 	}
 
 	// Stop the active SSE / poll loop without cancelling the task. The route
@@ -428,7 +499,7 @@ function createSession(): ChatSession {
 	// EventSource (or poll timer) running; remounting re-subscribes from the
 	// persisted task_events via loadHistory, so no progress is lost.
 	function teardown() {
-		if (activeStream) { activeStream.stop(); activeStream = null; }
+		stopActive();
 	}
 
 	return {

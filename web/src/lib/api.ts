@@ -1397,7 +1397,11 @@ export interface ChatHistoryMessage {
 
 export interface ChatHistory {
 	messages: ChatHistoryMessage[];
+	// Oldest in-flight task (back-compat). Prefer active_tasks.
 	active_task: { id: number; status: string } | null;
+	// All in-flight tasks for the room, oldest-first. The room runs them one at
+	// a time; the client resumes the first and queues the rest in this order.
+	active_tasks?: { id: number; status: string }[];
 }
 
 export interface SendResult {

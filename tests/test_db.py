@@ -208,6 +208,41 @@ class TestClaimTaskChannelGate:
             assert claimed is not None
             assert claimed.id == t2
 
+    def test_pending_confirmation_blocks_channel(self, db_path):
+        """A task parked awaiting confirmation owns its channel — the next
+        queued message in the same room must wait (web chat single-active-per-
+        room), but a different room stays claimable."""
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="do thing 1", user_id="user1",
+                source_type="web", conversation_token="room1",
+                queue="foreground",
+            )
+            db.set_task_confirmation(conn, t1, "Proceed?")
+
+            db.create_task(
+                conn, prompt="do thing 2", user_id="user1",
+                source_type="web", conversation_token="room1",
+                queue="foreground",
+            )
+            other = db.create_task(
+                conn, prompt="other room", user_id="user1",
+                source_type="web", conversation_token="room2",
+                queue="foreground",
+            )
+
+            # Same-room message is blocked behind the parked confirmation;
+            # the other room's task is claimed instead.
+            claimed = db.claim_task(conn, "worker-1", queue="foreground")
+            assert claimed is not None
+            assert claimed.id == other
+
+            # Resolving the confirmation (confirm → pending) unblocks room1.
+            db.confirm_task(conn, t1)
+            claimed = db.claim_task(conn, "worker-2", queue="foreground")
+            assert claimed is not None
+            assert claimed.id == t1
+
 
 class TestClaimTaskInlineOnlyExclusion:
     """REPL tasks run inline via run_task_inline and must never be claimed by a
