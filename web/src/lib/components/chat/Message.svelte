@@ -107,7 +107,9 @@
 	.msg {
 		display: flex;
 		gap: 0.6rem;
-		padding: 0.1rem 0.75rem;
+		/* Extra bottom padding so the hover highlight isn't flush with the last
+		   line of text. */
+		padding: 0.1rem 0.75rem 0.45rem;
 		align-items: flex-start;
 	}
 	.msg:not(.continuation) { margin-top: 0.7rem; padding-top: 0.15rem; }
