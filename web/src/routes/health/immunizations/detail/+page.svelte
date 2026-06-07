@@ -345,7 +345,9 @@
 	}
 	.empty {
 		color: var(--text-dim);
-		padding: 2rem 0;
+		font-size: var(--text-base);
+		padding: 2rem 1rem;
+		text-align: center;
 	}
 
 	.linked {

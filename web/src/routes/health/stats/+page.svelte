@@ -488,7 +488,12 @@
 	.log-btn:hover {
 		background: var(--surface-raised);
 	}
-	.empty { color: var(--text-dim); padding: 2rem 0; }
+	.empty {
+		color: var(--text-dim);
+		font-size: var(--text-base);
+		padding: 2rem 1rem;
+		text-align: center;
+	}
 	.link {
 		background: none;
 		border: none;

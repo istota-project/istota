@@ -516,7 +516,9 @@
 
 	.empty {
 		color: var(--text-dim);
-		padding: 1.25rem 0;
+		font-size: var(--text-base);
+		padding: 2rem 1rem;
+		text-align: center;
 	}
 	.empty.small {
 		padding: 0.5rem 0;
