@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-06-06
+
 ### Added
 - **The native brain reaches parity with the Claude Code brain on four fronts.** Reasoning effort now flows through to thinking-capable models. Prompt caching marks cache breakpoints (on by default against Anthropic, off for other endpoints) and logs a per-task cache hit-rate. A mid-task context overflow is recovered by compacting the conversation and continuing instead of failing the task. Image-bearing tool results are passed through to vision models. All native-brain only; the Claude Code brain is unchanged.
 - **The Bash tool can keep noisy command output out of the model's context.** A command can stream its full output to you while the model sees only a short stub, so large or repetitive output doesn't crowd the context window. Failure markers still ride along on the stub, so a failed command is never mistaken for a success.
@@ -610,7 +612,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.16.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.17.0...main
+[0.17.0]: https://gitlab.com/cynium/istota/-/releases/v0.17.0
 [0.16.0]: https://gitlab.com/cynium/istota/-/releases/v0.16.0
 [0.15.1]: https://gitlab.com/cynium/istota/-/releases/v0.15.1
 [0.15.0]: https://gitlab.com/cynium/istota/-/releases/v0.15.0
