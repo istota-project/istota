@@ -2,6 +2,44 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-07: Web chat — live progress, shared verbs, single tool box, spinner fix
+
+Follow-up polish on the web chat streaming UI. Four asks plus two bugs found along the way.
+
+**Live progress instead of "Thinking…".** The in-progress status line only updated on `progress_text` events, so before/between them it showed a hardcoded "Thinking…". The intermediate text now drives it directly.
+
+**Shared progress verbs (global).** The whimsical Talk ack verbs ("On it…", "Hmm…", "Inking…") lived as a `*…*`-wrapped list in `scheduler.py`. Moved them to `events.py` as plain, surface-agnostic text plus a `random_progress_message()` helper, so every output surface draws from one list. The executor stamps one onto the `task_started` event payload; the web store shows it as the initial status until the first tool/text event. Talk keeps picking its own at ack time and applies its italic there (`*{verb}*`). `scheduler` re-exports `PROGRESS_MESSAGES` so existing imports/tests keep working; the one test asserting the verbs were italic now asserts they're plain.
+
+**Single tool box (replaces per-chip expand).** The old UI was a row of `ToolChip`s, each expanding on click. New `ToolStrip` component: minimized it shows the active (running) tool with its description, or a "✓ N tool calls" summary once done; clicking expands to the full list of tool calls. Live `tool_progress` output attaches to the running tool and shows in the box. `ToolChip.svelte` deleted.
+
+**Completion shown (spinner-forever bug).** Tool `running` only cleared on `tool_end`, which **only the NativeBrain emits** — under the Claude Code brain tools spun forever after the task finished. Added `finalizeTools()` on every terminal event (`result`/`error`/`cancelled`/`done`) to freeze running tools; `success` stays undefined (unknown) so the box shows a neutral done check rather than a false success/fail.
+
+**Bug — transient "Something went wrong."** The SSE listener loop registered a handler for the `error` event kind, which collides with the browser's native data-less EventSource connection-`error` event. In the mock (and on any real reconnect) that rendered a connection blip as a task error before the polling fallback corrected it. Guarded with `if (e.data == null) return` so only server-sent `event: error` (which always carries data) is treated as a task error; `es.onerror` still drives the polling fallback.
+
+**Bug — chevron alignment.** The `ToolStrip` icon slots were plain spans, so the lucide SVGs sat on the text baseline and looked off. Made the icon slots `inline-flex` + centered. (Icons were already lucide — the library used throughout.)
+
+Separation of concerns settled: the status line carries *generic* progress (shared verbs + intermediate text); the tool box carries *tool* activity. The status line is suppressed while a tool is actively running so the two don't compete. Verified end-to-end in the browser against the mock backend (running → completed → expand), plus `svelte-check` / `npm run build` clean and backend tests green (events/progress 38, executor 261).
+
+**Key changes:**
+- Shared `PROGRESS_MESSAGES` + `random_progress_message()` in `events.py`; executor stamps a verb onto `task_started`; Talk italicizes its own pick.
+- `ToolStrip` single-box tool UI (active tool + details, expand-to-all); `ToolChip` removed.
+- `finalizeTools()` on terminal events fixes the never-ending tool spinner under the Claude Code brain.
+- SSE native-`error` guard fixes the transient "Something went wrong." flash.
+- Tool-box icon alignment fix.
+- Chat added as the first dashboard feature card (gated on the always-on `chat` feature).
+
+**Files added/modified:**
+- `web/src/routes/+page.svelte` - Chat dashboard card (first)
+- `web/src/lib/components/chat/ToolStrip.svelte` - new single tool box (replaces ToolChip)
+- `web/src/lib/components/chat/Message.svelte` - use ToolStrip, suppress status line while a tool runs
+- `web/src/lib/stores/chat.ts` - task_started verb, tool_progress on the tool, finalizeTools, SSE error guard, ToolEntry.progress
+- `src/istota/events.py` - shared PROGRESS_MESSAGES + random_progress_message()
+- `src/istota/scheduler.py` - import/re-export shared verbs; italicize the Talk ack pick
+- `src/istota/executor.py` - stamp a verb onto the task_started event
+- `web/vite-mock-api.ts` - task_started carries a verb in the mock
+- `tests/test_scheduler.py` - verbs-are-plain assertion
+- `CHANGELOG.md` - Unreleased Changed/Fixed entries
+
 ## 2026-06-07: Web chat — Discord/Slack styling, markdown-it, real names
 
 Visual polish on the now-working web chat surface. Two asks: move off messenger-style bubbles toward a Discord/Slack transcript, and stop hand-rolling Markdown.

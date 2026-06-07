@@ -41,7 +41,7 @@ from .brain import (
     ToolUseEvent,
     make_brain,
 )
-from .events import EventWriter
+from .events import EventWriter, random_progress_message
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 
 logger = logging.getLogger("istota.executor")
@@ -2455,7 +2455,11 @@ def execute_task(
 
     try:
         if event_writer is not None:
-            event_writer.emit("task_started")
+            # Stamp a generic progress verb so stream surfaces (web chat) show a
+            # real "working on it" line instead of a hardcoded placeholder until
+            # the first tool/text event arrives. Talk ignores this payload and
+            # picks its own verb at ack time; both draw from the same list.
+            event_writer.emit("task_started", {"text": random_progress_message()})
         use_streaming = event_writer is not None
         allowed = build_allowed_tools(is_admin, selected_skills)
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,6 +34,66 @@ from typing import Any, Literal, Protocol
 logger = logging.getLogger("istota.events")
 
 PAYLOAD_MAX_BYTES = 8192
+
+# Generic "working on it" progress verbs, surface-agnostic (no markup) so every
+# output surface draws from one list. The executor stamps one onto the
+# ``task_started`` event so a stream surface (web chat) shows a real verb instead
+# of a hardcoded placeholder; the Talk ack picks one too (and italicizes it
+# itself). Tool-specific progress comes from ``agent.events._describe_tool_use``,
+# not here.
+PROGRESS_MESSAGES = [
+    "On it...",
+    "Hmm...",
+    "Heard, chef...",
+    "Investigating...",
+    "One sec...",
+    "Copy that...",
+    "Roger...",
+    "Considering...",
+    "Thinkifying...",
+    "Braining...",
+    "Improvising...",
+    "Jamming...",
+    "Riffing...",
+    "Grooving...",
+    "Beboppin'...",
+    "Noodling...",
+    "Syncopating...",
+    "Comping...",
+    "Soloing...",
+    # Cephalopod
+    "Inking...",
+    "Tentacling...",
+    "Suckering...",
+    "Jetting...",
+    "Unfurling...",
+    "Chromatophoring...",
+    "Squidding...",
+    "Grasping...",
+    "Probing...",
+    "Siphoning...",
+    # Cheeky
+    "Instigating...",
+    "Scheming...",
+    "Concocting...",
+    "Percolating...",
+    "Marinating...",
+    "Hatching...",
+    "Sleuthing...",
+    "Finagling...",
+    "Wrangling...",
+    "Tinkering...",
+    "Rummaging...",
+    "Conjuring...",
+    "Fermenting...",
+    "Machinating...",
+    "Gallivanting...",
+]
+
+
+def random_progress_message() -> str:
+    """A random surface-agnostic progress verb (plain text, no markup)."""
+    return random.choice(PROGRESS_MESSAGES)
 
 EventKind = Literal[
     "task_started",        # executor picked up the task

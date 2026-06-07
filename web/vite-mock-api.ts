@@ -130,7 +130,7 @@ function mockTaskEvents(task: MockChatTask) {
 		'- Streaming, tools, and `markdown` all render here.\n\n' +
 		'Try `!help` for commands.';
 	return [
-		{ seq: 1, kind: 'task_started', payload: {}, at: 0 },
+		{ seq: 1, kind: 'task_started', payload: { text: 'On it...' }, at: 0 },
 		{ seq: 2, kind: 'progress_text', payload: { text: 'Looking into it…' }, at: 300 },
 		{ seq: 3, kind: 'tool_start', payload: { tool_name: 'calendar', description: 'calendar list --date today', tool_call_id: 'c1' }, at: 700 },
 		{ seq: 4, kind: 'tool_end', payload: { tool_name: 'calendar', tool_call_id: 'c1', success: true, duration_ms: 420 }, at: 1300 },

@@ -30,6 +30,8 @@ export interface ToolEntry {
 	description: string;
 	running: boolean;
 	success?: boolean;
+	// Live incremental output while the tool runs (NativeBrain tool_progress).
+	progress?: string;
 }
 
 export interface ChatMessage {
@@ -96,20 +98,45 @@ function createSession(): ChatSession {
 		});
 	};
 
+	// Mark every still-running tool as finished. Required because the Claude
+	// Code brain never emits tool_end — without this, tool spinners would spin
+	// forever once the task completes. success stays undefined (unknown) so the
+	// UI shows a neutral "done" rather than a real success/fail mark.
+	const finalizeTools = (m: ChatMessage) => {
+		for (const t of m.tools) t.running = false;
+	};
+
 	function applyEvent(cid: number, kind: string, payload: Record<string, any>) {
 		updateMsg(cid, (m) => {
 			switch (kind) {
+				case 'task_started':
+					// Generic "working on it" verb stamped by the executor (shared
+					// with Talk). Shows a real status line until the first tool or
+					// text event replaces it.
+					if (payload.text) m.progress = String(payload.text);
+					break;
 				case 'progress_text':
 					m.progress = String(payload.text ?? '');
 					break;
-				case 'tool_start':
+				case 'tool_start': {
+					const name = String(payload.tool_name ?? 'tool');
+					const description = String(payload.description ?? '');
 					m.tools.push({
 						id: String(payload.tool_call_id ?? `t${m.tools.length}`),
-						name: String(payload.tool_name ?? 'tool'),
-						description: String(payload.description ?? ''),
+						name,
+						description,
 						running: true,
 					});
 					break;
+				}
+				case 'tool_progress': {
+					// Incremental tool output (NativeBrain) — attach to the running
+					// tool so the tool box shows live detail.
+					const txt = String(payload.text ?? '');
+					const t = m.tools.find((x) => x.id === String(payload.tool_call_id));
+					if (t && txt) t.progress = txt;
+					break;
+				}
 				case 'tool_end': {
 					const t = m.tools.find((x) => x.id === String(payload.tool_call_id));
 					if (t) {
@@ -122,6 +149,7 @@ function createSession(): ChatSession {
 					m.text = String(payload.text ?? '');
 					m.progress = undefined;
 					m.streaming = false;
+					finalizeTools(m);
 					break;
 				case 'confirmation':
 					m.text = String(payload.prompt ?? '');
@@ -129,17 +157,26 @@ function createSession(): ChatSession {
 					m.status = 'pending_confirmation';
 					m.progress = undefined;
 					m.streaming = false;
+					finalizeTools(m);
 					break;
 				case 'error':
 					m.text = String(payload.message ?? 'Something went wrong.');
 					m.error = true;
 					m.progress = undefined;
 					m.streaming = false;
+					finalizeTools(m);
 					break;
 				case 'cancelled':
 					if (!m.text) m.text = '_(cancelled)_';
 					m.progress = undefined;
 					m.streaming = false;
+					finalizeTools(m);
+					break;
+				case 'done':
+					// Terminal safety net: if no result/error/cancelled arrived,
+					// still stop streaming and freeze any running tools.
+					m.streaming = false;
+					finalizeTools(m);
 					break;
 			}
 		});
@@ -184,9 +221,14 @@ function createSession(): ChatSession {
 		try {
 			es = new EventSource(chatStreamUrl(taskId), { withCredentials: true });
 			for (const k of STREAM_KINDS) {
-				es.addEventListener(k, (e: MessageEvent) =>
-					handle(k, e.data, Number(e.lastEventId) || 0),
-				);
+				es.addEventListener(k, (e: MessageEvent) => {
+					// The browser fires a native 'error' event (no data) on the
+					// EventSource for connection failures, which collides with our
+					// server-sent `event: error` task error. Ignore the data-less
+					// native one — es.onerror handles the fallback to polling.
+					if (e.data == null) return;
+					handle(k, e.data, Number(e.lastEventId) || 0);
+				});
 			}
 			es.onerror = () => {
 				if (finished) return;
