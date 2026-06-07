@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- New `<namespace>-run` host wrapper for ad-hoc CLI use in production. It self-sudoes into the service user, loads the same secret bundle and admins file the daemon uses, and passes its arguments straight through to the `istota` CLI — so an interactive REPL is just `istota-run repl -u <user>` instead of a long hand-built environment incantation. Deployed by Ansible; the caller needs sudo rights.
+
 ### Changed
 - The per-user delivery-routing settings are simpler. The Preferences page previously showed a five-row "per purpose" matrix (reply/alert/log/briefing/notification), most of which duplicated dedicated settings or did nothing. It now shows a default delivery destination plus a single optional "Send alerts to" override for heartbeat and security alerts. Finer per-purpose routes are still settable from the CLI, and any existing CLI-set routes are preserved.
 - Briefings can now be sent to ntfy, and the output picker shows the real delivery surfaces (talk / email / ntfy) instead of the old `talk`/`email`/`both` choices. The legacy `both` value still works everywhere it was already saved.
