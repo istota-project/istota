@@ -22,14 +22,75 @@ if TYPE_CHECKING:
 logger = logging.getLogger("istota.notifications")
 
 
+# Purpose names for the per-user routing table.
+PURPOSES = ("reply", "alert", "log", "briefing", "notification")
+
+
+def resolve_destination(config: "Config", user_id: str, purpose: str):
+    """Resolve the delivery ``Destination`` for a user + purpose. Surface-agnostic.
+
+    Precedence:
+      1. the user's ``routing[purpose]`` descriptor (first destination),
+      2. legacy per-purpose fields (alerts_channel → ``alert``;
+         log_channel → ``log``; first briefing token → ``briefing`` / ``reply``),
+      3. the user's ``default_destination`` descriptor,
+      4. instance fallback ``talk`` (channel ``None`` → resolve at delivery / DM).
+
+    The returned ``Destination`` may carry ``channel=None`` for Talk, meaning
+    "resolve the user's Talk channel at delivery time."
+    """
+    from .transport import Destination, parse_output_target
+
+    uc = config.users.get(user_id)
+
+    if uc and uc.routing:
+        spec = uc.routing.get(purpose)
+        if spec:
+            dests = parse_output_target(spec)
+            if dests:
+                return dests[0]
+
+    if uc:
+        if purpose == "alert" and uc.alerts_channel:
+            return Destination("talk", uc.alerts_channel)
+        if purpose == "log" and uc.log_channel:
+            return Destination("talk", uc.log_channel)
+        if purpose in ("briefing", "reply"):
+            for briefing in uc.briefings:
+                if briefing.conversation_token:
+                    return Destination("talk", briefing.conversation_token)
+
+    if uc and uc.default_destination:
+        dests = parse_output_target(uc.default_destination)
+        if dests:
+            return dests[0]
+
+    return Destination("talk", None)
+
+
 def resolve_conversation_token(config: "Config", user_id: str) -> str | None:
     """Resolve Talk conversation token for a user.
 
-    Priority: alerts_channel > briefing token > auto-detected 1:1 DM.
+    Priority: an explicit Talk route (``routing["alert"]`` / ``routing["reply"]``)
+    > alerts_channel > briefing token > auto-detected 1:1 DM. Retains the
+    unconditional Talk auto-DM fallback so routing a purpose off-Talk does not
+    make this report Talk as unconfigured (which would corrupt heartbeat's
+    ``consecutive_errors`` accounting).
     """
     user_config = config.users.get(user_id)
     if not user_config:
         return None
+
+    # Honour an explicit Talk route for the alert/reply purposes first.
+    if user_config.routing:
+        from .transport import parse_output_target
+        for purpose in ("alert", "reply"):
+            spec = user_config.routing.get(purpose)
+            if not spec:
+                continue
+            for dest in parse_output_target(spec):
+                if dest.surface == "talk" and dest.channel:
+                    return dest.channel
 
     if user_config.alerts_channel:
         return user_config.alerts_channel

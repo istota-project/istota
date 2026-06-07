@@ -271,3 +271,60 @@ class TestJsonDecodeResilience:
         p = user_profiles.get_profile(db_path, "alice")
         assert p is not None
         assert p.email_addresses == []  # decoded as empty rather than raising
+
+
+class TestRoutingFields:
+    """routing (dict) + default_destination (scalar) round-trip and merge."""
+
+    def test_defaults_on_fresh_row(self, db_path):
+        p = user_profiles.ensure_profile(db_path, "alice")
+        assert p.routing == {}
+        assert p.default_destination == "talk"
+
+    def test_routing_dict_round_trip(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice")
+        p = user_profiles.update_profile(
+            db_path, "alice",
+            routing={"alert": "email", "briefing": "talk:room"},
+            default_destination="both",
+        )
+        assert p.routing == {"alert": "email", "briefing": "talk:room"}
+        assert p.default_destination == "both"
+        # re-read from disk
+        again = user_profiles.get_profile(db_path, "alice")
+        assert again.routing == {"alert": "email", "briefing": "talk:room"}
+        assert again.default_destination == "both"
+
+    def test_routing_noop_detection(self, db_path):
+        user_profiles.update_profile_with_status(
+            db_path, "alice", routing={"alert": "email"},
+        )
+        _, state = user_profiles.update_profile_with_status(
+            db_path, "alice", routing={"alert": "email"},
+        )
+        assert state == "noop"
+
+    def test_default_destination_empty_coerces_to_talk(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice")
+        p = user_profiles.update_profile(db_path, "alice", default_destination="")
+        assert p.default_destination == "talk"
+
+    def test_merge_routing_db_owns_it(self):
+        uc = UserConfig(routing={"alert": "talk"}, default_destination="talk")
+        profile = UserProfile(
+            user_id="alice", routing={"briefing": "email"}, default_destination="both",
+        )
+        user_profiles.merge_into_user_config(profile, uc)
+        assert uc.routing == {"briefing": "email"}
+        assert uc.default_destination == "both"
+
+    def test_migration_adds_columns(self, tmp_path):
+        # A DB created fresh has the columns (schema.sql parity); also verify
+        # the values are readable defaults.
+        from istota import db as _db
+        path = tmp_path / "fresh.db"
+        _db.init_db(path)
+        with _db.get_db(path) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(user_profiles)")}
+        assert "routing" in cols
+        assert "default_destination" in cols

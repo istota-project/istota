@@ -136,6 +136,29 @@ def _validate_effort(name: str, user_id: str, effort: str) -> None:
         )
 
 
+# Surfaces a CRON.md `target` descriptor may name. Aliases (both/all/none) and
+# stream included. Unknown leaves warn-and-drop at delivery; this is warn-only.
+_KNOWN_TARGET_SURFACES = frozenset({
+    "talk", "email", "ntfy", "istota_file", "stream", "matrix", "web",
+})
+
+
+def _validate_target(name: str, user_id: str, target: str) -> None:
+    """Warn when a target descriptor names an unknown surface; never reject.
+
+    The `target` is an output_target descriptor (talk/email/ntfy/both/all/
+    talk:<token>/comma lists). Unknown leaves are dropped at delivery, so a typo
+    is a warning, not a hard failure (mirrors model/effort handling)."""
+    from .transport import parse_output_target
+    for dest in parse_output_target(target):
+        if dest.surface not in _KNOWN_TARGET_SURFACES:
+            logger.warning(
+                "Job '%s' (user %s): target surface %r not recognized; it will "
+                "be dropped at delivery",
+                name, user_id, dest.surface,
+            )
+
+
 @dataclass
 class CronJob:
     name: str
@@ -225,13 +248,16 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
             _validate_model(name, user_id, model)
         if effort:
             _validate_effort(name, user_id, effort)
+        target = j.get("target", "")
+        if target:
+            _validate_target(name, user_id, target)
         jobs.append(CronJob(
             name=name,
             cron=cron,
             prompt=prompt,
             command=command,
             prompt_file=prompt_file,
-            target=j.get("target", ""),
+            target=target,
             room=j.get("room", ""),
             enabled=j.get("enabled", True),
             silent_unless_action=j.get("silent_unless_action", False),

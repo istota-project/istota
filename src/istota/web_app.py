@@ -1564,7 +1564,46 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "max_foreground_workers": {"type": "int"},
     "max_background_workers": {"type": "int"},
     "site_enabled":           {"type": "bool"},
+    "default_destination":    {"type": "descriptor"},
+    "routing":                {"type": "routing"},
 }
+
+
+def _routing_purposes() -> tuple[str, ...]:
+    from .notifications import PURPOSES
+    return PURPOSES
+
+
+def _registered_delivery_surfaces() -> list[str]:
+    """Surfaces the Preferences UI can offer for routing (registered transports
+    plus the events-only ``stream`` surface)."""
+    from .transport import make_registry
+    surfaces = {"stream"}
+    if _config is not None:
+        surfaces |= set(make_registry(_config).names())
+    return sorted(surfaces)
+
+
+_BUILTIN_DELIVERY_SURFACES = frozenset({
+    "talk", "email", "ntfy", "istota_file", "stream",
+})
+
+
+def _validate_descriptor_surfaces(descriptor: str) -> None:
+    """Raise ValueError if any leaf surface in a descriptor is neither a builtin
+    surface nor a registered transport.
+
+    Builtin surfaces (talk/email/ntfy/istota_file/stream) are always accepted
+    even when disabled at the instance level — a user may route to email before
+    the operator enables it. Only genuinely-unknown surfaces (typos, an
+    unregistered Matrix) are rejected."""
+    from .transport import make_registry, parse_output_target
+    known = set(_BUILTIN_DELIVERY_SURFACES)
+    if _config is not None:
+        known |= set(make_registry(_config).names())
+    for dest in parse_output_target(descriptor):
+        if dest.surface not in known:
+            raise ValueError(f"unknown delivery surface: {dest.surface}")
 
 
 def _coerce_profile_value(field: str, value: object) -> object:
@@ -1619,6 +1658,42 @@ def _coerce_profile_value(field: str, value: object) -> object:
         if isinstance(value, str):
             return value.lower() in ("1", "true", "yes", "on")
         raise ValueError(f"{field} must be boolean")
+    if t == "descriptor":
+        from .transport import parse_output_target
+        if value is None or value == "":
+            return "talk"
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string")
+        value = value.strip()
+        if not value:
+            return "talk"
+        if not parse_output_target(value):
+            raise ValueError(f"{field} is not a valid delivery descriptor")
+        _validate_descriptor_surfaces(value)
+        return value
+    if t == "routing":
+        from .notifications import PURPOSES
+        from .transport import parse_output_target
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError(f"{field} must be an object")
+        out: dict[str, str] = {}
+        for purpose, descriptor in value.items():
+            if purpose not in PURPOSES:
+                raise ValueError(f"unknown routing purpose: {purpose}")
+            if descriptor is None or descriptor == "":
+                continue  # empty clears the route for that purpose
+            if not isinstance(descriptor, str):
+                raise ValueError(f"route {purpose} must be a string")
+            descriptor = descriptor.strip()
+            if not descriptor:
+                continue
+            if not parse_output_target(descriptor):
+                raise ValueError(f"route {purpose} is not a valid descriptor")
+            _validate_descriptor_surfaces(descriptor)
+            out[purpose] = descriptor
+        return out
     raise ValueError(f"unsupported field type: {t}")  # pragma: no cover
 
 
@@ -1650,6 +1725,10 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "max_foreground_workers": profile.max_foreground_workers,
         "max_background_workers": profile.max_background_workers,
         "site_enabled": profile.site_enabled,
+        "default_destination": profile.default_destination,
+        "routing": profile.routing,
+        "purposes": list(_routing_purposes()),
+        "delivery_surfaces": _registered_delivery_surfaces(),
     }}
 
 

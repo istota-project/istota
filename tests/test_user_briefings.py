@@ -65,12 +65,23 @@ class TestEnsureBriefing:
         assert b.conversation_token == ""
         assert b.output == "email"
 
-    def test_invalid_output_rejected(self, db_path):
-        with pytest.raises(ValueError):
-            user_briefings.ensure_briefing(
-                db_path, user_id="alice", name="x", cron="0 9 * * *",
-                output="sms",
-            )
+    def test_empty_output_rejected(self, db_path):
+        # An output that parses to no destinations (empty / "none") is invalid.
+        for bad in ("", "none"):
+            with pytest.raises(ValueError):
+                user_briefings.ensure_briefing(
+                    db_path, user_id="alice", name="x", cron="0 9 * * *",
+                    output=bad,
+                )
+
+    def test_descriptor_output_accepted(self, db_path):
+        # Descriptors (incl. comma lists and explicit channels) are accepted;
+        # unknown surfaces are warn-and-dropped at delivery, not rejected here.
+        b, _ = user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="multi",
+            cron="0 9 * * *", output="email,ntfy", components={},
+        )
+        assert b.output == "email,ntfy"
 
     def test_empty_name_rejected(self, db_path):
         with pytest.raises(ValueError):

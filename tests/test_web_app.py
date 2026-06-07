@@ -1554,6 +1554,46 @@ class TestProfileEndpoints:
         assert p.email_addresses == ["a@x.com", "b@x.com"]
         assert p.trusted_email_senders == ["*@trusted.org"]
 
+    async def test_update_profile_routing_and_default_destination(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"default_destination": "both", "routing": {"alert": "email"}},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import user_profiles
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.default_destination == "both"
+        assert p.routing == {"alert": "email"}
+
+    async def test_update_profile_rejects_unknown_routing_surface(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"routing": {"alert": "carrier-pigeon"}},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_update_profile_rejects_unknown_routing_purpose(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"routing": {"bogus_purpose": "email"}},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
     async def test_update_profile_rejects_unknown_field(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)

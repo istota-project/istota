@@ -89,7 +89,9 @@ def _row_to_briefing(row: sqlite3.Row) -> UserBriefing:
     # Some clients pack ``output`` into components for back-compat. Hoist it
     # into the dataclass field.
     raw_output = components.pop("__output__", None)
-    if isinstance(raw_output, str) and raw_output in {"talk", "email", "both"}:
+    # Accept any stored descriptor (talk/email/both/all/ntfy/talk:<tok>/comma
+    # lists); the legacy {talk,email,both} values are a subset.
+    if isinstance(raw_output, str) and raw_output.strip():
         output = raw_output
     return UserBriefing(
         id=int(row["id"]),
@@ -150,8 +152,13 @@ def ensure_briefing(
         raise ValueError("briefing name cannot be empty")
     if not cron:
         raise ValueError("briefing cron cannot be empty")
-    if output not in {"talk", "email", "both"}:
-        raise ValueError(f"briefing output must be talk|email|both, got {output!r}")
+    # Accept any output_target descriptor (talk/email/both/all/ntfy/talk:<tok>/
+    # comma lists). Unknown surfaces are warn-and-dropped at delivery, not here.
+    from .transport import parse_output_target
+    if not parse_output_target(output):
+        raise ValueError(
+            f"briefing output must be a valid delivery descriptor, got {output!r}"
+        )
 
     components = dict(components or {})
     # Pack ``output`` into components for storage on the legacy schema, since
