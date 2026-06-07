@@ -166,7 +166,7 @@
 		background: #4a4a52;
 		user-select: none;
 	}
-	.avatar.bot { background: var(--map-path); }
+	.avatar.bot { background: var(--accent-amber); color: #111; }
 
 	.hover-time {
 		font-size: 0.62rem;
@@ -190,7 +190,7 @@
 		font-weight: 600;
 		color: var(--text-primary);
 	}
-	.author.bot { color: var(--map-path); }
+	.author.bot { color: var(--accent-amber); }
 	.stamp {
 		font-size: var(--text-xs);
 		color: var(--text-dim);
@@ -276,12 +276,12 @@
 	.markdown :global(code) {
 		font-family: ui-monospace, monospace;
 		font-size: 0.9em;
-		background: var(--surface-base);
+		background: var(--surface-raised);
 		padding: 0.05rem 0.3rem;
 		border-radius: 0.25rem;
 	}
 	.markdown :global(pre) {
-		background: var(--surface-base);
+		background: var(--surface-raised);
 		border: 1px solid var(--border-subtle);
 		border-radius: 0.35rem;
 		padding: 0.5rem 0.65rem;
@@ -289,7 +289,7 @@
 		margin: 0 0 0.5rem;
 	}
 	.markdown :global(pre code) { background: none; padding: 0; }
-	.markdown :global(a) { color: var(--map-path); }
+	.markdown :global(a) { color: var(--accent-amber); }
 	.markdown :global(del) { color: var(--text-muted); }
 	.markdown :global(table) {
 		border-collapse: collapse;
