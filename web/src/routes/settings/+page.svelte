@@ -133,6 +133,33 @@
 	}
 
 	const DEFAULT_PURPOSES = ['reply', 'alert', 'log', 'briefing', 'notification'];
+	const BUILTIN_SURFACES = ['talk', 'email', 'ntfy', 'istota_file', 'stream'];
+
+	function deliverySurfaces(): string[] {
+		const s = profile?.delivery_surfaces;
+		return s && s.length ? s : BUILTIN_SURFACES;
+	}
+
+	// Options for a per-purpose route dropdown: a "(default)" no-op plus every
+	// known delivery surface. If the saved descriptor isn't a bare surface
+	// (e.g. "talk:<token>" or "talk,email"), keep it as an extra option so the
+	// current value still shows and isn't silently dropped when re-saving.
+	function routeOptions(current: string): SelectOption[] {
+		const surfaces = deliverySurfaces();
+		const opts: SelectOption[] = [{ value: '', label: '(default)' }];
+		for (const s of surfaces) opts.push({ value: s, label: s });
+		if (current && !surfaces.includes(current)) opts.push({ value: current, label: current });
+		return opts;
+	}
+
+	// Options for the default destination dropdown: every delivery surface, plus
+	// the current value if it's a custom descriptor that isn't a bare surface.
+	function destinationOptions(current: string): SelectOption[] {
+		const surfaces = deliverySurfaces();
+		const opts: SelectOption[] = surfaces.map((s) => ({ value: s, label: s }));
+		if (current && !surfaces.includes(current)) opts.push({ value: current, label: current });
+		return opts;
+	}
 
 	function setRoute(purpose: string, value: string) {
 		if (!profile) return;
@@ -482,43 +509,38 @@
 					</p>
 				</div>
 			{/if}
-			<SettingsField label="Default delivery destination">
-				<input
-					type="text"
+			<SettingsField
+				label="Default delivery destination"
+				hint="Where messages go when a purpose below has no specific route."
+			>
+				<Select
 					value={profile.default_destination || 'talk'}
-					placeholder="talk"
-					onchange={(e) => {
-						if (profile)
-							profile.default_destination =
-								(e.currentTarget as HTMLInputElement).value.trim() || 'talk';
+					options={destinationOptions(profile.default_destination || 'talk')}
+					ariaLabel="Default delivery destination"
+					fullWidth
+					onValueChange={(v) => {
+						if (profile) profile.default_destination = v || 'talk';
 					}}
 				/>
 			</SettingsField>
-			<div class="field">
-				<span>Delivery routing (per purpose)</span>
-				<div class="route-grid">
-					{#each profile.purposes && profile.purposes.length ? profile.purposes : DEFAULT_PURPOSES as purpose (purpose)}
-						<label class="route-row">
-							<span class="route-purpose">{purpose}</span>
-							<input
-								type="text"
-								value={(profile.routing || {})[purpose] || ''}
-								placeholder="(default)"
-								onchange={(e) =>
-									setRoute(purpose, (e.currentTarget as HTMLInputElement).value)}
-							/>
-						</label>
-					{/each}
-				</div>
+			<div class="route-section">
+				<span class="route-heading">Delivery routing (per purpose)</span>
 				<p class="hint">
-					Where each kind of message goes. A destination is
-					<code>surface[:channel]</code> (e.g. <code>email</code>,
-					<code>talk:&lt;token&gt;</code>, <code>talk,email</code>). Leave blank to
-					use the default destination.
-					{#if profile.delivery_surfaces && profile.delivery_surfaces.length}
-						Available surfaces: {profile.delivery_surfaces.join(', ')}.
-					{/if}
+					Where each kind of message goes. Pick a delivery surface per purpose,
+					or leave it on <code>(default)</code> to fall back to the default
+					destination above.
 				</p>
+				{#each profile.purposes && profile.purposes.length ? profile.purposes : DEFAULT_PURPOSES as purpose (purpose)}
+					<SettingsField label={purpose}>
+						<Select
+							value={(profile.routing || {})[purpose] || ''}
+							options={routeOptions((profile.routing || {})[purpose] || '')}
+							ariaLabel={`Route for ${purpose}`}
+							fullWidth
+							onValueChange={(v) => setRoute(purpose, v)}
+						/>
+					</SettingsField>
+				{/each}
 			</div>
 			<SettingsField label="Static website hosting at /~user/" checkbox>
 				<input type="checkbox" bind:checked={profile.site_enabled} />
@@ -850,6 +872,17 @@
 	.add-actions {
 		display: flex;
 		justify-content: flex-end;
+	}
+
+	.route-section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.route-heading {
+		font-size: var(--text-sm);
+		color: var(--text-muted);
 	}
 
 	.module-toggles {
