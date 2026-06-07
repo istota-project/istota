@@ -61,6 +61,16 @@ class TransportCapabilities:
     ``supports_progress_ack`` is True, and splits long messages only when
     ``max_message_length`` is set. A new surface declares its capabilities once
     and the core does the right thing without a ``source_type ==`` check.
+
+    ``surface_class`` is the routing dimension the delivery planner reads:
+
+    - ``"push"`` — the daemon actively delivers via ``Transport.deliver()``
+      (Talk, email, ntfy, istota_file, future Matrix). Requires a durable
+      channel target resolved before delivery.
+    - ``"stream"`` — outbound is the ``task_events`` log; the client tails it.
+      ``deliver()`` is a no-op. REPL and web chat. A ``stream`` destination
+      contributes no push work; the ``result``/``error``/``done`` events satisfy
+      it.
     """
 
     supports_edit: bool = False          # can edit a previously sent message
@@ -68,6 +78,21 @@ class TransportCapabilities:
     supports_progress_ack: bool = False  # an editable ack message during run
     supports_typing: bool = False
     max_message_length: int | None = None  # None = unlimited; drives splitting
+    surface_class: str = "push"          # "push" | "stream"
+
+
+@dataclass(frozen=True)
+class DeliveryOptions:
+    """Optional per-delivery metadata carried alongside ``deliver(target, text)``.
+
+    Push surfaces that don't use these ignore them; ``NtfyTransport.deliver``
+    reads ``title`` / ``priority`` / ``tags``. Kept a typed object (rather than
+    untyped ``**extra``) so the protocol change is one explicit field set.
+    """
+
+    title: str | None = None
+    priority: int | None = None
+    tags: str | None = None
 
 
 @runtime_checkable
@@ -89,6 +114,7 @@ class Transport(Protocol):
         reply_to: int | None = None,
         reference_id: str | None = None,
         threaded: bool = False,
+        options: "DeliveryOptions | None" = None,
     ) -> int | None:
         """Send a result/message to a target channel. Handles splitting,
         formatting, and threading per the surface. Returns the last posted
@@ -97,7 +123,8 @@ class Transport(Protocol):
         ``task`` is optional and ignored by surfaces that don't need it; email
         uses it for the deferred-output / ``ProcessedEmail`` lookup and Talk
         uses it for group-chat reply-threading + @mention (the "task-aware
-        deliver" decision)."""
+        deliver" decision). ``options`` carries surface-specific metadata
+        (ntfy title/priority/tags); surfaces that don't use it ignore it."""
         ...
 
     async def edit(self, target: str, message_id: int, text: str) -> None:
