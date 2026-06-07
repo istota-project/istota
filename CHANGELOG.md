@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-06-07
+
 ### Added
 - New `<namespace>-run` host wrapper for ad-hoc CLI use in production. It self-sudoes into the service user, loads the same secret bundle and admins file the daemon uses, and passes its arguments straight through to the `istota` CLI — so an interactive REPL is just `istota-run repl -u <user>` instead of a long hand-built environment incantation. Deployed by Ansible; the caller needs sudo rights.
 
@@ -625,7 +627,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.17.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.18.0...main
+[0.18.0]: https://gitlab.com/cynium/istota/-/releases/v0.18.0
 [0.17.0]: https://gitlab.com/cynium/istota/-/releases/v0.17.0
 [0.16.0]: https://gitlab.com/cynium/istota/-/releases/v0.16.0
 [0.15.1]: https://gitlab.com/cynium/istota/-/releases/v0.15.1
