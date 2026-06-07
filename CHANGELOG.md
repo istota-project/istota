@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - In-app web chat. A new always-on "Chat" tab in the web UI lets you talk to the bot without leaving the dashboard — a full-page console with Discord/Slack-style rooms in a sidebar, live streaming of tool use and intermediate text, inline `!commands`, confirmation prompts rendered as Confirm/Cancel cards, cancel, and drag-drop/paste file attachments. Each room is its own persistent conversation with its own channel memory. It complements Nextcloud Talk rather than replacing it.
+- The full `!command` set now works the same in web chat as in Nextcloud Talk, including `!export` and `!search` (export reads your conversation from the database, so it no longer needs a Talk server; search uses the memory index).
 
 ### Changed
+- The `!model` model-override prefix now works in web chat. Previously `!model opus …` only worked in Nextcloud Talk; in web chat it errored as an unknown command instead of running your message on the chosen model.
 - Web chat now uses a Discord/Slack-style transcript instead of chat bubbles: full-width rows with an avatar, the author name and time, and grouping of consecutive messages from the same author. Messages show your real display name and the bot's configured name.
 - Web chat message rendering moved to a full Markdown library. Bot replies now render nested lists, blockquotes, tables, strikethrough, and auto-linked URLs, on top of the formatting already supported.
 - Web chat live progress is more informative. Instead of a generic "Thinking…" placeholder, the in-progress line shows the same "working on it" verbs Nextcloud Talk uses (now shared between both surfaces), and intermediate text as it streams.
@@ -26,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web chat: Markdown tables now render. The chat renderer gained GitHub-style pipe-table support with per-column alignment, so tabular answers (health, money, feeds data) display as real tables.
 - Web chat: fixed a rendering bug where `*` or `**` inside a link URL produced a broken link. (Not exploitable — links were already safe — but the link came out malformed.)
 - Web chat: archived rooms no longer accept new messages, and leaving the Chat tab mid-response no longer leaves a stream connection open in the background.
+- Web chat: `!command` output (like `!help`) now renders left-aligned with proper lists and code blocks, instead of being centered.
+- Web chat: the hover-revealed message metadata (task id, duration, tool count) no longer steals a column from the message body — it overlays the top-right corner, so the content uses the full width (noticeably better on mobile).
 
 ## [0.18.0] - 2026-06-07
 

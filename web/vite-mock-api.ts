@@ -141,6 +141,60 @@ function mockTaskEvents(task: MockChatTask) {
 }
 const MOCK_TASK_DONE_MS = 2200;
 
+// Mock !command output so the command rendering (lists, code, tables) can be
+// previewed without a live backend. Returns the inline markdown for a command,
+// or null when the input is a `!model <alias> <prompt>` prefix that should
+// create a real task instead (mirrors the server: unknown alias → usage).
+const MOCK_MODEL_ALIASES = ['default', 'fast', 'general', 'smart', 'opus', 'opus-high', 'sonnet', 'haiku'];
+const MOCK_HELP = [
+	'**Available commands:**',
+	'',
+	'- `!check` -- Run Claude Code health check',
+	'- `!cron` -- List/enable/disable scheduled jobs',
+	'- `!export` -- Export conversation history to a file: `!export [markdown|text]`',
+	'- `!help` -- List available commands',
+	'- `!memory` -- Show memory: `!memory user`, `!memory channel`, `!memory facts`',
+	'- `!models` -- List available model aliases (and what they resolve to)',
+	'- `!more` -- Show execution trace for a task: `!more #123`',
+	'- `!search` -- Search conversation history: `!search <query>`',
+	'- `!skills` -- List available skills and their triggers',
+	'- `!status` -- Show your running/pending tasks and system status',
+	'- `!stop` -- Cancel your currently running task',
+	'',
+	'**Per-task model override:**',
+	'',
+	'- `!model <alias> <prompt>` — one-shot. Aliases: ' + MOCK_MODEL_ALIASES.map((a) => `\`${a}\``).join(', ') + '.',
+].join('\n');
+const MOCK_MODELS = [
+	'**Model aliases**',
+	'',
+	'Use `!model <alias> <prompt>` to override the model for a single task.',
+	'',
+	'- `default` → (no override — use default)',
+	'- `fast` → `claude-haiku-4-5`',
+	'- `general` → `claude-sonnet-4-6`',
+	'- `smart` → `claude-opus-4-8`',
+	'- `opus` → `claude-opus-4-8`',
+	'- `opus-high` → `claude-opus-4-8` + effort `high`',
+].join('\n');
+
+function mockCommandResult(text: string): string | null {
+	const lower = text.toLowerCase();
+	const name = lower.slice(1).split(/\s/)[0];
+	if (name === 'model') {
+		const alias = lower.split(/\s+/)[1] || '';
+		if (alias && MOCK_MODEL_ALIASES.includes(alias) && text.split(/\s+/).length > 2) {
+			return null; // valid prefix with a prompt → real task
+		}
+		return 'Usage: `!model <alias> <prompt>`. Aliases: ' +
+			MOCK_MODEL_ALIASES.map((a) => `\`${a}\``).join(', ') + '.';
+	}
+	if (name === 'help') return MOCK_HELP;
+	if (name === 'models') return MOCK_MODELS;
+	if (name === 'status') return 'No active or pending tasks.\n\n**System:** 0 running, 0 queued';
+	return `Mock command result for \`${text}\`.`;
+}
+
 const chatHandler: MockHandler = ({ url, method, body }) => {
 	if (!url.startsWith('/istota/api/chat/')) return undefined;
 	const path = url.split('?')[0];
@@ -195,7 +249,9 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 		const text = String(body?.text || '').trim();
 		if (!text) return { error: 'text required' };
 		if (text.startsWith('!')) {
-			return { task_id: null, inline_result: `Mock command result for \`${text}\`.` };
+			const inline = mockCommandResult(text);
+			if (inline !== null) return { task_id: null, inline_result: inline };
+			// !model <alias> <prompt> falls through to a real task (override carried).
 		}
 		const id = ++mockChatTaskSeq;
 		mockChatTasks.set(id, { id, roomToken: room.token, prompt: text, createdAt: Date.now() });
