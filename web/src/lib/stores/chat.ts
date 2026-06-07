@@ -44,6 +44,7 @@ export interface ChatMessage {
 	streaming: boolean;
 	error?: boolean;
 	attachments?: string[];
+	createdAt?: string;
 }
 
 export type ChatStatus = 'idle' | 'sending' | 'streaming';
@@ -219,6 +220,7 @@ function createSession(): ChatSession {
 			confirmation: !!m.confirmation,
 			tools: [],
 			streaming: false,
+			createdAt: m.created_at,
 		}));
 		messages.set(msgs);
 
@@ -236,6 +238,7 @@ function createSession(): ChatSession {
 					const ph: ChatMessage = {
 						cid: nextCid(), role: 'assistant', text: '', taskId: at.id,
 						status: at.status, tools: [], streaming: true,
+						createdAt: new Date().toISOString(),
 					};
 					arr.push(ph);
 					cid = ph.cid;
@@ -304,12 +307,16 @@ function createSession(): ChatSession {
 			{
 				cid: nextCid(), role: 'user', text: trimmed, tools: [], streaming: false,
 				attachments: attachments.map((x) => x.name),
+				createdAt: new Date().toISOString(),
 			},
 		]);
 		const phCid = nextCid();
 		messages.update((a) => [
 			...a,
-			{ cid: phCid, role: 'assistant', text: '', tools: [], streaming: true },
+			{
+				cid: phCid, role: 'assistant', text: '', tools: [], streaming: true,
+				createdAt: new Date().toISOString(),
+			},
 		]);
 		status.set('sending');
 

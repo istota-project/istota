@@ -186,6 +186,7 @@ class TestApiMe:
         # NC's built-in OAuth2 inlines user_id but not display_name; the
         # callback falls back to username when no OCS roundtrip happens.
         assert data["display_name"] == "alice"
+        assert data["bot_name"] == "Istota"
         assert data["features"]["feeds"] is True
 
     async def test_returns_no_feeds_for_user_without_feeds_resource(self, client, app):

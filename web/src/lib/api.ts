@@ -20,6 +20,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 export interface User {
 	username: string;
 	display_name: string;
+	bot_name: string;
 	is_admin: boolean;
 	features: {
 		chat: boolean;

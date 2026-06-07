@@ -98,6 +98,7 @@ const BIOMARKER_REFS: Array<{
 const user = {
 	username: 'alice',
 	display_name: 'Alice',
+	bot_name: 'Istota',
 	is_admin: true,
 	features: {
 		chat: true,
