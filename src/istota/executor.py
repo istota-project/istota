@@ -377,11 +377,15 @@ def _native_with_user_key(native_config, config: Config, user_id: str):
     return native_config
 
 
-def _build_native_classifier(native_config, timeout: float):
-    """A `prompt -> raw_output | None` Pass-2 classifier over the native provider.
+def _build_native_completer(native_config, timeout: float):
+    """A `prompt -> raw_output | None` one-shot completer over the native provider.
+
+    Used for both Pass-2 skill classification and conversation-context triage,
+    so the native brain runs them through its own provider/model instead of
+    shelling out to the `claude` CLI it isn't using.
 
     Returns None if the provider can't be built (e.g. missing key / bad config),
-    so the caller skips semantic routing rather than mis-routing to the CLI.
+    so the caller skips the brain-aware path rather than mis-routing to the CLI.
     """
     try:
         from istota.llm import make_provider
@@ -402,6 +406,29 @@ def _build_native_classifier(native_config, timeout: float):
         return completer(prompt, timeout=timeout)
 
     return _classify
+
+
+def _build_triage_completer(task: "db.Task", config: Config):
+    """Conversation-context triage completer, routed through the task's brain.
+
+    Mirrors the Pass-2 skill-routing decision (per-source-type brain routing):
+    - claude_code → None, so context triage uses the `claude` CLI as before.
+    - native → a native provider completer. If it can't be built (missing key /
+      bad config), returns a completer that always yields None so triage fails
+      open (includes all older messages) instead of shelling out to the `claude`
+      CLI the native brain isn't using.
+    """
+    from .brain import resolve_brain_kind
+
+    routed = resolve_brain_kind(task.source_type, config.brain)
+    if routed.kind != "native":
+        return None
+
+    native = _native_with_user_key(routed.native, config, task.user_id)
+    completer = _build_native_completer(native, config.conversation.selection_timeout)
+    if completer is None:
+        return lambda _prompt: None
+    return completer
 
 
 # Credential-related env var patterns to strip from subprocess environments
@@ -1265,8 +1292,10 @@ def _build_talk_api_context(
             )
             talk_messages = [reply_parent_talk_msg] + talk_messages
 
-    # Select relevant messages
-    relevant = select_relevant_talk_context(task.prompt, talk_messages, config)
+    # Select relevant messages (triage routed through the task's brain)
+    relevant = select_relevant_talk_context(
+        task.prompt, talk_messages, config, completer=_build_triage_completer(task, config)
+    )
 
     # Ensure reply parent survives triage
     if reply_parent_talk_msg:
@@ -1364,7 +1393,9 @@ def _build_db_context(
                 task, history, config, conn if conn is not None else None,
             )
 
-        relevant = select_relevant_context(task.prompt, history, config)
+        relevant = select_relevant_context(
+            task.prompt, history, config, completer=_build_triage_completer(task, config)
+        )
 
         if reply_parent_msg:
             relevant_ids = {msg.id for msg in relevant}
@@ -2042,7 +2073,7 @@ def execute_task(
             _pass2_native = _native_with_user_key(
                 _routed_brain.native, config, task.user_id
             )
-            _pass2_classifier = _build_native_classifier(
+            _pass2_classifier = _build_native_completer(
                 _pass2_native, config.skills.semantic_routing_timeout
             )
             _pass2_model = _pass2_native.model
