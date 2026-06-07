@@ -104,6 +104,35 @@ def cmd_task(args):
                     sys.exit(1)
 
 
+def cmd_repl(args):
+    """Launch the interactive terminal assistant (full-stack, streamed)."""
+    from .repl import run_session
+
+    config = load_config(Path(args.config) if args.config else None)
+
+    user_id = args.user
+    if not user_id:
+        # Default to the sole configured user, else the first admin.
+        if len(config.users) == 1:
+            user_id = next(iter(config.users))
+        elif config.admin_users:
+            user_id = sorted(config.admin_users)[0]
+    if not user_id:
+        print(
+            "Error: could not infer a user; pass -u/--user.", file=sys.stderr,
+        )
+        sys.exit(1)
+
+    run_session(
+        config,
+        user_id=user_id,
+        token=args.token,
+        workspace=args.workspace,
+        model=args.model,
+        effort=args.effort,
+    )
+
+
 def cmd_run(args):
     """Run the scheduler once (process pending tasks)."""
     config = load_config(Path(args.config) if args.config else None)
@@ -1176,6 +1205,21 @@ def main():
     run_parser.add_argument("--briefings", action="store_true", help="Check and queue briefings first")
     run_parser.add_argument("--dry-run", action="store_true", help="Don't actually execute tasks")
 
+    # repl
+    repl_parser = subparsers.add_parser(
+        "repl", help="Interactive terminal assistant (full-stack, streamed)",
+    )
+    repl_parser.add_argument("-u", "--user", help="User id (defaults to the sole/admin user)")
+    repl_parser.add_argument(
+        "-t", "--token", help="Resume a named conversation token (default: a fresh one)",
+    )
+    repl_parser.add_argument(
+        "--workspace", default="cwd",
+        help="Working directory: cwd (default) | standard (per-user temp) | PATH",
+    )
+    repl_parser.add_argument("--model", help="Model alias for turns (e.g. opus, sonnet)")
+    repl_parser.add_argument("--effort", help="Reasoning effort (low|medium|high|xhigh|max)")
+
     # list
     list_parser = subparsers.add_parser("list", help="List tasks")
     list_parser.add_argument("-s", "--status", help="Filter by status")
@@ -1429,6 +1473,7 @@ def main():
         "briefing": cmd_briefing,
         "secret": cmd_secret,
         "email": cmd_email,
+        "repl": cmd_repl,
     }
 
     if args.command == "user":
