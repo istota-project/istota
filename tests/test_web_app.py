@@ -1095,6 +1095,32 @@ class TestSettingsEndpoints:
         assert "overland" not in services
         assert services["karakeep"]["status"] in ("missing", "partial", "configured")
         assert services["karakeep"]["used_by"] == ["bookmarks"]
+        # native_brain is CLI-only — it must not surface in the web UI even
+        # though it's a connected service (the per-user key knob did less
+        # than it looked like; operator-provisioned via `istota secret`).
+        assert "native_brain" not in services
+
+    async def test_native_brain_is_cli_only_but_still_known(self, tmp_path, client, app):
+        # The web surface is gone, but CLI/runtime validation must still
+        # accept native_brain so `istota secret ensure -s native_brain` and
+        # the executor's per-user-key overlay keep working.
+        from istota import secret_schema
+
+        assert "native_brain" in secret_schema.all_known_services()
+        assert "api_key" in secret_schema.known_service_keys()["native_brain"]
+        assert secret_schema.CONNECTED_SERVICE_SCHEMA["native_brain"].get("cli_only") is True
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        # PUT still works (no UI offers it, but the route stays permissive).
+        resp = await client.put(
+            "/istota/api/settings/secrets/native_brain/api_key",
+            json={"value": "user-byo-key"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
 
     async def test_module_services_endpoint(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)

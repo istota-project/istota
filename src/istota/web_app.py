@@ -1282,6 +1282,9 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
 
     cards: list[dict] = []
     for service, schema in _CONNECTED_SERVICE_SCHEMA.items():
+        if schema.get("cli_only"):
+            # Operator-provisioned via `istota secret`; no web surface.
+            continue
         extra: dict = {}
         if service == "google_workspace":
             extra["connected"] = _has_google_token(username)
