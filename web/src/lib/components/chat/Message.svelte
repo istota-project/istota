@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { renderMarkdown } from '$lib/markdown';
 	import type { ChatMessage } from '$lib/stores/chat';
-	import ToolChip from './ToolChip.svelte';
+	import ToolStrip from './ToolStrip.svelte';
 	import ConfirmationCard from './ConfirmationCard.svelte';
 
 	let {
@@ -30,6 +30,8 @@
 	// User text is shown verbatim (escaped via text binding) — we don't render
 	// their input as markdown. Bot text goes through the safe markdown renderer.
 	const bodyHtml = $derived(isUser ? '' : renderMarkdown(message.text));
+
+	const hasRunningTool = $derived(message.tools.some((t) => t.running));
 
 	const time = $derived.by(() => {
 		if (!message.createdAt) return '';
@@ -62,18 +64,16 @@
 			{/if}
 
 			{#if message.tools.length}
-				<div class="tools">
-					{#each message.tools as tool (tool.id)}
-						<ToolChip {tool} />
-					{/each}
-				</div>
+				<ToolStrip tools={message.tools} />
 			{/if}
 
 			{#if message.streaming && !message.text}
-				<div class="progress">
-					<span class="dot"></span>
-					<span>{message.progress || 'Thinking…'}</span>
-				</div>
+				{#if !hasRunningTool}
+					<div class="progress">
+						<span class="dot"></span>
+						<span class="status-text">{message.progress || 'Thinking…'}</span>
+					</div>
+				{/if}
 			{:else if isUser}
 				{#if message.text}<div class="body user-body">{message.text}</div>{/if}
 				{#if message.attachments?.length}
@@ -85,8 +85,8 @@
 				{/if}
 			{:else}
 				<div class="body markdown">{@html bodyHtml}</div>
-				{#if message.streaming && message.progress}
-					<div class="progress subtle"><span class="dot"></span><span>{message.progress}</span></div>
+				{#if message.streaming && message.progress && !hasRunningTool}
+					<div class="progress subtle"><span class="dot"></span><span class="status-text">{message.progress}</span></div>
 				{/if}
 			{/if}
 
@@ -198,21 +198,23 @@
 		padding: 0.1rem 0.45rem;
 	}
 
-	.tools {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.3rem;
-		margin-bottom: 0.4rem;
-	}
-
 	.progress {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
+		min-width: 0;
 		color: var(--text-muted);
 		font-size: var(--text-sm);
 	}
 	.progress.subtle { margin-top: 0.3rem; color: var(--text-dim); }
+	/* Tool descriptions (e.g. a long shell command) shouldn't wrap the row. */
+	.status-text {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.dot { flex: 0 0 auto; }
 	.dot {
 		width: 6px; height: 6px; border-radius: 50%;
 		background: var(--text-muted);

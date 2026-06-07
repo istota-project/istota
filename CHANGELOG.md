@@ -13,8 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Web chat now uses a Discord/Slack-style transcript instead of chat bubbles: full-width rows with an avatar, the author name and time, and grouping of consecutive messages from the same author. Messages show your real display name and the bot's configured name.
 - Web chat message rendering moved to a full Markdown library. Bot replies now render nested lists, blockquotes, tables, strikethrough, and auto-linked URLs, on top of the formatting already supported.
+- Web chat live progress is more informative. Instead of a generic "Thinking…" placeholder, the in-progress line shows the same "working on it" verbs Nextcloud Talk uses (now shared between both surfaces), and intermediate text as it streams.
+- Web chat tool use is now a single box that shows the active tool with its details while running and a "✓ N tool calls" summary when done; click it to expand the full list of tool calls. Replaces the row of individually-expanding chips.
 
 ### Fixed
+- Web chat: tool indicators no longer spin forever after a task finishes — running tools are marked complete on the task's final event.
+- Web chat: a transient "Something went wrong." no longer flashes mid-response when the live event stream falls back to polling.
 - Web chat: confirmation prompts now work. An action that needs your approval parks correctly and shows the Confirm/Cancel card instead of silently completing as a plain message, and any staged side effects wait until you confirm. Previously the confirmation only fired for Nextcloud Talk.
 - Web chat: file attachments now actually reach the bot. Uploaded files were saved but never linked to the message, so the bot couldn't see them; the message now carries them through, and a message can only reference files you uploaded.
 - Web chat: confirming or double-clicking a task that isn't awaiting confirmation no longer wipes a running task's live progress log.

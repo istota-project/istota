@@ -31,7 +31,7 @@ from .consumers import (
     TalkEventSubscriber,
 )
 from .db_health import CheckReport, check_and_repair
-from .events import EventWriter
+from .events import EventWriter, PROGRESS_MESSAGES
 from .skills.briefing import (
     build_briefing_prompt,
     get_briefings_for_user,
@@ -131,57 +131,6 @@ CONFIRMATION_PATTERN = re.compile(
     r')',
     re.IGNORECASE
 )
-
-# Progress messages for Talk acknowledgments
-PROGRESS_MESSAGES = [
-    "*On it...*",
-    "*Hmm...*",
-    "*Heard, chef...*",
-    "*Investigating...*",
-    "*One sec...*",
-    "*Copy that...*",
-    "*Roger...*",
-    "*Considering...*",
-    "*Thinkifying...*",
-    "*Braining...*",
-    "*Improvising...*",
-    "*Jamming...*",
-    "*Riffing...*",
-    "*Grooving...*",
-    "*Beboppin'...*",
-    "*Noodling...*",
-    "*Syncopating...*",
-    "*Comping...*",
-    "*Soloing...*",
-    # Cephalopod
-    "*Inking...*",
-    "*Tentacling...*",
-    "*Suckering...*",
-    "*Jetting...*",
-    "*Unfurling...*",
-    "*Chromatophoring...*",
-    "*Squidding...*",
-    "*Grasping...*",
-    "*Probing...*",
-    "*Siphoning...*",
-    # Cheeky
-    "*Instigating...*",
-    "*Scheming...*",
-    "*Concocting...*",
-    "*Percolating...*",
-    "*Marinating...*",
-    "*Hatching...*",
-    "*Sleuthing...*",
-    "*Finagling...*",
-    "*Wrangling...*",
-    "*Tinkering...*",
-    "*Rummaging...*",
-    "*Conjuring...*",
-    "*Fermenting...*",
-    "*Machinating...*",
-    "*Gallivanting...*",
-]
-
 
 _POLICY_REFUSAL_KEYWORDS = ("safety", "policy", "content", "refused", "harm", "blocked")
 
@@ -1389,7 +1338,7 @@ def process_one_task(
             )
             if (_supports_ack and task.source_type == "talk"
                     and task.conversation_token and not dry_run):
-                ack_text = f"`#{task.id}` *Retrying…*" if is_rerun else f"`#{task.id}` {random.choice(PROGRESS_MESSAGES)}"
+                ack_text = f"`#{task.id}` *Retrying…*" if is_rerun else f"`#{task.id}` *{random.choice(PROGRESS_MESSAGES)}*"
                 ack_msg_id = run_coro(post_result_to_talk(
                     config, task, ack_text,
                     reference_id=f"istota:task:{task.id}:ack",

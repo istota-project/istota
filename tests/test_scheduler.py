@@ -1913,9 +1913,14 @@ class TestProgressMessages:
     def test_progress_messages_not_empty(self):
         assert len(PROGRESS_MESSAGES) > 0
 
-    def test_all_messages_are_italic(self):
+    def test_all_messages_are_plain(self):
+        # Phrases are now surface-agnostic plain text (no markup); each surface
+        # applies its own formatting (Talk italicizes at ack time).
         for msg in PROGRESS_MESSAGES:
-            assert msg.startswith("*") and msg.endswith("*"), f"Message not italic: {msg}"
+            assert msg, "Empty progress message"
+            assert not msg.startswith("*") and not msg.endswith("*"), (
+                f"Message carries Talk markup: {msg}"
+            )
 
 
 # ---------------------------------------------------------------------------
