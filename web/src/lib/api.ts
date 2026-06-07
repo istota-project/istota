@@ -22,6 +22,7 @@ export interface User {
 	display_name: string;
 	is_admin: boolean;
 	features: {
+		chat: boolean;
 		feeds: boolean;
 		location: boolean;
 		money: boolean;
@@ -1364,6 +1365,125 @@ export async function syncGarmin(days_back = 7): Promise<GarminSyncResponse> {
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ days_back }),
 	});
+}
+
+// ---- Web chat ----
+
+export interface ChatRoom {
+	id: number;
+	token: string;
+	name: string;
+	archived: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ChatConfig {
+	max_prompt_chars: number;
+	max_attachment_mb: number;
+	attachment_extensions: string[];
+	client_poll_interval_ms: number;
+}
+
+export interface ChatHistoryMessage {
+	role: 'user' | 'assistant';
+	text: string;
+	task_id: number;
+	status?: string;
+	confirmation?: boolean;
+	created_at: string;
+}
+
+export interface ChatHistory {
+	messages: ChatHistoryMessage[];
+	active_task: { id: number; status: string } | null;
+}
+
+export interface SendResult {
+	ok: boolean;
+	status: number;
+	retry_after?: number;
+	task_id?: number | null;
+	inline_result?: string;
+	stream_url?: string;
+	error?: string;
+}
+
+export interface TaskEventDTO {
+	seq: number;
+	kind: string;
+	payload: Record<string, unknown>;
+	created_at: string;
+}
+
+export function getChatConfig(): Promise<ChatConfig> {
+	return apiFetch<ChatConfig>('/chat/config');
+}
+
+export function getChatRooms(): Promise<{ rooms: ChatRoom[] }> {
+	return apiFetch<{ rooms: ChatRoom[] }>('/chat/rooms');
+}
+
+export function createChatRoom(name: string): Promise<ChatRoom> {
+	return apiFetch<ChatRoom>('/chat/rooms', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ name }),
+	});
+}
+
+export function updateChatRoom(
+	id: number,
+	patch: { name?: string; archived?: boolean },
+): Promise<ChatRoom> {
+	return apiFetch<ChatRoom>(`/chat/rooms/${id}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(patch),
+	});
+}
+
+export function getRoomMessages(id: number, limit = 50): Promise<ChatHistory> {
+	return apiFetch<ChatHistory>(`/chat/rooms/${id}/messages?limit=${limit}`);
+}
+
+export async function sendChatMessage(
+	roomId: number,
+	text: string,
+	attachments: string[] = [],
+): Promise<SendResult> {
+	const resp = await fetch(`${base}/api/chat/rooms/${roomId}/messages`, {
+		method: 'POST',
+		credentials: 'same-origin',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ text, attachments }),
+	});
+	if (resp.status === 401) throw new AuthError();
+	if (resp.status === 429) {
+		const retry = Number(resp.headers.get('Retry-After') || '60');
+		return { ok: false, status: 429, retry_after: retry };
+	}
+	const data = await resp.json().catch(() => ({}));
+	if (!resp.ok) {
+		return { ok: false, status: resp.status, error: data.error || `error ${resp.status}` };
+	}
+	return { ok: true, status: resp.status, ...data };
+}
+
+export function getTaskEvents(taskId: number, sinceSeq = 0): Promise<{ events: TaskEventDTO[] }> {
+	return apiFetch<{ events: TaskEventDTO[] }>(`/chat/tasks/${taskId}/events?since_seq=${sinceSeq}`);
+}
+
+export function confirmChatTask(taskId: number): Promise<{ status: string }> {
+	return apiFetch<{ status: string }>(`/chat/tasks/${taskId}/confirm`, { method: 'POST' });
+}
+
+export function cancelChatTask(taskId: number): Promise<{ status: string }> {
+	return apiFetch<{ status: string }>(`/chat/tasks/${taskId}/cancel`, { method: 'POST' });
+}
+
+export function chatStreamUrl(taskId: number): string {
+	return `${base}/api/chat/tasks/${taskId}/stream`;
 }
 
 export { AuthError };

@@ -54,6 +54,7 @@
 	<nav class="app-nav">
 		<a href="{base}/" class="app-name">Istota</a>
 		<div class="nav-links">
+			<a href="{base}/chat" class:active={isActive('/chat')}>Chat</a>
 			{#if user.features.feeds}
 				<a href="{base}/feeds" class:active={isActive('/feeds')}>Feeds</a>
 			{/if}
@@ -92,6 +93,16 @@
 				</DropdownMenu.Trigger>
 				<DropdownMenu.Portal>
 					<DropdownMenu.Content class="app-nav-menu" align="end" sideOffset={6}>
+						<DropdownMenu.Item>
+							{#snippet child({ props })}
+								<a
+									href="{base}/chat"
+									class="app-nav-menu-link"
+									class:active={isActive('/chat')}
+									{...props}>Chat</a
+								>
+							{/snippet}
+						</DropdownMenu.Item>
 						{#if user.features.feeds}
 							<DropdownMenu.Item>
 								{#snippet child({ props })}
@@ -167,7 +178,7 @@
 			</DropdownMenu.Root>
 		</div>
 	</nav>
-	<main class="app-content" class:app-content-fill={isActive('/location') || isActive('/feeds') || isActive('/money') || isActive('/health')}>
+	<main class="app-content" class:app-content-fill={isActive('/chat') || isActive('/location') || isActive('/feeds') || isActive('/money') || isActive('/health')}>
 		{@render children()}
 	</main>
 {/if}
