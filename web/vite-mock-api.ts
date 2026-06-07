@@ -100,6 +100,7 @@ const user = {
 	display_name: 'Stefan',
 	is_admin: true,
 	features: {
+		chat: true,
 		feeds: true,
 		location: true,
 		money: true,
@@ -108,6 +109,116 @@ const user = {
 		google_workspace_enabled: false,
 		admin: true,
 	},
+};
+
+// ---- Web chat mock state ----
+interface MockChatRoom { id: number; token: string; name: string; archived: boolean; created_at: string; updated_at: string; }
+interface MockChatTask { id: number; roomToken: string; prompt: string; createdAt: number; }
+const mockChatRooms: MockChatRoom[] = [
+	{ id: 1, token: 'web-stefan-general', name: 'general', archived: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+];
+const mockChatTasks = new Map<number, MockChatTask>();
+let mockChatRoomSeq = 1;
+let mockChatTaskSeq = 1000;
+
+// A canned event timeline for a mock task (ms offsets from creation).
+function mockTaskEvents(task: MockChatTask) {
+	const reply =
+		`Here's a mock reply to **${task.prompt.slice(0, 60)}**.\n\n` +
+		'- The real bot runs your message through the scheduler.\n' +
+		'- Streaming, tools, and `markdown` all render here.\n\n' +
+		'Try `!help` for commands.';
+	return [
+		{ seq: 1, kind: 'task_started', payload: {}, at: 0 },
+		{ seq: 2, kind: 'progress_text', payload: { text: 'Looking into it…' }, at: 300 },
+		{ seq: 3, kind: 'tool_start', payload: { tool_name: 'calendar', description: 'calendar list --date today', tool_call_id: 'c1' }, at: 700 },
+		{ seq: 4, kind: 'tool_end', payload: { tool_name: 'calendar', tool_call_id: 'c1', success: true, duration_ms: 420 }, at: 1300 },
+		{ seq: 5, kind: 'progress_text', payload: { text: 'Writing the answer…' }, at: 1600 },
+		{ seq: 6, kind: 'result', payload: { text: reply, truncated: false }, at: 2100 },
+		{ seq: 7, kind: 'done', payload: { stop_reason: 'completed', duration_seconds: 2.1 }, at: 2200 },
+	];
+}
+const MOCK_TASK_DONE_MS = 2200;
+
+const chatHandler: MockHandler = ({ url, method, body }) => {
+	if (!url.startsWith('/istota/api/chat/')) return undefined;
+	const path = url.split('?')[0];
+
+	if (path === '/istota/api/chat/config') {
+		return { max_prompt_chars: 32000, max_attachment_mb: 25, attachment_extensions: ['pdf', 'png', 'jpg'], client_poll_interval_ms: 600 };
+	}
+
+	if (path === '/istota/api/chat/rooms' && method === 'GET') {
+		return { rooms: mockChatRooms.filter((r) => !r.archived) };
+	}
+	if (path === '/istota/api/chat/rooms' && method === 'POST') {
+		const room: MockChatRoom = {
+			id: ++mockChatRoomSeq, token: `web-stefan-${mockChatRoomSeq}`,
+			name: (body?.name || 'room').slice(0, 80), archived: false,
+			created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+		};
+		mockChatRooms.push(room);
+		return room;
+	}
+	const roomPatch = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)$/);
+	if (roomPatch && method === 'PATCH') {
+		const room = mockChatRooms.find((r) => r.id === Number(roomPatch[1]));
+		if (!room) return { error: 'room not found' };
+		if (body?.name != null) room.name = String(body.name).slice(0, 80);
+		if (body?.archived != null) room.archived = !!body.archived;
+		return room;
+	}
+
+	const msgMatch = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)\/messages$/);
+	if (msgMatch && method === 'GET') {
+		const room = mockChatRooms.find((r) => r.id === Number(msgMatch[1]));
+		if (!room) return { error: 'room not found' };
+		const now = Date.now();
+		const tasks = [...mockChatTasks.values()].filter((t) => t.roomToken === room.token).sort((a, b) => a.id - b.id);
+		const messages: any[] = [];
+		let active: any = null;
+		for (const t of tasks) {
+			messages.push({ role: 'user', text: t.prompt, task_id: t.id, created_at: new Date(t.createdAt).toISOString() });
+			if (now - t.createdAt >= MOCK_TASK_DONE_MS) {
+				const ev = mockTaskEvents(t).find((e) => e.kind === 'result');
+				messages.push({ role: 'assistant', text: (ev?.payload as any).text, task_id: t.id, status: 'completed', created_at: new Date(t.createdAt).toISOString() });
+			} else {
+				active = { id: t.id, status: 'running' };
+			}
+		}
+		return { messages, active_task: active };
+	}
+	if (msgMatch && method === 'POST') {
+		const room = mockChatRooms.find((r) => r.id === Number(msgMatch[1]));
+		if (!room) return { error: 'room not found' };
+		const text = String(body?.text || '').trim();
+		if (!text) return { error: 'text required' };
+		if (text.startsWith('!')) {
+			return { task_id: null, inline_result: `Mock command result for \`${text}\`.` };
+		}
+		const id = ++mockChatTaskSeq;
+		mockChatTasks.set(id, { id, roomToken: room.token, prompt: text, createdAt: Date.now() });
+		return { task_id: id, status: 'pending', stream_url: `/istota/api/chat/tasks/${id}/stream`, snapshot_url: `/istota/api/chat/tasks/${id}/events` };
+	}
+
+	const evMatch = path.match(/^\/istota\/api\/chat\/tasks\/(\d+)\/events$/);
+	if (evMatch && method === 'GET') {
+		const id = Number(evMatch[1]);
+		const sinceSeq = Number(new URL(`http://x${url}`).searchParams.get('since_seq') || '0');
+		const task = mockChatTasks.get(id);
+		if (!task) return { events: [] };
+		const elapsed = Date.now() - task.createdAt;
+		const events = mockTaskEvents(task)
+			.filter((e) => e.at <= elapsed && e.seq > sinceSeq)
+			.map((e) => ({ seq: e.seq, kind: e.kind, payload: e.payload, created_at: new Date().toISOString() }));
+		return { events };
+	}
+
+	if (path.match(/^\/istota\/api\/chat\/tasks\/\d+\/(confirm|cancel)$/) && method === 'POST') {
+		return { status: 'ok' };
+	}
+
+	return undefined;
 };
 
 const mockAdminStats = {
@@ -742,6 +853,7 @@ function mockModuleServices(module: string) {
 
 const handlers: MockHandler[] = [
 	({ url }) => (url === '/istota/api/me' ? user : undefined),
+	chatHandler,
 
 	({ url }) => (url === '/istota/api/admin/stats' ? mockAdminStats : undefined),
 
