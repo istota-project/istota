@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Internal: all Nextcloud Talk I/O now runs on one persistent asyncio loop with a single reused HTTP client, instead of spinning up a fresh event loop and connection per call. Connections to Nextcloud are pooled across the daemon's lifetime, and a class of event-loop-teardown leaks becomes structurally impossible. Behavior-preserving; no config changes.
 - Internal: email is now a first-class transport (`transport/email/`) mirroring Talk, with shared non-transport helpers in `email_support`. Behavior-preserving refactor; adds end-to-end tests for the email send path.
 
+### Fixed
+- Internal: the persistent Talk loop now cancels any in-flight request before closing the shared HTTP client on shutdown, avoiding a spurious "client closed" error when the daemon stops mid-poll.
+- Internal: one-shot runs (`istota run`, cron single-pass) now shut the persistent loop down cleanly instead of dropping pooled connections on process exit.
+
 ## [0.16.0] - 2026-06-06
 
 ### Added

@@ -155,6 +155,60 @@ class TestCleanupHooks:
         assert rt.is_running is False
 
 
+class TestShutdownOrdering:
+    def test_inflight_cancelled_before_cleanup_hooks(self):
+        """stop() must cancel in-flight coroutines BEFORE running cleanup hooks.
+
+        Otherwise a hook like TalkClient.aclose closes the shared client out from
+        under a live request (e.g. the poller's long-poll), surfacing a spurious
+        "client closed" error instead of a clean CancelledError.
+        """
+        rt = AsyncRuntime()
+        rt.start()
+        order: list[str] = []
+        started = threading.Event()
+
+        async def inflight():
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                order.append("cancelled")
+                raise
+
+        async def hook():
+            order.append("hook")
+
+        # Schedule the long-running coroutine on the loop without blocking this
+        # thread, so it is a genuine pending task when stop() runs.
+        asyncio.run_coroutine_threadsafe(inflight(), rt.loop)
+        assert started.wait(timeout=2.0), "in-flight coroutine never started"
+        rt.add_cleanup_hook(hook)
+
+        rt.stop()
+
+        assert order == ["cancelled", "hook"]
+
+    def test_start_clears_stale_cleanup_hooks(self):
+        """A restart of the same instance must not accumulate hooks from the
+        prior run (get_talk_client appends one aclose hook per client)."""
+        rt = AsyncRuntime()
+        calls: list[str] = []
+
+        async def hook():
+            calls.append("x")
+
+        rt.start()
+        rt.add_cleanup_hook(hook)
+        rt.stop()
+        assert calls == ["x"]
+
+        # Restart + stop: the stale hook from the first cycle must be gone.
+        rt.start()
+        rt.stop()
+        assert calls == ["x"], "stale cleanup hook ran again after restart"
+
+
 class TestModuleSingleton:
     def teardown_method(self):
         reset_async_runtime()

@@ -207,3 +207,46 @@ class TestStage6PersistentRequests:
             run_coro(go())
 
         assert inst.get.call_args.kwargs["timeout"] == 40
+
+
+class TestShimDeliveryEndToEnd:
+    """The scheduler delivery shims are the highest-traffic Talk call sites, but
+    the scheduler unit tests mock run_coro away — so the path from the shim
+    through run_coro onto the persistent client is otherwise unexercised. This
+    drives post_result_to_talk end to end with only the httpx layer mocked,
+    proving the awaited TalkClient method runs on the persistent loop and reuses
+    the singleton client."""
+
+    def _resp(self, json_value, status=200):
+        resp = MagicMock()
+        resp.status_code = status
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value=json_value)
+        return resp
+
+    def test_post_result_to_talk_drives_persistent_client(self):
+        from istota.scheduler import post_result_to_talk
+
+        cfg = _config()
+        task = MagicMock()
+        task.id = 7
+        task.conversation_token = "room42"
+        task.is_group_chat = False
+        task.talk_message_id = None
+        task.user_id = "alice"
+
+        with patch("istota.talk.httpx.AsyncClient") as MockHttp:
+            inst = MockHttp.return_value
+            inst.post = AsyncMock(
+                return_value=self._resp({"ocs": {"data": {"id": 99}}})
+            )
+            inst.aclose = AsyncMock()
+
+            msg_id = run_coro(post_result_to_talk(cfg, task, "hello"))
+
+        assert msg_id == 99
+        # The shim awaited the persistent client's post exactly once, on the loop.
+        assert inst.post.await_count == 1
+        assert MockHttp.call_count == 1  # one pooled client, not a per-call one
+        # The singleton the shim used is the process-global one.
+        assert get_talk_client(cfg)._client is inst

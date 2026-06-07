@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-06: Mulder/Scully review of the persistent asyncio loop — shutdown ordering + lifecycle fixes
+
+Ran both review agents over the just-landed persistent-asyncio-loop refactor. Verdict: architecture sound, the dangerous traps (reentry deadlock, transient `TalkClient(config)` in a daemon path, email accidentally on the persistent loop) were genuinely avoided, all stated guarantees verified, suite green. The agents surfaced a handful of real fragilities; this session fixed the ones worth acting on.
+
+**`stop()` closed the client before cancelling in-flight work.** The original `stop()` ran the cleanup hooks (which `aclose` the shared client) first, then stopped the loop, and only afterward cancelled pending tasks in `_run`'s `finally`. So at shutdown the talk-poller's in-flight long-poll — awaiting `self._client.get(...)` — had its client closed out from under it, surfacing a spurious "client closed" error instead of a clean `CancelledError` (swallowed by `gather(return_exceptions=True)`, so survivable but inverted). Fixed by adding an `_shutdown` coroutine that runs on the loop and does cancel-then-aclose in the correct order: cancel all pending tasks, `gather` them, *then* run the cleanup hooks. `stop()` submits it with half the timeout budget, then stops the loop with the remainder.
+
+**One-shot paths leaked the runtime.** `run_scheduler` (cron single-pass) and `cmd_run` (`istota run`) both lazily start the process-global runtime via `run_coro` but never stopped it — every one-shot invocation exited with the shared client's `aclose` hook never running, dropping pooled keep-alives without a clean TLS shutdown (strictly worse than the old per-call `async with`). Both now call `reset_async_runtime()` before returning; no-op when Talk is disabled and the runtime was never started.
+
+**Cleanup hooks accumulated across an in-process restart.** `start()` never cleared `_cleanup_hooks`, and `run_daemon` stopped the runtime without clearing the process globals, so a second `run_daemon` in the same process would re-`start()` the same instance with the prior run's `aclose` hook still in the list, and `get_talk_client` would append another. Benign while `aclose` is idempotent, latent otherwise. Fixed two ways: `start()` now resets `_cleanup_hooks`, and `run_daemon` shutdown switched from `runtime.stop()` to `reset_async_runtime()` (stops *and* clears the globals).
+
+**Test isolation — and a real latent flake it exposed.** The runtime/TalkClient singletons are process-global and persisted across tests within an xdist worker; only the two dedicated test files reset them, on teardown only. Added an autouse `conftest.py` fixture that resets both around every test (near-free for the ~5500 tests that never touch the runtime — the reset helpers early-return when the globals are still `None`). This wasn't just hygiene: the full suite under xdist deterministically failed `test_accessor_starts_runtime_for_cleanup_hook` (it asserts the singleton's pool isn't opened eagerly, but inherited an already-opened client leaked by a prior file's test). Passed in isolation, failed in the suite — exactly the contamination the fixture now prevents.
+
+**Coverage added.** The scheduler delivery shims (`post_result_to_talk` / `edit_talk_message`) are the highest-traffic Talk call sites, but the scheduler unit tests mock `run_coro` away, so the path from shim → `run_coro` → persistent client was unexercised. Added an end-to-end test driving `post_result_to_talk` with only the httpx layer mocked, asserting the persistent client's `post` is awaited once, exactly one pooled client is constructed, and the result id flows back. Plus tests for the new `stop()` cancel-before-aclose ordering and the `start()` hook-clear.
+
+Left as-is by design: no caller-side `run_coro` timeout (httpx bounds each request; the long-poll deliberately wants `timeout=None`).
+
+**Tests.** Full suite green twice (5585 passed, 7 skipped).
+
+**Files modified:**
+- `src/istota/async_runtime.py` - `_shutdown` coroutine + reordered `stop()` (cancel→aclose→stop); `start()` clears `_cleanup_hooks`
+- `src/istota/scheduler.py` - `run_scheduler` calls `reset_async_runtime()`; `run_daemon` shutdown uses `reset_async_runtime()`; dropped unused `runtime` binding
+- `src/istota/cli.py` - `cmd_run` calls `reset_async_runtime()` on exit
+- `tests/conftest.py` - autouse runtime/TalkClient singleton reset
+- `tests/test_async_runtime.py` - shutdown-ordering + hook-clear tests
+- `tests/test_talk_client_persistent.py` - end-to-end shim→persistent-client delivery test
+- `.claude/rules/scheduler.md` - `stop()` ordering + one-shot graceful-shutdown notes
+
 ## 2026-06-06: Persistent asyncio loop for Talk (one loop, one pooled client)
 
 The scheduler invoked async coroutines through dozens of `asyncio.run(...)` calls — every Talk send, edit, poll-cycle, and progress update spun up a fresh event loop, built a fresh default `ThreadPoolExecutor`, opened a fresh `httpx.AsyncClient` (fresh TCP+TLS handshake to Nextcloud), ran the coroutine, and tore the whole stack down. This refactor (spec: `scheduler-persistent-asyncio-loop.md`) collapses all of that onto **one** long-lived loop on a dedicated daemon thread with **one** pooled client. It's a performance + robustness change, not a bug fix: connection reuse on every short message op, and a whole class of loop-teardown leaks (a cancellation propagating into `httpx.AsyncClient.__aexit__` mid-TLS-shutdown) becomes structurally impossible because there's no per-call loop to tear down.

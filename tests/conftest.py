@@ -107,3 +107,25 @@ def make_user_config():
         defaults.update(overrides)
         return UserConfig(**defaults)
     return _make_user_config
+
+
+@pytest.fixture(autouse=True)
+def _reset_async_runtime_singletons():
+    """Isolate the process-global persistent asyncio runtime + TalkClient.
+
+    These singletons (``istota.async_runtime._RUNTIME`` / ``_TALK_CLIENT``)
+    persist across tests within an xdist worker. A test that lazily starts the
+    runtime or opens the shared client and doesn't reset it would leak that
+    state into the next test on the same worker (e.g. a returned-singleton whose
+    httpx pool is already open). Reset before and after every test so isolation
+    doesn't depend on each Talk-touching test remembering to clean up. Cheap for
+    the vast majority of tests that never touch the runtime: the reset helpers
+    early-return when the globals are still ``None``.
+    """
+    from istota.async_runtime import reset_async_runtime, reset_talk_client
+
+    reset_talk_client()
+    reset_async_runtime()
+    yield
+    reset_talk_client()
+    reset_async_runtime()
