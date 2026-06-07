@@ -496,6 +496,17 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # oauth2_userinfo_endpoint = ""                    # server-to-server identity URL
 # oauth2_redirect_uri = ""                         # explicit override; otherwise derived from request
 
+# In-app web chat surface (always-on companion to Talk; reachable from the
+# "Chat" tab). All knobs have sensible defaults — this block is only for tuning.
+# [web.chat]
+# max_prompt_chars = 32000
+# max_attachment_mb = 25
+# attachment_extensions = ["pdf", "png", "jpg", "jpeg", "webp", "gif", "txt", "md", "csv", "wav", "mp3", "m4a", "ogg", "docx", "xlsx"]
+# rate_limit_messages = 30                          # per window, per user
+# rate_limit_window_seconds = 300
+# sse_poll_interval_ms = 200                        # server-side SSE generator cadence
+# client_poll_interval_ms = 1500                    # client polling fallback cadence
+
 # ============================================================================
 # Google Workspace Integration
 # ============================================================================
