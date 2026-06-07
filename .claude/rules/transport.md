@@ -229,24 +229,58 @@ Distinct from `resolve_delivery_plan` (which routes task *results* by
   security/action alerts (`alert`), email-sent notices (`notification`).
 - Set via `istota user ensure --route purpose=descriptor` (validated against
   `PURPOSES`) or the web `/settings` Preferences card; both go through the same
-  `user_profiles` row.
+  `user_profiles.routing` JSON column. The CLI can set any purpose. The web card
+  is deliberately narrowed (see below): it edits only `default_destination` and
+  the `alert` route, since `alert` is the one purpose framework-generated
+  notifications can't override per-task and benefits from a separate/louder
+  channel. The other purposes are effectively dead UI — `log` duplicates the
+  dedicated `log_channel` field, `briefing` duplicates each briefing's own
+  `conversation_token`, `reply` is vestigial (result delivery routes via
+  `resolve_delivery_plan`/`output_target`, not the routing table), and
+  `notification` falls to the default. The web card preserves any
+  CLI-set non-`alert` routes on round-trip rather than stripping them — it just
+  doesn't surface them.
 
-## Known residuals (candidates for a later sweep)
+## Deliberate residuals (ISSUE-113, closed)
 
-The Talk-protocol-internal spots that used to build their own `TalkClient`
+Three things the transport-abstraction spec's *Deviations* section flagged for a
+later sweep were reviewed under ISSUE-113 and kept as-is. They are settled
+decisions, not pending debt.
+
+**No direct `TalkClient` construction outside the singleton.** The
+Talk-protocol-internal spots that used to build their own `TalkClient`
 (`scheduler._resolve_channel_name`, `scheduler._finalize_log_channel`, the
 `run_cleanup_checks` stale/ancient-task notices, `commands.dispatch` `!command`
-replies, the inbound poller, the confirmation-reply handler) now all pull the
-persistent `get_talk_client(config)` singleton and run via `run_coro` — there
-are no transient `TalkClient(config)` constructions left in daemon Talk paths.
-The low-level `TalkClient` class itself lives in `istota.talk` and is still
-instantiated directly by the CLI (one-shot `asyncio.run` processes that don't
-share the daemon's loop). The Talk inbound caches (conversation/participant/DM)
-remain module-global in `transport/talk/inbound.py` (they back its
+replies, the inbound poller, the confirmation-reply handler) all pull the
+persistent `get_talk_client(config)` singleton and run via `run_coro` — swept by
+the persistent-asyncio-loop refactor. A repo-wide grep finds exactly one
+`TalkClient(...)` construction: the singleton factory in `async_runtime.py`,
+which is its canonical home. The CLI shares that singleton too (via
+`commands.dispatch` → `get_talk_client`), so the "no direct `TalkClient` outside
+the transport" invariant holds by grep.
+
+**The delivery shims stay.** `scheduler.post_result_to_talk`,
+`post_result_to_email`, and `edit_talk_message` remain thin named functions over
+`TalkTransport.deliver`/`.edit` and `transport.email.outbound.deliver_email_result`
+rather than collapsing into bare `registry.get(surface).deliver(...)` calls at
+each site. They centralize three genuine impedance-matches that a uniform
+`Transport.deliver` can't carry: the Talk `target_token` override (the
+email-source-task-replying-into-Talk synthetic-token case), the email
+bool-vs-`int|None` mismatch (the protocol returns a message id, but email has no
+message-id concept and its two callers branch on a success bool), and the Talk
+url/token guard + exception→`False` in `edit`. The event consumers
+(`consumers/talk.py`, `consumers/log_channel.py`) call these by name. Collapsing
+buys no behavioral change and would smear that logic across ~5 call sites plus
+the consumers; the newest surfaces (ntfy, istota_file) already deliver through
+`registry.get(surface).deliver(...)` directly, so the shims are Talk/email-only
+and won't acquire new callers.
+
+**Talk inbound caches stay module-global.** The conversation/participant/DM
+caches remain module-global in `transport/talk/inbound.py` (they back its
 `get_dm_token`, which `notifications.resolve_conversation_token` calls) rather
 than instance state on `TalkTransport`. Email's shared, non-transport helpers
-live in `istota.email_support` (see the layout section). These are intentional:
-moving them buys little and would churn tightly-coupled tests.
+live in `istota.email_support` (see the layout section). Moving either buys
+little and would churn tightly-coupled tests.
 
 ## How to add a transport (e.g. Matrix, web chat)
 

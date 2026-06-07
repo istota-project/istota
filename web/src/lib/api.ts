@@ -591,8 +591,7 @@ export interface UserProfile {
 	site_enabled: boolean;
 	default_destination: string;
 	routing: Record<string, string>;
-	// Read-only hints from the server for rendering the routing UI.
-	purposes?: string[];
+	// Read-only hint from the server: surfaces available for delivery routing.
 	delivery_surfaces?: string[];
 }
 

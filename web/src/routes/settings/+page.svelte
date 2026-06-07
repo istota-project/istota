@@ -132,7 +132,6 @@
 		profile.disabled_modules = [...next];
 	}
 
-	const DEFAULT_PURPOSES = ['reply', 'alert', 'log', 'briefing', 'notification'];
 	const BUILTIN_SURFACES = ['talk', 'email', 'ntfy', 'istota_file', 'stream'];
 
 	function deliverySurfaces(): string[] {
@@ -511,7 +510,7 @@
 			{/if}
 			<SettingsField
 				label="Default delivery destination"
-				hint="Where messages go when a purpose below has no specific route."
+				hint="Where your results and notifications go. Alerts can use a separate channel below."
 			>
 				<Select
 					value={profile.default_destination || 'talk'}
@@ -523,25 +522,18 @@
 					}}
 				/>
 			</SettingsField>
-			<div class="route-section">
-				<span class="route-heading">Delivery routing (per purpose)</span>
-				<p class="hint">
-					Where each kind of message goes. Pick a delivery surface per purpose,
-					or leave it on <code>(default)</code> to fall back to the default
-					destination above.
-				</p>
-				{#each profile.purposes && profile.purposes.length ? profile.purposes : DEFAULT_PURPOSES as purpose (purpose)}
-					<SettingsField label={purpose}>
-						<Select
-							value={(profile.routing || {})[purpose] || ''}
-							options={routeOptions((profile.routing || {})[purpose] || '')}
-							ariaLabel={`Route for ${purpose}`}
-							fullWidth
-							onValueChange={(v) => setRoute(purpose, v)}
-						/>
-					</SettingsField>
-				{/each}
-			</div>
+			<SettingsField
+				label="Send alerts to"
+				hint="Optional. Route alerts (heartbeat failures, security and policy notices) to a louder or separate channel, e.g. ntfy for push. Leave on (default) to use the default destination."
+			>
+				<Select
+					value={(profile.routing || {})['alert'] || ''}
+					options={routeOptions((profile.routing || {})['alert'] || '')}
+					ariaLabel="Alert delivery destination"
+					fullWidth
+					onValueChange={(v) => setRoute('alert', v)}
+				/>
+			</SettingsField>
 			<SettingsField label="Static website hosting at /~user/" checkbox>
 				<input type="checkbox" bind:checked={profile.site_enabled} />
 			</SettingsField>
@@ -874,16 +866,6 @@
 		justify-content: flex-end;
 	}
 
-	.route-section {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-
-	.route-heading {
-		font-size: var(--text-sm);
-		color: var(--text-muted);
-	}
 
 	.module-toggles {
 		display: flex;

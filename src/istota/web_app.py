@@ -1569,11 +1569,6 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
 }
 
 
-def _routing_purposes() -> tuple[str, ...]:
-    from .notifications import PURPOSES
-    return PURPOSES
-
-
 def _registered_delivery_surfaces() -> list[str]:
     """Surfaces the Preferences UI can offer for routing (registered transports
     plus the events-only ``stream`` surface)."""
@@ -1727,7 +1722,6 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "site_enabled": profile.site_enabled,
         "default_destination": profile.default_destination,
         "routing": profile.routing,
-        "purposes": list(_routing_purposes()),
         "delivery_surfaces": _registered_delivery_surfaces(),
     }}
 
