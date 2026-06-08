@@ -77,11 +77,15 @@
 			{/if}
 
 			{#if message.tools.length}
-				<ToolStrip tools={message.tools} />
+				<ToolStrip tools={message.tools} streaming={message.streaming} />
 			{/if}
 
 			{#if message.streaming && !message.text}
-				{#if !hasRunningTool}
+				{#if !hasRunningTool && !message.tools.length}
+					<!-- Pre-tool / pure-thinking cue. Suppressed once any tool
+					     appears — the ToolStrip is then the single activity
+					     indicator (it keeps pulsing between tools while streaming),
+					     so the dot doesn't flicker in and out per tool call. -->
 					<div class="progress">
 						<span class="dot"></span>
 						<span class="status-text">{message.progress || 'Thinking…'}</span>
@@ -98,10 +102,11 @@
 				{/if}
 			{:else}
 				<div class="body markdown">{@html bodyHtml}</div>
-				{#if message.streaming && !hasRunningTool}
-					<!-- Typing affordance while the answer streams. A status verb
-					     shows if one is set; once text_delta clears it, just the
-					     pulsing dot remains as a "still writing" cue. -->
+				{#if message.streaming && !hasRunningTool && !message.tools.length}
+					<!-- Typing affordance while the answer streams, for the
+					     no-tools case only. When tools are present the ToolStrip
+					     carries the "still working" signal, so we don't also show
+					     this dot (it would flicker in after each tool completes). -->
 					<div class="progress subtle">
 						<span class="dot"></span>
 						{#if message.progress}<span class="status-text">{message.progress}</span>{/if}
