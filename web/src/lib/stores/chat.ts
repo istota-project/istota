@@ -60,10 +60,22 @@ export type ChatStatus = 'idle' | 'sending' | 'streaming';
 // `task_started` verb is then skipped (see applyEvent) so the line doesn't
 // flicker from one random verb to another. Real status (progress_text,
 // tool_start) still takes over normally.
+//
+// This MUST mirror the master list in src/istota/events.py (PROGRESS_MESSAGES)
+// so the client-side seed never shows a verb the backend wouldn't. Same verbs,
+// only the trailing "..." rendered as a single "…". Keep the two lists in sync.
 const ACK_VERBS = [
-	'On it…', 'Hmm…', 'Heard, chef…', 'Working on it…', 'Looking…',
-	'Thinking it through…', 'Digging in…', 'Right then…', 'Let me see…',
-	'Getting into it…',
+	'On it…', 'Hmm…', 'Heard, chef…', 'Investigating…', 'One sec…',
+	'Copy that…', 'Roger…', 'Considering…', 'Thinkifying…', 'Braining…',
+	'Improvising…', 'Jamming…', 'Riffing…', 'Grooving…', 'Beboppin’…',
+	'Noodling…', 'Syncopating…', 'Comping…', 'Soloing…',
+	// Cephalopod
+	'Inking…', 'Tentacling…', 'Suckering…', 'Jetting…', 'Unfurling…',
+	'Chromatophoring…', 'Squidding…', 'Grasping…', 'Probing…', 'Siphoning…',
+	// Cheeky
+	'Instigating…', 'Scheming…', 'Concocting…', 'Percolating…', 'Marinating…',
+	'Hatching…', 'Sleuthing…', 'Finagling…', 'Wrangling…', 'Tinkering…',
+	'Rummaging…', 'Conjuring…', 'Fermenting…', 'Machinating…', 'Gallivanting…',
 ];
 
 function randomAckVerb(): string {
