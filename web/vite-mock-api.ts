@@ -223,6 +223,12 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 		if (body?.archived != null) room.archived = !!body.archived;
 		return room;
 	}
+	if (roomPatch && method === 'DELETE') {
+		const idx = mockChatRooms.findIndex((r) => r.id === Number(roomPatch[1]));
+		if (idx < 0) return { error: 'room not found' };
+		mockChatRooms.splice(idx, 1);
+		return { status: 'ok' };
+	}
 
 	const msgMatch = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)\/messages$/);
 	if (msgMatch && method === 'GET') {

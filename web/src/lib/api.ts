@@ -1450,6 +1450,26 @@ export function updateChatRoom(
 	});
 }
 
+/** A room can't be deleted while a task is still running in it (HTTP 409). */
+export class ChatRoomBusyError extends Error {
+	constructor() {
+		super('room has a task in progress');
+		this.name = 'ChatRoomBusyError';
+	}
+}
+
+export async function deleteChatRoom(id: number): Promise<{ status: string }> {
+	const resp = await fetch(`${base}/api/chat/rooms/${id}`, {
+		method: 'DELETE',
+		credentials: 'same-origin',
+	});
+	if (resp.status === 409) throw new ChatRoomBusyError();
+	// 404 → already gone; idempotent from the caller's view.
+	if (resp.status === 404) return { status: 'gone' };
+	if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+	return resp.json();
+}
+
 export function getRoomMessages(id: number, limit = 50): Promise<ChatHistory> {
 	return apiFetch<ChatHistory>(`/chat/rooms/${id}/messages?limit=${limit}`);
 }

@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-07: Web chat room settings — rename, copy token, hard-delete, deep link
+
+Web chat shipped with rooms you could create and select but not manage: no rename, no delete, and the per-room channel token (the thing you'd paste into a `web:<token>` output route after ISSUE-121) was never shown anywhere but the DB. This session added a per-room settings modal and a query-param deep link.
+
+**Affordance.** Each room row in the sidebar gained the existing `KebabMenu` (⋮) with a single "Settings…" item opening `RoomSettings.svelte` (built on the shared `Modal`, mirroring the location `PlaceForm` pattern). The modal: rename the room (token stays invariant), a read-only token field with a Copy button (clipboard write, "Copied!" feedback, falls back to a "select manually" notice when `navigator.clipboard` rejects on an insecure context), and a delete flow.
+
+**Delete is a hard cascade.** `db.delete_web_chat_room` removes, in one transaction, the room's tasks' `task_events`, those tasks, its `web_chat_messages`, its `channel_sleep_cycle_state`, and the room row — ownership-checked (`user_id` mismatch / unknown id → `False`, deleting nothing). The API helper (`_chat_delete_room`) guards on `count_active_web_tasks` (a non-terminal task in the room → 409, so a running worker can't write `task_events` against rows we just dropped) and best-effort removes the `Channels/<token>/` directory outside the transaction. The destructive button is gated behind a GitHub-style type-the-room-name confirmation (exact, case-sensitive, against the *saved* name, not any unsaved rename). Channel `memory_chunks` are a documented residual — removing `CHANNEL.md` stops them being re-indexed.
+
+**Deep link.** `/chat?room=<token>` selects that room on mount via a new `selectRoomByToken` store action, overriding the persisted-room default for that load. A token not in the per-user room list (foreign / typo / archived) silently falls back — which is also the access-control boundary, since the list is already per-user.
+
+Verified end-to-end against the mock backend (kebab → settings, rename disabled-when-unchanged, type-to-confirm gating wrong vs. exact, delete → empty-state fall-through, deep-link selects the named room over the active one, unknown token falls back). Backend is TDD: `TestWebChatRoomDelete` (DB cascade + ownership + busy count) and `TestChatDeleteApi` (200/409/404/CSRF) in `tests/test_web_chat.py`.
+
+**Files added/modified:**
+- `src/istota/db.py` - `delete_web_chat_room` + `count_active_web_tasks`
+- `src/istota/web_app.py` - `_chat_delete_room` + `DELETE /chat/rooms/{id}` route + `CHANNEL.md` cleanup
+- `web/src/lib/api.ts` - `deleteChatRoom` + `ChatRoomBusyError`
+- `web/src/lib/stores/chat.ts` - `deleteRoom` + `selectRoomByToken` actions
+- `web/src/lib/components/chat/RoomSettings.svelte` (new) - the modal
+- `web/src/routes/chat/+page.svelte` - kebab affordance, modal wiring, deep-link read
+- `web/vite-mock-api.ts` - mock `DELETE /chat/rooms/:id`
+- `tests/test_web_chat.py` - `TestWebChatRoomDelete` + `TestChatDeleteApi`
+
 ## 2026-06-07: Web chat as a user-routable delivery surface (ISSUE-121)
 
 Web chat shipped as an *interactive* surface only: you could talk to the bot in a room, but it wasn't a destination you could route logs/alerts/notifications to. The settings UI's logs/alerts route pickers offered talk/email/ntfy but not web, and the underlying reason was structural — there was no `WebTransport`, so `registry.routable_names()` (which every UI selector already reads) couldn't surface it.
