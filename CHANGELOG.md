@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A light/dark theme toggle in the web UI. It switches the whole interface between light and dark, and your choice is remembered per browser.
+- Web chat now syntax-highlights fenced code blocks, so code in replies is colored by language.
+- Web chat can show the model's own reasoning as a separate, collapsible segment in the activity chip, alongside the tools it ran.
+
+### Changed
+- Web chat and the REPL now stream the assistant's answer live, token by token, as the model produces it instead of arriving all at once when the task finishes. This works on both brains — the native brain and the Claude Code brain. Nextcloud Talk is unchanged.
+- Web chat renders an assistant turn as ordered, interleaved text and tool steps, with the whole work trace folded into a single activity chip that expands to the full list of tool calls. Only the actual answer streams into the message body; lead-in narration like "Let me check…" is held back so it can't leak into the answer.
+- Web chat visual polish: softer overall contrast, lighter message panes, more readable code blocks, and a subtle pulse on the active-tool strip.
+
+### Fixed
+- Web chat: a task that fails terminally no longer leaves the room stuck on "Working…" — the room settles to the failure instead of spinning forever.
+- Web chat: when an attempt fails and retries, the room now shows a "retrying" notice instead of a silent spinner.
+- Web chat: the live stream no longer freezes partway through a response.
+- Web chat: several light-mode rendering glitches (message-row hover, the bot avatar initial, and the browser-geolocation dot) are fixed.
+
 ## [0.19.0] - 2026-06-08
 
 ### Added
