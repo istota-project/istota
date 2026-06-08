@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-06-08
+
 ### Added
 - In-app web chat. A new always-on "Chat" tab in the web UI lets you talk to the bot without leaving the dashboard — a full-page console with Discord/Slack-style rooms in a sidebar, live streaming of tool use and intermediate text, inline `!commands`, confirmation prompts rendered as Confirm/Cancel cards, cancel, and drag-drop/paste file attachments. Each room is its own persistent conversation with its own channel memory. It complements Nextcloud Talk rather than replacing it.
 - The full `!command` set now works the same in web chat as in Nextcloud Talk, including `!export` and `!search` (export reads your conversation from the database, so it no longer needs a Talk server; search uses the memory index).
@@ -653,7 +655,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.18.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.19.0...main
+[0.19.0]: https://gitlab.com/cynium/istota/-/releases/v0.19.0
 [0.18.0]: https://gitlab.com/cynium/istota/-/releases/v0.18.0
 [0.17.0]: https://gitlab.com/cynium/istota/-/releases/v0.17.0
 [0.16.0]: https://gitlab.com/cynium/istota/-/releases/v0.16.0
