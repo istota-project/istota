@@ -290,11 +290,13 @@
 		font-family: ui-monospace, monospace;
 		font-size: 0.9em;
 		background: #2d2d2d;
+		color: #e6e6e6;
 		padding: 0.05rem 0.3rem;
 		border-radius: 0.25rem;
 	}
 	.markdown :global(pre) {
 		background: #2d2d2d;
+		color: #e6e6e6;
 		border: 1px solid var(--border-subtle);
 		border-radius: 0.35rem;
 		padding: 0.5rem 0.65rem;
