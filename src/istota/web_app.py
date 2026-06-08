@@ -1112,6 +1112,50 @@ def _load_task_events(task_id: int, since_seq: int) -> list[dict]:
         return db.get_task_events(conn, task_id, since_seq)
 
 
+_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
+    """Terminal backstop for the web chat stream.
+
+    A web task's event log is the bus, but it can be emptied out from under a
+    watching client: ``set_task_pending_retry`` deletes every row and resets the
+    per-task ``seq`` on each retry-eligible failure, so the final attempt's
+    ``error``/``done`` land at a ``seq`` *below* the client's resume cursor and
+    never reach it — the UI hangs on "Working…" though the task is terminal. A
+    crash that skips ``EventWriter.finish()`` leaves the same gap.
+
+    When the task is terminal but no ``done`` is deliverable to a client parked
+    at ``after_seq``, synthesize the terminal frames from the task row, numbered
+    *above* ``after_seq`` so the client's monotonic-seq guard accepts them.
+    Returns ``[]`` while the task is still running (incl. ``pending`` between
+    retries) or when a real ``done`` is still deliverable normally.
+    """
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        task = db.get_task(conn, task_id)
+        if task is None or task.status not in _TERMINAL_TASK_STATUSES:
+            return []
+        pending = db.get_task_events(conn, task_id, after_seq)
+    if any(e["kind"] == "done" for e in pending):
+        return []  # a real terminal frame is still on its way to this client
+    seq = max([after_seq, *(e["seq"] for e in pending)]) + 1
+    frames: list[dict] = []
+    if task.status == "completed":
+        frames.append({"seq": seq, "kind": "result",
+                       "payload": {"text": (task.result or "")[:8000]}})
+    elif task.status == "cancelled":
+        frames.append({"seq": seq, "kind": "cancelled", "payload": {}})
+    else:  # failed — mirror the live error frame's raw-ish message
+        frames.append({"seq": seq, "kind": "error",
+                       "payload": {"message": (task.error or "Task failed.")[:500],
+                                   "stop_reason": "error"}})
+    frames.append({"seq": seq + 1, "kind": "done",
+                   "payload": {"stop_reason":
+                               "completed" if task.status == "completed" else "error"}})
+    return frames
+
+
 async def _authorize_task_access(task_id: int, user: dict) -> None:
     """404 if the task is unknown, 403 if it isn't the caller's (admins exempt)."""
     from fastapi import HTTPException
@@ -1129,6 +1173,14 @@ async def chat_task_events(
     """Snapshot of a task's events (web chat reconnect / late connect)."""
     await _authorize_task_access(task_id, user)
     events = await asyncio.to_thread(_load_task_events, task_id, since_seq)
+    # Polling-fallback backstop: a terminal task whose `done` the client can't
+    # reach (retry wiped the log / crash skipped finish()) gets a synthesized
+    # terminal frame so the poll loop settles instead of spinning forever.
+    if not any(e["kind"] == "done" for e in events):
+        last = max([since_seq, *(e["seq"] for e in events)])
+        events = events + await asyncio.to_thread(
+            _synthetic_terminal_events, task_id, last,
+        )
     return {"events": events}
 
 
@@ -1164,6 +1216,20 @@ async def chat_task_stream(
                 yield f"id: {ev['seq']}\nevent: {ev['kind']}\ndata: {payload}\n\n"
                 if ev["kind"] == "done":
                     return
+            if not events:
+                # No new rows. If the task is terminal but this client will never
+                # get a `done` (retry deleted + seq-reset the log, or a crash
+                # skipped finish()), synthesize one so the stream ends instead of
+                # polling forever. No-op while the task is still running/pending.
+                synth = await asyncio.to_thread(
+                    _synthetic_terminal_events, task_id, last,
+                )
+                for ev in synth:
+                    last = ev["seq"]
+                    yield (f"id: {ev['seq']}\nevent: {ev['kind']}\n"
+                           f"data: {json.dumps(ev['payload'])}\n\n")
+                    if ev["kind"] == "done":
+                        return
             await asyncio.sleep(_sse_poll_seconds())
 
     return StreamingResponse(
